@@ -2,7 +2,12 @@ param(
     [switch]$SkipInstall,
     [string]$Serial = "emulator-5554",
     [int]$VersionCode = 10000,
-    [string]$VersionName = "1.0.0"
+    [string]$VersionName = "1.0.0",
+    [string]$AndroidSdk = "",
+    [string]$KeystorePath = "",
+    [string]$KeystorePassword = "",
+    [string]$KeyAlias = "androiddebugkey",
+    [string]$KeyPassword = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,7 +20,16 @@ function Run-Native([scriptblock]$Command, [string]$Step) {
 }
 
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
-$Sdk = Join-Path $Root "tooling/android-sdk"
+$LocalSdk = Join-Path $Root "tooling/android-sdk"
+$SdkCandidate = if ($AndroidSdk) { $AndroidSdk }
+    elseif (Test-Path -LiteralPath $LocalSdk) { $LocalSdk }
+    elseif ($env:ANDROID_SDK_ROOT) { $env:ANDROID_SDK_ROOT }
+    elseif ($env:ANDROID_HOME) { $env:ANDROID_HOME }
+    else { "" }
+if (-not $SdkCandidate -or -not (Test-Path -LiteralPath $SdkCandidate)) {
+    throw "Android SDK not found; pass -AndroidSdk or set ANDROID_SDK_ROOT"
+}
+$Sdk = Resolve-Path $SdkCandidate
 $BuildTools = Join-Path $Sdk "build-tools/36.0.0"
 $App = Join-Path $Root "prototypes/linux-app-manager-stub"
 $Out = Join-Path $App "out"
@@ -57,12 +71,23 @@ Pop-Location
 
 $SigningDir = Join-Path $Root "tooling/signing"
 New-Item -ItemType Directory -Force -Path $SigningDir | Out-Null
-$Key = Join-Path $SigningDir "archpheneos-manager-debug.keystore"
-if (-not (Test-Path -LiteralPath $Key)) {
-    Run-Native { & keytool -genkeypair -keystore $Key -storepass android -keypass android -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=ArchpheneOS Manager,O=ArchpheneOS,C=US" } "keytool"
+if ($KeystorePath) {
+    if (-not (Test-Path -LiteralPath $KeystorePath)) { throw "Release keystore not found" }
+    if (-not $KeystorePassword -or -not $KeyPassword -or -not $KeyAlias) {
+        throw "Release signing requires keystore password, key password, and alias"
+    }
+    $Key = Resolve-Path $KeystorePath
+} else {
+    $Key = Join-Path $SigningDir "archpheneos-manager-debug.keystore"
+    $KeystorePassword = "android"
+    $KeyPassword = "android"
+    $KeyAlias = "androiddebugkey"
+    if (-not (Test-Path -LiteralPath $Key)) {
+        Run-Native { & keytool -genkeypair -keystore $Key -storepass $KeystorePassword -keypass $KeyPassword -alias $KeyAlias -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Archphene,O=Archphene,C=US" } "keytool"
+    }
 }
 Run-Native { & (Join-Path $BuildTools "zipalign.exe") -f 4 (Join-Path $Out "unsigned.apk") (Join-Path $Out "aligned.apk") } "zipalign"
-Run-Native { & (Join-Path $BuildTools "apksigner.bat") sign --ks $Key --ks-pass pass:android --key-pass pass:android --out (Join-Path $Out "archpheneos-manager.apk") (Join-Path $Out "aligned.apk") } "apksigner sign"
+Run-Native { & (Join-Path $BuildTools "apksigner.bat") sign --ks $Key --ks-key-alias $KeyAlias --ks-pass "pass:$KeystorePassword" --key-pass "pass:$KeyPassword" --out (Join-Path $Out "archpheneos-manager.apk") (Join-Path $Out "aligned.apk") } "apksigner sign"
 Run-Native { & (Join-Path $BuildTools "apksigner.bat") verify --verbose (Join-Path $Out "archpheneos-manager.apk") } "apksigner verify"
 
 if (-not $SkipInstall) {
