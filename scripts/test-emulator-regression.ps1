@@ -7,8 +7,12 @@ param(
 $ErrorActionPreference = "Stop"
 $tests = @(
     @{ Name = "Linux manager update"; Command = { & "$PSScriptRoot/test-linux-manager-update.ps1" -Serial $Serial } },
+    @{ Name = "Linux manager pull refresh"; Command = { & "$PSScriptRoot/test-linux-manager-pull-refresh.ps1" -Serial $Serial } },
     @{ Name = "Linux manager KCalc launch"; Command = { & "$PSScriptRoot/test-linux-manager-kcalc.ps1" -Serial $Serial } },
     @{ Name = "Linux manager catalog isolation"; Command = { & "$PSScriptRoot/test-linux-manager-catalog.ps1" -Serial $Serial } },
+    @{ Name = "Linux manager Obtainium workflow"; Command = { & "$PSScriptRoot/test-linux-manager-obtainium-workflow.ps1" -Serial $Serial } },
+    @{ Name = "Linux manager repository search"; Command = { & "$PSScriptRoot/test-linux-manager-repository-search.ps1" -Serial $Serial } },
+    @{ Name = "Linux manager version selector"; Command = { & "$PSScriptRoot/test-linux-manager-version-selector.ps1" -Serial $Serial } },
     @{ Name = "KCalc native menus"; Command = { & "$PSScriptRoot/test-kcalc-menu-switch.ps1" -Serial $Serial } },
     @{ Name = "KCalc clipboard"; Command = { & "$PSScriptRoot/test-kcalc-clipboard.ps1" -Serial $Serial } },
     @{ Name = "KCalc live resize"; Command = { & "$PSScriptRoot/test-kcalc-live-resize.ps1" -Serial $Serial } },

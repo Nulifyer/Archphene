@@ -4,14 +4,15 @@ $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $Adb = Join-Path $Root "tooling/android-sdk/platform-tools/adb.exe"
 
-& $Adb -s $Serial shell monkey -p org.archpheneos.manager -c android.intent.category.LAUNCHER 1 | Out-Null
+& $Adb -s $Serial shell pm clear org.archpheneos.manager | Out-Null
+& $Adb -s $Serial shell am start -S -W -n org.archpheneos.manager/.MainActivity | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Could not launch Linux app manager" }
 Start-Sleep -Seconds 2
 & $Adb -s $Serial shell uiautomator dump /sdcard/archphene-manager-catalog.xml | Out-Null
 & $Adb -s $Serial pull /sdcard/archphene-manager-catalog.xml `
         (Join-Path $Root "artifacts/archphene-manager-catalog.xml") | Out-Null
 $catalog = Get-Content -LiteralPath (Join-Path $Root "artifacts/archphene-manager-catalog.xml") -Raw
-foreach ($required in @("KCalc", "Mousepad", "extra/kcalc", "extra/mousepad", "glibc-x86_64")) {
+foreach ($required in @("Archphene", "KCalc", "Mousepad", "extra/kcalc", "extra/mousepad", "glibc-x86_64")) {
     if (-not $catalog.Contains($required)) { throw "Manager catalog is missing $required" }
 }
 

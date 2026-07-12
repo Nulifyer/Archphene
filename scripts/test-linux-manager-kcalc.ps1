@@ -9,21 +9,27 @@ $KCalc = "org.archphene.linux.kcalc"
 
 & $Adb -s $Serial shell am force-stop $Manager | Out-Null
 & $Adb -s $Serial shell am force-stop $KCalc | Out-Null
-& $Adb -s $Serial shell monkey -p $Manager -c android.intent.category.LAUNCHER 1 | Out-Null
+& $Adb -s $Serial shell am start -S -W -n org.archpheneos.manager/.MainActivity | Out-Null
 Start-Sleep -Seconds 2
 & $Adb -s $Serial shell uiautomator dump /sdcard/archphene-manager-test.xml | Out-Null
 $Ui = (& $Adb -s $Serial shell cat /sdcard/archphene-manager-test.xml) -join "`n"
 
-foreach ($Expected in @("Archphene Linux Apps", "KCalc", "extra/kcalc 26.04.3-1", "glibc-x86_64")) {
+foreach ($Expected in @("Apps", "KCalc", "extra/kcalc", "26.04.3-1", "glibc-x86_64")) {
     if (-not $Ui.Contains($Expected)) {
         throw "Manager catalog evidence missing: $Expected"
     }
 }
 
-$LaunchNode = [regex]::Match($Ui, 'text="LAUNCH"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"')
-if (-not $LaunchNode.Success) {
-    throw "Could not find KCalc launch control bounds"
-}
+$KCalcNode = [regex]::Match($Ui, 'text="KCalc"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"')
+if (-not $KCalcNode.Success) { throw "Could not find KCalc catalog row" }
+$X = ([int]$KCalcNode.Groups[1].Value + [int]$KCalcNode.Groups[3].Value) / 2
+$Y = ([int]$KCalcNode.Groups[2].Value + [int]$KCalcNode.Groups[4].Value) / 2
+& $Adb -s $Serial shell input tap ([int]$X) ([int]$Y) | Out-Null
+Start-Sleep -Seconds 1
+& $Adb -s $Serial shell uiautomator dump --compressed /sdcard/archphene-manager-kcalc-detail.xml | Out-Null
+$Detail = (& $Adb -s $Serial shell cat /sdcard/archphene-manager-kcalc-detail.xml) -join "`n"
+$LaunchNode = [regex]::Match($Detail, 'text="Launch"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"')
+if (-not $LaunchNode.Success) { throw "Could not find KCalc detail launch control" }
 $X = ([int]$LaunchNode.Groups[1].Value + [int]$LaunchNode.Groups[3].Value) / 2
 $Y = ([int]$LaunchNode.Groups[2].Value + [int]$LaunchNode.Groups[4].Value) / 2
 & $Adb -s $Serial shell input tap ([int]$X) ([int]$Y) | Out-Null

@@ -14,6 +14,7 @@ $AppLibDir = Join-Path $Root $AppLibDir
 New-Item -ItemType Directory -Force -Path $AppLibDir | Out-Null
 
 $preserve = @(
+    "libarchphene_qt_clipboard_probe.so",
     "libarchphene_wayland_jni.so",
     "libarchphene_wayland_socket_probe.so",
     "libarchphene_frame_client.so",

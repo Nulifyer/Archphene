@@ -12,8 +12,13 @@ $Private = "/data/user/0/$Manager/cache/archpheneos-kcalc-update.apk"
 $Hash = (Get-FileHash -LiteralPath $Apk -Algorithm SHA256).Hash.ToLowerInvariant()
 
 function Get-Ui([string]$Path) {
-    & $Adb -s $Serial shell uiautomator dump $Path | Out-Null
-    return ((& $Adb -s $Serial shell cat $Path) -join "`n")
+    for ($attempt = 0; $attempt -lt 5; $attempt++) {
+        & $Adb -s $Serial shell uiautomator dump --compressed $Path 2>$null | Out-Null
+        $ui = ((& $Adb -s $Serial shell cat $Path 2>$null) -join "`n")
+        if ($ui -match '<hierarchy') { return $ui }
+        Start-Sleep -Milliseconds 400
+    }
+    return ""
 }
 
 & $Adb -s $Serial push $Apk $Remote | Out-Null

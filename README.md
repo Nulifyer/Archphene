@@ -48,5 +48,7 @@ Start here:
 - [Linux home and storage policy](docs/linux-home-and-storage-policy.md)
 - [Wayland compositor reference review](docs/wayland-compositor-reference-review.md)
 - [Implementation gap audit](docs/implementation-gap-audit.md)
+- [Obtainium manager reference review](docs/obtainium-manager-reference-review.md)
+- [Signed wrapper repository format](docs/wrapper-repository-format.md)
 
 Current conclusion: the no-OS-edit generated-APK route is proven for unmodified x86_64 Arch KCalc and Mousepad ELF payloads and for unmodified AArch64 Arch Linux ARM KCalc on a physical Samsung Galaxy S22 Ultra. The Android-owned Wayland bridge handles real Qt and GTK interfaces, menus, dialogs, touch, hardware keys, clipboard, IME retention, live/freeform resize, and app lifecycle under distinct Android UIDs. Mousepad can open a user-selected Android document, edit and save it through normal POSIX APIs, immediately write it back through the scoped URI grant, cold-reopen it, and expose its brokered Linux Home through DocumentsUI. Signed package update and manager discovery/install flows have emulator regression coverage. ARM64 now has a source-rebuildable, seccomp-compatible glibc runtime, a signature-verified 62-package KCalc closure, and a repeatable physical-device regression suite. GrapheneOS-on-Pixel, ARM64 Mousepad document workflows, production package resolution/signing, and broader toolkit/hardware integration remain unproven.

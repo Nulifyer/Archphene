@@ -39,6 +39,9 @@ if ($Descriptor.android.package -ne "org.archphene.linux.kcalc") {
 }
 $ManifestText = Get-Content -LiteralPath (Join-Path $App "AndroidManifest.xml") -Raw
 $ManifestText = [regex]::Replace($ManifestText,
+        '(android:name="org\.archphene\.source\.version" android:value=")[^"]+',
+        "`${1}$($Descriptor.android.versionName)")
+$ManifestText = [regex]::Replace($ManifestText,
         '(android:name="org\.archphene\.source\.update_url" android:value=")[^"]+',
         "`${1}$($Descriptor.source.metadataUrl)")
 $ManifestText = [regex]::Replace($ManifestText,

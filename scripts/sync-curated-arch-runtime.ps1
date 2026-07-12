@@ -4,6 +4,7 @@ param(
     [string]$Mirror = "https://geo.mirror.pkgbuild.com",
     [string]$RepositoryPath = "{repo}/os/{arch}",
     [string]$DownloadContainer = "",
+    [string]$WorkDirectory = "",
     [switch]$DownloadSignatures,
     [switch]$Refresh
 )
@@ -13,7 +14,9 @@ $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $ClassPath = Resolve-Path (Join-Path $Root $Classification)
 $Class = Get-Content -Raw -LiteralPath $ClassPath | ConvertFrom-Json
 $Package = $Class.linuxPackage
-$Work = Join-Path $Root "tooling/downloads/arch-curated-$Package-$Arch"
+$Work = if ($WorkDirectory) { Join-Path $Root $WorkDirectory } else {
+    Join-Path $Root "tooling/downloads/arch-curated-$Package-$Arch"
+}
 $DbDir = Join-Path $Work "db"
 $PkgDir = Join-Path $Work "packages"
 $RuntimeDir = Join-Path $Work "runtime-root"

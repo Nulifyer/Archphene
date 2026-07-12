@@ -45,6 +45,21 @@ public final class InstalledLinuxAppCatalog {
         Intent launcher = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
         List<ResolveInfo> activities = packages.queryIntentActivities(launcher, PackageManager.GET_META_DATA);
         ArrayList<Entry> result = new ArrayList<>();
+        PackageInfo managerInfo = packages.getPackageInfo(context.getPackageName(), 0);
+        Bundle managerMetadata = new Bundle();
+        managerMetadata.putString("org.archphene.source.type", "archphene");
+        managerMetadata.putString("org.archphene.source.id", "manager");
+        managerMetadata.putString("org.archphene.source.version",
+                managerInfo.versionName == null ? "unknown" : managerInfo.versionName);
+        managerMetadata.putString("org.archphene.runtime.abi", "Android");
+        managerMetadata.putString("org.archphene.source.update_url",
+                "archphene-wrapper://" + context.getPackageName());
+        Intent managerLaunch = packages.getLaunchIntentForPackage(context.getPackageName());
+        if (managerLaunch != null) {
+            result.add(new Entry(context.getPackageName(), "Archphene",
+                    managerInfo.versionName == null ? "unknown" : managerInfo.versionName,
+                    managerMetadata, managerLaunch));
+        }
         Set<String> seen = new HashSet<>();
         for (ResolveInfo resolved : activities) {
             ApplicationInfo app = resolved.activityInfo.applicationInfo;

@@ -7,11 +7,11 @@ $Adb = Join-Path $Root "tooling/android-sdk/platform-tools/adb.exe"
 $Manager = "org.archpheneos.manager"
 
 & $Adb -s $Serial shell am force-stop $Manager | Out-Null
-& $Adb -s $Serial shell monkey -p $Manager -c android.intent.category.LAUNCHER 1 | Out-Null
+& $Adb -s $Serial shell am start -S -W -n org.archpheneos.manager/.MainActivity | Out-Null
 Start-Sleep -Seconds 2
 & $Adb -s $Serial shell uiautomator dump /sdcard/archphene-update-before.xml | Out-Null
 $Ui = (& $Adb -s $Serial shell cat /sdcard/archphene-update-before.xml) -join "`n"
-$Check = [regex]::Match($Ui, 'text="CHECK"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"')
+$Check = [regex]::Match($Ui, 'content-desc="(?:Check KCalc for updates\.[^"]*|KCalc [^"]+\. Check again)"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"')
 if (-not $Check.Success) {
     throw "Could not find KCalc update-check control"
 }
@@ -24,9 +24,9 @@ do {
     Start-Sleep -Seconds 1
     & $Adb -s $Serial shell uiautomator dump /sdcard/archphene-update-after.xml | Out-Null
     $Result = (& $Adb -s $Serial shell cat /sdcard/archphene-update-after.xml) -join "`n"
-} while ($Result -notmatch "Available:" -and [DateTime]::UtcNow -lt $Deadline)
+} while ($Result -notmatch 'content-desc="KCalc 26\.04\.3-1 is up to date\. Check again"' -and [DateTime]::UtcNow -lt $Deadline)
 
-if ($Result -notmatch "Available: 26\.04\.3-1" -or $Result -notmatch "Up to date") {
+if ($Result -notmatch 'content-desc="KCalc 26\.04\.3-1 is up to date\. Check again"') {
     throw "Official Arch update comparison did not return the expected installed version"
 }
 
