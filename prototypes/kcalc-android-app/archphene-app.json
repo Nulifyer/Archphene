@@ -1,0 +1,40 @@
+{
+  "schema": "org.archphene.app.v1",
+  "android": {
+    "package": "org.archphene.linux.kcalc",
+    "label": "KCalc",
+    "versionCode": 26040301,
+    "versionName": "26.04.3-1",
+    "minSdk": 23,
+    "targetSdk": 36
+  },
+  "source": {
+    "type": "pacman",
+    "distribution": "archlinux",
+    "repository": "extra",
+    "architecture": "x86_64",
+    "package": "kcalc",
+    "metadataUrl": "https://archlinux.org/packages/extra/x86_64/kcalc/json/",
+    "packageFilename": "kcalc-26.04.3-1-x86_64.pkg.tar.zst",
+    "signatureUrl": "https://geo.mirror.pkgbuild.com/extra/os/x86_64/kcalc-26.04.3-1-x86_64.pkg.tar.zst.sig"
+  },
+  "payload": {
+    "entrypoint": "/usr/bin/kcalc",
+    "apkLibrary": "lib/x86_64/libarchphene_kcalc.so",
+    "sha256": "DA0C475F4EC44B6F8E5B493099C35D87DEEDA194584EAAC10A027948C1643B78"
+  },
+  "runtime": {
+    "linuxAbi": "glibc-x86_64",
+    "bridgeProfile": "qt6-wayland-v1",
+    "libraryClosureAsset": "linux-runtime.zip"
+  },
+  "capabilities": [
+    "gui.wayland",
+    "input.pointer",
+    "input.keyboard",
+    "clipboard.text",
+    "storage.app_private_home",
+    "window.live_resize"
+  ],
+  "androidPermissions": []
+}

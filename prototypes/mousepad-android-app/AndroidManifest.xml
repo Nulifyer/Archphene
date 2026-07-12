@@ -1,0 +1,91 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="org.archphene.linux.mousepad">
+    <uses-sdk android:minSdkVersion="23" android:targetSdkVersion="36" />
+
+    <application
+        android:theme="@style/AppTheme"
+        android:label="Mousepad"
+        android:icon="@drawable/mousepad_icon"
+        android:roundIcon="@drawable/mousepad_icon"
+        android:allowBackup="false"
+        android:debuggable="true"
+        android:extractNativeLibs="true"
+        android:supportsRtl="true">
+        <meta-data android:name="org.archphene.linux_app" android:value="true" />
+        <meta-data android:name="org.archphene.source.type" android:value="pacman" />
+        <meta-data android:name="org.archphene.source.id" android:value="extra/mousepad" />
+        <meta-data android:name="org.archphene.source.version" android:value="0.7.0-1" />
+        <meta-data android:name="org.archphene.source.update_url" android:value="https://archlinux.org/packages/extra/x86_64/mousepad/json/" />
+        <meta-data android:name="org.archphene.runtime.abi" android:value="glibc-x86_64" />
+        <provider
+            android:name="org.archphene.linux.mousepad.LinuxHomeDocumentsProvider"
+            android:authorities="org.archphene.linux.mousepad.documents"
+            android:exported="true"
+            android:grantUriPermissions="true"
+            android:permission="android.permission.MANAGE_DOCUMENTS">
+            <intent-filter>
+                <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
+            </intent-filter>
+        </provider>
+        <provider
+            android:name="org.archphene.linux.mousepad.LinuxHomeDocumentsProvider"
+            android:authorities="org.archphene.linux.mousepad.documents"
+            android:exported="true"
+            android:grantUriPermissions="true"
+            android:permission="android.permission.MANAGE_DOCUMENTS">
+            <intent-filter>
+                <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
+            </intent-filter>
+        </provider>
+        <provider
+            android:name="org.archphene.linux.mousepad.LinuxHomeDocumentsProvider"
+            android:authorities="org.archphene.linux.mousepad.documents"
+            android:exported="true"
+            android:grantUriPermissions="true"
+            android:permission="android.permission.MANAGE_DOCUMENTS">
+            <intent-filter>
+                <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
+            </intent-filter>
+        </provider>
+        <provider
+            android:name="org.archphene.linux.mousepad.LinuxHomeDocumentsProvider"
+            android:authorities="org.archphene.linux.mousepad.documents"
+            android:exported="true"
+            android:grantUriPermissions="true"
+            android:permission="android.permission.MANAGE_DOCUMENTS">
+            <intent-filter>
+                <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
+            </intent-filter>
+        </provider>
+        <provider
+            android:name="org.archphene.linux.mousepad.LinuxHomeDocumentsProvider"
+            android:authorities="org.archphene.linux.mousepad.documents"
+            android:exported="true"
+            android:grantUriPermissions="true"
+            android:permission="android.permission.MANAGE_DOCUMENTS">
+            <intent-filter>
+                <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
+            </intent-filter>
+        </provider>
+        <provider
+            android:name="org.archphene.linux.mousepad.LinuxHomeDocumentsProvider"
+            android:authorities="org.archphene.linux.mousepad.documents"
+            android:exported="true"
+            android:grantUriPermissions="true"
+            android:permission="android.permission.MANAGE_DOCUMENTS">
+            <intent-filter>
+                <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
+            </intent-filter>
+        </provider>
+        <activity
+            android:name="org.archphene.linux.mousepad.MainActivity"
+            android:launchMode="singleTask"
+            android:windowSoftInputMode="stateAlwaysHidden|adjustResize"
+            android:configChanges="orientation|screenSize|smallestScreenSize|keyboardHidden"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

@@ -1,0 +1,393 @@
+diff --git a/nptl/pthread_create.c b/nptl/pthread_create.c
+index 6e7e0c64..bdbc9485 100644
+--- a/nptl/pthread_create.c
++++ b/nptl/pthread_create.c
+@@ -386,6 +386,7 @@ start_thread (void *arg)
+       __libc_fatal ("Fatal glibc error: rseq registration failed\n");
+   }
+ 
++#ifndef ARCHPHENE_ANDROID_APP_COMPAT
+ #ifndef __ASSUME_SET_ROBUST_LIST
+   if (__nptl_set_robust_list_avail)
+ #endif
+@@ -395,6 +396,7 @@ start_thread (void *arg)
+       INTERNAL_SYSCALL_CALL (set_robust_list, &pd->robust_head,
+ 			     sizeof (struct robust_list_head));
+     }
++#endif
+ 
+   /* This is where the try/finally block should be created.  For
+      compilers without that support we do use setjmp.  */
+diff --git a/sysdeps/nptl/_Fork.c b/sysdeps/nptl/_Fork.c
+index 907b3fef..b953b97f 100644
+--- a/sysdeps/nptl/_Fork.c
++++ b/sysdeps/nptl/_Fork.c
+@@ -49,8 +49,10 @@ _Fork (void)
+       self->robust_prev = &self->robust_head;
+ #endif
+       self->robust_head.list = &self->robust_head;
++#ifndef ARCHPHENE_ANDROID_APP_COMPAT
+       INTERNAL_SYSCALL_CALL (set_robust_list, &self->robust_head,
+-			     sizeof (struct robust_list_head));
++                             sizeof (struct robust_list_head));
++#endif
+       call_function_static_weak (__getrandom_fork_subprocess);
+     }
+ 
+diff --git a/sysdeps/nptl/dl-tls_init_tp.c b/sysdeps/nptl/dl-tls_init_tp.c
+index 72cc4087..02353327 100644
+--- a/sysdeps/nptl/dl-tls_init_tp.c
++++ b/sysdeps/nptl/dl-tls_init_tp.c
+@@ -92,8 +92,12 @@ __tls_init_tp (void)
+     pd->robust_head.futex_offset = (offsetof (pthread_mutex_t, __data.__lock)
+                                     - offsetof (pthread_mutex_t,
+                                                 __data.__list.__next));
++#ifdef ARCHPHENE_ANDROID_APP_COMPAT
++    int res = -ENOSYS;
++#else
+     int res = INTERNAL_SYSCALL_CALL (set_robust_list, &pd->robust_head,
+                                      sizeof (struct robust_list_head));
++#endif
+     if (!INTERNAL_SYSCALL_ERROR_P (res))
+       {
+ #ifndef __ASSUME_SET_ROBUST_LIST
+diff --git a/sysdeps/unix/sysv/linux/access.c b/sysdeps/unix/sysv/linux/access.c
+index b0fd4e83..ebdfc3d3 100644
+--- a/sysdeps/unix/sysv/linux/access.c
++++ b/sysdeps/unix/sysv/linux/access.c
+@@ -23,10 +23,10 @@
+ int
+ __access (const char *file, int type)
+ {
+-#ifdef __NR_access
+-  return INLINE_SYSCALL_CALL (access, file, type);
+-#else
++#if defined ARCHPHENE_ANDROID_APP_COMPAT || !defined __NR_access
+   return INLINE_SYSCALL_CALL (faccessat, AT_FDCWD, file, type);
++#else
++  return INLINE_SYSCALL_CALL (access, file, type);
+ #endif
+ }
+ libc_hidden_def (__access)
+diff --git a/sysdeps/unix/sysv/linux/chmod.c b/sysdeps/unix/sysv/linux/chmod.c
+index 6b8e3601..f86df3bf 100644
+--- a/sysdeps/unix/sysv/linux/chmod.c
++++ b/sysdeps/unix/sysv/linux/chmod.c
+@@ -23,10 +23,10 @@
+ int
+ __chmod (const char *file, mode_t mode)
+ {
+-#ifdef __NR_chmod
+-  return INLINE_SYSCALL_CALL (chmod, file, mode);
+-#else
++#if defined ARCHPHENE_ANDROID_APP_COMPAT || !defined __NR_chmod
+   return INLINE_SYSCALL_CALL (fchmodat, AT_FDCWD, file, mode);
++#else
++  return INLINE_SYSCALL_CALL (chmod, file, mode);
+ #endif
+ }
+ 
+diff --git a/sysdeps/unix/sysv/linux/chown.c b/sysdeps/unix/sysv/linux/chown.c
+index 80a540c0..cbf35a54 100644
+--- a/sysdeps/unix/sysv/linux/chown.c
++++ b/sysdeps/unix/sysv/linux/chown.c
+@@ -24,10 +24,10 @@
+ int
+ __chown (const char *file, uid_t owner, gid_t group)
+ {
+-#ifdef __NR_chown
+-  return INLINE_SYSCALL_CALL (chown, file, owner, groups);
+-#else
++#if defined ARCHPHENE_ANDROID_APP_COMPAT || !defined __NR_chown
+   return INLINE_SYSCALL_CALL (fchownat, AT_FDCWD, file, owner, group, 0);
++#else
++  return INLINE_SYSCALL_CALL (chown, file, owner, groups);
+ #endif
+ }
+ libc_hidden_def (__chown)
+diff --git a/sysdeps/unix/sysv/linux/dup2.c b/sysdeps/unix/sysv/linux/dup2.c
+index 62dce257..80e14699 100644
+--- a/sysdeps/unix/sysv/linux/dup2.c
++++ b/sysdeps/unix/sysv/linux/dup2.c
+@@ -25,7 +25,7 @@
+ int
+ __dup2 (int fd, int fd2)
+ {
+-#ifdef __NR_dup2
++#if !defined ARCHPHENE_ANDROID_APP_COMPAT && defined __NR_dup2
+   return INLINE_SYSCALL_CALL (dup2, fd, fd2);
+ #else
+   /* For the degenerate case, check if the fd is valid (by trying to
+diff --git a/sysdeps/unix/sysv/linux/epoll_create.c b/sysdeps/unix/sysv/linux/epoll_create.c
+index e75724b2..d498e23a 100644
+--- a/sysdeps/unix/sysv/linux/epoll_create.c
++++ b/sysdeps/unix/sysv/linux/epoll_create.c
+@@ -24,7 +24,7 @@ libc_hidden_proto (epoll_create)
+ int
+ epoll_create (int size)
+ {
+-#ifdef __NR_epoll_create
++#if !defined ARCHPHENE_ANDROID_APP_COMPAT && defined __NR_epoll_create
+   return INLINE_SYSCALL_CALL (epoll_create, size);
+ #else
+   if (size <= 0)
+diff --git a/sysdeps/unix/sysv/linux/epoll_wait.c b/sysdeps/unix/sysv/linux/epoll_wait.c
+index 3a948e2a..5ff6ad3b 100644
+--- a/sysdeps/unix/sysv/linux/epoll_wait.c
++++ b/sysdeps/unix/sysv/linux/epoll_wait.c
+@@ -26,7 +26,7 @@
+ int
+ epoll_wait (int epfd, struct epoll_event *events, int maxevents, int timeout)
+ {
+-#ifdef __NR_epoll_wait
++#if !defined ARCHPHENE_ANDROID_APP_COMPAT && defined __NR_epoll_wait
+   return SYSCALL_CANCEL (epoll_wait, epfd, events, maxevents, timeout);
+ #else
+   return epoll_pwait (epfd, events, maxevents, timeout, NULL);
+diff --git a/sysdeps/unix/sysv/linux/faccessat.c b/sysdeps/unix/sysv/linux/faccessat.c
+index 97efb740..8bd2f924 100644
+--- a/sysdeps/unix/sysv/linux/faccessat.c
++++ b/sysdeps/unix/sysv/linux/faccessat.c
+@@ -26,8 +26,13 @@
+ int
+ __faccessat (int fd, const char *file, int mode, int flag)
+ {
++#ifdef ARCHPHENE_ANDROID_APP_COMPAT
++  int ret = -1;
++  __set_errno (ENOSYS);
++#else
+   int ret = INLINE_SYSCALL_CALL (faccessat2, fd, file, mode, flag);
+-#if __ASSUME_FACCESSAT2
++#endif
++#if __ASSUME_FACCESSAT2 && !defined ARCHPHENE_ANDROID_APP_COMPAT
+   return ret;
+ #else
+   if (ret == 0 || errno != ENOSYS)
+diff --git a/sysdeps/unix/sysv/linux/inotify_init.c b/sysdeps/unix/sysv/linux/inotify_init.c
+index fcc6e2b6..eb57a223 100644
+--- a/sysdeps/unix/sysv/linux/inotify_init.c
++++ b/sysdeps/unix/sysv/linux/inotify_init.c
+@@ -24,7 +24,7 @@ libc_hidden_proto (inotify_init)
+ int
+ inotify_init (void)
+ {
+-#ifdef __NR_inotify_init
++#if !defined ARCHPHENE_ANDROID_APP_COMPAT && defined __NR_inotify_init
+   return INLINE_SYSCALL_CALL (inotify_init);
+ #else
+   return INLINE_SYSCALL_CALL (inotify_init1, 0);
+diff --git a/sysdeps/unix/sysv/linux/lchown.c b/sysdeps/unix/sysv/linux/lchown.c
+index 903fbddc..ed2d34f2 100644
+--- a/sysdeps/unix/sysv/linux/lchown.c
++++ b/sysdeps/unix/sysv/linux/lchown.c
+@@ -24,11 +24,11 @@
+ int
+ __lchown (const char *file, uid_t owner, gid_t group)
+ {
+-#ifdef __NR_lchown
+-  return INLINE_SYSCALL_CALL (lchown, file, owner, group);
+-#else
++#if defined ARCHPHENE_ANDROID_APP_COMPAT || !defined __NR_lchown
+   return INLINE_SYSCALL_CALL (fchownat, AT_FDCWD, file, owner, group,
+-			      AT_SYMLINK_NOFOLLOW);
++                              AT_SYMLINK_NOFOLLOW);
++#else
++  return INLINE_SYSCALL_CALL (lchown, file, owner, group);
+ #endif
+ }
+ weak_alias (__lchown, lchown)
+diff --git a/sysdeps/unix/sysv/linux/link.c b/sysdeps/unix/sysv/linux/link.c
+index e2edef39..dc43be0b 100644
+--- a/sysdeps/unix/sysv/linux/link.c
++++ b/sysdeps/unix/sysv/linux/link.c
+@@ -24,10 +24,10 @@
+ int
+ __link (const char *from, const char *to)
+ {
+-#ifdef __NR_link
+-  return INLINE_SYSCALL_CALL (link, from, to);
+-#else
++#if defined ARCHPHENE_ANDROID_APP_COMPAT || !defined __NR_link
+   return INLINE_SYSCALL_CALL (linkat, AT_FDCWD, from, AT_FDCWD, to, 0);
++#else
++  return INLINE_SYSCALL_CALL (link, from, to);
+ #endif
+ }
+ 
+diff --git a/sysdeps/unix/sysv/linux/mkdir.c b/sysdeps/unix/sysv/linux/mkdir.c
+index a4ef2586..e8dc2ee0 100644
+--- a/sysdeps/unix/sysv/linux/mkdir.c
++++ b/sysdeps/unix/sysv/linux/mkdir.c
+@@ -24,10 +24,10 @@
+ int
+ __mkdir (const char *path, mode_t mode)
+ {
+-#ifdef __NR_mkdir
+-  return INLINE_SYSCALL_CALL (mkdir,  path, mode);
+-#else
++#if defined ARCHPHENE_ANDROID_APP_COMPAT || !defined __NR_mkdir
+   return INLINE_SYSCALL_CALL (mkdirat, AT_FDCWD, path, mode);
++#else
++  return INLINE_SYSCALL_CALL (mkdir, path, mode);
+ #endif
+ }
+ 
+diff --git a/sysdeps/unix/sysv/linux/openat2.c b/sysdeps/unix/sysv/linux/openat2.c
+index ac7b7058..2c9b1718 100644
+--- a/sysdeps/unix/sysv/linux/openat2.c
++++ b/sysdeps/unix/sysv/linux/openat2.c
+@@ -17,12 +17,18 @@
+    <https://www.gnu.org/licenses/>.  */
+ 
+ #include <fcntl.h>
++#include <errno.h>
+ #include <sysdep-cancel.h>
+ 
+ int
+ __openat2 (int dfd, const char *filename,
+ 	   const struct open_how *how, size_t usize)
+ {
++#ifdef ARCHPHENE_ANDROID_APP_COMPAT
++  __set_errno (ENOSYS);
++  return -1;
++#else
+   return SYSCALL_CANCEL (openat2, dfd, filename, how, usize);
++#endif
+ }
+ weak_alias (__openat2, openat2)
+diff --git a/sysdeps/unix/sysv/linux/poll.c b/sysdeps/unix/sysv/linux/poll.c
+index 504cb444..18715839 100644
+--- a/sysdeps/unix/sysv/linux/poll.c
++++ b/sysdeps/unix/sysv/linux/poll.c
+@@ -25,7 +25,7 @@
+ int
+ __poll (struct pollfd *fds, nfds_t nfds, int timeout)
+ {
+-#ifdef __NR_poll
++#if !defined ARCHPHENE_ANDROID_APP_COMPAT && defined __NR_poll
+   return SYSCALL_CANCEL (poll, fds, nfds, timeout);
+ #else
+   struct timespec timeout_ts;
+diff --git a/sysdeps/unix/sysv/linux/readlink.c b/sysdeps/unix/sysv/linux/readlink.c
+index 5af5be9e..f25da808 100644
+--- a/sysdeps/unix/sysv/linux/readlink.c
++++ b/sysdeps/unix/sysv/linux/readlink.c
+@@ -26,10 +26,10 @@
+ ssize_t
+ __readlink (const char *path, char *buf, size_t len)
+ {
+-#ifdef __NR_readlink
+-  return INLINE_SYSCALL_CALL (readlink, path, buf, len);
+-#else
++#if defined ARCHPHENE_ANDROID_APP_COMPAT || !defined __NR_readlink
+   return INLINE_SYSCALL_CALL (readlinkat, AT_FDCWD, path, buf, len);
++#else
++  return INLINE_SYSCALL_CALL (readlink, path, buf, len);
+ #endif
+ }
+ weak_alias (__readlink, readlink)
+diff --git a/sysdeps/unix/sysv/linux/rename.c b/sysdeps/unix/sysv/linux/rename.c
+index 0046632b..dda03180 100644
+--- a/sysdeps/unix/sysv/linux/rename.c
++++ b/sysdeps/unix/sysv/linux/rename.c
+@@ -25,7 +25,9 @@
+ int
+ rename (const char *old, const char *new)
+ {
+-#if defined (__NR_rename)
++#if defined ARCHPHENE_ANDROID_APP_COMPAT && defined __NR_renameat
++  return INLINE_SYSCALL_CALL (renameat, AT_FDCWD, old, AT_FDCWD, new);
++#elif defined (__NR_rename)
+   return INLINE_SYSCALL_CALL (rename, old, new);
+ #elif defined (__NR_renameat)
+   return INLINE_SYSCALL_CALL (renameat, AT_FDCWD, old, AT_FDCWD, new);
+diff --git a/sysdeps/unix/sysv/linux/rmdir.c b/sysdeps/unix/sysv/linux/rmdir.c
+index d5c267e7..5f69d6b5 100644
+--- a/sysdeps/unix/sysv/linux/rmdir.c
++++ b/sysdeps/unix/sysv/linux/rmdir.c
+@@ -24,10 +24,10 @@
+ int
+ __rmdir (const char *path)
+ {
+-#ifdef __NR_rmdir
+-  return INLINE_SYSCALL_CALL (rmdir, path);
+-#else
++#if defined ARCHPHENE_ANDROID_APP_COMPAT || !defined __NR_rmdir
+   return INLINE_SYSCALL_CALL (unlinkat, AT_FDCWD, path, AT_REMOVEDIR);
++#else
++  return INLINE_SYSCALL_CALL (rmdir, path);
+ #endif
+ }
+ weak_alias (__rmdir, rmdir)
+diff --git a/sysdeps/unix/sysv/linux/rseq-internal.h b/sysdeps/unix/sysv/linux/rseq-internal.h
+index 7febc667..f5df7bf0 100644
+--- a/sysdeps/unix/sysv/linux/rseq-internal.h
++++ b/sysdeps/unix/sysv/linux/rseq-internal.h
+@@ -97,6 +97,9 @@ RSEQ_SELF (void)
+ static inline bool
+ rseq_register_current_thread (struct pthread *self, bool do_rseq)
+ {
++#ifdef ARCHPHENE_ANDROID_APP_COMPAT
++  do_rseq = false;
++#endif
+   if (do_rseq)
+     {
+       unsigned int size =  __rseq_size;
+diff --git a/sysdeps/unix/sysv/linux/symlink.c b/sysdeps/unix/sysv/linux/symlink.c
+index d82ee898..c745a370 100644
+--- a/sysdeps/unix/sysv/linux/symlink.c
++++ b/sysdeps/unix/sysv/linux/symlink.c
+@@ -24,10 +24,10 @@
+ int
+ __symlink (const char *from, const char *to)
+ {
+-#ifdef __NR_symlink
+-  return INLINE_SYSCALL_CALL (symlink, from, to);
+-#else
++#if defined ARCHPHENE_ANDROID_APP_COMPAT || !defined __NR_symlink
+   return INLINE_SYSCALL_CALL (symlinkat, from, AT_FDCWD, to);
++#else
++  return INLINE_SYSCALL_CALL (symlink, from, to);
+ #endif
+ }
+ weak_alias (__symlink, symlink)
+diff --git a/sysdeps/unix/sysv/linux/unlink.c b/sysdeps/unix/sysv/linux/unlink.c
+index 6bf7ee1e..6dd6fdd0 100644
+--- a/sysdeps/unix/sysv/linux/unlink.c
++++ b/sysdeps/unix/sysv/linux/unlink.c
+@@ -24,10 +24,10 @@
+ int
+ __unlink (const char *name)
+ {
+-#ifdef __NR_unlink
+-  return INLINE_SYSCALL_CALL (unlink, name);
+-#else
++#if defined ARCHPHENE_ANDROID_APP_COMPAT || !defined __NR_unlink
+   return INLINE_SYSCALL_CALL (unlinkat, AT_FDCWD, name, 0);
++#else
++  return INLINE_SYSCALL_CALL (unlink, name);
+ #endif
+ }
+ weak_alias (__unlink, unlink)
+diff --git a/sysdeps/x86/dl-get-cpu-features.c b/sysdeps/x86/dl-get-cpu-features.c
+index 9d657259..b2b466f5 100644
+--- a/sysdeps/x86/dl-get-cpu-features.c
++++ b/sysdeps/x86/dl-get-cpu-features.c
+@@ -73,9 +73,17 @@ Fatal glibc error: CPU does not support APX\n");
+     }
+ }
+ 
++#ifdef ARCHPHENE_ANDROID_APP_COMPAT
++void
++__x86_cpu_features (void)
++{
++  _dl_x86_init_cpu_features ();
++}
++#else
+ __ifunc (__x86_cpu_features, __x86_cpu_features, NULL, void,
+ 	 _dl_x86_init_cpu_features);
+ #endif
++#endif
+ 
+ #undef _dl_x86_get_cpu_features
+ 

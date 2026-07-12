@@ -1,0 +1,79 @@
+{
+  "schema": "org.archphene.lapk.test.v1",
+  "package": "org.archphene.linux.mousepad",
+  "displayName": "Mousepad",
+  "source": {
+    "distribution": "archlinux",
+    "repository": "extra",
+    "arch": "x86_64",
+    "package": "mousepad",
+    "observedVersion": "0.7.0-1",
+    "packageUrl": "https://archlinux.org/packages/extra/x86_64/mousepad/"
+  },
+  "entrypoint": {
+    "path": "/usr/bin/mousepad",
+    "argv": ["/usr/bin/mousepad"],
+    "environment": {
+      "GDK_BACKEND": "wayland",
+      "WAYLAND_DISPLAY": "wayland-0",
+      "HOME": "$APP_PRIVATE_HOME",
+      "XDG_CACHE_HOME": "$APP_PRIVATE_HOME/.cache",
+      "XDG_CONFIG_HOME": "$APP_PRIVATE_HOME/.config",
+      "XDG_DATA_HOME": "$APP_PRIVATE_HOME/.local/share",
+      "XDG_STATE_HOME": "$APP_PRIVATE_HOME/.local/state",
+      "XDG_RUNTIME_DIR": "$APP_RUNTIME_DIR",
+      "TMPDIR": "$APP_PRIVATE_TMP",
+      "LANG": "C.UTF-8",
+      "LC_ALL": "C.UTF-8"
+    }
+  },
+  "androidPermissions": [],
+  "capabilities": [
+    "gui.wayland",
+    "input.pointer",
+    "input.keyboard",
+    "clipboard.foreground",
+    "storage.app_private_home",
+    "storage.open_document",
+    "storage.create_document",
+    "storage.open_tree.optional"
+  ],
+  "storagePolicy": {
+    "/home/user/.cache": "app_private_no_prompt",
+    "/home/user/.config": "app_private_no_prompt",
+    "/home/user/.local/share": "app_private_no_prompt",
+    "/home/user/.local/state": "app_private_no_prompt",
+    "/tmp": "app_private_no_prompt",
+    "/run/user/app": "app_runtime_private",
+    "openFile": "android_action_open_document",
+    "saveAs": "android_action_create_document",
+    "projectFolder": "android_action_open_document_tree_optional"
+  },
+  "runtimeRequires": [
+    "org.archphene.runtime.glibc-x86_64",
+    "org.archphene.runtime.gtk3-x86_64",
+    "org.archphene.runtime.gtksourceview4-x86_64",
+    "org.archphene.runtime.glib-gio-x86_64",
+    "org.archphene.runtime.fontconfig-pango-cairo-x86_64",
+    "org.archphene.runtime.icons-hicolor-x86_64"
+  ],
+  "archDependenciesObserved": [
+    "desktop-file-utils",
+    "gtksourceview4",
+    "hicolor-icon-theme",
+    "gspell (optional)",
+    "libxfce4ui (optional)"
+  ],
+  "testPlan": [
+    "resolve_arch_package_metadata",
+    "extract_usr_bin_mousepad",
+    "verify_elf_interpreter_and_sonames",
+    "launch_against_app_local_wayland_bridge",
+    "verify_text_entry_and_selection",
+    "verify_action_open_document",
+    "verify_action_create_document",
+    "verify_persisted_tree_project_write_optional",
+    "verify_app_private_config_cache",
+    "verify_no_dangerous_android_permissions"
+  ]
+}

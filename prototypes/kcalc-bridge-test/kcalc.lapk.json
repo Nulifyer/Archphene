@@ -1,0 +1,85 @@
+{
+  "schema": "org.archphene.lapk.test.v1",
+  "package": "org.archphene.linux.kcalc",
+  "displayName": "KCalc",
+  "source": {
+    "distribution": "archlinux",
+    "repository": "extra",
+    "arch": "x86_64",
+    "package": "kcalc",
+    "observedVersion": "26.04.3-1",
+    "packageUrl": "https://archlinux.org/packages/extra/x86_64/kcalc/"
+  },
+  "entrypoint": {
+    "path": "/usr/bin/kcalc",
+    "argv": ["/usr/bin/kcalc"],
+    "environment": {
+      "QT_QPA_PLATFORM": "wayland",
+      "WAYLAND_DISPLAY": "wayland-0",
+      "HOME": "$APP_PRIVATE_HOME",
+      "XDG_CACHE_HOME": "$APP_PRIVATE_HOME/.cache",
+      "XDG_CONFIG_HOME": "$APP_PRIVATE_HOME/.config",
+      "XDG_DATA_HOME": "$APP_PRIVATE_HOME/.local/share",
+      "XDG_STATE_HOME": "$APP_PRIVATE_HOME/.local/state",
+      "XDG_RUNTIME_DIR": "$APP_RUNTIME_DIR",
+      "TMPDIR": "$APP_PRIVATE_TMP",
+      "LANG": "C.UTF-8",
+      "LC_ALL": "C.UTF-8"
+    }
+  },
+  "androidPermissions": [],
+  "capabilities": [
+    "gui.wayland",
+    "input.pointer",
+    "input.keyboard",
+    "clipboard.foreground",
+    "storage.app_private_home"
+  ],
+  "storagePolicy": {
+    "/home/user/.cache": "app_private_no_prompt",
+    "/home/user/.config": "app_private_no_prompt",
+    "/home/user/.local/share": "app_private_no_prompt",
+    "/home/user/.local/state": "app_private_no_prompt",
+    "/tmp": "app_private_no_prompt",
+    "/run/user/app": "app_runtime_private",
+    "userVisibleFiles": "not_expected_initial_test"
+  },
+  "runtimeRequires": [
+    "org.archphene.runtime.glibc-x86_64",
+    "org.archphene.runtime.libstdcpp-x86_64",
+    "org.archphene.runtime.qt6-base-x86_64",
+    "org.archphene.runtime.kf6-core-x86_64",
+    "org.archphene.runtime.kf6-widgets-x86_64",
+    "org.archphene.runtime.kf6-icons-i18n-x86_64",
+    "org.archphene.runtime.math-libs-x86_64"
+  ],
+  "archDependenciesObserved": [
+    "glibc",
+    "gmp",
+    "kcolorscheme",
+    "kconfig",
+    "kconfigwidgets",
+    "kcoreaddons",
+    "kcrash",
+    "kguiaddons",
+    "ki18n",
+    "kiconthemes",
+    "knotifications",
+    "kwidgetsaddons",
+    "kxmlgui",
+    "libmpc",
+    "libstdc++",
+    "mpfr",
+    "qt6-base"
+  ],
+  "testPlan": [
+    "resolve_arch_package_metadata",
+    "extract_usr_bin_kcalc",
+    "verify_elf_interpreter_and_sonames",
+    "launch_headless_or_offscreen_probe",
+    "launch_against_app_local_wayland_bridge",
+    "verify_touch_keyboard_calculation",
+    "verify_app_private_config_cache",
+    "verify_no_dangerous_android_permissions"
+  ]
+}

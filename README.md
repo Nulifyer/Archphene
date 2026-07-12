@@ -1,0 +1,48 @@
+# ArchpheneOS
+
+Research and prototype workspace for combining a GrapheneOS-like Android security model with Arch package access.
+
+Start here:
+
+- [Feasibility report](docs/archpheneos-feasibility.md)
+- [Arch host + Waydroid track](tracks/arch-host-waydroid/README.md)
+- [GrapheneOS host + Arch VM track](tracks/graphene-host-arch-vm/README.md)
+- [GrapheneOS host + Linux apps without VM track](tracks/graphene-host-linux-apps-no-vm/README.md)
+- [No-VM Linux apps as Android-managed apps](docs/no-vm-linux-apps-as-android-apps.md)
+- [Linux package to APK store](docs/linux-package-to-apk-store.md)
+- [Day-one compatibility bridge](docs/day-one-compatibility-bridge.md)
+- [VS Code pacman package bridge case study](docs/vscode-pacman-bridge-case-study.md)
+- [Zed pacman package bridge case study](docs/zed-pacman-bridge-case-study.md)
+- [Linux app bridge survey](docs/linux-app-bridge-survey.md)
+- [Shared Linux runtime dependencies](docs/shared-linux-runtime-dependencies.md)
+- [Two core feasibility questions](docs/two-core-feasibility-questions.md)
+- [VM validation plan](docs/vm-validation-plan.md)
+- [VM GUI test results](docs/vm-gui-test-results.md)
+- [LinuxAppManager stub VM results](docs/linux-manager-stub-vm-results.md)
+- [LAPK parser VM results](docs/lapk-parser-vm-results.md)
+- [Payload staging VM results](docs/payload-staging-vm-results.md)
+- [Launch plumbing VM results](docs/launch-plumbing-vm-results.md)
+- [Direct Linux ELF VM results](docs/direct-linux-elf-vm-results.md)
+- [Generated APK wrapper VM results](docs/generated-apk-wrapper-vm-results.md)
+- [Dynamic glibc wrapper VM results](docs/dynamic-glibc-wrapper-vm-results.md)
+- [Dynamic musl wrapper VM results](docs/dynamic-musl-wrapper-vm-results.md)
+- [App-spawned syscall probe VM results](docs/app-spawned-syscall-probe-vm-results.md)
+- [Android permission bridge emulator results](docs/permission-bridge-emulator-results.md)
+- [Bidirectional permission bridge emulator results](docs/bidirectional-permission-bridge-emulator-results.md)
+- [Storage Access Framework bridge emulator results](docs/storage-access-framework-bridge-emulator-results.md)
+- [Framed bridge protocol emulator results](docs/framed-bridge-protocol-emulator-results.md)
+- [C bridge client emulator results](docs/c-bridge-client-emulator-results.md)
+- [Android JSON parser bridge emulator results](docs/android-json-parser-bridge-emulator-results.md)
+- [Create-document bridge emulator results](docs/create-document-bridge-emulator-results.md)
+- [Persisted tree background bridge emulator results](docs/persisted-tree-background-bridge-emulator-results.md)
+- [App-private HOME bridge emulator results](docs/app-private-home-bridge-emulator-results.md)
+- [Split storage bridge emulator results](docs/split-storage-bridge-emulator-results.md)
+- [KCalc Arch package bridge test](docs/kcalc-arch-package-bridge-test.md)
+- [KCalc Android launcher emulator results](docs/kcalc-android-launcher-emulator-results.md)
+- [Real Arch KCalc GUI bridge results](docs/kcalc-real-gui-bridge-emulator-results.md)
+- [Linux app manager emulator results](docs/linux-app-manager-emulator-results.md)
+- [KCalc runtime ship-vs-bridge split](docs/kcalc-runtime-ship-vs-bridge.md)
+- [Mousepad Arch package bridge test](docs/mousepad-arch-package-bridge-test.md)
+- [Linux home and storage policy](docs/linux-home-and-storage-policy.md)
+
+Current conclusion: the no-OS-edit generated-APK route is now proven for real KCalc. The emulator launches the unmodified Arch KCalc 26.04.3 ELF under the Android app UID through a source-built glibc compatibility runtime and an Android-owned Wayland/xdg-shell bridge. The real KDE GUI renders at the inset-adjusted Android resolution, touch and hardware-key input work, 1 + 2 = produces 3, the launcher has a KDE-derived KCalc icon, and singleTask lifecycle handling keeps one KCalc process. Android seccomp, SELinux, app storage, and lifecycle remain in force. The next phase is generalizing the compositor protocols, permission/document brokers, dependency delivery, and update transactions beyond KCalc.

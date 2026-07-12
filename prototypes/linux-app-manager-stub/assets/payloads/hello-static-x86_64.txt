@@ -1,0 +1,3 @@
+#!/archphene/static-placeholder
+This is a staged payload placeholder for org.archpheneos.samples.hello.
+Next milestone replaces this file with a real x86_64 static Linux ELF.

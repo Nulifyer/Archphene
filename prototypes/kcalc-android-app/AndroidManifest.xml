@@ -1,0 +1,30 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="org.archphene.linux.kcalc">
+    <uses-sdk android:minSdkVersion="23" android:targetSdkVersion="36" />
+
+    <application
+        android:theme="@style/AppTheme"
+        android:label="KCalc"
+        android:icon="@drawable/kcalc_icon"
+        android:roundIcon="@drawable/kcalc_icon"
+        android:allowBackup="false"
+        android:debuggable="true"
+        android:extractNativeLibs="true"
+        android:supportsRtl="true">
+        <meta-data android:name="org.archphene.linux_app" android:value="true" />
+        <meta-data android:name="org.archphene.source.type" android:value="pacman" />
+        <meta-data android:name="org.archphene.source.id" android:value="extra/kcalc" />
+        <meta-data android:name="org.archphene.source.version" android:value="26.04.3-1" />
+        <meta-data android:name="org.archphene.source.update_url" android:value="https://archlinux.org/packages/extra/x86_64/kcalc/json/" />
+        <meta-data android:name="org.archphene.runtime.abi" android:value="glibc-x86_64" />
+        <activity
+            android:name="org.archphene.linux.kcalc.MainActivity"
+            android:launchMode="singleTask"
+            android:configChanges="orientation|screenSize|smallestScreenSize|keyboardHidden"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

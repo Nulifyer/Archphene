@@ -1,0 +1,203 @@
+# -----------------------------------------------------------------------------
+# ArchpheneOS repository
+# Keep source, docs, scripts, patches, manifests, and intentional test fixtures.
+# Ignore generated build outputs, local SDK/tooling, caches, emulator state,
+# binaries, packages, logs, screenshots, and temporary files.
+# -----------------------------------------------------------------------------
+
+# OS / editor files
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.keystore
+*.jks
+*.p12
+*.pfx
+*.pem
+*.key
+
+# Logs / temporary files
+*.log
+*.pid
+*.tmp
+*.temp
+*.bak
+*.old
+*.orig
+*.rej
+*.stackdump
+
+# Archives / downloaded packages
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.tar.xz
+*.tar.zst
+*.7z
+*.rar
+*.jar
+*.pkg.tar.zst
+
+# Compiled binaries and libraries
+*.exe
+*.dll
+*.so
+*.so.*
+*.a
+*.o
+*.obj
+*.lib
+*.dylib
+*.class
+*.dex
+*.idsig
+
+# Android build artifacts
+*.apk
+*.aab
+*.ap_
+*.aar
+local.properties
+.gradle/
+**/build/
+**/out/
+**/gen/
+**/compiled/
+**/classes/
+**/dex/
+
+# Android emulator / AVD state
+*.avd/
+*.ini.lock
+*.qcow2
+*.img
+*.lock
+*.snapshot
+snapshots/
+hardware-qemu.ini
+bootcompleted.ini
+emulator-user.ini
+emu-launch-params.txt
+quickbootChoice.ini
+read-snapshot.txt
+qemu-version.txt
+version_num.cache
+tmpAdbCmds/
+modem_simulator/
+netsim.ini
+
+# Repository-local SDKs, tools, downloads, and generated workspaces
+/tooling/android-sdk/
+/tooling/avd/
+/tooling/backups/
+/tooling/build/
+/tooling/downloads/
+/tooling/jadx-*/
+/tooling/jadx-cache/
+/tooling/jadx-config/
+/tooling/recovery-*/
+/tooling/reference/
+/tooling/source/
+/tooling/sources/
+/tooling/gtk3-extract/
+/tooling/gtk3.pkg.tar.zst
+/tooling/cfr-*.jar
+/tooling/glibc-debian-*/
+/tooling/musl-alpine-*/
+/tooling/signing/
+
+# Go caches / generated binaries
+/tooling/go-cache/
+/tooling/go-appdata/
+**/*.test
+coverage.out
+
+# Zig caches
+/tooling/zig-cache/
+/tooling/zig-global-cache/
+.zig-cache/
+zig-out/
+
+# Generated runtime payloads and staged native libraries
+/prototypes/linux-payloads/bin/
+**/runtime-root/
+**/runtime-root-*/
+**/packages/
+**/db/
+**/install/
+**/runtime-manifest.tsv
+**/curated-manifest.tsv
+**/elf-needed-*.tsv
+**/elf-needed-missing.txt
+**/missing-symlink-copy-targets.tsv
+
+# Generated screenshots, UI dumps, reports, and test artifacts
+/artifacts/
+*.png
+*.jpg
+*.jpeg
+*.webp
+*-window.xml
+window.xml
+*-report.txt
+*-logcat.txt
+*-dmesg.txt
+
+# Preserve intentional documentation assets if added later
+!docs/**/*.png
+!docs/**/*.jpg
+!docs/**/*.jpeg
+!docs/**/*.webp
+
+# Native build systems
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+compile_commands.json
+meson-private/
+meson-logs/
+meson-info/
+.ninja_deps
+.ninja_log
+build.ninja
+
+# Java / Kotlin / Android tooling
+.externalNativeBuild/
+.cxx/
+captures/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Test / coverage output
+coverage/
+.coverage
+htmlcov/
+test-results/
+reports/
+
+# Misc generated metadata
+*.trace
+*.dump
+*.core

@@ -1,0 +1,21 @@
+{
+  "schema": "org.archpheneos.lapk.v0",
+  "package": "org.archpheneos.samples.hello",
+  "name": "Linux Hello",
+  "version": "0.2.0",
+  "arch": "x86_64",
+  "linuxAbi": "static-linux-elf",
+  "entrypoint": "/app/bin/hello",
+  "payload": {
+    "asset": "payload-hello-linux-amd64",
+    "installPath": "bin/hello"
+  },
+  "requires": [
+    "org.archpheneos.bridge.exec >= 0.1",
+    "org.archpheneos.runtime.none"
+  ],
+  "capabilities": [
+    "process.exec",
+    "stdout.capture"
+  ]
+}
