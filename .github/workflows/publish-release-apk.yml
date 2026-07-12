@@ -80,7 +80,7 @@ jobs:
       - name: Build signed Archphene APK
         shell: pwsh
         run: |
-          ./scripts/build-install-linux-manager-stub.ps1 -SkipInstall `
+          ./scripts/build-install-linux-manager-stub.ps1 -SkipInstall -ReleaseBuild `
             -AndroidSdk $env:ANDROID_HOME `
             -VersionCode ([int]$env:VERSION_CODE) `
             -VersionName $env:VERSION_NAME `

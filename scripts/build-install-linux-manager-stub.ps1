@@ -1,5 +1,6 @@
 param(
     [switch]$SkipInstall,
+    [switch]$ReleaseBuild,
     [string]$Serial = "emulator-5554",
     [int]$VersionCode = 10000,
     [string]$VersionName = "1.0.0",
@@ -51,6 +52,10 @@ $ManifestText = [regex]::Replace($ManifestText, 'android:versionCode="[^"]+"',
         "android:versionCode=`"$VersionCode`"")
 $ManifestText = [regex]::Replace($ManifestText, 'android:versionName="[^"]+"',
         "android:versionName=`"$VersionName`"")
+if ($ReleaseBuild) {
+    $ManifestText = $ManifestText.Replace('android:debuggable="true"',
+            'android:debuggable="false"')
+}
 [IO.File]::WriteAllText($BuildManifest, $ManifestText, [Text.UTF8Encoding]::new($false))
 Run-Native { & (Join-Path $BuildTools "aapt2.exe") compile --dir (Join-Path $App "res") -o (Join-Path $Out "compiled/res.zip") } "aapt2 compile"
 $Assets = Join-Path $App "assets"
