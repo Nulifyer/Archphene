@@ -687,7 +687,6 @@ public final class MainActivity extends Activity {
 
         if (server.bitmap != null) {
             framePreview.setImageBitmap(server.bitmap);
-            framePreview.setMinimumHeight(Math.max(240, server.height));
         }
         out.append("Frame bridge server accepted: ").append(server.accepted).append("\n");
         out.append("Frame bridge server header: ").append(server.header).append("\n");
@@ -747,7 +746,6 @@ public final class MainActivity extends Activity {
 
         if (server.bitmap != null) {
             framePreview.setImageBitmap(server.bitmap);
-            framePreview.setMinimumHeight(Math.max(240, server.height));
         }
         out.append("Shm frame bridge server accepted: ").append(server.accepted).append("\n");
         out.append("Shm frame bridge header: ").append(server.header).append("\n");
@@ -808,7 +806,6 @@ public final class MainActivity extends Activity {
 
         if (server.bitmap != null) {
             framePreview.setImageBitmap(server.bitmap);
-            framePreview.setMinimumHeight(Math.max(240, server.height));
         }
         out.append("Raw Wayland server accepted: ").append(server.accepted).append("\n");
         out.append("Raw Wayland parsed messages: ").append(server.messageCount).append("\n");
@@ -871,7 +868,6 @@ public final class MainActivity extends Activity {
 
         if (server.bitmap != null) {
             framePreview.setImageBitmap(server.bitmap);
-            framePreview.setMinimumHeight(Math.max(240, server.height));
         }
         out.append("Evented Wayland server accepted: ").append(server.accepted).append("\n");
         out.append("Evented Wayland parsed messages: ").append(server.messageCount).append("\n");
@@ -937,7 +933,6 @@ public final class MainActivity extends Activity {
 
         if (server.bitmap != null) {
             framePreview.setImageBitmap(server.bitmap);
-            framePreview.setMinimumHeight(Math.max(240, server.height));
         }
         out.append("XDG Wayland server accepted: ").append(server.accepted).append("\n");
         out.append("XDG Wayland parsed messages: ").append(server.messageCount).append("\n");
@@ -1146,7 +1141,6 @@ public final class MainActivity extends Activity {
 
         if (server.bitmap != null) {
             framePreview.setImageBitmap(server.bitmap);
-            framePreview.setMinimumHeight(Math.max(240, server.height));
         }
         out.append("Android Wayland API render exit code: ").append(result.exitCode).append("\n");
         out.append("Android Wayland API render accepted: ").append(server.accepted).append("\n");
@@ -1221,7 +1215,6 @@ public final class MainActivity extends Activity {
 
         if (server.bitmap != null) {
             framePreview.setImageBitmap(server.bitmap);
-            framePreview.setMinimumHeight(Math.max(240, server.height));
         }
         out.append("Android Wayland API xdg exit code: ").append(result.exitCode).append("\n");
         out.append("Android Wayland API xdg accepted: ").append(server.accepted).append("\n");
@@ -1438,7 +1431,6 @@ public final class MainActivity extends Activity {
         if (server.bitmap != null) {
             runOnUiThread(() -> {
                 framePreview.setImageBitmap(server.bitmap);
-                framePreview.setMinimumHeight(Math.max(240, server.height));
             });
         }
         boolean nativeRepaint = result.stdout.contains("pointer_repainted=1") || result.stdout.contains("real_pointer_repainted=1");
@@ -1632,7 +1624,7 @@ public final class MainActivity extends Activity {
 
 
     private String prepareLinuxRuntime(File runtimeLibDir) {
-        String prefix = "lib/x86_64/";
+        String prefix = "lib/" + Build.SUPPORTED_ABIS[0] + "/";
         int count = 0;
         long bytes = 0;
         try {
@@ -1918,6 +1910,7 @@ public final class MainActivity extends Activity {
         volatile boolean callbackDoneSent;
         volatile boolean xdgConfigureSent;
         volatile boolean xdgConfigureAcked;
+        volatile boolean initialXdgConfigureAcked;
         volatile int xdgConfigureSerial;
         volatile boolean frameCallbackDoneSent;
         volatile boolean bufferReleaseSent;
@@ -2087,6 +2080,7 @@ public final class MainActivity extends Activity {
                 ready.countDown();
             } finally {
                 connectedClient = null;
+                closeAllShmPools();
                 synchronized (eventLock) {
                     log = events.toString();
                     eventLog = null;
@@ -2358,6 +2352,7 @@ public final class MainActivity extends Activity {
                     popup.configureAcked = serial == popup.configureSerial;
                 } else {
                     xdgConfigureAcked = serial == xdgConfigureSerial;
+                    initialXdgConfigureAcked = true;
                 }
                 events.append(" xdg_surface.ack_configure serial=").append(serial).append("\n");
                 return;
@@ -2372,35 +2367,8 @@ public final class MainActivity extends Activity {
                     if (pointerGrabSurfaceId == popupRole.wlSurfaceId) {
                         pointerGrabSurfaceId = 0;
                     }
-                    popupRole.visible = false;                    if (pointerFocusSurfaceId == popupRole.wlSurfaceId) {
-                        pointerFocusSurfaceId = 0;
-                        pointerInside = false;
-                    }
-                    if (pointerGrabSurfaceId == popupRole.wlSurfaceId) {
-                        pointerGrabSurfaceId = 0;
-                    }
-                    popupRole.visible = false;                    if (pointerFocusSurfaceId == popupRole.wlSurfaceId) {
-                        pointerFocusSurfaceId = 0;
-                        pointerInside = false;
-                    }
-                    if (pointerGrabSurfaceId == popupRole.wlSurfaceId) {
-                        pointerGrabSurfaceId = 0;
-                    }
-                    popupRole.visible = false;                    if (pointerFocusSurfaceId == popupRole.wlSurfaceId) {
-                        pointerFocusSurfaceId = 0;
-                        pointerInside = false;
-                    }
-                    if (pointerGrabSurfaceId == popupRole.wlSurfaceId) {
-                        pointerGrabSurfaceId = 0;
-                    }
-                    popupRole.visible = false;                    if (pointerFocusSurfaceId == popupRole.wlSurfaceId) {
-                        pointerFocusSurfaceId = 0;
-                        pointerInside = false;
-                    }
-                    if (pointerGrabSurfaceId == popupRole.wlSurfaceId) {
-                        pointerGrabSurfaceId = 0;
-                    }
-                    popupRole.visible = false;                    popups.remove(object);
+                    popupRole.visible = false;
+                    popups.remove(object);
                     popupsByXdgSurface.remove(popupRole.xdgSurfaceId);
                     if (activePopupGrabId == object) {
                         PopupState parent = popupsByXdgSurface.get(popupRole.parentXdgSurfaceId);
@@ -2448,6 +2416,8 @@ public final class MainActivity extends Activity {
                     cleanupPending = true;
                 }
                 shmPools.remove(object);
+                pool.destroyed = true;
+                pool.closeIfUnused();
                 events.append(" wl_shm_pool.destroy\n");
                 return;
             }
@@ -2464,6 +2434,7 @@ public final class MainActivity extends Activity {
                 stride = u32(payload, 16);
                 int format = u32(payload, 20);
                 shmBuffers.put(bufferId, new ShmBufferState(pool, offset, width, height, stride, format));
+                pool.bufferRefs++;
                 events.append(" wl_shm_pool.create_buffer buffer_id=").append(bufferId).append(" offset=").append(offset).append(" width=").append(width).append(" height=").append(height).append(" stride=").append(stride).append(" format=").append(format).append("\n");
                 return;
             }
@@ -2472,7 +2443,11 @@ public final class MainActivity extends Activity {
                 if (!interactivePointerMode) {
                     cleanupPending = true;
                 }
-                shmBuffers.remove(object);
+                ShmBufferState removed = shmBuffers.remove(object);
+                if (removed != null) {
+                    removed.pool.bufferRefs = Math.max(0, removed.pool.bufferRefs - 1);
+                    removed.pool.closeIfUnused();
+                }
                 events.append(" wl_buffer.destroy\n");
                 return;
             }
@@ -2570,8 +2545,8 @@ public final class MainActivity extends Activity {
                     sendXdgConfigure(client, events);
                     return;
                 }
-                if (sendServerEvents && xdgSurfaceId != 0 && !xdgConfigureAcked) {
-                    throw new IllegalStateException("xdg surface committed buffer before ack_configure");
+                if (sendServerEvents && xdgSurfaceId != 0 && !initialXdgConfigureAcked) {
+                    throw new IllegalStateException("xdg surface committed initial buffer before ack_configure");
                 }
                 boolean releaseAttachedBuffer = mainBufferAttachPending && attachedBufferId != 0;
                 commitBuffer();
@@ -2861,15 +2836,26 @@ public final class MainActivity extends Activity {
             if (nextWidth == configureWidth && nextHeight == configureHeight) {
                 return;
             }
+            boolean orientationChanged = (configureWidth > configureHeight) != (nextWidth > nextHeight);
             configureWidth = nextWidth;
             configureHeight = nextHeight;
             LocalSocket client = connectedClient;
-            if (client == null || xdgSurfaceId == 0 || xdgToplevelId == 0) {
+            if (client == null) {
                 return;
             }
             try {
-                xdgConfigureAcked = false;
                 StringBuilder resize = new StringBuilder();
+                if (orientationChanged) {
+                    dismissPopupsForViewportChange(client, resize);
+                }
+                if (outputId != 0) {
+                    sendOutputMode(client, outputId, resize);
+                }
+                if (xdgSurfaceId == 0 || xdgToplevelId == 0) {
+                    appendAsyncEvent(resize.toString().trim());
+                    return;
+                }
+                xdgConfigureAcked = false;
                 sendXdgConfigure(client, resize);
                 appendAsyncEvent(resize.toString().trim());
             } catch (Exception e) {
@@ -2930,8 +2916,11 @@ public final class MainActivity extends Activity {
             if (client == null || pointerId == 0 || surfaceId == 0) {
                 return false;
             }
-            int px = Math.max(0, Math.min(configureWidth - 1, Math.round(x)));
-            int py = Math.max(0, Math.min(configureHeight - 1, Math.round(y)));
+            Bitmap committed = mainBitmap;
+            int inputWidth = committed == null ? configureWidth : committed.getWidth();
+            int inputHeight = committed == null ? configureHeight : committed.getHeight();
+            int px = Math.max(0, Math.min(inputWidth - 1, Math.round(x)));
+            int py = Math.max(0, Math.min(inputHeight - 1, Math.round(y)));
             pointerLastX = px;
             pointerLastY = py;
             androidPointerEventsSent++;
@@ -3234,18 +3223,44 @@ public final class MainActivity extends Activity {
             System.arraycopy(model, 0, geometry, 20 + make.length, model.length);
             putU32(geometry, 20 + make.length + model.length, 0);
             writeMessage(client, output, 0, geometry);
+            sendU32Event(client, output, 3, 1, events, "wl_output.scale");
+            events.append("server->client object=").append(output).append(" opcode=0 wl_output.geometry make=Archphene model=Android Display\n");
+            sendOutputMode(client, output, events);
+        }
+
+        private void sendOutputMode(LocalSocket client, int output, StringBuilder events) throws Exception {
             byte[] mode = new byte[16];
             putU32(mode, 0, 1);
             putU32(mode, 4, configureWidth);
             putU32(mode, 8, configureHeight);
             putU32(mode, 12, 60000);
             writeMessage(client, output, 1, mode);
-            sendU32Event(client, output, 3, 1, events, "wl_output.scale");
             writeMessage(client, output, 2, new byte[0]);
             outputDoneSent = true;
-            events.append("server->client object=").append(output).append(" opcode=0 wl_output.geometry make=Archphene model=Android Display\n");
             events.append("server->client object=").append(output).append(" opcode=1 wl_output.mode current width=").append(configureWidth).append(" height=").append(configureHeight).append(" refresh=60000\n");
             events.append("server->client object=").append(output).append(" opcode=2 wl_output.done\n");
+        }
+
+        private void dismissPopupsForViewportChange(LocalSocket client, StringBuilder events) throws Exception {
+            ArrayList<PopupState> stack = new ArrayList<>(popups.values());
+            stack.sort((left, right) -> Integer.compare(right.sequence, left.sequence));
+            boolean changed = false;
+            for (PopupState popup : stack) {
+                if (!popup.visible) {
+                    continue;
+                }
+                writeMessage(client, popup.popupId, 1, new byte[0]);
+                popup.visible = false;
+                changed = true;
+                events.append("server->client object=").append(popup.popupId)
+                        .append(" opcode=1 xdg_popup.popup_done reason=viewport-change\n");
+            }
+            if (changed) {
+                activePopupGrabId = 0;
+                pointerGrabSurfaceId = 0;
+                pointerFocusSurfaceId = surfaceId;
+                restoreMainBitmap();
+            }
         }
 
         private void sendSeatEvents(LocalSocket client, int seat, StringBuilder events) throws Exception {
@@ -3577,13 +3592,55 @@ Bitmap incoming = Bitmap.createBitmap(argb, width, height, Bitmap.Config.ARGB_88
             }
         }
 
+        private void closeAllShmPools() {
+            java.util.HashSet<ShmPoolState> pools = new java.util.HashSet<>(shmPools.values());
+            for (ShmBufferState buffer : shmBuffers.values()) {
+                pools.add(buffer.pool);
+            }
+            for (ShmPoolState pool : pools) {
+                pool.closeNow();
+            }
+            while (!pendingShmFds.isEmpty()) {
+                FileDescriptor fd = pendingShmFds.removeFirst();
+                try {
+                    if (fd.valid()) {
+                        Os.close(fd);
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+            shmPools.clear();
+            shmBuffers.clear();
+        }
         private static final class ShmPoolState {
             final FileDescriptor fd;
             int size;
+            int bufferRefs;
+            boolean destroyed;
+            boolean closed;
 
             ShmPoolState(FileDescriptor fd, int size) {
                 this.fd = fd;
                 this.size = size;
+            }
+
+            void closeIfUnused() {
+                if (destroyed && bufferRefs == 0) {
+                    closeNow();
+                }
+            }
+
+            void closeNow() {
+                if (closed) {
+                    return;
+                }
+                closed = true;
+                try {
+                    if (fd.valid()) {
+                        Os.close(fd);
+                    }
+                } catch (Exception ignored) {
+                }
             }
         }
 

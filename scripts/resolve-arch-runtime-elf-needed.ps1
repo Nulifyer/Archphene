@@ -58,8 +58,9 @@ $outDir = Split-Path -Parent $RuntimeRoot
 $resolvedPath = Join-Path $outDir "elf-needed-resolved.tsv"
 $missingPath = Join-Path $outDir "elf-needed-missing.txt"
 $edgesPath = Join-Path $outDir "elf-needed-edges.tsv"
+[IO.File]::WriteAllText($missingPath, "", [Text.UTF8Encoding]::new($false))
 $resolved.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Name)`t$($_.Value.Substring($RuntimeRoot.Length + 1))" } | Set-Content -LiteralPath $resolvedPath
-$missing | Set-Content -LiteralPath $missingPath
+if ($missing.Count -gt 0) { $missing | Set-Content -LiteralPath $missingPath }
 $edges | ForEach-Object { "$($_.From)`t$($_.Needed)`t$($_.Resolved)" } | Set-Content -LiteralPath $edgesPath
 
 [pscustomobject]@{

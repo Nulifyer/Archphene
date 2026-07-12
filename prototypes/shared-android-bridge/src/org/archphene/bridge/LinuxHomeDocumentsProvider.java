@@ -1,4 +1,4 @@
-package org.archphene.linux.mousepad;
+package org.archphene.bridge;
 
 import android.database.Cursor;
 import android.database.MatrixCursor;
@@ -95,10 +95,12 @@ public final class LinuxHomeDocumentsProvider extends DocumentsProvider {
 
     private void include(MatrixCursor rows, String id, File file) {
         boolean directory = file.isDirectory();
-        int flags = DocumentsContract.Document.FLAG_SUPPORTS_RENAME
-                | DocumentsContract.Document.FLAG_SUPPORTS_DELETE;
-        flags |= directory ? DocumentsContract.Document.FLAG_DIR_SUPPORTS_CREATE
+        int flags = directory ? DocumentsContract.Document.FLAG_DIR_SUPPORTS_CREATE
                 : DocumentsContract.Document.FLAG_SUPPORTS_WRITE;
+        if (!HOME_ID.equals(id)) {
+            flags |= DocumentsContract.Document.FLAG_SUPPORTS_RENAME
+                    | DocumentsContract.Document.FLAG_SUPPORTS_DELETE;
+        }
         rows.newRow()
                 .add(DocumentsContract.Document.COLUMN_DOCUMENT_ID, id)
                 .add(DocumentsContract.Document.COLUMN_DISPLAY_NAME,

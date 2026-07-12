@@ -1,7 +1,9 @@
 param(
     [string]$RuntimeRoot = "tooling/downloads/arch-curated-kcalc-x86_64/runtime-root",
     [string]$ResolvedFile = "tooling/downloads/arch-curated-kcalc-x86_64/elf-needed-resolved.tsv",
-    [string]$AppLibDir = "prototypes/kcalc-android-app/lib/x86_64"
+    [string]$AppLibDir = "prototypes/kcalc-android-app/lib/x86_64",
+    [string]$LoaderPath = "",
+    [string]$CompatLibcPath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -41,10 +43,16 @@ foreach ($line in Get-Content -LiteralPath $ResolvedFile) {
     $totalBytes += (Get-Item -LiteralPath $source).Length
 }
 
-$loader = Join-Path $RuntimeRoot "usr/lib/ld-linux-x86-64.so.2"
+$loader = if ($LoaderPath) { (Resolve-Path (Join-Path $Root $LoaderPath)).Path } else {
+    Join-Path $RuntimeRoot "usr/lib/ld-linux-x86-64.so.2"
+}
 if (-not (Test-Path -LiteralPath $loader -PathType Leaf)) { throw "loader missing: $loader" }
 Copy-Item -LiteralPath $loader -Destination (Join-Path $AppLibDir "libld.so.2") -Force
 Copy-Item -LiteralPath $loader -Destination (Join-Path $AppLibDir "libarchphene_ld.so") -Force
+if ($CompatLibcPath) {
+    $compatLibc = (Resolve-Path (Join-Path $Root $CompatLibcPath)).Path
+    Copy-Item -LiteralPath $compatLibc -Destination (Join-Path $AppLibDir "libc.so.6") -Force
+}
 
 $kcalc = Join-Path $RuntimeRoot "usr/bin/kcalc"
 if (-not (Test-Path -LiteralPath $kcalc -PathType Leaf)) { throw "kcalc missing: $kcalc" }

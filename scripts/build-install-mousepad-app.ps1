@@ -28,6 +28,10 @@ if ($Descriptor.android.package -ne "org.archphene.linux.mousepad") {
     throw "This Mousepad wrapper template requires package org.archphene.linux.mousepad"
 }
 $ManifestText = Get-Content -LiteralPath (Join-Path $App "AndroidManifest.xml") -Raw
+$ProviderCount = ([regex]::Matches($ManifestText, '<provider\s')).Count
+if ($ProviderCount -ne 1) {
+    throw "Mousepad manifest must declare exactly one DocumentsProvider; found $ProviderCount"
+}
 foreach ($Expected in @($Descriptor.android.package, $Descriptor.android.label,
         $Descriptor.android.versionName, $Descriptor.source.metadataUrl, $Descriptor.runtime.linuxAbi)) {
     if (-not $ManifestText.Contains([string]$Expected)) {
@@ -101,7 +105,10 @@ try {
 Run-Native { & (Join-Path $BuildTools "aapt2.exe") compile --dir (Join-Path $App "res") -o (Join-Path $Out "compiled/res.zip") } "aapt2 compile"
 Run-Native { & (Join-Path $BuildTools "aapt2.exe") link -o (Join-Path $Out "unsigned.apk") -I (Join-Path $Sdk "platforms/android-36/android.jar") --version-code ([int]$Descriptor.android.versionCode) --version-name ([string]$Descriptor.android.versionName) --manifest (Join-Path $App "AndroidManifest.xml") --java (Join-Path $Out "gen") (Join-Path $Out "compiled/res.zip") } "aapt2 link"
 
-$JavaFiles = Get-ChildItem -LiteralPath (Join-Path $App "src") -Recurse -Filter *.java | ForEach-Object { $_.FullName }
+$JavaFiles = @(
+    Get-ChildItem -LiteralPath (Join-Path $App "src") -Recurse -Filter *.java
+    Get-ChildItem -LiteralPath (Join-Path $Root "prototypes/shared-android-bridge/src") -Recurse -Filter *.java
+) | ForEach-Object { $_.FullName }
 Run-Native { & javac --release 17 -classpath (Join-Path $Sdk "platforms/android-36/android.jar") -d (Join-Path $Out "classes") $JavaFiles } "javac"
 
 $ClassFiles = Get-ChildItem -LiteralPath (Join-Path $Out "classes") -Recurse -Filter *.class | ForEach-Object { $_.FullName }

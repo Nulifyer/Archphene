@@ -7,8 +7,12 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.regex.Pattern;
 
 public final class LinuxPackageManifest {
+    private static final Pattern PACKAGE_NAME = Pattern.compile("[a-z0-9]+(?:[._-][a-z0-9]+)*");
     public final String schema;
     public final String packageName;
     public final String name;
@@ -50,7 +54,7 @@ public final class LinuxPackageManifest {
         String json = readAsset(context, "sample-lapk.json");
         JSONObject root = new JSONObject(json);
         JSONObject payload = root.getJSONObject("payload");
-        return new LinuxPackageManifest(
+        LinuxPackageManifest manifest = new LinuxPackageManifest(
                 root.getString("schema"),
                 root.getString("package"),
                 root.getString("name"),
@@ -62,6 +66,47 @@ public final class LinuxPackageManifest {
                 payload.getString("installPath"),
                 readStringArray(root.getJSONArray("requires")),
                 readStringArray(root.getJSONArray("capabilities")));
+        manifest.validate();
+        return manifest;
+    }
+
+    private void validate() {
+        if (!"org.archpheneos.lapk.v0".equals(schema)) {
+            throw new IllegalArgumentException("Unsupported LAPK schema: " + schema);
+        }
+        if (!PACKAGE_NAME.matcher(packageName).matches()) {
+            throw new IllegalArgumentException("Invalid package name: " + packageName);
+        }
+        requireText(name, "name");
+        requireText(version, "version");
+        requireText(arch, "arch");
+        requireText(linuxAbi, "linuxAbi");
+        requireText(payloadAsset, "payload.asset");
+        requireText(payloadInstallPath, "payload.installPath");
+        if (!entrypoint.startsWith("/") || entrypoint.contains("/../") || entrypoint.endsWith("/..")) {
+            throw new IllegalArgumentException("Entrypoint must be an absolute normalized Linux path");
+        }
+        if (payloadAsset.contains("/") || payloadAsset.contains("\\") || payloadAsset.equals(".") || payloadAsset.equals("..")) {
+            throw new IllegalArgumentException("Payload asset must be an asset filename");
+        }
+        if (payloadInstallPath.startsWith("/") || payloadInstallPath.startsWith("\\")
+                || payloadInstallPath.contains("../") || payloadInstallPath.contains("..\\")) {
+            throw new IllegalArgumentException("Payload install path must be relative and normalized");
+        }
+        rejectDuplicates(requires, "requires");
+        rejectDuplicates(capabilities, "capabilities");
+    }
+
+    private static void requireText(String value, String field) {
+        if (value.trim().isEmpty()) { throw new IllegalArgumentException(field + " must not be empty"); }
+    }
+
+    private static void rejectDuplicates(String[] values, String field) {
+        Set<String> unique = new HashSet<>();
+        for (String value : values) {
+            requireText(value, field);
+            if (!unique.add(value)) { throw new IllegalArgumentException("Duplicate " + field + " value: " + value); }
+        }
     }
 
     public String renderForUi() {

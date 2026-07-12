@@ -101,7 +101,7 @@ index 80a540c0..cbf35a54 100644
 +#if defined ARCHPHENE_ANDROID_APP_COMPAT || !defined __NR_chown
    return INLINE_SYSCALL_CALL (fchownat, AT_FDCWD, file, owner, group, 0);
 +#else
-+  return INLINE_SYSCALL_CALL (chown, file, owner, groups);
++  return INLINE_SYSCALL_CALL (chown, file, owner, group);
  #endif
  }
  libc_hidden_def (__chown)

@@ -2,6 +2,9 @@ param(
     [string]$Classification = "prototypes/kcalc-bridge-test/kcalc.runtime-classification.json",
     [string]$Arch = "x86_64",
     [string]$Mirror = "https://geo.mirror.pkgbuild.com",
+    [string]$RepositoryPath = "{repo}/os/{arch}",
+    [string]$DownloadContainer = "",
+    [switch]$DownloadSignatures,
     [switch]$Refresh
 )
 
@@ -43,19 +46,33 @@ function Read-Desc([string]$Path, [string]$Repo) {
 function Download-File([string]$Url, [string]$OutFile) {
     if ((Test-Path -LiteralPath $OutFile) -and -not $Refresh) { return }
     Write-Host "download $Url"
-    & curl.exe -L --fail --retry 3 --retry-delay 2 -o $OutFile $Url
-    if ($LASTEXITCODE -ne 0) { throw "curl failed for $Url" }
+    if ($DownloadContainer) {
+        $temporary = "/tmp/archphene-download-$([guid]::NewGuid().ToString('N'))"
+        & podman exec $DownloadContainer curl --fail --show-error --silent --location `
+                --retry 3 --retry-delay 2 --output $temporary $Url
+        if ($LASTEXITCODE -ne 0) { throw "container curl failed for $Url" }
+        & podman cp "${DownloadContainer}:$temporary" $OutFile
+        if ($LASTEXITCODE -ne 0) { throw "podman cp failed for $Url" }
+        & podman exec $DownloadContainer rm -f $temporary | Out-Null
+    } else {
+        & curl.exe -L --fail --retry 3 --retry-delay 2 -o $OutFile $Url
+        if ($LASTEXITCODE -ne 0) { throw "curl failed for $Url" }
+    }
 }
 
 function Get-LocalPackageFileName([string]$PackageFileName) {
     # Arch epoch separators are ':'; Windows treats ':' as an alternate stream separator.
     return $PackageFileName.Replace(':', '_')
 }
+function Get-RepositoryUrl([string]$Repo) {
+    $path = $RepositoryPath.Replace('{repo}', $Repo).Replace('{arch}', $Arch)
+    return "$($Mirror.TrimEnd('/'))/$($path.Trim('/'))"
+}
 
 foreach ($repo in $Repos) {
     $dbFile = Join-Path $DbDir "$repo.db"
     $extractDir = Join-Path $DbDir $repo
-    Download-File "$Mirror/$repo/os/$Arch/$repo.db" $dbFile
+    Download-File "$(Get-RepositoryUrl $repo)/$repo.db" $dbFile
     if ((Test-Path -LiteralPath $extractDir) -and $Refresh) { Remove-Item -LiteralPath $extractDir -Recurse -Force }
     if (-not (Test-Path -LiteralPath $extractDir)) {
         New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
@@ -97,14 +114,19 @@ if ($missing.Count -gt 0) { $missing | Sort-Object -Unique | Set-Content -Litera
 
 foreach ($pkg in ($selected | Sort-Object Repo,Name)) {
     if ([string]::IsNullOrWhiteSpace($pkg.Filename)) { continue }
-    Download-File "$Mirror/$($pkg.Repo)/os/$Arch/$($pkg.Filename)" (Join-Path $PkgDir (Get-LocalPackageFileName $pkg.Filename))
+    Download-File "$(Get-RepositoryUrl $pkg.Repo)/$($pkg.Filename)" (Join-Path $PkgDir (Get-LocalPackageFileName $pkg.Filename))
+    if ($DownloadSignatures) {
+        Download-File "$(Get-RepositoryUrl $pkg.Repo)/$($pkg.Filename).sig" `
+                (Join-Path $PkgDir (Get-LocalPackageFileName "$($pkg.Filename).sig"))
+    }
 }
 
 if ((Test-Path -LiteralPath $RuntimeDir) -and $Refresh) {
     Remove-Item -LiteralPath $RuntimeDir -Recurse -Force
     New-Item -ItemType Directory -Force -Path $RuntimeDir | Out-Null
 }
-foreach ($pkgFile in Get-ChildItem -LiteralPath $PkgDir -File -Filter "*.pkg.tar.*") {
+foreach ($pkgFile in (Get-ChildItem -LiteralPath $PkgDir -File -Filter "*.pkg.tar.*" |
+        Where-Object { $_.Name -notlike "*.sig" })) {
     Write-Host "extract $($pkgFile.Name)"
     & tar -xf $pkgFile.FullName -C $RuntimeDir
     if ($LASTEXITCODE -ne 0) { Write-Warning "tar returned $LASTEXITCODE for $($pkgFile.Name); continuing" }

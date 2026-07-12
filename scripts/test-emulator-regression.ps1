@@ -1,0 +1,41 @@
+param(
+    [string]$Serial = "emulator-5554",
+    [switch]$SkipDocumentWorkflow,
+    [switch]$SkipPackageInstaller
+)
+
+$ErrorActionPreference = "Stop"
+$tests = @(
+    @{ Name = "Linux manager update"; Command = { & "$PSScriptRoot/test-linux-manager-update.ps1" -Serial $Serial } },
+    @{ Name = "Linux manager KCalc launch"; Command = { & "$PSScriptRoot/test-linux-manager-kcalc.ps1" -Serial $Serial } },
+    @{ Name = "Linux manager catalog isolation"; Command = { & "$PSScriptRoot/test-linux-manager-catalog.ps1" -Serial $Serial } },
+    @{ Name = "KCalc native menus"; Command = { & "$PSScriptRoot/test-kcalc-menu-switch.ps1" -Serial $Serial } },
+    @{ Name = "KCalc clipboard"; Command = { & "$PSScriptRoot/test-kcalc-clipboard.ps1" -Serial $Serial } },
+    @{ Name = "KCalc live resize"; Command = { & "$PSScriptRoot/test-kcalc-live-resize.ps1" -Serial $Serial } },
+    @{ Name = "KCalc signed update transaction"; Command = { & "$PSScriptRoot/test-kcalc-update-transaction.ps1" -SkipBuild -Serial $Serial } }
+)
+if (-not $SkipPackageInstaller) {
+    $tests += @{ Name = "Manager PackageInstaller"; Command = { & "$PSScriptRoot/test-linux-manager-package-installer.ps1" -Serial $Serial } }
+}
+if (-not $SkipDocumentWorkflow) {
+    $tests += @{ Name = "Mousepad Android document workflow"; Command = { & "$PSScriptRoot/test-mousepad-android-document-workflow.ps1" -Serial $Serial } }
+    $tests += @{ Name = "Mousepad open-dialog IME"; Command = { & "$PSScriptRoot/test-mousepad-open-dialog-ime.ps1" -Serial $Serial } }
+}
+
+$results = @()
+foreach ($test in $tests) {
+    $started = Get-Date
+    Write-Host "`n==> $($test.Name)"
+    & $test.Command
+    if ($LASTEXITCODE -ne 0) {
+        throw "$($test.Name) failed with exit code $LASTEXITCODE"
+    }
+    $results += [pscustomobject]@{
+        Test = $test.Name
+        Status = "PASS"
+        Seconds = [math]::Round(((Get-Date) - $started).TotalSeconds, 1)
+    }
+}
+
+Write-Host "`nArchphene emulator regression suite passed."
+$results | Format-Table -AutoSize

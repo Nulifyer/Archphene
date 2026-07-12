@@ -38,8 +38,12 @@ public final class PayloadStager {
     }
 
     public static Result stage(Context context, LinuxPackageManifest manifest) throws Exception {
-        File packageRoot = new File(new File(context.getFilesDir(), "archphene/payloads"), manifest.packageName);
-        File target = new File(packageRoot, manifest.payloadInstallPath);
+        File payloadRoot = new File(context.getFilesDir(), "archphene/payloads").getCanonicalFile();
+        File packageRoot = new File(payloadRoot, manifest.packageName).getCanonicalFile();
+        File target = new File(packageRoot, manifest.payloadInstallPath).getCanonicalFile();
+        if (!isWithin(packageRoot, target)) {
+            throw new SecurityException("Payload install path escapes package root");
+        }
         File parent = target.getParentFile();
         if (parent != null && !parent.exists() && !parent.mkdirs()) {
             throw new IllegalStateException("Failed to create " + parent);
@@ -59,6 +63,11 @@ public final class PayloadStager {
         target.setExecutable(true, true);
 
         return new Result(target, target.length(), sha256(target));
+    }
+
+    private static boolean isWithin(File root, File child) {
+        String rootPath = root.getPath() + File.separator;
+        return child.getPath().startsWith(rootPath);
     }
 
     private static String sha256(File file) throws Exception {

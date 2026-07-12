@@ -1,3 +1,5 @@
+param([string]$Serial = "emulator-5554")
+
 $ErrorActionPreference = "Stop"
 
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
@@ -10,17 +12,17 @@ $Private = "/data/user/0/$Manager/cache/archpheneos-kcalc-update.apk"
 $Hash = (Get-FileHash -LiteralPath $Apk -Algorithm SHA256).Hash.ToLowerInvariant()
 
 function Get-Ui([string]$Path) {
-    & $Adb shell uiautomator dump $Path | Out-Null
-    return ((& $Adb shell cat $Path) -join "`n")
+    & $Adb -s $Serial shell uiautomator dump $Path | Out-Null
+    return ((& $Adb -s $Serial shell cat $Path) -join "`n")
 }
 
-& $Adb push $Apk $Remote | Out-Null
-& $Adb shell run-as $Manager cp $Remote cache/archpheneos-kcalc-update.apk
-& $Adb shell run-as $Manager chmod 600 cache/archpheneos-kcalc-update.apk
-& $Adb shell appops set $Manager REQUEST_INSTALL_PACKAGES allow
+& $Adb -s $Serial push $Apk $Remote | Out-Null
+& $Adb -s $Serial shell run-as $Manager cp $Remote cache/archpheneos-kcalc-update.apk
+& $Adb -s $Serial shell run-as $Manager chmod 600 cache/archpheneos-kcalc-update.apk
+& $Adb -s $Serial shell appops set $Manager REQUEST_INSTALL_PACKAGES allow
 try {
-    & $Adb shell am force-stop $Manager | Out-Null
-    & $Adb shell am start -n "$Manager/.MainActivity" `
+    & $Adb -s $Serial shell am force-stop $Manager | Out-Null
+    & $Adb -s $Serial shell am start -n "$Manager/.MainActivity" `
         --es archphene_test_apk_url "file://$Private" `
         --es archphene_test_apk_sha256 $Hash `
         --es archphene_test_apk_package $KCalc | Out-Null
@@ -40,7 +42,7 @@ try {
     }
     $X = ([int]$Update.Groups[1].Value + [int]$Update.Groups[3].Value) / 2
     $Y = ([int]$Update.Groups[2].Value + [int]$Update.Groups[4].Value) / 2
-    & $Adb shell input tap ([int]$X) ([int]$Y) | Out-Null
+    & $Adb -s $Serial shell input tap ([int]$X) ([int]$Y) | Out-Null
 
     $Deadline = [DateTime]::UtcNow.AddSeconds(25)
     do {
@@ -51,11 +53,11 @@ try {
         throw "Manager did not receive PackageInstaller success"
     }
 
-    & (Join-Path $PSScriptRoot "test-kcalc-clipboard.ps1")
+    & (Join-Path $PSScriptRoot "test-kcalc-clipboard.ps1") -Serial $Serial
     Write-Host "Manager PackageInstaller update passed with Android confirmation and KCalc health check."
 }
 finally {
-    & $Adb shell appops set $Manager REQUEST_INSTALL_PACKAGES default | Out-Null
-    & $Adb shell rm -f $Remote | Out-Null
-    & $Adb shell run-as $Manager rm -f cache/archpheneos-kcalc-update.apk | Out-Null
+    & $Adb -s $Serial shell appops set $Manager REQUEST_INSTALL_PACKAGES default | Out-Null
+    & $Adb -s $Serial shell rm -f $Remote | Out-Null
+    & $Adb -s $Serial shell run-as $Manager rm -f cache/archpheneos-kcalc-update.apk | Out-Null
 }

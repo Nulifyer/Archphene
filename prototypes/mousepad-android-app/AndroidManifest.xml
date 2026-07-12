@@ -16,8 +16,9 @@
         <meta-data android:name="org.archphene.source.version" android:value="0.7.0-1" />
         <meta-data android:name="org.archphene.source.update_url" android:value="https://archlinux.org/packages/extra/x86_64/mousepad/json/" />
         <meta-data android:name="org.archphene.runtime.abi" android:value="glibc-x86_64" />
+
         <provider
-            android:name="org.archphene.linux.mousepad.LinuxHomeDocumentsProvider"
+            android:name="org.archphene.bridge.LinuxHomeDocumentsProvider"
             android:authorities="org.archphene.linux.mousepad.documents"
             android:exported="true"
             android:grantUriPermissions="true"
@@ -26,56 +27,12 @@
                 <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
             </intent-filter>
         </provider>
-        <provider
-            android:name="org.archphene.linux.mousepad.LinuxHomeDocumentsProvider"
-            android:authorities="org.archphene.linux.mousepad.documents"
-            android:exported="true"
-            android:grantUriPermissions="true"
-            android:permission="android.permission.MANAGE_DOCUMENTS">
-            <intent-filter>
-                <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
-            </intent-filter>
-        </provider>
-        <provider
-            android:name="org.archphene.linux.mousepad.LinuxHomeDocumentsProvider"
-            android:authorities="org.archphene.linux.mousepad.documents"
-            android:exported="true"
-            android:grantUriPermissions="true"
-            android:permission="android.permission.MANAGE_DOCUMENTS">
-            <intent-filter>
-                <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
-            </intent-filter>
-        </provider>
-        <provider
-            android:name="org.archphene.linux.mousepad.LinuxHomeDocumentsProvider"
-            android:authorities="org.archphene.linux.mousepad.documents"
-            android:exported="true"
-            android:grantUriPermissions="true"
-            android:permission="android.permission.MANAGE_DOCUMENTS">
-            <intent-filter>
-                <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
-            </intent-filter>
-        </provider>
-        <provider
-            android:name="org.archphene.linux.mousepad.LinuxHomeDocumentsProvider"
-            android:authorities="org.archphene.linux.mousepad.documents"
-            android:exported="true"
-            android:grantUriPermissions="true"
-            android:permission="android.permission.MANAGE_DOCUMENTS">
-            <intent-filter>
-                <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
-            </intent-filter>
-        </provider>
-        <provider
-            android:name="org.archphene.linux.mousepad.LinuxHomeDocumentsProvider"
-            android:authorities="org.archphene.linux.mousepad.documents"
-            android:exported="true"
-            android:grantUriPermissions="true"
-            android:permission="android.permission.MANAGE_DOCUMENTS">
-            <intent-filter>
-                <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
-            </intent-filter>
-        </provider>
+
+        <activity
+            android:name="org.archphene.bridge.DocumentOpenActivity"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
+            android:exported="true" />
+
         <activity
             android:name="org.archphene.linux.mousepad.MainActivity"
             android:launchMode="singleTask"
@@ -85,6 +42,15 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.EDIT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/*" />
+                <data android:mimeType="application/json" />
+                <data android:mimeType="application/xml" />
+                <data android:mimeType="application/yaml" />
             </intent-filter>
         </activity>
     </application>

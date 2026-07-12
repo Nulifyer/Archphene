@@ -44,20 +44,20 @@ Hyprland independently tracks popup trees, nested children, mapping, damage, eff
 - Send `xdg_popup.popup_done` on outside press, Back/Escape, Activity focus loss, or invalidated parent.
 - Restore pointer and keyboard focus to the root after dismissal.
 - Use each surface's effective input region rather than buffer bounds alone.
-- Implement `xdg_popup.reposition` and `repositioned(token)`.
+- [x] Implement `xdg_popup.reposition` and `repositioned(token)`. The bridge now applies the new positioner state, constrains the popup, acknowledges the token, and emits popup and surface configure events in protocol order.
 
 ### P1: real surface trees
 
-- Implement `wl_subcompositor` and `wl_subsurface` synchronized/desynchronized commits.
-- Preserve parent-relative offsets, stacking above/below siblings, and atomic parent commits.
+- [~] `wl_subcompositor` and `wl_subsurface` objects, parent-relative positioning, stacking, rendering, and input routing are implemented. Finish synchronized/desynchronized pending-state latching.
+- Preserve atomic parent commits: synchronized child buffers and position/stack changes must become visible only with the parent commit.
 - Compose nested popup and subsurface trees in protocol stacking order.
 - Apply damage per surface instead of rebuilding a single flattened bitmap after every commit.
 - Send output enter/leave and scale updates to every surface in the tree.
 
 ### P1: Android text and clipboard integration
 
-- Implement `zwp_text_input_v3` and translate its enable, content type, surrounding text, cursor rectangle, preedit, commit, and delete operations to Android IME APIs.
-- Implement `wl_data_device_manager` with Android ClipboardManager as a broker.
+- [~] `zwp_text_input_v3` enable/disable state and Android IME retention are implemented and regression-tested for GTK search. Complete surrounding-text, preedit, cursor-rectangle, and delete-surrounding-text fidelity.
+- [x] `wl_data_device_manager` text transfer is brokered through Android `ClipboardManager` in both directions with feedback-loop suppression.
 - Stream MIME payloads over descriptors; do not copy arbitrary clipboard data into bridge logs or global files.
 - Add drag-and-drop only after selection and offer lifecycle behavior is correct.
 

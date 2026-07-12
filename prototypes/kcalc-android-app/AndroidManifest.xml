@@ -19,7 +19,7 @@
         <activity
             android:name="org.archphene.linux.kcalc.MainActivity"
             android:launchMode="singleTask"
-            android:configChanges="orientation|screenSize|smallestScreenSize|keyboardHidden"
+            android:configChanges="density|fontScale|keyboard|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

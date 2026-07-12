@@ -38,7 +38,9 @@
     "storage.open_document",
     "storage.create_document",
     "storage.open_tree.optional",
-    "window.live_resize"
+    "window.live_resize",
+    "storage.edit_document_writeback",
+    "storage.documents_provider"
   ],
   "androidPermissions": []
 }

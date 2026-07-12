@@ -46,6 +46,7 @@ import android.app.Activity;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.content.Intent;
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.Insets;
@@ -88,6 +89,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.Enumeration;
 import java.util.Locale;
@@ -97,6 +99,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import java.util.zip.ZipInputStream;
+import org.archphene.bridge.AndroidDocumentSession;
 
 public final class MainActivity
 extends Activity {
@@ -128,6 +131,8 @@ extends Activity {
     private boolean waylandTextInputDesired;
     private int waylandTextInputGeneration;
     private Runnable pendingWaylandTextInputApply;
+    private long lastAndroidImeCommitUptime;
+    private boolean retainAndroidImeForKeyboardNavigation;
     private boolean popupBackInProgress;
     private boolean suppressNextBackInvocation;
     private ClipboardManager clipboardManager;
@@ -139,6 +144,7 @@ extends Activity {
     private boolean touchScrolling;
     private boolean touchPointerPressed;
     private Runnable pendingViewportResize;
+    private AndroidDocumentSession documentSession;
 
     private static native FileDescriptor createFilesystemWaylandServer(String var0) throws IOException;
 
@@ -158,6 +164,7 @@ extends Activity {
         String string;
         ClipboardManager clipboardManager;
         super.onCreate(bundle);
+        this.documentSession = new AndroidDocumentSession(this, TAG);
         currentActivity = new WeakReference<MainActivity>(this);
         String string2 = this.getIntent().getStringExtra("archphene_android_clipboard_text");
         if (string2 != null) {
@@ -239,32 +246,79 @@ extends Activity {
     }
 
     private void setWaylandTextInputEnabled(boolean enabled) {
+        this.setWaylandTextInputEnabled(enabled, true);
+    }
+
+    private void setWaylandTextInputEnabled(boolean enabled, boolean allowKeyboardNavigationRetention) {
         BridgeRootView root = this.bridgeRootView;
         if (root == null) {
             return;
+        }
+        if (!enabled && allowKeyboardNavigationRetention
+                && this.waylandTextInputRequested
+                && SystemClock.uptimeMillis() - this.lastAndroidImeCommitUptime < 750L) {
+            this.retainAndroidImeForKeyboardNavigation = true;
+            this.waylandTextInputDesired = true;
+            if (this.pendingWaylandTextInputApply != null) {
+                root.removeCallbacks(this.pendingWaylandTextInputApply);
+                this.pendingWaylandTextInputApply = null;
+            }
+            Log.i(TAG, "Wayland text input retained for keyboard navigation");
+            return;
+        }
+        if (enabled) {
+            this.retainAndroidImeForKeyboardNavigation = false;
         }
         this.waylandTextInputDesired = enabled;
         int generation = ++this.waylandTextInputGeneration;
         if (this.pendingWaylandTextInputApply != null) {
             root.removeCallbacks(this.pendingWaylandTextInputApply);
+            this.pendingWaylandTextInputApply = null;
+        }
+        if (this.waylandTextInputRequested == enabled) {
+            Log.i(TAG, "Wayland text input unchanged enabled=" + enabled
+                    + " generation=" + generation);
+            return;
         }
         this.pendingWaylandTextInputApply = () -> {
             if (this.waylandTextInputGeneration != generation) {
                 return;
             }
             this.pendingWaylandTextInputApply = null;
-            this.waylandTextInputRequested = this.waylandTextInputDesired;
-            root.requestFocus();
+            boolean requested = this.waylandTextInputDesired;
+            if (this.waylandTextInputRequested == requested) {
+                return;
+            }
+            this.waylandTextInputRequested = requested;
             InputMethodManager input = (InputMethodManager)this.getSystemService("input_method");
-            input.restartInput(root);
             if (this.waylandTextInputRequested) {
+                root.requestFocus();
+                input.restartInput(root);
                 input.showSoftInput(root, InputMethodManager.SHOW_IMPLICIT);
             } else {
                 input.hideSoftInputFromWindow(root.getWindowToken(), 0);
             }
+            Log.i(TAG, "Wayland text input applied enabled="
+                    + this.waylandTextInputRequested + " generation=" + generation);
         };
-        root.postDelayed(this.pendingWaylandTextInputApply, 50L);
+        long delayMillis = enabled ? 0L : 300L;
+        Log.i(TAG, "Wayland text input scheduled enabled=" + enabled
+                + " delayMs=" + delayMillis + " generation=" + generation);
+        root.postDelayed(this.pendingWaylandTextInputApply, delayMillis);
     }
+    private void noteAndroidImeCommit() {
+        this.lastAndroidImeCommitUptime = SystemClock.uptimeMillis();
+    }
+
+    private void releaseRetainedAndroidIme() {
+        if (!this.retainAndroidImeForKeyboardNavigation) {
+            return;
+        }
+        this.retainAndroidImeForKeyboardNavigation = false;
+        this.lastAndroidImeCommitUptime = 0L;
+        this.setWaylandTextInputEnabled(false, false);
+    }
+
     private float[] mapPointerCoordinates(ImageView imageView, RawWaylandShmServer rawWaylandShmServer, float f, float f2) {
         float f3 = f - (float)imageView.getLeft();
         float f4 = f2 - (float)imageView.getTop();
@@ -283,7 +337,29 @@ extends Activity {
         }, 1000L);
     }
 
+    @Override
+    protected void onPause() {
+        super.onPause();
+        this.documentSession.syncAsyncIfDirty();
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        if (!AndroidDocumentSession.isDocumentIntent(intent)) {
+            return;
+        }
+        this.documentSession.sync();
+        this.setIntent(intent);
+        Process process = this.activeLinuxProcess;
+        if (process != null) {
+            process.destroy();
+        }
+        this.recreate();
+    }
+
     protected void onDestroy() {
+        this.documentSession.close();
         MainActivity mainActivity;
         Process process;
         if (this.clipboardManager != null && this.clipboardListener != null) {
@@ -623,7 +699,6 @@ extends Activity {
         }
         if (frameBridgeServer.bitmap != null) {
             imageView.setImageBitmap(frameBridgeServer.bitmap);
-            imageView.setMinimumHeight(Math.max(240, frameBridgeServer.height));
         }
         stringBuilder.append("Frame bridge server accepted: ").append(frameBridgeServer.accepted).append("\n");
         stringBuilder.append("Frame bridge server header: ").append(frameBridgeServer.header).append("\n");
@@ -681,7 +756,6 @@ extends Activity {
         }
         if (shmFrameBridgeServer.bitmap != null) {
             imageView.setImageBitmap(shmFrameBridgeServer.bitmap);
-            imageView.setMinimumHeight(Math.max(240, shmFrameBridgeServer.height));
         }
         stringBuilder.append("Shm frame bridge server accepted: ").append(shmFrameBridgeServer.accepted).append("\n");
         stringBuilder.append("Shm frame bridge header: ").append(shmFrameBridgeServer.header).append("\n");
@@ -740,7 +814,6 @@ extends Activity {
         }
         if (rawWaylandShmServer.bitmap != null) {
             imageView.setImageBitmap(rawWaylandShmServer.bitmap);
-            imageView.setMinimumHeight(Math.max(240, rawWaylandShmServer.height));
         }
         stringBuilder.append("Raw Wayland server accepted: ").append(rawWaylandShmServer.accepted).append("\n");
         stringBuilder.append("Raw Wayland parsed messages: ").append(rawWaylandShmServer.messageCount).append("\n");
@@ -801,7 +874,6 @@ extends Activity {
         }
         if (rawWaylandShmServer.bitmap != null) {
             imageView.setImageBitmap(rawWaylandShmServer.bitmap);
-            imageView.setMinimumHeight(Math.max(240, rawWaylandShmServer.height));
         }
         stringBuilder.append("Evented Wayland server accepted: ").append(rawWaylandShmServer.accepted).append("\n");
         stringBuilder.append("Evented Wayland parsed messages: ").append(rawWaylandShmServer.messageCount).append("\n");
@@ -866,7 +938,6 @@ extends Activity {
         }
         if (rawWaylandShmServer.bitmap != null) {
             imageView.setImageBitmap(rawWaylandShmServer.bitmap);
-            imageView.setMinimumHeight(Math.max(240, rawWaylandShmServer.height));
         }
         stringBuilder.append("XDG Wayland server accepted: ").append(rawWaylandShmServer.accepted).append("\n");
         stringBuilder.append("XDG Wayland parsed messages: ").append(rawWaylandShmServer.messageCount).append("\n");
@@ -1072,7 +1143,6 @@ extends Activity {
         }
         if (rawWaylandShmServer.bitmap != null) {
             imageView.setImageBitmap(rawWaylandShmServer.bitmap);
-            imageView.setMinimumHeight(Math.max(240, rawWaylandShmServer.height));
         }
         stringBuilder.append("Android Wayland API render exit code: ").append(result.exitCode).append("\n");
         stringBuilder.append("Android Wayland API render accepted: ").append(rawWaylandShmServer.accepted).append("\n");
@@ -1146,7 +1216,6 @@ extends Activity {
         }
         if (rawWaylandShmServer.bitmap != null) {
             imageView.setImageBitmap(rawWaylandShmServer.bitmap);
-            imageView.setMinimumHeight(Math.max(240, rawWaylandShmServer.height));
         }
         stringBuilder.append("Android Wayland API xdg exit code: ").append(result.exitCode).append("\n");
         stringBuilder.append("Android Wayland API xdg accepted: ").append(rawWaylandShmServer.accepted).append("\n");
@@ -1317,8 +1386,20 @@ extends Activity {
         hashMap.put("ARCHPHENE_INTERACTIVE_KEYBOARD", "1");
         this.activeInteractiveServer = rawWaylandShmServer;
         try {
-            String[] stringArray = new String[]{file5.getAbsolutePath(), "--library-path", string, file6.getAbsolutePath()};
+            ArrayList<String> command = new ArrayList<String>();
+            command.add(file5.getAbsolutePath());
+            command.add("--library-path");
+            command.add(string);
+            command.add(file6.getAbsolutePath());
+            if (!bl && !bl2) {
+                File incomingDocument = this.documentSession.importDocument(this.getIntent());
+                if (incomingDocument != null) {
+                    command.add(incomingDocument.getAbsolutePath());
+                }
+            }
+            String[] stringArray = command.toArray(new String[0]);
             result = this.run(stringArray, hashMap, 0);
+            this.documentSession.sync();
             stringBuilder.append("Real Mousepad process connected to the Android-owned Wayland compositor\n\n").append(MainActivity.formatCommandResult(stringArray, result));
         }
         catch (Exception exception) {
@@ -1340,7 +1421,6 @@ extends Activity {
         if (rawWaylandShmServer.bitmap != null) {
             this.runOnUiThread(() -> {
                 imageView.setImageBitmap(rawWaylandShmServer.bitmap);
-                imageView.setMinimumHeight(Math.max(240, rawWaylandShmServer.height));
             });
         }
         boolean bl3 = result.stdout.contains("pointer_repainted=1") || result.stdout.contains("real_pointer_repainted=1");
@@ -1876,6 +1956,7 @@ extends Activity {
                     action, point[0], point[1], motionEvent.getEventTime());
         }
         if (action == MotionEvent.ACTION_DOWN) {
+            this.releaseRetainedAndroidIme();
             return server.prepareAndroidTouchTarget(point[0], point[1], motionEvent.getEventTime())
                     && server.handleAndroidTouchEvent(action, motionEvent.getEventTime());
         }
@@ -1913,6 +1994,7 @@ extends Activity {
             return new BaseInputConnection((View)this, true){
 
                 public boolean commitText(CharSequence charSequence, int n) {
+                    MainActivity.this.noteAndroidImeCommit();
                     RawWaylandShmServer rawWaylandShmServer = MainActivity.this.activeInteractiveServer;
                     if (rawWaylandShmServer != null && rawWaylandShmServer.handleAndroidImeCommitText(charSequence)) {
                         return true;
@@ -2174,6 +2256,7 @@ extends Activity {
                 this.ready.countDown();
             }
             finally {
+                this.closeAllShmPools();
                 this.connectedClient = null;
                 object = this.eventLock;
                 synchronized (object) {
@@ -2279,7 +2362,7 @@ extends Activity {
                     this.textInputId = 0;
                     this.textInputEnabled = false;
                     this.textInputPendingEnabled = false;
-                    this.notifyAndroidTextInput(false);
+                    this.notifyAndroidTextInput(false, false);
                     stringBuilder.append(" zwp_text_input_v3.destroy" + (char) 10);
                 } else if (n2 == 1) {
                     this.textInputPendingEnabled = true;
@@ -2722,6 +2805,8 @@ extends Activity {
                     this.cleanupPending = true;
                 }
                 this.shmPools.remove(n);
+                shmPoolState.destroyed = true;
+                shmPoolState.closeIfUnused();
                 stringBuilder.append(" wl_shm_pool.destroy\n");
                 return;
             }
@@ -2738,6 +2823,7 @@ extends Activity {
                 this.stride = RawWaylandShmServer.u32(byArray, 16);
                 int n30 = RawWaylandShmServer.u32(byArray, 20);
                 this.shmBuffers.put(this.bufferId, new ShmBufferState(shmPoolState, n29, this.width, this.height, this.stride, n30));
+                ++shmPoolState.bufferRefs;
                 stringBuilder.append(" wl_shm_pool.create_buffer buffer_id=").append(this.bufferId).append(" offset=").append(n29).append(" width=").append(this.width).append(" height=").append(this.height).append(" stride=").append(this.stride).append(" format=").append(n30).append("\n");
                 return;
             }
@@ -2746,7 +2832,11 @@ extends Activity {
                 if (!this.interactivePointerMode) {
                     this.cleanupPending = true;
                 }
-                this.shmBuffers.remove(n);
+                ShmBufferState removed = this.shmBuffers.remove(n);
+                if (removed != null) {
+                    removed.pool.bufferRefs = Math.max(0, removed.pool.bufferRefs - 1);
+                    removed.pool.closeIfUnused();
+                }
                 stringBuilder.append(" wl_buffer.destroy\n");
                 return;
             }
@@ -3448,11 +3538,17 @@ extends Activity {
         }
 
         private void notifyAndroidTextInput(boolean enabled) {
+            this.notifyAndroidTextInput(enabled, true);
+        }
+
+        private void notifyAndroidTextInput(boolean enabled, boolean allowKeyboardNavigationRetention) {
             MainActivity activity = MainActivity.currentActivity.get();
             if (activity != null) {
-                activity.runOnUiThread(() -> activity.setWaylandTextInputEnabled(enabled));
+                activity.runOnUiThread(() -> activity.setWaylandTextInputEnabled(
+                        enabled, allowKeyboardNavigationRetention));
             }
-            this.appendAsyncEvent("wayland->android text-input enabled=" + enabled);
+            this.appendAsyncEvent("wayland->android text-input enabled=" + enabled
+                    + " retainable=" + allowKeyboardNavigationRetention);
         }
 
         private void sendTextInputEnter(LocalSocket client, int targetSurfaceId) throws Exception {
@@ -3474,7 +3570,7 @@ extends Activity {
             this.writeMessage(client, this.textInputId, 1, payload);
             this.textInputEnabled = false;
             this.textInputPendingEnabled = false;
-            this.notifyAndroidTextInput(false);
+            this.notifyAndroidTextInput(false, false);
             this.appendAsyncEvent("server->client zwp_text_input_v3.leave surface=" + targetSurfaceId);
         }
 
@@ -3544,39 +3640,72 @@ extends Activity {
         }
 
         synchronized void requestResize(int n, int n2) {
-            this.outputWidth = Math.max(320, Math.min(4096, n));
-            this.outputHeight = Math.max(240, Math.min(4096, n2));
-            int n3 = Math.max(160, this.outputWidth / this.outputScale);
-            int n4 = Math.max(120, this.outputHeight / this.outputScale);
-            if (n3 == this.configureWidth && n4 == this.configureHeight) {
-                return;
-            }
-            this.configureWidth = n3;
-            this.configureHeight = n4;
-            LocalSocket localSocket = this.connectedClient;
-            if (localSocket == null || this.xdgSurfaceId == 0 || this.xdgToplevelId == 0) {
-                return;
-            }
+            int nextOutputWidth = Math.max(320, Math.min(4096, n));
+            int nextOutputHeight = Math.max(240, Math.min(4096, n2));
+            int nextConfigureWidth = Math.max(160, nextOutputWidth / this.outputScale);
+            int nextConfigureHeight = Math.max(120, nextOutputHeight / this.outputScale);
+            if (nextOutputWidth == this.outputWidth && nextOutputHeight == this.outputHeight) return;
+            boolean orientationChanged = (this.outputWidth > this.outputHeight)
+                    != (nextOutputWidth > nextOutputHeight);
+            this.outputWidth = nextOutputWidth;
+            this.outputHeight = nextOutputHeight;
+            this.configureWidth = nextConfigureWidth;
+            this.configureHeight = nextConfigureHeight;
+            LocalSocket client = this.connectedClient;
+            if (client == null) return;
             try {
-                this.xdgConfigureAcked = false;
-                StringBuilder stringBuilder = new StringBuilder();
-                this.sendXdgConfigure(localSocket, stringBuilder);
-                for (ChildToplevelState object : this.childToplevelsByXdg.values()) {
-                    if (!object.visible || !object.isFileDialog()) continue;
-                    object.configureAcked = false;
-                    this.sendChildToplevelConfigure(localSocket, object, stringBuilder);
+                StringBuilder events = new StringBuilder();
+                if (orientationChanged) this.dismissPopupsForViewportChange(client, events);
+                if (this.outputId != 0) this.sendOutputMode(client, this.outputId, events);
+                if (this.xdgSurfaceId != 0 && this.xdgToplevelId != 0) {
+                    this.xdgConfigureAcked = false;
+                    this.sendXdgConfigure(client, events);
+                    for (ChildToplevelState child : this.childToplevelsByXdg.values()) {
+                        if (!child.visible) continue;
+                        child.configureAcked = false;
+                        this.sendChildToplevelConfigure(client, child, events);
+                    }
                 }
-                for (PopupState popupState : this.popups.values()) {
-                    if (!popupState.visible || !popupState.positioner.reactive) continue;
-                    this.constrainPopup(popupState);
-                    popupState.configureAcked = false;
-                    this.sendPopupConfigure(localSocket, popupState, stringBuilder);
-                }
-                this.appendAsyncEvent(stringBuilder.toString().trim());
-            }
-            catch (Exception exception) {
-                this.appendAsyncEvent("android resize forwarding failed: " + String.valueOf(exception));
+                this.appendAsyncEvent(events.toString().trim());
+            } catch (Exception exception) {
+                this.appendAsyncEvent("android resize forwarding failed: " + exception);
                 this.error = exception.toString();
+            }
+        }
+
+        private void sendOutputMode(LocalSocket client, int output, StringBuilder events) throws Exception {
+            byte[] mode = new byte[16];
+            RawWaylandShmServer.putU32(mode, 0, 1);
+            RawWaylandShmServer.putU32(mode, 4, this.outputWidth);
+            RawWaylandShmServer.putU32(mode, 8, this.outputHeight);
+            RawWaylandShmServer.putU32(mode, 12, 60000);
+            this.writeMessage(client, output, 1, mode);
+            this.writeMessage(client, output, 2, new byte[0]);
+            this.outputDoneSent = true;
+            events.append("server->client object=").append(output)
+                    .append(" opcode=1 wl_output.mode current width=").append(this.outputWidth)
+                    .append(" height=").append(this.outputHeight).append(" refresh=60000\n");
+            events.append("server->client object=").append(output).append(" opcode=2 wl_output.done\n");
+        }
+
+        private void dismissPopupsForViewportChange(LocalSocket client, StringBuilder events) throws Exception {
+            ArrayList<PopupState> stack = new ArrayList<>(this.popups.values());
+            stack.sort((left, right) -> Integer.compare(right.sequence, left.sequence));
+            boolean changed = false;
+            for (PopupState popup : stack) {
+                if (!popup.visible) continue;
+                this.writeMessage(client, popup.popupId, 1, new byte[0]);
+                popup.visible = false;
+                popup.grabbed = false;
+                changed = true;
+                events.append("server->client object=").append(popup.popupId)
+                        .append(" opcode=1 xdg_popup.popup_done reason=viewport-change\n");
+            }
+            if (changed) {
+                this.activePopupGrabId = 0;
+                this.pointerGrabSurfaceId = 0;
+                this.pointerFocusSurfaceId = this.surfaceId;
+                this.restoreMainBitmap();
             }
         }
 
@@ -5053,13 +5182,44 @@ extends Activity {
             }
         }
 
+        private void closeAllShmPools() {
+            HashSet<ShmPoolState> pools = new HashSet<>(this.shmPools.values());
+            for (ShmBufferState buffer : this.shmBuffers.values()) pools.add(buffer.pool);
+            for (ShmPoolState pool : pools) pool.closeNow();
+            while (!this.pendingShmFds.isEmpty()) {
+                FileDescriptor fd = this.pendingShmFds.removeFirst();
+                try {
+                    if (fd.valid()) Os.close(fd);
+                } catch (Exception ignored) {
+                }
+            }
+            this.shmPools.clear();
+            this.shmBuffers.clear();
+        }
+
         private static final class ShmPoolState {
             final FileDescriptor fd;
             int size;
+            int bufferRefs;
+            boolean destroyed;
+            boolean closed;
 
             ShmPoolState(FileDescriptor fileDescriptor, int n) {
                 this.fd = fileDescriptor;
                 this.size = n;
+            }
+
+            void closeIfUnused() {
+                if (this.destroyed && this.bufferRefs == 0) this.closeNow();
+            }
+
+            void closeNow() {
+                if (this.closed) return;
+                this.closed = true;
+                try {
+                    if (this.fd.valid()) Os.close(this.fd);
+                } catch (Exception ignored) {
+                }
             }
         }
 

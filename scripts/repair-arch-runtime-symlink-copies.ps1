@@ -21,7 +21,8 @@ function Get-LinkTargetFullName([string]$LinkFullName, [string]$Target) {
 }
 
 $links = New-Object System.Collections.Generic.List[object]
-foreach ($pkg in Get-ChildItem -LiteralPath $PackageDir -File -Filter "*.pkg.tar.*") {
+foreach ($pkg in (Get-ChildItem -LiteralPath $PackageDir -File -Filter "*.pkg.tar.*" |
+        Where-Object { $_.Name -notlike "*.sig" })) {
     $listing = & tar -tvf $pkg.FullName
     if ($LASTEXITCODE -ne 0) { throw "tar listing failed for $($pkg.FullName)" }
     foreach ($line in $listing) {
