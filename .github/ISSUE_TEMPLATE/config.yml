@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/Nulifyer/Archphene/security/advisories/new
+    about: Report vulnerabilities privately
+  - name: Support guidance
+    url: https://github.com/Nulifyer/Archphene/blob/main/SUPPORT.md
+    about: Read what information to collect before requesting help

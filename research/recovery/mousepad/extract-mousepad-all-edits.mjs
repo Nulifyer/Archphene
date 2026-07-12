@@ -58,6 +58,6 @@ for (const line of readFileSync(session, "utf8").split(LF)) {
     }
   }
 }
-writeFileSync("tooling/replay-mousepad-all.json", JSON.stringify({ captureFailed, replay }, null, 2));
+writeFileSync(new URL("replay-mousepad-all.json", import.meta.url), JSON.stringify({ captureFailed, replay }, null, 2));
 const patchCount = replay.filter(x => x.kind === "patch").length;
 process.stdout.write(JSON.stringify({ entries: replay.length, patches: patchCount, captureFailed }) + LF);

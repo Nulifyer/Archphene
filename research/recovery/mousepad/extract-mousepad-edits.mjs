@@ -44,5 +44,5 @@ for (const line of readFileSync(session, "utf8").split(LF)) {
     if (command.trim()) replay.push({ timestamp: row.timestamp, command });
   }
 }
-writeFileSync("tooling/replay-mousepad-commands.json", JSON.stringify({ captureFailed, replay }, null, 2));
+writeFileSync(new URL("replay-mousepad-commands.json", import.meta.url), JSON.stringify({ captureFailed, replay }, null, 2));
 process.stdout.write(JSON.stringify({ commands: replay.length, captureFailed }) + LF);

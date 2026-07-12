@@ -115,4 +115,4 @@ The app bridge can preserve Android per-app UIDs and Android permission brokers,
 - Android 16 KB page-size guidance: https://source.android.com/docs/core/architecture/16kb-page-size/16kb
 - Android signing certificate history: https://developer.android.com/reference/android/content/pm/PackageInfo.html
 - Android verified signing information: https://developer.android.com/reference/android/content/pm/PackageManager.html
-- Existing compositor comparison: `docs/wayland-compositor-reference-review.md`
+- Existing compositor comparison: [`wayland-compositor-reference-review.md`](../references/wayland-compositor-reference-review.md)

@@ -1,0 +1,50 @@
+# Roadmap
+
+Archphene is moving from application-specific proofs toward a package-driven Android application platform.
+
+## P0: product foundation
+
+1. **On-device package conversion**
+   - synchronize Arch and Arch Linux ARM repository databases;
+   - resolve dependency closures;
+   - verify package signatures and extraction safety;
+   - select the desktop entrypoint, icon, toolkit, ABI, and capabilities;
+   - generate a wrapper APK from a reusable template;
+   - sign with a persistent per-device identity;
+   - install through Android `PackageInstaller`.
+
+2. **Shared Wayland compositor**
+   - replace duplicated KCalc and Mousepad Java implementations;
+   - use generated Wayland protocol bindings;
+   - enforce object, role, version, configure/ack, buffer, popup, and subsurface lifecycles;
+   - add deterministic protocol errors and fuzzable parsers.
+
+3. **Production runtime model**
+   - atomically materialize immutable runtime contents;
+   - validate 4 KB and 16 KB page-size compatibility;
+   - track process groups and descendants;
+   - reduce per-app runtime duplication without weakening UID isolation.
+
+4. **Permission and document policy**
+   - generate manifest permissions from declared capabilities;
+   - complete multi-document conflict/error handling;
+   - provide a manager-owned user-document provider with explicit per-app grants.
+
+## P1: desktop usability
+
+- general secondary-window mapping for phone, tablet, and Android desktop/freeform modes;
+- drag-and-drop, clipboard MIME types, cursor and pointer protocols;
+- GPU/EGL/Vulkan presentation with SHM fallback;
+- audio, notifications, printing, URL handling, secrets, and portals;
+- accessibility and input-method completeness;
+- rollback, health checks, storage quotas, and vulnerability status.
+
+## P2: compatibility and platform validation
+
+- broader Qt, GTK, SDL, Electron, and Rust-native application coverage;
+- reproducible x86_64 and AArch64 CI package fixtures;
+- supported GrapheneOS Pixel validation;
+- 16 KB page-size Android devices;
+- sustained desktop-mode performance and multi-window testing.
+
+Historical alternatives and evidence are indexed under [Research](../research/README.md).

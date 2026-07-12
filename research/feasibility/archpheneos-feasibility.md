@@ -357,7 +357,7 @@ Mobile Linux:
 
 Create two tracks in this workspace:
 
-- `tracks/arch-host-waydroid/`: desktop proof-of-concept scripts and install profile.
-- `tracks/graphene-host-arch-vm/`: GrapheneOS build notes, Arch rootfs builder, and VM integration notes.
+- `research/tracks/arch-host-waydroid/`: desktop proof-of-concept scripts and install profile.
+- `research/tracks/graphene-host-arch-vm/`: GrapheneOS build notes, Arch rootfs builder, and VM integration notes.
 
 The first track is runnable sooner. The second track is the real route to the stated phone/security goal.

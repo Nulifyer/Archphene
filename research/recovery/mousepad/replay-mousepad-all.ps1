@@ -41,7 +41,7 @@ function Apply-RecordedPatch([string]$patch,[string]$stamp) {
   if($inHunk -and $active){Apply-Hunk ([ref]$content) $old $new $stamp}
   [IO.File]::WriteAllText($path,$content,[Text.UTF8Encoding]::new($false))
 }
-$data=Get-Content tooling/replay-mousepad-all.json -Raw|ConvertFrom-Json
+$data=Get-Content (Join-Path $PSScriptRoot "replay-mousepad-all.json") -Raw|ConvertFrom-Json
 $ok=0;$failed=0;$patchOk=0;$index=0
 foreach($entry in $data.replay){
   $index++

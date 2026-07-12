@@ -1,0 +1,42 @@
+name: Feature request
+description: Propose a scoped Archphene capability
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the user or developer problem, not only a preferred implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: boundary
+    attributes:
+      label: Android and security boundary
+      description: Explain permissions, storage, package identity, process, or installer implications.
+    validations:
+      required: true
+  - type: input
+    id: targets
+    attributes:
+      label: Target applications, toolkits, devices, and ABIs
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I reviewed the roadmap and existing issues.
+          required: true
+        - label: This belongs in a shared layer rather than an app-specific workaround.
+          required: true

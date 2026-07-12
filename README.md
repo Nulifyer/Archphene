@@ -24,7 +24,7 @@ Each wrapped Linux application receives a normal Android package identity, UID, 
 - Maps Android light/dark mode into GTK and Qt/KDE applications.
 - Brokers user-visible files through Android's Storage Access Framework while keeping background application state private.
 - Exposes a Linux Home document provider for Android file managers and sharing workflows.
-- Provides an Archphene manager UI with package search, update checks, version history, pinning, prerelease policy, repository settings, self-update support, and Android-confirmed APK installation.
+- Provides an Archphene manager UI with package search, update checks, version history, pinning, prerelease policy, repository settings, and Android-confirmed APK installation.
 - Verifies package names, hashes, signer continuity, version ordering, HTTPS sources, and download limits before opening an Android `PackageInstaller` session.
 
 ## Tested applications
@@ -34,7 +34,7 @@ Each wrapped Linux application receives a normal Android package identity, UID, 
 | KCalc | Qt 6 / KDE Frameworks | x86_64 | Android 16 emulator | GUI, menus, keyboard, clipboard, theme, resize |
 | KCalc | Qt 6 / KDE Frameworks | AArch64 | Samsung Galaxy S22 Ultra, Android 15 | GUI, menus, keyboard, clipboard, freeform resize |
 | Mousepad | GTK 3 | x86_64 | Android 16 emulator | Editing, dialogs, IME, document open/save/reopen |
-| Archphene manager | Android | x86_64 and AArch64 | Emulator and Samsung device | Catalog, versions, updates, settings, self-update |
+| Archphene manager | Android | x86_64 and AArch64 | Emulator and Samsung device | Catalog, versions, updates, settings, APK replacement plumbing |
 
 These results prove the bridge on the listed targets only. They do not establish compatibility with every Android device, Linux application, GPU driver, or GrapheneOS release.
 
@@ -121,6 +121,7 @@ The physical suite expects the curated ARM64 package/runtime workspace and a com
 ## Current limitations
 
 - The manager cannot yet resolve, verify, wrap, sign, and install arbitrary pacman packages entirely on-device.
+- Manager APK replacement is tested, but GitHub Releases discovery and download are not yet a complete production self-update flow.
 - KCalc and Mousepad still contain duplicated prototype Java Wayland compositor implementations. A shared native compositor is required before broad application support.
 - The current wrappers duplicate large runtime closures per Android UID.
 - GPU acceleration, audio, printing, camera, drag-and-drop, accessibility, keyrings, and many desktop portals are incomplete or absent.
@@ -129,7 +130,7 @@ The physical suite expects the curated ARM64 package/runtime workspace and a com
 - GrapheneOS-on-Pixel, Android 16 KB page-size devices, and generic laptop hardware remain unvalidated.
 - Archphene does not provide GrapheneOS firmware, verified boot, kernel hardening, or security updates on unsupported hardware.
 
-See the [implementation gap audit](docs/implementation-gap-audit.md) for the detailed engineering and security backlog.
+See the [roadmap](docs/roadmap.md) for the detailed engineering and security backlog.
 
 ## Roadmap
 
@@ -151,25 +152,27 @@ See the [implementation gap audit](docs/implementation-gap-audit.md) for the det
 | `prototypes/shared-android-bridge/` | Shared bridge extraction work |
 | `patches/glibc/` | Android app-seccomp compatibility patches |
 | `scripts/` | Build, package, emulator, physical-device, and regression automation |
-| `docs/` | Architecture decisions, experiments, evidence, and gap analysis |
-| `tracks/` | Earlier host/VM/no-VM feasibility tracks |
+| `docs/` | Current product, architecture, security, development, and release documentation |
+| `research/` | Historical feasibility studies, experiments, source reviews, audits, and recovery evidence |
 
-## Key documentation
+## Documentation
 
-- [Implementation gap audit](docs/implementation-gap-audit.md)
-- [No-VM Linux apps as Android-managed apps](docs/no-vm-linux-apps-as-android-apps.md)
-- [Day-one compatibility bridge](docs/day-one-compatibility-bridge.md)
-- [Linux package to APK store](docs/linux-package-to-apk-store.md)
-- [Wayland compositor reference review](docs/wayland-compositor-reference-review.md)
-- [Linux home and storage policy](docs/linux-home-and-storage-policy.md)
-- [ARM64 bridge readiness](docs/arm64-bridge-readiness.md)
+- [Documentation index](docs/README.md)
+- [Architecture](docs/architecture.md)
+- [Security model](docs/security.md)
+- [Storage and documents](docs/storage.md)
+- [Development](docs/development.md)
+- [Roadmap](docs/roadmap.md)
 - [Publishing APK releases](docs/releases.md)
+- [Research archive](research/README.md)
 
 ## Contributing
 
 The highest-value contributions are shared bridge improvements, protocol correctness, package verification, reproducible wrapper generation, Android permission/storage brokers, and automated compatibility tests.
 
 Before adding application-specific workarounds, check whether the behavior belongs in the shared Wayland, runtime, storage, or permission layer. Include the target Android version, CPU ABI, package version, reproduction steps, and relevant logs in bug reports.
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and [SUPPORT.md](SUPPORT.md) before opening a pull request or issue.
 
 Use [GitHub Issues](https://github.com/Nulifyer/Archphene/issues) for reproducible bugs and focused design proposals.
 

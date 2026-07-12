@@ -1,5 +1,5 @@
 # -----------------------------------------------------------------------------
-# ArchpheneOS repository
+# Archphene repository
 # Keep source, docs, scripts, patches, manifests, and intentional test fixtures.
 # Ignore generated build outputs, local SDK/tooling, caches, emulator state,
 # binaries, packages, logs, screenshots, and temporary files.

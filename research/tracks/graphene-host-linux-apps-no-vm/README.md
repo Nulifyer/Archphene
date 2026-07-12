@@ -33,4 +33,4 @@ This is a custom platform development track. It requires changes to Android/Grap
 
 ## Main doc
 
-See [no-VM Linux apps as Android apps](../../docs/no-vm-linux-apps-as-android-apps.md).
+See [no-VM Linux apps as Android apps](../../feasibility/no-vm-linux-apps-as-android-apps.md).
