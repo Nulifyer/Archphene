@@ -117,8 +117,10 @@ if ($missing.Count -gt 0) {
 
 foreach ($pkg in $ordered) {
     if ([string]::IsNullOrWhiteSpace($pkg.Filename)) { continue }
-    $out = Join-Path $PkgDir $pkg.Filename
-    Download-File "$Mirror/$($pkg.Repo)/os/$Arch/$($pkg.Filename)" $out
+    $localFilename = $pkg.Filename.Replace(':', '_')
+    $remoteFilename = [Uri]::EscapeDataString($pkg.Filename)
+    $out = Join-Path $PkgDir $localFilename
+    Download-File "$Mirror/$($pkg.Repo)/os/$Arch/$remoteFilename" $out
 }
 
 foreach ($pkgFile in Get-ChildItem -LiteralPath $PkgDir -File -Filter "*.pkg.tar.*") {

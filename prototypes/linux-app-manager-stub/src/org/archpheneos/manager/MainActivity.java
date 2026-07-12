@@ -94,6 +94,7 @@ public final class MainActivity extends Activity {
         showAppsPage();
         if (ManagerStateStore.checkOnLaunch(this)) checkAll();
         handleTestInstallIntent();
+        handleTestPackageRuntimeIntent();
     }
 
     @Override
@@ -1180,6 +1181,48 @@ public final class MainActivity extends Activity {
         if (ManagerStateStore.backgroundChecksEnabled(this)) {
             LinuxAppManagerService.schedule(this, true);
         }
+    }
+
+    private void handleTestPackageRuntimeIntent() {
+        if (!getIntent().getBooleanExtra("archphene_test_package_runtime", false)) return;
+        new Thread(() -> {
+            try {
+                String resolvePackage = getIntent().getStringExtra("archphene_test_resolve_package");
+                String packagePath = getIntent().getStringExtra("archphene_test_package_file");
+                String signaturePath = getIntent().getStringExtra("archphene_test_signature_file");
+                if (resolvePackage != null) {
+                    ArchPackageRuntime.refreshDatabases(this);
+                    List<ArchPackageRuntime.ResolvedPackage> resolved =
+                            ArchPackageRuntime.resolve(this, resolvePackage);
+                    if (getIntent().getBooleanExtra("archphene_test_download_target", false)) {
+                        ArchPackageRuntime.ResolvedPackage target = null;
+                        for (ArchPackageRuntime.ResolvedPackage value : resolved) {
+                            if (value.name.equals(resolvePackage)) { target = value; break; }
+                        }
+                        if (target == null) throw new IllegalStateException("Resolved target is missing");
+                        ArchPackageRuntime.Verification verification =
+                                ArchPackageRuntime.downloadAndVerify(this, target);
+                        runOnUiThread(() -> showBanner("Downloaded and verified " + resolvePackage
+                                + "\nSigner " + verification.signerFingerprint, false));
+                    } else {
+                        runOnUiThread(() -> showBanner("Resolved " + resolvePackage + "\n"
+                                + resolved.size() + " packages through libalpm", false));
+                    }
+                } else if (packagePath != null && signaturePath != null) {
+                    ArchPackageRuntime.Verification verification = ArchPackageRuntime.verifyPackage(
+                            this, new java.io.File(packagePath), new java.io.File(signaturePath));
+                    runOnUiThread(() -> showBanner("Verified Arch package\nSigner "
+                            + verification.signerFingerprint, false));
+                } else {
+                    ArchPackageRuntime.Result result = ArchPackageRuntime.pacman(this, "--version");
+                    String firstLine = result.output.replace('\r', '\n').trim();
+                    runOnUiThread(() -> showBanner("Package runtime exit " + result.exitCode
+                            + "\n" + firstLine, result.exitCode != 0));
+                }
+            } catch (Exception e) {
+                runOnUiThread(() -> showBanner("Package runtime failed: " + e.getMessage(), true));
+            }
+        }, "archphene-package-runtime-test").start();
     }
 
     private void handleTestInstallIntent() {
