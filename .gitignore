@@ -160,6 +160,9 @@ window.xml
 !docs/**/*.jpeg
 !docs/**/*.webp
 
+# Android resource images are source assets, not test screenshots
+!prototypes/**/res/**/*.png
+
 # Native build systems
 CMakeFiles/
 CMakeCache.txt
