@@ -338,6 +338,27 @@ public final class MainActivity extends Activity {
                     throw new IllegalStateException("wl_keyboard key lifecycle was incomplete");
                 }
 
+                output.write(unmapXdgToplevelAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                readKeyboardUnmapUntilCallback(input, 36, 20, 38);
+                if (nativeLastFrameWidth(core) != 0
+                        || nativeLastFrameHeight(core) != 0
+                        || nativeKeyboardEventCount(core) != 7) {
+                    throw new IllegalStateException("xdg toplevel unmap lifecycle was incomplete");
+                }
+
+                output.write(remapXdgToplevelAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                readKeyboardRemapUntilCallback(input, 36, 20, 28, 39);
+                if (nativeLastFrameWidth(core) != 4
+                        || nativeLastFrameHeight(core) != 2
+                        || nativeLastFrameChecksum(core) != 656
+                        || nativeKeyboardEventCount(core) != 9) {
+                    throw new IllegalStateException("xdg toplevel remap lifecycle was incomplete");
+                }
+
                 Bitmap pointerFrame = renderedFrame;
                 runOnUiThread(() -> {
                     frameView.setImageBitmap(pointerFrame);
@@ -407,7 +428,7 @@ public final class MainActivity extends Activity {
                 output.write(releaseInputAndSyncRequest());
                 output.flush();
                 dispatch(core);
-                readUntilCallback(input, 38);
+                readUntilCallback(input, 40);
                 if (nativePointerCount(core) != 0 || nativeKeyboardCount(core) != 0) {
                     throw new IllegalStateException("seat input resources were not released");
                 }
@@ -415,11 +436,11 @@ public final class MainActivity extends Activity {
                 output.write(destroySecondShmResourcesAndSyncRequest());
                 output.flush();
                 dispatch(core);
-                readUntilCallback(input, 39);
+                readUntilCallback(input, 41);
                 output.write(destroyXdgToplevelAndSyncRequest());
                 output.flush();
                 dispatch(core);
-                readUntilCallback(input, 40);
+                readUntilCallback(input, 42);
                 if (nativeXdgSurfaceCount(core) != 0
                         || nativeXdgToplevelCount(core) != 0
                         || nativeSurfaceCount(core) != 0
@@ -585,13 +606,42 @@ public final class MainActivity extends Activity {
         return request.array();
     }
 
+    private static byte[] unmapXdgToplevelAndSyncRequest() {
+        ByteBuffer request = buffer(40);
+        putHeader(request, 20, 1, 20);
+        request.putInt(0);
+        request.putInt(0);
+        request.putInt(0);
+        putHeader(request, 20, 6, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(38);
+        return request.array();
+    }
+
+    private static byte[] remapXdgToplevelAndSyncRequest() {
+        ByteBuffer request = buffer(64);
+        putHeader(request, 20, 1, 20);
+        request.putInt(28);
+        request.putInt(0);
+        request.putInt(0);
+        putHeader(request, 20, 9, 24);
+        request.putInt(0);
+        request.putInt(0);
+        request.putInt(4);
+        request.putInt(2);
+        putHeader(request, 20, 6, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(39);
+        return request.array();
+    }
+
     private static byte[] releaseInputAndSyncRequest() {
         ByteBuffer request = buffer(36);
         putHeader(request, 34, 1, 8);
         putHeader(request, 36, 0, 8);
         putHeader(request, 32, 3, 8);
         putHeader(request, 1, 0, 12);
-        request.putInt(38);
+        request.putInt(40);
         return request.array();
     }
 
@@ -600,7 +650,7 @@ public final class MainActivity extends Activity {
         putHeader(request, 28, 0, 8);
         putHeader(request, 26, 1, 8);
         putHeader(request, 1, 0, 12);
-        request.putInt(39);
+        request.putInt(41);
         return request.array();
     }
 
@@ -611,7 +661,7 @@ public final class MainActivity extends Activity {
         putHeader(request, 20, 0, 8);
         putHeader(request, 18, 0, 8);
         putHeader(request, 1, 0, 12);
-        request.putInt(40);
+        request.putInt(42);
         return request.array();
     }
 
@@ -792,6 +842,73 @@ public final class MainActivity extends Activity {
             if (message.objectId == callbackId && message.opcode == 0) {
                 if (!repeatInfo || !entered || !modifiers) {
                     throw new IllegalStateException("wl_keyboard metadata was incomplete");
+                }
+                return;
+            }
+        }
+    }
+
+    private static void readKeyboardUnmapUntilCallback(
+            FileInputStream input, int keyboardId, int surfaceId, int callbackId)
+            throws Exception {
+        boolean left = false;
+        while (true) {
+            Message message = readMessage(input);
+            throwIfDisplayError(message);
+            if (message.objectId == keyboardId && message.opcode == 2) {
+                if (message.body.length != 8) {
+                    throw new IllegalStateException("invalid wl_keyboard.leave event");
+                }
+                ByteBuffer body = ByteBuffer.wrap(message.body).order(ByteOrder.nativeOrder());
+                left = body.getInt() != 0 && body.getInt() == surfaceId;
+            }
+            if (message.objectId == callbackId && message.opcode == 0) {
+                if (!left) {
+                    throw new IllegalStateException("xdg unmap did not clear keyboard focus");
+                }
+                return;
+            }
+        }
+    }
+
+    private static void readKeyboardRemapUntilCallback(
+            FileInputStream input,
+            int keyboardId,
+            int surfaceId,
+            int bufferId,
+            int callbackId)
+            throws Exception {
+        boolean bufferReleased = false;
+        boolean entered = false;
+        boolean modifiers = false;
+        int enterSerial = 0;
+        while (true) {
+            Message message = readMessage(input);
+            throwIfDisplayError(message);
+            bufferReleased |= message.objectId == bufferId && message.opcode == 0;
+            if (message.objectId == keyboardId && message.opcode == 1) {
+                if (message.body.length != 12) {
+                    throw new IllegalStateException("invalid remap wl_keyboard.enter event");
+                }
+                ByteBuffer body = ByteBuffer.wrap(message.body).order(ByteOrder.nativeOrder());
+                enterSerial = body.getInt();
+                entered = enterSerial != 0
+                        && body.getInt() == surfaceId
+                        && body.getInt() == 0;
+            } else if (message.objectId == keyboardId && message.opcode == 4) {
+                if (message.body.length != 20) {
+                    throw new IllegalStateException("invalid remap wl_keyboard.modifiers event");
+                }
+                ByteBuffer body = ByteBuffer.wrap(message.body).order(ByteOrder.nativeOrder());
+                modifiers = body.getInt() == enterSerial
+                        && body.getInt() == 0
+                        && body.getInt() == 0
+                        && body.getInt() == 0
+                        && body.getInt() == 0;
+            }
+            if (message.objectId == callbackId && message.opcode == 0) {
+                if (!bufferReleased || !entered || !modifiers) {
+                    throw new IllegalStateException("xdg remap events were incomplete");
                 }
                 return;
             }

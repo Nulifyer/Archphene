@@ -11,13 +11,13 @@ This page separates validated behavior from planned platform work. Package searc
 | Manager self-update | Public GitHub Releases discovery, bounded download, SHA-256 verification, signer/package validation, Android confirmation, replacement, restart reconciliation, and 0.9.0 to 1.0.0 device test |
 | KCalc package transaction | x86_64 Arch dependency resolution, package-signature verification, closure staging, wrapper assembly, persistent Android Keystore signing, and PackageInstaller installation performed at manager runtime |
 | Qt and GTK bridge prototypes | KCalc and Mousepad GUI, input, popups, dialogs, clipboard/IME, resizing, and selected document workflows on the listed test devices |
-| Native compositor bootstrap | Rust wayland-server core cross-compiles for Android x86_64 and AArch64; registry/compositor/SHM/xdg-shell/pointer-and-keyboard seat discovery, SCM_RIGHTS SHM and sealed XKB v1 keymap FD transfer, checked padded-stride frames, xdg configure/ack enforcement, post-ack Android bitmap presentation, focused pointer and hardware-key events routed from Android input, exact wire/pixel checks, and resource teardown pass on both |
+| Native compositor bootstrap | Rust wayland-server core cross-compiles for Android x86_64 and AArch64; registry/compositor/SHM/xdg-shell/pointer-and-keyboard seat discovery, SCM_RIGHTS SHM and sealed XKB v1 keymap FD transfer, checked padded-stride frames, xdg configure/ack and mapped/unmapped lifecycle enforcement, post-ack Android bitmap presentation, focused pointer and hardware-key events routed from Android input, exact wire/pixel checks, and resource teardown pass on both |
 | Manager status UI | Static current-version state, active spinner, and separate download/install progress are implemented |
 
 ## In progress
 
 1. **Shared native compositor**
-   - continue after the validated registry, SHM, surface, initial xdg-toplevel, pointer, XKB keymap, focus, and hardware-key slices with configure queues, mapped/unmapped transitions, popups, clipboard, Android IME/text input, and output state;
+   - continue after the validated registry, SHM, surface, initial xdg-toplevel, map/unmap, pointer, XKB keymap, focus, and hardware-key slices with configure queues, popups, clipboard, Android IME/text input, and output state;
    - replace both application-specific Java compositor forks only after cross-toolkit regression gates pass;
    - keep clipboard reads focused and user-initiated to prevent Android clipboard privacy notifications.
 
