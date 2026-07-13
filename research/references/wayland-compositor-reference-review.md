@@ -46,13 +46,13 @@ Hyprland independently tracks popup trees, nested children, mapping, damage, eff
 - [~] Send `xdg_popup.popup_done` child-first and idempotently, and finish wiring outside press, Back/Escape, Activity focus loss, and invalidated-parent triggers.
 - [x] Restore pointer and keyboard focus to the root after dismissal.
 - Use each surface's effective input region rather than buffer bounds alone.
-- [x] Implement `xdg_popup.reposition` and `repositioned(token)`. The bridge now applies the new positioner state, constrains the popup, acknowledges the token, and emits popup and surface configure events in protocol order.
+- [~] Implement `xdg_popup.reposition` and `repositioned(token)`. The bridge applies positioner state, acknowledges the token, and emits configure events in protocol order; full flip/slide/resize constraint adjustment remains.
 
 ### P1: real surface trees
 
 - [~] `wl_subcompositor` and `wl_subsurface` objects, parent-relative positioning, stacking, rendering, and input routing are implemented. Finish synchronized/desynchronized pending-state latching.
 - Preserve atomic parent commits: synchronized child buffers and position/stack changes must become visible only with the parent commit.
-- Compose nested popup and subsurface trees in protocol stacking order.
+- [~] Compose clipped nested popup SHM buffers in protocol stacking order with ARGB/XRGB source-over blending; subsurface composition remains.
 - Apply damage per surface instead of rebuilding a single flattened bitmap after every commit.
 - Send output enter/leave and scale updates to every surface in the tree.
 
@@ -100,7 +100,7 @@ Migration order is registry/globals, SHM/pools/buffers, surfaces/regions, xdg-sh
 - [x] Moving and clicking between root, parent-popup, and nested-popup surfaces follows owner-events semantics in the native wire probe.
 - Outside press sends `popup_done` exactly once and restores root focus.
 - Nested submenu dismissal removes only the topmost popup when appropriate.
-- Popup reposition tokens are acknowledged.
+- [x] Popup reposition tokens are acknowledged.
 - Subsurface commits obey sync/desync and stacking rules.
 - Scale and input coordinates remain aligned at Android densities 1.0, 2.625, and 3.0.
 - Clipboard and IME data cross only their Android broker APIs and remain under the app UID.

@@ -511,7 +511,7 @@ public final class MainActivity extends Activity {
                 output.flush();
                 dispatch(core);
                 int popupConfigureSerial =
-                        readPopupConfigureUntilCallback(input, 49, 50, 51, 13, 55, 160, 120);
+                        readPopupConfigureUntilCallback(input, 49, 50, 51, 1, 0, 2, 2);
                 if (nativeXdgPopupCount(core) != 1
                         || nativeXdgSurfaceCount(core) != 2
                         || nativeSurfaceCount(core) != 2
@@ -531,11 +531,19 @@ public final class MainActivity extends Activity {
                 output.flush();
                 dispatch(core);
                 readUntilCallback(input, 53);
-                if (nativePointerMotion(core, 20, 60, 9001) != 1) {
+                if (nativeLastFrameWidth(core) != 4
+                        || nativeLastFrameHeight(core) != 2
+                        || nativeLastFrameChecksum(core) != 608
+                        || nativeCopyLastFrameToBitmap(core, renderedFrame) != 0
+                        || renderedFrame.getPixel(1, 0) != 0xff030201
+                        || renderedFrame.getPixel(2, 1) != 0xff1f1e1d) {
+                    throw new IllegalStateException("parent popup pixels were not composed");
+                }
+                if (nativePointerMotion(core, 2, 1, 9001) != 1) {
                     throw new IllegalStateException("parent popup pointer routing failed");
                 }
                 dispatch(core);
-                readPointerEnterAndFrame(input, 34, 47, 7, 5);
+                readPointerEnterAndFrame(input, 34, 47, 1, 1);
                 expectedPointerEvents++;
 
                 output.write(createNestedPositionerAndSyncRequest(popupConfigureSerial));
@@ -550,7 +558,7 @@ public final class MainActivity extends Activity {
                 output.flush();
                 dispatch(core);
                 int nestedConfigureSerial =
-                        readPopupConfigureUntilCallback(input, 58, 59, 60, 5, 16, 80, 60);
+                        readPopupConfigureUntilCallback(input, 58, 59, 60, 0, 0, 1, 1);
                 if (nativeXdgPopupCount(core) != 2
                         || nativeXdgPositionerCount(core) != 2
                         || nativeXdgPositionerRequestCount(core) != 14
@@ -571,12 +579,17 @@ public final class MainActivity extends Activity {
                 output.flush();
                 dispatch(core);
                 readUntilCallback(input, 62);
-                if (nativePointerMotion(core, 20, 72, 9002) != 1) {
+                if (nativeLastFrameChecksum(core) != 608
+                        || nativeCopyLastFrameToBitmap(core, renderedFrame) != 0
+                        || renderedFrame.getPixel(1, 0) != 0xff030201) {
+                    throw new IllegalStateException("nested popup pixels were not composed");
+                }
+                if (nativePointerMotion(core, 1, 0, 9002) != 1) {
                     throw new IllegalStateException("nested popup pointer routing failed");
                 }
                 dispatch(core);
                 readPointerLeaveAndFrame(input, 34, 47);
-                readPointerEnterAndFrame(input, 34, 56, 2, 1);
+                readPointerEnterAndFrame(input, 34, 56, 0, 0);
                 expectedPointerEvents++;
                 if (nativePointerButton(core, true, 9003) != 1) {
                     throw new IllegalStateException("nested popup pointer press failed");
@@ -597,6 +610,11 @@ public final class MainActivity extends Activity {
                 output.flush();
                 dispatch(core);
                 readNestedPopupDoneUntilCallback(input, 59, 50, 34, 56, 20, 63);
+                if (nativeLastFrameChecksum(core) != 656
+                        || nativeCopyLastFrameToBitmap(core, renderedFrame) != 0
+                        || renderedFrame.getPixel(1, 0) != 0xff070605) {
+                    throw new IllegalStateException("dismissed popup pixels remained composed");
+                }
                 if (nativeDismissPopups(core) != 0
                         || nativeXdgPopupDoneCount(core) != 2
                         || nativeXdgPopupGrabDepth(core) != 2) {
@@ -812,22 +830,22 @@ public final class MainActivity extends Activity {
         putHeader(request, 18, 1, 12);
         request.putInt(45);
         putHeader(request, 45, 1, 16);
-        request.putInt(160);
-        request.putInt(120);
+        request.putInt(2);
+        request.putInt(2);
         putHeader(request, 45, 2, 24);
-        request.putInt(10);
-        request.putInt(20);
-        request.putInt(40);
-        request.putInt(30);
+        request.putInt(0);
+        request.putInt(0);
+        request.putInt(1);
+        request.putInt(1);
         putHeader(request, 45, 3, 12);
-        request.putInt(6);
+        request.putInt(5);
         putHeader(request, 45, 4, 12);
         request.putInt(8);
         putHeader(request, 45, 5, 12);
         request.putInt(15);
         putHeader(request, 45, 6, 16);
-        request.putInt(3);
-        request.putInt(5);
+        request.putInt(1);
+        request.putInt(0);
         putHeader(request, 45, 7, 8);
         putHeader(request, 45, 8, 16);
         request.putInt(4);
@@ -897,15 +915,15 @@ public final class MainActivity extends Activity {
         putHeader(request, 18, 1, 12);
         request.putInt(54);
         putHeader(request, 54, 1, 16);
-        request.putInt(80);
-        request.putInt(60);
+        request.putInt(1);
+        request.putInt(1);
         putHeader(request, 54, 2, 24);
-        request.putInt(5);
-        request.putInt(6);
-        request.putInt(20);
-        request.putInt(10);
+        request.putInt(0);
+        request.putInt(0);
+        request.putInt(1);
+        request.putInt(1);
         putHeader(request, 54, 3, 12);
-        request.putInt(6);
+        request.putInt(5);
         putHeader(request, 54, 4, 12);
         request.putInt(8);
         putHeader(request, 54, 9, 12);
@@ -1552,8 +1570,8 @@ public final class MainActivity extends Activity {
                 ByteBuffer body = ByteBuffer.wrap(message.body).order(ByteOrder.nativeOrder());
                 pointerEnteredRoot = body.getInt() != 0
                         && body.getInt() == rootSurfaceId
-                        && body.getInt() == 20 * 256
-                        && body.getInt() == 72 * 256;
+                        && body.getInt() == 1 * 256
+                        && body.getInt() == 0;
             }
             if (message.objectId == callbackId && message.opcode == 0) {
                 if (dismissed != 2 || !pointerLeftChild || !pointerEnteredRoot) {

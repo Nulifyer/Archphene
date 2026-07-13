@@ -50,6 +50,8 @@ pub struct CompositorState {
     last_frame_width: u32,
     last_frame_height: u32,
     last_frame_checksum: u32,
+    root_surface: Option<WlSurface>,
+    root_frame: Option<Arc<CommittedFrame>>,
     last_frame: Option<Arc<CommittedFrame>>,
     xdg_wm_base_binds: u32,
     xdg_positioner_count: u32,
@@ -1083,6 +1085,7 @@ impl Dispatch<XdgPopup, XdgPopupData> for CompositorState {
             }
         }
         state.popups.retain(|popup| popup.id() != resource.id());
+        update_composited_frame(state);
         if clear_grab {
             state.popup_grab = None;
         }
@@ -1866,17 +1869,15 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 surface.pending_damage = false;
                 let latest_frame = surface.committed_frame.clone();
                 let is_xdg_toplevel = surface.role == Some(SurfaceRole::XdgToplevel);
+                let publishes_root_frame = is_xdg_toplevel || !surface.has_xdg_surface;
                 let has_frame = latest_frame.is_some();
-                let metrics = latest_frame.as_ref().map(|frame| {
-                    let checksum = frame.pixels.iter().fold(0u32, |checksum, value| {
-                        checksum.wrapping_add(u32::from(*value))
-                    });
-                    (frame.width, frame.height, checksum)
-                });
                 drop(surface);
 
                 state.surface_commit_count = state.surface_commit_count.saturating_add(1);
-                state.last_frame = latest_frame;
+                if publishes_root_frame {
+                    state.root_surface = Some(resource.clone());
+                    state.root_frame = latest_frame;
+                }
                 if is_xdg_toplevel {
                     if has_frame {
                         if state
@@ -1900,15 +1901,7 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                         set_keyboard_focus(state, None);
                     }
                 }
-                if let Some((width, height, checksum)) = metrics {
-                    state.last_frame_width = width;
-                    state.last_frame_height = height;
-                    state.last_frame_checksum = checksum;
-                } else {
-                    state.last_frame_width = 0;
-                    state.last_frame_height = 0;
-                    state.last_frame_checksum = 0;
-                }
+                update_composited_frame(state);
                 for callback in callbacks {
                     callback.done(0);
                 }
@@ -1918,6 +1911,15 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
     }
 
     fn destroyed(state: &mut Self, _client: ClientId, resource: &WlSurface, _data: &SurfaceData) {
+        if state
+            .root_surface
+            .as_ref()
+            .is_some_and(|root| root.id() == resource.id())
+        {
+            state.root_surface = None;
+            state.root_frame = None;
+            update_composited_frame(state);
+        }
         if state
             .pointer_focus_surface
             .as_ref()
@@ -1977,6 +1979,167 @@ impl Dispatch<WlRegion, RegionData> for CompositorState {
     }
 }
 
+fn xdg_surface_origin(
+    state: &CompositorState,
+    xdg_surface: &XdgSurface,
+    depth: usize,
+) -> Option<(i32, i32)> {
+    if depth > state.popups.len() {
+        return None;
+    }
+    let xdg_data = xdg_surface.data::<XdgSurfaceData>()?;
+    let surface_data = xdg_data.wl_surface.data::<SurfaceData>()?;
+    let (role, popup) = {
+        let surface = surface_data
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        (surface.role, surface.xdg_popup.clone())
+    };
+    match role {
+        Some(SurfaceRole::XdgToplevel) => Some((0, 0)),
+        Some(SurfaceRole::XdgPopup) => {
+            let popup = popup?;
+            let popup_data = popup.data::<XdgPopupData>()?;
+            let (parent_x, parent_y) =
+                xdg_surface_origin(state, &popup_data.parent, depth.saturating_add(1))?;
+            let (x, y, _, _) = popup_data
+                .positioner
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .geometry()?;
+            Some((parent_x.saturating_add(x), parent_y.saturating_add(y)))
+        }
+        None => None,
+    }
+}
+
+fn popup_geometry_in_root(
+    state: &CompositorState,
+    popup: &XdgPopup,
+) -> Option<(i32, i32, i32, i32)> {
+    let data = popup.data::<XdgPopupData>()?;
+    let (parent_x, parent_y) = xdg_surface_origin(state, &data.parent, 0)?;
+    let (x, y, width, height) = data
+        .positioner
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .geometry()?;
+    Some((
+        parent_x.saturating_add(x),
+        parent_y.saturating_add(y),
+        width,
+        height,
+    ))
+}
+
+fn blend_channel(source: u8, source_alpha: u32, destination: u8, destination_alpha: u32) -> u8 {
+    let inverse_source_alpha = 255 - source_alpha;
+    let output_alpha = source_alpha + (destination_alpha * inverse_source_alpha + 127) / 255;
+    if output_alpha == 0 {
+        return 0;
+    }
+    let numerator = u32::from(source) * source_alpha * 255
+        + u32::from(destination) * destination_alpha * inverse_source_alpha;
+    ((numerator + output_alpha * 127) / (output_alpha * 255)) as u8
+}
+
+fn blend_popup_frame(
+    destination: &mut CommittedFrame,
+    source: &CommittedFrame,
+    x: i32,
+    y: i32,
+    configured_width: i32,
+    configured_height: i32,
+) {
+    let source_width = source.width.min(configured_width.max(0) as u32);
+    let source_height = source.height.min(configured_height.max(0) as u32);
+    for source_y in 0..source_height {
+        let destination_y = i64::from(y) + i64::from(source_y);
+        if destination_y < 0 || destination_y >= i64::from(destination.height) {
+            continue;
+        }
+        for source_x in 0..source_width {
+            let destination_x = i64::from(x) + i64::from(source_x);
+            if destination_x < 0 || destination_x >= i64::from(destination.width) {
+                continue;
+            }
+            let source_index = ((source_y * source.width + source_x) * 4) as usize;
+            let destination_index =
+                ((destination_y as u32 * destination.width + destination_x as u32) * 4) as usize;
+            let source_alpha = if source.format == wl_shm::Format::Argb8888 {
+                u32::from(source.pixels[source_index + 3])
+            } else {
+                255
+            };
+            let destination_alpha = if destination.format == wl_shm::Format::Argb8888 {
+                u32::from(destination.pixels[destination_index + 3])
+            } else {
+                255
+            };
+            for channel in 0..3 {
+                destination.pixels[destination_index + channel] = blend_channel(
+                    source.pixels[source_index + channel],
+                    source_alpha,
+                    destination.pixels[destination_index + channel],
+                    destination_alpha,
+                );
+            }
+            if destination.format == wl_shm::Format::Argb8888 {
+                destination.pixels[destination_index + 3] =
+                    (source_alpha + destination_alpha * (255 - source_alpha) / 255) as u8;
+            }
+        }
+    }
+}
+
+fn update_composited_frame(state: &mut CompositorState) {
+    let Some(root) = state.root_frame.as_ref() else {
+        state.last_frame = None;
+        state.last_frame_width = 0;
+        state.last_frame_height = 0;
+        state.last_frame_checksum = 0;
+        return;
+    };
+    let mut composed = CommittedFrame {
+        width: root.width,
+        height: root.height,
+        format: root.format,
+        pixels: root.pixels.clone(),
+    };
+    for popup in state.popups.iter().filter(|popup| popup.is_alive()) {
+        let Some(data) = popup.data::<XdgPopupData>() else {
+            continue;
+        };
+        if data.dismissed.load(Ordering::Acquire) {
+            continue;
+        }
+        let Some(xdg_data) = data.xdg_surface.data::<XdgSurfaceData>() else {
+            continue;
+        };
+        let Some(surface_data) = xdg_data.wl_surface.data::<SurfaceData>() else {
+            continue;
+        };
+        let frame = surface_data
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .committed_frame
+            .clone();
+        let (Some(frame), Some((x, y, width, height))) =
+            (frame, popup_geometry_in_root(state, popup))
+        else {
+            continue;
+        };
+        blend_popup_frame(&mut composed, &frame, x, y, width, height);
+    }
+    state.last_frame_width = composed.width;
+    state.last_frame_height = composed.height;
+    state.last_frame_checksum = composed.pixels.iter().fold(0u32, |checksum, value| {
+        checksum.wrapping_add(u32::from(*value))
+    });
+    state.last_frame = Some(Arc::new(composed));
+}
 impl CompositorCore {
     pub fn new() -> std::io::Result<Self> {
         let display = Display::new().map_err(|error| std::io::Error::other(error.to_string()))?;
@@ -2092,6 +2255,7 @@ impl CompositorCore {
             }
         }
         self.state.xdg_popup_done_count = self.state.xdg_popup_done_count.saturating_add(dismissed);
+        update_composited_frame(&mut self.state);
         let root = self.state.popup_grab.as_mut().and_then(|grab| {
             if grab.active {
                 grab.active = false;
@@ -3327,6 +3491,25 @@ mod tests {
         assert!(validate_buffer_geometry(32, 0, 0, 2, 16).is_err());
     }
 
+    #[test]
+    fn clips_and_alpha_blends_popup_frames() {
+        let mut destination = CommittedFrame {
+            width: 2,
+            height: 1,
+            format: wl_shm::Format::Xrgb8888,
+            pixels: vec![10, 20, 30, 0, 40, 50, 60, 0],
+        };
+        let source = CommittedFrame {
+            width: 2,
+            height: 1,
+            format: wl_shm::Format::Argb8888,
+            pixels: vec![110, 120, 130, 128, 210, 220, 230, 255],
+        };
+
+        blend_popup_frame(&mut destination, &source, 1, 0, 2, 1);
+
+        assert_eq!(destination.pixels, [10, 20, 30, 0, 75, 85, 95, 0]);
+    }
     #[test]
     fn creates_wayland_display_and_reports_protocol_version() {
         let core = CompositorCore::new().expect("Wayland display");
