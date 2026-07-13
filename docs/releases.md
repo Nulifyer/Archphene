@@ -32,3 +32,17 @@ The local keystore and credentials backup are stored under ignored `tooling/sign
 The Android `versionName` comes from the release tag. The `versionCode` uses a high CI range plus the monotonic GitHub workflow run number, allowing a stable release after a prerelease with the same semantic version.
 
 The workflow can be rerun manually with **Run workflow** and an existing release tag. Uploads use `--clobber`, so a rerun replaces assets for that release.
+
+## Validate self-update
+
+The emulator regression installs an older manager signed by the production key,
+discovers and downloads the requested public GitHub Release through the manager,
+and accepts Android's system-owned update confirmation:
+
+```powershell
+./scripts/test-linux-manager-github-self-update.ps1
+```
+
+Use `-RebuildBaseline` after manager source changes. This test uninstalls the
+manager package and therefore clears manager-private state, but it does not remove
+separately installed Linux application packages.
