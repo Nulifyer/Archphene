@@ -41,6 +41,7 @@ public final class MainActivity extends Activity {
     private static native int nativeXdgWmBaseBindCount(long handle);
     private static native int nativeXdgPositionerCount(long handle);
     private static native int nativeXdgPositionerRequestCount(long handle);
+    private static native int nativeXdgPopupCount(long handle);
     private static native int nativeXdgSurfaceCount(long handle);
     private static native int nativeXdgToplevelCount(long handle);
     private static native int nativeXdgAckCount(long handle);
@@ -493,18 +494,45 @@ public final class MainActivity extends Activity {
                         || nativeXdgPositionerRequestCount(core) != 9) {
                     throw new IllegalStateException("xdg_positioner state was incomplete");
                 }
-                output.write(destroyPositionerAndSyncRequest());
+                output.write(createPopupSurfaceAndSyncRequest());
                 output.flush();
                 dispatch(core);
-                readUntilCallback(input, 47);
-                if (nativeXdgPositionerCount(core) != 0) {
-                    throw new IllegalStateException("xdg_positioner destruction failed");
+                readUntilCallback(input, 48);
+
+                output.write(createPopupRoleAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                int popupConfigureSerial =
+                        readPopupConfigureUntilCallback(input, 49, 50, 51);
+                if (nativeXdgPopupCount(core) != 1
+                        || nativeXdgSurfaceCount(core) != 2
+                        || nativeSurfaceCount(core) != 2) {
+                    throw new IllegalStateException("xdg_popup role lifecycle was incomplete");
+                }
+
+                output.write(ackPopupConfigureAndSyncRequest(popupConfigureSerial));
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 52);
+                if (nativeXdgAckCount(core) != 4) {
+                    throw new IllegalStateException("xdg_popup configure ack failed");
+                }
+
+                output.write(destroyPopupResourcesAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 53);
+                if (nativeXdgPopupCount(core) != 0
+                        || nativeXdgPositionerCount(core) != 0
+                        || nativeXdgSurfaceCount(core) != 1
+                        || nativeSurfaceCount(core) != 1) {
+                    throw new IllegalStateException("xdg_popup destruction failed");
                 }
 
                 output.write(destroyXdgToplevelAndSyncRequest());
                 output.flush();
                 dispatch(core);
-                readUntilCallback(input, 48);
+                readUntilCallback(input, 54);
                 if (nativeXdgSurfaceCount(core) != 0
                         || nativeXdgToplevelCount(core) != 0
                         || nativeSurfaceCount(core) != 0
@@ -692,11 +720,47 @@ public final class MainActivity extends Activity {
         return request.array();
     }
 
-    private static byte[] destroyPositionerAndSyncRequest() {
-        ByteBuffer request = buffer(20);
+    private static byte[] createPopupSurfaceAndSyncRequest() {
+        ByteBuffer request = buffer(24);
+        putHeader(request, 4, 0, 12);
+        request.putInt(47);
+        putHeader(request, 1, 0, 12);
+        request.putInt(48);
+        return request.array();
+    }
+
+    private static byte[] createPopupRoleAndSyncRequest() {
+        ByteBuffer request = buffer(56);
+        putHeader(request, 18, 2, 16);
+        request.putInt(49);
+        request.putInt(47);
+        putHeader(request, 49, 2, 20);
+        request.putInt(50);
+        request.putInt(22);
+        request.putInt(45);
+        putHeader(request, 47, 6, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(51);
+        return request.array();
+    }
+
+    private static byte[] ackPopupConfigureAndSyncRequest(int serial) {
+        ByteBuffer request = buffer(24);
+        putHeader(request, 49, 4, 12);
+        request.putInt(serial);
+        putHeader(request, 1, 0, 12);
+        request.putInt(52);
+        return request.array();
+    }
+
+    private static byte[] destroyPopupResourcesAndSyncRequest() {
+        ByteBuffer request = buffer(44);
+        putHeader(request, 50, 0, 8);
+        putHeader(request, 49, 0, 8);
+        putHeader(request, 47, 0, 8);
         putHeader(request, 45, 0, 8);
         putHeader(request, 1, 0, 12);
-        request.putInt(47);
+        request.putInt(53);
         return request.array();
     }
 
@@ -773,7 +837,7 @@ public final class MainActivity extends Activity {
         putHeader(request, 20, 0, 8);
         putHeader(request, 18, 0, 8);
         putHeader(request, 1, 0, 12);
-        request.putInt(48);
+        request.putInt(54);
         return request.array();
     }
 
@@ -1159,6 +1223,41 @@ public final class MainActivity extends Activity {
         readPointerFrame(input, pointerId);
         return serial;
     }
+    private static int readPopupConfigureUntilCallback(
+            FileInputStream input, int xdgSurfaceId, int popupId, int callbackId)
+            throws Exception {
+        boolean geometryConfigured = false;
+        Integer configureSerial = null;
+        while (true) {
+            Message message = readMessage(input);
+            throwIfDisplayError(message);
+            if (message.objectId == popupId && message.opcode == 0) {
+                if (message.body.length != 16) {
+                    throw new IllegalStateException("invalid xdg_popup.configure event");
+                }
+                ByteBuffer body = ByteBuffer.wrap(message.body).order(ByteOrder.nativeOrder());
+                geometryConfigured = body.getInt() == 13
+                        && body.getInt() == 55
+                        && body.getInt() == 160
+                        && body.getInt() == 120;
+            } else if (message.objectId == xdgSurfaceId && message.opcode == 0) {
+                if (message.body.length != 4) {
+                    throw new IllegalStateException("invalid popup xdg_surface.configure event");
+                }
+                configureSerial = ByteBuffer.wrap(message.body)
+                        .order(ByteOrder.nativeOrder()).getInt();
+            }
+            if (message.objectId == callbackId && message.opcode == 0) {
+                if (!geometryConfigured
+                        || configureSerial == null
+                        || configureSerial == 0) {
+                    throw new IllegalStateException("xdg_popup configure sequence was incomplete");
+                }
+                return configureSerial;
+            }
+        }
+    }
+
     private static void readQueuedConfiguresUntilCallback(
             FileInputStream input,
             int xdgSurfaceId,

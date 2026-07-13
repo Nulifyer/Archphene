@@ -10,6 +10,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
+use wayland_protocols::xdg::shell::server::xdg_popup::{self, XdgPopup};
 use wayland_protocols::xdg::shell::server::xdg_positioner::{self, XdgPositioner};
 use wayland_protocols::xdg::shell::server::xdg_surface::{self, XdgSurface};
 use wayland_protocols::xdg::shell::server::xdg_toplevel::{self, XdgToplevel};
@@ -52,6 +53,7 @@ pub struct CompositorState {
     xdg_wm_base_binds: u32,
     xdg_positioner_count: u32,
     xdg_positioner_request_count: u32,
+    xdg_popup_count: u32,
     xdg_surface_count: u32,
     xdg_toplevel_count: u32,
     xdg_ack_count: u32,
@@ -88,12 +90,14 @@ struct SurfaceState {
     role: Option<SurfaceRole>,
     xdg_surface: Option<XdgSurface>,
     xdg_toplevel: Option<XdgToplevel>,
+    xdg_popup: Option<XdgPopup>,
     xdg_configured: bool,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum SurfaceRole {
     XdgToplevel,
+    XdgPopup,
 }
 
 #[derive(Default)]
@@ -117,6 +121,106 @@ struct XdgPositionerState {
     reactive: bool,
     parent_size: Option<(i32, i32)>,
     parent_configure: Option<u32>,
+}
+
+impl XdgPositionerState {
+    fn anchor_has_edge(&self, edge: xdg_positioner::Anchor) -> bool {
+        self.anchor.is_some_and(|anchor| match edge {
+            xdg_positioner::Anchor::Top => matches!(
+                anchor,
+                xdg_positioner::Anchor::Top
+                    | xdg_positioner::Anchor::TopLeft
+                    | xdg_positioner::Anchor::TopRight
+            ),
+            xdg_positioner::Anchor::Bottom => matches!(
+                anchor,
+                xdg_positioner::Anchor::Bottom
+                    | xdg_positioner::Anchor::BottomLeft
+                    | xdg_positioner::Anchor::BottomRight
+            ),
+            xdg_positioner::Anchor::Left => matches!(
+                anchor,
+                xdg_positioner::Anchor::Left
+                    | xdg_positioner::Anchor::TopLeft
+                    | xdg_positioner::Anchor::BottomLeft
+            ),
+            xdg_positioner::Anchor::Right => matches!(
+                anchor,
+                xdg_positioner::Anchor::Right
+                    | xdg_positioner::Anchor::TopRight
+                    | xdg_positioner::Anchor::BottomRight
+            ),
+            _ => false,
+        })
+    }
+
+    fn gravity_has_edge(&self, edge: xdg_positioner::Gravity) -> bool {
+        self.gravity.is_some_and(|gravity| match edge {
+            xdg_positioner::Gravity::Top => matches!(
+                gravity,
+                xdg_positioner::Gravity::Top
+                    | xdg_positioner::Gravity::TopLeft
+                    | xdg_positioner::Gravity::TopRight
+            ),
+            xdg_positioner::Gravity::Bottom => matches!(
+                gravity,
+                xdg_positioner::Gravity::Bottom
+                    | xdg_positioner::Gravity::BottomLeft
+                    | xdg_positioner::Gravity::BottomRight
+            ),
+            xdg_positioner::Gravity::Left => matches!(
+                gravity,
+                xdg_positioner::Gravity::Left
+                    | xdg_positioner::Gravity::TopLeft
+                    | xdg_positioner::Gravity::BottomLeft
+            ),
+            xdg_positioner::Gravity::Right => matches!(
+                gravity,
+                xdg_positioner::Gravity::Right
+                    | xdg_positioner::Gravity::TopRight
+                    | xdg_positioner::Gravity::BottomRight
+            ),
+            _ => false,
+        })
+    }
+
+    fn geometry(&self) -> Option<(i32, i32, i32, i32)> {
+        let (width, height) = self.size?;
+        let (anchor_x, anchor_y, anchor_width, anchor_height) = self.anchor_rect?;
+        let mut x = anchor_x + self.offset.0;
+        let mut y = anchor_y + self.offset.1;
+        x += if self.anchor_has_edge(xdg_positioner::Anchor::Left) {
+            0
+        } else if self.anchor_has_edge(xdg_positioner::Anchor::Right) {
+            anchor_width
+        } else {
+            anchor_width / 2
+        };
+        y += if self.anchor_has_edge(xdg_positioner::Anchor::Top) {
+            0
+        } else if self.anchor_has_edge(xdg_positioner::Anchor::Bottom) {
+            anchor_height
+        } else {
+            anchor_height / 2
+        };
+        if self.gravity_has_edge(xdg_positioner::Gravity::Top) {
+            y -= height;
+        } else if !self.gravity_has_edge(xdg_positioner::Gravity::Bottom) {
+            y -= height / 2;
+        }
+        if self.gravity_has_edge(xdg_positioner::Gravity::Left) {
+            x -= width;
+        } else if !self.gravity_has_edge(xdg_positioner::Gravity::Right) {
+            x -= width / 2;
+        }
+        Some((x, y, width, height))
+    }
+}
+
+struct XdgPopupData {
+    xdg_surface: XdgSurface,
+    parent: XdgSurface,
+    positioner: Mutex<XdgPositionerState>,
 }
 
 struct XdgSurfaceData {
@@ -574,7 +678,13 @@ impl Dispatch<XdgSurface, XdgSurfaceData> for CompositorState {
                 }
                 match surface_state.role {
                     None => surface_state.role = Some(SurfaceRole::XdgToplevel),
-                    Some(SurfaceRole::XdgToplevel) => {}
+                    Some(_) => {
+                        resource.post_error(
+                            xdg_surface::Error::AlreadyConstructed,
+                            "wl_surface already has an active role",
+                        );
+                        return;
+                    }
                 }
                 xdg_state.role_active = true;
                 let toplevel = data_init.init(
@@ -586,11 +696,96 @@ impl Dispatch<XdgSurface, XdgSurfaceData> for CompositorState {
                 surface_state.xdg_toplevel = Some(toplevel);
                 state.xdg_toplevel_count = state.xdg_toplevel_count.saturating_add(1);
             }
-            xdg_surface::Request::GetPopup { .. } => {
-                resource.post_error(
-                    xdg_surface::Error::NotConstructed,
-                    "xdg_popup support is not implemented yet",
+            xdg_surface::Request::GetPopup {
+                id,
+                parent,
+                positioner,
+            } => {
+                let Some(parent) = parent else {
+                    resource.post_error(
+                        xdg_surface::Error::InvalidSize,
+                        "xdg_popup requires a parent",
+                    );
+                    return;
+                };
+                let Some(parent_data) = parent.data::<XdgSurfaceData>() else {
+                    resource.post_error(
+                        xdg_surface::Error::NotConstructed,
+                        "xdg_popup parent is unknown",
+                    );
+                    return;
+                };
+                let parent_mapped = parent_data
+                    .wl_surface
+                    .data::<SurfaceData>()
+                    .and_then(|surface| {
+                        surface
+                            .inner
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .committed_frame
+                            .as_ref()
+                            .map(|_| ())
+                    })
+                    .is_some();
+                if !parent_mapped {
+                    resource.post_error(
+                        xdg_surface::Error::NotConstructed,
+                        "xdg_popup parent is not mapped",
+                    );
+                    return;
+                }
+                let Some(positioner_data) = positioner.data::<XdgPositionerData>() else {
+                    resource.post_error(
+                        xdg_surface::Error::InvalidSize,
+                        "xdg_popup positioner is unknown",
+                    );
+                    return;
+                };
+                let positioner_state = positioner_data
+                    .state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone();
+                if positioner_state.geometry().is_none() {
+                    resource.post_error(
+                        xdg_surface::Error::InvalidSize,
+                        "xdg_popup positioner is incomplete",
+                    );
+                    return;
+                }
+
+                let Some(surface_data) = data.wl_surface.data::<SurfaceData>() else {
+                    resource.post_error(
+                        xdg_surface::Error::NotConstructed,
+                        "xdg_popup wl_surface is unknown",
+                    );
+                    return;
+                };
+                let mut surface_state = surface_data
+                    .inner
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                let mut xdg_state = data.state.lock().unwrap_or_else(|error| error.into_inner());
+                if xdg_state.role_active || surface_state.role.is_some() {
+                    resource.post_error(
+                        xdg_surface::Error::AlreadyConstructed,
+                        "xdg_surface already has an active role",
+                    );
+                    return;
+                }
+                surface_state.role = Some(SurfaceRole::XdgPopup);
+                xdg_state.role_active = true;
+                let popup = data_init.init(
+                    id,
+                    XdgPopupData {
+                        xdg_surface: resource.clone(),
+                        parent,
+                        positioner: Mutex::new(positioner_state),
+                    },
                 );
+                surface_state.xdg_popup = Some(popup);
+                state.xdg_popup_count = state.xdg_popup_count.saturating_add(1);
             }
             xdg_surface::Request::SetWindowGeometry { width, height, .. } => {
                 if width <= 0 || height <= 0 {
@@ -645,6 +840,89 @@ impl Dispatch<XdgSurface, XdgSurfaceData> for CompositorState {
             surface.xdg_surface = None;
             surface.xdg_configured = false;
         }
+    }
+}
+
+impl Dispatch<XdgPopup, XdgPopupData> for CompositorState {
+    fn request(
+        state: &mut Self,
+        _client: &Client,
+        resource: &XdgPopup,
+        request: xdg_popup::Request,
+        data: &XdgPopupData,
+        _handle: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            xdg_popup::Request::Destroy => {}
+            xdg_popup::Request::Grab { seat, serial } => {
+                if serial == 0 || !seat.id().same_client_as(&data.parent.id()) {
+                    resource.post_error(
+                        xdg_popup::Error::InvalidGrab,
+                        "xdg_popup grab requires the parent seat and a valid serial",
+                    );
+                }
+            }
+            xdg_popup::Request::Reposition { positioner, token } => {
+                let Some(positioner_data) = positioner.data::<XdgPositionerData>() else {
+                    resource.post_error(
+                        xdg_popup::Error::InvalidGrab,
+                        "xdg_popup repositioner is unknown",
+                    );
+                    return;
+                };
+                let positioner = positioner_data
+                    .state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone();
+                let Some((x, y, width, height)) = positioner.geometry() else {
+                    resource.post_error(
+                        xdg_popup::Error::InvalidGrab,
+                        "xdg_popup repositioner is incomplete",
+                    );
+                    return;
+                };
+                *data
+                    .positioner
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = positioner;
+                state.next_configure_serial = state.next_configure_serial.wrapping_add(1).max(1);
+                let serial = state.next_configure_serial;
+                if let Some(xdg_data) = data.xdg_surface.data::<XdgSurfaceData>() {
+                    xdg_data
+                        .state
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .pending_configures
+                        .push_back(serial);
+                }
+                resource.configure(x, y, width, height);
+                resource.repositioned(token);
+                data.xdg_surface.configure(serial);
+            }
+            _ => unreachable!("xdg_popup request added without an implementation"),
+        }
+    }
+
+    fn destroyed(state: &mut Self, _client: ClientId, _resource: &XdgPopup, data: &XdgPopupData) {
+        if let Some(xdg_data) = data.xdg_surface.data::<XdgSurfaceData>() {
+            xdg_data
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .role_active = false;
+            if let Some(surface_data) = xdg_data.wl_surface.data::<SurfaceData>() {
+                let mut surface = surface_data
+                    .inner
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                surface.role = None;
+                surface.xdg_popup = None;
+                surface.xdg_configured = false;
+            }
+        }
+        state.xdg_popup_count = state.xdg_popup_count.saturating_sub(1);
     }
 }
 
@@ -1280,6 +1558,53 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                         return;
                     }
                 }
+                if surface.role == Some(SurfaceRole::XdgPopup) && !surface.xdg_configured {
+                    if attaches_buffer {
+                        if let Some(xdg_surface) = surface.xdg_surface.as_ref() {
+                            xdg_surface.post_error(
+                                xdg_surface::Error::UnconfiguredBuffer,
+                                "xdg_popup buffer committed before ack_configure",
+                            );
+                        }
+                        return;
+                    }
+                    if let (Some(xdg_surface), Some(popup)) =
+                        (surface.xdg_surface.as_ref(), surface.xdg_popup.as_ref())
+                    {
+                        let Some(xdg_data) = xdg_surface.data::<XdgSurfaceData>() else {
+                            return;
+                        };
+                        let Some(popup_data) = popup.data::<XdgPopupData>() else {
+                            return;
+                        };
+                        let mut xdg_state = xdg_data
+                            .state
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner());
+                        if xdg_state.pending_configures.is_empty()
+                            && xdg_state.acknowledged_configure.is_none()
+                        {
+                            let Some((x, y, width, height)) = popup_data
+                                .positioner
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner())
+                                .geometry()
+                            else {
+                                popup.post_error(
+                                    xdg_popup::Error::InvalidGrab,
+                                    "xdg_popup positioner became incomplete",
+                                );
+                                return;
+                            };
+                            state.next_configure_serial =
+                                state.next_configure_serial.wrapping_add(1).max(1);
+                            let serial = state.next_configure_serial;
+                            xdg_state.pending_configures.push_back(serial);
+                            popup.configure(x, y, width, height);
+                            xdg_surface.configure(serial);
+                        }
+                    }
+                }
                 if let Some(assignment) = surface.pending_buffer.take() {
                     surface.committed_frame = match assignment {
                         Some(buffer) => match buffer.inner.snapshot() {
@@ -1476,6 +1801,10 @@ impl CompositorCore {
 
     pub fn xdg_positioner_request_count(&self) -> u32 {
         self.state.xdg_positioner_request_count
+    }
+
+    pub fn xdg_popup_count(&self) -> u32 {
+        self.state.xdg_popup_count
     }
 
     pub fn xdg_surface_count(&self) -> u32 {
@@ -2033,6 +2362,18 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeXdgPopupCount(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.xdg_popup_count()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeXdgSurfaceCount(
     _environment: *mut std::ffi::c_void,
     _activity: *mut std::ffi::c_void,
@@ -2381,6 +2722,7 @@ mod tests {
         assert_eq!(core.xdg_wm_base_bind_count(), 0);
         assert_eq!(core.xdg_positioner_count(), 0);
         assert_eq!(core.xdg_positioner_request_count(), 0);
+        assert_eq!(core.xdg_popup_count(), 0);
         assert_eq!(core.xdg_surface_count(), 0);
         assert_eq!(core.xdg_toplevel_count(), 0);
         assert_eq!(core.xdg_ack_count(), 0);
