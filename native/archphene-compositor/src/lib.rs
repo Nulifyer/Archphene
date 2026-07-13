@@ -88,6 +88,7 @@ pub struct CompositorState {
     seat_binds: u32,
     pointer_count: u32,
     pointer_event_count: u32,
+    presentation_callbacks: Vec<WlCallback>,
     next_input_serial: u32,
     pointers: Vec<WlPointer>,
     pointer_focus_surface: Option<WlSurface>,
@@ -3022,9 +3023,7 @@ impl Dispatch<WlSubsurface, SubsurfaceData> for CompositorState {
                     let mut callbacks = Vec::new();
                     apply_cached_subsurface_tree(state, &data.surface, 0, false, &mut callbacks);
                     update_composited_frame(state);
-                    for callback in callbacks {
-                        callback.done(0);
-                    }
+                    state.presentation_callbacks.extend(callbacks);
                 }
             }
             _ => unreachable!("wl_subsurface request added without an implementation"),
@@ -3450,9 +3449,7 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                     reconfigure_reactive_popups(state, xdg_surface.as_ref());
                 }
                 update_composited_frame(state);
-                for callback in callbacks {
-                    callback.done(0);
-                }
+                state.presentation_callbacks.extend(callbacks);
             }
             _ => unreachable!("wl_surface request added without an implementation"),
         }
@@ -4911,6 +4908,22 @@ impl CompositorCore {
         1
     }
 
+    pub fn pending_frame_callback_count(&self) -> u32 {
+        u32::try_from(self.state.presentation_callbacks.len()).unwrap_or(u32::MAX)
+    }
+
+    pub fn present_frame(&mut self, time: u32) -> u32 {
+        let callbacks = std::mem::take(&mut self.state.presentation_callbacks);
+        let mut presented = 0u32;
+        for callback in callbacks {
+            if callback.is_alive() {
+                callback.done(time);
+                presented = presented.saturating_add(1);
+            }
+        }
+        presented
+    }
+
     pub fn pointer_leave(&mut self) -> u32 {
         if !self.state.pointer_inside || self.state.pointer_pressed {
             return 0;
@@ -5909,6 +5922,31 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     };
     i32::try_from(core.ime_delete_surrounding(before_length, after_length)).unwrap_or(i32::MAX)
 }
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativePendingFrameCallbackCount(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.pending_frame_callback_count()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativePresentFrame(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+    time: i32,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+        return -1;
+    };
+    i32::try_from(core.present_frame(time as u32)).unwrap_or(i32::MAX)
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativePointerCount(
     _environment: *mut std::ffi::c_void,

@@ -9,6 +9,7 @@ import android.graphics.Color;
 import android.os.Bundle;
 import android.os.ParcelFileDescriptor;
 import android.util.Log;
+import android.view.Choreographer;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
@@ -28,6 +29,8 @@ public final class MainActivity extends Activity {
     private final LinkedBlockingQueue<PointerInput> pointerInputs =
             new LinkedBlockingQueue<>();
     private final LinkedBlockingQueue<KeyboardInput> keyboardInputs =
+            new LinkedBlockingQueue<>();
+    private final LinkedBlockingQueue<Integer> presentationTimes =
             new LinkedBlockingQueue<>();
     private volatile boolean pointerInputReady;
     private volatile boolean keyboardInputReady;
@@ -88,6 +91,8 @@ public final class MainActivity extends Activity {
     private static native int nativeImePreeditProbeText(long handle);
     private static native int nativeImeDeleteSurrounding(
             long handle, int beforeLength, int afterLength);
+    private static native int nativePendingFrameCallbackCount(long handle);
+    private static native int nativePresentFrame(long handle, int time);
     private static native int nativePointerCount(long handle);
     private static native int nativeKeyboardCount(long handle);
     private static native int nativeKeyboardEventCount(long handle);
@@ -266,8 +271,10 @@ public final class MainActivity extends Activity {
                 output.write(commitShmFrameAndSyncRequest());
                 output.flush();
                 dispatch(core);
-                readFrameCommitUntilCallback(input, 12, 14, 15);
-                if (nativeSurfaceCommitCount(core) != 1
+                readFrameCommitUntilSync(input, 12, 14, 15);
+                readDeleteId(input, 15);
+                if (nativePendingFrameCallbackCount(core) != 1
+                        || nativeSurfaceCommitCount(core) != 1
                         || nativeLastFrameWidth(core) != 4
                         || nativeLastFrameHeight(core) != 2
                         || nativeLastFrameChecksum(core) != 656) {
@@ -279,6 +286,7 @@ public final class MainActivity extends Activity {
                         || renderedFrame.getPixel(0, 1) != 0xff1b1a19) {
                     throw new IllegalStateException("Android bitmap did not match the XRGB SHM frame");
                 }
+                presentNextFrame(core, input, 14, renderedFrame, frameView);
 
                 output.write(destroyShmResourcesAndSyncRequest());
                 output.flush();
@@ -339,14 +347,19 @@ public final class MainActivity extends Activity {
                 output.write(commitXdgFrameAndSyncRequest());
                 output.flush();
                 dispatch(core);
-                readFrameCommitUntilCallback(input, 28, 30, 31);
+                readFrameCommitUntilSync(input, 28, 30, 31);
                 readDeleteId(input, 31);
-                if (nativeSurfaceCommitCount(core) != 3
+                if (nativePendingFrameCallbackCount(core) != 1
+                        || nativeSurfaceCommitCount(core) != 3
                         || nativeLastFrameWidth(core) != 4
                         || nativeLastFrameHeight(core) != 2
                         || nativeLastFrameChecksum(core) != 656) {
                     throw new IllegalStateException("configured xdg frame was not committed");
                 }
+                if (nativeCopyLastFrameToBitmap(core, renderedFrame) != 0) {
+                    throw new IllegalStateException("configured xdg frame bitmap copy failed");
+                }
+                presentNextFrame(core, input, 30, renderedFrame, frameView);
 
                 output.write(transformAndScaleXdgFrameAndSyncRequest());
                 output.flush();
@@ -1144,7 +1157,7 @@ public final class MainActivity extends Activity {
             passed = true;
             message = "Native Wayland compositor passed\n"
                     + "registry, Android bitmap, xdg toplevel, keyboard input, "
-                    + "buffer scale/transform, MotionEvent pointer and wheel input, nested popup grabs, synchronized subsurface trees, "
+                    + "buffer scale/transform, Choreographer-paced frames, MotionEvent pointer and wheel input, nested popup grabs, synchronized subsurface trees, "
                     + "committed parent geometry, and bidirectional clipboard and text-input v3 lifecycle complete";
         } catch (Exception error) {
             message = "Native compositor probe failed\n" + error.getMessage();
@@ -2315,6 +2328,38 @@ public final class MainActivity extends Activity {
         return serial;
     }
 
+    private void presentNextFrame(
+            long core,
+            FileInputStream input,
+            int frameCallbackId,
+            Bitmap frame,
+            ImageView frameView)
+            throws Exception {
+        runOnUiThread(() -> {
+            frameView.setImageBitmap(frame);
+            frameView.invalidate();
+            Choreographer.getInstance().postFrameCallback(frameTimeNanos -> {
+                int frameTime = (int) (frameTimeNanos / 1_000_000L);
+                Log.i(TAG, "Choreographer frame time=" + Integer.toUnsignedString(frameTime));
+                presentationTimes.offer(frameTime);
+            });
+        });
+        Integer frameTime = presentationTimes.poll(30, TimeUnit.SECONDS);
+        if (frameTime == null) {
+            throw new IllegalStateException("timed out waiting for Android Choreographer");
+        }
+        if (nativePendingFrameCallbackCount(core) != 1
+                || nativePresentFrame(core, frameTime) != 1) {
+            throw new IllegalStateException("Wayland frame callback was not presentation-gated");
+        }
+        dispatch(core);
+        readPresentedFrame(input, frameCallbackId, frameTime);
+        readDeleteId(input, frameCallbackId);
+        if (nativePendingFrameCallbackCount(core) != 0) {
+            throw new IllegalStateException("presented frame callback was not drained");
+        }
+    }
+
     private PointerInput awaitPointerInput(int timeoutSeconds) throws Exception {
         PointerInput input = pointerInputs.poll(timeoutSeconds, TimeUnit.SECONDS);
         if (input == null) {
@@ -2673,22 +2718,38 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private static void readFrameCommitUntilCallback(
+    private static void readFrameCommitUntilSync(
             FileInputStream input, int bufferId, int frameCallbackId, int syncCallbackId)
             throws Exception {
         boolean bufferReleased = false;
-        boolean frameDone = false;
         while (true) {
             Message message = readMessage(input);
             throwIfDisplayError(message);
             bufferReleased |= message.objectId == bufferId && message.opcode == 0;
-            frameDone |= message.objectId == frameCallbackId && message.opcode == 0;
+            if (message.objectId == frameCallbackId && message.opcode == 0) {
+                throw new IllegalStateException(
+                        "wl_surface.frame completed before Android presentation");
+            }
             if (message.objectId == syncCallbackId && message.opcode == 0) {
-                if (!bufferReleased || !frameDone) {
-                    throw new IllegalStateException("frame commit events were incomplete");
+                if (!bufferReleased) {
+                    throw new IllegalStateException("frame buffer was not released before sync");
                 }
                 return;
             }
+        }
+    }
+
+    private static void readPresentedFrame(
+            FileInputStream input, int frameCallbackId, int expectedTime)
+            throws Exception {
+        Message message = readMessage(input);
+        throwIfDisplayError(message);
+        if (message.objectId != frameCallbackId
+                || message.opcode != 0
+                || message.body.length != 4
+                || ByteBuffer.wrap(message.body)
+                        .order(ByteOrder.nativeOrder()).getInt() != expectedTime) {
+            throw new IllegalStateException("invalid presentation-paced wl_callback.done");
         }
     }
 

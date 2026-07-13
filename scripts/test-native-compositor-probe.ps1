@@ -50,7 +50,7 @@ do {
             $scrollSent = $true
         }
     }
-    if ($output.Contains("registry, Android bitmap, xdg toplevel, keyboard input, buffer scale/transform, MotionEvent pointer and wheel input, nested popup grabs, synchronized subsurface trees, committed parent geometry, and bidirectional clipboard and text-input v3 lifecycle complete")) {
+    if ($output.Contains("registry, Android bitmap, xdg toplevel, keyboard input, buffer scale/transform, Choreographer-paced frames, MotionEvent pointer and wheel input, nested popup grabs, synchronized subsurface trees, committed parent geometry, and bidirectional clipboard and text-input v3 lifecycle complete")) {
         Write-Host "Native compositor Android MotionEvent probe passed on $Serial ($AndroidAbi)."
         exit 0
     }
