@@ -96,6 +96,7 @@ public final class MainActivity extends Activity {
         handleTestInstallIntent();
         handleTestPackageRuntimeIntent();
         handleTestWrapperSigningIntent();
+        handleTestWrapperAssemblyIntent();
     }
 
     @Override
@@ -620,7 +621,7 @@ public final class MainActivity extends Activity {
         details.addView(detailLine("Repository", app.repository));
         details.addView(detailLine("Architecture", app.architecture));
         details.addView(detailLine("Arch status", app.flaggedOutOfDate ? "Flagged out of date" : "Current"));
-        TextView wrapperAvailability = text("Wrapper artifact: checking repositories",
+        TextView wrapperAvailability = text("Wrapper: built and signed on this device",
                 12, COLOR_MUTED);
         details.addView(wrapperAvailability, spacedWrap(dp(8)));
         page.addView(details, spacedWrap(dp(10)));
@@ -638,27 +639,14 @@ public final class MainActivity extends Activity {
         });
         page.addView(action, spacedWrap(dp(12)));
         Button install = actionButton("Install", android.R.drawable.stat_sys_download_done);
-        install.setEnabled(false);
+        boolean supported = "x86_64".equals(app.architecture)
+                && java.util.Arrays.asList(android.os.Build.SUPPORTED_ABIS).contains("x86_64");
+        install.setEnabled(supported);
+        install.setContentDescription(supported
+                ? "Resolve, verify, build, and install " + app.name
+                : app.name + " is not available for this device architecture");
+        install.setOnClickListener(view -> startOnDevicePackageInstall(app));
         page.addView(install, spacedWrap(dp(8)));
-        new Thread(() -> {
-            try {
-                WrapperRepositoryClient.Artifact artifact =
-                        WrapperRepositoryClient.latestForSource(this, app.name);
-                runOnUiThread(() -> {
-                    if (currentPage != 4) return;
-                    wrapperAvailability.setText("Signed wrapper " + artifact.version
-                            + ("bad".equals(artifact.health) ? " | Reported bad" : ""));
-                    wrapperAvailability.setTextColor("bad".equals(artifact.health)
-                            ? COLOR_ERROR : COLOR_SUCCESS);
-                    install.setEnabled(!"bad".equals(artifact.health));
-                    install.setOnClickListener(view -> startTrackedArtifactInstall(app, artifact));
-                });
-            } catch (Exception e) {
-                runOnUiThread(() -> {
-                    if (currentPage == 4) wrapperAvailability.setText("Wrapper artifact: not available");
-                });
-            }
-        }, "wrapper-availability").start();
         scroll.addView(page);
         content.addView(scroll, frameMatch());
     }
@@ -683,6 +671,76 @@ public final class MainActivity extends Activity {
                     }
                 });
         renderAppList();
+    }
+    private void startOnDevicePackageInstall(ArchPackageRepository.PackageResult source) {
+        TrackedPackageStore.add(this, source);
+        showAppsPage();
+        String stateKey = "tracked:" + source.name + ":" + source.architecture;
+        ApkUpdateInstaller.Operation buildOperation = new ApkUpdateInstaller.Operation();
+        activeInstallPackage = stateKey;
+        activeInstallOperation = buildOperation;
+        activeInstallPhase = ApkUpdateInstaller.Phase.DOWNLOAD;
+        activeInstallPercent = 5;
+        activeInstallStatus = "Resolving signed Arch transaction";
+        renderAppList();
+        Thread worker = new Thread(() -> {
+            try {
+                ArchPackageRuntime.StagedTransaction staged =
+                        ArchPackageRuntime.stageTransaction(this, source.name);
+                if (Thread.currentThread().isInterrupted()) throw new InterruptedException();
+                runOnUiThread(() -> {
+                    activeInstallPercent = 70;
+                    activeInstallStatus = "Building Android wrapper";
+                    if (currentPage == 0) renderAppList();
+                });
+                ArchWrapperAssembler.Result result = ArchWrapperAssembler.assembleQt(
+                        this, source.repository, source.name, staged.root);
+                if (Thread.currentThread().isInterrupted()) throw new InterruptedException();
+                runOnUiThread(() -> {
+                    activeInstallPhase = ApkUpdateInstaller.Phase.INSTALL;
+                    activeInstallPercent = 0;
+                    activeInstallStatus = "Verifying generated APK";
+                    activeInstallOperation = ApkUpdateInstaller.installWithProgress(this,
+                            result.apk.toURI().toString(), result.apkSha256,
+                            result.packageName, result.signerSha256,
+                            (phase, percent, status, terminal) -> {
+                                activeInstallPhase = phase;
+                                activeInstallPercent = percent;
+                                activeInstallStatus = status;
+                                if (terminal) {
+                                    if (phase == ApkUpdateInstaller.Phase.COMPLETE) {
+                                        TrackedPackageStore.remove(this, source.name,
+                                                source.architecture);
+                                    }
+                                    activeInstallOperation = null;
+                                    activeInstallPackage = "";
+                                    showBanner(status, phase == ApkUpdateInstaller.Phase.ERROR);
+                                    loadCatalog();
+                                } else if (currentPage == 0) {
+                                    renderAppList();
+                                }
+                            });
+                    if (currentPage == 0) renderAppList();
+                });
+            } catch (InterruptedException cancelled) {
+                runOnUiThread(() -> {
+                    activeInstallOperation = null;
+                    activeInstallPackage = "";
+                    showBanner("Package install cancelled", false);
+                    if (currentPage == 0) renderAppList();
+                });
+            } catch (Exception error) {
+                android.util.Log.e("ArchpheneManager", "On-device package install failed", error);
+                runOnUiThread(() -> {
+                    activeInstallOperation = null;
+                    activeInstallPackage = "";
+                    showBanner("Install failed: " + error.getMessage(), true);
+                    if (currentPage == 0) renderAppList();
+                });
+            }
+        }, "archphene-package-install");
+        buildOperation.setCancellationHook(worker::interrupt);
+        worker.start();
     }
     private String versionButtonText(InstalledLinuxAppCatalog.Entry app,
             ManagerStateStore.Snapshot state) {
@@ -1184,6 +1242,39 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private void handleTestWrapperAssemblyIntent() {
+        String sourcePackage = getIntent().getStringExtra("archphene_test_assemble_qt");
+        if (sourcePackage == null) return;
+        new Thread(() -> {
+            try {
+                java.io.File runtimeRoot = null;
+                if (getIntent().getBooleanExtra("archphene_test_stage_transaction", false)) {
+                    runOnUiThread(() -> showBanner("Resolving and verifying " + sourcePackage, false));
+                    runtimeRoot = ArchPackageRuntime.stageTransaction(this, sourcePackage).root;
+                }
+                ArchWrapperAssembler.Result result = ArchWrapperAssembler.assembleQt(
+                        this, "extra", sourcePackage, runtimeRoot);
+                if (getIntent().getBooleanExtra("archphene_test_install_assembled", false)) {
+                    runOnUiThread(() -> {
+                        showBanner("Generated " + result.packageName + "\nOpening Android installer", false);
+                        ApkUpdateInstaller.installWithProgress(this, result.apk.toURI().toString(),
+                                result.apkSha256, result.packageName, result.signerSha256,
+                                (phase, percent, status, terminal) -> {
+                                    if (terminal) showBanner(status,
+                                            phase == ApkUpdateInstaller.Phase.ERROR);
+                                });
+                    });
+                } else {
+                    runOnUiThread(() -> showBanner("Generated wrapper APK\nPackage "
+                            + result.packageName + "\nSigner " + result.signerSha256, false));
+                }
+            } catch (Exception e) {
+                android.util.Log.e("ArchpheneManager", "Wrapper assembly failed", e);
+                runOnUiThread(() -> showBanner("Wrapper assembly failed: " + e.getMessage(), true));
+            }
+        }, "archphene-wrapper-assembly-test").start();
+    }
+
     private void handleTestWrapperSigningIntent() {
         String inputPath = getIntent().getStringExtra("archphene_test_sign_apk_file");
         if (inputPath == null) return;
@@ -1256,7 +1347,7 @@ public final class MainActivity extends Activity {
                         activeInstallPercent = percent;
                         activeInstallStatus = status;
                         if (terminal) {
-                            activeInstallOperation = null;
+                        activeInstallOperation = null;
                             activeInstallPackage = "";
                             showBanner(status, phase == ApkUpdateInstaller.Phase.ERROR);
                         }

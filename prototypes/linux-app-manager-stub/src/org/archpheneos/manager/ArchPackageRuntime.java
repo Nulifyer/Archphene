@@ -1,6 +1,10 @@
 package org.archpheneos.manager;
 
 import android.content.Context;
+import android.system.ErrnoException;
+import android.system.Os;
+import android.system.OsConstants;
+import android.system.StructStat;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -19,7 +23,7 @@ import java.util.Map;
 import java.util.Set;
 
 public final class ArchPackageRuntime {
-    private static final int OUTPUT_LIMIT = 1024 * 1024;
+    private static final int OUTPUT_LIMIT = 16 * 1024 * 1024;
     private static final String ASSET_ROOT = "package-runtime/";
 
     public static final class Result {
@@ -58,6 +62,18 @@ public final class ArchPackageRuntime {
             this.repository = repository;
             this.url = url;
             this.filename = filename;
+        }
+    }
+
+    public static final class StagedTransaction {
+        public final String sourcePackage;
+        public final List<ResolvedPackage> packages;
+        public final File root;
+
+        StagedTransaction(String sourcePackage, List<ResolvedPackage> packages, File root) {
+            this.sourcePackage = sourcePackage;
+            this.packages = packages;
+            this.root = root;
         }
     }
 
@@ -137,11 +153,184 @@ public final class ArchPackageRuntime {
         String safeName = value.filename.replace(':', '_');
         File packageFile = new File(downloads, safeName);
         File signatureFile = new File(downloads, safeName + ".sig");
+        if (packageFile.isFile() && signatureFile.isFile()) {
+            try {
+                return verifyPackage(context, packageFile, signatureFile);
+            } catch (Exception invalidCache) {
+                packageFile.delete();
+                signatureFile.delete();
+            }
+        }
         download(value.url, packageFile, 1024L * 1024 * 1024);
         download(value.url + ".sig", signatureFile, 1024L * 1024);
         return verifyPackage(context, packageFile, signatureFile);
     }
 
+    public static synchronized StagedTransaction stageTransaction(Context context,
+            String packageName) throws Exception {
+        List<ResolvedPackage> packages = resolve(context, packageName);
+        File staging = new File(state(context), "staging/" + packageName);
+        deleteRecursively(staging);
+        File root = new File(staging, "root");
+        if (!root.mkdirs()) throw new IllegalStateException("Could not create transaction root");
+        File downloads = directory(state(context), "downloads");
+        for (ResolvedPackage value : packages) {
+            android.util.Log.i("ArchphenePackages", "staging " + value.repository + "/"
+                    + value.name + " " + value.version);
+            downloadAndVerify(context, value);
+            File archive = new File(downloads, value.filename.replace(':', '_'));
+            stageVerifiedArchive(context, archive, root, packageName);
+        }
+        File executable = new File(root, "usr/bin/" + packageName).getCanonicalFile();
+        if (!executable.isFile() || !executable.getPath().startsWith(root.getCanonicalPath()
+                + File.separator)) {
+            deleteRecursively(staging);
+            throw new SecurityException("Resolved package has no safe desktop executable");
+        }
+        return new StagedTransaction(packageName, packages, root);
+    }
+
+    private static void stageVerifiedArchive(Context context, File archive, File root,
+            String packageName) throws Exception {
+        Result namesResult = runTool(context, "libarchphene_bsdtar.so",
+                Arrays.asList("-tf", archive.getPath()));
+        if (namesResult.exitCode != 0) {
+            throw new SecurityException("Could not inspect verified Arch package archive");
+        }
+        String[] names = namesResult.output.split("\\r?\\n");
+        boolean hasSelectedEntry = false;
+        for (String entry : names) {
+            validateArchivePath(entry);
+            if (isRuntimeLibraryEntry(entry) || entry.equals("usr/bin/" + packageName)) {
+                hasSelectedEntry = true;
+            }
+        }
+        if (!hasSelectedEntry) return;
+        Result verboseResult = runTool(context, "libarchphene_bsdtar.so",
+                Arrays.asList("-tvf", archive.getPath()));
+        if (verboseResult.exitCode != 0) {
+            throw new SecurityException("Could not inspect verified Arch package metadata");
+        }
+        String[] verbose = verboseResult.output.split("\\r?\\n");
+        if (names.length != verbose.length) {
+            throw new SecurityException("Arch package archive listing mismatch");
+        }
+        ArrayList<String[]> symlinks = new ArrayList<>();
+        for (int index = 0; index < names.length; index++) {
+            String entry = names[index];
+            validateArchivePath(entry);
+            boolean selected = isRuntimeLibraryEntry(entry)
+                    || entry.equals("usr/bin/" + packageName);
+            if (!selected) continue;
+            char type = verbose[index].isEmpty() ? '?' : verbose[index].charAt(0);
+            File destination = safeStagingFile(root, entry);
+            if (type == 'd') {
+                if (!destination.isDirectory() && !destination.mkdirs()) {
+                    throw new IllegalStateException("Could not create staged directory");
+                }
+            } else if (type == '-' || type == 'h') {
+                File parent = destination.getParentFile();
+                if (!parent.isDirectory() && !parent.mkdirs()) {
+                    throw new IllegalStateException("Could not create staged parent");
+                }
+                extractArchiveFile(context, archive, entry, destination);
+            } else if (type == 'l') {
+                int marker = verbose[index].lastIndexOf(" -> ");
+                if (marker < 0) throw new SecurityException("Malformed archive symlink");
+                String target = normalizeSymlinkTarget(root, entry,
+                        verbose[index].substring(marker + 4));
+                symlinks.add(new String[] {entry, target});
+            } else {
+                throw new SecurityException("Unsupported selected archive entry type: " + type);
+            }
+        }
+        for (String[] symlink : symlinks) {
+            File destination = safeStagingFile(root, symlink[0]);
+            File parent = destination.getParentFile();
+            if (!parent.isDirectory() && !parent.mkdirs()) {
+                throw new IllegalStateException("Could not create staged symlink parent");
+            }
+            if (destination.exists()) throw new SecurityException("Archive symlink collision");
+            Os.symlink(symlink[1], destination.getPath());
+        }
+    }
+
+    private static boolean isRuntimeLibraryEntry(String entry) {
+        if (!entry.startsWith("usr/lib/") || entry.startsWith("usr/lib/getconf/")
+                || entry.startsWith("usr/lib/gconv/") || entry.startsWith("usr/lib/audit/")) {
+            return false;
+        }
+        if (entry.endsWith("/")) return true;
+        String name = entry.substring(entry.lastIndexOf('/') + 1);
+        return name.endsWith(".so") || name.contains(".so.");
+    }
+    private static void extractArchiveFile(Context context, File archive, String entry,
+            File destination) throws Exception {
+        File nativeDir = new File(context.getApplicationInfo().nativeLibraryDir).getCanonicalFile();
+        File loader = executable(nativeDir, "libarchphene_ld.so");
+        File tool = executable(nativeDir, "libarchphene_bsdtar.so");
+        List<String> command = new ArrayList<>(Arrays.asList(loader.getPath(),
+                "--library-path", nativeDir.getPath(), tool.getPath(),
+                "-xOf", archive.getPath(), entry));
+        File error = new File(state(context), "bsdtar-extract.err");
+        ProcessBuilder builder = new ProcessBuilder(command);
+        builder.directory(state(context));
+        builder.redirectOutput(destination);
+        builder.redirectError(error);
+        Map<String, String> environment = builder.environment();
+        environment.put("HOME", directory(state(context), "home").getPath());
+        environment.put("TMPDIR", directory(state(context), "tmp").getPath());
+        environment.put("LANG", "C");
+        environment.put("LC_ALL", "C");
+        int exitCode = builder.start().waitFor();
+        String diagnostics = error.isFile() ? readText(error, OUTPUT_LIMIT) : "";
+        error.delete();
+        if (exitCode != 0 || !destination.isFile()
+                || destination.length() > 256L * 1024 * 1024) {
+            destination.delete();
+            throw new SecurityException("Could not decode archive entry " + entry
+                    + " (exit " + exitCode + ") " + diagnostics);
+        }
+    }
+
+    private static void validateArchivePath(String entry) {
+        if (entry.isEmpty() || entry.startsWith("/") || entry.indexOf('\\') >= 0
+                || entry.equals("..") || entry.startsWith("../")
+                || entry.contains("/../") || entry.endsWith("/..")) {
+            throw new SecurityException("Arch package contains an unsafe path");
+        }
+    }
+
+    private static File safeStagingFile(File root, String entry) throws Exception {
+        File value = new File(root, entry).getCanonicalFile();
+        String rootPath = root.getCanonicalPath() + File.separator;
+        if (!value.getPath().startsWith(rootPath)) {
+            throw new SecurityException("Arch package path escapes staging root");
+        }
+        return value;
+    }
+
+    private static String normalizeSymlinkTarget(File root, String entry, String target)
+            throws Exception {
+        if (target.isEmpty() || target.indexOf('\\') >= 0) {
+            throw new SecurityException("Arch package contains an unsafe symlink");
+        }
+        String normalized = target;
+        if (target.startsWith("/")) {
+            if (!target.startsWith("/usr/lib/")) {
+                throw new SecurityException("Arch package contains an unsafe absolute symlink");
+            }
+            java.nio.file.Path logicalParent = java.nio.file.Paths.get("/" + entry).getParent();
+            normalized = logicalParent.relativize(java.nio.file.Paths.get(target).normalize())
+                    .toString();
+        }
+        File parent = new File(root, entry).getParentFile();
+        File resolved = new File(parent, normalized).getCanonicalFile();
+        if (!resolved.getPath().startsWith(root.getCanonicalPath() + File.separator)) {
+            throw new SecurityException("Arch package symlink escapes staging root");
+        }
+        return normalized;
+    }
     public static synchronized Verification verifyPackage(Context context, File packageFile,
             File signatureFile) throws Exception {
         requireManagedFile(context, packageFile);
@@ -214,7 +403,9 @@ public final class ArchPackageRuntime {
         File state = state(context);
         File home = directory(state, "home");
         File temp = directory(state, "tmp");
-        List<String> command = new ArrayList<>(Arrays.asList(loader.getPath(),
+        List<String> command = new ArrayList<>();
+
+        command.addAll(Arrays.asList(loader.getPath(),
                 "--library-path", nativeDir.getPath(), tool.getPath()));
         command.addAll(arguments);
         ProcessBuilder builder = new ProcessBuilder(command);
@@ -223,14 +414,19 @@ public final class ArchPackageRuntime {
         Map<String, String> environment = builder.environment();
         environment.put("HOME", home.getPath());
         environment.put("TMPDIR", temp.getPath());
-        environment.put("LANG", "C.UTF-8");
-        environment.put("LC_ALL", "C.UTF-8");
+        environment.put("LANG", "C");
+        environment.put("LC_ALL", "C");
         Process process = builder.start();
         String output;
         try (InputStream input = process.getInputStream()) {
             output = readBounded(input);
         }
-        return new Result(process.waitFor(), output);
+        int exitCode = process.waitFor();
+        if ("libarchphene_bsdtar.so".equals(toolName)) {
+            android.util.Log.i("ArchphenePackages", "bsdtar exit=" + exitCode
+                    + " args=" + arguments + " outputChars=" + output.length());
+        }
+        return new Result(exitCode, output);
     }
 
     private static void download(String endpoint, File target, long limit) throws Exception {
@@ -381,10 +577,18 @@ public final class ArchPackageRuntime {
     }
 
     private static void deleteRecursively(File file) {
-        if (!file.exists()) return;
-        File[] children = file.listFiles();
-        if (children != null) for (File child : children) deleteRecursively(child);
-        if (!file.delete()) throw new IllegalStateException("Could not reset package trust database");
+        StructStat stat;
+        try {
+            stat = Os.lstat(file.getPath());
+        } catch (ErrnoException missing) {
+            if (missing.errno == OsConstants.ENOENT) return;
+            throw new IllegalStateException("Could not inspect staging path: " + file, missing);
+        }
+        if (OsConstants.S_ISDIR(stat.st_mode)) {
+            File[] children = file.listFiles();
+            if (children != null) for (File child : children) deleteRecursively(child);
+        }
+        if (!file.delete()) throw new IllegalStateException("Could not remove staging path: " + file);
     }
 
     private static String hex(byte[] bytes) {

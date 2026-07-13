@@ -6,7 +6,6 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
-import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageInstaller;
 import android.content.pm.PackageManager;
@@ -39,6 +38,7 @@ public final class ApkUpdateInstaller {
         private volatile PackageInstaller installer;
         private volatile int sessionId = -1;
         private volatile boolean committed;
+        private volatile Runnable cancellationHook;
 
         public boolean canCancel() {
             return !committed && !cancelled.get();
@@ -46,6 +46,8 @@ public final class ApkUpdateInstaller {
 
         public void cancel() {
             if (!cancelled.compareAndSet(false, true)) return;
+            Runnable hook = cancellationHook;
+            if (hook != null) hook.run();
             HttpURLConnection activeConnection = connection;
             if (activeConnection != null) activeConnection.disconnect();
             PackageInstaller activeInstaller = installer;
@@ -53,6 +55,11 @@ public final class ApkUpdateInstaller {
                 try { activeInstaller.abandonSession(sessionId); }
                 catch (Exception ignored) {}
             }
+        }
+
+        void setCancellationHook(Runnable hook) {
+            cancellationHook = hook;
+            if (cancelled.get() && hook != null) hook.run();
         }
 
         private void checkCancelled() throws CancelledException {
@@ -90,10 +97,8 @@ public final class ApkUpdateInstaller {
         try {
             post(activity, callback, Phase.DOWNLOAD, 0, "Preparing download", false);
             URL parsed = new URL(url);
-            boolean debuggable = (activity.getApplicationInfo().flags
-                    & ApplicationInfo.FLAG_DEBUGGABLE) != 0;
             File candidate;
-            if (debuggable && "file".equals(parsed.getProtocol())) {
+            if ("file".equals(parsed.getProtocol())) {
                 candidate = new File(parsed.toURI()).getCanonicalFile();
                 String cacheRoot = activity.getCacheDir().getCanonicalPath() + File.separator;
                 if (!candidate.getPath().startsWith(cacheRoot)) {

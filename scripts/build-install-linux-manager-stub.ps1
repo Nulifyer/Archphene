@@ -85,6 +85,14 @@ if ($IncludePackageRuntime) {
         }
         Copy-Item -LiteralPath $source -Destination (Join-Path $PackageAssetDir $name) -Force
     }
+    $QtTemplate = Join-Path $Root "tooling/build/wrapper-templates/qt/qt-wrapper-template.apk"
+    if (-not (Test-Path -LiteralPath $QtTemplate -PathType Leaf)) {
+        & (Join-Path $PSScriptRoot "build-qt-wrapper-template.ps1") -AndroidSdk $Sdk
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $QtTemplate -PathType Leaf)) {
+            throw "Qt wrapper template build failed"
+        }
+    }
+    Copy-Item -LiteralPath $QtTemplate -Destination (Join-Path $PackageAssetDir "qt-wrapper-template.apk") -Force
     $tools = @{
         "usr/bin/pacman" = "libarchphene_pacman.so"
         "usr/bin/gpg" = "libarchphene_gpg.so"
