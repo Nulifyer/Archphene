@@ -26,7 +26,7 @@ The native library uses wayland-server 0.31.13 with its pure-Rust backend. Andro
 16. Receive xdg_toplevel.configure followed by xdg_surface.configure, require a nonzero serial, and acknowledge that exact serial.
 17. Transfer a second padded SHM buffer, commit it only after configure acknowledgement, and revalidate release, callback, 4x2 dimensions, and checksum 656.
 18. Bind wl_seat, require the Archphene name and pointer-only capability, and create a wl_pointer for the client owning the mapped xdg surface.
-19. Inject a native pointer sequence and assert exact wire ordering and payloads: enter at 10x20, frame, motion to 11x21, frame, BTN_LEFT press/frame, and release/frame with increasing serials.
+19. Publish the Android frame center, inject a system-level ADB tap there, queue its real MotionEvent objects onto the compositor thread, and assert wl_pointer enter, BTN_LEFT press/release, leave, frame boundaries, coordinates, timestamps, and increasing serials.
 20. Release wl_pointer and wl_seat and confirm the pointer live count returns to zero.
 21. Destroy the role object before xdg_surface, then destroy wl_surface and xdg_wm_base; confirm every xdg, surface, pool, and buffer live count returns to zero.
 22. Decode and report any wl_display.error deterministically.
@@ -41,8 +41,8 @@ Windows performs only ADB device selection, APK installation, launch, and logcat
 
 | Target | Device | Result |
 |---|---|---|
-| x86_64 | Android 16 emulator, emulator-5554 | Passed frame/pixel presentation, xdg configure/ack, focused pointer enter/motion/BTN_LEFT/frame wire events, and ordered teardown |
-| arm64-v8a | Samsung Galaxy S22 Ultra, RFCT90AEEFA | Passed frame/pixel presentation, xdg configure/ack, focused pointer enter/motion/BTN_LEFT/frame wire events, and ordered teardown |
+| x86_64 | Android 16 emulator, emulator-5554 | Passed frame/pixel presentation, xdg configure/ack, system-injected Android MotionEvent routing, exact pointer wire events, and ordered teardown |
+| arm64-v8a | Samsung Galaxy S22 Ultra, RFCT90AEEFA | Passed frame/pixel presentation, xdg configure/ack, system-injected Android MotionEvent routing, wrapped 32-bit timestamps, exact pointer wire events, and ordered teardown |
 
 The arm64 result is emitted through a structured logcat marker, so it remains observable when Samsung System UI covers the Activity with the lock screen.
 
@@ -55,4 +55,4 @@ The arm64 result is emitted through a structured logcat marker, so it remains ob
 
 ## Boundary
 
-This renders a protocol test frame and injects a synthetic pointer sequence; it does not yet route Android MotionEvent objects or run an application. Frame callbacks fire after the native copy and must be paced by Android Choreographer/presentation. The raw JNI handle is single-threaded probe infrastructure and requires a serialized service boundary. Keyboard/XKB keymap and focus, touch, scroll axes, cursor roles, input regions, grabs, Android event routing, complete damage/transform/scale state, configure queues, mapped/unmapped xdg state, popups/positioners, clipboard, text input, continuous presentation, and wrapper integration remain.
+This renders a protocol test frame and validates Android MotionEvent routing, but it does not yet run an application through the native core. Frame callbacks fire after the native copy and must be paced by Android Choreographer/presentation. The probe serializes JNI access through one compositor thread; this must become a reusable service boundary. Keyboard/XKB keymap and focus, touch, scroll axes, cursor roles, input regions, grabs, complete damage/transform/scale state, configure queues, mapped/unmapped xdg state, popups/positioners, clipboard, text input, continuous presentation, and wrapper integration remain.

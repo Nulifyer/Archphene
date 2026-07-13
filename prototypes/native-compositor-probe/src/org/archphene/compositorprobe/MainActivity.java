@@ -7,6 +7,7 @@ import android.os.Bundle;
 import android.os.ParcelFileDescriptor;
 import android.util.Log;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
@@ -15,8 +16,14 @@ import java.io.FileOutputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 
 public final class MainActivity extends Activity {
+    private static final String TAG = "ArchpheneCompositorProbe";
+    private final LinkedBlockingQueue<PointerInput> pointerInputs =
+            new LinkedBlockingQueue<>();
+    private volatile boolean pointerInputReady;
     static { System.loadLibrary("archphene_compositor"); }
 
     private static native int nativeProtocolVersion();
@@ -33,8 +40,11 @@ public final class MainActivity extends Activity {
     private static native int nativeSeatBindCount(long handle);
     private static native int nativePointerCount(long handle);
     private static native int nativePointerEventCount(long handle);
-    private static native int nativeInjectPointerSequence(
+    private static native int nativePointerMotion(
             long handle, int x, int y, int time);
+    private static native int nativePointerButton(
+            long handle, boolean pressed, int time);
+    private static native int nativePointerLeave(long handle);
     private static native int nativeShmBindCount(long handle);
     private static native int nativeShmPoolCount(long handle);
     private static native int nativeShmBufferCount(long handle);
@@ -58,6 +68,31 @@ public final class MainActivity extends Activity {
         frameView.setBackgroundColor(Color.DKGRAY);
         frameView.setScaleType(ImageView.ScaleType.FIT_XY);
         frameView.setContentDescription("No committed Wayland frame");
+        frameView.setClickable(true);
+        frameView.setOnTouchListener((view, event) -> {
+            if (!pointerInputReady) {
+                return false;
+            }
+            int action = event.getActionMasked();
+            if (action != MotionEvent.ACTION_DOWN
+                    && action != MotionEvent.ACTION_MOVE
+                    && action != MotionEvent.ACTION_UP
+                    && action != MotionEvent.ACTION_CANCEL) {
+                return false;
+            }
+            int localX = Math.round(event.getX());
+            int localY = Math.round(event.getY());
+            Log.i(TAG, "MotionEvent action=" + action + " local=" + localX + "," + localY);
+            pointerInputs.offer(new PointerInput(
+                    action,
+                    localX,
+                    localY,
+                    (int) event.getEventTime()));
+            if (action == MotionEvent.ACTION_UP) {
+                view.performClick();
+            }
+            return true;
+        });
         content.addView(frameView, new LinearLayout.LayoutParams(320, 160));
         TextView result = new TextView(this);
         result.setGravity(Gravity.CENTER);
@@ -233,13 +268,70 @@ public final class MainActivity extends Activity {
                     throw new IllegalStateException("wl_pointer was not constructed");
                 }
 
-                if (nativeInjectPointerSequence(core, 10, 20, 1234) != 4) {
-                    throw new IllegalStateException("native pointer sequence was not emitted");
+                Bitmap pointerFrame = renderedFrame;
+                runOnUiThread(() -> {
+                    frameView.setImageBitmap(pointerFrame);
+                    frameView.setContentDescription("Committed Wayland XRGB frame");
+                    frameView.post(() -> {
+                        int[] location = new int[2];
+                        frameView.getLocationOnScreen(location);
+                        int targetX = location[0] + frameView.getWidth() / 2;
+                        int targetY = location[1] + frameView.getHeight() / 2;
+                        pointerInputReady = true;
+                        Log.i(TAG, "pointer target screen=" + targetX + "," + targetY);
+                    });
+                });
+
+                PointerInput down = awaitPointerInput(15);
+                if (down.action != MotionEvent.ACTION_DOWN
+                        || nativePointerMotion(core, down.x, down.y, down.time) != 1) {
+                    throw new IllegalStateException("Android pointer down was not focused");
                 }
                 dispatch(core);
-                readPointerSequence(input, 34, 20);
-                if (nativePointerEventCount(core) != 4) {
-                    throw new IllegalStateException("native pointer events were not counted");
+                int enterSerial = readPointerEnterAndFrame(
+                        input, 34, 20, down.x, down.y);
+                if (nativePointerButton(core, true, down.time) != 1) {
+                    throw new IllegalStateException("Android pointer press was not emitted");
+                }
+                dispatch(core);
+                int pressSerial = readPointerButtonAndFrame(
+                        input, 34, true, down.time);
+                if (pressSerial <= enterSerial) {
+                    throw new IllegalStateException("pointer press serial did not advance");
+                }
+
+                int expectedPointerEvents = 2;
+                int releaseSerial = 0;
+                while (releaseSerial == 0) {
+                    PointerInput event = awaitPointerInput(5);
+                    if (event.action == MotionEvent.ACTION_MOVE) {
+                        if (nativePointerMotion(core, event.x, event.y, event.time) != 1) {
+                            throw new IllegalStateException("Android pointer motion was not emitted");
+                        }
+                        dispatch(core);
+                        readPointerMotionAndFrame(input, 34, event.x, event.y, event.time);
+                        expectedPointerEvents++;
+                    } else if (event.action == MotionEvent.ACTION_UP
+                            || event.action == MotionEvent.ACTION_CANCEL) {
+                        if (nativePointerButton(core, false, event.time) != 1) {
+                            throw new IllegalStateException("Android pointer release was not emitted");
+                        }
+                        dispatch(core);
+                        releaseSerial = readPointerButtonAndFrame(
+                                input, 34, false, event.time);
+                        if (releaseSerial <= pressSerial || nativePointerLeave(core) != 1) {
+                            throw new IllegalStateException("pointer release lifecycle was invalid");
+                        }
+                        dispatch(core);
+                        int leaveSerial = readPointerLeaveAndFrame(input, 34, 20);
+                        if (leaveSerial <= releaseSerial) {
+                            throw new IllegalStateException("pointer leave serial did not advance");
+                        }
+                        expectedPointerEvents += 2;
+                    }
+                }
+                if (nativePointerEventCount(core) != expectedPointerEvents) {
+                    throw new IllegalStateException("Android pointer events were not counted");
                 }
 
                 output.write(releasePointerSeatAndSyncRequest());
@@ -268,16 +360,18 @@ public final class MainActivity extends Activity {
             }
             passed = true;
             message = "Native Wayland compositor passed\n"
-                    + "registry, Android bitmap, xdg toplevel, and pointer lifecycle complete";
+                    + "registry, Android bitmap, xdg toplevel, and MotionEvent pointer lifecycle complete";
         } catch (Exception error) {
             message = "Native compositor probe failed\n" + error.getMessage();
         } finally {
+            pointerInputReady = false;
+            pointerInputs.clear();
             if (core != 0) nativeDestroyCore(core);
         }
         boolean finalPassed = passed;
         String finalMessage = message;
         Bitmap finalRenderedFrame = renderedFrame;
-        Log.i("ArchpheneCompositorProbe", finalMessage.replace('\n', ' '));
+        Log.i(TAG, finalMessage.replace('\n', ' '));
         runOnUiThread(() -> {
             if (finalRenderedFrame != null) {
                 frameView.setImageBitmap(finalRenderedFrame);
@@ -562,58 +656,105 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private static void readPointerSequence(
-            FileInputStream input, int pointerId, int surfaceId) throws Exception {
-        int[] expectedOpcodes = {0, 5, 2, 5, 3, 5, 3, 5};
-        int enterSerial = 0;
-        int pressSerial = 0;
-        for (int expectedOpcode : expectedOpcodes) {
-            Message message;
-            do {
-                message = readMessage(input);
-                throwIfDisplayError(message);
-            } while (message.objectId == 1 && message.opcode == 1);
-            if (message.objectId != pointerId || message.opcode != expectedOpcode) {
-                throw new IllegalStateException(
-                        "unexpected wl_pointer event object=" + message.objectId
-                                + " opcode=" + message.opcode
-                                + " expected=" + expectedOpcode);
-            }
-            ByteBuffer body = ByteBuffer.wrap(message.body).order(ByteOrder.nativeOrder());
-            if (expectedOpcode == 0) {
-                enterSerial = body.getInt();
-                if (enterSerial == 0
-                        || body.getInt() != surfaceId
-                        || body.getInt() != 10 * 256
-                        || body.getInt() != 20 * 256) {
-                    throw new IllegalStateException("invalid wl_pointer.enter event");
-                }
-            } else if (expectedOpcode == 2) {
-                if (body.getInt() != 1234
-                        || body.getInt() != 11 * 256
-                        || body.getInt() != 21 * 256) {
-                    throw new IllegalStateException("invalid wl_pointer.motion event");
-                }
-            } else if (expectedOpcode == 3) {
-                int serial = body.getInt();
-                int time = body.getInt();
-                int button = body.getInt();
-                int state = body.getInt();
-                if (button != 272) {
-                    throw new IllegalStateException("invalid wl_pointer button code");
-                }
-                if (pressSerial == 0) {
-                    pressSerial = serial;
-                    if (serial <= enterSerial || time != 1234 || state != 1) {
-                        throw new IllegalStateException("invalid wl_pointer press event");
-                    }
-                } else if (serial <= pressSerial || time != 1235 || state != 0) {
-                    throw new IllegalStateException("invalid wl_pointer release event");
-                }
-            } else if (message.body.length != 0) {
-                throw new IllegalStateException("invalid wl_pointer.frame event");
-            }
+    private PointerInput awaitPointerInput(int timeoutSeconds) throws Exception {
+        PointerInput input = pointerInputs.poll(timeoutSeconds, TimeUnit.SECONDS);
+        if (input == null) {
+            throw new IllegalStateException("timed out waiting for Android MotionEvent");
         }
+        return input;
+    }
+
+    private static Message readPointerMessage(
+            FileInputStream input, int pointerId, int expectedOpcode) throws Exception {
+        Message message;
+        do {
+            message = readMessage(input);
+            throwIfDisplayError(message);
+        } while (message.objectId == 1 && message.opcode == 1);
+        if (message.objectId != pointerId || message.opcode != expectedOpcode) {
+            throw new IllegalStateException(
+                    "unexpected wl_pointer event object=" + message.objectId
+                            + " opcode=" + message.opcode
+                            + " expected=" + expectedOpcode);
+        }
+        return message;
+    }
+
+    private static void readPointerFrame(FileInputStream input, int pointerId)
+            throws Exception {
+        Message frame = readPointerMessage(input, pointerId, 5);
+        if (frame.body.length != 0) {
+            throw new IllegalStateException("invalid wl_pointer.frame event");
+        }
+    }
+
+    private static int readPointerEnterAndFrame(
+            FileInputStream input, int pointerId, int surfaceId, int x, int y)
+            throws Exception {
+        Message message = readPointerMessage(input, pointerId, 0);
+        if (message.body.length != 16) {
+            throw new IllegalStateException("invalid wl_pointer.enter size");
+        }
+        ByteBuffer body = ByteBuffer.wrap(message.body).order(ByteOrder.nativeOrder());
+        int serial = body.getInt();
+        if (serial == 0
+                || body.getInt() != surfaceId
+                || body.getInt() != x * 256
+                || body.getInt() != y * 256) {
+            throw new IllegalStateException("invalid wl_pointer.enter event");
+        }
+        readPointerFrame(input, pointerId);
+        return serial;
+    }
+
+    private static void readPointerMotionAndFrame(
+            FileInputStream input, int pointerId, int x, int y, int time)
+            throws Exception {
+        Message message = readPointerMessage(input, pointerId, 2);
+        if (message.body.length != 12) {
+            throw new IllegalStateException("invalid wl_pointer.motion size");
+        }
+        ByteBuffer body = ByteBuffer.wrap(message.body).order(ByteOrder.nativeOrder());
+        if (body.getInt() != time
+                || body.getInt() != x * 256
+                || body.getInt() != y * 256) {
+            throw new IllegalStateException("invalid wl_pointer.motion event");
+        }
+        readPointerFrame(input, pointerId);
+    }
+
+    private static int readPointerButtonAndFrame(
+            FileInputStream input, int pointerId, boolean pressed, int time)
+            throws Exception {
+        Message message = readPointerMessage(input, pointerId, 3);
+        if (message.body.length != 16) {
+            throw new IllegalStateException("invalid wl_pointer.button size");
+        }
+        ByteBuffer body = ByteBuffer.wrap(message.body).order(ByteOrder.nativeOrder());
+        int serial = body.getInt();
+        if (serial == 0
+                || body.getInt() != time
+                || body.getInt() != 272
+                || body.getInt() != (pressed ? 1 : 0)) {
+            throw new IllegalStateException("invalid wl_pointer.button event");
+        }
+        readPointerFrame(input, pointerId);
+        return serial;
+    }
+
+    private static int readPointerLeaveAndFrame(
+            FileInputStream input, int pointerId, int surfaceId) throws Exception {
+        Message message = readPointerMessage(input, pointerId, 1);
+        if (message.body.length != 8) {
+            throw new IllegalStateException("invalid wl_pointer.leave size");
+        }
+        ByteBuffer body = ByteBuffer.wrap(message.body).order(ByteOrder.nativeOrder());
+        int serial = body.getInt();
+        if (serial == 0 || body.getInt() != surfaceId) {
+            throw new IllegalStateException("invalid wl_pointer.leave event");
+        }
+        readPointerFrame(input, pointerId);
+        return serial;
     }
     private static int readXdgConfigureUntilCallback(
             FileInputStream input, int xdgSurfaceId, int toplevelId, int callbackId)
@@ -736,6 +877,19 @@ public final class MainActivity extends Activity {
         buffer.putInt((size << 16) | opcode);
     }
 
+    private static final class PointerInput {
+        final int action;
+        final int x;
+        final int y;
+        final int time;
+
+        PointerInput(int action, int x, int y, int time) {
+            this.action = action;
+            this.x = x;
+            this.y = y;
+            this.time = time;
+        }
+    }
     private static final class RegistryGlobals {
         final Global compositor;
         final Global shm;

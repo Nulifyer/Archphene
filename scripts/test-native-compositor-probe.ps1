@@ -19,15 +19,26 @@ function Invoke-Adb([Parameter(ValueFromRemainingArguments)][string[]]$Arguments
 }
 
 Invoke-Adb get-state | Out-Null
+Invoke-Adb shell input keyevent KEYCODE_WAKEUP | Out-Null
+Invoke-Adb shell wm dismiss-keyguard | Out-Null
 Invoke-Adb logcat -c
 & (Join-Path $PSScriptRoot "install-apk.ps1") -Apk $Apk -Serial $Serial -Package org.archphene.compositorprobe
+Invoke-Adb shell wm dismiss-keyguard | Out-Null
 
-$deadline = [DateTime]::UtcNow.AddSeconds(20)
+$tapSent = $false
+$deadline = [DateTime]::UtcNow.AddSeconds(30)
 do {
     Start-Sleep -Milliseconds 500
     $output = (& adb -s $Serial logcat -d -s "ArchpheneCompositorProbe:I" "*:S") -join [Environment]::NewLine
-    if ($output.Contains("registry, Android bitmap, xdg toplevel, and pointer lifecycle complete")) {
-        Write-Host "Native compositor pointer lifecycle probe passed on $Serial ($AndroidAbi)."
+    if (-not $tapSent) {
+        $target = [regex]::Match($output, 'pointer target screen=([0-9]+),([0-9]+)')
+        if ($target.Success) {
+            Invoke-Adb shell input tap $target.Groups[1].Value $target.Groups[2].Value | Out-Null
+            $tapSent = $true
+        }
+    }
+    if ($output.Contains("registry, Android bitmap, xdg toplevel, and MotionEvent pointer lifecycle complete")) {
+        Write-Host "Native compositor Android MotionEvent probe passed on $Serial ($AndroidAbi)."
         exit 0
     }
     if ($output.Contains("Native compositor probe failed")) {

@@ -57,6 +57,8 @@ pub struct CompositorState {
     next_input_serial: u32,
     pointers: Vec<WlPointer>,
     pointer_focus_surface: Option<WlSurface>,
+    pointer_inside: bool,
+    pointer_pressed: bool,
 }
 
 #[derive(Default)]
@@ -1044,6 +1046,14 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 state.last_frame = latest_frame;
                 if is_xdg_toplevel {
                     if has_frame {
+                        if state
+                            .pointer_focus_surface
+                            .as_ref()
+                            .is_none_or(|focused| focused.id() != resource.id())
+                        {
+                            state.pointer_inside = false;
+                            state.pointer_pressed = false;
+                        }
                         state.pointer_focus_surface = Some(resource.clone());
                     } else if state
                         .pointer_focus_surface
@@ -1051,6 +1061,8 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                         .is_some_and(|focused| focused.id() == resource.id())
                     {
                         state.pointer_focus_surface = None;
+                        state.pointer_inside = false;
+                        state.pointer_pressed = false;
                     }
                 }
                 if let Some((width, height, checksum)) = metrics {
@@ -1077,6 +1089,8 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
             .is_some_and(|focused| focused.id() == resource.id())
         {
             state.pointer_focus_surface = None;
+            state.pointer_inside = false;
+            state.pointer_pressed = false;
         }
         state.surface_count = state.surface_count.saturating_sub(1);
         if state.surface_count == 0 {
@@ -1200,10 +1214,8 @@ impl CompositorCore {
         self.state.pointer_event_count
     }
 
-    pub fn inject_pointer_sequence(&mut self, x: f64, y: f64, time: u32) -> u32 {
-        let Some(surface) = self.state.pointer_focus_surface.clone() else {
-            return 0;
-        };
+    fn focused_pointer_resources(&self) -> Option<(WlSurface, Vec<WlPointer>)> {
+        let surface = self.state.pointer_focus_surface.clone()?;
         let pointers: Vec<_> = self
             .state
             .pointers
@@ -1211,47 +1223,76 @@ impl CompositorCore {
             .filter(|pointer| pointer.is_alive() && pointer.id().same_client_as(&surface.id()))
             .cloned()
             .collect();
-        if pointers.is_empty() {
+        (!pointers.is_empty()).then_some((surface, pointers))
+    }
+
+    fn next_input_serial(&mut self) -> u32 {
+        self.state.next_input_serial = self.state.next_input_serial.wrapping_add(1).max(1);
+        self.state.next_input_serial
+    }
+
+    pub fn pointer_motion(&mut self, x: f64, y: f64, time: u32) -> u32 {
+        let Some((surface, pointers)) = self.focused_pointer_resources() else {
+            return 0;
+        };
+        let entering = !self.state.pointer_inside;
+        let serial = entering.then(|| self.next_input_serial());
+        for pointer in pointers {
+            if let Some(serial) = serial {
+                pointer.enter(serial, &surface, x, y);
+            } else {
+                pointer.motion(time, x, y);
+            }
+            if pointer.version() >= 5 {
+                pointer.frame();
+            }
+        }
+        self.state.pointer_inside = true;
+        self.state.pointer_event_count = self.state.pointer_event_count.saturating_add(1);
+        1
+    }
+
+    pub fn pointer_button(&mut self, pressed: bool, time: u32) -> u32 {
+        if !self.state.pointer_inside || self.state.pointer_pressed == pressed {
             return 0;
         }
-
-        self.state.next_input_serial = self.state.next_input_serial.wrapping_add(1).max(1);
-        let enter_serial = self.state.next_input_serial;
-        self.state.next_input_serial = self.state.next_input_serial.wrapping_add(1).max(1);
-        let press_serial = self.state.next_input_serial;
-        self.state.next_input_serial = self.state.next_input_serial.wrapping_add(1).max(1);
-        let release_serial = self.state.next_input_serial;
-
+        let Some((_surface, pointers)) = self.focused_pointer_resources() else {
+            return 0;
+        };
+        let serial = self.next_input_serial();
+        let button_state = if pressed {
+            wl_pointer::ButtonState::Pressed
+        } else {
+            wl_pointer::ButtonState::Released
+        };
         for pointer in pointers {
-            pointer.enter(enter_serial, &surface, x, y);
-            if pointer.version() >= 5 {
-                pointer.frame();
-            }
-            pointer.motion(time, x + 1.0, y + 1.0);
-            if pointer.version() >= 5 {
-                pointer.frame();
-            }
-            pointer.button(
-                press_serial,
-                time,
-                272,
-                wl_pointer::ButtonState::Pressed.into(),
-            );
-            if pointer.version() >= 5 {
-                pointer.frame();
-            }
-            pointer.button(
-                release_serial,
-                time.saturating_add(1),
-                272,
-                wl_pointer::ButtonState::Released.into(),
-            );
+            pointer.button(serial, time, 272, button_state.into());
             if pointer.version() >= 5 {
                 pointer.frame();
             }
         }
-        self.state.pointer_event_count = self.state.pointer_event_count.saturating_add(4);
-        4
+        self.state.pointer_pressed = pressed;
+        self.state.pointer_event_count = self.state.pointer_event_count.saturating_add(1);
+        1
+    }
+
+    pub fn pointer_leave(&mut self) -> u32 {
+        if !self.state.pointer_inside || self.state.pointer_pressed {
+            return 0;
+        }
+        let Some((surface, pointers)) = self.focused_pointer_resources() else {
+            return 0;
+        };
+        let serial = self.next_input_serial();
+        for pointer in pointers {
+            pointer.leave(serial, &surface);
+            if pointer.version() >= 5 {
+                pointer.frame();
+            }
+        }
+        self.state.pointer_inside = false;
+        self.state.pointer_event_count = self.state.pointer_event_count.saturating_add(1);
+        1
     }
 
     pub fn shm_bind_count(&self) -> u32 {
@@ -1547,7 +1588,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeInjectPointerSequence(
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativePointerMotion(
     _environment: *mut std::ffi::c_void,
     _activity: *mut std::ffi::c_void,
     handle: i64,
@@ -1558,12 +1599,33 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
         return -1;
     };
-    i32::try_from(core.inject_pointer_sequence(
-        f64::from(x),
-        f64::from(y),
-        u32::try_from(time).unwrap_or(0),
-    ))
-    .unwrap_or(i32::MAX)
+    i32::try_from(core.pointer_motion(f64::from(x), f64::from(y), time as u32)).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativePointerButton(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+    pressed: u8,
+    time: i32,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+        return -1;
+    };
+    i32::try_from(core.pointer_button(pressed != 0, time as u32)).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativePointerLeave(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+        return -1;
+    };
+    i32::try_from(core.pointer_leave()).unwrap_or(i32::MAX)
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeShmBindCount(
