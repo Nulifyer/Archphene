@@ -81,44 +81,23 @@ The manager can generate and install the tested x86_64 Qt/KCalc wrapper on-devic
 
 ### Linux release build
 
-Release CI builds the Arch runtime, patched glibc, wrapper template, and signed manager APK on Linux. The same path can run under Podman or Docker:
+Release CI builds the Arch runtime, patched glibc, wrapper template, and signed manager APK on Linux. On Windows, the thin launcher runs those build phases inside Podman:
 
-    bash scripts/build-ci-package-runtime.sh
-    KEYSTORE_PATH=/path/to/key \
-    KEYSTORE_PASSWORD=... \
-    KEY_ALIAS=... \
-    KEY_PASSWORD=... \
-    bash scripts/build-linux-manager-apk.sh
+    ./scripts/build-manager-podman.ps1
+
+Use `-SkipRuntime` for manager-only rebuilds and `-ReleaseBuild` for a locally production-signed APK.
 
 Output: prototypes/linux-app-manager-stub/out-linux/archphene.apk.
 
 ### Windows emulator/device adapter
 
-Requirements:
-
-- PowerShell 7
-- JDK 17
-- Android SDK platform 36
-- Android build-tools 36.0.0
-
-The build script uses `tooling/android-sdk` when present, then falls back to `ANDROID_SDK_ROOT` or `ANDROID_HOME`.
+Windows is only the host adapter for Podman, ADB, emulator control, USB devices,
+screenshots, and input automation. Arch package work, native compilation, glibc,
+APK assembly, signing, and releases run in Linux.
 
 ```powershell
-./scripts/build-install-linux-manager-stub.ps1 -SkipInstall
-```
-
-Output:
-
-```text
-prototypes/linux-app-manager-stub/out/archpheneos-manager.apk
-```
-
-Install on a connected device or emulator:
-
-```powershell
-./scripts/build-install-linux-manager-stub.ps1 -Serial emulator-5554
-```
-
+./scripts/install-apk.ps1 -Serial emulator-5554
+`$([Environment]::NewLine)
 Development builds use a persistent ignored debug key and remain debuggable for automated `run-as` tests. GitHub Releases use the separate non-debuggable release profile documented in [Publishing releases](docs/releases.md).
 
 ### Regression tests
@@ -135,7 +114,7 @@ The physical suite expects the curated ARM64 package/runtime workspace and a com
 ## Current limitations
 
 - The complete on-device transaction is proven for x86_64 KCalc/Qt. Arbitrary packages still need toolkit detection, capability policy, additional wrapper templates, ABI filtering, and compatibility reporting.
-- GitHub Releases discovery, checksum validation, bounded download, signer/package verification, Android confirmation, replacement, and restart reconciliation are implemented. A first public release asset is still required for a live positive GitHub download test.
+- GitHub Releases discovery, checksum validation, bounded download, signer/package verification, Android confirmation, replacement, and restart reconciliation are implemented. The Linux workflow published and checksummed the first `v1.0.0` APK.
 - KCalc and Mousepad still contain duplicated prototype Java Wayland compositor implementations. A shared native compositor is required before broad application support.
 - The current wrappers duplicate large runtime closures per Android UID.
 - GPU acceleration, audio, printing, camera, drag-and-drop, accessibility, keyrings, and many desktop portals are incomplete or absent.
