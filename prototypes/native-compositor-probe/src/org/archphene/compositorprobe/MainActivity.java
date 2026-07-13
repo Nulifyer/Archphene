@@ -7,6 +7,7 @@ import android.os.Bundle;
 import android.os.ParcelFileDescriptor;
 import android.util.Log;
 import android.view.Gravity;
+import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -23,7 +24,10 @@ public final class MainActivity extends Activity {
     private static final String TAG = "ArchpheneCompositorProbe";
     private final LinkedBlockingQueue<PointerInput> pointerInputs =
             new LinkedBlockingQueue<>();
+    private final LinkedBlockingQueue<KeyboardInput> keyboardInputs =
+            new LinkedBlockingQueue<>();
     private volatile boolean pointerInputReady;
+    private volatile boolean keyboardInputReady;
     static { System.loadLibrary("archphene_compositor"); }
 
     private static native int nativeProtocolVersion();
@@ -31,6 +35,7 @@ public final class MainActivity extends Activity {
     private static native int nativeAdoptClient(long handle, int fd);
     private static native int nativeSendShmPoolRequest(
             int socketFd, int poolId, int poolSize, int callbackId);
+    private static native int nativeReceiveKeyboardKeymap(int socketFd, int keyboardId);
     private static native int nativeDispatchOnce(long handle);
     private static native int nativeCompositorBindCount(long handle);
     private static native int nativeXdgWmBaseBindCount(long handle);
@@ -39,6 +44,10 @@ public final class MainActivity extends Activity {
     private static native int nativeXdgAckCount(long handle);
     private static native int nativeSeatBindCount(long handle);
     private static native int nativePointerCount(long handle);
+    private static native int nativeKeyboardCount(long handle);
+    private static native int nativeKeyboardEventCount(long handle);
+    private static native int nativeKeyboardKey(
+            long handle, int key, boolean pressed, int time);
     private static native int nativePointerEventCount(long handle);
     private static native int nativePointerMotion(
             long handle, int x, int y, int time);
@@ -56,6 +65,25 @@ public final class MainActivity extends Activity {
     private static native int nativeLastFrameChecksum(long handle);
     private static native int nativeCopyLastFrameToBitmap(long handle, Bitmap bitmap);
     private static native void nativeDestroyCore(long handle);
+
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        int action = event.getAction();
+        int linuxKey = toLinuxKeyCode(event.getKeyCode());
+        if (keyboardInputReady
+                && linuxKey != 0
+                && event.getRepeatCount() == 0
+                && (action == KeyEvent.ACTION_DOWN || action == KeyEvent.ACTION_UP)) {
+            keyboardInputs.offer(new KeyboardInput(
+                    linuxKey,
+                    action == KeyEvent.ACTION_DOWN,
+                    (int) event.getEventTime()));
+            Log.i(TAG, "KeyEvent key=" + linuxKey + " pressed="
+                    + (action == KeyEvent.ACTION_DOWN));
+            return true;
+        }
+        return super.dispatchKeyEvent(event);
+    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -264,8 +292,50 @@ public final class MainActivity extends Activity {
                 output.flush();
                 dispatch(core);
                 readUntilCallback(input, 35);
+                readDeleteId(input, 35);
                 if (nativePointerCount(core) != 1) {
                     throw new IllegalStateException("wl_pointer was not constructed");
+                }
+
+                output.write(getKeyboardAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                int keymapSize = nativeReceiveKeyboardKeymap(client.getFd(), 36);
+                if (keymapSize <= 1) {
+                    throw new IllegalStateException("wl_keyboard keymap FD validation");
+                }
+                readKeyboardMetadataUntilCallback(input, 36, 20, 37);
+                if (nativeKeyboardCount(core) != 1
+                        || nativeKeyboardEventCount(core) != 4) {
+                    throw new IllegalStateException("wl_keyboard metadata lifecycle was incomplete");
+                }
+
+                keyboardInputReady = true;
+                Log.i(TAG, "keyboard target ready");
+                KeyboardInput keyDown = awaitKeyboardInput(15);
+                if (!keyDown.pressed
+                        || keyDown.key != 30
+                        || nativeKeyboardKey(
+                                core, keyDown.key, true, keyDown.time) != 1) {
+                    throw new IllegalStateException("Android key press was not routed");
+                }
+                dispatch(core);
+                int keyPressSerial = readKeyboardKey(
+                        input, 36, 30, true, keyDown.time);
+                KeyboardInput keyUp = awaitKeyboardInput(5);
+                if (keyUp.pressed
+                        || keyUp.key != 30
+                        || nativeKeyboardKey(
+                                core, keyUp.key, false, keyUp.time) != 1) {
+                    throw new IllegalStateException("Android key release was not routed");
+                }
+                dispatch(core);
+                int keyReleaseSerial = readKeyboardKey(
+                        input, 36, 30, false, keyUp.time);
+                keyboardInputReady = false;
+                if (keyReleaseSerial <= keyPressSerial
+                        || nativeKeyboardEventCount(core) != 6) {
+                    throw new IllegalStateException("wl_keyboard key lifecycle was incomplete");
                 }
 
                 Bitmap pointerFrame = renderedFrame;
@@ -334,22 +404,22 @@ public final class MainActivity extends Activity {
                     throw new IllegalStateException("Android pointer events were not counted");
                 }
 
-                output.write(releasePointerSeatAndSyncRequest());
+                output.write(releaseInputAndSyncRequest());
                 output.flush();
                 dispatch(core);
-                readUntilCallback(input, 36);
-                if (nativePointerCount(core) != 0) {
-                    throw new IllegalStateException("wl_pointer release was not dispatched");
+                readUntilCallback(input, 38);
+                if (nativePointerCount(core) != 0 || nativeKeyboardCount(core) != 0) {
+                    throw new IllegalStateException("seat input resources were not released");
                 }
 
                 output.write(destroySecondShmResourcesAndSyncRequest());
                 output.flush();
                 dispatch(core);
-                readUntilCallback(input, 37);
+                readUntilCallback(input, 39);
                 output.write(destroyXdgToplevelAndSyncRequest());
                 output.flush();
                 dispatch(core);
-                readUntilCallback(input, 38);
+                readUntilCallback(input, 40);
                 if (nativeXdgSurfaceCount(core) != 0
                         || nativeXdgToplevelCount(core) != 0
                         || nativeSurfaceCount(core) != 0
@@ -360,12 +430,15 @@ public final class MainActivity extends Activity {
             }
             passed = true;
             message = "Native Wayland compositor passed\n"
-                    + "registry, Android bitmap, xdg toplevel, and MotionEvent pointer lifecycle complete";
+                    + "registry, Android bitmap, xdg toplevel, keyboard input, "
+                    + "and MotionEvent pointer lifecycle complete";
         } catch (Exception error) {
             message = "Native compositor probe failed\n" + error.getMessage();
         } finally {
             pointerInputReady = false;
+            keyboardInputReady = false;
             pointerInputs.clear();
+            keyboardInputs.clear();
             if (core != 0) nativeDestroyCore(core);
         }
         boolean finalPassed = passed;
@@ -503,20 +576,31 @@ public final class MainActivity extends Activity {
         return request.array();
     }
 
-    private static byte[] releasePointerSeatAndSyncRequest() {
-        ByteBuffer request = buffer(28);
-        putHeader(request, 34, 1, 8);
-        putHeader(request, 32, 3, 8);
-        putHeader(request, 1, 0, 12);
+    private static byte[] getKeyboardAndSyncRequest() {
+        ByteBuffer request = buffer(24);
+        putHeader(request, 32, 1, 12);
         request.putInt(36);
+        putHeader(request, 1, 0, 12);
+        request.putInt(37);
         return request.array();
     }
+
+    private static byte[] releaseInputAndSyncRequest() {
+        ByteBuffer request = buffer(36);
+        putHeader(request, 34, 1, 8);
+        putHeader(request, 36, 0, 8);
+        putHeader(request, 32, 3, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(38);
+        return request.array();
+    }
+
     private static byte[] destroySecondShmResourcesAndSyncRequest() {
         ByteBuffer request = buffer(28);
         putHeader(request, 28, 0, 8);
         putHeader(request, 26, 1, 8);
         putHeader(request, 1, 0, 12);
-        request.putInt(37);
+        request.putInt(39);
         return request.array();
     }
 
@@ -527,7 +611,7 @@ public final class MainActivity extends Activity {
         putHeader(request, 20, 0, 8);
         putHeader(request, 18, 0, 8);
         putHeader(request, 1, 0, 12);
-        request.putInt(38);
+        request.putInt(40);
         return request.array();
     }
 
@@ -622,9 +706,22 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private static void readDeleteId(FileInputStream input, int expectedId) throws Exception {
+        Message message = readMessage(input);
+        if (message.objectId != 1 || message.opcode != 1 || message.body.length != 4) {
+            throw new IllegalStateException("expected wl_display.delete_id");
+        }
+        int deletedId = ByteBuffer.wrap(message.body)
+                .order(ByteOrder.nativeOrder()).getInt();
+        if (deletedId != expectedId) {
+            throw new IllegalStateException(
+                    "unexpected wl_display.delete_id " + deletedId + ", expected " + expectedId);
+        }
+    }
+
     private static void readSeatUntilCallback(
             FileInputStream input, int seatId, int callbackId) throws Exception {
-        boolean pointerOnly = false;
+        boolean pointerAndKeyboard = false;
         boolean named = false;
         while (true) {
             Message message = readMessage(input);
@@ -635,7 +732,7 @@ public final class MainActivity extends Activity {
                 }
                 int capabilities = ByteBuffer.wrap(message.body)
                         .order(ByteOrder.nativeOrder()).getInt();
-                pointerOnly = capabilities == 1;
+                pointerAndKeyboard = capabilities == 3;
             } else if (message.objectId == seatId && message.opcode == 1) {
                 ByteBuffer body = ByteBuffer.wrap(message.body).order(ByteOrder.nativeOrder());
                 int length = body.getInt();
@@ -648,12 +745,89 @@ public final class MainActivity extends Activity {
                         new String(encoded, 0, length - 1, StandardCharsets.UTF_8));
             }
             if (message.objectId == callbackId && message.opcode == 0) {
-                if (!pointerOnly || !named) {
+                if (!pointerAndKeyboard || !named) {
                     throw new IllegalStateException("wl_seat metadata was incomplete");
                 }
                 return;
             }
         }
+    }
+
+    private static void readKeyboardMetadataUntilCallback(
+            FileInputStream input, int keyboardId, int surfaceId, int callbackId)
+            throws Exception {
+        boolean repeatInfo = false;
+        boolean entered = false;
+        boolean modifiers = false;
+        int enterSerial = 0;
+        while (true) {
+            Message message = readMessage(input);
+            throwIfDisplayError(message);
+            if (message.objectId == keyboardId && message.opcode == 5) {
+                if (message.body.length != 8) {
+                    throw new IllegalStateException("invalid wl_keyboard.repeat_info event");
+                }
+                ByteBuffer body = ByteBuffer.wrap(message.body).order(ByteOrder.nativeOrder());
+                repeatInfo = body.getInt() == 25 && body.getInt() == 400;
+            } else if (message.objectId == keyboardId && message.opcode == 1) {
+                if (message.body.length != 12) {
+                    throw new IllegalStateException("invalid wl_keyboard.enter event");
+                }
+                ByteBuffer body = ByteBuffer.wrap(message.body).order(ByteOrder.nativeOrder());
+                enterSerial = body.getInt();
+                entered = enterSerial != 0
+                        && body.getInt() == surfaceId
+                        && body.getInt() == 0;
+            } else if (message.objectId == keyboardId && message.opcode == 4) {
+                if (message.body.length != 20) {
+                    throw new IllegalStateException("invalid wl_keyboard.modifiers event");
+                }
+                ByteBuffer body = ByteBuffer.wrap(message.body).order(ByteOrder.nativeOrder());
+                modifiers = body.getInt() == enterSerial
+                        && body.getInt() == 0
+                        && body.getInt() == 0
+                        && body.getInt() == 0
+                        && body.getInt() == 0;
+            }
+            if (message.objectId == callbackId && message.opcode == 0) {
+                if (!repeatInfo || !entered || !modifiers) {
+                    throw new IllegalStateException("wl_keyboard metadata was incomplete");
+                }
+                return;
+            }
+        }
+    }
+
+    private KeyboardInput awaitKeyboardInput(int timeoutSeconds) throws Exception {
+        KeyboardInput input = keyboardInputs.poll(timeoutSeconds, TimeUnit.SECONDS);
+        if (input == null) {
+            throw new IllegalStateException("timed out waiting for Android KeyEvent");
+        }
+        return input;
+    }
+
+    private static int readKeyboardKey(
+            FileInputStream input, int keyboardId, int key, boolean pressed, int time)
+            throws Exception {
+        Message message;
+        do {
+            message = readMessage(input);
+            throwIfDisplayError(message);
+        } while (message.objectId == 1 && message.opcode == 1);
+        if (message.objectId != keyboardId
+                || message.opcode != 3
+                || message.body.length != 16) {
+            throw new IllegalStateException("invalid wl_keyboard.key event");
+        }
+        ByteBuffer body = ByteBuffer.wrap(message.body).order(ByteOrder.nativeOrder());
+        int serial = body.getInt();
+        if (serial == 0
+                || body.getInt() != time
+                || body.getInt() != key
+                || body.getInt() != (pressed ? 1 : 0)) {
+            throw new IllegalStateException("unexpected wl_keyboard.key event");
+        }
+        return serial;
     }
 
     private PointerInput awaitPointerInput(int timeoutSeconds) throws Exception {
@@ -875,6 +1049,40 @@ public final class MainActivity extends Activity {
     private static void putHeader(ByteBuffer buffer, int objectId, int opcode, int size) {
         buffer.putInt(objectId);
         buffer.putInt((size << 16) | opcode);
+    }
+
+    private static int toLinuxKeyCode(int androidKeyCode) {
+        if (androidKeyCode >= KeyEvent.KEYCODE_A && androidKeyCode <= KeyEvent.KEYCODE_Z) {
+            int[] linuxLetters = {
+                30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38, 50,
+                49, 24, 25, 16, 19, 31, 20, 22, 47, 17, 45, 21, 44
+            };
+            return linuxLetters[androidKeyCode - KeyEvent.KEYCODE_A];
+        }
+        return switch (androidKeyCode) {
+            case KeyEvent.KEYCODE_ENTER -> 28;
+            case KeyEvent.KEYCODE_DEL -> 14;
+            case KeyEvent.KEYCODE_SPACE -> 57;
+            case KeyEvent.KEYCODE_TAB -> 15;
+            case KeyEvent.KEYCODE_ESCAPE -> 1;
+            case KeyEvent.KEYCODE_DPAD_UP -> 103;
+            case KeyEvent.KEYCODE_DPAD_LEFT -> 105;
+            case KeyEvent.KEYCODE_DPAD_RIGHT -> 106;
+            case KeyEvent.KEYCODE_DPAD_DOWN -> 108;
+            default -> 0;
+        };
+    }
+
+    private static final class KeyboardInput {
+        final int key;
+        final boolean pressed;
+        final int time;
+
+        KeyboardInput(int key, boolean pressed, int time) {
+            this.key = key;
+            this.pressed = pressed;
+            this.time = time;
+        }
     }
 
     private static final class PointerInput {

@@ -25,11 +25,16 @@ Invoke-Adb logcat -c
 & (Join-Path $PSScriptRoot "install-apk.ps1") -Apk $Apk -Serial $Serial -Package org.archphene.compositorprobe
 Invoke-Adb shell wm dismiss-keyguard | Out-Null
 
+$keySent = $false
 $tapSent = $false
 $deadline = [DateTime]::UtcNow.AddSeconds(30)
 do {
     Start-Sleep -Milliseconds 500
     $output = (& adb -s $Serial logcat -d -s "ArchpheneCompositorProbe:I" "*:S") -join [Environment]::NewLine
+    if (-not $keySent -and $output.Contains("keyboard target ready")) {
+        Invoke-Adb shell input keyevent KEYCODE_A | Out-Null
+        $keySent = $true
+    }
     if (-not $tapSent) {
         $target = [regex]::Match($output, 'pointer target screen=([0-9]+),([0-9]+)')
         if ($target.Success) {
@@ -37,7 +42,7 @@ do {
             $tapSent = $true
         }
     }
-    if ($output.Contains("registry, Android bitmap, xdg toplevel, and MotionEvent pointer lifecycle complete")) {
+    if ($output.Contains("registry, Android bitmap, xdg toplevel, keyboard input, and MotionEvent pointer lifecycle complete")) {
         Write-Host "Native compositor Android MotionEvent probe passed on $Serial ($AndroidAbi)."
         exit 0
     }

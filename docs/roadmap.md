@@ -16,6 +16,7 @@ Archphene is moving from application-specific proofs toward a package-driven And
 2. **Shared Wayland compositor**
    - replace duplicated KCalc and Mousepad Java implementations;
    - use generated Wayland protocol bindings;
+   - retain the validated native SHM, xdg-toplevel, pointer, XKB keymap, focus, and hardware-key lifecycle gates for x86_64 and AArch64;
    - enforce object, role, version, configure/ack, buffer, popup, and subsurface lifecycles;
    - add deterministic protocol errors and fuzzable parsers.
 

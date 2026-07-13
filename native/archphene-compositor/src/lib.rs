@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io;
 use std::mem::{size_of, zeroed};
 use std::ops::Range;
-use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, RawFd};
 use std::os::unix::fs::FileExt;
 use std::os::unix::net::UnixStream;
 use std::ptr;
@@ -15,6 +15,7 @@ use wayland_protocols::xdg::shell::server::xdg_wm_base::{self, XdgWmBase};
 use wayland_server::protocol::wl_buffer::{self, WlBuffer};
 use wayland_server::protocol::wl_callback::{self, WlCallback};
 use wayland_server::protocol::wl_compositor::{self, WlCompositor};
+use wayland_server::protocol::wl_keyboard::{self, WlKeyboard};
 use wayland_server::protocol::wl_pointer::{self, WlPointer};
 use wayland_server::protocol::wl_region::{self, WlRegion};
 use wayland_server::protocol::wl_seat::{self, WlSeat};
@@ -59,7 +60,14 @@ pub struct CompositorState {
     pointer_focus_surface: Option<WlSurface>,
     pointer_inside: bool,
     pointer_pressed: bool,
+    keyboard_count: u32,
+    keyboard_event_count: u32,
+    keyboards: Vec<WlKeyboard>,
+    keyboard_focus_surface: Option<WlSurface>,
+    pressed_keys: Vec<u32>,
 }
+
+const XKB_KEYMAP: &[u8] = concat!(include_str!("archphene-us.xkb"), "\0").as_bytes();
 
 #[derive(Default)]
 pub struct SurfaceData {
@@ -556,6 +564,63 @@ impl Dispatch<XdgToplevel, XdgToplevelData> for CompositorState {
     }
 }
 
+fn create_keymap_file() -> io::Result<File> {
+    let name = b"archphene-keymap\0";
+    let raw_fd = unsafe {
+        libc::syscall(
+            libc::SYS_memfd_create,
+            name.as_ptr().cast::<libc::c_char>(),
+            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+        ) as RawFd
+    };
+    if raw_fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let file = unsafe { File::from_raw_fd(raw_fd) };
+    file.set_len(XKB_KEYMAP.len() as u64)?;
+    file.write_all_at(XKB_KEYMAP, 0)?;
+    let seals = libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE | libc::F_SEAL_SEAL;
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, seals) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(file)
+}
+
+fn set_keyboard_focus(state: &mut CompositorState, surface: Option<WlSurface>) {
+    if state.keyboard_focus_surface.as_ref().map(Resource::id) == surface.as_ref().map(Resource::id)
+    {
+        return;
+    }
+
+    state.next_input_serial = state.next_input_serial.wrapping_add(1).max(1);
+    let serial = state.next_input_serial;
+    if let Some(previous) = state.keyboard_focus_surface.take() {
+        for keyboard in state
+            .keyboards
+            .iter()
+            .filter(|keyboard| keyboard.is_alive() && keyboard.id().same_client_as(&previous.id()))
+        {
+            keyboard.leave(serial, &previous);
+            state.keyboard_event_count = state.keyboard_event_count.saturating_add(1);
+        }
+    }
+
+    if let Some(surface) = surface {
+        for keyboard in state
+            .keyboards
+            .iter()
+            .filter(|keyboard| keyboard.is_alive() && keyboard.id().same_client_as(&surface.id()))
+        {
+            keyboard.enter(serial, &surface, Vec::new());
+            keyboard.modifiers(serial, 0, 0, 0, 0);
+            state.keyboard_event_count = state.keyboard_event_count.saturating_add(2);
+        }
+        state.keyboard_focus_surface = Some(surface);
+    } else {
+        state.pressed_keys.clear();
+    }
+}
+
 impl GlobalDispatch<WlSeat, ()> for CompositorState {
     fn bind(
         state: &mut Self,
@@ -570,7 +635,7 @@ impl GlobalDispatch<WlSeat, ()> for CompositorState {
         if seat.version() >= 2 {
             seat.name("Archphene".into());
         }
-        seat.capabilities(wl_seat::Capability::Pointer);
+        seat.capabilities(wl_seat::Capability::Pointer | wl_seat::Capability::Keyboard);
     }
 }
 
@@ -590,10 +655,43 @@ impl Dispatch<WlSeat, ()> for CompositorState {
                 state.pointer_count = state.pointer_count.saturating_add(1);
                 state.pointers.push(pointer);
             }
-            wl_seat::Request::GetKeyboard { .. } => resource.post_error(
-                wl_seat::Error::MissingCapability,
-                "keyboard capability is not advertised yet",
-            ),
+            wl_seat::Request::GetKeyboard { id } => {
+                let keyboard = data_init.init(id, ());
+                match create_keymap_file() {
+                    Ok(file) => {
+                        keyboard.keymap(
+                            wl_keyboard::KeymapFormat::XkbV1,
+                            file.as_fd(),
+                            XKB_KEYMAP.len() as u32,
+                        );
+                        state.keyboard_event_count = state.keyboard_event_count.saturating_add(1);
+                    }
+                    Err(error) => {
+                        resource.post_error(
+                            wl_seat::Error::MissingCapability,
+                            format!("could not create keyboard keymap: {error}"),
+                        );
+                        return;
+                    }
+                }
+                if keyboard.version() >= 4 {
+                    keyboard.repeat_info(25, 400);
+                    state.keyboard_event_count = state.keyboard_event_count.saturating_add(1);
+                }
+                if let Some(surface) = state
+                    .keyboard_focus_surface
+                    .as_ref()
+                    .filter(|surface| keyboard.id().same_client_as(&surface.id()))
+                {
+                    state.next_input_serial = state.next_input_serial.wrapping_add(1).max(1);
+                    let serial = state.next_input_serial;
+                    keyboard.enter(serial, surface, Vec::new());
+                    keyboard.modifiers(serial, 0, 0, 0, 0);
+                    state.keyboard_event_count = state.keyboard_event_count.saturating_add(2);
+                }
+                state.keyboard_count = state.keyboard_count.saturating_add(1);
+                state.keyboards.push(keyboard);
+            }
             wl_seat::Request::GetTouch { .. } => resource.post_error(
                 wl_seat::Error::MissingCapability,
                 "touch capability is not advertised yet",
@@ -627,6 +725,30 @@ impl Dispatch<WlPointer, ()> for CompositorState {
         state.pointer_count = state.pointer_count.saturating_sub(1);
     }
 }
+impl Dispatch<WlKeyboard, ()> for CompositorState {
+    fn request(
+        _state: &mut Self,
+        _client: &Client,
+        _resource: &WlKeyboard,
+        request: wl_keyboard::Request,
+        _data: &(),
+        _handle: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            wl_keyboard::Request::Release => {}
+            _ => unreachable!("wl_keyboard request added without an implementation"),
+        }
+    }
+
+    fn destroyed(state: &mut Self, _client: ClientId, resource: &WlKeyboard, _data: &()) {
+        state
+            .keyboards
+            .retain(|keyboard| keyboard.id() != resource.id());
+        state.keyboard_count = state.keyboard_count.saturating_sub(1);
+    }
+}
+
 impl GlobalDispatch<WlCompositor, ()> for CompositorState {
     fn bind(
         state: &mut Self,
@@ -1055,6 +1177,7 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                             state.pointer_pressed = false;
                         }
                         state.pointer_focus_surface = Some(resource.clone());
+                        set_keyboard_focus(state, Some(resource.clone()));
                     } else if state
                         .pointer_focus_surface
                         .as_ref()
@@ -1063,6 +1186,7 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                         state.pointer_focus_surface = None;
                         state.pointer_inside = false;
                         state.pointer_pressed = false;
+                        set_keyboard_focus(state, None);
                     }
                 }
                 if let Some((width, height, checksum)) = metrics {
@@ -1091,6 +1215,13 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
             state.pointer_focus_surface = None;
             state.pointer_inside = false;
             state.pointer_pressed = false;
+        }
+        if state
+            .keyboard_focus_surface
+            .as_ref()
+            .is_some_and(|focused| focused.id() == resource.id())
+        {
+            set_keyboard_focus(state, None);
         }
         state.surface_count = state.surface_count.saturating_sub(1);
         if state.surface_count == 0 {
@@ -1212,6 +1343,54 @@ impl CompositorCore {
 
     pub fn pointer_event_count(&self) -> u32 {
         self.state.pointer_event_count
+    }
+
+    pub fn keyboard_count(&self) -> u32 {
+        self.state.keyboard_count
+    }
+
+    pub fn keyboard_event_count(&self) -> u32 {
+        self.state.keyboard_event_count
+    }
+
+    fn focused_keyboard_resources(&self) -> Vec<WlKeyboard> {
+        let Some(surface) = self.state.keyboard_focus_surface.as_ref() else {
+            return Vec::new();
+        };
+        self.state
+            .keyboards
+            .iter()
+            .filter(|keyboard| keyboard.is_alive() && keyboard.id().same_client_as(&surface.id()))
+            .cloned()
+            .collect()
+    }
+
+    pub fn keyboard_key(&mut self, key: u32, pressed: bool, time: u32) -> u32 {
+        if self.state.pressed_keys.contains(&key) == pressed {
+            return 0;
+        }
+        let keyboards = self.focused_keyboard_resources();
+        if keyboards.is_empty() {
+            return 0;
+        }
+        let serial = self.next_input_serial();
+        let key_state = if pressed {
+            wl_keyboard::KeyState::Pressed
+        } else {
+            wl_keyboard::KeyState::Released
+        };
+        for keyboard in keyboards {
+            keyboard.key(serial, time, key, key_state.into());
+        }
+        if pressed {
+            self.state.pressed_keys.push(key);
+        } else {
+            self.state
+                .pressed_keys
+                .retain(|pressed_key| *pressed_key != key);
+        }
+        self.state.keyboard_event_count = self.state.keyboard_event_count.saturating_add(1);
+        1
     }
 
     fn focused_pointer_resources(&self) -> Option<(WlSurface, Vec<WlPointer>)> {
@@ -1375,6 +1554,94 @@ fn send_fd(socket_fd: RawFd, bytes: &[u8], transferred_fd: RawFd) -> io::Result<
     Ok(())
 }
 
+fn receive_probe_keymap(socket_fd: RawFd, keyboard_id: u32) -> io::Result<usize> {
+    let mut bytes = [0u8; 16];
+    let mut io_vector = libc::iovec {
+        iov_base: bytes.as_mut_ptr().cast(),
+        iov_len: bytes.len(),
+    };
+    let control_size = unsafe { libc::CMSG_SPACE(size_of::<RawFd>() as u32) } as usize;
+    let control_words = control_size.div_ceil(size_of::<usize>());
+    let mut control = vec![0usize; control_words];
+    let mut message: libc::msghdr = unsafe { zeroed() };
+    message.msg_iov = &mut io_vector;
+    message.msg_iovlen = 1;
+    message.msg_control = control.as_mut_ptr().cast();
+    message.msg_controllen = control_size;
+
+    let received = loop {
+        let result = unsafe { libc::recvmsg(socket_fd, &mut message, libc::MSG_WAITALL) };
+        if result >= 0 {
+            break result as usize;
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    };
+    if received != bytes.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "incomplete wl_keyboard.keymap event",
+        ));
+    }
+    if message.msg_flags & (libc::MSG_CTRUNC | libc::MSG_TRUNC) != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "truncated wl_keyboard.keymap event",
+        ));
+    }
+
+    let object = u32::from_ne_bytes(bytes[0..4].try_into().expect("fixed header"));
+    let word = u32::from_ne_bytes(bytes[4..8].try_into().expect("fixed header"));
+    let format = u32::from_ne_bytes(bytes[8..12].try_into().expect("fixed body"));
+    let keymap_size = u32::from_ne_bytes(bytes[12..16].try_into().expect("fixed body"));
+    if object != keyboard_id || word & 0xffff != 0 || word >> 16 != 16 || format != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid wl_keyboard.keymap wire event",
+        ));
+    }
+    if keymap_size as usize != XKB_KEYMAP.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unexpected wl_keyboard keymap size",
+        ));
+    }
+
+    let control_message = unsafe { libc::CMSG_FIRSTHDR(&message) };
+    if control_message.is_null()
+        || unsafe { (*control_message).cmsg_level } != libc::SOL_SOCKET
+        || unsafe { (*control_message).cmsg_type } != libc::SCM_RIGHTS
+        || unsafe { (*control_message).cmsg_len }
+            < unsafe { libc::CMSG_LEN(size_of::<RawFd>() as u32) } as usize
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "wl_keyboard.keymap event did not include an FD",
+        ));
+    }
+
+    let received_fd =
+        unsafe { ptr::read_unaligned(libc::CMSG_DATA(control_message).cast::<RawFd>()) };
+    if received_fd < 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "wl_keyboard.keymap FD was invalid",
+        ));
+    }
+    let file = unsafe { File::from_raw_fd(received_fd) };
+    let mut keymap = vec![0u8; XKB_KEYMAP.len()];
+    file.read_exact_at(&mut keymap, 0)?;
+    if keymap != XKB_KEYMAP {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "wl_keyboard.keymap FD content mismatch",
+        ));
+    }
+    Ok(keymap.len())
+}
+
 fn send_probe_shm_pool_request(
     socket_fd: RawFd,
     pool_id: u32,
@@ -1477,6 +1744,22 @@ pub extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeSen
 }
 
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeReceiveKeyboardKeymap(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    socket_fd: i32,
+    keyboard_id: i32,
+) -> i32 {
+    let Ok(keyboard_id) = u32::try_from(keyboard_id) else {
+        return -1;
+    };
+    match receive_probe_keymap(socket_fd, keyboard_id) {
+        Ok(size) => i32::try_from(size).unwrap_or(i32::MAX),
+        Err(_) => -2,
+    }
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeDispatchOnce(
     _environment: *mut std::ffi::c_void,
     _activity: *mut std::ffi::c_void,
@@ -1573,6 +1856,48 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
         return -1;
     };
     i32::try_from(core.pointer_count()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeKeyboardCount(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.keyboard_count()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeKeyboardEventCount(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.keyboard_event_count()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeKeyboardKey(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+    key: i32,
+    pressed: u8,
+    time: i32,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+        return -1;
+    };
+    let Ok(key) = u32::try_from(key) else {
+        return -2;
+    };
+    i32::try_from(core.keyboard_key(key, pressed != 0, time as u32)).unwrap_or(i32::MAX)
 }
 
 #[unsafe(no_mangle)]
@@ -1800,6 +2125,8 @@ mod tests {
         assert_eq!(core.seat_bind_count(), 0);
         assert_eq!(core.pointer_count(), 0);
         assert_eq!(core.pointer_event_count(), 0);
+        assert_eq!(core.keyboard_count(), 0);
+        assert_eq!(core.keyboard_event_count(), 0);
         assert_eq!(core.shm_bind_count(), 0);
         assert_eq!(core.shm_pool_count(), 0);
         assert_eq!(core.shm_buffer_count(), 0);
@@ -1810,5 +2137,11 @@ mod tests {
         assert_eq!(core.last_frame_height(), 0);
         assert_eq!(core.last_frame_checksum(), 0);
         assert_eq!(archphene_compositor_protocol_version(), 1);
+    }
+
+    #[test]
+    fn embeds_null_terminated_xkb_v1_keymap() {
+        assert!(XKB_KEYMAP.starts_with(b"xkb_keymap {"));
+        assert!(XKB_KEYMAP.ends_with(b"};\n\0"));
     }
 }
