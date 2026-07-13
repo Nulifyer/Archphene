@@ -75,13 +75,30 @@ done < <(printf "%s\n" "${!resolved[@]}" | sort)
 cp -a /usr/share/pacman/keyrings/. /out/keyrings/
 pacman -Q archlinux-keyring gnupg libarchive pacman > /out/package-versions.txt
 
+if [[ "$SKIP_CHOWN" != "1" ]]; then
+  chown -R "$HOST_UID:$HOST_GID" /out
+fi
+
 source=/tmp/glibc-source
 obj=/tmp/glibc-obj
 install=/tmp/glibc-install
-git -c advice.detachedHead=false clone --filter=blob:none --no-checkout \
-  https://sourceware.org/git/glibc.git "$source"
-git -C "$source" fetch --depth 1 origin "$GLIBC_COMMIT"
-git -C "$source" checkout --detach "$GLIBC_COMMIT"
+mkdir "$source"
+git -C "$source" init --quiet
+git -C "$source" remote add origin https://sourceware.org/git/glibc.git
+fetched=false
+for attempt in 1 2 3; do
+  if git -C "$source" fetch --depth 1 origin "$GLIBC_COMMIT"; then
+    fetched=true
+    break
+  fi
+  echo "glibc fetch attempt $attempt failed" >&2
+  sleep "$((attempt * 10))"
+done
+[[ "$fetched" == "true" ]] || {
+  echo "Could not fetch pinned glibc commit after 3 attempts" >&2
+  exit 1
+}
+git -C "$source" checkout --detach FETCH_HEAD
 git -C "$source" apply /archphene-patches/0001-android-app-seccomp-compat.patch
 mkdir "$obj"
 (
