@@ -421,10 +421,16 @@ struct XdgSurfaceData {
 #[derive(Default)]
 struct XdgSurfaceState {
     role_active: bool,
-    pending_configures: VecDeque<u32>,
-    acknowledged_configure: Option<u32>,
+    pending_configures: VecDeque<XdgConfigure>,
+    acknowledged_configure: Option<XdgConfigure>,
     pending_window_geometry: Option<WindowGeometry>,
     committed_window_geometry: Option<WindowGeometry>,
+}
+
+#[derive(Clone, Copy)]
+struct XdgConfigure {
+    serial: u32,
+    popup_geometry: Option<(i32, i32, i32, i32)>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1071,7 +1077,7 @@ impl Dispatch<XdgSurface, XdgSurfaceData> for CompositorState {
                 let Some(position) = xdg_state
                     .pending_configures
                     .iter()
-                    .position(|pending| *pending == serial)
+                    .position(|pending| pending.serial == serial)
                 else {
                     resource.post_error(
                         xdg_surface::Error::InvalidSerial,
@@ -1079,8 +1085,9 @@ impl Dispatch<XdgSurface, XdgSurfaceData> for CompositorState {
                     );
                     return;
                 };
+                let acknowledged = xdg_state.pending_configures[position];
                 xdg_state.pending_configures.drain(..=position);
-                xdg_state.acknowledged_configure = Some(serial);
+                xdg_state.acknowledged_configure = Some(acknowledged);
                 if let Some(surface_data) = data.wl_surface.data::<SurfaceData>() {
                     surface_data
                         .inner
@@ -1264,10 +1271,6 @@ impl Dispatch<XdgPopup, XdgPopupData> for CompositorState {
                     .positioner
                     .lock()
                     .unwrap_or_else(|error| error.into_inner()) = positioner;
-                *data
-                    .applied_geometry
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner()) = Some(geometry);
                 state.next_configure_serial = state.next_configure_serial.wrapping_add(1).max(1);
                 let serial = state.next_configure_serial;
                 if let Some(xdg_data) = data.xdg_surface.data::<XdgSurfaceData>() {
@@ -1276,13 +1279,14 @@ impl Dispatch<XdgPopup, XdgPopupData> for CompositorState {
                         .lock()
                         .unwrap_or_else(|error| error.into_inner())
                         .pending_configures
-                        .push_back(serial);
+                        .push_back(XdgConfigure {
+                            serial,
+                            popup_geometry: Some(geometry),
+                        });
                 }
-                resource.configure(x, y, width, height);
                 resource.repositioned(token);
+                resource.configure(x, y, width, height);
                 data.xdg_surface.configure(serial);
-                reconfigure_reactive_popups(state, Some(&data.xdg_surface));
-                update_composited_frame(state);
             }
             _ => unreachable!("xdg_popup request added without an implementation"),
         }
@@ -2452,7 +2456,10 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                             state.next_configure_serial =
                                 state.next_configure_serial.wrapping_add(1).max(1);
                             let serial = state.next_configure_serial;
-                            xdg_state.pending_configures.push_back(serial);
+                            xdg_state.pending_configures.push_back(XdgConfigure {
+                                serial,
+                                popup_geometry: None,
+                            });
                             toplevel.configure(0, 0, Vec::new());
                             xdg_surface.configure(serial);
                         }
@@ -2505,14 +2512,13 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                                 return;
                             };
                             let (x, y, width, height) = geometry;
-                            *popup_data
-                                .applied_geometry
-                                .lock()
-                                .unwrap_or_else(|error| error.into_inner()) = Some(geometry);
                             state.next_configure_serial =
                                 state.next_configure_serial.wrapping_add(1).max(1);
                             let serial = state.next_configure_serial;
-                            xdg_state.pending_configures.push_back(serial);
+                            xdg_state.pending_configures.push_back(XdgConfigure {
+                                serial,
+                                popup_geometry: Some(geometry),
+                            });
                             popup.configure(x, y, width, height);
                             xdg_surface.configure(serial);
                         }
@@ -2546,17 +2552,8 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 let role = surface.role;
                 let xdg_surface = surface.xdg_surface.clone();
                 drop(surface);
-                let parent_geometry_changed = xdg_surface.as_ref().is_some_and(|xdg_surface| {
-                    xdg_surface
-                        .data::<XdgSurfaceData>()
-                        .is_some_and(|xdg_data| {
-                            xdg_data
-                                .state
-                                .lock()
-                                .unwrap_or_else(|error| error.into_inner())
-                                .commit_window_geometry()
-                        })
-                });
+                let parent_geometry_changed =
+                    xdg_surface.as_ref().is_some_and(commit_xdg_surface_state);
 
                 if role == Some(SurfaceRole::Subsurface)
                     && subsurface_effectively_synchronized(resource, state.surface_count)
@@ -2883,6 +2880,50 @@ fn surface_accepts_pointer(
             .is_none_or(|region| region.contains(x, y))
 }
 
+fn commit_xdg_surface_state(xdg_surface: &XdgSurface) -> bool {
+    let Some(xdg_data) = xdg_surface.data::<XdgSurfaceData>() else {
+        return false;
+    };
+    let (window_geometry_changed, popup_geometry) = {
+        let mut state = xdg_data
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        (
+            state.commit_window_geometry(),
+            state
+                .acknowledged_configure
+                .and_then(|configure| configure.popup_geometry),
+        )
+    };
+    let popup_geometry_changed = popup_geometry.is_some_and(|geometry| {
+        xdg_data
+            .wl_surface
+            .data::<SurfaceData>()
+            .and_then(|surface_data| {
+                surface_data
+                    .inner
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .xdg_popup
+                    .clone()
+            })
+            .is_some_and(|popup| {
+                let Some(popup_data) = popup.data::<XdgPopupData>() else {
+                    return false;
+                };
+                let mut applied = popup_data
+                    .applied_geometry
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                let changed = *applied != Some(geometry);
+                *applied = Some(geometry);
+                changed
+            })
+    });
+    window_geometry_changed || popup_geometry_changed
+}
+
 fn popup_local_geometry(data: &XdgPopupData) -> Option<(i32, i32, i32, i32)> {
     data.applied_geometry
         .lock()
@@ -3183,8 +3224,6 @@ fn update_composited_frame(state: &mut CompositorState) {
 
 fn reconfigure_reactive_popups(state: &mut CompositorState, changed_parent: Option<&XdgSurface>) {
     let popups = state.popups.clone();
-    let mut changed_parents = changed_parent.iter().copied().cloned().collect::<Vec<_>>();
-    let mut geometry_changed = false;
     for popup in popups.iter().filter(|popup| popup.is_alive()) {
         let Some(data) = popup.data::<XdgPopupData>() else {
             continue;
@@ -3198,10 +3237,7 @@ fn reconfigure_reactive_popups(state: &mut CompositorState, changed_parent: Opti
             .unwrap_or_else(|error| error.into_inner())
             .clone();
         if !positioner.reactive
-            || (changed_parent.is_some()
-                && !changed_parents
-                    .iter()
-                    .any(|parent| parent.id() == data.parent.id()))
+            || changed_parent.is_some_and(|parent| parent.id() != data.parent.id())
         {
             continue;
         }
@@ -3218,10 +3254,6 @@ fn reconfigure_reactive_popups(state: &mut CompositorState, changed_parent: Opti
         if old_geometry == Some(geometry) {
             continue;
         }
-        *data
-            .applied_geometry
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = Some(geometry);
         state.next_configure_serial = state.next_configure_serial.wrapping_add(1).max(1);
         let serial = state.next_configure_serial;
         if let Some(xdg_data) = data.xdg_surface.data::<XdgSurfaceData>() {
@@ -3230,15 +3262,13 @@ fn reconfigure_reactive_popups(state: &mut CompositorState, changed_parent: Opti
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
                 .pending_configures
-                .push_back(serial);
+                .push_back(XdgConfigure {
+                    serial,
+                    popup_geometry: Some(geometry),
+                });
         }
         popup.configure(geometry.0, geometry.1, geometry.2, geometry.3);
         data.xdg_surface.configure(serial);
-        changed_parents.push(data.xdg_surface.clone());
-        geometry_changed = true;
-    }
-    if geometry_changed {
-        update_composited_frame(state);
     }
 }
 
@@ -3489,7 +3519,10 @@ impl CompositorCore {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .pending_configures
-            .push_back(serial);
+            .push_back(XdgConfigure {
+                serial,
+                popup_geometry: None,
+            });
         toplevel.configure(width, height, Vec::new());
         xdg_surface.configure(serial);
         serial

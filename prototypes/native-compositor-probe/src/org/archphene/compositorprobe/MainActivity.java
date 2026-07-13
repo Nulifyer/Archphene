@@ -580,6 +580,11 @@ public final class MainActivity extends Activity {
                 dispatch(core);
                 int reactivePopupConfigureSerial =
                         readPopupConfigureUntilCallback(input, 49, 50, 54, 3, 0, 2, 2);
+                if (nativeLastFrameChecksum(core) != 560
+                        || nativeCopyLastFrameToBitmap(core, renderedFrame) != 0
+                        || renderedFrame.getPixel(2, 0) != 0xff030201) {
+                    throw new IllegalStateException("unacknowledged popup geometry became visible");
+                }
                 output.write(ackPopupConfigureAndSyncRequest(reactivePopupConfigureSerial, 55));
                 output.flush();
                 dispatch(core);
@@ -1030,9 +1035,10 @@ public final class MainActivity extends Activity {
     }
 
     private static byte[] ackPopupConfigureAndSyncRequest(int serial, int callbackId) {
-        ByteBuffer request = buffer(24);
+        ByteBuffer request = buffer(32);
         putHeader(request, 49, 4, 12);
         request.putInt(serial);
+        putHeader(request, 47, 6, 8);
         putHeader(request, 1, 0, 12);
         request.putInt(callbackId);
         return request.array();
@@ -1106,9 +1112,10 @@ public final class MainActivity extends Activity {
     }
 
     private static byte[] ackNestedPopupConfigureAndSyncRequest(int serial) {
-        ByteBuffer request = buffer(24);
+        ByteBuffer request = buffer(32);
         putHeader(request, 60, 4, 12);
         request.putInt(serial);
+        putHeader(request, 58, 6, 8);
         putHeader(request, 1, 0, 12);
         request.putInt(63);
         return request.array();

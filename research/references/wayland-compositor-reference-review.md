@@ -46,7 +46,7 @@ Hyprland independently tracks popup trees, nested children, mapping, damage, eff
 - [~] Send `xdg_popup.popup_done` child-first and idempotently, and finish wiring outside press, Back/Escape, Activity focus loss, and invalidated-parent triggers.
 - [x] Restore pointer and keyboard focus to the root after dismissal.
 - [x] Snapshot `wl_region` add/subtract state at `set_input_region`, latch it on commit, intersect it with surface bounds, and use it for root/parent/nested popup hit testing and fall-through.
-- [x] Implement `xdg_popup.reposition` and `repositioned(token)`, persist the applied configure geometry, apply output-bound flip/slide/resize adjustments in protocol order, reconfigure reactive popups when Android output bounds change, latch xdg window geometry only on parent commit, propagate parent-placement changes to reactive descendants, and preserve popup focus across root commits.
+- [x] Implement `xdg_popup.reposition` and `repositioned(token)`, queue popup configure geometry until its acknowledgement and surface commit, apply output-bound flip/slide/resize adjustments in protocol order, reconfigure reactive popups when Android output bounds change, latch xdg window geometry only on parent commit, propagate parent-placement changes to reactive descendants, and preserve popup focus across root commits.
 
 ### P1: real surface trees
 
@@ -102,6 +102,7 @@ Migration order is registry/globals, SHM/pools/buffers, surfaces/regions, xdg-sh
 - Nested submenu dismissal removes only the topmost popup when appropriate.
 - [x] Popup reposition tokens are acknowledged, and flip/slide/resize plus reactive output-bound changes keep configure, pixels, and input coordinates aligned.
 - [x] Parent window geometry is double-buffered until `wl_surface.commit`; root configure/commit while a popup owns focus preserves the grab, and parent-placement changes propagate to reactive descendants.
+- [x] Repositioned and reactive popup geometry remains invisible until the matching configure is acknowledged and committed; pre-ack and post-commit pixels are asserted on both Android architectures.
 - [x] Subsurface commits obey effective ancestor sync/desync, parent-position, and stacking rules in the native wire probe.
 - Scale and input coordinates remain aligned at Android densities 1.0, 2.625, and 3.0.
 - Clipboard and IME data cross only their Android broker APIs and remain under the app UID.
