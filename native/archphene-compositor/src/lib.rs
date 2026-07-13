@@ -10,6 +10,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
+use wayland_protocols::xdg::shell::server::xdg_positioner::{self, XdgPositioner};
 use wayland_protocols::xdg::shell::server::xdg_surface::{self, XdgSurface};
 use wayland_protocols::xdg::shell::server::xdg_toplevel::{self, XdgToplevel};
 use wayland_protocols::xdg::shell::server::xdg_wm_base::{self, XdgWmBase};
@@ -49,6 +50,8 @@ pub struct CompositorState {
     last_frame_checksum: u32,
     last_frame: Option<Arc<CommittedFrame>>,
     xdg_wm_base_binds: u32,
+    xdg_positioner_count: u32,
+    xdg_positioner_request_count: u32,
     xdg_surface_count: u32,
     xdg_toplevel_count: u32,
     xdg_ack_count: u32,
@@ -96,6 +99,24 @@ enum SurfaceRole {
 #[derive(Default)]
 struct XdgWmBaseData {
     child_count: Arc<AtomicU32>,
+}
+
+#[derive(Default)]
+struct XdgPositionerData {
+    state: Mutex<XdgPositionerState>,
+}
+
+#[derive(Clone, Default)]
+struct XdgPositionerState {
+    size: Option<(i32, i32)>,
+    anchor_rect: Option<(i32, i32, i32, i32)>,
+    anchor: Option<xdg_positioner::Anchor>,
+    gravity: Option<xdg_positioner::Gravity>,
+    constraint_adjustment: Option<xdg_positioner::ConstraintAdjustment>,
+    offset: (i32, i32),
+    reactive: bool,
+    parent_size: Option<(i32, i32)>,
+    parent_configure: Option<u32>,
 }
 
 struct XdgSurfaceData {
@@ -338,11 +359,9 @@ impl Dispatch<XdgWmBase, XdgWmBaseData> for CompositorState {
                     );
                 }
             }
-            xdg_wm_base::Request::CreatePositioner { .. } => {
-                resource.post_error(
-                    xdg_wm_base::Error::Role,
-                    "xdg_positioner support is not implemented yet",
-                );
+            xdg_wm_base::Request::CreatePositioner { id } => {
+                data_init.init(id, XdgPositionerData::default());
+                state.xdg_positioner_count = state.xdg_positioner_count.saturating_add(1);
             }
             xdg_wm_base::Request::GetXdgSurface { id, surface } => {
                 let Some(surface_data) = surface.data::<SurfaceData>() else {
@@ -383,6 +402,131 @@ impl Dispatch<XdgWmBase, XdgWmBaseData> for CompositorState {
             xdg_wm_base::Request::Pong { .. } => {}
             _ => unreachable!("xdg_wm_base request added without an implementation"),
         }
+    }
+}
+
+impl Dispatch<XdgPositioner, XdgPositionerData> for CompositorState {
+    fn request(
+        state: &mut Self,
+        _client: &Client,
+        resource: &XdgPositioner,
+        request: xdg_positioner::Request,
+        data: &XdgPositionerData,
+        _handle: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+        let mut positioner = data.state.lock().unwrap_or_else(|error| error.into_inner());
+        let accepted = match request {
+            xdg_positioner::Request::Destroy => false,
+            xdg_positioner::Request::SetSize { width, height } => {
+                if width <= 0 || height <= 0 {
+                    resource.post_error(
+                        xdg_positioner::Error::InvalidInput,
+                        "positioner size must be positive",
+                    );
+                    false
+                } else {
+                    positioner.size = Some((width, height));
+                    true
+                }
+            }
+            xdg_positioner::Request::SetAnchorRect {
+                x,
+                y,
+                width,
+                height,
+            } => {
+                if width <= 0 || height <= 0 {
+                    resource.post_error(
+                        xdg_positioner::Error::InvalidInput,
+                        "positioner anchor rectangle must be positive",
+                    );
+                    false
+                } else {
+                    positioner.anchor_rect = Some((x, y, width, height));
+                    true
+                }
+            }
+            xdg_positioner::Request::SetAnchor { anchor } => {
+                if let WEnum::Value(anchor) = anchor {
+                    positioner.anchor = Some(anchor);
+                    true
+                } else {
+                    resource.post_error(
+                        xdg_positioner::Error::InvalidInput,
+                        "unknown positioner anchor",
+                    );
+                    false
+                }
+            }
+            xdg_positioner::Request::SetGravity { gravity } => {
+                if let WEnum::Value(gravity) = gravity {
+                    positioner.gravity = Some(gravity);
+                    true
+                } else {
+                    resource.post_error(
+                        xdg_positioner::Error::InvalidInput,
+                        "unknown positioner gravity",
+                    );
+                    false
+                }
+            }
+            xdg_positioner::Request::SetConstraintAdjustment {
+                constraint_adjustment,
+            } => {
+                if let WEnum::Value(constraint_adjustment) = constraint_adjustment {
+                    positioner.constraint_adjustment = Some(constraint_adjustment);
+                    true
+                } else {
+                    resource.post_error(
+                        xdg_positioner::Error::InvalidInput,
+                        "unknown positioner constraint adjustment",
+                    );
+                    false
+                }
+            }
+            xdg_positioner::Request::SetOffset { x, y } => {
+                positioner.offset = (x, y);
+                true
+            }
+            xdg_positioner::Request::SetReactive => {
+                positioner.reactive = true;
+                true
+            }
+            xdg_positioner::Request::SetParentSize {
+                parent_width,
+                parent_height,
+            } => {
+                if parent_width <= 0 || parent_height <= 0 {
+                    resource.post_error(
+                        xdg_positioner::Error::InvalidInput,
+                        "positioner parent size must be positive",
+                    );
+                    false
+                } else {
+                    positioner.parent_size = Some((parent_width, parent_height));
+                    true
+                }
+            }
+            xdg_positioner::Request::SetParentConfigure { serial } => {
+                positioner.parent_configure = Some(serial);
+                true
+            }
+            _ => unreachable!("xdg_positioner request added without an implementation"),
+        };
+        if accepted {
+            state.xdg_positioner_request_count =
+                state.xdg_positioner_request_count.saturating_add(1);
+        }
+    }
+
+    fn destroyed(
+        state: &mut Self,
+        _client: ClientId,
+        _resource: &XdgPositioner,
+        _data: &XdgPositionerData,
+    ) {
+        state.xdg_positioner_count = state.xdg_positioner_count.saturating_sub(1);
     }
 }
 
@@ -1326,6 +1470,14 @@ impl CompositorCore {
         self.state.xdg_wm_base_binds
     }
 
+    pub fn xdg_positioner_count(&self) -> u32 {
+        self.state.xdg_positioner_count
+    }
+
+    pub fn xdg_positioner_request_count(&self) -> u32 {
+        self.state.xdg_positioner_request_count
+    }
+
     pub fn xdg_surface_count(&self) -> u32 {
         self.state.xdg_surface_count
     }
@@ -1857,6 +2009,30 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeXdgPositionerCount(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.xdg_positioner_count()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeXdgPositionerRequestCount(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.xdg_positioner_request_count()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeXdgSurfaceCount(
     _environment: *mut std::ffi::c_void,
     _activity: *mut std::ffi::c_void,
@@ -2203,6 +2379,8 @@ mod tests {
         assert!(!core.is_stopping());
         assert_eq!(core.compositor_bind_count(), 0);
         assert_eq!(core.xdg_wm_base_bind_count(), 0);
+        assert_eq!(core.xdg_positioner_count(), 0);
+        assert_eq!(core.xdg_positioner_request_count(), 0);
         assert_eq!(core.xdg_surface_count(), 0);
         assert_eq!(core.xdg_toplevel_count(), 0);
         assert_eq!(core.xdg_ack_count(), 0);

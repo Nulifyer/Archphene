@@ -39,6 +39,8 @@ public final class MainActivity extends Activity {
     private static native int nativeDispatchOnce(long handle);
     private static native int nativeCompositorBindCount(long handle);
     private static native int nativeXdgWmBaseBindCount(long handle);
+    private static native int nativeXdgPositionerCount(long handle);
+    private static native int nativeXdgPositionerRequestCount(long handle);
     private static native int nativeXdgSurfaceCount(long handle);
     private static native int nativeXdgToplevelCount(long handle);
     private static native int nativeXdgAckCount(long handle);
@@ -283,6 +285,7 @@ public final class MainActivity extends Activity {
                     throw new IllegalStateException("configured xdg frame was not committed");
                 }
 
+
                 output.write(bindGlobalAndSyncRequest(globals.seat, "wl_seat", 32, 33));
                 output.flush();
                 dispatch(core);
@@ -481,10 +484,27 @@ public final class MainActivity extends Activity {
                 output.flush();
                 dispatch(core);
                 readUntilCallback(input, 44);
+
+                output.write(createPositionerAndSyncRequest(configureSerial));
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 46);
+                if (nativeXdgPositionerCount(core) != 1
+                        || nativeXdgPositionerRequestCount(core) != 9) {
+                    throw new IllegalStateException("xdg_positioner state was incomplete");
+                }
+                output.write(destroyPositionerAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 47);
+                if (nativeXdgPositionerCount(core) != 0) {
+                    throw new IllegalStateException("xdg_positioner destruction failed");
+                }
+
                 output.write(destroyXdgToplevelAndSyncRequest());
                 output.flush();
                 dispatch(core);
-                readUntilCallback(input, 45);
+                readUntilCallback(input, 48);
                 if (nativeXdgSurfaceCount(core) != 0
                         || nativeXdgToplevelCount(core) != 0
                         || nativeSurfaceCount(core) != 0
@@ -640,6 +660,46 @@ public final class MainActivity extends Activity {
         return request.array();
     }
 
+    private static byte[] createPositionerAndSyncRequest(int parentConfigureSerial) {
+        ByteBuffer request = buffer(152);
+        putHeader(request, 18, 1, 12);
+        request.putInt(45);
+        putHeader(request, 45, 1, 16);
+        request.putInt(160);
+        request.putInt(120);
+        putHeader(request, 45, 2, 24);
+        request.putInt(10);
+        request.putInt(20);
+        request.putInt(40);
+        request.putInt(30);
+        putHeader(request, 45, 3, 12);
+        request.putInt(6);
+        putHeader(request, 45, 4, 12);
+        request.putInt(8);
+        putHeader(request, 45, 5, 12);
+        request.putInt(15);
+        putHeader(request, 45, 6, 16);
+        request.putInt(3);
+        request.putInt(5);
+        putHeader(request, 45, 7, 8);
+        putHeader(request, 45, 8, 16);
+        request.putInt(4);
+        request.putInt(2);
+        putHeader(request, 45, 9, 12);
+        request.putInt(parentConfigureSerial);
+        putHeader(request, 1, 0, 12);
+        request.putInt(46);
+        return request.array();
+    }
+
+    private static byte[] destroyPositionerAndSyncRequest() {
+        ByteBuffer request = buffer(20);
+        putHeader(request, 45, 0, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(47);
+        return request.array();
+    }
+
     private static byte[] getPointerAndSyncRequest() {
         ByteBuffer request = buffer(24);
         putHeader(request, 32, 0, 12);
@@ -713,7 +773,7 @@ public final class MainActivity extends Activity {
         putHeader(request, 20, 0, 8);
         putHeader(request, 18, 0, 8);
         putHeader(request, 1, 0, 12);
-        request.putInt(45);
+        request.putInt(48);
         return request.array();
     }
 
