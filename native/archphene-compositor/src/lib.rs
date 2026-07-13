@@ -55,6 +55,8 @@ pub struct CompositorState {
     xdg_positioner_count: u32,
     xdg_positioner_request_count: u32,
     xdg_popup_count: u32,
+    xdg_popup_done_count: u32,
+    popups: Vec<XdgPopup>,
     xdg_surface_count: u32,
     xdg_toplevel_count: u32,
     xdg_ack_count: u32,
@@ -228,6 +230,7 @@ struct XdgPopupData {
     xdg_surface: XdgSurface,
     parent: XdgSurface,
     positioner: Mutex<XdgPositionerState>,
+    dismissed: AtomicBool,
 }
 
 struct XdgSurfaceData {
@@ -789,8 +792,10 @@ impl Dispatch<XdgSurface, XdgSurfaceData> for CompositorState {
                         xdg_surface: resource.clone(),
                         parent,
                         positioner: Mutex::new(positioner_state),
+                        dismissed: AtomicBool::new(false),
                     },
                 );
+                state.popups.push(popup.clone());
                 surface_state.xdg_popup = Some(popup);
                 state.xdg_popup_count = state.xdg_popup_count.saturating_add(1);
             }
@@ -929,6 +934,7 @@ impl Dispatch<XdgPopup, XdgPopupData> for CompositorState {
                 surface.xdg_configured = false;
             }
         }
+        state.popups.retain(|popup| popup.id() != _resource.id());
         state.xdg_popup_count = state.xdg_popup_count.saturating_sub(1);
     }
 }
@@ -1893,6 +1899,25 @@ impl CompositorCore {
         self.state.xdg_popup_count
     }
 
+    pub fn xdg_popup_done_count(&self) -> u32 {
+        self.state.xdg_popup_done_count
+    }
+
+    pub fn dismiss_popups(&mut self) -> u32 {
+        let mut dismissed = 0u32;
+        for popup in self.state.popups.iter().filter(|popup| popup.is_alive()) {
+            let Some(data) = popup.data::<XdgPopupData>() else {
+                continue;
+            };
+            if !data.dismissed.swap(true, Ordering::AcqRel) {
+                popup.popup_done();
+                dismissed = dismissed.saturating_add(1);
+            }
+        }
+        self.state.xdg_popup_done_count = self.state.xdg_popup_done_count.saturating_add(dismissed);
+        dismissed
+    }
+
     pub fn xdg_surface_count(&self) -> u32 {
         self.state.xdg_surface_count
     }
@@ -2498,6 +2523,30 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeXdgPopupDoneCount(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.xdg_popup_done_count()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeDismissPopups(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+        return -1;
+    };
+    i32::try_from(core.dismiss_popups()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeXdgSurfaceCount(
     _environment: *mut std::ffi::c_void,
     _activity: *mut std::ffi::c_void,
@@ -2898,6 +2947,7 @@ mod tests {
         assert_eq!(core.xdg_positioner_count(), 0);
         assert_eq!(core.xdg_positioner_request_count(), 0);
         assert_eq!(core.xdg_popup_count(), 0);
+        assert_eq!(core.xdg_popup_done_count(), 0);
         assert_eq!(core.xdg_surface_count(), 0);
         assert_eq!(core.xdg_toplevel_count(), 0);
         assert_eq!(core.xdg_ack_count(), 0);

@@ -42,6 +42,8 @@ public final class MainActivity extends Activity {
     private static native int nativeXdgPositionerCount(long handle);
     private static native int nativeXdgPositionerRequestCount(long handle);
     private static native int nativeXdgPopupCount(long handle);
+    private static native int nativeXdgPopupDoneCount(long handle);
+    private static native int nativeDismissPopups(long handle);
     private static native int nativeXdgSurfaceCount(long handle);
     private static native int nativeXdgToplevelCount(long handle);
     private static native int nativeXdgAckCount(long handle);
@@ -523,10 +525,22 @@ public final class MainActivity extends Activity {
                     throw new IllegalStateException("xdg_popup configure ack failed");
                 }
 
+                if (nativeDismissPopups(core) != 1) {
+                    throw new IllegalStateException("xdg_popup dismissal was not routed");
+                }
+                output.write(syncRequest(53));
+                output.flush();
+                dispatch(core);
+                readPopupDoneUntilCallback(input, 50, 53);
+                if (nativeDismissPopups(core) != 0
+                        || nativeXdgPopupDoneCount(core) != 1) {
+                    throw new IllegalStateException("xdg_popup dismissal was not idempotent");
+                }
+
                 output.write(destroyPopupResourcesAndSyncRequest());
                 output.flush();
                 dispatch(core);
-                readUntilCallback(input, 53);
+                readUntilCallback(input, 54);
                 if (nativeXdgPopupCount(core) != 0
                         || nativeXdgPositionerCount(core) != 0
                         || nativeXdgSurfaceCount(core) != 1
@@ -535,10 +549,10 @@ public final class MainActivity extends Activity {
                 }
 
                 output.write(bindGlobalAndSyncRequest(
-                        globals.output, "wl_output", 54, 55));
+                        globals.output, "wl_output", 55, 56));
                 output.flush();
                 dispatch(core);
-                readOutputUntilCallback(input, 20, 54, 55, 320, 160, 1, true);
+                readOutputUntilCallback(input, 20, 55, 56, 320, 160, 1, true);
                 if (nativeOutputBindCount(core) != 1
                         || nativeOutputCount(core) != 1
                         || nativeOutputEventCount(core) != 7) {
@@ -548,10 +562,10 @@ public final class MainActivity extends Activity {
                 if (nativeConfigureOutput(core, 640, 360, 2) != 1) {
                     throw new IllegalStateException("Android output update was not routed");
                 }
-                output.write(syncRequest(56));
+                output.write(syncRequest(57));
                 output.flush();
                 dispatch(core);
-                readOutputUntilCallback(input, 20, 54, 56, 640, 360, 2, false);
+                readOutputUntilCallback(input, 20, 55, 57, 640, 360, 2, false);
                 if (nativeOutputEventCount(core) != 10) {
                     throw new IllegalStateException("wl_output update events were incomplete");
                 }
@@ -559,7 +573,7 @@ public final class MainActivity extends Activity {
                 output.write(releaseOutputAndSyncRequest());
                 output.flush();
                 dispatch(core);
-                readUntilCallback(input, 57);
+                readUntilCallback(input, 58);
                 if (nativeOutputCount(core) != 0) {
                     throw new IllegalStateException("wl_output release failed");
                 }
@@ -567,7 +581,7 @@ public final class MainActivity extends Activity {
                 output.write(destroyXdgToplevelAndSyncRequest());
                 output.flush();
                 dispatch(core);
-                readUntilCallback(input, 58);
+                readUntilCallback(input, 59);
                 if (nativeXdgSurfaceCount(core) != 0
                         || nativeXdgToplevelCount(core) != 0
                         || nativeSurfaceCount(core) != 0
@@ -795,7 +809,7 @@ public final class MainActivity extends Activity {
         putHeader(request, 47, 0, 8);
         putHeader(request, 45, 0, 8);
         putHeader(request, 1, 0, 12);
-        request.putInt(53);
+        request.putInt(54);
         return request.array();
     }
 
@@ -867,9 +881,9 @@ public final class MainActivity extends Activity {
 
     private static byte[] releaseOutputAndSyncRequest() {
         ByteBuffer request = buffer(20);
-        putHeader(request, 54, 0, 8);
+        putHeader(request, 55, 0, 8);
         putHeader(request, 1, 0, 12);
-        request.putInt(57);
+        request.putInt(58);
         return request.array();
     }
 
@@ -880,7 +894,7 @@ public final class MainActivity extends Activity {
         putHeader(request, 20, 0, 8);
         putHeader(request, 18, 0, 8);
         putHeader(request, 1, 0, 12);
-        request.putInt(58);
+        request.putInt(59);
         return request.array();
     }
 
@@ -1344,6 +1358,24 @@ public final class MainActivity extends Activity {
         readPointerFrame(input, pointerId);
         return serial;
     }
+    private static void readPopupDoneUntilCallback(
+            FileInputStream input, int popupId, int callbackId) throws Exception {
+        boolean popupDone = false;
+        while (true) {
+            Message message = readMessage(input);
+            throwIfDisplayError(message);
+            popupDone |= message.objectId == popupId
+                    && message.opcode == 1
+                    && message.body.length == 0;
+            if (message.objectId == callbackId && message.opcode == 0) {
+                if (!popupDone) {
+                    throw new IllegalStateException("xdg_popup.popup_done was not emitted");
+                }
+                return;
+            }
+        }
+    }
+
     private static int readPopupConfigureUntilCallback(
             FileInputStream input, int xdgSurfaceId, int popupId, int callbackId)
             throws Exception {
