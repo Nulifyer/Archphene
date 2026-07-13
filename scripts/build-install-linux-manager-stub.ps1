@@ -33,6 +33,10 @@ if (-not $SdkCandidate -or -not (Test-Path -LiteralPath $SdkCandidate)) {
 }
 $Sdk = Resolve-Path $SdkCandidate
 $BuildTools = Join-Path $Sdk "build-tools/36.0.0"
+$ApkSignerJar = Join-Path $BuildTools "lib/apksigner.jar"
+if (-not (Test-Path -LiteralPath $ApkSignerJar -PathType Leaf)) {
+    throw "Android apksig library not found: $ApkSignerJar"
+}
 $App = Join-Path $Root "prototypes/linux-app-manager-stub"
 $Out = Join-Path $App "out"
 
@@ -119,10 +123,11 @@ $JavaFiles = @(
     Get-ChildItem -LiteralPath (Join-Path $App "src") -Recurse -Filter *.java
     Get-ChildItem -LiteralPath (Join-Path $Out "gen") -Recurse -Filter *.java
 ) | ForEach-Object { $_.FullName }
-Run-Native { & javac --release 17 -classpath (Join-Path $Sdk "platforms/android-36/android.jar") -d (Join-Path $Out "classes") $JavaFiles } "javac"
+$CompileClasspath = (Join-Path $Sdk "platforms/android-36/android.jar") + [IO.Path]::PathSeparator + $ApkSignerJar
+Run-Native { & javac --release 17 -classpath $CompileClasspath -d (Join-Path $Out "classes") $JavaFiles } "javac"
 
 $ClassFiles = Get-ChildItem -LiteralPath (Join-Path $Out "classes") -Recurse -Filter *.class | ForEach-Object { $_.FullName }
-Run-Native { & (Join-Path $BuildTools "d8.bat") --lib (Join-Path $Sdk "platforms/android-36/android.jar") --min-api 23 --output (Join-Path $Out "dex") $ClassFiles } "d8"
+Run-Native { & (Join-Path $BuildTools "d8.bat") --lib (Join-Path $Sdk "platforms/android-36/android.jar") --min-api 23 --output (Join-Path $Out "dex") $ClassFiles $ApkSignerJar } "d8"
 
 Push-Location (Join-Path $Out "dex")
 Run-Native { & jar uf "..\unsigned.apk" classes.dex } "jar update apk"

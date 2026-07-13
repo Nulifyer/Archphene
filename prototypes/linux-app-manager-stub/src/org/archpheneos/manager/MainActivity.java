@@ -95,6 +95,7 @@ public final class MainActivity extends Activity {
         if (ManagerStateStore.checkOnLaunch(this)) checkAll();
         handleTestInstallIntent();
         handleTestPackageRuntimeIntent();
+        handleTestWrapperSigningIntent();
     }
 
     @Override
@@ -1181,6 +1182,24 @@ public final class MainActivity extends Activity {
         if (ManagerStateStore.backgroundChecksEnabled(this)) {
             LinuxAppManagerService.schedule(this, true);
         }
+    }
+
+    private void handleTestWrapperSigningIntent() {
+        String inputPath = getIntent().getStringExtra("archphene_test_sign_apk_file");
+        if (inputPath == null) return;
+        new Thread(() -> {
+            try {
+                java.io.File output = new java.io.File(getFilesDir(),
+                        "package-runtime/generated-wrapper-test.apk");
+                ArchWrapperSigner.Result result = ArchWrapperSigner.sign(this,
+                        new java.io.File(inputPath), output);
+                runOnUiThread(() -> showBanner("Signed generated APK\nSigner "
+                        + result.signerSha256 + "\nv2=" + result.verifiedV2
+                        + " v3=" + result.verifiedV3, false));
+            } catch (Exception e) {
+                runOnUiThread(() -> showBanner("APK signing failed: " + e.getMessage(), true));
+            }
+        }, "archphene-wrapper-signing-test").start();
     }
 
     private void handleTestPackageRuntimeIntent() {
