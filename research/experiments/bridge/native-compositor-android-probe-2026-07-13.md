@@ -8,7 +8,7 @@ The native library uses wayland-server 0.31.13 with its pure-Rust backend. Andro
 
 ## Protocol sequence
 
-1. Create the native display and advertise wl_compositor version 6 and wl_shm version 1.
+1. Create the native display and advertise wl_compositor version 6, wl_shm version 1, and xdg_wm_base version 6.
 2. Adopt an Android socket file descriptor as a Wayland client.
 3. Request wl_registry and complete wl_display.sync.
 4. Find and bind wl_compositor.
@@ -21,8 +21,12 @@ The native library uses wayland-server 0.31.13 with its pure-Rust backend. Andro
 11. Confirm wl_buffer.release and wl_callback.done arrive before the sync marker.
 12. Lock an Android ARGB_8888 bitmap through libjnigraphics, convert Wayland BGRX bytes to Android RGBA, and assert pixels 0xff030201 and 0xff1b1a19.
 13. Display the bitmap in the Activity and verify the nonblank frame visually on both targets.
-14. Destroy the buffer, pool, and surface and confirm all native resource counts return to zero.
-15. Decode and report any wl_display.error deterministically.
+14. Destroy the first buffer, pool, and surface and confirm their native resource counts return to zero.
+15. Bind xdg_wm_base, create a fresh wl_surface, xdg_surface, and xdg_toplevel, then perform the required initial bufferless wl_surface.commit.
+16. Receive xdg_toplevel.configure followed by xdg_surface.configure, require a nonzero serial, and acknowledge that exact serial.
+17. Transfer a second padded SHM buffer, commit it only after configure acknowledgement, and revalidate release, callback, 4x2 dimensions, and checksum 656.
+18. Destroy the role object before xdg_surface, then destroy wl_surface and xdg_wm_base; confirm every xdg, surface, pool, and buffer live count returns to zero.
+19. Decode and report any wl_display.error deterministically.
 
 ## Build boundary
 
@@ -34,8 +38,8 @@ Windows performs only ADB device selection, APK installation, launch, and logcat
 
 | Target | Device | Result |
 |---|---|---|
-| x86_64 | Android 16 emulator, emulator-5554 | Passed padded-stride frame commit, XRGB conversion, exact Android bitmap pixels, visible presentation, and lifecycle |
-| arm64-v8a | Samsung Galaxy S22 Ultra, RFCT90AEEFA | Passed padded-stride frame commit, XRGB conversion, exact Android bitmap pixels, visible presentation, and lifecycle |
+| x86_64 | Android 16 emulator, emulator-5554 | Passed padded-stride frame commit, XRGB conversion, exact Android bitmap pixels, visible presentation, xdg initial commit/configure/ack, post-ack frame, and ordered teardown |
+| arm64-v8a | Samsung Galaxy S22 Ultra, RFCT90AEEFA | Passed padded-stride frame commit, XRGB conversion, exact Android bitmap pixels, visible presentation, xdg initial commit/configure/ack, post-ack frame, and ordered teardown |
 
 The arm64 result is emitted through a structured logcat marker, so it remains observable when Samsung System UI covers the Activity with the lock screen.
 
@@ -48,4 +52,4 @@ The arm64 result is emitted through a structured logcat marker, so it remains ob
 
 ## Boundary
 
-This renders a protocol test frame, not an application. The probe fires frame callbacks after the native copy; production callbacks must be paced by Android Choreographer/presentation. The raw JNI handle is single-threaded probe infrastructure and requires a serialized/thread-safe service boundary. Complete damage regions, buffer transform/scale state, xdg-shell roles, seats/input, popups, clipboard, text input, continuous Android presentation, and wrapper integration remain before KCalc or Mousepad can use the shared core.
+This renders a protocol test frame, not an application. The probe fires frame callbacks after the native copy; production callbacks must be paced by Android Choreographer/presentation. The raw JNI handle is single-threaded probe infrastructure and requires a serialized/thread-safe service boundary. Complete damage regions, buffer transform/scale state, multiple pending configure handling, mapped/unmapped xdg state, xdg popups/positioners, seats/input, clipboard, text input, continuous Android presentation, and wrapper integration remain before KCalc or Mousepad can use the shared core.

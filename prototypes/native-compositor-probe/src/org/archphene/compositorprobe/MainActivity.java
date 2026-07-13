@@ -26,6 +26,10 @@ public final class MainActivity extends Activity {
             int socketFd, int poolId, int poolSize, int callbackId);
     private static native int nativeDispatchOnce(long handle);
     private static native int nativeCompositorBindCount(long handle);
+    private static native int nativeXdgWmBaseBindCount(long handle);
+    private static native int nativeXdgSurfaceCount(long handle);
+    private static native int nativeXdgToplevelCount(long handle);
+    private static native int nativeXdgAckCount(long handle);
     private static native int nativeShmBindCount(long handle);
     private static native int nativeShmPoolCount(long handle);
     private static native int nativeShmBufferCount(long handle);
@@ -156,10 +160,77 @@ public final class MainActivity extends Activity {
                 if (nativeSurfaceCount(core) != 0) {
                     throw new IllegalStateException("wl_surface destruction was not dispatched");
                 }
+
+                output.write(bindGlobalAndSyncRequest(
+                        globals.xdgWmBase, "xdg_wm_base", 18, 19));
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 19);
+                if (nativeXdgWmBaseBindCount(core) != 1) {
+                    throw new IllegalStateException("xdg_wm_base bind was not dispatched");
+                }
+
+                output.write(createSecondSurfaceAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 21);
+
+                output.write(createXdgToplevelAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                int configureSerial = readXdgConfigureUntilCallback(input, 22, 23, 24);
+                if (nativeXdgSurfaceCount(core) != 1 || nativeXdgToplevelCount(core) != 1) {
+                    throw new IllegalStateException("xdg toplevel role was not constructed");
+                }
+
+                output.write(ackXdgConfigureAndSyncRequest(configureSerial));
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 25);
+                if (nativeXdgAckCount(core) != 1) {
+                    throw new IllegalStateException("xdg configure serial was not acknowledged");
+                }
+
+                if (nativeSendShmPoolRequest(client.getFd(), 26, 40, 27) != 0) {
+                    throw new IllegalStateException("second SHM pool FD transfer");
+                }
+                dispatch(core);
+                readUntilCallback(input, 27);
+                output.write(createSecondShmBufferAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 29);
+
+                output.write(commitXdgFrameAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                readFrameCommitUntilCallback(input, 28, 30, 31);
+                if (nativeSurfaceCommitCount(core) != 3
+                        || nativeLastFrameWidth(core) != 4
+                        || nativeLastFrameHeight(core) != 2
+                        || nativeLastFrameChecksum(core) != 656) {
+                    throw new IllegalStateException("configured xdg frame was not committed");
+                }
+
+                output.write(destroySecondShmResourcesAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 32);
+                output.write(destroyXdgToplevelAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 33);
+                if (nativeXdgSurfaceCount(core) != 0
+                        || nativeXdgToplevelCount(core) != 0
+                        || nativeSurfaceCount(core) != 0
+                        || nativeShmBufferCount(core) != 0
+                        || nativeShmPoolCount(core) != 0) {
+                    throw new IllegalStateException("xdg destruction lifecycle failed");
+                }
             }
             passed = true;
             message = "Native Wayland compositor passed\n"
-                    + "registry, native frame, Android bitmap, and lifecycles complete";
+                    + "registry, Android bitmap, and xdg toplevel lifecycle complete";
         } catch (Exception error) {
             message = "Native compositor probe failed\n" + error.getMessage();
         } finally {
@@ -227,6 +298,90 @@ public final class MainActivity extends Activity {
         return request.array();
     }
 
+    private static byte[] createSecondSurfaceAndSyncRequest() {
+        ByteBuffer request = buffer(24);
+        putHeader(request, 4, 0, 12);
+        request.putInt(20);
+        putHeader(request, 1, 0, 12);
+        request.putInt(21);
+        return request.array();
+    }
+
+    private static byte[] createXdgToplevelAndSyncRequest() {
+        ByteBuffer request = buffer(48);
+        putHeader(request, 18, 2, 16);
+        request.putInt(22);
+        request.putInt(20);
+        putHeader(request, 22, 1, 12);
+        request.putInt(23);
+        putHeader(request, 20, 6, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(24);
+        return request.array();
+    }
+
+    private static byte[] ackXdgConfigureAndSyncRequest(int configureSerial) {
+        ByteBuffer request = buffer(24);
+        putHeader(request, 22, 4, 12);
+        request.putInt(configureSerial);
+        putHeader(request, 1, 0, 12);
+        request.putInt(25);
+        return request.array();
+    }
+
+    private static byte[] createSecondShmBufferAndSyncRequest() {
+        ByteBuffer request = buffer(44);
+        putHeader(request, 26, 0, 32);
+        request.putInt(28);
+        request.putInt(0);
+        request.putInt(4);
+        request.putInt(2);
+        request.putInt(24);
+        request.putInt(1);
+        putHeader(request, 1, 0, 12);
+        request.putInt(29);
+        return request.array();
+    }
+
+    private static byte[] commitXdgFrameAndSyncRequest() {
+        ByteBuffer request = buffer(76);
+        putHeader(request, 20, 1, 20);
+        request.putInt(28);
+        request.putInt(0);
+        request.putInt(0);
+        putHeader(request, 20, 9, 24);
+        request.putInt(0);
+        request.putInt(0);
+        request.putInt(4);
+        request.putInt(2);
+        putHeader(request, 20, 3, 12);
+        request.putInt(30);
+        putHeader(request, 20, 6, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(31);
+        return request.array();
+    }
+
+    private static byte[] destroySecondShmResourcesAndSyncRequest() {
+        ByteBuffer request = buffer(28);
+        putHeader(request, 28, 0, 8);
+        putHeader(request, 26, 1, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(32);
+        return request.array();
+    }
+
+    private static byte[] destroyXdgToplevelAndSyncRequest() {
+        ByteBuffer request = buffer(44);
+        putHeader(request, 23, 0, 8);
+        putHeader(request, 22, 0, 8);
+        putHeader(request, 20, 0, 8);
+        putHeader(request, 18, 0, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(33);
+        return request.array();
+    }
+
     private static byte[] createShmBufferAndSyncRequest() {
         ByteBuffer request = buffer(44);
         putHeader(request, 10, 0, 32);
@@ -273,6 +428,7 @@ public final class MainActivity extends Activity {
             throws Exception {
         Global compositor = null;
         Global shm = null;
+        Global xdgWmBase = null;
         while (true) {
             Message message = readMessage(input);
             throwIfDisplayError(message);
@@ -293,13 +449,15 @@ public final class MainActivity extends Activity {
                     compositor = new Global(name, version);
                 } else if ("wl_shm".equals(interfaceName)) {
                     shm = new Global(name, version);
+                } else if ("xdg_wm_base".equals(interfaceName)) {
+                    xdgWmBase = new Global(name, version);
                 }
             }
             if (message.objectId == callbackId && message.opcode == 0) {
-                if (compositor == null || shm == null) {
+                if (compositor == null || shm == null || xdgWmBase == null) {
                     throw new IllegalStateException("required Wayland globals not advertised");
                 }
-                return new RegistryGlobals(compositor, shm);
+                return new RegistryGlobals(compositor, shm, xdgWmBase);
             }
         }
     }
@@ -309,6 +467,35 @@ public final class MainActivity extends Activity {
             Message message = readMessage(input);
             throwIfDisplayError(message);
             if (message.objectId == callbackId && message.opcode == 0) return;
+        }
+    }
+
+    private static int readXdgConfigureUntilCallback(
+            FileInputStream input, int xdgSurfaceId, int toplevelId, int callbackId)
+            throws Exception {
+        boolean toplevelConfigured = false;
+        Integer configureSerial = null;
+        while (true) {
+            Message message = readMessage(input);
+            throwIfDisplayError(message);
+            if (message.objectId == toplevelId && message.opcode == 0) {
+                if (message.body.length < 12) {
+                    throw new IllegalStateException("invalid xdg_toplevel.configure event");
+                }
+                toplevelConfigured = true;
+            } else if (message.objectId == xdgSurfaceId && message.opcode == 0) {
+                if (message.body.length != 4) {
+                    throw new IllegalStateException("invalid xdg_surface.configure event");
+                }
+                configureSerial = ByteBuffer.wrap(message.body)
+                        .order(ByteOrder.nativeOrder()).getInt();
+            }
+            if (message.objectId == callbackId && message.opcode == 0) {
+                if (!toplevelConfigured || configureSerial == null || configureSerial == 0) {
+                    throw new IllegalStateException("xdg configure sequence was incomplete");
+                }
+                return configureSerial;
+            }
         }
     }
 
@@ -407,10 +594,12 @@ public final class MainActivity extends Activity {
     private static final class RegistryGlobals {
         final Global compositor;
         final Global shm;
+        final Global xdgWmBase;
 
-        RegistryGlobals(Global compositor, Global shm) {
+        RegistryGlobals(Global compositor, Global shm, Global xdgWmBase) {
             this.compositor = compositor;
             this.shm = shm;
+            this.xdgWmBase = xdgWmBase;
         }
     }
     private static final class Global {

@@ -6,9 +6,12 @@ use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::fs::FileExt;
 use std::os::unix::net::UnixStream;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
+use wayland_protocols::xdg::shell::server::xdg_surface::{self, XdgSurface};
+use wayland_protocols::xdg::shell::server::xdg_toplevel::{self, XdgToplevel};
+use wayland_protocols::xdg::shell::server::xdg_wm_base::{self, XdgWmBase};
 use wayland_server::protocol::wl_buffer::{self, WlBuffer};
 use wayland_server::protocol::wl_callback::{self, WlCallback};
 use wayland_server::protocol::wl_compositor::{self, WlCompositor};
@@ -41,6 +44,11 @@ pub struct CompositorState {
     last_frame_height: u32,
     last_frame_checksum: u32,
     last_frame: Option<Arc<CommittedFrame>>,
+    xdg_wm_base_binds: u32,
+    xdg_surface_count: u32,
+    xdg_toplevel_count: u32,
+    xdg_ack_count: u32,
+    next_configure_serial: u32,
 }
 
 #[derive(Default)]
@@ -54,6 +62,39 @@ struct SurfaceState {
     pending_damage: bool,
     pending_callbacks: Vec<WlCallback>,
     committed_frame: Option<Arc<CommittedFrame>>,
+    has_xdg_surface: bool,
+    role: Option<SurfaceRole>,
+    xdg_surface: Option<XdgSurface>,
+    xdg_toplevel: Option<XdgToplevel>,
+    xdg_configured: bool,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum SurfaceRole {
+    XdgToplevel,
+}
+
+#[derive(Default)]
+struct XdgWmBaseData {
+    child_count: Arc<AtomicU32>,
+}
+
+struct XdgSurfaceData {
+    wl_surface: WlSurface,
+    wm_base: XdgWmBase,
+    wm_child_count: Arc<AtomicU32>,
+    state: Mutex<XdgSurfaceState>,
+}
+
+#[derive(Default)]
+struct XdgSurfaceState {
+    role_active: bool,
+    pending_configure: Option<u32>,
+    acknowledged_configure: Option<u32>,
+}
+
+struct XdgToplevelData {
+    xdg_surface: XdgSurface,
 }
 
 #[derive(Clone)]
@@ -242,6 +283,266 @@ impl ShmBufferInner {
             format: self.format,
             pixels,
         })
+    }
+}
+
+impl GlobalDispatch<XdgWmBase, ()> for CompositorState {
+    fn bind(
+        state: &mut Self,
+        _handle: &DisplayHandle,
+        _client: &Client,
+        resource: New<XdgWmBase>,
+        _global_data: &(),
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        data_init.init(resource, XdgWmBaseData::default());
+        state.xdg_wm_base_binds = state.xdg_wm_base_binds.saturating_add(1);
+    }
+}
+
+impl Dispatch<XdgWmBase, XdgWmBaseData> for CompositorState {
+    fn request(
+        state: &mut Self,
+        _client: &Client,
+        resource: &XdgWmBase,
+        request: xdg_wm_base::Request,
+        data: &XdgWmBaseData,
+        _handle: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            xdg_wm_base::Request::Destroy => {
+                if data.child_count.load(Ordering::Acquire) != 0 {
+                    resource.post_error(
+                        xdg_wm_base::Error::DefunctSurfaces,
+                        "xdg_wm_base destroyed before its xdg_surface children",
+                    );
+                }
+            }
+            xdg_wm_base::Request::CreatePositioner { .. } => {
+                resource.post_error(
+                    xdg_wm_base::Error::Role,
+                    "xdg_positioner support is not implemented yet",
+                );
+            }
+            xdg_wm_base::Request::GetXdgSurface { id, surface } => {
+                let Some(surface_data) = surface.data::<SurfaceData>() else {
+                    resource.post_error(xdg_wm_base::Error::Role, "unknown wl_surface");
+                    return;
+                };
+                {
+                    let mut surface_state = surface_data
+                        .inner
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner());
+                    if surface_state.has_xdg_surface {
+                        resource.post_error(
+                            xdg_wm_base::Error::Role,
+                            "wl_surface already has an xdg_surface",
+                        );
+                        return;
+                    }
+                    surface_state.has_xdg_surface = true;
+                }
+                let xdg_surface = data_init.init(
+                    id,
+                    XdgSurfaceData {
+                        wl_surface: surface.clone(),
+                        wm_base: resource.clone(),
+                        wm_child_count: Arc::clone(&data.child_count),
+                        state: Mutex::new(XdgSurfaceState::default()),
+                    },
+                );
+                surface_data
+                    .inner
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .xdg_surface = Some(xdg_surface);
+                data.child_count.fetch_add(1, Ordering::AcqRel);
+                state.xdg_surface_count = state.xdg_surface_count.saturating_add(1);
+            }
+            xdg_wm_base::Request::Pong { .. } => {}
+            _ => unreachable!("xdg_wm_base request added without an implementation"),
+        }
+    }
+}
+
+impl Dispatch<XdgSurface, XdgSurfaceData> for CompositorState {
+    fn request(
+        state: &mut Self,
+        _client: &Client,
+        resource: &XdgSurface,
+        request: xdg_surface::Request,
+        data: &XdgSurfaceData,
+        _handle: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            xdg_surface::Request::Destroy => {
+                if data
+                    .state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .role_active
+                {
+                    data.wm_base.post_error(
+                        xdg_wm_base::Error::Role,
+                        "xdg_surface destroyed before its role object",
+                    );
+                }
+            }
+            xdg_surface::Request::GetToplevel { id } => {
+                let Some(surface_data) = data.wl_surface.data::<SurfaceData>() else {
+                    data.wm_base
+                        .post_error(xdg_wm_base::Error::Role, "unknown wl_surface");
+                    return;
+                };
+                let mut surface_state = surface_data
+                    .inner
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                let mut xdg_state = data.state.lock().unwrap_or_else(|error| error.into_inner());
+                if xdg_state.role_active {
+                    resource.post_error(
+                        xdg_surface::Error::AlreadyConstructed,
+                        "xdg_surface already has an active role",
+                    );
+                    return;
+                }
+                match surface_state.role {
+                    None => surface_state.role = Some(SurfaceRole::XdgToplevel),
+                    Some(SurfaceRole::XdgToplevel) => {}
+                }
+                xdg_state.role_active = true;
+                let toplevel = data_init.init(
+                    id,
+                    XdgToplevelData {
+                        xdg_surface: resource.clone(),
+                    },
+                );
+                surface_state.xdg_toplevel = Some(toplevel);
+                state.xdg_toplevel_count = state.xdg_toplevel_count.saturating_add(1);
+            }
+            xdg_surface::Request::GetPopup { .. } => {
+                resource.post_error(
+                    xdg_surface::Error::NotConstructed,
+                    "xdg_popup support is not implemented yet",
+                );
+            }
+            xdg_surface::Request::SetWindowGeometry { width, height, .. } => {
+                if width <= 0 || height <= 0 {
+                    resource.post_error(
+                        xdg_surface::Error::InvalidSize,
+                        "window geometry must be positive",
+                    );
+                }
+            }
+            xdg_surface::Request::AckConfigure { serial } => {
+                let mut xdg_state = data.state.lock().unwrap_or_else(|error| error.into_inner());
+                if xdg_state.pending_configure != Some(serial) {
+                    resource.post_error(
+                        xdg_surface::Error::InvalidSerial,
+                        "ack_configure did not match the pending serial",
+                    );
+                    return;
+                }
+                xdg_state.acknowledged_configure = Some(serial);
+                xdg_state.pending_configure = None;
+                if let Some(surface_data) = data.wl_surface.data::<SurfaceData>() {
+                    surface_data
+                        .inner
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .xdg_configured = true;
+                }
+                state.xdg_ack_count = state.xdg_ack_count.saturating_add(1);
+            }
+            _ => unreachable!("xdg_surface request added without an implementation"),
+        }
+    }
+
+    fn destroyed(
+        state: &mut Self,
+        _client: ClientId,
+        _resource: &XdgSurface,
+        data: &XdgSurfaceData,
+    ) {
+        data.wm_child_count.fetch_sub(1, Ordering::AcqRel);
+        state.xdg_surface_count = state.xdg_surface_count.saturating_sub(1);
+        if let Some(surface_data) = data.wl_surface.data::<SurfaceData>() {
+            let mut surface = surface_data
+                .inner
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            surface.has_xdg_surface = false;
+            surface.xdg_surface = None;
+            surface.xdg_configured = false;
+        }
+    }
+}
+
+impl Dispatch<XdgToplevel, XdgToplevelData> for CompositorState {
+    fn request(
+        _state: &mut Self,
+        _client: &Client,
+        resource: &XdgToplevel,
+        request: xdg_toplevel::Request,
+        _data: &XdgToplevelData,
+        _handle: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            xdg_toplevel::Request::Destroy
+            | xdg_toplevel::Request::SetParent { .. }
+            | xdg_toplevel::Request::SetTitle { .. }
+            | xdg_toplevel::Request::SetAppId { .. }
+            | xdg_toplevel::Request::ShowWindowMenu { .. }
+            | xdg_toplevel::Request::Move { .. }
+            | xdg_toplevel::Request::Resize { .. }
+            | xdg_toplevel::Request::SetMaximized
+            | xdg_toplevel::Request::UnsetMaximized
+            | xdg_toplevel::Request::SetFullscreen { .. }
+            | xdg_toplevel::Request::UnsetFullscreen
+            | xdg_toplevel::Request::SetMinimized => {}
+            xdg_toplevel::Request::SetMaxSize { width, height }
+            | xdg_toplevel::Request::SetMinSize { width, height } => {
+                if width < 0 || height < 0 {
+                    resource.post_error(
+                        xdg_toplevel::Error::InvalidSize,
+                        "minimum and maximum sizes cannot be negative",
+                    );
+                }
+            }
+            _ => unreachable!("xdg_toplevel request added without an implementation"),
+        }
+    }
+
+    fn destroyed(
+        state: &mut Self,
+        _client: ClientId,
+        _resource: &XdgToplevel,
+        data: &XdgToplevelData,
+    ) {
+        if let Some(surface_data) = data.xdg_surface.data::<XdgSurfaceData>() {
+            {
+                let mut xdg_state = surface_data
+                    .state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                xdg_state.role_active = false;
+                xdg_state.pending_configure = None;
+                xdg_state.acknowledged_configure = None;
+            }
+            if let Some(wl_surface_data) = surface_data.wl_surface.data::<SurfaceData>() {
+                let mut surface = wl_surface_data
+                    .inner
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                surface.xdg_toplevel = None;
+                surface.xdg_configured = false;
+            }
+        }
+        state.xdg_toplevel_count = state.xdg_toplevel_count.saturating_sub(1);
     }
 }
 
@@ -579,6 +880,54 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
             }
             wl_surface::Request::Commit => {
                 let mut surface = data.inner.lock().unwrap_or_else(|error| error.into_inner());
+                let attaches_buffer = matches!(surface.pending_buffer, Some(Some(_)));
+                if surface.has_xdg_surface && surface.role.is_none() {
+                    if let Some(xdg_surface) = surface.xdg_surface.as_ref() {
+                        xdg_surface.post_error(
+                            xdg_surface::Error::NotConstructed,
+                            "xdg_surface committed before creating a role",
+                        );
+                    }
+                    return;
+                }
+                if surface.role == Some(SurfaceRole::XdgToplevel) && !surface.xdg_configured {
+                    if attaches_buffer {
+                        if let Some(xdg_surface) = surface.xdg_surface.as_ref() {
+                            xdg_surface.post_error(
+                                xdg_surface::Error::UnconfiguredBuffer,
+                                "xdg_surface buffer committed before ack_configure",
+                            );
+                        }
+                        return;
+                    }
+                    if let (Some(xdg_surface), Some(toplevel)) =
+                        (surface.xdg_surface.as_ref(), surface.xdg_toplevel.as_ref())
+                    {
+                        let Some(xdg_data) = xdg_surface.data::<XdgSurfaceData>() else {
+                            return;
+                        };
+                        let mut xdg_state = xdg_data
+                            .state
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner());
+                        if xdg_state.pending_configure.is_none()
+                            && xdg_state.acknowledged_configure.is_none()
+                        {
+                            state.next_configure_serial =
+                                state.next_configure_serial.wrapping_add(1).max(1);
+                            let serial = state.next_configure_serial;
+                            xdg_state.pending_configure = Some(serial);
+                            toplevel.configure(0, 0, Vec::new());
+                            xdg_surface.configure(serial);
+                        }
+                    } else if let Some(xdg_surface) = surface.xdg_surface.as_ref() {
+                        xdg_surface.post_error(
+                            xdg_surface::Error::NotConstructed,
+                            "xdg_surface committed without an active role",
+                        );
+                        return;
+                    }
+                }
                 if let Some(assignment) = surface.pending_buffer.take() {
                     surface.committed_frame = match assignment {
                         Some(buffer) => match buffer.inner.snapshot() {
@@ -682,6 +1031,9 @@ impl CompositorCore {
         display
             .handle()
             .create_global::<CompositorState, WlShm, _>(1, ());
+        display
+            .handle()
+            .create_global::<CompositorState, XdgWmBase, _>(6, ());
         Ok(Self {
             display,
             state: CompositorState::default(),
@@ -716,6 +1068,22 @@ impl CompositorCore {
 
     pub fn compositor_bind_count(&self) -> u32 {
         self.state.compositor_binds
+    }
+
+    pub fn xdg_wm_base_bind_count(&self) -> u32 {
+        self.state.xdg_wm_base_binds
+    }
+
+    pub fn xdg_surface_count(&self) -> u32 {
+        self.state.xdg_surface_count
+    }
+
+    pub fn xdg_toplevel_count(&self) -> u32 {
+        self.state.xdg_toplevel_count
+    }
+
+    pub fn xdg_ack_count(&self) -> u32 {
+        self.state.xdg_ack_count
     }
 
     pub fn shm_bind_count(&self) -> u32 {
@@ -927,6 +1295,54 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeXdgWmBaseBindCount(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.xdg_wm_base_bind_count()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeXdgSurfaceCount(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.xdg_surface_count()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeXdgToplevelCount(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.xdg_toplevel_count()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeXdgAckCount(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.xdg_ack_count()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeShmBindCount(
     _environment: *mut std::ffi::c_void,
     _activity: *mut std::ffi::c_void,
@@ -1092,6 +1508,10 @@ mod tests {
         let core = CompositorCore::new().expect("Wayland display");
         assert!(!core.is_stopping());
         assert_eq!(core.compositor_bind_count(), 0);
+        assert_eq!(core.xdg_wm_base_bind_count(), 0);
+        assert_eq!(core.xdg_surface_count(), 0);
+        assert_eq!(core.xdg_toplevel_count(), 0);
+        assert_eq!(core.xdg_ack_count(), 0);
         assert_eq!(core.shm_bind_count(), 0);
         assert_eq!(core.shm_pool_count(), 0);
         assert_eq!(core.shm_buffer_count(), 0);
