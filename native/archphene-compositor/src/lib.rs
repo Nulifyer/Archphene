@@ -40,6 +40,7 @@ pub struct CompositorState {
     last_frame_width: u32,
     last_frame_height: u32,
     last_frame_checksum: u32,
+    last_frame: Option<Arc<CommittedFrame>>,
 }
 
 #[derive(Default)]
@@ -52,7 +53,7 @@ struct SurfaceState {
     pending_buffer: Option<Option<SurfaceBuffer>>,
     pending_damage: bool,
     pending_callbacks: Vec<WlCallback>,
-    committed_frame: Option<CommittedFrame>,
+    committed_frame: Option<Arc<CommittedFrame>>,
 }
 
 #[derive(Clone)]
@@ -68,6 +69,122 @@ struct CommittedFrame {
     format: wl_shm::Format,
     #[allow(dead_code)]
     pixels: Vec<u8>,
+}
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn copy_wayland_pixels_to_android(
+    source: &[u8],
+    format: wl_shm::Format,
+    destination: &mut [u8],
+) -> Result<(), ()> {
+    if source.len() != destination.len() || source.len() % 4 != 0 {
+        return Err(());
+    }
+    for (source, destination) in source.chunks_exact(4).zip(destination.chunks_exact_mut(4)) {
+        destination[0] = source[2];
+        destination[1] = source[1];
+        destination[2] = source[0];
+        destination[3] = if format == wl_shm::Format::Argb8888 {
+            source[3]
+        } else {
+            u8::MAX
+        };
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "android")]
+#[repr(C)]
+struct AndroidBitmapInfo {
+    width: u32,
+    height: u32,
+    stride: u32,
+    format: i32,
+    flags: u32,
+}
+
+#[cfg(target_os = "android")]
+#[link(name = "jnigraphics")]
+unsafe extern "C" {
+    #[link_name = "AndroidBitmap_getInfo"]
+    fn android_bitmap_get_info(
+        environment: *mut std::ffi::c_void,
+        bitmap: *mut std::ffi::c_void,
+        info: *mut AndroidBitmapInfo,
+    ) -> i32;
+    #[link_name = "AndroidBitmap_lockPixels"]
+    fn android_bitmap_lock_pixels(
+        environment: *mut std::ffi::c_void,
+        bitmap: *mut std::ffi::c_void,
+        address: *mut *mut std::ffi::c_void,
+    ) -> i32;
+    #[link_name = "AndroidBitmap_unlockPixels"]
+    fn android_bitmap_unlock_pixels(
+        environment: *mut std::ffi::c_void,
+        bitmap: *mut std::ffi::c_void,
+    ) -> i32;
+}
+
+#[cfg(target_os = "android")]
+fn copy_last_frame_to_bitmap(
+    core: &CompositorCore,
+    environment: *mut std::ffi::c_void,
+    bitmap: *mut std::ffi::c_void,
+) -> i32 {
+    const ANDROID_BITMAP_FORMAT_RGBA_8888: i32 = 1;
+    let Some(frame) = core.state.last_frame.as_ref() else {
+        return -1;
+    };
+    let mut info: AndroidBitmapInfo = unsafe { zeroed() };
+    if unsafe { android_bitmap_get_info(environment, bitmap, &mut info) } != 0 {
+        return -2;
+    }
+    let row_bytes = match usize::try_from(frame.width)
+        .ok()
+        .and_then(|width| width.checked_mul(4))
+    {
+        Some(value) => value,
+        None => return -3,
+    };
+    let Ok(bitmap_stride) = usize::try_from(info.stride) else {
+        return -3;
+    };
+    if info.format != ANDROID_BITMAP_FORMAT_RGBA_8888
+        || info.width != frame.width
+        || info.height != frame.height
+        || bitmap_stride < row_bytes
+    {
+        return -3;
+    }
+    let Some(bitmap_bytes) = bitmap_stride.checked_mul(info.height as usize) else {
+        return -3;
+    };
+    let mut address = ptr::null_mut();
+    if unsafe { android_bitmap_lock_pixels(environment, bitmap, &mut address) } != 0 {
+        return -4;
+    }
+    if address.is_null() {
+        let _ = unsafe { android_bitmap_unlock_pixels(environment, bitmap) };
+        return -4;
+    }
+
+    let destination = unsafe { std::slice::from_raw_parts_mut(address.cast::<u8>(), bitmap_bytes) };
+    for (source, destination) in frame
+        .pixels
+        .chunks_exact(row_bytes)
+        .zip(destination.chunks_exact_mut(bitmap_stride))
+    {
+        if copy_wayland_pixels_to_android(source, frame.format, &mut destination[..row_bytes])
+            .is_err()
+        {
+            let _ = unsafe { android_bitmap_unlock_pixels(environment, bitmap) };
+            return -5;
+        }
+    }
+    if unsafe { android_bitmap_unlock_pixels(environment, bitmap) } != 0 {
+        return -6;
+    }
+    0
 }
 
 pub struct RegionData;
@@ -469,7 +586,7 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                                 if buffer.resource.is_alive() {
                                     buffer.resource.release();
                                 }
-                                Some(frame)
+                                Some(Arc::new(frame))
                             }
                             Err(error) => {
                                 resource.post_error(
@@ -484,7 +601,8 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 }
                 let callbacks = std::mem::take(&mut surface.pending_callbacks);
                 surface.pending_damage = false;
-                let metrics = surface.committed_frame.as_ref().map(|frame| {
+                let latest_frame = surface.committed_frame.clone();
+                let metrics = latest_frame.as_ref().map(|frame| {
                     let checksum = frame.pixels.iter().fold(0u32, |checksum, value| {
                         checksum.wrapping_add(u32::from(*value))
                     });
@@ -493,6 +611,7 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 drop(surface);
 
                 state.surface_commit_count = state.surface_commit_count.saturating_add(1);
+                state.last_frame = latest_frame;
                 if let Some((width, height, checksum)) = metrics {
                     state.last_frame_width = width;
                     state.last_frame_height = height;
@@ -512,6 +631,12 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
 
     fn destroyed(state: &mut Self, _client: ClientId, _resource: &WlSurface, _data: &SurfaceData) {
         state.surface_count = state.surface_count.saturating_sub(1);
+        if state.surface_count == 0 {
+            state.last_frame = None;
+            state.last_frame_width = 0;
+            state.last_frame_height = 0;
+            state.last_frame_checksum = 0;
+        }
     }
 }
 
@@ -908,6 +1033,20 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     i32::try_from(core.last_frame_checksum()).unwrap_or(i32::MAX)
 }
 
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeCopyLastFrameToBitmap(
+    environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+    bitmap: *mut std::ffi::c_void,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    copy_last_frame_to_bitmap(core, environment, bitmap)
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeDestroyCore(
     _environment: *mut std::ffi::c_void,
@@ -923,6 +1062,20 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn converts_wayland_argb_and_xrgb_to_android_rgba() {
+        let source = [1, 2, 3, 4, 5, 6, 7, 8];
+        let mut argb = [0; 8];
+        copy_wayland_pixels_to_android(&source, wl_shm::Format::Argb8888, &mut argb)
+            .expect("ARGB conversion");
+        assert_eq!(argb, [3, 2, 1, 4, 7, 6, 5, 8]);
+
+        let mut xrgb = [0; 8];
+        copy_wayland_pixels_to_android(&source, wl_shm::Format::Xrgb8888, &mut xrgb)
+            .expect("XRGB conversion");
+        assert_eq!(xrgb, [3, 2, 1, 255, 7, 6, 5, 255]);
+    }
 
     #[test]
     fn validates_shm_buffer_geometry() {

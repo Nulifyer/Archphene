@@ -1,10 +1,14 @@
 package org.archphene.compositorprobe;
 
 import android.app.Activity;
+import android.graphics.Bitmap;
+import android.graphics.Color;
 import android.os.Bundle;
 import android.os.ParcelFileDescriptor;
 import android.util.Log;
 import android.view.Gravity;
+import android.widget.ImageView;
+import android.widget.LinearLayout;
 import android.widget.TextView;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -31,21 +35,33 @@ public final class MainActivity extends Activity {
     private static native int nativeLastFrameWidth(long handle);
     private static native int nativeLastFrameHeight(long handle);
     private static native int nativeLastFrameChecksum(long handle);
+    private static native int nativeCopyLastFrameToBitmap(long handle, Bitmap bitmap);
     private static native void nativeDestroyCore(long handle);
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setGravity(Gravity.CENTER);
+        content.setPadding(24, 24, 24, 24);
+        ImageView frameView = new ImageView(this);
+        frameView.setBackgroundColor(Color.DKGRAY);
+        frameView.setScaleType(ImageView.ScaleType.FIT_XY);
+        frameView.setContentDescription("No committed Wayland frame");
+        content.addView(frameView, new LinearLayout.LayoutParams(320, 160));
         TextView result = new TextView(this);
         result.setGravity(Gravity.CENTER);
         result.setTextSize(20);
-        setContentView(result);
-        new Thread(() -> runProbe(result), "native-compositor-probe").start();
+        content.addView(result);
+        setContentView(content);
+        new Thread(() -> runProbe(result, frameView), "native-compositor-probe").start();
     }
 
-    private void runProbe(TextView result) {
+    private void runProbe(TextView result, ImageView frameView) {
         String message;
         boolean passed = false;
+        Bitmap renderedFrame = null;
         long core = 0;
         try {
             if (nativeProtocolVersion() != 1) throw new IllegalStateException("protocol version");
@@ -118,6 +134,12 @@ public final class MainActivity extends Activity {
                         || nativeLastFrameChecksum(core) != 656) {
                     throw new IllegalStateException("wl_surface commit did not snapshot the SHM frame");
                 }
+                renderedFrame = Bitmap.createBitmap(4, 2, Bitmap.Config.ARGB_8888);
+                if (nativeCopyLastFrameToBitmap(core, renderedFrame) != 0
+                        || renderedFrame.getPixel(0, 0) != 0xff030201
+                        || renderedFrame.getPixel(0, 1) != 0xff1b1a19) {
+                    throw new IllegalStateException("Android bitmap did not match the XRGB SHM frame");
+                }
 
                 output.write(destroyShmResourcesAndSyncRequest());
                 output.flush();
@@ -137,7 +159,7 @@ public final class MainActivity extends Activity {
             }
             passed = true;
             message = "Native Wayland compositor passed\n"
-                    + "registry, SHM frame commit, callback, and lifecycles complete";
+                    + "registry, native frame, Android bitmap, and lifecycles complete";
         } catch (Exception error) {
             message = "Native compositor probe failed\n" + error.getMessage();
         } finally {
@@ -145,8 +167,13 @@ public final class MainActivity extends Activity {
         }
         boolean finalPassed = passed;
         String finalMessage = message;
+        Bitmap finalRenderedFrame = renderedFrame;
         Log.i("ArchpheneCompositorProbe", finalMessage.replace('\n', ' '));
         runOnUiThread(() -> {
+            if (finalRenderedFrame != null) {
+                frameView.setImageBitmap(finalRenderedFrame);
+                frameView.setContentDescription("Committed Wayland XRGB frame");
+            }
             result.setText(finalMessage);
             result.setContentDescription(finalPassed
                     ? "Native compositor probe passed"
@@ -208,7 +235,7 @@ public final class MainActivity extends Activity {
         request.putInt(4);
         request.putInt(2);
         request.putInt(24);
-        request.putInt(0);
+        request.putInt(1);
         putHeader(request, 1, 0, 12);
         request.putInt(13);
         return request.array();
