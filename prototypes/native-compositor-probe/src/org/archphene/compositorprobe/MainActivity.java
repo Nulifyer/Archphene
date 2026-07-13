@@ -18,9 +18,14 @@ public final class MainActivity extends Activity {
     private static native int nativeProtocolVersion();
     private static native long nativeCreateCore();
     private static native int nativeAdoptClient(long handle, int fd);
+    private static native int nativeSendShmPoolRequest(
+            int socketFd, int poolId, int poolSize, int callbackId);
     private static native int nativeDispatchOnce(long handle);
     private static native int nativeCompositorBindCount(long handle);
     private static native int nativeShmBindCount(long handle);
+    private static native int nativeShmPoolCount(long handle);
+    private static native int nativeShmBufferCount(long handle);
+    private static native int nativeLastBufferChecksum(long handle);
     private static native int nativeSurfaceCount(long handle);
     private static native void nativeDestroyCore(long handle);
 
@@ -89,10 +94,35 @@ public final class MainActivity extends Activity {
                 if (nativeSurfaceCount(core) != 0) {
                     throw new IllegalStateException("wl_surface destruction was not dispatched");
                 }
+
+                if (nativeSendShmPoolRequest(client.getFd(), 11, 32, 12) != 0) {
+                    throw new IllegalStateException("SHM pool FD transfer");
+                }
+                dispatch(core);
+                readUntilCallback(input, 12);
+                if (nativeShmPoolCount(core) != 1) {
+                    throw new IllegalStateException("wl_shm_pool creation was not dispatched");
+                }
+
+                output.write(createShmBufferAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 14);
+                if (nativeShmBufferCount(core) != 1 || nativeLastBufferChecksum(core) != 528) {
+                    throw new IllegalStateException("wl_buffer creation did not expose SHM pixels");
+                }
+
+                output.write(destroyShmResourcesAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 15);
+                if (nativeShmBufferCount(core) != 0 || nativeShmPoolCount(core) != 0) {
+                    throw new IllegalStateException("SHM resources were not destroyed");
+                }
             }
             passed = true;
             message = "Native Wayland compositor passed\n"
-                    + "registry, compositor/SHM binds, and surface lifecycle complete";
+                    + "registry, SHM FD/buffer, and surface lifecycles complete";
         } catch (Exception error) {
             message = "Native compositor probe failed\n" + error.getMessage();
         } finally {
@@ -152,6 +182,29 @@ public final class MainActivity extends Activity {
         putHeader(request, 8, 0, 8);
         putHeader(request, 1, 0, 12);
         request.putInt(10);
+        return request.array();
+    }
+
+    private static byte[] createShmBufferAndSyncRequest() {
+        ByteBuffer request = buffer(44);
+        putHeader(request, 11, 0, 32);
+        request.putInt(13);
+        request.putInt(0);
+        request.putInt(4);
+        request.putInt(2);
+        request.putInt(16);
+        request.putInt(0);
+        putHeader(request, 1, 0, 12);
+        request.putInt(14);
+        return request.array();
+    }
+
+    private static byte[] destroyShmResourcesAndSyncRequest() {
+        ByteBuffer request = buffer(28);
+        putHeader(request, 13, 0, 8);
+        putHeader(request, 11, 1, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(15);
         return request.array();
     }
 

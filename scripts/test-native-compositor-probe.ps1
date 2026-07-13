@@ -26,8 +26,8 @@ $deadline = [DateTime]::UtcNow.AddSeconds(20)
 do {
     Start-Sleep -Milliseconds 500
     $output = (& adb -s $Serial logcat -d -s "ArchpheneCompositorProbe:I" "*:S") -join [Environment]::NewLine
-    if ($output.Contains("Native Wayland compositor passed")) {
-        Write-Host "Native compositor registry/compositor/SHM/surface probe passed on $Serial ($AndroidAbi)."
+    if ($output.Contains("registry, SHM FD/buffer, and surface lifecycles complete")) {
+        Write-Host "Native compositor SHM FD/buffer lifecycle probe passed on $Serial ($AndroidAbi)."
         exit 0
     }
     if ($output.Contains("Native compositor probe failed")) {
