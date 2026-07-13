@@ -72,6 +72,22 @@ public final class MainActivity extends Activity {
     private static native int nativeOfferAndroidClipboardText(long handle);
     private static native int nativeTakeAndroidPasteFd(long handle);
     private static native int nativeTakeLinuxCopyFd(long handle);
+    private static native int nativeTextInputManagerBindCount(long handle);
+    private static native int nativeTextInputCount(long handle);
+    private static native int nativeImeActive(long handle);
+    private static native int nativeImeShowRequestCount(long handle);
+    private static native int nativeImeHideRequestCount(long handle);
+    private static native int nativeImeSurroundingTextLength(long handle);
+    private static native int nativeImeSurroundingCursor(long handle);
+    private static native int nativeImeSurroundingAnchor(long handle);
+    private static native int nativeImeContentHint(long handle);
+    private static native int nativeImeContentPurpose(long handle);
+    private static native int nativeImeCursorRectangleComponent(
+            long handle, int component);
+    private static native int nativeImeCommitProbeText(long handle);
+    private static native int nativeImePreeditProbeText(long handle);
+    private static native int nativeImeDeleteSurrounding(
+            long handle, int beforeLength, int afterLength);
     private static native int nativePointerCount(long handle);
     private static native int nativeKeyboardCount(long handle);
     private static native int nativeKeyboardEventCount(long handle);
@@ -812,17 +828,11 @@ public final class MainActivity extends Activity {
                     throw new IllegalStateException("wl_output release failed");
                 }
 
-                output.write(destroyXdgToplevelAndSyncRequest());
+
+                output.write(syncRequest(82));
                 output.flush();
                 dispatch(core);
                 readUntilCallback(input, 82);
-                if (nativeXdgSurfaceCount(core) != 0
-                        || nativeXdgToplevelCount(core) != 0
-                        || nativeSurfaceCount(core) != 0
-                        || nativeShmBufferCount(core) != 0
-                        || nativeShmPoolCount(core) != 0) {
-                    throw new IllegalStateException("xdg destruction lifecycle failed");
-                }
                 output.write(bindGlobalAndSyncRequest(globals.seat, "wl_seat", 83, 84));
                 output.flush();
                 dispatch(core);
@@ -939,12 +949,84 @@ public final class MainActivity extends Activity {
                 output.flush();
                 dispatch(core);
                 readNullSelectionUntilCallback(input, 88, 92);
+                output.write(syncRequest(93));
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 93);
+
+                output.write(bindGlobalAndSyncRequest(
+                        globals.textInputManager, "zwp_text_input_manager_v3", 94, 95));
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 95);
+                if (nativeTextInputManagerBindCount(core) != 1) {
+                    throw new IllegalStateException(
+                            "zwp_text_input_manager_v3 bind was not dispatched");
+                }
+
+                output.write(createTextInputAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                readTextInputEnterUntilCallback(input, 96, 20, 97);
+                if (nativeTextInputCount(core) != 1
+                        || nativeImeActive(core) != 0
+                        || nativeImeShowRequestCount(core) != 0) {
+                    throw new IllegalStateException(
+                            "text-input focus incorrectly activated Android IME");
+                }
+
+                output.write(enableTextInputAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 98);
+                if (nativeImeActive(core) != 1
+                        || nativeImeShowRequestCount(core) != 1
+                        || nativeImeSurroundingTextLength(core) != 5
+                        || nativeImeSurroundingCursor(core) != 5
+                        || nativeImeSurroundingAnchor(core) != 5
+                        || nativeImeContentHint(core) != 3
+                        || nativeImeContentPurpose(core) != 6
+                        || nativeImeCursorRectangleComponent(core, 0) != 4
+                        || nativeImeCursorRectangleComponent(core, 1) != 6
+                        || nativeImeCursorRectangleComponent(core, 2) != 2
+                        || nativeImeCursorRectangleComponent(core, 3) != 12) {
+                    throw new IllegalStateException(
+                            "committed text-input state was not exposed to Android");
+                }
+
+                if (nativeImePreeditProbeText(core) != 1
+                        || nativeImeCommitProbeText(core) != 1
+                        || nativeImeDeleteSurrounding(core, 1, 0) != 1) {
+                    throw new IllegalStateException("Android IME events were not routed");
+                }
+                output.write(syncRequest(99));
+                output.flush();
+                dispatch(core);
+                readImeEventsUntilCallback(input, 96, 99, 1);
+
+                output.write(disableTextInputAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 100);
+                if (nativeImeActive(core) != 0
+                        || nativeImeHideRequestCount(core) != 1) {
+                    throw new IllegalStateException(
+                            "committed text-input disable did not hide Android IME");
+                }
+
+                output.write(destroyTextInputAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 101);
+                if (nativeTextInputCount(core) != 0) {
+                    throw new IllegalStateException("text-input resource leaked");
+                }
 
                 output.write(destroyDataSelectionAndSyncRequest(
                         dataOfferId, androidOfferId));
                 output.flush();
                 dispatch(core);
-                readUntilCallback(input, 93);
+                readUntilCallback(input, 102);
                 if (nativeDataSourceCount(core) != 0
                         || nativeDataDeviceCount(core) != 0
                         || nativeDataOfferCount(core) != 0
@@ -953,12 +1035,23 @@ public final class MainActivity extends Activity {
                     throw new IllegalStateException(
                             "wl_data_device selection resources leaked");
                 }
+                output.write(destroyXdgToplevelAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 103);
+                if (nativeXdgSurfaceCount(core) != 0
+                        || nativeXdgToplevelCount(core) != 0
+                        || nativeSurfaceCount(core) != 0
+                        || nativeShmBufferCount(core) != 0
+                        || nativeShmPoolCount(core) != 0) {
+                    throw new IllegalStateException("xdg destruction lifecycle failed");
+                }
             }
             passed = true;
             message = "Native Wayland compositor passed\n"
                     + "registry, Android bitmap, xdg toplevel, keyboard input, "
                     + "MotionEvent pointer, nested popup grabs, synchronized subsurface trees, "
-                    + "committed parent geometry, and bidirectional demand-driven Android clipboard complete";
+                    + "committed parent geometry, and bidirectional clipboard and text-input v3 lifecycle complete";
         } catch (Exception error) {
             message = "Native compositor probe failed\n" + error.getMessage();
         } finally {
@@ -1125,7 +1218,63 @@ public final class MainActivity extends Activity {
         putHeader(request, 88, 2, 8);
         putHeader(request, 83, 3, 8);
         putHeader(request, 1, 0, 12);
-        request.putInt(93);
+        request.putInt(102);
+        return request.array();
+    }
+    private static byte[] createTextInputAndSyncRequest() {
+        ByteBuffer request = buffer(28);
+        putHeader(request, 94, 1, 16);
+        request.putInt(96);
+        request.putInt(83);
+        putHeader(request, 1, 0, 12);
+        request.putInt(97);
+        return request.array();
+    }
+
+    private static byte[] enableTextInputAndSyncRequest() {
+        byte[] surrounding = "hello".getBytes(StandardCharsets.UTF_8);
+        int stringLength = surrounding.length + 1;
+        int paddedLength = (stringLength + 3) & ~3;
+        int surroundingSize = 8 + 4 + paddedLength + 8;
+        ByteBuffer request = buffer(8 + surroundingSize + 16 + 24 + 8 + 12);
+        putHeader(request, 96, 1, 8);
+        putHeader(request, 96, 3, surroundingSize);
+        request.putInt(stringLength);
+        request.put(surrounding);
+        request.put((byte) 0);
+        int stringEnd = 8 + 8 + 4 + paddedLength;
+        while (request.position() < stringEnd) request.put((byte) 0);
+        request.putInt(5);
+        request.putInt(5);
+        putHeader(request, 96, 5, 16);
+        request.putInt(3);
+        request.putInt(6);
+        putHeader(request, 96, 6, 24);
+        request.putInt(4);
+        request.putInt(6);
+        request.putInt(2);
+        request.putInt(12);
+        putHeader(request, 96, 7, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(98);
+        return request.array();
+    }
+
+    private static byte[] disableTextInputAndSyncRequest() {
+        ByteBuffer request = buffer(28);
+        putHeader(request, 96, 2, 8);
+        putHeader(request, 96, 7, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(100);
+        return request.array();
+    }
+
+    private static byte[] destroyTextInputAndSyncRequest() {
+        ByteBuffer request = buffer(28);
+        putHeader(request, 96, 0, 8);
+        putHeader(request, 94, 0, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(101);
         return request.array();
     }
     private static byte[] createSecondShmBufferAndSyncRequest() {
@@ -1511,7 +1660,7 @@ public final class MainActivity extends Activity {
         putHeader(request, 20, 0, 8);
         putHeader(request, 18, 0, 8);
         putHeader(request, 1, 0, 12);
-        request.putInt(82);
+        request.putInt(103);
         return request.array();
     }
     private static byte[] createShmBufferAndSyncRequest() {
@@ -1564,6 +1713,7 @@ public final class MainActivity extends Activity {
         Global xdgWmBase = null;
         Global seat = null;
         Global dataDeviceManager = null;
+        Global textInputManager = null;
         Global output = null;
         while (true) {
             Message message = readMessage(input);
@@ -1593,6 +1743,8 @@ public final class MainActivity extends Activity {
                     seat = new Global(name, version);
                 } else if ("wl_data_device_manager".equals(interfaceName)) {
                     dataDeviceManager = new Global(name, version);
+                } else if ("zwp_text_input_manager_v3".equals(interfaceName)) {
+                    textInputManager = new Global(name, version);
                 } else if ("wl_output".equals(interfaceName)) {
                     output = new Global(name, version);
                 }
@@ -1604,11 +1756,12 @@ public final class MainActivity extends Activity {
                         || xdgWmBase == null
                         || seat == null
                         || dataDeviceManager == null
+                        || textInputManager == null
                         || output == null) {
                     throw new IllegalStateException("required Wayland globals not advertised");
                 }
                 return new RegistryGlobals(compositor, subcompositor, shm, xdgWmBase, seat,
-                        dataDeviceManager, output);
+                        dataDeviceManager, textInputManager, output);
             }
         }
     }
@@ -1691,6 +1844,67 @@ public final class MainActivity extends Activity {
             throw new IllegalStateException("unterminated Wayland string");
         }
         return new String(encoded, 0, length - 1, StandardCharsets.UTF_8);
+    }
+    private static void readTextInputEnterUntilCallback(
+            FileInputStream input, int textInputId, int surfaceId, int callbackId)
+            throws Exception {
+        boolean entered = false;
+        while (true) {
+            Message message = readMessage(input);
+            throwIfDisplayError(message);
+            if (message.objectId == textInputId
+                    && message.opcode == 0
+                    && message.body.length == 4) {
+                entered |= ByteBuffer.wrap(message.body)
+                        .order(ByteOrder.nativeOrder()).getInt() == surfaceId;
+            }
+            if (message.objectId == callbackId && message.opcode == 0) {
+                if (!entered) {
+                    throw new IllegalStateException(
+                            "text-input did not enter the keyboard-focused surface");
+                }
+                return;
+            }
+        }
+    }
+
+    private static void readImeEventsUntilCallback(
+            FileInputStream input, int textInputId, int callbackId, int serial)
+            throws Exception {
+        boolean preedit = false;
+        boolean committed = false;
+        boolean deleted = false;
+        int doneCount = 0;
+        while (true) {
+            Message message = readMessage(input);
+            throwIfDisplayError(message);
+            if (message.objectId == textInputId && message.opcode == 2) {
+                preedit |= "compose".equals(readWaylandString(message.body));
+            } else if (message.objectId == textInputId && message.opcode == 3) {
+                committed |= "Archphene IME".equals(readWaylandString(message.body));
+            } else if (message.objectId == textInputId
+                    && message.opcode == 4
+                    && message.body.length == 8) {
+                ByteBuffer body = ByteBuffer.wrap(message.body)
+                        .order(ByteOrder.nativeOrder());
+                deleted |= body.getInt() == 1 && body.getInt() == 0;
+            } else if (message.objectId == textInputId
+                    && message.opcode == 5
+                    && message.body.length == 4) {
+                int doneSerial = ByteBuffer.wrap(message.body)
+                        .order(ByteOrder.nativeOrder()).getInt();
+                if (doneSerial != serial) {
+                    throw new IllegalStateException("text-input done serial mismatch");
+                }
+                doneCount++;
+            }
+            if (message.objectId == callbackId && message.opcode == 0) {
+                if (!preedit || !committed || !deleted || doneCount != 3) {
+                    throw new IllegalStateException("Android IME event sequence was incomplete");
+                }
+                return;
+            }
+        }
     }
     private static void readNullSelectionUntilCallback(
             FileInputStream input, int dataDeviceId, int callbackId) throws Exception {
@@ -2445,6 +2659,7 @@ public final class MainActivity extends Activity {
         final Global xdgWmBase;
         final Global seat;
         final Global dataDeviceManager;
+        final Global textInputManager;
         final Global output;
 
         RegistryGlobals(
@@ -2454,6 +2669,7 @@ public final class MainActivity extends Activity {
                 Global xdgWmBase,
                 Global seat,
                 Global dataDeviceManager,
+                Global textInputManager,
                 Global output) {
             this.compositor = compositor;
             this.subcompositor = subcompositor;
@@ -2461,6 +2677,7 @@ public final class MainActivity extends Activity {
             this.xdgWmBase = xdgWmBase;
             this.seat = seat;
             this.dataDeviceManager = dataDeviceManager;
+            this.textInputManager = textInputManager;
             this.output = output;
         }
     }

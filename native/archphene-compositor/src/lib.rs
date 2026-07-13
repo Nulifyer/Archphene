@@ -10,6 +10,10 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
+use wayland_protocols::wp::text_input::zv3::server::zwp_text_input_manager_v3::{
+    self, ZwpTextInputManagerV3,
+};
+use wayland_protocols::wp::text_input::zv3::server::zwp_text_input_v3::{self, ZwpTextInputV3};
 use wayland_protocols::xdg::shell::server::xdg_popup::{self, XdgPopup};
 use wayland_protocols::xdg::shell::server::xdg_positioner::{self, XdgPositioner};
 use wayland_protocols::xdg::shell::server::xdg_surface::{self, XdgSurface};
@@ -108,6 +112,12 @@ pub struct CompositorState {
     android_clipboard_offered: bool,
     pending_android_paste_fds: VecDeque<File>,
     pending_linux_copy_fds: VecDeque<File>,
+    text_input_manager_binds: u32,
+    text_input_count: u32,
+    text_inputs: Vec<ZwpTextInputV3>,
+    ime_active: bool,
+    ime_show_requests: u32,
+    ime_hide_requests: u32,
 }
 
 const XKB_KEYMAP: &[u8] = concat!(include_str!("archphene-us.xkb"), "\0").as_bytes();
@@ -171,6 +181,30 @@ enum ClipboardOfferSource {
 struct DataOfferData {
     source: ClipboardOfferSource,
     mime_types: Vec<String>,
+}
+struct TextInputData {
+    seat: WlSeat,
+    state: Mutex<TextInputState>,
+}
+
+#[derive(Default)]
+struct TextInputState {
+    focused_surface: Option<WlSurface>,
+    pending_enabled: Option<bool>,
+    enabled: bool,
+    pending_surrounding_text: Option<SurroundingText>,
+    surrounding_text: Option<SurroundingText>,
+    pending_content_type: Option<(u32, u32)>,
+    content_type: (u32, u32),
+    pending_cursor_rectangle: Option<(i32, i32, i32, i32)>,
+    cursor_rectangle: Option<(i32, i32, i32, i32)>,
+    commit_count: u32,
+}
+
+struct SurroundingText {
+    text: String,
+    cursor: i32,
+    anchor: i32,
 }
 
 #[derive(Default)]
@@ -1487,6 +1521,21 @@ fn set_keyboard_focus(state: &mut CompositorState, surface: Option<WlSurface>) {
             keyboard.leave(serial, &previous);
             state.keyboard_event_count = state.keyboard_event_count.saturating_add(1);
         }
+        let mut disabled = 0u32;
+        for text_input in state.text_inputs.iter().filter(|text_input| {
+            text_input.is_alive() && text_input.id().same_client_as(&previous.id())
+        }) {
+            text_input.leave(&previous);
+            if let Some(data) = text_input.data::<TextInputData>() {
+                let mut text_state = data.state.lock().unwrap_or_else(|error| error.into_inner());
+                disabled = disabled.saturating_add(u32::from(text_state.enabled));
+                *text_state = TextInputState::default();
+            }
+        }
+        if disabled > 0 {
+            state.ime_active = false;
+            state.ime_hide_requests = state.ime_hide_requests.saturating_add(1);
+        }
     }
 
     if let Some(surface) = surface {
@@ -1499,12 +1548,22 @@ fn set_keyboard_focus(state: &mut CompositorState, surface: Option<WlSurface>) {
             keyboard.modifiers(serial, 0, 0, 0, 0);
             state.keyboard_event_count = state.keyboard_event_count.saturating_add(2);
         }
+        for text_input in state.text_inputs.iter().filter(|text_input| {
+            text_input.is_alive() && text_input.id().same_client_as(&surface.id())
+        }) {
+            text_input.enter(&surface);
+            if let Some(data) = text_input.data::<TextInputData>() {
+                data.state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .focused_surface = Some(surface.clone());
+            }
+        }
         state.keyboard_focus_surface = Some(surface);
     } else {
         state.pressed_keys.clear();
     }
 }
-
 const TEXT_MIME_TYPES: [&str; 2] = ["text/plain;charset=utf-8", "text/plain"];
 
 fn create_cloexec_pipe() -> io::Result<(File, File)> {
@@ -1623,6 +1682,212 @@ fn queue_linux_copy(state: &mut CompositorState, source: &WlDataSource) {
     source.send((*mime_type).to_owned(), write_end.as_fd());
     state.pending_linux_copy_fds.push_back(read_end);
 }
+impl GlobalDispatch<ZwpTextInputManagerV3, ()> for CompositorState {
+    fn bind(
+        state: &mut Self,
+        _handle: &DisplayHandle,
+        _client: &Client,
+        resource: New<ZwpTextInputManagerV3>,
+        _global_data: &(),
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        data_init.init(resource, ());
+        state.text_input_manager_binds = state.text_input_manager_binds.saturating_add(1);
+    }
+}
+
+impl Dispatch<ZwpTextInputManagerV3, ()> for CompositorState {
+    fn request(
+        state: &mut Self,
+        _client: &Client,
+        _resource: &ZwpTextInputManagerV3,
+        request: zwp_text_input_manager_v3::Request,
+        _data: &(),
+        _handle: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            zwp_text_input_manager_v3::Request::GetTextInput { id, seat } => {
+                let focused_surface = state
+                    .keyboard_focus_surface
+                    .as_ref()
+                    .filter(|surface| surface.id().same_client_as(&seat.id()))
+                    .cloned();
+                let text_input = data_init.init(
+                    id,
+                    TextInputData {
+                        seat,
+                        state: Mutex::new(TextInputState {
+                            focused_surface: focused_surface.clone(),
+                            ..TextInputState::default()
+                        }),
+                    },
+                );
+                if let Some(surface) = focused_surface {
+                    text_input.enter(&surface);
+                }
+                state.text_input_count = state.text_input_count.saturating_add(1);
+                state.text_inputs.push(text_input);
+            }
+            zwp_text_input_manager_v3::Request::Destroy => {}
+            _ => unreachable!("text-input manager request added without an implementation"),
+        }
+    }
+}
+
+impl Dispatch<ZwpTextInputV3, TextInputData> for CompositorState {
+    fn request(
+        state: &mut Self,
+        _client: &Client,
+        resource: &ZwpTextInputV3,
+        request: zwp_text_input_v3::Request,
+        data: &TextInputData,
+        _handle: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            zwp_text_input_v3::Request::Destroy => {}
+            zwp_text_input_v3::Request::Enable => {
+                let mut text_state = data.state.lock().unwrap_or_else(|error| error.into_inner());
+                text_state.pending_enabled = Some(true);
+                text_state.pending_surrounding_text = None;
+                text_state.pending_content_type = None;
+                text_state.pending_cursor_rectangle = None;
+            }
+            zwp_text_input_v3::Request::Disable => {
+                data.state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .pending_enabled = Some(false);
+            }
+            zwp_text_input_v3::Request::SetSurroundingText {
+                text,
+                cursor,
+                anchor,
+            } => {
+                let length = i32::try_from(text.len()).unwrap_or(i32::MAX);
+                if text.len() <= 4_000
+                    && cursor >= 0
+                    && anchor >= 0
+                    && cursor <= length
+                    && anchor <= length
+                    && text.is_char_boundary(cursor as usize)
+                    && text.is_char_boundary(anchor as usize)
+                {
+                    data.state
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .pending_surrounding_text = Some(SurroundingText {
+                        text,
+                        cursor,
+                        anchor,
+                    });
+                }
+            }
+            zwp_text_input_v3::Request::SetTextChangeCause { .. } => {}
+            zwp_text_input_v3::Request::SetContentType { hint, purpose } => {
+                let hint = match hint {
+                    WEnum::Value(hint) => hint.bits(),
+                    WEnum::Unknown(hint) => hint,
+                };
+                let purpose = match purpose {
+                    WEnum::Value(purpose) => purpose as u32,
+                    WEnum::Unknown(purpose) => purpose,
+                };
+                data.state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .pending_content_type = Some((hint, purpose));
+            }
+            zwp_text_input_v3::Request::SetCursorRectangle {
+                x,
+                y,
+                width,
+                height,
+            } => {
+                if width >= 0 && height >= 0 {
+                    data.state
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .pending_cursor_rectangle = Some((x, y, width, height));
+                }
+            }
+            zwp_text_input_v3::Request::Commit => {
+                let another_enabled = state.text_inputs.iter().any(|text_input| {
+                    text_input.id() != resource.id()
+                        && text_input.is_alive()
+                        && text_input
+                            .data::<TextInputData>()
+                            .is_some_and(|other_data| {
+                                other_data.seat.id() == data.seat.id()
+                                    && other_data
+                                        .state
+                                        .lock()
+                                        .unwrap_or_else(|error| error.into_inner())
+                                        .enabled
+                            })
+                });
+                let mut text_state = data.state.lock().unwrap_or_else(|error| error.into_inner());
+                text_state.commit_count = text_state.commit_count.wrapping_add(1);
+                if text_state.focused_surface.is_none() {
+                    return;
+                }
+                let was_enabled = text_state.enabled;
+                if let Some(enabled) = text_state.pending_enabled.take() {
+                    text_state.enabled = enabled && !another_enabled;
+                    text_state.surrounding_text = None;
+                    text_state.content_type = (0, 0);
+                    text_state.cursor_rectangle = None;
+                }
+                if let Some(surrounding_text) = text_state.pending_surrounding_text.take() {
+                    text_state.surrounding_text = Some(surrounding_text);
+                }
+                if let Some(content_type) = text_state.pending_content_type.take() {
+                    text_state.content_type = content_type;
+                }
+                if let Some(cursor_rectangle) = text_state.pending_cursor_rectangle.take() {
+                    text_state.cursor_rectangle = Some(cursor_rectangle);
+                }
+                if text_state.enabled && !was_enabled {
+                    state.ime_active = true;
+                    state.ime_show_requests = state.ime_show_requests.saturating_add(1);
+                } else if !text_state.enabled && was_enabled {
+                    state.ime_active = false;
+                    state.ime_hide_requests = state.ime_hide_requests.saturating_add(1);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn destroyed(
+        state: &mut Self,
+        _client: ClientId,
+        resource: &ZwpTextInputV3,
+        data: &TextInputData,
+    ) {
+        let was_enabled = data
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .enabled;
+        state
+            .text_inputs
+            .retain(|text_input| text_input.id() != resource.id());
+        state.text_input_count = state.text_input_count.saturating_sub(1);
+        if was_enabled {
+            state.ime_active = state.text_inputs.iter().any(|text_input| {
+                text_input.data::<TextInputData>().is_some_and(|data| {
+                    data.state
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .enabled
+                })
+            });
+            state.ime_hide_requests = state.ime_hide_requests.saturating_add(1);
+        }
+    }
+}
 impl GlobalDispatch<WlDataDeviceManager, ()> for CompositorState {
     fn bind(
         state: &mut Self,
@@ -1740,10 +2005,7 @@ impl Dispatch<WlDataDevice, DataDeviceData> for CompositorState {
                     candidate.serial == serial
                         && candidate.surface.id().same_client_as(&resource.id())
                 });
-                if serial == 0
-                    || !data.seat.id().same_client_as(&resource.id())
-                    || !valid_serial
-                {
+                if serial == 0 || !data.seat.id().same_client_as(&resource.id()) || !valid_serial {
                     return;
                 }
                 if let Some(source) = source.as_ref() {
@@ -3665,6 +3927,9 @@ impl CompositorCore {
             .create_global::<CompositorState, WlDataDeviceManager, _>(3, ());
         display
             .handle()
+            .create_global::<CompositorState, ZwpTextInputManagerV3, _>(1, ());
+        display
+            .handle()
             .create_global::<CompositorState, WlOutput, _>(4, ());
         let state = CompositorState {
             output_width: 320,
@@ -4033,6 +4298,115 @@ impl CompositorCore {
             .pending_linux_copy_fds
             .pop_front()
             .map_or(-1, IntoRawFd::into_raw_fd)
+    }
+    pub fn text_input_manager_bind_count(&self) -> u32 {
+        self.state.text_input_manager_binds
+    }
+
+    pub fn text_input_count(&self) -> u32 {
+        self.state.text_input_count
+    }
+
+    pub fn ime_active(&self) -> u32 {
+        u32::from(self.state.ime_active)
+    }
+
+    pub fn ime_show_request_count(&self) -> u32 {
+        self.state.ime_show_requests
+    }
+
+    pub fn ime_hide_request_count(&self) -> u32 {
+        self.state.ime_hide_requests
+    }
+
+    pub fn ime_surrounding_text_length(&self) -> i32 {
+        self.enabled_text_input_state()
+            .and_then(|state| state.surrounding_text.as_ref().map(|text| text.text.len()))
+            .and_then(|length| i32::try_from(length).ok())
+            .unwrap_or(-1)
+    }
+
+    pub fn ime_surrounding_cursor(&self) -> i32 {
+        self.enabled_text_input_state()
+            .and_then(|state| state.surrounding_text.as_ref().map(|text| text.cursor))
+            .unwrap_or(-1)
+    }
+
+    pub fn ime_surrounding_anchor(&self) -> i32 {
+        self.enabled_text_input_state()
+            .and_then(|state| state.surrounding_text.as_ref().map(|text| text.anchor))
+            .unwrap_or(-1)
+    }
+    pub fn ime_content_hint(&self) -> i32 {
+        self.enabled_text_input_state()
+            .and_then(|state| i32::try_from(state.content_type.0).ok())
+            .unwrap_or(-1)
+    }
+
+    pub fn ime_content_purpose(&self) -> i32 {
+        self.enabled_text_input_state()
+            .and_then(|state| i32::try_from(state.content_type.1).ok())
+            .unwrap_or(-1)
+    }
+
+    pub fn ime_cursor_rectangle_component(&self, component: usize) -> i32 {
+        self.ime_cursor_rectangle()
+            .and_then(|rectangle| {
+                [rectangle.0, rectangle.1, rectangle.2, rectangle.3]
+                    .get(component)
+                    .copied()
+            })
+            .unwrap_or(-1)
+    }
+
+    pub fn ime_cursor_rectangle(&self) -> Option<(i32, i32, i32, i32)> {
+        self.enabled_text_input_state()
+            .and_then(|state| state.cursor_rectangle)
+    }
+
+    fn enabled_text_input_state(&self) -> Option<std::sync::MutexGuard<'_, TextInputState>> {
+        self.state.text_inputs.iter().find_map(|text_input| {
+            let data = text_input.data::<TextInputData>()?;
+            let state = data.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.enabled.then_some(state)
+        })
+    }
+
+    fn enabled_text_input(&self) -> Option<(ZwpTextInputV3, u32)> {
+        self.state.text_inputs.iter().find_map(|text_input| {
+            let data = text_input.data::<TextInputData>()?;
+            let state = data.state.lock().unwrap_or_else(|error| error.into_inner());
+            state
+                .enabled
+                .then_some((text_input.clone(), state.commit_count))
+        })
+    }
+
+    pub fn ime_commit_text(&mut self, text: String) -> u32 {
+        let Some((text_input, serial)) = self.enabled_text_input() else {
+            return 0;
+        };
+        text_input.commit_string(Some(text));
+        text_input.done(serial);
+        1
+    }
+
+    pub fn ime_set_preedit(&mut self, text: String, cursor_begin: i32, cursor_end: i32) -> u32 {
+        let Some((text_input, serial)) = self.enabled_text_input() else {
+            return 0;
+        };
+        text_input.preedit_string(Some(text), cursor_begin, cursor_end);
+        text_input.done(serial);
+        1
+    }
+
+    pub fn ime_delete_surrounding(&mut self, before_length: u32, after_length: u32) -> u32 {
+        let Some((text_input, serial)) = self.enabled_text_input() else {
+            return 0;
+        };
+        text_input.delete_surrounding_text(before_length, after_length);
+        text_input.done(serial);
+        1
     }
 
     pub fn pointer_count(&self) -> u32 {
@@ -4606,9 +4980,7 @@ fn send_probe_data_offer_receive(
     let encoded = mime_type.as_bytes();
     let length = encoded.len().saturating_add(1);
     let padded_length = length.saturating_add(3) & !3;
-    let size = 8usize
-        .saturating_add(4)
-        .saturating_add(padded_length);
+    let size = 8usize.saturating_add(4).saturating_add(padded_length);
     let size = u16::try_from(size)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "MIME type is too long"))?;
     let mut request = Vec::with_capacity(usize::from(size));
@@ -4736,12 +5108,7 @@ pub extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeRec
     let Ok(source_id) = u32::try_from(source_id) else {
         return -1;
     };
-    match receive_probe_data_source_send(
-        socket_fd,
-        source_id,
-        TEXT_MIME_TYPES[0],
-        PAYLOAD,
-    ) {
+    match receive_probe_data_source_send(socket_fd, source_id, TEXT_MIME_TYPES[0], PAYLOAD) {
         Ok(size) => i32::try_from(size).unwrap_or(i32::MAX),
         Err(_) => -2,
     }
@@ -4756,8 +5123,7 @@ pub extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeSen
     if offer_id == 0 {
         return -1;
     }
-    send_probe_data_offer_receive(socket_fd, offer_id as u32, TEXT_MIME_TYPES[0])
-        .unwrap_or(-2)
+    send_probe_data_offer_receive(socket_fd, offer_id as u32, TEXT_MIME_TYPES[0]).unwrap_or(-2)
 }
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeReceiveKeyboardKeymap(
@@ -5132,6 +5498,183 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     core.take_linux_copy_fd()
 }
 
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeTextInputManagerBindCount(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.text_input_manager_bind_count()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeTextInputCount(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.text_input_count()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeImeActive(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.ime_active()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeImeShowRequestCount(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.ime_show_request_count()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeImeHideRequestCount(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.ime_hide_request_count()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeImeSurroundingTextLength(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    core.ime_surrounding_text_length()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeImeSurroundingCursor(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    core.ime_surrounding_cursor()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeImeSurroundingAnchor(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    core.ime_surrounding_anchor()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeImeContentHint(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    core.ime_content_hint()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeImeContentPurpose(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    core.ime_content_purpose()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeImeCursorRectangleComponent(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+    component: i32,
+) -> i32 {
+    let (Some(core), Ok(component)) = (
+        unsafe { (handle as *mut CompositorCore).as_ref() },
+        usize::try_from(component),
+    ) else {
+        return -1;
+    };
+    core.ime_cursor_rectangle_component(component)
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeImeCommitProbeText(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+        return -1;
+    };
+    i32::try_from(core.ime_commit_text("Archphene IME".to_owned())).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeImePreeditProbeText(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+        return -1;
+    };
+    i32::try_from(core.ime_set_preedit("compose".to_owned(), 7, 7)).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeImeDeleteSurrounding(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+    before_length: i32,
+    after_length: i32,
+) -> i32 {
+    let (Ok(before_length), Ok(after_length)) =
+        (u32::try_from(before_length), u32::try_from(after_length))
+    else {
+        return -2;
+    };
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+        return -1;
+    };
+    i32::try_from(core.ime_delete_surrounding(before_length, after_length)).unwrap_or(i32::MAX)
+}
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativePointerCount(
     _environment: *mut std::ffi::c_void,
@@ -5593,6 +6136,18 @@ mod tests {
         assert_eq!(core.set_clipboard_active(true), 1);
         assert_eq!(core.offer_android_clipboard_text(), 0);
         assert_eq!(core.set_clipboard_active(false), 0);
+        assert_eq!(core.text_input_manager_bind_count(), 0);
+        assert_eq!(core.text_input_count(), 0);
+        assert_eq!(core.ime_active(), 0);
+        assert_eq!(core.ime_show_request_count(), 0);
+        assert_eq!(core.ime_hide_request_count(), 0);
+        assert_eq!(core.ime_surrounding_text_length(), -1);
+        assert_eq!(core.ime_surrounding_cursor(), -1);
+        assert_eq!(core.ime_surrounding_anchor(), -1);
+        assert_eq!(core.ime_content_hint(), -1);
+        assert_eq!(core.ime_content_purpose(), -1);
+        assert_eq!(core.ime_cursor_rectangle(), None);
+        assert_eq!(core.ime_cursor_rectangle_component(0), -1);
         assert_eq!(core.pointer_count(), 0);
         assert_eq!(core.pointer_event_count(), 0);
         assert_eq!(core.keyboard_count(), 0);
