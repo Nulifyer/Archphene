@@ -60,7 +60,7 @@ do {
             $touchSent = $true
         }
     }
-    if ($output.Contains("registry, Android bitmap, xdg toplevel, keyboard input, damage-batched buffer scale/transform, viewporter/fractional scaling, Choreographer-paced frames, MotionEvent pointer/wheel/touch input, cursor surfaces, pointer gestures, nested popup grabs, synchronized subsurface trees, committed parent geometry, and bidirectional clipboard and text-input v3 lifecycle complete")) {
+    if ($output.Contains("registry, Android bitmap, xdg toplevel, keyboard input, damage-batched buffer scale/transform, viewporter/fractional scaling, Choreographer-paced frames, MotionEvent pointer/wheel/touch input, cursor surfaces, pointer gestures, nested popup grabs, synchronized subsurface trees, committed parent geometry, demand-driven clipboard, and Android InputConnection UTF-8 text-input v3 lifecycle complete")) {
         Write-Host "Native compositor Android MotionEvent probe passed on $Serial ($AndroidAbi)."
         exit 0
     }

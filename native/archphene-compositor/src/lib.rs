@@ -10,6 +10,13 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
+use jni::{JNIEnv, objects::JByteArray, sys::jbyteArray};
+use wayland_protocols::wp::fractional_scale::v1::server::wp_fractional_scale_manager_v1::{
+    self, WpFractionalScaleManagerV1,
+};
+use wayland_protocols::wp::fractional_scale::v1::server::wp_fractional_scale_v1::{
+    self, WpFractionalScaleV1,
+};
 use wayland_protocols::wp::pointer_gestures::zv1::server::zwp_pointer_gesture_hold_v1::{
     self, ZwpPointerGestureHoldV1,
 };
@@ -22,18 +29,12 @@ use wayland_protocols::wp::pointer_gestures::zv1::server::zwp_pointer_gesture_sw
 use wayland_protocols::wp::pointer_gestures::zv1::server::zwp_pointer_gestures_v1::{
     self, ZwpPointerGesturesV1,
 };
-use wayland_protocols::wp::fractional_scale::v1::server::wp_fractional_scale_manager_v1::{
-    self, WpFractionalScaleManagerV1,
-};
-use wayland_protocols::wp::fractional_scale::v1::server::wp_fractional_scale_v1::{
-    self, WpFractionalScaleV1,
-};
 use wayland_protocols::wp::text_input::zv3::server::zwp_text_input_manager_v3::{
     self, ZwpTextInputManagerV3,
 };
+use wayland_protocols::wp::text_input::zv3::server::zwp_text_input_v3::{self, ZwpTextInputV3};
 use wayland_protocols::wp::viewporter::server::wp_viewport::{self, WpViewport};
 use wayland_protocols::wp::viewporter::server::wp_viewporter::{self, WpViewporter};
-use wayland_protocols::wp::text_input::zv3::server::zwp_text_input_v3::{self, ZwpTextInputV3};
 use wayland_protocols::xdg::shell::server::xdg_popup::{self, XdgPopup};
 use wayland_protocols::xdg::shell::server::xdg_positioner::{self, XdgPositioner};
 use wayland_protocols::xdg::shell::server::xdg_surface::{self, XdgSurface};
@@ -900,15 +901,13 @@ fn apply_viewport_to_frame(
     for destination_y in 0..height {
         let source_y = (source.y
             + (f64::from(destination_y) + 0.5) * source.height / f64::from(height))
-            .floor()
-            .clamp(0.0, f64::from(frame.height.saturating_sub(1)))
-            as u32;
+        .floor()
+        .clamp(0.0, f64::from(frame.height.saturating_sub(1))) as u32;
         for destination_x in 0..width {
             let source_x = (source.x
                 + (f64::from(destination_x) + 0.5) * source.width / f64::from(width))
-                .floor()
-                .clamp(0.0, f64::from(frame.width.saturating_sub(1)))
-                as u32;
+            .floor()
+            .clamp(0.0, f64::from(frame.width.saturating_sub(1))) as u32;
             let source_index = ((source_y * frame.width + source_x) * 4) as usize;
             let destination_index = ((destination_y * width + destination_x) * 4) as usize;
             pixels[destination_index..destination_index + 4]
@@ -2187,7 +2186,9 @@ impl Dispatch<ZwpPointerGestureSwipeV1, PointerGestureData> for CompositorState 
         resource: &ZwpPointerGestureSwipeV1,
         _data: &PointerGestureData,
     ) {
-        state.swipe_gestures.retain(|gesture| gesture.id() != resource.id());
+        state
+            .swipe_gestures
+            .retain(|gesture| gesture.id() != resource.id());
     }
 }
 
@@ -2213,7 +2214,9 @@ impl Dispatch<ZwpPointerGesturePinchV1, PointerGestureData> for CompositorState 
         resource: &ZwpPointerGesturePinchV1,
         _data: &PointerGestureData,
     ) {
-        state.pinch_gestures.retain(|gesture| gesture.id() != resource.id());
+        state
+            .pinch_gestures
+            .retain(|gesture| gesture.id() != resource.id());
     }
 }
 
@@ -2239,7 +2242,9 @@ impl Dispatch<ZwpPointerGestureHoldV1, PointerGestureData> for CompositorState {
         resource: &ZwpPointerGestureHoldV1,
         _data: &PointerGestureData,
     ) {
-        state.hold_gestures.retain(|gesture| gesture.id() != resource.id());
+        state
+            .hold_gestures
+            .retain(|gesture| gesture.id() != resource.id());
     }
 }
 impl GlobalDispatch<WpViewporter, ()> for CompositorState {
@@ -2366,12 +2371,7 @@ impl Dispatch<WpViewport, ViewportData> for CompositorState {
         }
     }
 
-    fn destroyed(
-        _state: &mut Self,
-        _client: ClientId,
-        resource: &WpViewport,
-        data: &ViewportData,
-    ) {
+    fn destroyed(_state: &mut Self, _client: ClientId, resource: &WpViewport, data: &ViewportData) {
         if let Some(surface_data) = data.surface.data::<SurfaceData>() {
             let mut surface = surface_data
                 .inner
@@ -3140,7 +3140,7 @@ impl Dispatch<WlPointer, ()> for CompositorState {
                         surface_state.role = Some(SurfaceRole::Cursor);
                     }
                     Some(_) => {
-                            resource.post_error(
+                        resource.post_error(
                             wl_pointer::Error::Role,
                             "cursor wl_surface already has another role",
                         );
@@ -4211,8 +4211,7 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 };
                 let next_scale = buffer_scale_update.unwrap_or(base_scale);
                 let next_transform = buffer_transform_update.unwrap_or(base_transform);
-                let next_viewport_source =
-                    viewport_source_update.unwrap_or(base_viewport_source);
+                let next_viewport_source = viewport_source_update.unwrap_or(base_viewport_source);
                 let next_viewport_destination =
                     viewport_destination_update.unwrap_or(base_viewport_destination);
                 let viewport_state_changed =
@@ -4232,9 +4231,9 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                                     Ok(frame) => frame,
                                     Err(()) => {
                                         resource.post_error(
-                                            wl_surface::Error::InvalidSize,
-                                            "transformed buffer dimensions must be divisible by scale",
-                                        );
+                                        wl_surface::Error::InvalidSize,
+                                        "transformed buffer dimensions must be divisible by scale",
+                                    );
                                         return;
                                     }
                                 };
@@ -4245,8 +4244,10 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                             ) {
                                 Ok(frame) => Some(frame),
                                 Err(error) => {
-                                    let Some(viewport) =
-                                        surface.viewport.as_ref().filter(|viewport| viewport.is_alive())
+                                    let Some(viewport) = surface
+                                        .viewport
+                                        .as_ref()
+                                        .filter(|viewport| viewport.is_alive())
                                     else {
                                         return;
                                     };
@@ -4315,10 +4316,9 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 let latest_frame = surface.committed_frame.clone();
                 let is_xdg_toplevel = role == Some(SurfaceRole::XdgToplevel);
                 let is_cursor = role == Some(SurfaceRole::Cursor);
-                let publishes_root_frame = !matches!(
-                    role,
-                    Some(SurfaceRole::Subsurface | SurfaceRole::Cursor)
-                ) && (is_xdg_toplevel || !surface.has_xdg_surface);
+                let publishes_root_frame =
+                    !matches!(role, Some(SurfaceRole::Subsurface | SurfaceRole::Cursor))
+                        && (is_xdg_toplevel || !surface.has_xdg_surface);
                 let has_frame = latest_frame.is_some();
                 drop(surface);
 
@@ -4422,7 +4422,9 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
         state
             .active_touches
             .retain(|touch| touch.surface.id() != resource.id());
-        state.surfaces.retain(|surface| surface.id() != resource.id());
+        state
+            .surfaces
+            .retain(|surface| surface.id() != resource.id());
         state.surface_count = state.surface_count.saturating_sub(1);
         if state.surface_count == 0 {
             state.last_frame = None;
@@ -5384,7 +5386,12 @@ impl CompositorCore {
             }
             updated = updated.saturating_add(1);
         }
-        for surface in self.state.surfaces.iter().filter(|surface| surface.is_alive()) {
+        for surface in self
+            .state
+            .surfaces
+            .iter()
+            .filter(|surface| surface.is_alive())
+        {
             if surface.version() >= 6 {
                 surface.preferred_buffer_scale(scale);
                 surface.preferred_buffer_transform(wl_output::Transform::Normal);
@@ -5507,6 +5514,15 @@ impl CompositorCore {
             .unwrap_or(-1)
     }
 
+    pub fn ime_surrounding_text(&self) -> Option<String> {
+        self.enabled_text_input_state().and_then(|state| {
+            state
+                .surrounding_text
+                .as_ref()
+                .map(|text| text.text.clone())
+        })
+    }
+
     pub fn ime_surrounding_cursor(&self) -> i32 {
         self.enabled_text_input_state()
             .and_then(|state| state.surrounding_text.as_ref().map(|text| text.cursor))
@@ -5567,9 +5583,20 @@ impl CompositorCore {
         let Some((text_input, serial)) = self.enabled_text_input() else {
             return 0;
         };
+        text_input.preedit_string(None, 0, 0);
         text_input.commit_string(Some(text));
         text_input.done(serial);
         1
+    }
+
+    pub fn ime_editor_action(&mut self, action: u32, time: u32) -> u32 {
+        let key = if matches!(action, 5 | 7) { 15 } else { 28 };
+        if self.keyboard_key(key, true, time) == 1 {
+            let _ = self.keyboard_key(key, false, time);
+            return 1;
+        }
+        let text = if key == 15 { "\t" } else { "\n" };
+        self.ime_commit_text(text.to_owned())
     }
 
     pub fn ime_set_preedit(&mut self, text: String, cursor_begin: i32, cursor_end: i32) -> u32 {
@@ -5954,7 +5981,6 @@ impl CompositorCore {
         1
     }
 
-
     fn gesture_focus_surface(&self) -> Option<WlSurface> {
         self.state
             .pointer_inside
@@ -5973,8 +5999,7 @@ impl CompositorCore {
             .filter(|gesture| {
                 gesture.is_alive()
                     && gesture.data::<PointerGestureData>().is_some_and(|data| {
-                        data.pointer.is_alive()
-                            && data.pointer.id().same_client_as(&surface.id())
+                        data.pointer.is_alive() && data.pointer.id().same_client_as(&surface.id())
                     })
             })
             .cloned()
@@ -6021,8 +6046,7 @@ impl CompositorCore {
             .filter(|gesture| {
                 gesture.is_alive()
                     && gesture.data::<PointerGestureData>().is_some_and(|data| {
-                        data.pointer.is_alive()
-                            && data.pointer.id().same_client_as(&surface.id())
+                        data.pointer.is_alive() && data.pointer.id().same_client_as(&surface.id())
                     })
             })
             .cloned()
@@ -6049,8 +6073,7 @@ impl CompositorCore {
             .filter(|gesture| {
                 gesture.is_alive()
                     && gesture.data::<PointerGestureData>().is_some_and(|data| {
-                        data.pointer.is_alive()
-                            && data.pointer.id().same_client_as(&surface.id())
+                        data.pointer.is_alive() && data.pointer.id().same_client_as(&surface.id())
                     })
             })
             .cloned()
@@ -6066,14 +6089,7 @@ impl CompositorCore {
         1
     }
 
-    pub fn pinch_update(
-        &mut self,
-        dx: f64,
-        dy: f64,
-        scale: f64,
-        rotation: f64,
-        time: u32,
-    ) -> u32 {
+    pub fn pinch_update(&mut self, dx: f64, dy: f64, scale: f64, rotation: f64, time: u32) -> u32 {
         if !scale.is_finite() || scale <= 0.0 || !rotation.is_finite() {
             return 0;
         }
@@ -6107,8 +6123,7 @@ impl CompositorCore {
             .filter(|gesture| {
                 gesture.is_alive()
                     && gesture.data::<PointerGestureData>().is_some_and(|data| {
-                        data.pointer.is_alive()
-                            && data.pointer.id().same_client_as(&surface.id())
+                        data.pointer.is_alive() && data.pointer.id().same_client_as(&surface.id())
                     })
             })
             .cloned()
@@ -6135,8 +6150,7 @@ impl CompositorCore {
             .filter(|gesture| {
                 gesture.is_alive()
                     && gesture.data::<PointerGestureData>().is_some_and(|data| {
-                        data.pointer.is_alive()
-                            && data.pointer.id().same_client_as(&surface.id())
+                        data.pointer.is_alive() && data.pointer.id().same_client_as(&surface.id())
                     })
             })
             .cloned()
@@ -6163,8 +6177,7 @@ impl CompositorCore {
             .filter(|gesture| {
                 gesture.is_alive()
                     && gesture.data::<PointerGestureData>().is_some_and(|data| {
-                        data.pointer.is_alive()
-                            && data.pointer.id().same_client_as(&surface.id())
+                        data.pointer.is_alive() && data.pointer.id().same_client_as(&surface.id())
                     })
             })
             .cloned()
@@ -6187,11 +6200,17 @@ impl CompositorCore {
         self.state.last_pointer_enter_serial
     }
     pub fn cursor_width(&self) -> u32 {
-        self.state.cursor_frame.as_ref().map_or(0, |frame| frame.width)
+        self.state
+            .cursor_frame
+            .as_ref()
+            .map_or(0, |frame| frame.width)
     }
 
     pub fn cursor_height(&self) -> u32 {
-        self.state.cursor_frame.as_ref().map_or(0, |frame| frame.height)
+        self.state
+            .cursor_frame
+            .as_ref()
+            .map_or(0, |frame| frame.height)
     }
 
     pub fn cursor_hotspot_component(&self, component: u32) -> i32 {
@@ -7287,28 +7306,115 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     };
     core.ime_cursor_rectangle_component(component)
 }
-#[unsafe(no_mangle)]
-pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeImeCommitProbeText(
-    _environment: *mut std::ffi::c_void,
-    _activity: *mut std::ffi::c_void,
-    handle: i64,
+fn java_byte_array(environment: *mut std::ffi::c_void, value: jbyteArray) -> Option<Vec<u8>> {
+    if environment.is_null() || value.is_null() {
+        return None;
+    }
+    let environment = unsafe { JNIEnv::from_raw(environment.cast()).ok()? };
+    let value = unsafe { JByteArray::from_raw(value) };
+    environment.convert_byte_array(&value).ok()
+}
+
+fn copy_to_java_byte_array(
+    environment: *mut std::ffi::c_void,
+    destination: jbyteArray,
+    source: &[u8],
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    if environment.is_null() || destination.is_null() {
+        return -1;
+    }
+    let environment = match unsafe { JNIEnv::from_raw(environment.cast()) } {
+        Ok(environment) => environment,
+        Err(_) => return -1,
+    };
+    let destination = unsafe { JByteArray::from_raw(destination) };
+    let Ok(length) = environment.get_array_length(&destination) else {
         return -1;
     };
-    i32::try_from(core.ime_commit_text("Archphene IME".to_owned())).unwrap_or(i32::MAX)
+    let Ok(source_length) = i32::try_from(source.len()) else {
+        return -2;
+    };
+    if length < source_length {
+        return -2;
+    }
+    let source = source.iter().map(|byte| *byte as i8).collect::<Vec<_>>();
+    if environment
+        .set_byte_array_region(&destination, 0, &source)
+        .is_err()
+    {
+        return -1;
+    }
+    source_length
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeImePreeditProbeText(
-    _environment: *mut std::ffi::c_void,
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeImeCopySurroundingText(
+    environment: *mut std::ffi::c_void,
     _activity: *mut std::ffi::c_void,
     handle: i64,
+    destination: jbyteArray,
 ) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    let Some(text) = core.ime_surrounding_text() else {
+        return -2;
+    };
+    copy_to_java_byte_array(environment, destination, text.as_bytes())
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeImeCommitText(
+    environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+    text: jbyteArray,
+) -> i32 {
+    let Some(text) =
+        java_byte_array(environment, text).and_then(|text| String::from_utf8(text).ok())
+    else {
+        return -2;
+    };
     let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
         return -1;
     };
-    i32::try_from(core.ime_set_preedit("compose".to_owned(), 7, 7)).unwrap_or(i32::MAX)
+    i32::try_from(core.ime_commit_text(text)).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeImeSetPreedit(
+    environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+    text: jbyteArray,
+    cursor_begin: i32,
+    cursor_end: i32,
+) -> i32 {
+    let Some(text) =
+        java_byte_array(environment, text).and_then(|text| String::from_utf8(text).ok())
+    else {
+        return -2;
+    };
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+        return -1;
+    };
+    i32::try_from(core.ime_set_preedit(text, cursor_begin, cursor_end)).unwrap_or(i32::MAX)
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeImeEditorAction(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+    action: i32,
+    time: i32,
+) -> i32 {
+    let Ok(action) = u32::try_from(action) else {
+        return -2;
+    };
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+        return -1;
+    };
+    i32::try_from(core.ime_editor_action(action, time as u32)).unwrap_or(i32::MAX)
 }
 
 #[unsafe(no_mangle)]
@@ -7641,8 +7747,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
         return -1;
     };
-    i32::try_from(core.touch_down(id, f64::from(x), f64::from(y), time as u32))
-        .unwrap_or(i32::MAX)
+    i32::try_from(core.touch_down(id, f64::from(x), f64::from(y), time as u32)).unwrap_or(i32::MAX)
 }
 
 #[unsafe(no_mangle)]
@@ -8111,7 +8216,13 @@ mod tests {
         assert_eq!((frame.width, frame.height), (4, 4));
         assert_eq!(&frame.pixels[0..4], &[2, 0, 0, 0]);
         assert_eq!(&frame.pixels[60..64], &[7, 0, 0, 0]);
-        assert_eq!((original_buffer_frame(&frame).width, original_buffer_frame(&frame).height), (4, 2));
+        assert_eq!(
+            (
+                original_buffer_frame(&frame).width,
+                original_buffer_frame(&frame).height
+            ),
+            (4, 2)
+        );
     }
 
     #[test]

@@ -9,6 +9,7 @@ import android.graphics.Color;
 import android.os.Bundle;
 import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
+import android.text.InputType;
 import android.util.Log;
 import android.view.Choreographer;
 import android.view.Gravity;
@@ -16,6 +17,9 @@ import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.PointerIcon;
+import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputConnection;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
@@ -24,8 +28,10 @@ import java.io.FileOutputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 public final class MainActivity extends Activity {
     private static final String TAG = "ArchpheneCompositorProbe";
@@ -39,10 +45,14 @@ public final class MainActivity extends Activity {
             new LinkedBlockingQueue<>();
     private final LinkedBlockingQueue<Integer> presentationTimes =
             new LinkedBlockingQueue<>();
+    private final LinkedBlockingQueue<ImeInput> imeInputs = new LinkedBlockingQueue<>();
+    private final LinkedBlockingQueue<Boolean> clipboardChanges = new LinkedBlockingQueue<>();
+    private ArchpheneClipboardBroker clipboardBroker;
     private volatile boolean pointerInputReady;
     private volatile boolean keyboardInputReady;
     private volatile boolean touchInputReady;
     private volatile boolean gestureInputReady;
+    private volatile boolean imeInputReady;
     private float gestureInitialSpan;
     private float gestureInitialAngle;
     private float gestureLastCentroidX;
@@ -100,8 +110,11 @@ public final class MainActivity extends Activity {
     private static native int nativeImeContentPurpose(long handle);
     private static native int nativeImeCursorRectangleComponent(
             long handle, int component);
-    private static native int nativeImeCommitProbeText(long handle);
-    private static native int nativeImePreeditProbeText(long handle);
+    private static native int nativeImeCopySurroundingText(long handle, byte[] destination);
+    private static native int nativeImeCommitText(long handle, byte[] text);
+    private static native int nativeImeSetPreedit(
+            long handle, byte[] text, int cursorBegin, int cursorEnd);
+    private static native int nativeImeEditorAction(long handle, int actionId, int time);
     private static native int nativeImeDeleteSurrounding(
             long handle, int beforeLength, int afterLength);
     private static native int nativePendingFrameCallbackCount(long handle);
@@ -188,16 +201,42 @@ public final class MainActivity extends Activity {
         content.setOrientation(LinearLayout.VERTICAL);
         content.setGravity(Gravity.CENTER);
         content.setPadding(24, 24, 24, 24);
-        ImageView frameView = new ImageView(this);
+        clipboardBroker = new ArchpheneClipboardBroker(
+                this, () -> clipboardChanges.offer(Boolean.TRUE));
+        clipboardBroker.start();
+        ArchpheneInputView frameView = new ArchpheneInputView(
+                this,
+                new ArchpheneInputView.InputSink() {
+                    @Override
+                    public void preedit(String value, int cursorBegin, int cursorEnd) {
+                        if (imeInputReady) imeInputs.offer(ImeInput.preedit(value, cursorBegin, cursorEnd));
+                    }
+
+                    @Override
+                    public void commit(String value) {
+                        if (imeInputReady) imeInputs.offer(ImeInput.commit(value));
+                    }
+
+                    @Override
+                    public void deleteSurrounding(int beforeLength, int afterLength) {
+                        if (imeInputReady) imeInputs.offer(ImeInput.delete(beforeLength, afterLength));
+                    }
+
+                    @Override
+                    public void editorAction(int actionId) {
+                        if (imeInputReady) imeInputs.offer(ImeInput.editorAction(actionId));
+                    }
+                });
         frameView.setBackgroundColor(Color.DKGRAY);
         frameView.setScaleType(ImageView.ScaleType.FIT_XY);
         frameView.setContentDescription("No committed Wayland frame");
         frameView.setClickable(true);
         frameView.setOnTouchListener((view, event) -> {
+            int action = event.getActionMasked();
+            if (action == MotionEvent.ACTION_DOWN) view.requestFocus();
             if (!pointerInputReady && !touchInputReady) {
                 return false;
             }
-            int action = event.getActionMasked();
             int actionIndex = event.getActionIndex();
             int time = (int) event.getEventTime();
             if (pointerInputReady
@@ -302,7 +341,18 @@ public final class MainActivity extends Activity {
         new Thread(() -> runProbe(result, frameView), "native-compositor-probe").start();
     }
 
-    private void runProbe(TextView result, ImageView frameView) {
+    @Override
+    protected void onDestroy() {
+        if (clipboardBroker != null) clipboardBroker.close();
+        super.onDestroy();
+    }
+
+    private static int utf8OffsetToUtf16(String value, int byteOffset) {
+        byte[] encoded = value.getBytes(StandardCharsets.UTF_8);
+        if (byteOffset < 0 || byteOffset > encoded.length) return 0;
+        return new String(encoded, 0, byteOffset, StandardCharsets.UTF_8).length();
+    }
+    private void runProbe(TextView result, ArchpheneInputView frameView) {
         String message;
         boolean passed = false;
         Bitmap renderedFrame = null;
@@ -1095,10 +1145,16 @@ public final class MainActivity extends Activity {
                                 "Wayland clipboard copy payload mismatch");
                     }
                 }
-                clipboard.setPrimaryClip(
-                        ClipData.newPlainText("Archphene Linux app", linuxClipboard));
+                clipboardChanges.clear();
+                runOnUiThread(() -> clipboardBroker.publishLinuxText(linuxClipboard));
 
                 int dataOfferId = readDataSelectionUntilCallback(input, 88, 89);
+                Thread.sleep(100);
+                if (clipboardBroker.contentReadCount() != 0) {
+                    throw new IllegalStateException(
+                            "clipboard content was read without a Wayland receive request");
+                }
+                clipboardChanges.clear();
                 if (nativeDataSourceCount(core) != 1
                         || nativeDataDeviceCount(core) != 1
                         || nativeDataOfferCount(core) != 1) {
@@ -1112,9 +1168,11 @@ public final class MainActivity extends Activity {
                 readClearedDataSelectionUntilCallback(input, 87, 88, 90);
 
                 String expectedClipboard = "ARCHPHENE_ANDROID_TO_WAYLAND";
-                clipboard.setPrimaryClip(
-                        ClipData.newPlainText("Archphene probe", expectedClipboard));
-                if (nativeOfferAndroidClipboardText(core) != 1
+                runOnUiThread(() -> clipboard.setPrimaryClip(
+                        ClipData.newPlainText("Archphene probe", expectedClipboard)));
+                if (clipboardChanges.poll(2, TimeUnit.SECONDS) == null
+                        || clipboardBroker.contentReadCount() != 0
+                        || nativeOfferAndroidClipboardText(core) != 1
                         || nativeTakeAndroidPasteFd(core) != -1
                         || nativeTakeLinuxCopyFd(core) != -1) {
                     throw new IllegalStateException(
@@ -1135,10 +1193,12 @@ public final class MainActivity extends Activity {
                     throw new IllegalStateException(
                             "Android clipboard paste request queue was invalid");
                 }
-                CharSequence clipboardValue = clipboard.getPrimaryClip()
-                        .getItemAt(0).coerceToText(this);
-                byte[] clipboardBytes = clipboardValue.toString()
+                byte[] clipboardBytes = clipboardBroker.readTextForWaylandPaste()
                         .getBytes(StandardCharsets.UTF_8);
+                if (clipboardBroker.contentReadCount() != 1) {
+                    throw new IllegalStateException(
+                            "clipboard content was not read exactly once on Wayland receive");
+                }
                 try (ParcelFileDescriptor destination =
                                 ParcelFileDescriptor.adoptFd(androidWriteFd);
                         FileOutputStream destinationStream =
@@ -1207,10 +1267,90 @@ public final class MainActivity extends Activity {
                             "committed text-input state was not exposed to Android");
                 }
 
-                if (nativeImePreeditProbeText(core) != 1
-                        || nativeImeCommitProbeText(core) != 1
-                        || nativeImeDeleteSurrounding(core, 1, 0) != 1) {
-                    throw new IllegalStateException("Android IME events were not routed");
+                int surroundingLength = nativeImeSurroundingTextLength(core);
+                byte[] surroundingBytes = new byte[surroundingLength];
+                if (nativeImeCopySurroundingText(core, surroundingBytes) != surroundingLength) {
+                    throw new IllegalStateException("Android IME surrounding text copy failed");
+                }
+                String surroundingText = new String(surroundingBytes, StandardCharsets.UTF_8);
+                ArchpheneInputView.EditorState editorState =
+                        new ArchpheneInputView.EditorState(
+                                surroundingText,
+                                utf8OffsetToUtf16(
+                                        surroundingText, nativeImeSurroundingAnchor(core)),
+                                utf8OffsetToUtf16(
+                                        surroundingText, nativeImeSurroundingCursor(core)),
+                                nativeImeContentHint(core),
+                                nativeImeContentPurpose(core));
+                CountDownLatch inputComplete = new CountDownLatch(1);
+                AtomicReference<Throwable> inputError = new AtomicReference<>();
+                imeInputReady = true;
+                runOnUiThread(() -> {
+                    try {
+                        frameView.setEditorState(editorState);
+                        frameView.requestFocus();
+                        InputMethodManager inputMethodManager = (InputMethodManager)
+                                getSystemService(Context.INPUT_METHOD_SERVICE);
+                        inputMethodManager.restartInput(frameView);
+                        inputMethodManager.showSoftInput(
+                                frameView, InputMethodManager.SHOW_IMPLICIT);
+                        EditorInfo editorInfo = new EditorInfo();
+                        InputConnection connection =
+                                frameView.onCreateInputConnection(editorInfo);
+                        if (connection == null
+                                || !"hello".equals(editorState.surroundingText)
+                                || editorInfo.initialSelStart != 5
+                                || editorInfo.initialSelEnd != 5
+                                || (editorInfo.inputType & InputType.TYPE_MASK_CLASS)
+                                        != InputType.TYPE_CLASS_TEXT
+                                || (editorInfo.imeOptions & EditorInfo.IME_MASK_ACTION)
+                                        != EditorInfo.IME_ACTION_SEND) {
+                            throw new IllegalStateException(
+                                    "Wayland content state was not mapped to EditorInfo");
+                        }
+                        connection.setComposingText("café 🎯", 1);
+                        connection.commitText("Archphene IME ✓", 1);
+                        connection.deleteSurroundingText(1, 0);
+                        connection.performEditorAction(EditorInfo.IME_ACTION_DONE);
+                    } catch (Throwable error) {
+                        inputError.set(error);
+                    } finally {
+                        inputComplete.countDown();
+                    }
+                });
+                if (!inputComplete.await(3, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("Android InputConnection timed out");
+                }
+                if (inputError.get() != null) {
+                    throw new IllegalStateException(
+                            "Android InputConnection failed", inputError.get());
+                }
+                for (int index = 0; index < 4; index++) {
+                    ImeInput imeInput = imeInputs.poll(2, TimeUnit.SECONDS);
+                    if (imeInput == null) {
+                        throw new IllegalStateException("Android InputConnection event missing");
+                    }
+                    int routed = switch (imeInput.type) {
+                        case ImeInput.PREEDIT -> nativeImeSetPreedit(
+                                core,
+                                imeInput.text.getBytes(StandardCharsets.UTF_8),
+                                imeInput.first,
+                                imeInput.second);
+                        case ImeInput.COMMIT -> nativeImeCommitText(
+                                core, imeInput.text.getBytes(StandardCharsets.UTF_8));
+                        case ImeInput.DELETE -> nativeImeDeleteSurrounding(
+                                core, imeInput.first, imeInput.second);
+                        case ImeInput.EDITOR_ACTION -> nativeImeEditorAction(
+                                core, imeInput.first, (int) SystemClock.uptimeMillis());
+                        default -> 0;
+                    };
+                    if (routed != 1) {
+                        throw new IllegalStateException(
+                                "Android InputConnection event was not routed");
+                    }
+                }
+                if (nativeImeCommitText(core, new byte[] {(byte) 0xc3, 0x28}) != -2) {
+                    throw new IllegalStateException("invalid UTF-8 IME text was accepted");
                 }
                 output.write(syncRequest(99));
                 output.flush();
@@ -1221,6 +1361,13 @@ public final class MainActivity extends Activity {
                 output.flush();
                 dispatch(core);
                 readUntilCallback(input, 100);
+                imeInputReady = false;
+                runOnUiThread(() -> {
+                    InputMethodManager inputMethodManager = (InputMethodManager)
+                            getSystemService(Context.INPUT_METHOD_SERVICE);
+                    inputMethodManager.hideSoftInputFromWindow(frameView.getWindowToken(), 0);
+                    frameView.clearFocus();
+                });
                 if (nativeImeActive(core) != 0
                         || nativeImeHideRequestCount(core) != 1) {
                     throw new IllegalStateException(
@@ -1265,7 +1412,7 @@ public final class MainActivity extends Activity {
             message = "Native Wayland compositor passed\n"
                     + "registry, Android bitmap, xdg toplevel, keyboard input, "
                     + "damage-batched buffer scale/transform, viewporter/fractional scaling, Choreographer-paced frames, MotionEvent pointer/wheel/touch input, cursor surfaces, pointer gestures, nested popup grabs, synchronized subsurface trees, "
-                    + "committed parent geometry, and bidirectional clipboard and text-input v3 lifecycle complete";
+                    + "committed parent geometry, demand-driven clipboard, and Android InputConnection UTF-8 text-input v3 lifecycle complete";
         } catch (Exception error) {
             message = "Native compositor probe failed\n" + error.getMessage();
         } finally {
@@ -1273,10 +1420,12 @@ public final class MainActivity extends Activity {
             keyboardInputReady = false;
             touchInputReady = false;
             gestureInputReady = false;
+            imeInputReady = false;
             pointerInputs.clear();
             keyboardInputs.clear();
             touchInputs.clear();
             gestureInputs.clear();
+            imeInputs.clear();
             if (core != 0) nativeDestroyCore(core);
         }
         boolean finalPassed = passed;
@@ -1704,6 +1853,7 @@ public final class MainActivity extends Activity {
 
             GestureInput gestureEnd = awaitGestureInput(5);
             gestureInputReady = false;
+            imeInputReady = false;
             if (gestureEnd.action != GestureInput.END
                     || nativeSwipeEnd(core, gestureEnd.cancelled, gestureEnd.time) != 1) {
                 throw new IllegalStateException("Android swipe end was not routed");
@@ -2750,15 +2900,22 @@ public final class MainActivity extends Activity {
             throws Exception {
         boolean preedit = false;
         boolean committed = false;
+        boolean editorAction = false;
         boolean deleted = false;
         int doneCount = 0;
         while (true) {
             Message message = readMessage(input);
             throwIfDisplayError(message);
             if (message.objectId == textInputId && message.opcode == 2) {
-                preedit |= "compose".equals(readWaylandString(message.body));
+                int stringLength = ByteBuffer.wrap(message.body)
+                        .order(ByteOrder.nativeOrder()).getInt();
+                if (stringLength > 0) {
+                    preedit |= "café 🎯".equals(readWaylandString(message.body));
+                }
             } else if (message.objectId == textInputId && message.opcode == 3) {
-                committed |= "Archphene IME".equals(readWaylandString(message.body));
+                String value = readWaylandString(message.body);
+                committed |= "Archphene IME ✓".equals(value);
+                editorAction |= "\n".equals(value);
             } else if (message.objectId == textInputId
                     && message.opcode == 4
                     && message.body.length == 8) {
@@ -2776,7 +2933,7 @@ public final class MainActivity extends Activity {
                 doneCount++;
             }
             if (message.objectId == callbackId && message.opcode == 0) {
-                if (!preedit || !committed || !deleted || doneCount != 3) {
+                if (!preedit || !committed || !editorAction || !deleted || doneCount != 4) {
                     throw new IllegalStateException("Android IME event sequence was incomplete");
                 }
                 return;
@@ -3905,6 +4062,40 @@ public final class MainActivity extends Activity {
         };
     }
 
+    private static final class ImeInput {
+        static final int PREEDIT = 0;
+        static final int COMMIT = 1;
+        static final int DELETE = 2;
+        static final int EDITOR_ACTION = 3;
+
+        final int type;
+        final String text;
+        final int first;
+        final int second;
+
+        private ImeInput(int type, String text, int first, int second) {
+            this.type = type;
+            this.text = text;
+            this.first = first;
+            this.second = second;
+        }
+
+        static ImeInput preedit(String text, int cursorBegin, int cursorEnd) {
+            return new ImeInput(PREEDIT, text, cursorBegin, cursorEnd);
+        }
+
+        static ImeInput commit(String text) {
+            return new ImeInput(COMMIT, text, 0, 0);
+        }
+
+        static ImeInput delete(int beforeLength, int afterLength) {
+            return new ImeInput(DELETE, "", beforeLength, afterLength);
+        }
+
+        static ImeInput editorAction(int actionId) {
+            return new ImeInput(EDITOR_ACTION, "", actionId, 0);
+        }
+    }
     private static final class KeyboardInput {
         final int key;
         final boolean pressed;
