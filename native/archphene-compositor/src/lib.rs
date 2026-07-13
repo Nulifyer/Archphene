@@ -18,6 +18,10 @@ use wayland_protocols::xdg::shell::server::xdg_wm_base::{self, XdgWmBase};
 use wayland_server::protocol::wl_buffer::{self, WlBuffer};
 use wayland_server::protocol::wl_callback::{self, WlCallback};
 use wayland_server::protocol::wl_compositor::{self, WlCompositor};
+use wayland_server::protocol::wl_data_device::{self, WlDataDevice};
+use wayland_server::protocol::wl_data_device_manager::{self, WlDataDeviceManager};
+use wayland_server::protocol::wl_data_offer::{self, WlDataOffer};
+use wayland_server::protocol::wl_data_source::{self, WlDataSource};
 use wayland_server::protocol::wl_keyboard::{self, WlKeyboard};
 use wayland_server::protocol::wl_output::{self, WlOutput};
 use wayland_server::protocol::wl_pointer::{self, WlPointer};
@@ -91,6 +95,14 @@ pub struct CompositorState {
     keyboards: Vec<WlKeyboard>,
     keyboard_focus_surface: Option<WlSurface>,
     pressed_keys: Vec<u32>,
+    data_device_manager_binds: u32,
+    data_source_count: u32,
+    data_device_count: u32,
+    data_offer_count: u32,
+    data_sources: Vec<WlDataSource>,
+    data_devices: Vec<WlDataDevice>,
+    data_offers: Vec<WlDataOffer>,
+    selection_source: Option<WlDataSource>,
 }
 
 const XKB_KEYMAP: &[u8] = concat!(include_str!("archphene-us.xkb"), "\0").as_bytes();
@@ -133,6 +145,21 @@ enum SurfaceRole {
 #[derive(Default)]
 struct XdgWmBaseData {
     child_count: Arc<AtomicU32>,
+}
+
+#[derive(Default)]
+struct DataSourceData {
+    mime_types: Mutex<Vec<String>>,
+    used: AtomicBool,
+}
+
+struct DataDeviceData {
+    seat: WlSeat,
+}
+
+struct DataOfferData {
+    source: WlDataSource,
+    mime_types: Vec<String>,
 }
 
 #[derive(Default)]
@@ -1464,6 +1491,232 @@ fn set_keyboard_focus(state: &mut CompositorState, surface: Option<WlSurface>) {
         state.keyboard_focus_surface = Some(surface);
     } else {
         state.pressed_keys.clear();
+    }
+}
+
+fn publish_selection(
+    state: &mut CompositorState,
+    handle: &DisplayHandle,
+    source: Option<&WlDataSource>,
+) {
+    let devices = state.data_devices.clone();
+    for device in devices.iter().filter(|device| device.is_alive()) {
+        let Some(source) = source.filter(|source| source.is_alive()) else {
+            device.selection(None);
+            continue;
+        };
+        let Some(source_data) = source.data::<DataSourceData>() else {
+            device.selection(None);
+            continue;
+        };
+        let mime_types = source_data
+            .mime_types
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let Ok(client) = handle.get_client(device.id()) else {
+            continue;
+        };
+        let Ok(offer) = client.create_resource::<WlDataOffer, _, CompositorState>(
+            handle,
+            device.version().min(3),
+            DataOfferData {
+                source: source.clone(),
+                mime_types: mime_types.clone(),
+            },
+        ) else {
+            continue;
+        };
+        device.data_offer(&offer);
+        for mime_type in mime_types {
+            offer.offer(mime_type);
+        }
+        device.selection(Some(&offer));
+        state.data_offer_count = state.data_offer_count.saturating_add(1);
+        state.data_offers.push(offer);
+    }
+}
+
+impl GlobalDispatch<WlDataDeviceManager, ()> for CompositorState {
+    fn bind(
+        state: &mut Self,
+        _handle: &DisplayHandle,
+        _client: &Client,
+        resource: New<WlDataDeviceManager>,
+        _global_data: &(),
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        data_init.init(resource, ());
+        state.data_device_manager_binds = state.data_device_manager_binds.saturating_add(1);
+    }
+}
+
+impl Dispatch<WlDataDeviceManager, ()> for CompositorState {
+    fn request(
+        state: &mut Self,
+        _client: &Client,
+        _resource: &WlDataDeviceManager,
+        request: wl_data_device_manager::Request,
+        _data: &(),
+        _handle: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            wl_data_device_manager::Request::CreateDataSource { id } => {
+                let source = data_init.init(id, DataSourceData::default());
+                state.data_source_count = state.data_source_count.saturating_add(1);
+                state.data_sources.push(source);
+            }
+            wl_data_device_manager::Request::GetDataDevice { id, seat } => {
+                let device = data_init.init(id, DataDeviceData { seat });
+                state.data_device_count = state.data_device_count.saturating_add(1);
+                state.data_devices.push(device);
+            }
+            wl_data_device_manager::Request::Release => {}
+            _ => unreachable!("wl_data_device_manager request added without an implementation"),
+        }
+    }
+}
+
+impl Dispatch<WlDataSource, DataSourceData> for CompositorState {
+    fn request(
+        _state: &mut Self,
+        _client: &Client,
+        _resource: &WlDataSource,
+        request: wl_data_source::Request,
+        data: &DataSourceData,
+        _handle: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            wl_data_source::Request::Offer { mime_type } => {
+                let mut mime_types = data
+                    .mime_types
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                if !mime_types.contains(&mime_type) {
+                    mime_types.push(mime_type);
+                }
+            }
+            wl_data_source::Request::Destroy | wl_data_source::Request::SetActions { .. } => {}
+            _ => unreachable!("wl_data_source request added without an implementation"),
+        }
+    }
+
+    fn destroyed(
+        state: &mut Self,
+        _client: ClientId,
+        resource: &WlDataSource,
+        _data: &DataSourceData,
+    ) {
+        let was_selection = state
+            .selection_source
+            .as_ref()
+            .is_some_and(|source| source.id() == resource.id());
+        state
+            .data_sources
+            .retain(|source| source.id() != resource.id());
+        state.data_source_count = state.data_source_count.saturating_sub(1);
+        if was_selection {
+            state.selection_source = None;
+            for device in state.data_devices.iter().filter(|device| device.is_alive()) {
+                device.selection(None);
+            }
+        }
+    }
+}
+
+impl Dispatch<WlDataDevice, DataDeviceData> for CompositorState {
+    fn request(
+        state: &mut Self,
+        _client: &Client,
+        resource: &WlDataDevice,
+        request: wl_data_device::Request,
+        data: &DataDeviceData,
+        handle: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            wl_data_device::Request::SetSelection { source, serial } => {
+                if serial == 0 || !data.seat.id().same_client_as(&resource.id()) {
+                    return;
+                }
+                if let Some(source) = source.as_ref() {
+                    let Some(source_data) = source.data::<DataSourceData>() else {
+                        return;
+                    };
+                    if source_data.used.swap(true, Ordering::AcqRel) {
+                        resource.post_error(
+                            wl_data_device::Error::UsedSource,
+                            "wl_data_source was already used",
+                        );
+                        return;
+                    }
+                }
+                if let Some(previous) = state.selection_source.take() {
+                    if source
+                        .as_ref()
+                        .is_none_or(|source| source.id() != previous.id())
+                        && previous.is_alive()
+                    {
+                        previous.cancelled();
+                    }
+                }
+                state.selection_source = source.clone();
+                publish_selection(state, handle, source.as_ref());
+            }
+            wl_data_device::Request::StartDrag { .. } | wl_data_device::Request::Release => {}
+            _ => unreachable!("wl_data_device request added without an implementation"),
+        }
+    }
+
+    fn destroyed(
+        state: &mut Self,
+        _client: ClientId,
+        resource: &WlDataDevice,
+        _data: &DataDeviceData,
+    ) {
+        state
+            .data_devices
+            .retain(|device| device.id() != resource.id());
+        state.data_device_count = state.data_device_count.saturating_sub(1);
+    }
+}
+
+impl Dispatch<WlDataOffer, DataOfferData> for CompositorState {
+    fn request(
+        _state: &mut Self,
+        _client: &Client,
+        _resource: &WlDataOffer,
+        request: wl_data_offer::Request,
+        data: &DataOfferData,
+        _handle: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            wl_data_offer::Request::Receive { mime_type, fd } => {
+                if data.mime_types.contains(&mime_type) && data.source.is_alive() {
+                    data.source.send(mime_type, fd.as_fd());
+                }
+            }
+            wl_data_offer::Request::Destroy
+            | wl_data_offer::Request::Accept { .. }
+            | wl_data_offer::Request::Finish
+            | wl_data_offer::Request::SetActions { .. } => {}
+            _ => unreachable!("wl_data_offer request added without an implementation"),
+        }
+    }
+
+    fn destroyed(
+        state: &mut Self,
+        _client: ClientId,
+        resource: &WlDataOffer,
+        _data: &DataOfferData,
+    ) {
+        state
+            .data_offers
+            .retain(|offer| offer.id() != resource.id());
+        state.data_offer_count = state.data_offer_count.saturating_sub(1);
     }
 }
 
@@ -3292,6 +3545,9 @@ impl CompositorCore {
             .create_global::<CompositorState, WlSeat, _>(7, ());
         display
             .handle()
+            .create_global::<CompositorState, WlDataDeviceManager, _>(3, ());
+        display
+            .handle()
             .create_global::<CompositorState, WlOutput, _>(4, ());
         let state = CompositorState {
             output_width: 320,
@@ -3589,6 +3845,22 @@ impl CompositorCore {
 
     pub fn seat_bind_count(&self) -> u32 {
         self.state.seat_binds
+    }
+
+    pub fn data_device_manager_bind_count(&self) -> u32 {
+        self.state.data_device_manager_binds
+    }
+
+    pub fn data_source_count(&self) -> u32 {
+        self.state.data_source_count
+    }
+
+    pub fn data_device_count(&self) -> u32 {
+        self.state.data_device_count
+    }
+
+    pub fn data_offer_count(&self) -> u32 {
+        self.state.data_offer_count
     }
 
     pub fn pointer_count(&self) -> u32 {
@@ -4413,6 +4685,54 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeDataDeviceManagerBindCount(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.data_device_manager_bind_count()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeDataSourceCount(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.data_source_count()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeDataDeviceCount(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.data_device_count()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeDataOfferCount(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.data_offer_count()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativePointerCount(
     _environment: *mut std::ffi::c_void,
     _activity: *mut std::ffi::c_void,
@@ -4864,6 +5184,10 @@ mod tests {
         assert_eq!(core.output_count(), 0);
         assert_eq!(core.output_event_count(), 0);
         assert_eq!(core.seat_bind_count(), 0);
+        assert_eq!(core.data_device_manager_bind_count(), 0);
+        assert_eq!(core.data_source_count(), 0);
+        assert_eq!(core.data_device_count(), 0);
+        assert_eq!(core.data_offer_count(), 0);
         assert_eq!(core.pointer_count(), 0);
         assert_eq!(core.pointer_event_count(), 0);
         assert_eq!(core.keyboard_count(), 0);

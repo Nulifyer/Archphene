@@ -59,6 +59,10 @@ public final class MainActivity extends Activity {
     private static native int nativeConfigureOutput(
             long handle, int width, int height, int scale);
     private static native int nativeSeatBindCount(long handle);
+    private static native int nativeDataDeviceManagerBindCount(long handle);
+    private static native int nativeDataSourceCount(long handle);
+    private static native int nativeDataDeviceCount(long handle);
+    private static native int nativeDataOfferCount(long handle);
     private static native int nativePointerCount(long handle);
     private static native int nativeKeyboardCount(long handle);
     private static native int nativeKeyboardEventCount(long handle);
@@ -810,12 +814,53 @@ public final class MainActivity extends Activity {
                         || nativeShmPoolCount(core) != 0) {
                     throw new IllegalStateException("xdg destruction lifecycle failed");
                 }
+                output.write(bindGlobalAndSyncRequest(globals.seat, "wl_seat", 83, 84));
+                output.flush();
+                dispatch(core);
+                readSeatUntilCallback(input, 83, 84);
+
+                output.write(bindGlobalAndSyncRequest(
+                        globals.dataDeviceManager, "wl_data_device_manager", 85, 86));
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 86);
+                if (nativeDataDeviceManagerBindCount(core) != 1) {
+                    throw new IllegalStateException(
+                            "wl_data_device_manager bind was not dispatched");
+                }
+
+                output.write(createDataSelectionAndSyncRequest(keyPressSerial));
+                output.flush();
+                dispatch(core);
+                int dataOfferId = readDataSelectionUntilCallback(input, 88, 89);
+                if (nativeDataSourceCount(core) != 1
+                        || nativeDataDeviceCount(core) != 1
+                        || nativeDataOfferCount(core) != 1) {
+                    throw new IllegalStateException(
+                            "wl_data_device selection resources were incomplete");
+                }
+
+                output.write(clearDataSelectionAndSyncRequest(keyReleaseSerial));
+                output.flush();
+                dispatch(core);
+                readClearedDataSelectionUntilCallback(input, 87, 88, 90);
+
+                output.write(destroyDataSelectionAndSyncRequest(dataOfferId));
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 91);
+                if (nativeDataSourceCount(core) != 0
+                        || nativeDataDeviceCount(core) != 0
+                        || nativeDataOfferCount(core) != 0) {
+                    throw new IllegalStateException(
+                            "wl_data_device selection resources leaked");
+                }
             }
             passed = true;
             message = "Native Wayland compositor passed\n"
                     + "registry, Android bitmap, xdg toplevel, keyboard input, "
                     + "MotionEvent pointer, nested popup grabs, synchronized subsurface trees, "
-                    + "and committed parent geometry complete";
+                    + "committed parent geometry, and clipboard selection lifecycle complete";
         } catch (Exception error) {
             message = "Native compositor probe failed\n" + error.getMessage();
         } finally {
@@ -942,6 +987,47 @@ public final class MainActivity extends Activity {
         return request.array();
     }
 
+    private static byte[] createDataSelectionAndSyncRequest(int serial) {
+        String plain = "text/plain";
+        String utf8 = "text/plain;charset=utf-8";
+        int plainSize = waylandStringMessageSize(plain);
+        int utf8Size = waylandStringMessageSize(utf8);
+        ByteBuffer request = buffer(12 + plainSize + utf8Size + 16 + 16 + 12);
+        putHeader(request, 85, 0, 12);
+        request.putInt(87);
+        putWaylandStringMessage(request, 87, 0, plain);
+        putWaylandStringMessage(request, 87, 0, utf8);
+        putHeader(request, 85, 1, 16);
+        request.putInt(88);
+        request.putInt(83);
+        putHeader(request, 88, 1, 16);
+        request.putInt(87);
+        request.putInt(serial);
+        putHeader(request, 1, 0, 12);
+        request.putInt(89);
+        return request.array();
+    }
+
+    private static byte[] clearDataSelectionAndSyncRequest(int serial) {
+        ByteBuffer request = buffer(28);
+        putHeader(request, 88, 1, 16);
+        request.putInt(0);
+        request.putInt(serial);
+        putHeader(request, 1, 0, 12);
+        request.putInt(90);
+        return request.array();
+    }
+
+    private static byte[] destroyDataSelectionAndSyncRequest(int offerId) {
+        ByteBuffer request = buffer(44);
+        putHeader(request, offerId, 2, 8);
+        putHeader(request, 87, 1, 8);
+        putHeader(request, 88, 2, 8);
+        putHeader(request, 83, 3, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(91);
+        return request.array();
+    }
     private static byte[] createSecondShmBufferAndSyncRequest() {
         ByteBuffer request = buffer(44);
         putHeader(request, 26, 0, 32);
@@ -1377,6 +1463,7 @@ public final class MainActivity extends Activity {
         Global subcompositor = null;
         Global xdgWmBase = null;
         Global seat = null;
+        Global dataDeviceManager = null;
         Global output = null;
         while (true) {
             Message message = readMessage(input);
@@ -1404,6 +1491,8 @@ public final class MainActivity extends Activity {
                     xdgWmBase = new Global(name, version);
                 } else if ("wl_seat".equals(interfaceName)) {
                     seat = new Global(name, version);
+                } else if ("wl_data_device_manager".equals(interfaceName)) {
+                    dataDeviceManager = new Global(name, version);
                 } else if ("wl_output".equals(interfaceName)) {
                     output = new Global(name, version);
                 }
@@ -1414,14 +1503,95 @@ public final class MainActivity extends Activity {
                         || subcompositor == null
                         || xdgWmBase == null
                         || seat == null
+                        || dataDeviceManager == null
                         || output == null) {
                     throw new IllegalStateException("required Wayland globals not advertised");
                 }
-                return new RegistryGlobals(compositor, subcompositor, shm, xdgWmBase, seat, output);
+                return new RegistryGlobals(compositor, subcompositor, shm, xdgWmBase, seat,
+                        dataDeviceManager, output);
             }
         }
     }
 
+    private static int readDataSelectionUntilCallback(
+            FileInputStream input, int dataDeviceId, int callbackId) throws Exception {
+        int offerId = 0;
+        boolean foundPlain = false;
+        boolean foundUtf8 = false;
+        boolean selected = false;
+        while (true) {
+            Message message = readMessage(input);
+            throwIfDisplayError(message);
+            if (message.objectId == dataDeviceId
+                    && message.opcode == 0
+                    && message.body.length == 4) {
+                offerId = ByteBuffer.wrap(message.body)
+                        .order(ByteOrder.nativeOrder()).getInt();
+            } else if (offerId != 0 && message.objectId == offerId && message.opcode == 0) {
+                String mimeType = readWaylandString(message.body);
+                foundPlain |= "text/plain".equals(mimeType);
+                foundUtf8 |= "text/plain;charset=utf-8".equals(mimeType);
+            } else if (message.objectId == dataDeviceId
+                    && message.opcode == 5
+                    && message.body.length == 4) {
+                int selectedOffer = ByteBuffer.wrap(message.body)
+                        .order(ByteOrder.nativeOrder()).getInt();
+                selected = offerId != 0 && selectedOffer == offerId;
+            }
+            if (message.objectId == callbackId && message.opcode == 0) {
+                if (offerId == 0 || !foundPlain || !foundUtf8 || !selected) {
+                    throw new IllegalStateException(
+                            "wl_data_device selection offer was incomplete");
+                }
+                return offerId;
+            }
+        }
+    }
+
+    private static void readClearedDataSelectionUntilCallback(
+            FileInputStream input, int sourceId, int dataDeviceId, int callbackId)
+            throws Exception {
+        boolean cancelled = false;
+        boolean cleared = false;
+        while (true) {
+            Message message = readMessage(input);
+            throwIfDisplayError(message);
+            cancelled |= message.objectId == sourceId
+                    && message.opcode == 2
+                    && message.body.length == 0;
+            if (message.objectId == dataDeviceId
+                    && message.opcode == 5
+                    && message.body.length == 4) {
+                int selectedOffer = ByteBuffer.wrap(message.body)
+                        .order(ByteOrder.nativeOrder()).getInt();
+                cleared |= selectedOffer == 0;
+            }
+            if (message.objectId == callbackId && message.opcode == 0) {
+                if (!cancelled || !cleared) {
+                    throw new IllegalStateException(
+                            "wl_data_device selection clear was incomplete");
+                }
+                return;
+            }
+        }
+    }
+
+    private static String readWaylandString(byte[] bodyBytes) {
+        ByteBuffer body = ByteBuffer.wrap(bodyBytes).order(ByteOrder.nativeOrder());
+        if (body.remaining() < 4) {
+            throw new IllegalStateException("missing Wayland string length");
+        }
+        int length = body.getInt();
+        if (length <= 0 || length > body.remaining()) {
+            throw new IllegalStateException("invalid Wayland string");
+        }
+        byte[] encoded = new byte[length];
+        body.get(encoded);
+        if (encoded[length - 1] != 0) {
+            throw new IllegalStateException("unterminated Wayland string");
+        }
+        return new String(encoded, 0, length - 1, StandardCharsets.UTF_8);
+    }
     private static void readUntilCallback(FileInputStream input, int callbackId) throws Exception {
         while (true) {
             Message message = readMessage(input);
@@ -2083,6 +2253,23 @@ public final class MainActivity extends Activity {
         buffer.putInt((size << 16) | opcode);
     }
 
+    private static int waylandStringMessageSize(String value) {
+        int length = value.getBytes(StandardCharsets.UTF_8).length + 1;
+        return 8 + 4 + ((length + 3) & ~3);
+    }
+
+    private static void putWaylandStringMessage(
+            ByteBuffer request, int objectId, int opcode, String value) {
+        byte[] encoded = value.getBytes(StandardCharsets.UTF_8);
+        int length = encoded.length + 1;
+        int size = waylandStringMessageSize(value);
+        int end = request.position() + size;
+        putHeader(request, objectId, opcode, size);
+        request.putInt(length);
+        request.put(encoded);
+        request.put((byte) 0);
+        while (request.position() < end) request.put((byte) 0);
+    }
     private static int toLinuxKeyCode(int androidKeyCode) {
         if (androidKeyCode >= KeyEvent.KEYCODE_A && androidKeyCode <= KeyEvent.KEYCODE_Z) {
             int[] linuxLetters = {
@@ -2136,6 +2323,7 @@ public final class MainActivity extends Activity {
         final Global shm;
         final Global xdgWmBase;
         final Global seat;
+        final Global dataDeviceManager;
         final Global output;
 
         RegistryGlobals(
@@ -2144,12 +2332,14 @@ public final class MainActivity extends Activity {
                 Global shm,
                 Global xdgWmBase,
                 Global seat,
+                Global dataDeviceManager,
                 Global output) {
             this.compositor = compositor;
             this.subcompositor = subcompositor;
             this.shm = shm;
             this.xdgWmBase = xdgWmBase;
             this.seat = seat;
+            this.dataDeviceManager = dataDeviceManager;
             this.output = output;
         }
     }
