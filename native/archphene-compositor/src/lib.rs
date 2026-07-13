@@ -10,6 +10,18 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
+use wayland_protocols::wp::pointer_gestures::zv1::server::zwp_pointer_gesture_hold_v1::{
+    self, ZwpPointerGestureHoldV1,
+};
+use wayland_protocols::wp::pointer_gestures::zv1::server::zwp_pointer_gesture_pinch_v1::{
+    self, ZwpPointerGesturePinchV1,
+};
+use wayland_protocols::wp::pointer_gestures::zv1::server::zwp_pointer_gesture_swipe_v1::{
+    self, ZwpPointerGestureSwipeV1,
+};
+use wayland_protocols::wp::pointer_gestures::zv1::server::zwp_pointer_gestures_v1::{
+    self, ZwpPointerGesturesV1,
+};
 use wayland_protocols::wp::fractional_scale::v1::server::wp_fractional_scale_manager_v1::{
     self, WpFractionalScaleManagerV1,
 };
@@ -44,6 +56,7 @@ use wayland_server::protocol::wl_shm_pool::{self, WlShmPool};
 use wayland_server::protocol::wl_subcompositor::{self, WlSubcompositor};
 use wayland_server::protocol::wl_subsurface::{self, WlSubsurface};
 use wayland_server::protocol::wl_surface::{self, WlSurface};
+use wayland_server::protocol::wl_touch::{self, WlTouch};
 use wayland_server::{
     Client, DataInit, Dispatch, Display, DisplayHandle, GlobalDispatch, New, Resource, WEnum,
     backend::ClientId,
@@ -104,6 +117,18 @@ pub struct CompositorState {
     next_input_serial: u32,
     pointers: Vec<WlPointer>,
     pointer_focus_surface: Option<WlSurface>,
+    last_pointer_enter_serial: u32,
+    cursor_surface: Option<WlSurface>,
+    cursor_frame: Option<Arc<CommittedFrame>>,
+    cursor_hotspot_x: i32,
+    cursor_hotspot_y: i32,
+    touches: Vec<WlTouch>,
+    active_touches: Vec<ActiveTouch>,
+    touch_event_count: u32,
+    swipe_gestures: Vec<ZwpPointerGestureSwipeV1>,
+    pinch_gestures: Vec<ZwpPointerGesturePinchV1>,
+    hold_gestures: Vec<ZwpPointerGestureHoldV1>,
+    gesture_event_count: u32,
     pointer_inside: bool,
     pointer_pressed: bool,
     pointer_x: f64,
@@ -143,6 +168,7 @@ pub struct SurfaceData {
 #[derive(Default)]
 struct SurfaceState {
     pending_buffer: Option<Option<SurfaceBuffer>>,
+    pending_offset: (i32, i32),
     pending_surface_damage: Vec<RegionRectangle>,
     pending_buffer_damage: Vec<RegionRectangle>,
     pending_callbacks: Vec<WlCallback>,
@@ -200,6 +226,7 @@ enum SurfaceRole {
     XdgToplevel,
     XdgPopup,
     Subsurface,
+    Cursor,
 }
 
 #[derive(Clone, Copy, Default, Eq, PartialEq)]
@@ -539,6 +566,15 @@ struct XdgPopupData {
 struct PopupGrabSerial {
     serial: u32,
     surface: WlSurface,
+}
+
+struct ActiveTouch {
+    id: i32,
+    surface: WlSurface,
+}
+
+struct PointerGestureData {
+    pointer: WlPointer,
 }
 
 struct PopupGrabState {
@@ -947,10 +983,19 @@ fn copy_last_frame_to_bitmap(
     environment: *mut std::ffi::c_void,
     bitmap: *mut std::ffi::c_void,
 ) -> i32 {
-    const ANDROID_BITMAP_FORMAT_RGBA_8888: i32 = 1;
     let Some(frame) = core.state.last_frame.as_ref() else {
         return -1;
     };
+    copy_frame_to_bitmap(frame, environment, bitmap)
+}
+
+#[cfg(target_os = "android")]
+fn copy_frame_to_bitmap(
+    frame: &CommittedFrame,
+    environment: *mut std::ffi::c_void,
+    bitmap: *mut std::ffi::c_void,
+) -> i32 {
+    const ANDROID_BITMAP_FORMAT_RGBA_8888: i32 = 1;
     let mut info: AndroidBitmapInfo = unsafe { zeroed() };
     if unsafe { android_bitmap_get_info(environment, bitmap, &mut info) } != 0 {
         return -2;
@@ -2078,6 +2123,125 @@ fn queue_linux_copy(state: &mut CompositorState, source: &WlDataSource) {
     source.send((*mime_type).to_owned(), write_end.as_fd());
     state.pending_linux_copy_fds.push_back(read_end);
 }
+impl GlobalDispatch<ZwpPointerGesturesV1, ()> for CompositorState {
+    fn bind(
+        _state: &mut Self,
+        _handle: &DisplayHandle,
+        _client: &Client,
+        resource: New<ZwpPointerGesturesV1>,
+        _global_data: &(),
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        data_init.init(resource, ());
+    }
+}
+
+impl Dispatch<ZwpPointerGesturesV1, ()> for CompositorState {
+    fn request(
+        state: &mut Self,
+        _client: &Client,
+        _resource: &ZwpPointerGesturesV1,
+        request: zwp_pointer_gestures_v1::Request,
+        _data: &(),
+        _handle: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            zwp_pointer_gestures_v1::Request::GetSwipeGesture { id, pointer } => {
+                let gesture = data_init.init(id, PointerGestureData { pointer });
+                state.swipe_gestures.push(gesture);
+            }
+            zwp_pointer_gestures_v1::Request::GetPinchGesture { id, pointer } => {
+                let gesture = data_init.init(id, PointerGestureData { pointer });
+                state.pinch_gestures.push(gesture);
+            }
+            zwp_pointer_gestures_v1::Request::GetHoldGesture { id, pointer } => {
+                let gesture = data_init.init(id, PointerGestureData { pointer });
+                state.hold_gestures.push(gesture);
+            }
+            zwp_pointer_gestures_v1::Request::Release => {}
+            _ => unreachable!("pointer-gestures request added without an implementation"),
+        }
+    }
+}
+
+impl Dispatch<ZwpPointerGestureSwipeV1, PointerGestureData> for CompositorState {
+    fn request(
+        _state: &mut Self,
+        _client: &Client,
+        _resource: &ZwpPointerGestureSwipeV1,
+        request: zwp_pointer_gesture_swipe_v1::Request,
+        _data: &PointerGestureData,
+        _handle: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            zwp_pointer_gesture_swipe_v1::Request::Destroy => {}
+            _ => unreachable!("swipe gesture request added without an implementation"),
+        }
+    }
+
+    fn destroyed(
+        state: &mut Self,
+        _client: ClientId,
+        resource: &ZwpPointerGestureSwipeV1,
+        _data: &PointerGestureData,
+    ) {
+        state.swipe_gestures.retain(|gesture| gesture.id() != resource.id());
+    }
+}
+
+impl Dispatch<ZwpPointerGesturePinchV1, PointerGestureData> for CompositorState {
+    fn request(
+        _state: &mut Self,
+        _client: &Client,
+        _resource: &ZwpPointerGesturePinchV1,
+        request: zwp_pointer_gesture_pinch_v1::Request,
+        _data: &PointerGestureData,
+        _handle: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            zwp_pointer_gesture_pinch_v1::Request::Destroy => {}
+            _ => unreachable!("pinch gesture request added without an implementation"),
+        }
+    }
+
+    fn destroyed(
+        state: &mut Self,
+        _client: ClientId,
+        resource: &ZwpPointerGesturePinchV1,
+        _data: &PointerGestureData,
+    ) {
+        state.pinch_gestures.retain(|gesture| gesture.id() != resource.id());
+    }
+}
+
+impl Dispatch<ZwpPointerGestureHoldV1, PointerGestureData> for CompositorState {
+    fn request(
+        _state: &mut Self,
+        _client: &Client,
+        _resource: &ZwpPointerGestureHoldV1,
+        request: zwp_pointer_gesture_hold_v1::Request,
+        _data: &PointerGestureData,
+        _handle: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            zwp_pointer_gesture_hold_v1::Request::Destroy => {}
+            _ => unreachable!("hold gesture request added without an implementation"),
+        }
+    }
+
+    fn destroyed(
+        state: &mut Self,
+        _client: ClientId,
+        resource: &ZwpPointerGestureHoldV1,
+        _data: &PointerGestureData,
+    ) {
+        state.hold_gestures.retain(|gesture| gesture.id() != resource.id());
+    }
+}
 impl GlobalDispatch<WpViewporter, ()> for CompositorState {
     fn bind(
         _state: &mut Self,
@@ -2828,7 +2992,11 @@ impl GlobalDispatch<WlSeat, ()> for CompositorState {
         if seat.version() >= 2 {
             seat.name("Archphene".into());
         }
-        seat.capabilities(wl_seat::Capability::Pointer | wl_seat::Capability::Keyboard);
+        seat.capabilities(
+            wl_seat::Capability::Pointer
+                | wl_seat::Capability::Keyboard
+                | wl_seat::Capability::Touch,
+        );
     }
 }
 
@@ -2885,28 +3053,107 @@ impl Dispatch<WlSeat, ()> for CompositorState {
                 state.keyboard_count = state.keyboard_count.saturating_add(1);
                 state.keyboards.push(keyboard);
             }
-            wl_seat::Request::GetTouch { .. } => resource.post_error(
-                wl_seat::Error::MissingCapability,
-                "touch capability is not advertised yet",
-            ),
+            wl_seat::Request::GetTouch { id } => {
+                let touch = data_init.init(id, ());
+                state.touches.push(touch);
+            }
             wl_seat::Request::Release => {}
             _ => unreachable!("wl_seat request added without an implementation"),
         }
     }
 }
 
-impl Dispatch<WlPointer, ()> for CompositorState {
+impl Dispatch<WlTouch, ()> for CompositorState {
     fn request(
         _state: &mut Self,
         _client: &Client,
-        _resource: &WlPointer,
+        _resource: &WlTouch,
+        request: wl_touch::Request,
+        _data: &(),
+        _handle: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            wl_touch::Request::Release => {}
+            _ => unreachable!("wl_touch request added without an implementation"),
+        }
+    }
+
+    fn destroyed(state: &mut Self, _client: ClientId, resource: &WlTouch, _data: &()) {
+        state.touches.retain(|touch| touch.id() != resource.id());
+    }
+}
+impl Dispatch<WlPointer, ()> for CompositorState {
+    fn request(
+        state: &mut Self,
+        _client: &Client,
+        resource: &WlPointer,
         request: wl_pointer::Request,
         _data: &(),
         _handle: &DisplayHandle,
         _data_init: &mut DataInit<'_, Self>,
     ) {
         match request {
-            wl_pointer::Request::SetCursor { .. } | wl_pointer::Request::Release => {}
+            wl_pointer::Request::SetCursor {
+                serial,
+                surface,
+                hotspot_x,
+                hotspot_y,
+            } => {
+                if serial != state.last_pointer_enter_serial {
+                    return;
+                }
+                let client_has_focus = state.pointer_focus_surface.as_ref().is_some_and(|focus| {
+                    surface.as_ref().map_or_else(
+                        || resource.id().same_client_as(&focus.id()),
+                        |cursor| cursor.id().same_client_as(&focus.id()),
+                    )
+                });
+                let updates_current = surface.as_ref().is_some_and(|surface| {
+                    state
+                        .cursor_surface
+                        .as_ref()
+                        .is_some_and(|cursor| cursor.id() == surface.id())
+                });
+                if !client_has_focus && !updates_current {
+                    return;
+                }
+                let Some(surface) = surface else {
+                    state.cursor_surface = None;
+                    state.cursor_frame = None;
+                    state.cursor_hotspot_x = 0;
+                    state.cursor_hotspot_y = 0;
+                    return;
+                };
+                if !resource.id().same_client_as(&surface.id()) {
+                    return;
+                }
+                let Some(surface_data) = surface.data::<SurfaceData>() else {
+                    return;
+                };
+                let mut surface_state = surface_data
+                    .inner
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                match surface_state.role {
+                    None | Some(SurfaceRole::Cursor) => {
+                        surface_state.role = Some(SurfaceRole::Cursor);
+                    }
+                    Some(_) => {
+                            resource.post_error(
+                            wl_pointer::Error::Role,
+                            "cursor wl_surface already has another role",
+                        );
+                        return;
+                    }
+                }
+                state.cursor_frame = surface_state.committed_frame.clone();
+                drop(surface_state);
+                state.cursor_surface = Some(surface);
+                state.cursor_hotspot_x = hotspot_x;
+                state.cursor_hotspot_y = hotspot_y;
+            }
+            wl_pointer::Request::Release => {}
             _ => unreachable!("wl_pointer request added without an implementation"),
         }
     }
@@ -3746,7 +3993,12 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                     .unwrap_or_else(|error| error.into_inner())
                     .pending_input_region = Some(region);
             }
-            wl_surface::Request::SetOpaqueRegion { .. } | wl_surface::Request::Offset { .. } => {}
+            wl_surface::Request::SetOpaqueRegion { .. } => {}
+            wl_surface::Request::Offset { x, y } => {
+                let mut surface = data.inner.lock().unwrap_or_else(|error| error.into_inner());
+                surface.pending_offset.0 = surface.pending_offset.0.saturating_add(x);
+                surface.pending_offset.1 = surface.pending_offset.1.saturating_add(y);
+            }
             wl_surface::Request::SetBufferTransform { transform } => match transform {
                 WEnum::Value(transform) => {
                     data.inner
@@ -3881,6 +4133,7 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                     }
                 }
                 let input_region_update = surface.pending_input_region.take();
+                let pending_offset = std::mem::take(&mut surface.pending_offset);
                 let surface_damage = std::mem::take(&mut surface.pending_surface_damage);
                 let buffer_damage = std::mem::take(&mut surface.pending_buffer_damage);
                 let damage_declared = !surface_damage.is_empty() || !buffer_damage.is_empty();
@@ -4061,8 +4314,11 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 }
                 let latest_frame = surface.committed_frame.clone();
                 let is_xdg_toplevel = role == Some(SurfaceRole::XdgToplevel);
-                let publishes_root_frame = role != Some(SurfaceRole::Subsurface)
-                    && (is_xdg_toplevel || !surface.has_xdg_surface);
+                let is_cursor = role == Some(SurfaceRole::Cursor);
+                let publishes_root_frame = !matches!(
+                    role,
+                    Some(SurfaceRole::Subsurface | SurfaceRole::Cursor)
+                ) && (is_xdg_toplevel || !surface.has_xdg_surface);
                 let has_frame = latest_frame.is_some();
                 drop(surface);
 
@@ -4085,7 +4341,19 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 }
                 if publishes_root_frame {
                     state.root_surface = Some(resource.clone());
-                    state.root_frame = latest_frame;
+                    state.root_frame = latest_frame.clone();
+                }
+                if is_cursor
+                    && state
+                        .cursor_surface
+                        .as_ref()
+                        .is_some_and(|cursor| cursor.id() == resource.id())
+                {
+                    state.cursor_frame = latest_frame;
+                    state.cursor_hotspot_x =
+                        state.cursor_hotspot_x.saturating_sub(pending_offset.0);
+                    state.cursor_hotspot_y =
+                        state.cursor_hotspot_y.saturating_sub(pending_offset.1);
                 }
                 if is_xdg_toplevel {
                     if has_frame && state.popup_grab.as_ref().is_none_or(|grab| !grab.active) {
@@ -4151,6 +4419,9 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
         {
             set_keyboard_focus(state, None);
         }
+        state
+            .active_touches
+            .retain(|touch| touch.surface.id() != resource.id());
         state.surfaces.retain(|surface| surface.id() != resource.id());
         state.surface_count = state.surface_count.saturating_sub(1);
         if state.surface_count == 0 {
@@ -4266,7 +4537,7 @@ fn surface_origin_in_root(
                 .unwrap_or_else(|error| error.into_inner());
             Some((parent_x.saturating_add(x), parent_y.saturating_add(y)))
         }
-        None => None,
+        Some(SurfaceRole::Cursor) | None => None,
     }
 }
 
@@ -4480,7 +4751,7 @@ fn xdg_surface_origin(
             let (x, y, _, _) = popup_local_geometry(popup_data)?;
             Some((parent_x.saturating_add(x), parent_y.saturating_add(y)))
         }
-        Some(SurfaceRole::Subsurface) | None => None,
+        Some(SurfaceRole::Subsurface | SurfaceRole::Cursor) | None => None,
     }
 }
 
@@ -4797,6 +5068,9 @@ impl CompositorCore {
         display
             .handle()
             .create_global::<CompositorState, ZwpTextInputManagerV3, _>(1, ());
+        display
+            .handle()
+            .create_global::<CompositorState, ZwpPointerGesturesV1, _>(3, ());
         display
             .handle()
             .create_global::<CompositorState, WpViewporter, _>(1, ());
@@ -5509,7 +5783,7 @@ impl CompositorCore {
             .state
             .pointer_focus_surface
             .as_ref()
-            .is_some_and(|focused| focused.id() != surface.id());
+            .is_none_or(|focused| focused.id() != surface.id());
         if focus_changed {
             if self.state.pointer_inside {
                 let previous = self
@@ -5548,6 +5822,7 @@ impl CompositorCore {
                     pointer.frame();
                 }
             }
+            self.state.last_pointer_enter_serial = serial;
         }
         self.state.pointer_inside = true;
         self.state.pointer_x = x;
@@ -5556,6 +5831,383 @@ impl CompositorCore {
         1
     }
 
+    fn touch_resources_for_surface(&self, surface: &WlSurface) -> Vec<WlTouch> {
+        self.state
+            .touches
+            .iter()
+            .filter(|touch| touch.is_alive() && touch.id().same_client_as(&surface.id()))
+            .cloned()
+            .collect()
+    }
+
+    fn touch_target(&self, x: f64, y: f64) -> Option<(WlSurface, f64, f64)> {
+        if self
+            .state
+            .popup_grab
+            .as_ref()
+            .is_some_and(|grab| grab.active)
+        {
+            self.popup_pointer_target(x, y)
+        } else {
+            self.state.root_surface.as_ref().and_then(|root| {
+                surface_tree_pointer_target(
+                    &self.state,
+                    root,
+                    0,
+                    0,
+                    self.state.output_width,
+                    self.state.output_height,
+                    x,
+                    y,
+                    0,
+                )
+            })
+        }
+    }
+
+    pub fn touch_down(&mut self, id: i32, x: f64, y: f64, time: u32) -> u32 {
+        if self.state.active_touches.iter().any(|touch| touch.id == id) {
+            return 0;
+        }
+        let Some((surface, local_x, local_y)) = self.touch_target(x, y) else {
+            return 0;
+        };
+        let touches = self.touch_resources_for_surface(&surface);
+        if touches.is_empty() {
+            return 0;
+        }
+        let serial = self.next_input_serial();
+        for touch in touches {
+            touch.down(serial, time, &surface, id, local_x, local_y);
+            touch.frame();
+        }
+        self.state.active_touches.push(ActiveTouch { id, surface });
+        self.state.touch_event_count = self.state.touch_event_count.saturating_add(1);
+        1
+    }
+
+    pub fn touch_motion(&mut self, id: i32, x: f64, y: f64, time: u32) -> u32 {
+        let Some(surface) = self
+            .state
+            .active_touches
+            .iter()
+            .find(|touch| touch.id == id)
+            .map(|touch| touch.surface.clone())
+        else {
+            return 0;
+        };
+        let touches = self.touch_resources_for_surface(&surface);
+        if touches.is_empty() {
+            return 0;
+        }
+        let (local_x, local_y) = self.pointer_local_coordinates(&surface, x, y);
+        for touch in touches {
+            touch.motion(time, id, local_x, local_y);
+            touch.frame();
+        }
+        self.state.touch_event_count = self.state.touch_event_count.saturating_add(1);
+        1
+    }
+
+    pub fn touch_up(&mut self, id: i32, time: u32) -> u32 {
+        let Some(index) = self
+            .state
+            .active_touches
+            .iter()
+            .position(|touch| touch.id == id)
+        else {
+            return 0;
+        };
+        let surface = self.state.active_touches[index].surface.clone();
+        let touches = self.touch_resources_for_surface(&surface);
+        if touches.is_empty() {
+            return 0;
+        }
+        let serial = self.next_input_serial();
+        for touch in touches {
+            touch.up(serial, time, id);
+            touch.frame();
+        }
+        self.state.active_touches.remove(index);
+        self.state.touch_event_count = self.state.touch_event_count.saturating_add(1);
+        1
+    }
+
+    pub fn touch_cancel(&mut self) -> u32 {
+        if self.state.active_touches.is_empty() {
+            return 0;
+        }
+        let mut touches = Vec::<WlTouch>::new();
+        for active in &self.state.active_touches {
+            for touch in self.touch_resources_for_surface(&active.surface) {
+                if !touches.iter().any(|candidate| candidate.id() == touch.id()) {
+                    touches.push(touch);
+                }
+            }
+        }
+        for touch in touches {
+            touch.cancel();
+            touch.frame();
+        }
+        self.state.active_touches.clear();
+        self.state.touch_event_count = self.state.touch_event_count.saturating_add(1);
+        1
+    }
+
+
+    fn gesture_focus_surface(&self) -> Option<WlSurface> {
+        self.state
+            .pointer_inside
+            .then(|| self.state.pointer_focus_surface.clone())
+            .flatten()
+    }
+
+    pub fn swipe_begin(&mut self, fingers: u32, time: u32) -> u32 {
+        let Some(surface) = self.gesture_focus_surface() else {
+            return 0;
+        };
+        let gestures = self
+            .state
+            .swipe_gestures
+            .iter()
+            .filter(|gesture| {
+                gesture.is_alive()
+                    && gesture.data::<PointerGestureData>().is_some_and(|data| {
+                        data.pointer.is_alive()
+                            && data.pointer.id().same_client_as(&surface.id())
+                    })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if gestures.is_empty() || fingers == 0 {
+            return 0;
+        }
+        let serial = self.next_input_serial();
+        for gesture in gestures {
+            gesture.begin(serial, time, &surface, fingers);
+        }
+        self.state.gesture_event_count = self.state.gesture_event_count.saturating_add(1);
+        1
+    }
+
+    pub fn swipe_update(&mut self, dx: f64, dy: f64, time: u32) -> u32 {
+        let Some(surface) = self.gesture_focus_surface() else {
+            return 0;
+        };
+        let mut sent = false;
+        for gesture in self.state.swipe_gestures.iter().filter(|gesture| {
+            gesture.is_alive()
+                && gesture.data::<PointerGestureData>().is_some_and(|data| {
+                    data.pointer.is_alive() && data.pointer.id().same_client_as(&surface.id())
+                })
+        }) {
+            gesture.update(time, dx, dy);
+            sent = true;
+        }
+        if sent {
+            self.state.gesture_event_count = self.state.gesture_event_count.saturating_add(1);
+        }
+        u32::from(sent)
+    }
+
+    pub fn swipe_end(&mut self, cancelled: bool, time: u32) -> u32 {
+        let Some(surface) = self.gesture_focus_surface() else {
+            return 0;
+        };
+        let gestures = self
+            .state
+            .swipe_gestures
+            .iter()
+            .filter(|gesture| {
+                gesture.is_alive()
+                    && gesture.data::<PointerGestureData>().is_some_and(|data| {
+                        data.pointer.is_alive()
+                            && data.pointer.id().same_client_as(&surface.id())
+                    })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if gestures.is_empty() {
+            return 0;
+        }
+        let serial = self.next_input_serial();
+        for gesture in gestures {
+            gesture.end(serial, time, i32::from(cancelled));
+        }
+        self.state.gesture_event_count = self.state.gesture_event_count.saturating_add(1);
+        1
+    }
+
+    pub fn pinch_begin(&mut self, fingers: u32, time: u32) -> u32 {
+        let Some(surface) = self.gesture_focus_surface() else {
+            return 0;
+        };
+        let gestures = self
+            .state
+            .pinch_gestures
+            .iter()
+            .filter(|gesture| {
+                gesture.is_alive()
+                    && gesture.data::<PointerGestureData>().is_some_and(|data| {
+                        data.pointer.is_alive()
+                            && data.pointer.id().same_client_as(&surface.id())
+                    })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if gestures.is_empty() || fingers == 0 {
+            return 0;
+        }
+        let serial = self.next_input_serial();
+        for gesture in gestures {
+            gesture.begin(serial, time, &surface, fingers);
+        }
+        self.state.gesture_event_count = self.state.gesture_event_count.saturating_add(1);
+        1
+    }
+
+    pub fn pinch_update(
+        &mut self,
+        dx: f64,
+        dy: f64,
+        scale: f64,
+        rotation: f64,
+        time: u32,
+    ) -> u32 {
+        if !scale.is_finite() || scale <= 0.0 || !rotation.is_finite() {
+            return 0;
+        }
+        let Some(surface) = self.gesture_focus_surface() else {
+            return 0;
+        };
+        let mut sent = false;
+        for gesture in self.state.pinch_gestures.iter().filter(|gesture| {
+            gesture.is_alive()
+                && gesture.data::<PointerGestureData>().is_some_and(|data| {
+                    data.pointer.is_alive() && data.pointer.id().same_client_as(&surface.id())
+                })
+        }) {
+            gesture.update(time, dx, dy, scale, rotation);
+            sent = true;
+        }
+        if sent {
+            self.state.gesture_event_count = self.state.gesture_event_count.saturating_add(1);
+        }
+        u32::from(sent)
+    }
+
+    pub fn pinch_end(&mut self, cancelled: bool, time: u32) -> u32 {
+        let Some(surface) = self.gesture_focus_surface() else {
+            return 0;
+        };
+        let gestures = self
+            .state
+            .pinch_gestures
+            .iter()
+            .filter(|gesture| {
+                gesture.is_alive()
+                    && gesture.data::<PointerGestureData>().is_some_and(|data| {
+                        data.pointer.is_alive()
+                            && data.pointer.id().same_client_as(&surface.id())
+                    })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if gestures.is_empty() {
+            return 0;
+        }
+        let serial = self.next_input_serial();
+        for gesture in gestures {
+            gesture.end(serial, time, i32::from(cancelled));
+        }
+        self.state.gesture_event_count = self.state.gesture_event_count.saturating_add(1);
+        1
+    }
+
+    pub fn hold_begin(&mut self, fingers: u32, time: u32) -> u32 {
+        let Some(surface) = self.gesture_focus_surface() else {
+            return 0;
+        };
+        let gestures = self
+            .state
+            .hold_gestures
+            .iter()
+            .filter(|gesture| {
+                gesture.is_alive()
+                    && gesture.data::<PointerGestureData>().is_some_and(|data| {
+                        data.pointer.is_alive()
+                            && data.pointer.id().same_client_as(&surface.id())
+                    })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if gestures.is_empty() || fingers == 0 {
+            return 0;
+        }
+        let serial = self.next_input_serial();
+        for gesture in gestures {
+            gesture.begin(serial, time, &surface, fingers);
+        }
+        self.state.gesture_event_count = self.state.gesture_event_count.saturating_add(1);
+        1
+    }
+
+    pub fn hold_end(&mut self, cancelled: bool, time: u32) -> u32 {
+        let Some(surface) = self.gesture_focus_surface() else {
+            return 0;
+        };
+        let gestures = self
+            .state
+            .hold_gestures
+            .iter()
+            .filter(|gesture| {
+                gesture.is_alive()
+                    && gesture.data::<PointerGestureData>().is_some_and(|data| {
+                        data.pointer.is_alive()
+                            && data.pointer.id().same_client_as(&surface.id())
+                    })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if gestures.is_empty() {
+            return 0;
+        }
+        let serial = self.next_input_serial();
+        for gesture in gestures {
+            gesture.end(serial, time, i32::from(cancelled));
+        }
+        self.state.gesture_event_count = self.state.gesture_event_count.saturating_add(1);
+        1
+    }
+
+    pub fn gesture_event_count(&self) -> u32 {
+        self.state.gesture_event_count
+    }
+    pub fn pointer_enter_serial(&self) -> u32 {
+        self.state.last_pointer_enter_serial
+    }
+    pub fn cursor_width(&self) -> u32 {
+        self.state.cursor_frame.as_ref().map_or(0, |frame| frame.width)
+    }
+
+    pub fn cursor_height(&self) -> u32 {
+        self.state.cursor_frame.as_ref().map_or(0, |frame| frame.height)
+    }
+
+    pub fn cursor_hotspot_component(&self, component: u32) -> i32 {
+        match component {
+            0 => self.state.cursor_hotspot_x,
+            1 => self.state.cursor_hotspot_y,
+            _ => 0,
+        }
+    }
+    pub fn touch_count(&self) -> u32 {
+        u32::try_from(self.state.touches.len()).unwrap_or(u32::MAX)
+    }
+
+    pub fn touch_event_count(&self) -> u32 {
+        self.state.touch_event_count
+    }
     pub fn pointer_button(&mut self, pressed: bool, time: u32) -> u32 {
         if !self.state.pointer_inside || self.state.pointer_pressed == pressed {
             return 0;
@@ -6742,6 +7394,299 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     i32::try_from(core.pointer_count()).unwrap_or(i32::MAX)
 }
 
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeSwipeBegin(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+    fingers: i32,
+    time: i32,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+        return -1;
+    };
+    i32::try_from(core.swipe_begin(fingers.max(0) as u32, time as u32)).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeSwipeUpdate(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+    dx_milli: i32,
+    dy_milli: i32,
+    time: i32,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+        return -1;
+    };
+    i32::try_from(core.swipe_update(
+        f64::from(dx_milli) / 1000.0,
+        f64::from(dy_milli) / 1000.0,
+        time as u32,
+    ))
+    .unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeSwipeEnd(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+    cancelled: bool,
+    time: i32,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+        return -1;
+    };
+    i32::try_from(core.swipe_end(cancelled, time as u32)).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativePinchBegin(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+    fingers: i32,
+    time: i32,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+        return -1;
+    };
+    i32::try_from(core.pinch_begin(fingers.max(0) as u32, time as u32)).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativePinchUpdate(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+    dx_milli: i32,
+    dy_milli: i32,
+    scale_milli: i32,
+    rotation_milli: i32,
+    time: i32,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+        return -1;
+    };
+    i32::try_from(core.pinch_update(
+        f64::from(dx_milli) / 1000.0,
+        f64::from(dy_milli) / 1000.0,
+        f64::from(scale_milli) / 1000.0,
+        f64::from(rotation_milli) / 1000.0,
+        time as u32,
+    ))
+    .unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativePinchEnd(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+    cancelled: bool,
+    time: i32,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+        return -1;
+    };
+    i32::try_from(core.pinch_end(cancelled, time as u32)).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeHoldBegin(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+    fingers: i32,
+    time: i32,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+        return -1;
+    };
+    i32::try_from(core.hold_begin(fingers.max(0) as u32, time as u32)).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeHoldEnd(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+    cancelled: bool,
+    time: i32,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+        return -1;
+    };
+    i32::try_from(core.hold_end(cancelled, time as u32)).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeGestureEventCount(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.gesture_event_count()).unwrap_or(i32::MAX)
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativePointerEnterSerial(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    core.pointer_enter_serial() as i32
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeCursorWidth(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.cursor_width()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeCursorHeight(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.cursor_height()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeCursorHotspot(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+    component: i32,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    core.cursor_hotspot_component(component as u32)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeCopyCursorToBitmap(
+    environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+    bitmap: *mut std::ffi::c_void,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    let Some(frame) = core.state.cursor_frame.as_ref() else {
+        return -1;
+    };
+    #[cfg(target_os = "android")]
+    {
+        return copy_frame_to_bitmap(frame, environment, bitmap);
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (environment, bitmap, frame);
+        -2
+    }
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeTouchCount(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.touch_count()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeTouchEventCount(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.touch_event_count()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeTouchDown(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+    id: i32,
+    x: i32,
+    y: i32,
+    time: i32,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+        return -1;
+    };
+    i32::try_from(core.touch_down(id, f64::from(x), f64::from(y), time as u32))
+        .unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeTouchMotion(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+    id: i32,
+    x: i32,
+    y: i32,
+    time: i32,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+        return -1;
+    };
+    i32::try_from(core.touch_motion(id, f64::from(x), f64::from(y), time as u32))
+        .unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeTouchUp(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+    id: i32,
+    time: i32,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+        return -1;
+    };
+    i32::try_from(core.touch_up(id, time as u32)).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeTouchCancel(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+        return -1;
+    };
+    i32::try_from(core.touch_cancel()).unwrap_or(i32::MAX)
+}
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeKeyboardCount(
     _environment: *mut std::ffi::c_void,

@@ -8,11 +8,14 @@ import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.os.Bundle;
 import android.os.ParcelFileDescriptor;
+import android.os.SystemClock;
 import android.util.Log;
 import android.view.Choreographer;
 import android.view.Gravity;
+import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
+import android.view.PointerIcon;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
@@ -30,10 +33,20 @@ public final class MainActivity extends Activity {
             new LinkedBlockingQueue<>();
     private final LinkedBlockingQueue<KeyboardInput> keyboardInputs =
             new LinkedBlockingQueue<>();
+    private final LinkedBlockingQueue<TouchInput> touchInputs =
+            new LinkedBlockingQueue<>();
+    private final LinkedBlockingQueue<GestureInput> gestureInputs =
+            new LinkedBlockingQueue<>();
     private final LinkedBlockingQueue<Integer> presentationTimes =
             new LinkedBlockingQueue<>();
     private volatile boolean pointerInputReady;
     private volatile boolean keyboardInputReady;
+    private volatile boolean touchInputReady;
+    private volatile boolean gestureInputReady;
+    private float gestureInitialSpan;
+    private float gestureInitialAngle;
+    private float gestureLastCentroidX;
+    private float gestureLastCentroidY;
     static { System.loadLibrary("archphene_compositor"); }
 
     private static native int nativeProtocolVersion();
@@ -96,6 +109,35 @@ public final class MainActivity extends Activity {
     private static native int nativePendingDamageComponent(long handle, int component);
     private static native int nativePresentFrame(long handle, int time);
     private static native int nativePointerCount(long handle);
+    private static native int nativeSwipeBegin(long handle, int fingers, int time);
+    private static native int nativeSwipeUpdate(
+            long handle, int dxMilli, int dyMilli, int time);
+    private static native int nativeSwipeEnd(long handle, boolean cancelled, int time);
+    private static native int nativePinchBegin(long handle, int fingers, int time);
+    private static native int nativePinchUpdate(
+            long handle,
+            int dxMilli,
+            int dyMilli,
+            int scaleMilli,
+            int rotationMilli,
+            int time);
+    private static native int nativePinchEnd(long handle, boolean cancelled, int time);
+    private static native int nativeHoldBegin(long handle, int fingers, int time);
+    private static native int nativeHoldEnd(long handle, boolean cancelled, int time);
+    private static native int nativeGestureEventCount(long handle);
+    private static native int nativePointerEnterSerial(long handle);
+    private static native int nativeCursorWidth(long handle);
+    private static native int nativeCursorHeight(long handle);
+    private static native int nativeCursorHotspot(long handle, int component);
+    private static native int nativeCopyCursorToBitmap(long handle, Bitmap bitmap);
+    private static native int nativeTouchCount(long handle);
+    private static native int nativeTouchEventCount(long handle);
+    private static native int nativeTouchDown(
+            long handle, int id, int x, int y, int time);
+    private static native int nativeTouchMotion(
+            long handle, int id, int x, int y, int time);
+    private static native int nativeTouchUp(long handle, int id, int time);
+    private static native int nativeTouchCancel(long handle);
     private static native int nativeKeyboardCount(long handle);
     private static native int nativeKeyboardEventCount(long handle);
     private static native int nativeKeyboardKey(
@@ -152,26 +194,82 @@ public final class MainActivity extends Activity {
         frameView.setContentDescription("No committed Wayland frame");
         frameView.setClickable(true);
         frameView.setOnTouchListener((view, event) -> {
-            if (!pointerInputReady) {
+            if (!pointerInputReady && !touchInputReady) {
                 return false;
             }
             int action = event.getActionMasked();
-            if (action != MotionEvent.ACTION_DOWN
-                    && action != MotionEvent.ACTION_MOVE
-                    && action != MotionEvent.ACTION_UP
-                    && action != MotionEvent.ACTION_CANCEL) {
-                return false;
+            int actionIndex = event.getActionIndex();
+            int time = (int) event.getEventTime();
+            if (pointerInputReady
+                    && (action == MotionEvent.ACTION_DOWN
+                            || action == MotionEvent.ACTION_MOVE
+                            || action == MotionEvent.ACTION_UP
+                            || action == MotionEvent.ACTION_CANCEL)) {
+                int localX = Math.round(event.getX());
+                int localY = Math.round(event.getY());
+                Log.i(TAG, "MotionEvent action=" + action + " local=" + localX + "," + localY);
+                pointerInputs.offer(new PointerInput(
+                        action, localX, localY, time, 0.0f, 0.0f));
             }
-            int localX = Math.round(event.getX());
-            int localY = Math.round(event.getY());
-            Log.i(TAG, "MotionEvent action=" + action + " local=" + localX + "," + localY);
-            pointerInputs.offer(new PointerInput(
-                    action,
-                    localX,
-                    localY,
-                    (int) event.getEventTime(),
-                    0.0f,
-                    0.0f));
+            if (touchInputReady) {
+                if (action == MotionEvent.ACTION_MOVE) {
+                    for (int index = 0; index < event.getPointerCount(); index++) {
+                        touchInputs.offer(new TouchInput(
+                                action,
+                                event.getPointerId(index),
+                                Math.round(event.getX(index)),
+                                Math.round(event.getY(index)),
+                                time));
+                    }
+                } else if (action == MotionEvent.ACTION_DOWN
+                        || action == MotionEvent.ACTION_POINTER_DOWN
+                        || action == MotionEvent.ACTION_UP
+                        || action == MotionEvent.ACTION_POINTER_UP) {
+                    touchInputs.offer(new TouchInput(
+                            action,
+                            event.getPointerId(actionIndex),
+                            Math.round(event.getX(actionIndex)),
+                            Math.round(event.getY(actionIndex)),
+                            time));
+                } else if (action == MotionEvent.ACTION_CANCEL) {
+                    touchInputs.offer(new TouchInput(action, -1, 0, 0, time));
+                }
+            }
+            if (gestureInputReady) {
+                if (action == MotionEvent.ACTION_POINTER_DOWN
+                        && event.getPointerCount() == 2) {
+                    float dx = event.getX(1) - event.getX(0);
+                    float dy = event.getY(1) - event.getY(0);
+                    gestureInitialSpan = Math.max(1.0f, (float) Math.hypot(dx, dy));
+                    gestureInitialAngle = (float) Math.atan2(dy, dx);
+                    gestureLastCentroidX = (event.getX(0) + event.getX(1)) / 2.0f;
+                    gestureLastCentroidY = (event.getY(0) + event.getY(1)) / 2.0f;
+                    gestureInputs.offer(GestureInput.begin(time));
+                } else if (action == MotionEvent.ACTION_MOVE
+                        && event.getPointerCount() >= 2
+                        && gestureInitialSpan > 0.0f) {
+                    float centroidX = (event.getX(0) + event.getX(1)) / 2.0f;
+                    float centroidY = (event.getY(0) + event.getY(1)) / 2.0f;
+                    float dx = event.getX(1) - event.getX(0);
+                    float dy = event.getY(1) - event.getY(0);
+                    float span = (float) Math.hypot(dx, dy);
+                    float angle = (float) Math.atan2(dy, dx);
+                    gestureInputs.offer(GestureInput.update(
+                            centroidX - gestureLastCentroidX,
+                            centroidY - gestureLastCentroidY,
+                            span / gestureInitialSpan,
+                            angle - gestureInitialAngle,
+                            time));
+                    gestureLastCentroidX = centroidX;
+                    gestureLastCentroidY = centroidY;
+                } else if ((action == MotionEvent.ACTION_POINTER_UP
+                                || action == MotionEvent.ACTION_CANCEL)
+                        && gestureInitialSpan > 0.0f) {
+                    gestureInputs.offer(GestureInput.end(
+                            action == MotionEvent.ACTION_CANCEL, time));
+                    gestureInitialSpan = 0.0f;
+                }
+            }
             if (action == MotionEvent.ACTION_UP) {
                 view.performClick();
             }
@@ -1166,15 +1264,19 @@ public final class MainActivity extends Activity {
             passed = true;
             message = "Native Wayland compositor passed\n"
                     + "registry, Android bitmap, xdg toplevel, keyboard input, "
-                    + "damage-batched buffer scale/transform, Choreographer-paced frames, MotionEvent pointer and wheel input, nested popup grabs, synchronized subsurface trees, "
+                    + "damage-batched buffer scale/transform, viewporter/fractional scaling, Choreographer-paced frames, MotionEvent pointer/wheel/touch input, cursor surfaces, pointer gestures, nested popup grabs, synchronized subsurface trees, "
                     + "committed parent geometry, and bidirectional clipboard and text-input v3 lifecycle complete";
         } catch (Exception error) {
             message = "Native compositor probe failed\n" + error.getMessage();
         } finally {
             pointerInputReady = false;
             keyboardInputReady = false;
+            touchInputReady = false;
+            gestureInputReady = false;
             pointerInputs.clear();
             keyboardInputs.clear();
+            touchInputs.clear();
+            gestureInputs.clear();
             if (core != 0) nativeDestroyCore(core);
         }
         boolean finalPassed = passed;
@@ -1193,6 +1295,78 @@ public final class MainActivity extends Activity {
         });
     }
 
+    private static void injectSyntheticGesture(ImageView view) {
+        long downTime = SystemClock.uptimeMillis();
+        MotionEvent.PointerProperties[] properties = new MotionEvent.PointerProperties[2];
+        MotionEvent.PointerCoords[] coordinates = new MotionEvent.PointerCoords[2];
+        for (int index = 0; index < 2; index++) {
+            properties[index] = new MotionEvent.PointerProperties();
+            properties[index].id = index;
+            properties[index].toolType = MotionEvent.TOOL_TYPE_FINGER;
+            coordinates[index] = new MotionEvent.PointerCoords();
+            coordinates[index].pressure = 1.0f;
+            coordinates[index].size = 1.0f;
+        }
+        coordinates[0].x = 140.0f;
+        coordinates[0].y = 80.0f;
+        coordinates[1].x = 180.0f;
+        coordinates[1].y = 80.0f;
+        dispatchSyntheticTouch(view, downTime, downTime, MotionEvent.ACTION_DOWN, 1,
+                properties, coordinates);
+        dispatchSyntheticTouch(
+                view,
+                downTime,
+                downTime + 8,
+                MotionEvent.ACTION_POINTER_DOWN
+                        | (1 << MotionEvent.ACTION_POINTER_INDEX_SHIFT),
+                2,
+                properties,
+                coordinates);
+        coordinates[0].x = 135.0f;
+        coordinates[1].x = 190.0f;
+        coordinates[0].y = 78.0f;
+        coordinates[1].y = 82.0f;
+        dispatchSyntheticTouch(view, downTime, downTime + 16, MotionEvent.ACTION_MOVE, 2,
+                properties, coordinates);
+        dispatchSyntheticTouch(
+                view,
+                downTime,
+                downTime + 24,
+                MotionEvent.ACTION_POINTER_UP
+                        | (1 << MotionEvent.ACTION_POINTER_INDEX_SHIFT),
+                2,
+                properties,
+                coordinates);
+        dispatchSyntheticTouch(view, downTime, downTime + 32, MotionEvent.ACTION_UP, 1,
+                properties, coordinates);
+    }
+
+    private static void dispatchSyntheticTouch(
+            ImageView view,
+            long downTime,
+            long eventTime,
+            int action,
+            int pointerCount,
+            MotionEvent.PointerProperties[] properties,
+            MotionEvent.PointerCoords[] coordinates) {
+        MotionEvent event = MotionEvent.obtain(
+                downTime,
+                eventTime,
+                action,
+                pointerCount,
+                properties,
+                coordinates,
+                0,
+                0,
+                1.0f,
+                1.0f,
+                0,
+                0,
+                InputDevice.SOURCE_TOUCHSCREEN,
+                0);
+        view.dispatchTouchEvent(event);
+        event.recycle();
+    }
     private Bitmap runViewportProbe(ImageView frameView) throws Exception {
         long core = nativeCreateCore();
         if (core == 0) {
@@ -1303,6 +1477,259 @@ public final class MainActivity extends Activity {
                 throw new IllegalStateException("reset viewport frame was not readable");
             }
             presentNextFrame(core, input, 0, resetFrame, frameView);
+
+            output.write(bindGlobalAndSyncRequest(globals.seat, "wl_seat", 27, 28));
+            output.flush();
+            dispatch(core);
+            readSeatUntilCallback(input, 27, 28);
+            output.write(getTouchAndSyncRequest());
+            output.flush();
+            dispatch(core);
+            readUntilCallback(input, 30);
+            if (nativeTouchCount(core) != 1) {
+                throw new IllegalStateException("wl_touch was not constructed");
+            }
+
+            runOnUiThread(() -> frameView.post(() -> {
+                int[] location = new int[2];
+                frameView.getLocationOnScreen(location);
+                int targetX = location[0] + frameView.getWidth() / 2;
+                int targetY = location[1] + frameView.getHeight() / 2;
+                touchInputReady = true;
+                Log.i(TAG, "touch target screen=" + targetX + "," + targetY);
+            }));
+            TouchInput down = awaitTouchInput(30);
+            if (down.action != MotionEvent.ACTION_DOWN
+                    || nativeTouchDown(core, down.id, down.x, down.y, down.time) != 1) {
+                throw new IllegalStateException("Android touch down was not routed");
+            }
+            dispatch(core);
+            int touchDownSerial = readTouchDownAndFrame(
+                    input, 29, 8, down.id, down.x, down.y, down.time);
+            int touchEvents = 1;
+            int touchUpSerial = 0;
+            while (touchUpSerial == 0) {
+                TouchInput event = awaitTouchInput(5);
+                if (event.action == MotionEvent.ACTION_MOVE) {
+                    if (nativeTouchMotion(
+                            core, event.id, event.x, event.y, event.time) != 1) {
+                        throw new IllegalStateException("Android touch motion was not routed");
+                    }
+                    dispatch(core);
+                    readTouchMotionAndFrame(
+                            input, 29, event.id, event.x, event.y, event.time);
+                    touchEvents++;
+                } else if (event.action == MotionEvent.ACTION_UP
+                        || event.action == MotionEvent.ACTION_POINTER_UP) {
+                    if (nativeTouchUp(core, event.id, event.time) != 1) {
+                        throw new IllegalStateException("Android touch up was not routed");
+                    }
+                    dispatch(core);
+                    touchUpSerial = readTouchUpAndFrame(
+                            input, 29, event.id, event.time);
+                    touchEvents++;
+                } else if (event.action == MotionEvent.ACTION_CANCEL) {
+                    if (nativeTouchCancel(core) != 1) {
+                        throw new IllegalStateException("Android touch cancel was not routed");
+                    }
+                    dispatch(core);
+                    readTouchCancelAndFrame(input, 29);
+                    touchUpSerial = touchDownSerial + 1;
+                    touchEvents++;
+                }
+            }
+            touchInputReady = false;
+            if (touchUpSerial <= touchDownSerial
+                    || nativeTouchEventCount(core) != touchEvents) {
+                throw new IllegalStateException("wl_touch lifecycle was incomplete");
+            }
+            output.write(releaseTouchAndSyncRequest());
+            output.flush();
+            dispatch(core);
+            readUntilCallback(input, 31);
+            if (nativeTouchCount(core) != 0) {
+                throw new IllegalStateException("wl_touch resource leaked");
+            }
+
+            output.write(getModernPointerAndSyncRequest());
+            output.flush();
+            dispatch(core);
+            readUntilCallback(input, 33);
+            if (nativePointerCount(core) != 1
+                    || nativePointerMotion(core, 2, 1, 7001) != 1) {
+                throw new IllegalStateException("cursor pointer focus was not established");
+            }
+            dispatch(core);
+            int cursorEnterSerial =
+                    readPointerEnterAndFrame(input, 32, 8, 2, 1);
+            if (nativePointerEnterSerial(core) != cursorEnterSerial) {
+                throw new IllegalStateException(
+                        "cursor enter serial mismatch: wire=" + cursorEnterSerial
+                                + " core=" + nativePointerEnterSerial(core));
+            }
+            output.write(createCursorSurfaceAndSyncRequest());
+            output.flush();
+            dispatch(core);
+            readUntilCallback(input, 35);
+            output.write(setCursorAndSyncRequest(cursorEnterSerial, 34, 1, 1, 36));
+            output.flush();
+            dispatch(core);
+            readUntilCallback(input, 36);
+            if (nativeCursorHotspot(core, 0) != 1
+                    || nativeCursorHotspot(core, 1) != 1) {
+                throw new IllegalStateException(
+                        "wl_pointer.set_cursor was ignored: hotspot="
+                                + nativeCursorHotspot(core, 0)
+                                + "," + nativeCursorHotspot(core, 1));
+            }
+            if (nativeSendShmPoolRequest(client.getFd(), 37, 40, 38) != 0) {
+                throw new IllegalStateException("cursor SHM pool FD transfer");
+            }
+            dispatch(core);
+            readUntilCallback(input, 38);
+            output.write(createCursorBufferAndSyncRequest());
+            output.flush();
+            dispatch(core);
+            readUntilCallback(input, 40);
+            output.write(mapCursorAndSyncRequest());
+            output.flush();
+            dispatch(core);
+            readUntilCallback(input, 41);
+            if (nativeCursorWidth(core) != 2
+                    || nativeCursorHeight(core) != 2
+                    || nativeCursorHotspot(core, 0) != 1
+                    || nativeCursorHotspot(core, 1) != 1
+                    || nativeLastFrameWidth(core) != 4
+                    || nativeLastFrameHeight(core) != 2) {
+                throw new IllegalStateException(
+                        "cursor surface state mismatch: cursor="
+                                + nativeCursorWidth(core) + "x" + nativeCursorHeight(core)
+                                + " hotspot=" + nativeCursorHotspot(core, 0)
+                                + "," + nativeCursorHotspot(core, 1)
+                                + " app=" + nativeLastFrameWidth(core)
+                                + "x" + nativeLastFrameHeight(core));
+            }
+            Bitmap cursorBitmap = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888);
+            if (nativeCopyCursorToBitmap(core, cursorBitmap) != 0) {
+                throw new IllegalStateException("cursor surface was not readable by Android");
+            }
+            runOnUiThread(() -> frameView.setPointerIcon(
+                    PointerIcon.create(cursorBitmap, 1.0f, 1.0f)));
+
+            output.write(offsetCursorAndSyncRequest());
+            output.flush();
+            dispatch(core);
+            readUntilCallback(input, 42);
+            if (nativeCursorHotspot(core, 0) != 0
+                    || nativeCursorHotspot(core, 1) != 1) {
+                throw new IllegalStateException("cursor hotspot did not follow wl_surface.offset");
+            }
+            output.write(setCursorAndSyncRequest(cursorEnterSerial, 0, 0, 0, 43));
+            output.flush();
+            dispatch(core);
+            readUntilCallback(input, 43);
+            if (nativeCursorWidth(core) != 0 || nativeCursorHeight(core) != 0) {
+                throw new IllegalStateException("null cursor surface did not hide the pointer");
+            }
+            runOnUiThread(() -> frameView.setPointerIcon(null));
+
+            output.write(bindGlobalAndSyncRequest(
+                    globals.pointerGestures, "zwp_pointer_gestures_v1", 44, 45));
+            output.flush();
+            dispatch(core);
+            readUntilCallback(input, 45);
+            output.write(createPointerGesturesAndSyncRequest());
+            output.flush();
+            dispatch(core);
+            readUntilCallback(input, 49);
+
+            gestureInputReady = true;
+            runOnUiThread(() -> injectSyntheticGesture(frameView));
+            GestureInput gestureBegin = awaitGestureInput(5);
+            if (gestureBegin.action != GestureInput.BEGIN
+                    || nativeSwipeBegin(core, 2, gestureBegin.time) != 1) {
+                throw new IllegalStateException("Android swipe begin was not routed");
+            }
+            dispatch(core);
+            readGestureBegin(input, 46, 8, 2, gestureBegin.time);
+            if (nativePinchBegin(core, 2, gestureBegin.time) != 1) {
+                throw new IllegalStateException("Android pinch begin was not routed");
+            }
+            dispatch(core);
+            readGestureBegin(input, 47, 8, 2, gestureBegin.time);
+            if (nativeHoldBegin(core, 2, gestureBegin.time) != 1) {
+                throw new IllegalStateException("Android hold begin was not routed");
+            }
+            dispatch(core);
+            readGestureBegin(input, 48, 8, 2, gestureBegin.time);
+
+            GestureInput gestureUpdate = awaitGestureInput(5);
+            if (gestureUpdate.action != GestureInput.UPDATE) {
+                throw new IllegalStateException("Android gesture update was missing");
+            }
+            int gestureDx = Math.round(gestureUpdate.dx * 1000.0f);
+            int gestureDy = Math.round(gestureUpdate.dy * 1000.0f);
+            int gestureScale = Math.round(gestureUpdate.scale * 1000.0f);
+            int gestureRotation = Math.round(gestureUpdate.rotation * 1000.0f);
+            if (nativeHoldEnd(core, true, gestureUpdate.time) != 1) {
+                throw new IllegalStateException("moving hold was not cancelled");
+            }
+            dispatch(core);
+            readGestureEnd(input, 48, 1, true, gestureUpdate.time);
+            if (nativeSwipeUpdate(
+                            core, gestureDx, gestureDy, gestureUpdate.time) != 1) {
+                throw new IllegalStateException("Android swipe update was not routed");
+            }
+            dispatch(core);
+            readSwipeUpdate(
+                    input, 46, gestureDx, gestureDy, gestureUpdate.time);
+            if (nativePinchUpdate(
+                            core,
+                            gestureDx,
+                            gestureDy,
+                            gestureScale,
+                            gestureRotation,
+                            gestureUpdate.time) != 1) {
+                throw new IllegalStateException("Android pinch update was not routed");
+            }
+            dispatch(core);
+            readPinchUpdate(
+                    input,
+                    47,
+                    gestureDx,
+                    gestureDy,
+                    gestureScale,
+                    gestureRotation,
+                    gestureUpdate.time);
+
+            GestureInput gestureEnd = awaitGestureInput(5);
+            gestureInputReady = false;
+            if (gestureEnd.action != GestureInput.END
+                    || nativeSwipeEnd(core, gestureEnd.cancelled, gestureEnd.time) != 1) {
+                throw new IllegalStateException("Android swipe end was not routed");
+            }
+            dispatch(core);
+            readGestureEnd(input, 46, 2, gestureEnd.cancelled, gestureEnd.time);
+            if (nativePinchEnd(core, gestureEnd.cancelled, gestureEnd.time) != 1) {
+                throw new IllegalStateException("Android pinch end was not routed");
+            }
+            dispatch(core);
+            readGestureEnd(input, 47, 2, gestureEnd.cancelled, gestureEnd.time);
+            if (nativeGestureEventCount(core) != 8) {
+                throw new IllegalStateException("pointer gesture lifecycle was incomplete");
+            }
+            output.write(destroyPointerGesturesAndSyncRequest());
+            output.flush();
+            dispatch(core);
+            readUntilCallback(input, 50);
+
+            output.write(releaseModernPointerAndSyncRequest());
+            output.flush();
+            dispatch(core);
+            readUntilCallback(input, 51);
+            if (nativePointerCount(core) != 0) {
+                throw new IllegalStateException("cursor pointer resource leaked");
+            }
             return resetFrame;
             }
         } finally {
@@ -1404,6 +1831,128 @@ public final class MainActivity extends Activity {
         putHeader(request, 8, 6, 8);
         putHeader(request, 1, 0, 12);
         request.putInt(26);
+        return request.array();
+    }
+    private static byte[] getTouchAndSyncRequest() {
+        ByteBuffer request = buffer(24);
+        putHeader(request, 27, 2, 12);
+        request.putInt(29);
+        putHeader(request, 1, 0, 12);
+        request.putInt(30);
+        return request.array();
+    }
+
+    private static byte[] releaseTouchAndSyncRequest() {
+        ByteBuffer request = buffer(20);
+        putHeader(request, 29, 0, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(31);
+        return request.array();
+    }
+    private static byte[] getModernPointerAndSyncRequest() {
+        ByteBuffer request = buffer(24);
+        putHeader(request, 27, 0, 12);
+        request.putInt(32);
+        putHeader(request, 1, 0, 12);
+        request.putInt(33);
+        return request.array();
+    }
+
+    private static byte[] createCursorSurfaceAndSyncRequest() {
+        ByteBuffer request = buffer(24);
+        putHeader(request, 4, 0, 12);
+        request.putInt(34);
+        putHeader(request, 1, 0, 12);
+        request.putInt(35);
+        return request.array();
+    }
+
+    private static byte[] setCursorAndSyncRequest(
+            int serial, int surfaceId, int hotspotX, int hotspotY, int callbackId) {
+        ByteBuffer request = buffer(36);
+        putHeader(request, 32, 0, 24);
+        request.putInt(serial);
+        request.putInt(surfaceId);
+        request.putInt(hotspotX);
+        request.putInt(hotspotY);
+        putHeader(request, 1, 0, 12);
+        request.putInt(callbackId);
+        return request.array();
+    }
+
+    private static byte[] createCursorBufferAndSyncRequest() {
+        ByteBuffer request = buffer(44);
+        putHeader(request, 37, 0, 32);
+        request.putInt(39);
+        request.putInt(0);
+        request.putInt(2);
+        request.putInt(2);
+        request.putInt(8);
+        request.putInt(1);
+        putHeader(request, 1, 0, 12);
+        request.putInt(40);
+        return request.array();
+    }
+
+    private static byte[] mapCursorAndSyncRequest() {
+        ByteBuffer request = buffer(64);
+        putHeader(request, 34, 1, 20);
+        request.putInt(39);
+        request.putInt(0);
+        request.putInt(0);
+        putHeader(request, 34, 9, 24);
+        request.putInt(0);
+        request.putInt(0);
+        request.putInt(2);
+        request.putInt(2);
+        putHeader(request, 34, 6, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(41);
+        return request.array();
+    }
+
+    private static byte[] offsetCursorAndSyncRequest() {
+        ByteBuffer request = buffer(36);
+        putHeader(request, 34, 10, 16);
+        request.putInt(1);
+        request.putInt(0);
+        putHeader(request, 34, 6, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(42);
+        return request.array();
+    }
+
+    private static byte[] createPointerGesturesAndSyncRequest() {
+        ByteBuffer request = buffer(60);
+        putHeader(request, 44, 0, 16);
+        request.putInt(46);
+        request.putInt(32);
+        putHeader(request, 44, 1, 16);
+        request.putInt(47);
+        request.putInt(32);
+        putHeader(request, 44, 3, 16);
+        request.putInt(48);
+        request.putInt(32);
+        putHeader(request, 1, 0, 12);
+        request.putInt(49);
+        return request.array();
+    }
+
+    private static byte[] destroyPointerGesturesAndSyncRequest() {
+        ByteBuffer request = buffer(44);
+        putHeader(request, 46, 0, 8);
+        putHeader(request, 47, 0, 8);
+        putHeader(request, 48, 0, 8);
+        putHeader(request, 44, 2, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(50);
+        return request.array();
+    }
+    private static byte[] releaseModernPointerAndSyncRequest() {
+        ByteBuffer request = buffer(20);
+        putHeader(request, 32, 1, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(51);
         return request.array();
     }
     private static byte[] destroySurfaceAndSyncRequest() {
@@ -2029,6 +2578,7 @@ public final class MainActivity extends Activity {
         Global seat = null;
         Global dataDeviceManager = null;
         Global textInputManager = null;
+        Global pointerGestures = null;
         Global viewporter = null;
         Global fractionalScaleManager = null;
         Global output = null;
@@ -2062,6 +2612,8 @@ public final class MainActivity extends Activity {
                     dataDeviceManager = new Global(name, version);
                 } else if ("zwp_text_input_manager_v3".equals(interfaceName)) {
                     textInputManager = new Global(name, version);
+                } else if ("zwp_pointer_gestures_v1".equals(interfaceName)) {
+                    pointerGestures = new Global(name, version);
                 } else if ("wp_viewporter".equals(interfaceName)) {
                     viewporter = new Global(name, version);
                 } else if ("wp_fractional_scale_manager_v1".equals(interfaceName)) {
@@ -2078,13 +2630,14 @@ public final class MainActivity extends Activity {
                         || seat == null
                         || dataDeviceManager == null
                         || textInputManager == null
+                        || pointerGestures == null
                         || viewporter == null
                         || fractionalScaleManager == null
                         || output == null) {
                     throw new IllegalStateException("required Wayland globals not advertised");
                 }
                 return new RegistryGlobals(compositor, subcompositor, shm, xdgWmBase, seat,
-                        dataDeviceManager, textInputManager, viewporter,
+                        dataDeviceManager, textInputManager, pointerGestures, viewporter,
                         fractionalScaleManager, output);
             }
         }
@@ -2356,7 +2909,7 @@ public final class MainActivity extends Activity {
                 }
                 int capabilities = ByteBuffer.wrap(message.body)
                         .order(ByteOrder.nativeOrder()).getInt();
-                pointerAndKeyboard = capabilities == 3;
+                pointerAndKeyboard = capabilities == 7;
             } else if (message.objectId == seatId && message.opcode == 1) {
                 ByteBuffer body = ByteBuffer.wrap(message.body).order(ByteOrder.nativeOrder());
                 int length = body.getInt();
@@ -2579,6 +3132,20 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private GestureInput awaitGestureInput(int timeoutSeconds) throws Exception {
+        GestureInput input = gestureInputs.poll(timeoutSeconds, TimeUnit.SECONDS);
+        if (input == null) {
+            throw new IllegalStateException("timed out waiting for Android gesture MotionEvent");
+        }
+        return input;
+    }
+    private TouchInput awaitTouchInput(int timeoutSeconds) throws Exception {
+        TouchInput input = touchInputs.poll(timeoutSeconds, TimeUnit.SECONDS);
+        if (input == null) {
+            throw new IllegalStateException("timed out waiting for Android touch MotionEvent");
+        }
+        return input;
+    }
     private PointerInput awaitPointerInput(int timeoutSeconds) throws Exception {
         PointerInput input = pointerInputs.poll(timeoutSeconds, TimeUnit.SECONDS);
         if (input == null) {
@@ -2587,6 +3154,212 @@ public final class MainActivity extends Activity {
         return input;
     }
 
+    private static Message readGestureMessage(
+            FileInputStream input, int gestureId, int expectedOpcode) throws Exception {
+        Message message;
+        do {
+            message = readMessage(input);
+            throwIfDisplayError(message);
+        } while (message.objectId == 1 && message.opcode == 1);
+        if (message.objectId != gestureId || message.opcode != expectedOpcode) {
+            throw new IllegalStateException(
+                    "unexpected pointer gesture event object=" + message.objectId
+                            + " opcode=" + message.opcode
+                            + " expected=" + expectedOpcode);
+        }
+        return message;
+    }
+
+    private static int readGestureBegin(
+            FileInputStream input,
+            int gestureId,
+            int surfaceId,
+            int fingers,
+            int time)
+            throws Exception {
+        Message message = readGestureMessage(input, gestureId, 0);
+        if (message.body.length != 16) {
+            throw new IllegalStateException("invalid pointer gesture begin event");
+        }
+        ByteBuffer body = ByteBuffer.wrap(message.body).order(ByteOrder.nativeOrder());
+        int serial = body.getInt();
+        if (serial == 0
+                || body.getInt() != time
+                || body.getInt() != surfaceId
+                || body.getInt() != fingers) {
+            throw new IllegalStateException("pointer gesture begin payload mismatch");
+        }
+        return serial;
+    }
+
+    private static void readSwipeUpdate(
+            FileInputStream input,
+            int gestureId,
+            int dxMilli,
+            int dyMilli,
+            int time)
+            throws Exception {
+        Message message = readGestureMessage(input, gestureId, 1);
+        if (message.body.length != 12) {
+            throw new IllegalStateException("invalid swipe update event");
+        }
+        ByteBuffer body = ByteBuffer.wrap(message.body).order(ByteOrder.nativeOrder());
+        int expectedDx = Math.round(dxMilli / 1000.0f * 256.0f);
+        int expectedDy = Math.round(dyMilli / 1000.0f * 256.0f);
+        if (body.getInt() != time
+                || body.getInt() != expectedDx
+                || body.getInt() != expectedDy) {
+            throw new IllegalStateException("swipe update payload mismatch");
+        }
+    }
+
+    private static void readPinchUpdate(
+            FileInputStream input,
+            int gestureId,
+            int dxMilli,
+            int dyMilli,
+            int scaleMilli,
+            int rotationMilli,
+            int time)
+            throws Exception {
+        Message message = readGestureMessage(input, gestureId, 1);
+        if (message.body.length != 20) {
+            throw new IllegalStateException("invalid pinch update event");
+        }
+        ByteBuffer body = ByteBuffer.wrap(message.body).order(ByteOrder.nativeOrder());
+        int expectedDx = Math.round(dxMilli / 1000.0f * 256.0f);
+        int expectedDy = Math.round(dyMilli / 1000.0f * 256.0f);
+        int expectedScale = Math.round(scaleMilli / 1000.0f * 256.0f);
+        int expectedRotation = Math.round(rotationMilli / 1000.0f * 256.0f);
+        int actualTime = body.getInt();
+        int actualDx = body.getInt();
+        int actualDy = body.getInt();
+        int actualScale = body.getInt();
+        int actualRotation = body.getInt();
+        if (actualTime != time
+                || Math.abs(actualDx - expectedDx) > 1
+                || Math.abs(actualDy - expectedDy) > 1
+                || Math.abs(actualScale - expectedScale) > 1
+                || Math.abs(actualRotation - expectedRotation) > 1) {
+            throw new IllegalStateException(
+                    "pinch update payload mismatch: actual="
+                            + actualTime + "," + actualDx + "," + actualDy + ","
+                            + actualScale + "," + actualRotation
+                            + " expected=" + time + "," + expectedDx + "," + expectedDy + ","
+                            + expectedScale + "," + expectedRotation);
+        }
+    }
+
+    private static int readGestureEnd(
+            FileInputStream input,
+            int gestureId,
+            int opcode,
+            boolean cancelled,
+            int time)
+            throws Exception {
+        Message message = readGestureMessage(input, gestureId, opcode);
+        if (message.body.length != 12) {
+            throw new IllegalStateException("invalid pointer gesture end event");
+        }
+        ByteBuffer body = ByteBuffer.wrap(message.body).order(ByteOrder.nativeOrder());
+        int serial = body.getInt();
+        if (serial == 0
+                || body.getInt() != time
+                || body.getInt() != (cancelled ? 1 : 0)) {
+            throw new IllegalStateException("pointer gesture end payload mismatch");
+        }
+        return serial;
+    }
+    private static int readTouchDownAndFrame(
+            FileInputStream input,
+            int touchId,
+            int surfaceId,
+            int contactId,
+            int x,
+            int y,
+            int time)
+            throws Exception {
+        Message message = readTouchMessage(input, touchId, 0);
+        if (message.body.length != 24) {
+            throw new IllegalStateException("invalid wl_touch.down event");
+        }
+        ByteBuffer body = ByteBuffer.wrap(message.body).order(ByteOrder.nativeOrder());
+        int serial = body.getInt();
+        if (serial == 0
+                || body.getInt() != time
+                || body.getInt() != surfaceId
+                || body.getInt() != contactId
+                || body.getInt() != x * 256
+                || body.getInt() != y * 256) {
+            throw new IllegalStateException("wl_touch.down payload mismatch");
+        }
+        readTouchFrame(input, touchId);
+        return serial;
+    }
+
+    private static void readTouchMotionAndFrame(
+            FileInputStream input, int touchId, int contactId, int x, int y, int time)
+            throws Exception {
+        Message message = readTouchMessage(input, touchId, 2);
+        if (message.body.length != 16) {
+            throw new IllegalStateException("invalid wl_touch.motion event");
+        }
+        ByteBuffer body = ByteBuffer.wrap(message.body).order(ByteOrder.nativeOrder());
+        if (body.getInt() != time
+                || body.getInt() != contactId
+                || body.getInt() != x * 256
+                || body.getInt() != y * 256) {
+            throw new IllegalStateException("wl_touch.motion payload mismatch");
+        }
+        readTouchFrame(input, touchId);
+    }
+
+    private static int readTouchUpAndFrame(
+            FileInputStream input, int touchId, int contactId, int time) throws Exception {
+        Message message = readTouchMessage(input, touchId, 1);
+        if (message.body.length != 12) {
+            throw new IllegalStateException("invalid wl_touch.up event");
+        }
+        ByteBuffer body = ByteBuffer.wrap(message.body).order(ByteOrder.nativeOrder());
+        int serial = body.getInt();
+        if (serial == 0 || body.getInt() != time || body.getInt() != contactId) {
+            throw new IllegalStateException("wl_touch.up payload mismatch");
+        }
+        readTouchFrame(input, touchId);
+        return serial;
+    }
+
+    private static void readTouchCancelAndFrame(FileInputStream input, int touchId)
+            throws Exception {
+        Message message = readTouchMessage(input, touchId, 4);
+        if (message.body.length != 0) {
+            throw new IllegalStateException("invalid wl_touch.cancel event");
+        }
+        readTouchFrame(input, touchId);
+    }
+
+    private static Message readTouchMessage(
+            FileInputStream input, int touchId, int expectedOpcode) throws Exception {
+        Message message;
+        do {
+            message = readMessage(input);
+            throwIfDisplayError(message);
+        } while (message.objectId == 1 && message.opcode == 1);
+        if (message.objectId != touchId || message.opcode != expectedOpcode) {
+            throw new IllegalStateException(
+                    "unexpected wl_touch event object=" + message.objectId
+                            + " opcode=" + message.opcode
+                            + " expected=" + expectedOpcode);
+        }
+        return message;
+    }
+
+    private static void readTouchFrame(FileInputStream input, int touchId) throws Exception {
+        Message frame = readTouchMessage(input, touchId, 3);
+        if (frame.body.length != 0) {
+            throw new IllegalStateException("invalid wl_touch.frame event");
+        }
+    }
     private static Message readPointerMessage(
             FileInputStream input, int pointerId, int expectedOpcode) throws Exception {
         Message message;
@@ -3144,6 +3917,64 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private static final class GestureInput {
+        static final int BEGIN = 0;
+        static final int UPDATE = 1;
+        static final int END = 2;
+
+        final int action;
+        final float dx;
+        final float dy;
+        final float scale;
+        final float rotation;
+        final boolean cancelled;
+        final int time;
+
+        private GestureInput(
+                int action,
+                float dx,
+                float dy,
+                float scale,
+                float rotation,
+                boolean cancelled,
+                int time) {
+            this.action = action;
+            this.dx = dx;
+            this.dy = dy;
+            this.scale = scale;
+            this.rotation = rotation;
+            this.cancelled = cancelled;
+            this.time = time;
+        }
+
+        static GestureInput begin(int time) {
+            return new GestureInput(BEGIN, 0.0f, 0.0f, 1.0f, 0.0f, false, time);
+        }
+
+        static GestureInput update(
+                float dx, float dy, float scale, float rotation, int time) {
+            return new GestureInput(UPDATE, dx, dy, scale, rotation, false, time);
+        }
+
+        static GestureInput end(boolean cancelled, int time) {
+            return new GestureInput(END, 0.0f, 0.0f, 1.0f, 0.0f, cancelled, time);
+        }
+    }
+    private static final class TouchInput {
+        final int action;
+        final int id;
+        final int x;
+        final int y;
+        final int time;
+
+        TouchInput(int action, int id, int x, int y, int time) {
+            this.action = action;
+            this.id = id;
+            this.x = x;
+            this.y = y;
+            this.time = time;
+        }
+    }
     private static final class PointerInput {
         final int action;
         final int x;
@@ -3175,6 +4006,7 @@ public final class MainActivity extends Activity {
         final Global seat;
         final Global dataDeviceManager;
         final Global textInputManager;
+        final Global pointerGestures;
         final Global viewporter;
         final Global fractionalScaleManager;
         final Global output;
@@ -3187,6 +4019,7 @@ public final class MainActivity extends Activity {
                 Global seat,
                 Global dataDeviceManager,
                 Global textInputManager,
+                Global pointerGestures,
                 Global viewporter,
                 Global fractionalScaleManager,
                 Global output) {
@@ -3197,6 +4030,7 @@ public final class MainActivity extends Activity {
             this.seat = seat;
             this.dataDeviceManager = dataDeviceManager;
             this.textInputManager = textInputManager;
+            this.pointerGestures = pointerGestures;
             this.viewporter = viewporter;
             this.fractionalScaleManager = fractionalScaleManager;
             this.output = output;
