@@ -340,6 +340,7 @@ public final class MainActivity extends Activity {
                 output.flush();
                 dispatch(core);
                 readFrameCommitUntilCallback(input, 28, 30, 31);
+                readDeleteId(input, 31);
                 if (nativeSurfaceCommitCount(core) != 3
                         || nativeLastFrameWidth(core) != 4
                         || nativeLastFrameHeight(core) != 2
@@ -347,6 +348,48 @@ public final class MainActivity extends Activity {
                     throw new IllegalStateException("configured xdg frame was not committed");
                 }
 
+                output.write(transformAndScaleXdgFrameAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 31);
+                readDeleteId(input, 31);
+                Bitmap transformedFrame =
+                        Bitmap.createBitmap(1, 2, Bitmap.Config.ARGB_8888);
+                int transformedCopyResult =
+                        nativeCopyLastFrameToBitmap(core, transformedFrame);
+                Log.i(TAG, "transformed frame commits=" + nativeSurfaceCommitCount(core)
+                        + " dimensions=" + nativeLastFrameWidth(core) + "x"
+                        + nativeLastFrameHeight(core)
+                        + " checksum=" + nativeLastFrameChecksum(core)
+                        + " copy=" + transformedCopyResult
+                        + " pixels=" + Integer.toHexString(transformedFrame.getPixel(0, 0))
+                        + "," + Integer.toHexString(transformedFrame.getPixel(0, 1)));
+                if (nativeSurfaceCommitCount(core) != 4
+                        || nativeLastFrameWidth(core) != 1
+                        || nativeLastFrameHeight(core) != 2
+                        || nativeLastFrameChecksum(core) != 84
+                        || transformedCopyResult != 0
+                        || transformedFrame.getPixel(0, 0) != 0xff0f0e0d
+                        || transformedFrame.getPixel(0, 1) != 0xff070605) {
+                    throw new IllegalStateException(
+                            "buffer transform and scale were not applied in surface coordinates");
+                }
+
+                output.write(resetXdgBufferStateAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 31);
+                readDeleteId(input, 31);
+                if (nativeSurfaceCommitCount(core) != 5
+                        || nativeLastFrameWidth(core) != 4
+                        || nativeLastFrameHeight(core) != 2
+                        || nativeLastFrameChecksum(core) != 656
+                        || nativeCopyLastFrameToBitmap(core, renderedFrame) != 0
+                        || renderedFrame.getPixel(0, 0) != 0xff030201
+                        || renderedFrame.getPixel(3, 1) != 0xff272625) {
+                    throw new IllegalStateException(
+                            "buffer state reset did not reinterpret the attached source");
+                }
 
                 output.write(bindGlobalAndSyncRequest(globals.seat, "wl_seat", 32, 33));
                 output.flush();
@@ -1101,7 +1144,7 @@ public final class MainActivity extends Activity {
             passed = true;
             message = "Native Wayland compositor passed\n"
                     + "registry, Android bitmap, xdg toplevel, keyboard input, "
-                    + "MotionEvent pointer and wheel input, nested popup grabs, synchronized subsurface trees, "
+                    + "buffer scale/transform, MotionEvent pointer and wheel input, nested popup grabs, synchronized subsurface trees, "
                     + "committed parent geometry, and bidirectional clipboard and text-input v3 lifecycle complete";
         } catch (Exception error) {
             message = "Native compositor probe failed\n" + error.getMessage();
@@ -1641,6 +1684,30 @@ public final class MainActivity extends Activity {
         request.putInt(77);
         return request.array();
     }
+    private static byte[] transformAndScaleXdgFrameAndSyncRequest() {
+        ByteBuffer request = buffer(44);
+        putHeader(request, 20, 7, 12);
+        request.putInt(1);
+        putHeader(request, 20, 8, 12);
+        request.putInt(2);
+        putHeader(request, 20, 6, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(31);
+        return request.array();
+    }
+
+    private static byte[] resetXdgBufferStateAndSyncRequest() {
+        ByteBuffer request = buffer(44);
+        putHeader(request, 20, 7, 12);
+        request.putInt(0);
+        putHeader(request, 20, 8, 12);
+        request.putInt(1);
+        putHeader(request, 20, 6, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(31);
+        return request.array();
+    }
+
     private static byte[] getPointerAndSyncRequest() {
         ByteBuffer request = buffer(24);
         putHeader(request, 32, 0, 12);

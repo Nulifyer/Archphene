@@ -135,6 +135,12 @@ struct SurfaceState {
     pending_input_region: Option<Option<RegionState>>,
     committed_input_region: Option<RegionState>,
     cached_input_region: Option<Option<RegionState>>,
+    pending_buffer_scale: Option<i32>,
+    committed_buffer_scale: i32,
+    cached_buffer_scale: Option<i32>,
+    pending_buffer_transform: Option<BufferTransform>,
+    committed_buffer_transform: BufferTransform,
+    cached_buffer_transform: Option<BufferTransform>,
     committed_frame: Option<Arc<CommittedFrame>>,
     cached_frame: Option<Option<Arc<CommittedFrame>>>,
     cached_callbacks: Vec<WlCallback>,
@@ -155,6 +161,35 @@ enum SurfaceRole {
     XdgToplevel,
     XdgPopup,
     Subsurface,
+}
+
+#[derive(Clone, Copy, Default, Eq, PartialEq)]
+enum BufferTransform {
+    #[default]
+    Normal,
+    Rotate90,
+    Rotate180,
+    Rotate270,
+    Flipped,
+    Flipped90,
+    Flipped180,
+    Flipped270,
+}
+
+impl From<wl_output::Transform> for BufferTransform {
+    fn from(transform: wl_output::Transform) -> Self {
+        match transform {
+            wl_output::Transform::Normal => Self::Normal,
+            wl_output::Transform::_90 => Self::Rotate90,
+            wl_output::Transform::_180 => Self::Rotate180,
+            wl_output::Transform::_270 => Self::Rotate270,
+            wl_output::Transform::Flipped => Self::Flipped,
+            wl_output::Transform::Flipped90 => Self::Flipped90,
+            wl_output::Transform::Flipped180 => Self::Flipped180,
+            wl_output::Transform::Flipped270 => Self::Flipped270,
+            _ => Self::Normal,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -541,6 +576,98 @@ struct CommittedFrame {
     format: wl_shm::Format,
     #[allow(dead_code)]
     pixels: Vec<u8>,
+    source: Option<Arc<CommittedFrame>>,
+}
+
+impl BufferTransform {
+    fn surface_size(self, buffer_width: u32, buffer_height: u32) -> (u32, u32) {
+        match self {
+            Self::Rotate90 | Self::Rotate270 | Self::Flipped90 | Self::Flipped270 => {
+                (buffer_height, buffer_width)
+            }
+            _ => (buffer_width, buffer_height),
+        }
+    }
+
+    fn buffer_coordinates(
+        self,
+        surface_x: u32,
+        surface_y: u32,
+        surface_width: u32,
+        surface_height: u32,
+    ) -> (u32, u32) {
+        match self {
+            Self::Normal => (surface_x, surface_y),
+            Self::Rotate90 => (surface_height - 1 - surface_y, surface_x),
+            Self::Rotate180 => (
+                surface_width - 1 - surface_x,
+                surface_height - 1 - surface_y,
+            ),
+            Self::Rotate270 => (surface_y, surface_width - 1 - surface_x),
+            Self::Flipped => (surface_width - 1 - surface_x, surface_y),
+            Self::Flipped90 => (surface_y, surface_x),
+            Self::Flipped180 => (surface_x, surface_height - 1 - surface_y),
+            Self::Flipped270 => (
+                surface_height - 1 - surface_y,
+                surface_width - 1 - surface_x,
+            ),
+        }
+    }
+}
+
+fn original_buffer_frame(frame: &Arc<CommittedFrame>) -> Arc<CommittedFrame> {
+    frame.source.clone().unwrap_or_else(|| Arc::clone(frame))
+}
+
+fn transform_buffer_frame(
+    frame: Arc<CommittedFrame>,
+    transform: BufferTransform,
+    scale: i32,
+) -> Result<Arc<CommittedFrame>, ()> {
+    let source = original_buffer_frame(&frame);
+    let scale = u32::try_from(scale).map_err(|_| ())?;
+    if scale == 0 {
+        return Err(());
+    }
+    let (physical_width, physical_height) = transform.surface_size(source.width, source.height);
+    if physical_width % scale != 0 || physical_height % scale != 0 {
+        return Err(());
+    }
+    if transform == BufferTransform::Normal && scale == 1 {
+        return Ok(source);
+    }
+
+    let width = physical_width / scale;
+    let height = physical_height / scale;
+    let pixel_count = width
+        .checked_mul(height)
+        .and_then(|count| count.checked_mul(4))
+        .and_then(|count| usize::try_from(count).ok())
+        .ok_or(())?;
+    let mut pixels = vec![0; pixel_count];
+    for surface_y in 0..height {
+        for surface_x in 0..width {
+            let physical_x = surface_x * scale;
+            let physical_y = surface_y * scale;
+            let (buffer_x, buffer_y) = transform.buffer_coordinates(
+                physical_x,
+                physical_y,
+                physical_width,
+                physical_height,
+            );
+            let source_index = ((buffer_y * source.width + buffer_x) * 4) as usize;
+            let destination_index = ((surface_y * width + surface_x) * 4) as usize;
+            pixels[destination_index..destination_index + 4]
+                .copy_from_slice(&source.pixels[source_index..source_index + 4]);
+        }
+    }
+    Ok(Arc::new(CommittedFrame {
+        width,
+        height,
+        format: source.format,
+        pixels,
+        source: Some(source),
+    }))
 }
 
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
@@ -756,6 +883,7 @@ impl ShmBufferInner {
             height: self.height as u32,
             format: self.format,
             pixels,
+            source: None,
         })
     }
 }
@@ -2650,6 +2778,12 @@ fn apply_cached_subsurface_tree(
         if let Some(input_region) = surface.cached_input_region.take() {
             surface.committed_input_region = input_region;
         }
+        if let Some(scale) = surface.cached_buffer_scale.take() {
+            surface.committed_buffer_scale = scale;
+        }
+        if let Some(transform) = surface.cached_buffer_transform.take() {
+            surface.committed_buffer_transform = transform;
+        }
         if let Some(frame) = surface.cached_frame.take() {
             surface.committed_frame = frame;
         }
@@ -3034,20 +3168,31 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                     .pending_input_region = Some(region);
             }
             wl_surface::Request::SetOpaqueRegion { .. } | wl_surface::Request::Offset { .. } => {}
-            wl_surface::Request::SetBufferTransform { transform } => {
-                if !matches!(transform, WEnum::Value(_)) {
+            wl_surface::Request::SetBufferTransform { transform } => match transform {
+                WEnum::Value(transform) => {
+                    data.inner
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .pending_buffer_transform = Some(transform.into());
+                }
+                WEnum::Unknown(_) => {
                     resource.post_error(
                         wl_surface::Error::InvalidTransform,
                         "unknown buffer transform",
                     );
                 }
-            }
+            },
             wl_surface::Request::SetBufferScale { scale } => {
                 if scale < 1 {
                     resource.post_error(
                         wl_surface::Error::InvalidScale,
                         "buffer scale must be positive",
                     );
+                } else {
+                    data.inner
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .pending_buffer_scale = Some(scale);
                 }
             }
             wl_surface::Request::Commit => {
@@ -3157,6 +3302,8 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                     }
                 }
                 let input_region_update = surface.pending_input_region.take();
+                let buffer_scale_update = surface.pending_buffer_scale.take();
+                let buffer_transform_update = surface.pending_buffer_transform.take();
                 let frame_update = if let Some(assignment) = surface.pending_buffer.take() {
                     Some(match assignment {
                         Some(buffer) => match buffer.inner.snapshot() {
@@ -3186,28 +3333,81 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 drop(surface);
                 let parent_geometry_changed =
                     xdg_surface.as_ref().is_some_and(commit_xdg_surface_state);
+                let synchronized = role == Some(SurfaceRole::Subsurface)
+                    && subsurface_effectively_synchronized(resource, state.surface_count);
 
-                if role == Some(SurfaceRole::Subsurface)
-                    && subsurface_effectively_synchronized(resource, state.surface_count)
-                {
-                    let mut surface = data.inner.lock().unwrap_or_else(|error| error.into_inner());
+                let mut surface = data.inner.lock().unwrap_or_else(|error| error.into_inner());
+                let committed_scale = surface.committed_buffer_scale.max(1);
+                let base_scale = if synchronized {
+                    surface.cached_buffer_scale.unwrap_or(committed_scale)
+                } else {
+                    committed_scale
+                };
+                let base_transform = if synchronized {
+                    surface
+                        .cached_buffer_transform
+                        .unwrap_or(surface.committed_buffer_transform)
+                } else {
+                    surface.committed_buffer_transform
+                };
+                let base_frame = if synchronized {
+                    surface
+                        .cached_frame
+                        .as_ref()
+                        .cloned()
+                        .unwrap_or_else(|| surface.committed_frame.clone())
+                } else {
+                    surface.committed_frame.clone()
+                };
+                let next_scale = buffer_scale_update.unwrap_or(base_scale);
+                let next_transform = buffer_transform_update.unwrap_or(base_transform);
+                let buffer_state_changed = frame_update.is_some()
+                    || buffer_scale_update.is_some()
+                    || buffer_transform_update.is_some();
+                let next_frame = if buffer_state_changed {
+                    let source = frame_update
+                        .clone()
+                        .unwrap_or_else(|| base_frame.as_ref().map(original_buffer_frame));
+                    match source {
+                        Some(source) => {
+                            match transform_buffer_frame(source, next_transform, next_scale) {
+                                Ok(frame) => Some(frame),
+                                Err(()) => {
+                                    resource.post_error(
+                                        wl_surface::Error::InvalidSize,
+                                        "transformed buffer dimensions must be divisible by scale",
+                                    );
+                                    return;
+                                }
+                            }
+                        }
+                        None => None,
+                    }
+                } else {
+                    base_frame
+                };
+
+                if synchronized {
                     if let Some(input_region) = input_region_update {
                         surface.cached_input_region = Some(input_region);
                     }
-                    if let Some(frame) = frame_update {
-                        surface.cached_frame = Some(frame);
+                    surface.cached_buffer_scale = Some(next_scale);
+                    surface.cached_buffer_transform = Some(next_transform);
+                    if buffer_state_changed {
+                        surface.cached_frame = Some(next_frame);
                     }
                     surface.cached_callbacks.append(&mut callbacks);
                     state.surface_commit_count = state.surface_commit_count.saturating_add(1);
                     return;
                 }
 
-                let mut surface = data.inner.lock().unwrap_or_else(|error| error.into_inner());
                 if let Some(input_region) = input_region_update {
                     surface.committed_input_region = input_region;
                 }
-                if let Some(frame) = frame_update {
-                    surface.committed_frame = frame;
+                surface.committed_buffer_scale = next_scale;
+                surface.committed_buffer_transform = next_transform;
+                if buffer_state_changed {
+                    surface.committed_frame = next_frame;
                 }
                 let latest_frame = surface.committed_frame.clone();
                 let is_xdg_toplevel = role == Some(SurfaceRole::XdgToplevel);
@@ -3806,6 +4006,7 @@ fn update_composited_frame(state: &mut CompositorState) {
         } else {
             root.pixels.clone()
         },
+        source: None,
     };
     if let Some(root_surface) = state.root_surface.as_ref() {
         blend_surface_tree(
@@ -5995,6 +6196,109 @@ mod tests {
         assert!(validate_buffer_geometry(32, 0, 0, 2, 16).is_err());
     }
 
+    fn test_frame(width: u32, height: u32, values: &[u8]) -> Arc<CommittedFrame> {
+        let pixels = values.iter().flat_map(|value| [*value, 0, 0, 0]).collect();
+        Arc::new(CommittedFrame {
+            width,
+            height,
+            format: wl_shm::Format::Xrgb8888,
+            pixels,
+            source: None,
+        })
+    }
+
+    #[test]
+    fn applies_inverse_buffer_transform_to_surface_pixels() {
+        let frame = transform_buffer_frame(
+            test_frame(2, 3, &[1, 2, 3, 4, 5, 6]),
+            BufferTransform::Rotate90,
+            1,
+        )
+        .expect("rotated frame");
+
+        assert_eq!((frame.width, frame.height), (3, 2));
+        assert_eq!(
+            frame
+                .pixels
+                .chunks_exact(4)
+                .map(|pixel| pixel[0])
+                .collect::<Vec<_>>(),
+            [2, 4, 6, 1, 3, 5]
+        );
+    }
+
+    #[test]
+    fn maps_every_wayland_buffer_transform_without_losing_pixels() {
+        let transforms = [
+            (BufferTransform::Normal, (2, 3)),
+            (BufferTransform::Rotate90, (3, 2)),
+            (BufferTransform::Rotate180, (2, 3)),
+            (BufferTransform::Rotate270, (3, 2)),
+            (BufferTransform::Flipped, (2, 3)),
+            (BufferTransform::Flipped90, (3, 2)),
+            (BufferTransform::Flipped180, (2, 3)),
+            (BufferTransform::Flipped270, (3, 2)),
+        ];
+        for (transform, dimensions) in transforms {
+            let frame = transform_buffer_frame(test_frame(2, 3, &[1, 2, 3, 4, 5, 6]), transform, 1)
+                .expect("transformed frame");
+            let mut values = frame
+                .pixels
+                .chunks_exact(4)
+                .map(|pixel| pixel[0])
+                .collect::<Vec<_>>();
+            values.sort_unstable();
+            assert_eq!((frame.width, frame.height), dimensions);
+            assert_eq!(values, [1, 2, 3, 4, 5, 6]);
+        }
+    }
+
+    #[test]
+    fn scales_buffer_pixels_into_surface_coordinates() {
+        let frame = transform_buffer_frame(
+            test_frame(4, 2, &[1, 2, 3, 4, 5, 6, 7, 8]),
+            BufferTransform::Normal,
+            2,
+        )
+        .expect("scaled frame");
+
+        assert_eq!((frame.width, frame.height), (2, 1));
+        assert_eq!(
+            frame
+                .pixels
+                .chunks_exact(4)
+                .map(|pixel| pixel[0])
+                .collect::<Vec<_>>(),
+            [1, 3]
+        );
+        assert!(
+            transform_buffer_frame(
+                test_frame(3, 2, &[1, 2, 3, 4, 5, 6]),
+                BufferTransform::Normal,
+                2,
+            )
+            .is_err()
+        );
+
+        let rotated = transform_buffer_frame(
+            test_frame(2, 3, &[1, 2, 3, 4, 5, 6]),
+            BufferTransform::Rotate90,
+            1,
+        )
+        .expect("rotated frame");
+        let restored =
+            transform_buffer_frame(rotated, BufferTransform::Normal, 1).expect("restored source");
+        assert_eq!((restored.width, restored.height), (2, 3));
+        assert_eq!(
+            restored
+                .pixels
+                .chunks_exact(4)
+                .map(|pixel| pixel[0])
+                .collect::<Vec<_>>(),
+            [1, 2, 3, 4, 5, 6]
+        );
+    }
+
     #[test]
     fn clips_and_alpha_blends_popup_frames() {
         let mut destination = CommittedFrame {
@@ -6002,12 +6306,14 @@ mod tests {
             height: 1,
             format: wl_shm::Format::Xrgb8888,
             pixels: vec![10, 20, 30, 0, 40, 50, 60, 0],
+            source: None,
         };
         let source = CommittedFrame {
             width: 2,
             height: 1,
             format: wl_shm::Format::Argb8888,
             pixels: vec![110, 120, 130, 128, 210, 220, 230, 255],
+            source: None,
         };
 
         blend_popup_frame(&mut destination, &source, 1, 0, 2, 1);
