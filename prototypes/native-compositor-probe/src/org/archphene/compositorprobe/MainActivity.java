@@ -98,6 +98,8 @@ public final class MainActivity extends Activity {
             long handle, int x, int y, int time);
     private static native int nativePointerButton(
             long handle, boolean pressed, int time);
+    private static native int nativePointerAxis(
+            long handle, int horizontalMilli, int verticalMilli, int time);
     private static native int nativePointerLeave(long handle);
     private static native int nativeShmBindCount(long handle);
     private static native int nativeShmPoolCount(long handle);
@@ -160,10 +162,30 @@ public final class MainActivity extends Activity {
                     action,
                     localX,
                     localY,
-                    (int) event.getEventTime()));
+                    (int) event.getEventTime(),
+                    0.0f,
+                    0.0f));
             if (action == MotionEvent.ACTION_UP) {
                 view.performClick();
             }
+            return true;
+        });
+        frameView.setOnGenericMotionListener((view, event) -> {
+            if (!pointerInputReady
+                    || event.getActionMasked() != MotionEvent.ACTION_SCROLL) {
+                return false;
+            }
+            float horizontal = event.getAxisValue(MotionEvent.AXIS_HSCROLL);
+            float vertical = event.getAxisValue(MotionEvent.AXIS_VSCROLL);
+            Log.i(TAG, "MotionEvent scroll horizontal=" + horizontal
+                    + " vertical=" + vertical);
+            pointerInputs.offer(new PointerInput(
+                    MotionEvent.ACTION_SCROLL,
+                    Math.round(event.getX()),
+                    Math.round(event.getY()),
+                    (int) event.getEventTime(),
+                    horizontal,
+                    vertical));
             return true;
         });
         content.addView(frameView, new LinearLayout.LayoutParams(320, 160));
@@ -497,17 +519,46 @@ public final class MainActivity extends Activity {
                         dispatch(core);
                         releaseSerial = readPointerButtonAndFrame(
                                 input, 34, false, event.time);
-                        if (releaseSerial <= pressSerial || nativePointerLeave(core) != 1) {
+                        if (releaseSerial <= pressSerial) {
                             throw new IllegalStateException("pointer release lifecycle was invalid");
                         }
-                        dispatch(core);
-                        int leaveSerial = readPointerLeaveAndFrame(input, 34, 20);
-                        if (leaveSerial <= releaseSerial) {
-                            throw new IllegalStateException("pointer leave serial did not advance");
-                        }
-                        expectedPointerEvents += 2;
+                        expectedPointerEvents++;
                     }
                 }
+
+                runOnUiThread(() -> frameView.post(() -> {
+                    int[] location = new int[2];
+                    frameView.getLocationOnScreen(location);
+                    int targetX = location[0] + frameView.getWidth() / 2;
+                    int targetY = location[1] + frameView.getHeight() / 2;
+                    Log.i(TAG, "scroll target ready screen=" + targetX + "," + targetY);
+                }));
+                PointerInput scroll = awaitPointerInput(30);
+                if (scroll.action != MotionEvent.ACTION_SCROLL
+                        || (scroll.horizontalScroll == 0.0f && scroll.verticalScroll == 0.0f)
+                        || nativePointerAxis(
+                                core,
+                                Math.round(scroll.horizontalScroll * 1000.0f),
+                                Math.round(scroll.verticalScroll * 1000.0f),
+                                scroll.time) != 1) {
+                    throw new IllegalStateException("Android pointer scroll was not emitted");
+                }
+                dispatch(core);
+                readPointerAxisAndFrame(
+                        input,
+                        34,
+                        scroll.horizontalScroll,
+                        scroll.verticalScroll,
+                        scroll.time);
+                if (nativePointerLeave(core) != 1) {
+                    throw new IllegalStateException("pointer scroll focus was not released");
+                }
+                dispatch(core);
+                int leaveSerial = readPointerLeaveAndFrame(input, 34, 20);
+                if (leaveSerial <= releaseSerial) {
+                    throw new IllegalStateException("pointer leave serial did not advance");
+                }
+                expectedPointerEvents += 2;
                 if (nativePointerEventCount(core) != expectedPointerEvents) {
                     throw new IllegalStateException("Android pointer events were not counted");
                 }
@@ -1050,7 +1101,7 @@ public final class MainActivity extends Activity {
             passed = true;
             message = "Native Wayland compositor passed\n"
                     + "registry, Android bitmap, xdg toplevel, keyboard input, "
-                    + "MotionEvent pointer, nested popup grabs, synchronized subsurface trees, "
+                    + "MotionEvent pointer and wheel input, nested popup grabs, synchronized subsurface trees, "
                     + "committed parent geometry, and bidirectional clipboard and text-input v3 lifecycle complete";
         } catch (Exception error) {
             message = "Native compositor probe failed\n" + error.getMessage();
@@ -2264,6 +2315,65 @@ public final class MainActivity extends Activity {
         readPointerFrame(input, pointerId);
     }
 
+    private static void readPointerAxisAndFrame(
+            FileInputStream input,
+            int pointerId,
+            float horizontal,
+            float vertical,
+            int time)
+            throws Exception {
+        Message source = readPointerMessage(input, pointerId, 6);
+        ByteBuffer sourceBody = ByteBuffer.wrap(source.body).order(ByteOrder.nativeOrder());
+        if (source.body.length != 4 || sourceBody.getInt() != 0) {
+            throw new IllegalStateException("invalid wl_pointer.axis_source event");
+        }
+        if (vertical != 0.0f) {
+            readPointerAxisPair(
+                    input,
+                    pointerId,
+                    0,
+                    Math.round(-vertical),
+                    Math.round(-vertical * 15.0f * 256.0f),
+                    time);
+        }
+        if (horizontal != 0.0f) {
+            readPointerAxisPair(
+                    input,
+                    pointerId,
+                    1,
+                    Math.round(horizontal),
+                    Math.round(horizontal * 15.0f * 256.0f),
+                    time);
+        }
+        readPointerFrame(input, pointerId);
+    }
+
+    private static void readPointerAxisPair(
+            FileInputStream input,
+            int pointerId,
+            int axis,
+            int discrete,
+            int fixedValue,
+            int time)
+            throws Exception {
+        Message discreteMessage = readPointerMessage(input, pointerId, 8);
+        ByteBuffer discreteBody =
+                ByteBuffer.wrap(discreteMessage.body).order(ByteOrder.nativeOrder());
+        if (discreteMessage.body.length != 8
+                || discreteBody.getInt() != axis
+                || discreteBody.getInt() != discrete) {
+            throw new IllegalStateException("invalid wl_pointer.axis_discrete event");
+        }
+        Message axisMessage = readPointerMessage(input, pointerId, 4);
+        ByteBuffer axisBody = ByteBuffer.wrap(axisMessage.body).order(ByteOrder.nativeOrder());
+        if (axisMessage.body.length != 12
+                || axisBody.getInt() != time
+                || axisBody.getInt() != axis
+                || axisBody.getInt() != fixedValue) {
+            throw new IllegalStateException("invalid wl_pointer.axis event");
+        }
+    }
+
     private static int readPointerButtonAndFrame(
             FileInputStream input, int pointerId, boolean pressed, int time)
             throws Exception {
@@ -2644,12 +2754,22 @@ public final class MainActivity extends Activity {
         final int x;
         final int y;
         final int time;
+        final float horizontalScroll;
+        final float verticalScroll;
 
-        PointerInput(int action, int x, int y, int time) {
+        PointerInput(
+                int action,
+                int x,
+                int y,
+                int time,
+                float horizontalScroll,
+                float verticalScroll) {
             this.action = action;
             this.x = x;
             this.y = y;
             this.time = time;
+            this.horizontalScroll = horizontalScroll;
+            this.verticalScroll = verticalScroll;
         }
     }
     private static final class RegistryGlobals {

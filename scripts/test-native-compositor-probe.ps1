@@ -27,6 +27,7 @@ Invoke-Adb shell wm dismiss-keyguard | Out-Null
 
 $keySent = $false
 $tapSent = $false
+$scrollSent = $false
 $deadline = [DateTime]::UtcNow.AddSeconds(60)
 do {
     Start-Sleep -Milliseconds 500
@@ -42,7 +43,14 @@ do {
             $tapSent = $true
         }
     }
-    if ($output.Contains("registry, Android bitmap, xdg toplevel, keyboard input, MotionEvent pointer, nested popup grabs, synchronized subsurface trees, committed parent geometry, and bidirectional clipboard and text-input v3 lifecycle complete")) {
+    if (-not $scrollSent) {
+        $target = [regex]::Match($output, 'scroll target ready screen=([0-9]+),([0-9]+)')
+        if ($target.Success) {
+            Invoke-Adb shell input mouse scroll $target.Groups[1].Value $target.Groups[2].Value --axis "VSCROLL,2" --axis "HSCROLL,1" | Out-Null
+            $scrollSent = $true
+        }
+    }
+    if ($output.Contains("registry, Android bitmap, xdg toplevel, keyboard input, MotionEvent pointer and wheel input, nested popup grabs, synchronized subsurface trees, committed parent geometry, and bidirectional clipboard and text-input v3 lifecycle complete")) {
         Write-Host "Native compositor Android MotionEvent probe passed on $Serial ($AndroidAbi)."
         exit 0
     }

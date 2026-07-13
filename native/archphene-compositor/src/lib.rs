@@ -4677,6 +4677,39 @@ impl CompositorCore {
         1
     }
 
+    pub fn pointer_axis(&mut self, horizontal: f64, vertical: f64, time: u32) -> u32 {
+        if !self.state.pointer_inside || (horizontal == 0.0 && vertical == 0.0) {
+            return 0;
+        }
+        let Some((_surface, pointers)) = self.focused_pointer_resources() else {
+            return 0;
+        };
+        for pointer in pointers {
+            if pointer.version() >= 5 {
+                pointer.axis_source(wl_pointer::AxisSource::Wheel);
+            }
+            if vertical != 0.0 {
+                let discrete = (-vertical).round() as i32;
+                if pointer.version() >= 5 && discrete != 0 {
+                    pointer.axis_discrete(wl_pointer::Axis::VerticalScroll, discrete);
+                }
+                pointer.axis(time, wl_pointer::Axis::VerticalScroll, -vertical * 15.0);
+            }
+            if horizontal != 0.0 {
+                let discrete = horizontal.round() as i32;
+                if pointer.version() >= 5 && discrete != 0 {
+                    pointer.axis_discrete(wl_pointer::Axis::HorizontalScroll, discrete);
+                }
+                pointer.axis(time, wl_pointer::Axis::HorizontalScroll, horizontal * 15.0);
+            }
+            if pointer.version() >= 5 {
+                pointer.frame();
+            }
+        }
+        self.state.pointer_event_count = self.state.pointer_event_count.saturating_add(1);
+        1
+    }
+
     pub fn pointer_leave(&mut self) -> u32 {
         if !self.state.pointer_inside || self.state.pointer_pressed {
             return 0;
@@ -5768,6 +5801,26 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
         return -1;
     };
     i32::try_from(core.pointer_button(pressed != 0, time as u32)).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativePointerAxis(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+    horizontal_milli: i32,
+    vertical_milli: i32,
+    time: i32,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+        return -1;
+    };
+    i32::try_from(core.pointer_axis(
+        f64::from(horizontal_milli) / 1000.0,
+        f64::from(vertical_milli) / 1000.0,
+        time as u32,
+    ))
+    .unwrap_or(i32::MAX)
 }
 
 #[unsafe(no_mangle)]
