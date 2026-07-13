@@ -89,6 +89,7 @@ pub struct CompositorState {
     pointer_count: u32,
     pointer_event_count: u32,
     presentation_callbacks: Vec<WlCallback>,
+    presentation_damage: Vec<RegionRectangle>,
     next_input_serial: u32,
     pointers: Vec<WlPointer>,
     pointer_focus_surface: Option<WlSurface>,
@@ -131,7 +132,8 @@ pub struct SurfaceData {
 #[derive(Default)]
 struct SurfaceState {
     pending_buffer: Option<Option<SurfaceBuffer>>,
-    pending_damage: bool,
+    pending_surface_damage: Vec<RegionRectangle>,
+    pending_buffer_damage: Vec<RegionRectangle>,
     pending_callbacks: Vec<WlCallback>,
     pending_input_region: Option<Option<RegionState>>,
     committed_input_region: Option<RegionState>,
@@ -145,6 +147,7 @@ struct SurfaceState {
     committed_frame: Option<Arc<CommittedFrame>>,
     cached_frame: Option<Option<Arc<CommittedFrame>>>,
     cached_callbacks: Vec<WlCallback>,
+    cached_damage: Vec<RegionRectangle>,
     has_xdg_surface: bool,
     role: Option<SurfaceRole>,
     xdg_surface: Option<XdgSurface>,
@@ -614,6 +617,88 @@ impl BufferTransform {
             ),
         }
     }
+
+    fn surface_coordinates(
+        self,
+        buffer_x: u32,
+        buffer_y: u32,
+        buffer_width: u32,
+        buffer_height: u32,
+    ) -> (u32, u32) {
+        match self {
+            Self::Normal => (buffer_x, buffer_y),
+            Self::Rotate90 => (buffer_y, buffer_width - 1 - buffer_x),
+            Self::Rotate180 => (buffer_width - 1 - buffer_x, buffer_height - 1 - buffer_y),
+            Self::Rotate270 => (buffer_height - 1 - buffer_y, buffer_x),
+            Self::Flipped => (buffer_width - 1 - buffer_x, buffer_y),
+            Self::Flipped90 => (buffer_y, buffer_x),
+            Self::Flipped180 => (buffer_x, buffer_height - 1 - buffer_y),
+            Self::Flipped270 => (buffer_height - 1 - buffer_y, buffer_width - 1 - buffer_x),
+        }
+    }
+
+    fn buffer_damage_to_surface(
+        self,
+        damage: RegionRectangle,
+        buffer_width: u32,
+        buffer_height: u32,
+        scale: u32,
+    ) -> Option<RegionRectangle> {
+        let damage = damage.clip(buffer_width, buffer_height)?;
+        let left = damage.x as u32;
+        let top = damage.y as u32;
+        let right = damage.right() as u32 - 1;
+        let bottom = damage.bottom() as u32 - 1;
+        let corners = [
+            self.surface_coordinates(left, top, buffer_width, buffer_height),
+            self.surface_coordinates(right, top, buffer_width, buffer_height),
+            self.surface_coordinates(left, bottom, buffer_width, buffer_height),
+            self.surface_coordinates(right, bottom, buffer_width, buffer_height),
+        ];
+        let min_x = corners.iter().map(|point| point.0).min()?;
+        let min_y = corners.iter().map(|point| point.1).min()?;
+        let max_x = corners.iter().map(|point| point.0).max()?;
+        let max_y = corners.iter().map(|point| point.1).max()?;
+        let left = min_x / scale;
+        let top = min_y / scale;
+        let right = (max_x + 1).div_ceil(scale);
+        let bottom = (max_y + 1).div_ceil(scale);
+        RegionRectangle::new(
+            left as i32,
+            top as i32,
+            (right - left) as i32,
+            (bottom - top) as i32,
+        )
+    }
+}
+
+fn damage_for_commit(
+    surface_damage: Vec<RegionRectangle>,
+    buffer_damage: Vec<RegionRectangle>,
+    frame: Option<&Arc<CommittedFrame>>,
+    transform: BufferTransform,
+    scale: i32,
+    force_full: bool,
+) -> Vec<RegionRectangle> {
+    let Some(frame) = frame else {
+        return Vec::new();
+    };
+    let scale = u32::try_from(scale).unwrap_or(1).max(1);
+    let mut damage = surface_damage
+        .into_iter()
+        .filter_map(|rectangle| rectangle.clip(frame.width, frame.height))
+        .collect::<Vec<_>>();
+    let source = original_buffer_frame(frame);
+    damage.extend(buffer_damage.into_iter().filter_map(|rectangle| {
+        transform.buffer_damage_to_surface(rectangle, source.width, source.height, scale)
+    }));
+    if force_full {
+        damage.clear();
+        if let Some(full) = RegionRectangle::new(0, 0, frame.width as i32, frame.height as i32) {
+            damage.push(full);
+        }
+    }
+    damage
 }
 
 fn original_buffer_frame(frame: &Arc<CommittedFrame>) -> Arc<CommittedFrame> {
@@ -787,7 +872,7 @@ fn copy_last_frame_to_bitmap(
     0
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RegionRectangle {
     x: i32,
     y: i32,
@@ -796,11 +881,62 @@ struct RegionRectangle {
 }
 
 impl RegionRectangle {
+    fn new(x: i32, y: i32, width: i32, height: i32) -> Option<Self> {
+        (width > 0 && height > 0).then_some(Self {
+            x,
+            y,
+            width,
+            height,
+        })
+    }
+
     fn contains(self, x: f64, y: f64) -> bool {
         x >= f64::from(self.x)
             && y >= f64::from(self.y)
-            && x < f64::from(self.x.saturating_add(self.width))
-            && y < f64::from(self.y.saturating_add(self.height))
+            && x < self.right() as f64
+            && y < self.bottom() as f64
+    }
+
+    fn right(self) -> i64 {
+        i64::from(self.x) + i64::from(self.width)
+    }
+
+    fn bottom(self) -> i64 {
+        i64::from(self.y) + i64::from(self.height)
+    }
+
+    fn clip(self, width: u32, height: u32) -> Option<Self> {
+        let left = i64::from(self.x).max(0).min(i64::from(width));
+        let top = i64::from(self.y).max(0).min(i64::from(height));
+        let right = self.right().max(0).min(i64::from(width));
+        let bottom = self.bottom().max(0).min(i64::from(height));
+        (right > left && bottom > top).then_some(Self {
+            x: left as i32,
+            y: top as i32,
+            width: (right - left) as i32,
+            height: (bottom - top) as i32,
+        })
+    }
+
+    fn translated(self, x: i32, y: i32) -> Self {
+        Self {
+            x: self.x.saturating_add(x),
+            y: self.y.saturating_add(y),
+            ..self
+        }
+    }
+
+    fn union(self, other: Self) -> Self {
+        let left = i64::from(self.x).min(i64::from(other.x));
+        let top = i64::from(self.y).min(i64::from(other.y));
+        let right = self.right().max(other.right());
+        let bottom = self.bottom().max(other.bottom());
+        Self {
+            x: left.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+            y: top.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+            width: (right - left).clamp(1, i64::from(i32::MAX)) as i32,
+            height: (bottom - top).clamp(1, i64::from(i32::MAX)) as i32,
+        }
     }
 }
 
@@ -2740,6 +2876,7 @@ fn apply_cached_subsurface_tree(
     depth: usize,
     apply_parent_state: bool,
     callbacks: &mut Vec<WlCallback>,
+    damage_batches: &mut Vec<(WlSurface, Vec<RegionRectangle>)>,
 ) {
     if depth > state.surface_count as usize {
         return;
@@ -2771,31 +2908,36 @@ fn apply_cached_subsurface_tree(
             }
         }
     }
-    let children = {
-        let mut surface = surface_data
+    let (children, local_damage) = {
+        let mut surface_state = surface_data
             .inner
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if let Some(input_region) = surface.cached_input_region.take() {
-            surface.committed_input_region = input_region;
+        if let Some(input_region) = surface_state.cached_input_region.take() {
+            surface_state.committed_input_region = input_region;
         }
-        if let Some(scale) = surface.cached_buffer_scale.take() {
-            surface.committed_buffer_scale = scale;
+        if let Some(scale) = surface_state.cached_buffer_scale.take() {
+            surface_state.committed_buffer_scale = scale;
         }
-        if let Some(transform) = surface.cached_buffer_transform.take() {
-            surface.committed_buffer_transform = transform;
+        if let Some(transform) = surface_state.cached_buffer_transform.take() {
+            surface_state.committed_buffer_transform = transform;
         }
-        if let Some(frame) = surface.cached_frame.take() {
-            surface.committed_frame = frame;
+        if let Some(frame) = surface_state.cached_frame.take() {
+            surface_state.committed_frame = frame;
         }
-        callbacks.append(&mut surface.cached_callbacks);
-        surface
+        callbacks.append(&mut surface_state.cached_callbacks);
+        let local_damage = std::mem::take(&mut surface_state.cached_damage);
+        let children = surface_state
             .children_below
             .iter()
-            .chain(surface.children_above.iter())
+            .chain(surface_state.children_above.iter())
             .cloned()
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        (children, local_damage)
     };
+    if !local_damage.is_empty() {
+        damage_batches.push((surface.clone(), local_damage));
+    }
     for child in children.iter().filter(|child| child.is_alive()) {
         apply_cached_subsurface_tree(
             state,
@@ -2803,6 +2945,7 @@ fn apply_cached_subsurface_tree(
             depth.saturating_add(1),
             apply_parent_state,
             callbacks,
+            damage_batches,
         );
     }
 }
@@ -2810,9 +2953,9 @@ fn apply_cached_subsurface_tree(
 fn apply_cached_subsurface_children(
     state: &CompositorState,
     parent: &WlSurface,
-) -> Vec<WlCallback> {
+) -> (Vec<WlCallback>, Vec<(WlSurface, Vec<RegionRectangle>)>) {
     let Some(parent_data) = parent.data::<SurfaceData>() else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
     let children = {
         let mut parent_state = parent_data
@@ -2831,12 +2974,32 @@ fn apply_cached_subsurface_children(
             .collect::<Vec<_>>()
     };
     let mut callbacks = Vec::new();
+    let mut damage_batches = Vec::new();
     for child in children.iter().filter(|child| child.is_alive()) {
-        apply_cached_subsurface_tree(state, child, 0, true, &mut callbacks);
+        apply_cached_subsurface_tree(state, child, 0, true, &mut callbacks, &mut damage_batches);
     }
-    callbacks
+    (callbacks, damage_batches)
 }
 
+fn append_damage_batches(
+    state: &mut CompositorState,
+    damage_batches: Vec<(WlSurface, Vec<RegionRectangle>)>,
+) {
+    let output_width = state.output_width.max(0) as u32;
+    let output_height = state.output_height.max(0) as u32;
+    for (surface, damage) in damage_batches {
+        let Some((origin_x, origin_y)) = surface_origin_in_root(state, &surface, 0) else {
+            continue;
+        };
+        state
+            .presentation_damage
+            .extend(damage.into_iter().filter_map(|rectangle| {
+                rectangle
+                    .translated(origin_x, origin_y)
+                    .clip(output_width, output_height)
+            }));
+    }
+}
 impl Dispatch<WlSubcompositor, ()> for CompositorState {
     fn request(
         state: &mut Self,
@@ -3021,7 +3184,16 @@ impl Dispatch<WlSubsurface, SubsurfaceData> for CompositorState {
                 data.synchronized.store(false, Ordering::Release);
                 if !subsurface_effectively_synchronized(&data.surface, state.surface_count) {
                     let mut callbacks = Vec::new();
-                    apply_cached_subsurface_tree(state, &data.surface, 0, false, &mut callbacks);
+                    let mut damage_batches = Vec::new();
+                    apply_cached_subsurface_tree(
+                        state,
+                        &data.surface,
+                        0,
+                        false,
+                        &mut callbacks,
+                        &mut damage_batches,
+                    );
+                    append_damage_batches(state, damage_batches);
                     update_composited_frame(state);
                     state.presentation_callbacks.extend(callbacks);
                 }
@@ -3133,11 +3305,32 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 let mut surface = data.inner.lock().unwrap_or_else(|error| error.into_inner());
                 surface.pending_buffer = Some(assignment);
             }
-            wl_surface::Request::Damage { width, height, .. }
-            | wl_surface::Request::DamageBuffer { width, height, .. } => {
-                if width > 0 && height > 0 {
-                    let mut surface = data.inner.lock().unwrap_or_else(|error| error.into_inner());
-                    surface.pending_damage = true;
+            wl_surface::Request::Damage {
+                x,
+                y,
+                width,
+                height,
+            } => {
+                if let Some(damage) = RegionRectangle::new(x, y, width, height) {
+                    data.inner
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .pending_surface_damage
+                        .push(damage);
+                }
+            }
+            wl_surface::Request::DamageBuffer {
+                x,
+                y,
+                width,
+                height,
+            } => {
+                if let Some(damage) = RegionRectangle::new(x, y, width, height) {
+                    data.inner
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .pending_buffer_damage
+                        .push(damage);
                 }
             }
             wl_surface::Request::Frame { callback } => {
@@ -3301,6 +3494,9 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                     }
                 }
                 let input_region_update = surface.pending_input_region.take();
+                let surface_damage = std::mem::take(&mut surface.pending_surface_damage);
+                let buffer_damage = std::mem::take(&mut surface.pending_buffer_damage);
+                let damage_declared = !surface_damage.is_empty() || !buffer_damage.is_empty();
                 let buffer_scale_update = surface.pending_buffer_scale.take();
                 let buffer_transform_update = surface.pending_buffer_transform.take();
                 let frame_update = if let Some(assignment) = surface.pending_buffer.take() {
@@ -3326,7 +3522,6 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                     None
                 };
                 let mut callbacks = std::mem::take(&mut surface.pending_callbacks);
-                surface.pending_damage = false;
                 let role = surface.role;
                 let xdg_surface = surface.xdg_surface.clone();
                 drop(surface);
@@ -3385,6 +3580,17 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 } else {
                     base_frame
                 };
+                let force_full_damage = buffer_scale_update.is_some()
+                    || buffer_transform_update.is_some()
+                    || (frame_update.is_some() && !damage_declared);
+                let local_damage = damage_for_commit(
+                    surface_damage,
+                    buffer_damage,
+                    next_frame.as_ref(),
+                    next_transform,
+                    next_scale,
+                    force_full_damage,
+                );
 
                 if synchronized {
                     if let Some(input_region) = input_region_update {
@@ -3395,6 +3601,7 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                     if buffer_state_changed {
                         surface.cached_frame = Some(next_frame);
                     }
+                    surface.cached_damage.extend(local_damage);
                     surface.cached_callbacks.append(&mut callbacks);
                     state.surface_commit_count = state.surface_commit_count.saturating_add(1);
                     return;
@@ -3416,6 +3623,22 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 drop(surface);
 
                 state.surface_commit_count = state.surface_commit_count.saturating_add(1);
+                let damage_origin = if publishes_root_frame {
+                    Some((0, 0))
+                } else {
+                    surface_origin_in_root(state, resource, 0)
+                };
+                if let Some((origin_x, origin_y)) = damage_origin {
+                    let output_width = state.output_width.max(0) as u32;
+                    let output_height = state.output_height.max(0) as u32;
+                    state
+                        .presentation_damage
+                        .extend(local_damage.into_iter().filter_map(|damage| {
+                            damage
+                                .translated(origin_x, origin_y)
+                                .clip(output_width, output_height)
+                        }));
+                }
                 if publishes_root_frame {
                     state.root_surface = Some(resource.clone());
                     state.root_frame = latest_frame;
@@ -3444,7 +3667,10 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                         set_keyboard_focus(state, None);
                     }
                 }
-                callbacks.extend(apply_cached_subsurface_children(state, resource));
+                let (child_callbacks, child_damage) =
+                    apply_cached_subsurface_children(state, resource);
+                callbacks.extend(child_callbacks);
+                append_damage_batches(state, child_damage);
                 if parent_geometry_changed {
                     reconfigure_reactive_popups(state, xdg_surface.as_ref());
                 }
@@ -4912,7 +5138,31 @@ impl CompositorCore {
         u32::try_from(self.state.presentation_callbacks.len()).unwrap_or(u32::MAX)
     }
 
+    pub fn pending_damage_count(&self) -> u32 {
+        u32::try_from(self.state.presentation_damage.len()).unwrap_or(u32::MAX)
+    }
+
+    pub fn pending_damage_component(&self, component: u32) -> i32 {
+        let Some(bounds) = self
+            .state
+            .presentation_damage
+            .iter()
+            .copied()
+            .reduce(RegionRectangle::union)
+        else {
+            return 0;
+        };
+        match component {
+            0 => bounds.x,
+            1 => bounds.y,
+            2 => bounds.width,
+            3 => bounds.height,
+            _ => 0,
+        }
+    }
+
     pub fn present_frame(&mut self, time: u32) -> u32 {
+        self.state.presentation_damage.clear();
         let callbacks = std::mem::take(&mut self.state.presentation_callbacks);
         let mut presented = 0u32;
         for callback in callbacks {
@@ -5935,6 +6185,34 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativePendingDamageCount(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.pending_damage_count()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativePendingDamageComponent(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+    component: i32,
+) -> i32 {
+    let Ok(component) = u32::try_from(component) else {
+        return 0;
+    };
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    core.pending_damage_component(component)
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativePresentFrame(
     _environment: *mut std::ffi::c_void,
     _activity: *mut std::ffi::c_void,
@@ -6334,6 +6612,34 @@ mod tests {
                 .map(|pixel| pixel[0])
                 .collect::<Vec<_>>(),
             [1, 2, 3, 4, 5, 6]
+        );
+    }
+
+    #[test]
+    fn maps_buffer_damage_through_inverse_transform_and_scale() {
+        let damage = BufferTransform::Rotate90
+            .buffer_damage_to_surface(RegionRectangle::new(2, 0, 2, 2).expect("damage"), 4, 2, 2)
+            .expect("mapped damage");
+        assert_eq!(
+            damage,
+            RegionRectangle::new(0, 0, 1, 1).expect("expected damage")
+        );
+    }
+
+    #[test]
+    fn clips_and_unions_presentation_damage_without_overflow() {
+        let first = RegionRectangle::new(-2, 1, 5, 4)
+            .expect("first")
+            .clip(4, 4)
+            .expect("clipped");
+        let second = RegionRectangle::new(2, 0, i32::MAX, 2)
+            .expect("second")
+            .clip(4, 4)
+            .expect("clipped");
+        assert_eq!(first, RegionRectangle::new(0, 1, 3, 3).expect("expected"));
+        assert_eq!(
+            first.union(second),
+            RegionRectangle::new(0, 0, 4, 4).expect("expected")
         );
     }
 

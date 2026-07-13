@@ -92,6 +92,8 @@ public final class MainActivity extends Activity {
     private static native int nativeImeDeleteSurrounding(
             long handle, int beforeLength, int afterLength);
     private static native int nativePendingFrameCallbackCount(long handle);
+    private static native int nativePendingDamageCount(long handle);
+    private static native int nativePendingDamageComponent(long handle, int component);
     private static native int nativePresentFrame(long handle, int time);
     private static native int nativePointerCount(long handle);
     private static native int nativeKeyboardCount(long handle);
@@ -274,6 +276,7 @@ public final class MainActivity extends Activity {
                 readFrameCommitUntilSync(input, 12, 14, 15);
                 readDeleteId(input, 15);
                 if (nativePendingFrameCallbackCount(core) != 1
+                        || nativePendingDamageCount(core) != 1
                         || nativeSurfaceCommitCount(core) != 1
                         || nativeLastFrameWidth(core) != 4
                         || nativeLastFrameHeight(core) != 2
@@ -350,6 +353,7 @@ public final class MainActivity extends Activity {
                 readFrameCommitUntilSync(input, 28, 30, 31);
                 readDeleteId(input, 31);
                 if (nativePendingFrameCallbackCount(core) != 1
+                        || nativePendingDamageCount(core) != 1
                         || nativeSurfaceCommitCount(core) != 3
                         || nativeLastFrameWidth(core) != 4
                         || nativeLastFrameHeight(core) != 2
@@ -387,6 +391,7 @@ public final class MainActivity extends Activity {
                     throw new IllegalStateException(
                             "buffer transform and scale were not applied in surface coordinates");
                 }
+                presentNextFrame(core, input, 0, transformedFrame, frameView);
 
                 output.write(resetXdgBufferStateAndSyncRequest());
                 output.flush();
@@ -403,6 +408,7 @@ public final class MainActivity extends Activity {
                     throw new IllegalStateException(
                             "buffer state reset did not reinterpret the attached source");
                 }
+                presentNextFrame(core, input, 0, renderedFrame, frameView);
 
                 output.write(bindGlobalAndSyncRequest(globals.seat, "wl_seat", 32, 33));
                 output.flush();
@@ -1157,7 +1163,7 @@ public final class MainActivity extends Activity {
             passed = true;
             message = "Native Wayland compositor passed\n"
                     + "registry, Android bitmap, xdg toplevel, keyboard input, "
-                    + "buffer scale/transform, Choreographer-paced frames, MotionEvent pointer and wheel input, nested popup grabs, synchronized subsurface trees, "
+                    + "damage-batched buffer scale/transform, Choreographer-paced frames, MotionEvent pointer and wheel input, nested popup grabs, synchronized subsurface trees, "
                     + "committed parent geometry, and bidirectional clipboard and text-input v3 lifecycle complete";
         } catch (Exception error) {
             message = "Native compositor probe failed\n" + error.getMessage();
@@ -2335,12 +2341,35 @@ public final class MainActivity extends Activity {
             Bitmap frame,
             ImageView frameView)
             throws Exception {
+        int expectedCallbacks = frameCallbackId == 0 ? 0 : 1;
+        int damageCount = nativePendingDamageCount(core);
+        int damageX = nativePendingDamageComponent(core, 0);
+        int damageY = nativePendingDamageComponent(core, 1);
+        int damageWidth = nativePendingDamageComponent(core, 2);
+        int damageHeight = nativePendingDamageComponent(core, 3);
+        if (damageCount <= 0
+                || damageX < 0
+                || damageY < 0
+                || damageWidth <= 0
+                || damageHeight <= 0
+                || damageX + damageWidth > frame.getWidth()
+                || damageY + damageHeight > frame.getHeight()) {
+            throw new IllegalStateException("native presentation damage was invalid");
+        }
         runOnUiThread(() -> {
             frameView.setImageBitmap(frame);
-            frameView.invalidate();
+            int viewWidth = frameView.getWidth();
+            int viewHeight = frameView.getHeight();
+            int left = damageX * viewWidth / frame.getWidth();
+            int top = damageY * viewHeight / frame.getHeight();
+            int right = (damageX + damageWidth) * viewWidth / frame.getWidth();
+            int bottom = (damageY + damageHeight) * viewHeight / frame.getHeight();
+            frameView.postInvalidateOnAnimation(left, top, right, bottom);
             Choreographer.getInstance().postFrameCallback(frameTimeNanos -> {
                 int frameTime = (int) (frameTimeNanos / 1_000_000L);
-                Log.i(TAG, "Choreographer frame time=" + Integer.toUnsignedString(frameTime));
+                Log.i(TAG, "Choreographer frame time=" + Integer.toUnsignedString(frameTime)
+                        + " damage=" + damageX + "," + damageY + " "
+                        + damageWidth + "x" + damageHeight);
                 presentationTimes.offer(frameTime);
             });
         });
@@ -2348,15 +2377,18 @@ public final class MainActivity extends Activity {
         if (frameTime == null) {
             throw new IllegalStateException("timed out waiting for Android Choreographer");
         }
-        if (nativePendingFrameCallbackCount(core) != 1
-                || nativePresentFrame(core, frameTime) != 1) {
+        if (nativePendingFrameCallbackCount(core) != expectedCallbacks
+                || nativePresentFrame(core, frameTime) != expectedCallbacks) {
             throw new IllegalStateException("Wayland frame callback was not presentation-gated");
         }
-        dispatch(core);
-        readPresentedFrame(input, frameCallbackId, frameTime);
-        readDeleteId(input, frameCallbackId);
-        if (nativePendingFrameCallbackCount(core) != 0) {
-            throw new IllegalStateException("presented frame callback was not drained");
+        if (expectedCallbacks != 0) {
+            dispatch(core);
+            readPresentedFrame(input, frameCallbackId, frameTime);
+            readDeleteId(input, frameCallbackId);
+        }
+        if (nativePendingFrameCallbackCount(core) != 0
+                || nativePendingDamageCount(core) != 0) {
+            throw new IllegalStateException("presented frame batch was not drained");
         }
     }
 
