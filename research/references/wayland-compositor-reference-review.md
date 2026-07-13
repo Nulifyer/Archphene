@@ -42,7 +42,7 @@ Hyprland independently tracks popup trees, nested children, mapping, damage, eff
 - [x] Validate `xdg_popup.grab` against the serial from the triggering input event.
 - [x] Track one explicit popup grab per seat, with root surface and ordered popup stack.
 - [x] Enforce parent/topmost ordering for nested popups.
-- Route pointer events to any surface from the owning client while the grab is active.
+- [x] Route pointer motion and buttons to root, parent-popup, and nested-popup surfaces from the owning client while the grab is active, using surface-local coordinates.
 - [~] Send `xdg_popup.popup_done` child-first and idempotently, and finish wiring outside press, Back/Escape, Activity focus loss, and invalidated-parent triggers.
 - [x] Restore pointer and keyboard focus to the root after dismissal.
 - Use each surface's effective input region rather than buffer bounds alone.
@@ -97,7 +97,7 @@ Migration order is registry/globals, SHM/pools/buffers, surfaces/regions, xdg-sh
 
 - Press/release remains on the original surface when a popup maps between events.
 - File, Edit, Settings, and Help remain open after a tap.
-- Moving and clicking between menu-bar and popup surfaces follows owner-events semantics.
+- [x] Moving and clicking between root, parent-popup, and nested-popup surfaces follows owner-events semantics in the native wire probe.
 - Outside press sends `popup_done` exactly once and restores root focus.
 - Nested submenu dismissal removes only the topmost popup when appropriate.
 - Popup reposition tokens are acknowledged.

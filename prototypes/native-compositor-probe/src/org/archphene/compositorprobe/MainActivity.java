@@ -485,8 +485,8 @@ public final class MainActivity extends Activity {
                 output.flush();
                 dispatch(core);
                 readUntilCallback(input, 43);
-                if (nativePointerCount(core) != 0 || nativeKeyboardCount(core) != 0) {
-                    throw new IllegalStateException("seat input resources were not released");
+                if (nativePointerCount(core) != 1 || nativeKeyboardCount(core) != 0) {
+                    throw new IllegalStateException("keyboard release changed pointer lifetime");
                 }
 
                 output.write(syncRequest(44));
@@ -531,6 +531,12 @@ public final class MainActivity extends Activity {
                 output.flush();
                 dispatch(core);
                 readUntilCallback(input, 53);
+                if (nativePointerMotion(core, 20, 60, 9001) != 1) {
+                    throw new IllegalStateException("parent popup pointer routing failed");
+                }
+                dispatch(core);
+                readPointerEnterAndFrame(input, 34, 47, 7, 5);
+                expectedPointerEvents++;
 
                 output.write(createNestedPositionerAndSyncRequest(popupConfigureSerial));
                 output.flush();
@@ -561,14 +567,36 @@ public final class MainActivity extends Activity {
                 if (nativeXdgAckCount(core) != 5) {
                     throw new IllegalStateException("nested xdg_popup configure ack failed");
                 }
+                output.write(mapNestedPopupFrameAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 62);
+                if (nativePointerMotion(core, 20, 72, 9002) != 1) {
+                    throw new IllegalStateException("nested popup pointer routing failed");
+                }
+                dispatch(core);
+                readPointerLeaveAndFrame(input, 34, 47);
+                readPointerEnterAndFrame(input, 34, 56, 2, 1);
+                expectedPointerEvents++;
+                if (nativePointerButton(core, true, 9003) != 1) {
+                    throw new IllegalStateException("nested popup pointer press failed");
+                }
+                dispatch(core);
+                readPointerButtonAndFrame(input, 34, true, 9003);
+                if (nativePointerButton(core, false, 9004) != 1) {
+                    throw new IllegalStateException("nested popup pointer release failed");
+                }
+                dispatch(core);
+                readPointerButtonAndFrame(input, 34, false, 9004);
+                expectedPointerEvents += 2;
 
                 if (nativeDismissPopups(core) != 2) {
                     throw new IllegalStateException("nested xdg_popup dismissal was not routed");
                 }
-                output.write(syncRequest(62));
+                output.write(syncRequest(63));
                 output.flush();
                 dispatch(core);
-                readNestedPopupDoneUntilCallback(input, 59, 50, 62);
+                readNestedPopupDoneUntilCallback(input, 59, 50, 34, 56, 20, 63);
                 if (nativeDismissPopups(core) != 0
                         || nativeXdgPopupDoneCount(core) != 2
                         || nativeXdgPopupGrabDepth(core) != 2) {
@@ -578,21 +606,23 @@ public final class MainActivity extends Activity {
                 output.write(destroyPopupResourcesAndSyncRequest());
                 output.flush();
                 dispatch(core);
-                readUntilCallback(input, 63);
+                readUntilCallback(input, 64);
                 if (nativeXdgPopupCount(core) != 0
                         || nativeXdgPositionerCount(core) != 0
                         || nativeXdgSurfaceCount(core) != 1
                         || nativeSurfaceCount(core) != 1
                         || nativeShmBufferCount(core) != 0
                         || nativeShmPoolCount(core) != 0
-                        || nativeXdgPopupGrabDepth(core) != 0) {
+                        || nativePointerCount(core) != 0
+                        || nativeXdgPopupGrabDepth(core) != 0
+                        || nativePointerEventCount(core) != expectedPointerEvents) {
                     throw new IllegalStateException("nested xdg_popup destruction failed");
                 }
                 output.write(bindGlobalAndSyncRequest(
-                        globals.output, "wl_output", 64, 65));
+                        globals.output, "wl_output", 65, 66));
                 output.flush();
                 dispatch(core);
-                readOutputUntilCallback(input, 20, 64, 65, 320, 160, 1, true);
+                readOutputUntilCallback(input, 20, 65, 66, 320, 160, 1, true);
                 if (nativeOutputBindCount(core) != 1
                         || nativeOutputCount(core) != 1
                         || nativeOutputEventCount(core) != 7) {
@@ -602,10 +632,10 @@ public final class MainActivity extends Activity {
                 if (nativeConfigureOutput(core, 640, 360, 2) != 1) {
                     throw new IllegalStateException("Android output update was not routed");
                 }
-                output.write(syncRequest(66));
+                output.write(syncRequest(67));
                 output.flush();
                 dispatch(core);
-                readOutputUntilCallback(input, 20, 64, 66, 640, 360, 2, false);
+                readOutputUntilCallback(input, 20, 65, 67, 640, 360, 2, false);
                 if (nativeOutputEventCount(core) != 10) {
                     throw new IllegalStateException("wl_output update events were incomplete");
                 }
@@ -613,7 +643,7 @@ public final class MainActivity extends Activity {
                 output.write(releaseOutputAndSyncRequest());
                 output.flush();
                 dispatch(core);
-                readUntilCallback(input, 67);
+                readUntilCallback(input, 68);
                 if (nativeOutputCount(core) != 0) {
                     throw new IllegalStateException("wl_output release failed");
                 }
@@ -621,7 +651,7 @@ public final class MainActivity extends Activity {
                 output.write(destroyXdgToplevelAndSyncRequest());
                 output.flush();
                 dispatch(core);
-                readUntilCallback(input, 68);
+                readUntilCallback(input, 69);
                 if (nativeXdgSurfaceCount(core) != 0
                         || nativeXdgToplevelCount(core) != 0
                         || nativeSurfaceCount(core) != 0
@@ -921,8 +951,25 @@ public final class MainActivity extends Activity {
         return request.array();
     }
 
+    private static byte[] mapNestedPopupFrameAndSyncRequest() {
+        ByteBuffer request = buffer(64);
+        putHeader(request, 56, 1, 20);
+        request.putInt(28);
+        request.putInt(0);
+        request.putInt(0);
+        putHeader(request, 56, 9, 24);
+        request.putInt(0);
+        request.putInt(0);
+        request.putInt(4);
+        request.putInt(2);
+        putHeader(request, 56, 6, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(62);
+        return request.array();
+    }
+
     private static byte[] destroyPopupResourcesAndSyncRequest() {
-        ByteBuffer request = buffer(100);
+        ByteBuffer request = buffer(108);
         putHeader(request, 59, 0, 8);
         putHeader(request, 58, 0, 8);
         putHeader(request, 56, 0, 8);
@@ -933,9 +980,10 @@ public final class MainActivity extends Activity {
         putHeader(request, 45, 0, 8);
         putHeader(request, 28, 0, 8);
         putHeader(request, 26, 1, 8);
+        putHeader(request, 34, 1, 8);
         putHeader(request, 32, 3, 8);
         putHeader(request, 1, 0, 12);
-        request.putInt(63);
+        request.putInt(64);
         return request.array();
     }
     private static byte[] getPointerAndSyncRequest() {
@@ -986,8 +1034,7 @@ public final class MainActivity extends Activity {
     }
 
     private static byte[] releaseInputAndSyncRequest() {
-        ByteBuffer request = buffer(28);
-        putHeader(request, 34, 1, 8);
+        ByteBuffer request = buffer(20);
         putHeader(request, 36, 0, 8);
         putHeader(request, 1, 0, 12);
         request.putInt(43);
@@ -996,9 +1043,9 @@ public final class MainActivity extends Activity {
 
     private static byte[] releaseOutputAndSyncRequest() {
         ByteBuffer request = buffer(20);
-        putHeader(request, 64, 0, 8);
+        putHeader(request, 65, 0, 8);
         putHeader(request, 1, 0, 12);
-        request.putInt(67);
+        request.putInt(68);
         return request.array();
     }
 
@@ -1009,10 +1056,9 @@ public final class MainActivity extends Activity {
         putHeader(request, 20, 0, 8);
         putHeader(request, 18, 0, 8);
         putHeader(request, 1, 0, 12);
-        request.putInt(68);
+        request.putInt(69);
         return request.array();
     }
-
     private static byte[] createShmBufferAndSyncRequest() {
         ByteBuffer request = buffer(44);
         putHeader(request, 10, 0, 32);
@@ -1474,9 +1520,17 @@ public final class MainActivity extends Activity {
         return serial;
     }
     private static void readNestedPopupDoneUntilCallback(
-            FileInputStream input, int childPopupId, int parentPopupId, int callbackId)
+            FileInputStream input,
+            int childPopupId,
+            int parentPopupId,
+            int pointerId,
+            int childSurfaceId,
+            int rootSurfaceId,
+            int callbackId)
             throws Exception {
         int dismissed = 0;
+        boolean pointerLeftChild = false;
+        boolean pointerEnteredRoot = false;
         while (true) {
             Message message = readMessage(input);
             throwIfDisplayError(message);
@@ -1487,10 +1541,24 @@ public final class MainActivity extends Activity {
                     throw new IllegalStateException("nested popup_done order was invalid");
                 }
                 dismissed++;
+            } else if (message.objectId == pointerId
+                    && message.opcode == 1
+                    && message.body.length == 8) {
+                ByteBuffer body = ByteBuffer.wrap(message.body).order(ByteOrder.nativeOrder());
+                pointerLeftChild = body.getInt() != 0 && body.getInt() == childSurfaceId;
+            } else if (message.objectId == pointerId
+                    && message.opcode == 0
+                    && message.body.length == 16) {
+                ByteBuffer body = ByteBuffer.wrap(message.body).order(ByteOrder.nativeOrder());
+                pointerEnteredRoot = body.getInt() != 0
+                        && body.getInt() == rootSurfaceId
+                        && body.getInt() == 20 * 256
+                        && body.getInt() == 72 * 256;
             }
             if (message.objectId == callbackId && message.opcode == 0) {
-                if (dismissed != 2) {
-                    throw new IllegalStateException("nested popup_done sequence was incomplete");
+                if (dismissed != 2 || !pointerLeftChild || !pointerEnteredRoot) {
+                    throw new IllegalStateException(
+                            "nested popup dismissal did not restore pointer focus");
                 }
                 return;
             }

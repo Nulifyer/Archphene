@@ -77,6 +77,8 @@ pub struct CompositorState {
     pointer_focus_surface: Option<WlSurface>,
     pointer_inside: bool,
     pointer_pressed: bool,
+    pointer_x: f64,
+    pointer_y: f64,
     keyboard_count: u32,
     keyboard_event_count: u32,
     keyboards: Vec<WlKeyboard>,
@@ -2099,8 +2101,34 @@ impl CompositorCore {
             }
         });
         if let Some(root) = root {
+            let previous = self.state.pointer_focus_surface.clone();
+            if self.state.pointer_inside
+                && previous
+                    .as_ref()
+                    .is_some_and(|surface| surface.id() != root.id())
+            {
+                if let Some(previous) = previous {
+                    let serial = self.next_input_serial();
+                    for pointer in self.pointer_resources_for_surface(&previous) {
+                        pointer.leave(serial, &previous);
+                        if pointer.version() >= 5 {
+                            pointer.frame();
+                        }
+                    }
+                }
+                let pointers = self.pointer_resources_for_surface(&root);
+                self.state.pointer_inside = !pointers.is_empty();
+                if !pointers.is_empty() {
+                    let serial = self.next_input_serial();
+                    for pointer in pointers {
+                        pointer.enter(serial, &root, self.state.pointer_x, self.state.pointer_y);
+                        if pointer.version() >= 5 {
+                            pointer.frame();
+                        }
+                    }
+                }
+            }
             self.state.pointer_focus_surface = Some(root.clone());
-            self.state.pointer_inside = false;
             self.state.pointer_pressed = false;
             set_keyboard_focus(&mut self.state, Some(root));
         }
@@ -2275,6 +2303,110 @@ impl CompositorCore {
         1
     }
 
+    fn pointer_resources_for_surface(&self, surface: &WlSurface) -> Vec<WlPointer> {
+        self.state
+            .pointers
+            .iter()
+            .filter(|pointer| pointer.is_alive() && pointer.id().same_client_as(&surface.id()))
+            .cloned()
+            .collect()
+    }
+
+    fn xdg_surface_origin(&self, xdg_surface: &XdgSurface, depth: usize) -> Option<(i32, i32)> {
+        if depth > self.state.popups.len() {
+            return None;
+        }
+        let xdg_data = xdg_surface.data::<XdgSurfaceData>()?;
+        let surface_data = xdg_data.wl_surface.data::<SurfaceData>()?;
+        let (role, popup) = {
+            let surface = surface_data
+                .inner
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            (surface.role, surface.xdg_popup.clone())
+        };
+        match role {
+            Some(SurfaceRole::XdgToplevel) => Some((0, 0)),
+            Some(SurfaceRole::XdgPopup) => {
+                let popup = popup?;
+                let popup_data = popup.data::<XdgPopupData>()?;
+                let (parent_x, parent_y) =
+                    self.xdg_surface_origin(&popup_data.parent, depth.saturating_add(1))?;
+                let (x, y, _, _) = popup_data
+                    .positioner
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .geometry()?;
+                Some((parent_x.saturating_add(x), parent_y.saturating_add(y)))
+            }
+            None => None,
+        }
+    }
+
+    fn popup_geometry_in_root(&self, popup: &XdgPopup) -> Option<(i32, i32, i32, i32)> {
+        let data = popup.data::<XdgPopupData>()?;
+        let (parent_x, parent_y) = self.xdg_surface_origin(&data.parent, 0)?;
+        let (x, y, width, height) = data
+            .positioner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .geometry()?;
+        Some((
+            parent_x.saturating_add(x),
+            parent_y.saturating_add(y),
+            width,
+            height,
+        ))
+    }
+
+    fn popup_pointer_target(&self, x: f64, y: f64) -> Option<(WlSurface, f64, f64)> {
+        let grab = self.state.popup_grab.as_ref().filter(|grab| grab.active)?;
+        for popup in grab.stack.iter().rev().filter(|popup| popup.is_alive()) {
+            let data = popup.data::<XdgPopupData>()?;
+            if data.dismissed.load(Ordering::Acquire) {
+                continue;
+            }
+            let xdg_data = data.xdg_surface.data::<XdgSurfaceData>()?;
+            let surface_data = xdg_data.wl_surface.data::<SurfaceData>()?;
+            let mapped = surface_data
+                .inner
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .committed_frame
+                .is_some();
+            if !mapped {
+                continue;
+            }
+            let (popup_x, popup_y, width, height) = self.popup_geometry_in_root(popup)?;
+            let popup_x = f64::from(popup_x);
+            let popup_y = f64::from(popup_y);
+            if x >= popup_x
+                && y >= popup_y
+                && x < popup_x + f64::from(width)
+                && y < popup_y + f64::from(height)
+            {
+                return Some((xdg_data.wl_surface.clone(), x - popup_x, y - popup_y));
+            }
+        }
+        Some((grab.root.clone(), x, y))
+    }
+
+    fn pointer_local_coordinates(&self, surface: &WlSurface, x: f64, y: f64) -> (f64, f64) {
+        for popup in self.state.popups.iter().filter(|popup| popup.is_alive()) {
+            let Some(data) = popup.data::<XdgPopupData>() else {
+                continue;
+            };
+            let Some(xdg_data) = data.xdg_surface.data::<XdgSurfaceData>() else {
+                continue;
+            };
+            if xdg_data.wl_surface.id() == surface.id() {
+                if let Some((popup_x, popup_y, _, _)) = self.popup_geometry_in_root(popup) {
+                    return (x - f64::from(popup_x), y - f64::from(popup_y));
+                }
+            }
+        }
+        (x, y)
+    }
     fn focused_pointer_resources(&self) -> Option<(WlSurface, Vec<WlPointer>)> {
         let surface = self.state.pointer_focus_surface.clone()?;
         let pointers: Vec<_> = self
@@ -2293,22 +2425,70 @@ impl CompositorCore {
     }
 
     pub fn pointer_motion(&mut self, x: f64, y: f64, time: u32) -> u32 {
-        let Some((surface, pointers)) = self.focused_pointer_resources() else {
+        let target = if self.state.pointer_pressed {
+            self.state.pointer_focus_surface.clone().map(|surface| {
+                let (local_x, local_y) = self.pointer_local_coordinates(&surface, x, y);
+                (surface, local_x, local_y)
+            })
+        } else {
+            self.popup_pointer_target(x, y).or_else(|| {
+                self.state.pointer_focus_surface.clone().map(|surface| {
+                    let (local_x, local_y) = self.pointer_local_coordinates(&surface, x, y);
+                    (surface, local_x, local_y)
+                })
+            })
+        };
+        let Some((surface, local_x, local_y)) = target else {
             return 0;
         };
-        let entering = !self.state.pointer_inside;
-        let serial = entering.then(|| self.next_input_serial());
-        for pointer in pointers {
-            if let Some(serial) = serial {
-                pointer.enter(serial, &surface, x, y);
-            } else {
-                pointer.motion(time, x, y);
+
+        let focus_changed = self
+            .state
+            .pointer_focus_surface
+            .as_ref()
+            .is_some_and(|focused| focused.id() != surface.id());
+        if focus_changed {
+            if self.state.pointer_inside {
+                let previous = self
+                    .state
+                    .pointer_focus_surface
+                    .clone()
+                    .expect("pointer focus checked above");
+                let serial = self.next_input_serial();
+                for pointer in self.pointer_resources_for_surface(&previous) {
+                    pointer.leave(serial, &previous);
+                    if pointer.version() >= 5 {
+                        pointer.frame();
+                    }
+                }
             }
-            if pointer.version() >= 5 {
-                pointer.frame();
+            self.state.pointer_focus_surface = Some(surface.clone());
+            self.state.pointer_inside = false;
+        }
+
+        let pointers = self.pointer_resources_for_surface(&surface);
+        if pointers.is_empty() {
+            return 0;
+        }
+        if self.state.pointer_inside {
+            for pointer in pointers {
+                pointer.motion(time, local_x, local_y);
+                if pointer.version() >= 5 {
+                    pointer.frame();
+                }
+            }
+        } else {
+            let serial = self.next_input_serial();
+            for pointer in pointers {
+                pointer.enter(serial, &surface, local_x, local_y);
+                if pointer.version() >= 5 {
+                    pointer.frame();
+                }
             }
         }
         self.state.pointer_inside = true;
+        self.state.pointer_x = x;
+        self.state.pointer_y = y;
         self.state.pointer_event_count = self.state.pointer_event_count.saturating_add(1);
         1
     }
