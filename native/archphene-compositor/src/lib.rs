@@ -10,9 +10,17 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
+use wayland_protocols::wp::fractional_scale::v1::server::wp_fractional_scale_manager_v1::{
+    self, WpFractionalScaleManagerV1,
+};
+use wayland_protocols::wp::fractional_scale::v1::server::wp_fractional_scale_v1::{
+    self, WpFractionalScaleV1,
+};
 use wayland_protocols::wp::text_input::zv3::server::zwp_text_input_manager_v3::{
     self, ZwpTextInputManagerV3,
 };
+use wayland_protocols::wp::viewporter::server::wp_viewport::{self, WpViewport};
+use wayland_protocols::wp::viewporter::server::wp_viewporter::{self, WpViewporter};
 use wayland_protocols::wp::text_input::zv3::server::zwp_text_input_v3::{self, ZwpTextInputV3};
 use wayland_protocols::xdg::shell::server::xdg_popup::{self, XdgPopup};
 use wayland_protocols::xdg::shell::server::xdg_positioner::{self, XdgPositioner};
@@ -56,6 +64,7 @@ pub struct CompositorState {
     shm_buffer_count: u32,
     last_buffer_checksum: u32,
     surface_count: u32,
+    surfaces: Vec<WlSurface>,
     surface_commit_count: u32,
     subcompositor_binds: u32,
     subsurface_count: u32,
@@ -84,7 +93,9 @@ pub struct CompositorState {
     output_width: i32,
     output_height: i32,
     output_scale: i32,
+    output_fractional_scale: u32,
     outputs: Vec<WlOutput>,
+    fractional_scales: Vec<WpFractionalScaleV1>,
     seat_binds: u32,
     pointer_count: u32,
     pointer_event_count: u32,
@@ -144,6 +155,14 @@ struct SurfaceState {
     pending_buffer_transform: Option<BufferTransform>,
     committed_buffer_transform: BufferTransform,
     cached_buffer_transform: Option<BufferTransform>,
+    viewport: Option<WpViewport>,
+    pending_viewport_source: Option<Option<ViewportSource>>,
+    committed_viewport_source: Option<ViewportSource>,
+    cached_viewport_source: Option<Option<ViewportSource>>,
+    pending_viewport_destination: Option<Option<(i32, i32)>>,
+    committed_viewport_destination: Option<(i32, i32)>,
+    cached_viewport_destination: Option<Option<(i32, i32)>>,
+    fractional_scale: Option<WpFractionalScaleV1>,
     committed_frame: Option<Arc<CommittedFrame>>,
     cached_frame: Option<Option<Arc<CommittedFrame>>>,
     cached_callbacks: Vec<WlCallback>,
@@ -158,6 +177,22 @@ struct SurfaceState {
     children_above: Vec<WlSurface>,
     pending_subsurface_stack: Vec<(WlSurface, WlSurface, bool)>,
     xdg_configured: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ViewportSource {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+struct ViewportData {
+    surface: WlSurface,
+}
+
+struct FractionalScaleData {
+    surface: WlSurface,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -702,7 +737,11 @@ fn damage_for_commit(
 }
 
 fn original_buffer_frame(frame: &Arc<CommittedFrame>) -> Arc<CommittedFrame> {
-    frame.source.clone().unwrap_or_else(|| Arc::clone(frame))
+    let mut source = Arc::clone(frame);
+    while let Some(parent) = source.source.as_ref() {
+        source = Arc::clone(parent);
+    }
+    source
 }
 
 fn transform_buffer_frame(
@@ -756,6 +795,98 @@ fn transform_buffer_frame(
     }))
 }
 
+#[derive(Clone, Copy, Debug)]
+enum ViewportApplyError {
+    BadSize,
+    OutOfBuffer,
+}
+
+fn apply_viewport_to_frame(
+    frame: Arc<CommittedFrame>,
+    source: Option<ViewportSource>,
+    destination: Option<(i32, i32)>,
+) -> Result<Arc<CommittedFrame>, ViewportApplyError> {
+    if source.is_none() && destination.is_none() {
+        return Ok(frame);
+    }
+    let source = source.unwrap_or(ViewportSource {
+        x: 0.0,
+        y: 0.0,
+        width: f64::from(frame.width),
+        height: f64::from(frame.height),
+    });
+    let right = source.x + source.width;
+    let bottom = source.y + source.height;
+    if !source.x.is_finite()
+        || !source.y.is_finite()
+        || !source.width.is_finite()
+        || !source.height.is_finite()
+        || source.x < 0.0
+        || source.y < 0.0
+        || source.width <= 0.0
+        || source.height <= 0.0
+        || right > f64::from(frame.width)
+        || bottom > f64::from(frame.height)
+    {
+        return Err(ViewportApplyError::OutOfBuffer);
+    }
+    let (width, height) = match destination {
+        Some((width, height)) => (
+            u32::try_from(width).map_err(|_| ViewportApplyError::BadSize)?,
+            u32::try_from(height).map_err(|_| ViewportApplyError::BadSize)?,
+        ),
+        None => {
+            if source.width.fract() != 0.0 || source.height.fract() != 0.0 {
+                return Err(ViewportApplyError::BadSize);
+            }
+            (source.width as u32, source.height as u32)
+        }
+    };
+    if width == 0 || height == 0 {
+        return Err(ViewportApplyError::BadSize);
+    }
+    if source.x == 0.0
+        && source.y == 0.0
+        && source.width == f64::from(frame.width)
+        && source.height == f64::from(frame.height)
+        && width == frame.width
+        && height == frame.height
+    {
+        return Ok(frame);
+    }
+
+    let byte_count = width
+        .checked_mul(height)
+        .and_then(|count| count.checked_mul(4))
+        .and_then(|count| usize::try_from(count).ok())
+        .ok_or(ViewportApplyError::BadSize)?;
+    let mut pixels = vec![0; byte_count];
+    for destination_y in 0..height {
+        let source_y = (source.y
+            + (f64::from(destination_y) + 0.5) * source.height / f64::from(height))
+            .floor()
+            .clamp(0.0, f64::from(frame.height.saturating_sub(1)))
+            as u32;
+        for destination_x in 0..width {
+            let source_x = (source.x
+                + (f64::from(destination_x) + 0.5) * source.width / f64::from(width))
+                .floor()
+                .clamp(0.0, f64::from(frame.width.saturating_sub(1)))
+                as u32;
+            let source_index = ((source_y * frame.width + source_x) * 4) as usize;
+            let destination_index = ((destination_y * width + destination_x) * 4) as usize;
+            pixels[destination_index..destination_index + 4]
+                .copy_from_slice(&frame.pixels[source_index..source_index + 4]);
+        }
+    }
+    Ok(Arc::new(CommittedFrame {
+        width,
+        height,
+        format: frame.format,
+        pixels,
+        source: Some(frame),
+    }))
+}
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 fn copy_wayland_pixels_to_android(
     source: &[u8],
@@ -1947,6 +2078,251 @@ fn queue_linux_copy(state: &mut CompositorState, source: &WlDataSource) {
     source.send((*mime_type).to_owned(), write_end.as_fd());
     state.pending_linux_copy_fds.push_back(read_end);
 }
+impl GlobalDispatch<WpViewporter, ()> for CompositorState {
+    fn bind(
+        _state: &mut Self,
+        _handle: &DisplayHandle,
+        _client: &Client,
+        resource: New<WpViewporter>,
+        _global_data: &(),
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        data_init.init(resource, ());
+    }
+}
+
+impl Dispatch<WpViewporter, ()> for CompositorState {
+    fn request(
+        _state: &mut Self,
+        _client: &Client,
+        resource: &WpViewporter,
+        request: wp_viewporter::Request,
+        _data: &(),
+        _handle: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            wp_viewporter::Request::Destroy => {}
+            wp_viewporter::Request::GetViewport { id, surface } => {
+                let Some(surface_data) = surface.data::<SurfaceData>() else {
+                    return;
+                };
+                let mut state = surface_data
+                    .inner
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                if state.viewport.as_ref().is_some_and(Resource::is_alive) {
+                    resource.post_error(
+                        wp_viewporter::Error::ViewportExists,
+                        "wl_surface already has a wp_viewport",
+                    );
+                    return;
+                }
+                let viewport = data_init.init(
+                    id,
+                    ViewportData {
+                        surface: surface.clone(),
+                    },
+                );
+                state.viewport = Some(viewport);
+            }
+            _ => unreachable!("wp_viewporter request added without an implementation"),
+        }
+    }
+}
+
+impl Dispatch<WpViewport, ViewportData> for CompositorState {
+    fn request(
+        _state: &mut Self,
+        _client: &Client,
+        resource: &WpViewport,
+        request: wp_viewport::Request,
+        data: &ViewportData,
+        _handle: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+        let Some(surface_data) = data.surface.data::<SurfaceData>() else {
+            resource.post_error(wp_viewport::Error::NoSurface, "wl_surface no longer exists");
+            return;
+        };
+        let mut surface = surface_data
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        match request {
+            wp_viewport::Request::Destroy => {
+                surface.viewport = None;
+                surface.pending_viewport_source = Some(None);
+                surface.pending_viewport_destination = Some(None);
+            }
+            wp_viewport::Request::SetSource {
+                x,
+                y,
+                width,
+                height,
+            } => {
+                let unset = x == -1.0 && y == -1.0 && width == -1.0 && height == -1.0;
+                if unset {
+                    surface.pending_viewport_source = Some(None);
+                } else if x.is_finite()
+                    && y.is_finite()
+                    && width.is_finite()
+                    && height.is_finite()
+                    && x >= 0.0
+                    && y >= 0.0
+                    && width > 0.0
+                    && height > 0.0
+                {
+                    surface.pending_viewport_source = Some(Some(ViewportSource {
+                        x,
+                        y,
+                        width,
+                        height,
+                    }));
+                } else {
+                    resource.post_error(
+                        wp_viewport::Error::BadValue,
+                        "viewport source must be unset or finite and positive",
+                    );
+                }
+            }
+            wp_viewport::Request::SetDestination { width, height } => {
+                if width == -1 && height == -1 {
+                    surface.pending_viewport_destination = Some(None);
+                } else if width > 0 && height > 0 {
+                    surface.pending_viewport_destination = Some(Some((width, height)));
+                } else {
+                    resource.post_error(
+                        wp_viewport::Error::BadValue,
+                        "viewport destination must be unset or positive",
+                    );
+                }
+            }
+            _ => unreachable!("wp_viewport request added without an implementation"),
+        }
+    }
+
+    fn destroyed(
+        _state: &mut Self,
+        _client: ClientId,
+        resource: &WpViewport,
+        data: &ViewportData,
+    ) {
+        if let Some(surface_data) = data.surface.data::<SurfaceData>() {
+            let mut surface = surface_data
+                .inner
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if surface
+                .viewport
+                .as_ref()
+                .is_some_and(|viewport| viewport.id() == resource.id())
+            {
+                surface.viewport = None;
+            }
+        }
+    }
+}
+
+impl GlobalDispatch<WpFractionalScaleManagerV1, ()> for CompositorState {
+    fn bind(
+        _state: &mut Self,
+        _handle: &DisplayHandle,
+        _client: &Client,
+        resource: New<WpFractionalScaleManagerV1>,
+        _global_data: &(),
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        data_init.init(resource, ());
+    }
+}
+
+impl Dispatch<WpFractionalScaleManagerV1, ()> for CompositorState {
+    fn request(
+        state: &mut Self,
+        _client: &Client,
+        resource: &WpFractionalScaleManagerV1,
+        request: wp_fractional_scale_manager_v1::Request,
+        _data: &(),
+        _handle: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            wp_fractional_scale_manager_v1::Request::Destroy => {}
+            wp_fractional_scale_manager_v1::Request::GetFractionalScale { id, surface } => {
+                let Some(surface_data) = surface.data::<SurfaceData>() else {
+                    return;
+                };
+                let mut surface_state = surface_data
+                    .inner
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                if surface_state
+                    .fractional_scale
+                    .as_ref()
+                    .is_some_and(Resource::is_alive)
+                {
+                    resource.post_error(
+                        wp_fractional_scale_manager_v1::Error::FractionalScaleExists,
+                        "wl_surface already has fractional-scale feedback",
+                    );
+                    return;
+                }
+                let fractional_scale = data_init.init(
+                    id,
+                    FractionalScaleData {
+                        surface: surface.clone(),
+                    },
+                );
+                fractional_scale.preferred_scale(state.output_fractional_scale.max(1));
+                surface_state.fractional_scale = Some(fractional_scale.clone());
+                state.fractional_scales.push(fractional_scale);
+            }
+            _ => unreachable!("fractional-scale manager request added without an implementation"),
+        }
+    }
+}
+
+impl Dispatch<WpFractionalScaleV1, FractionalScaleData> for CompositorState {
+    fn request(
+        _state: &mut Self,
+        _client: &Client,
+        _resource: &WpFractionalScaleV1,
+        request: wp_fractional_scale_v1::Request,
+        _data: &FractionalScaleData,
+        _handle: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            wp_fractional_scale_v1::Request::Destroy => {}
+            _ => unreachable!("wp_fractional_scale_v1 request added without an implementation"),
+        }
+    }
+
+    fn destroyed(
+        state: &mut Self,
+        _client: ClientId,
+        resource: &WpFractionalScaleV1,
+        data: &FractionalScaleData,
+    ) {
+        state
+            .fractional_scales
+            .retain(|scale| scale.id() != resource.id());
+        if let Some(surface_data) = data.surface.data::<SurfaceData>() {
+            let mut surface = surface_data
+                .inner
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if surface
+                .fractional_scale
+                .as_ref()
+                .is_some_and(|scale| scale.id() == resource.id())
+            {
+                surface.fractional_scale = None;
+            }
+        }
+    }
+}
 impl GlobalDispatch<ZwpTextInputManagerV3, ()> for CompositorState {
     fn bind(
         state: &mut Self,
@@ -2405,6 +2781,10 @@ impl GlobalDispatch<WlOutput, ()> for CompositorState {
             .filter(|surface| output.id().same_client_as(&surface.id()))
         {
             surface.enter(&output);
+            if surface.version() >= 6 {
+                surface.preferred_buffer_scale(state.output_scale);
+                surface.preferred_buffer_transform(wl_output::Transform::Normal);
+            }
             state.output_event_count = state.output_event_count.saturating_add(1);
         }
         state.output_binds = state.output_binds.saturating_add(1);
@@ -2922,6 +3302,12 @@ fn apply_cached_subsurface_tree(
         if let Some(transform) = surface_state.cached_buffer_transform.take() {
             surface_state.committed_buffer_transform = transform;
         }
+        if let Some(source) = surface_state.cached_viewport_source.take() {
+            surface_state.committed_viewport_source = source;
+        }
+        if let Some(destination) = surface_state.cached_viewport_destination.take() {
+            surface_state.committed_viewport_destination = destination;
+        }
         if let Some(frame) = surface_state.cached_frame.take() {
             surface_state.committed_frame = frame;
         }
@@ -3254,7 +3640,8 @@ impl Dispatch<WlCompositor, ()> for CompositorState {
     ) {
         match request {
             wl_compositor::Request::CreateSurface { id } => {
-                data_init.init(id, SurfaceData::default());
+                let surface = data_init.init(id, SurfaceData::default());
+                state.surfaces.push(surface);
                 state.surface_count = state.surface_count.saturating_add(1);
             }
             wl_compositor::Request::CreateRegion { id } => {
@@ -3499,6 +3886,8 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 let damage_declared = !surface_damage.is_empty() || !buffer_damage.is_empty();
                 let buffer_scale_update = surface.pending_buffer_scale.take();
                 let buffer_transform_update = surface.pending_buffer_transform.take();
+                let viewport_source_update = surface.pending_viewport_source.take();
+                let viewport_destination_update = surface.pending_viewport_destination.take();
                 let frame_update = if let Some(assignment) = surface.pending_buffer.take() {
                     Some(match assignment {
                         Some(buffer) => match buffer.inner.snapshot() {
@@ -3553,24 +3942,71 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 } else {
                     surface.committed_frame.clone()
                 };
+                let base_viewport_source = if synchronized {
+                    surface
+                        .cached_viewport_source
+                        .unwrap_or(surface.committed_viewport_source)
+                } else {
+                    surface.committed_viewport_source
+                };
+                let base_viewport_destination = if synchronized {
+                    surface
+                        .cached_viewport_destination
+                        .unwrap_or(surface.committed_viewport_destination)
+                } else {
+                    surface.committed_viewport_destination
+                };
                 let next_scale = buffer_scale_update.unwrap_or(base_scale);
                 let next_transform = buffer_transform_update.unwrap_or(base_transform);
+                let next_viewport_source =
+                    viewport_source_update.unwrap_or(base_viewport_source);
+                let next_viewport_destination =
+                    viewport_destination_update.unwrap_or(base_viewport_destination);
+                let viewport_state_changed =
+                    viewport_source_update.is_some() || viewport_destination_update.is_some();
                 let buffer_state_changed = frame_update.is_some()
                     || buffer_scale_update.is_some()
-                    || buffer_transform_update.is_some();
+                    || buffer_transform_update.is_some()
+                    || viewport_state_changed;
                 let next_frame = if buffer_state_changed {
                     let source = frame_update
                         .clone()
                         .unwrap_or_else(|| base_frame.as_ref().map(original_buffer_frame));
                     match source {
                         Some(source) => {
-                            match transform_buffer_frame(source, next_transform, next_scale) {
+                            let transformed =
+                                match transform_buffer_frame(source, next_transform, next_scale) {
+                                    Ok(frame) => frame,
+                                    Err(()) => {
+                                        resource.post_error(
+                                            wl_surface::Error::InvalidSize,
+                                            "transformed buffer dimensions must be divisible by scale",
+                                        );
+                                        return;
+                                    }
+                                };
+                            match apply_viewport_to_frame(
+                                transformed,
+                                next_viewport_source,
+                                next_viewport_destination,
+                            ) {
                                 Ok(frame) => Some(frame),
-                                Err(()) => {
-                                    resource.post_error(
-                                        wl_surface::Error::InvalidSize,
-                                        "transformed buffer dimensions must be divisible by scale",
-                                    );
+                                Err(error) => {
+                                    let Some(viewport) =
+                                        surface.viewport.as_ref().filter(|viewport| viewport.is_alive())
+                                    else {
+                                        return;
+                                    };
+                                    match error {
+                                        ViewportApplyError::BadSize => viewport.post_error(
+                                            wp_viewport::Error::BadSize,
+                                            "viewport source size must be integral without a destination",
+                                        ),
+                                        ViewportApplyError::OutOfBuffer => viewport.post_error(
+                                            wp_viewport::Error::OutOfBuffer,
+                                            "viewport source extends outside the transformed buffer",
+                                        ),
+                                    }
                                     return;
                                 }
                             }
@@ -3580,8 +4016,12 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 } else {
                     base_frame
                 };
+                let viewport_active =
+                    next_viewport_source.is_some() || next_viewport_destination.is_some();
                 let force_full_damage = buffer_scale_update.is_some()
                     || buffer_transform_update.is_some()
+                    || viewport_state_changed
+                    || (viewport_active && !buffer_damage.is_empty())
                     || (frame_update.is_some() && !damage_declared);
                 let local_damage = damage_for_commit(
                     surface_damage,
@@ -3598,6 +4038,8 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                     }
                     surface.cached_buffer_scale = Some(next_scale);
                     surface.cached_buffer_transform = Some(next_transform);
+                    surface.cached_viewport_source = Some(next_viewport_source);
+                    surface.cached_viewport_destination = Some(next_viewport_destination);
                     if buffer_state_changed {
                         surface.cached_frame = Some(next_frame);
                     }
@@ -3612,6 +4054,8 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 }
                 surface.committed_buffer_scale = next_scale;
                 surface.committed_buffer_transform = next_transform;
+                surface.committed_viewport_source = next_viewport_source;
+                surface.committed_viewport_destination = next_viewport_destination;
                 if buffer_state_changed {
                     surface.committed_frame = next_frame;
                 }
@@ -3707,6 +4151,7 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
         {
             set_keyboard_focus(state, None);
         }
+        state.surfaces.retain(|surface| surface.id() != resource.id());
         state.surface_count = state.surface_count.saturating_sub(1);
         if state.surface_count == 0 {
             state.last_frame = None;
@@ -4345,7 +4790,7 @@ impl CompositorCore {
             .create_global::<CompositorState, XdgWmBase, _>(6, ());
         display
             .handle()
-            .create_global::<CompositorState, WlSeat, _>(7, ());
+            .create_global::<CompositorState, WlSeat, _>(9, ());
         display
             .handle()
             .create_global::<CompositorState, WlDataDeviceManager, _>(3, ());
@@ -4354,11 +4799,18 @@ impl CompositorCore {
             .create_global::<CompositorState, ZwpTextInputManagerV3, _>(1, ());
         display
             .handle()
+            .create_global::<CompositorState, WpViewporter, _>(1, ());
+        display
+            .handle()
+            .create_global::<CompositorState, WpFractionalScaleManagerV1, _>(1, ());
+        display
+            .handle()
             .create_global::<CompositorState, WlOutput, _>(4, ());
         let state = CompositorState {
             output_width: 320,
             output_height: 160,
             output_scale: 1,
+            output_fractional_scale: 120,
             ..CompositorState::default()
         };
         Ok(Self {
@@ -4619,12 +5071,29 @@ impl CompositorCore {
     }
 
     pub fn configure_output(&mut self, width: i32, height: i32, scale: i32) -> u32 {
-        if width <= 0 || height <= 0 || scale <= 0 {
+        let Some(fractional_scale) = u32::try_from(scale)
+            .ok()
+            .and_then(|scale| scale.checked_mul(120))
+        else {
+            return 0;
+        };
+        self.configure_output_fractional(width, height, scale, fractional_scale)
+    }
+
+    pub fn configure_output_fractional(
+        &mut self,
+        width: i32,
+        height: i32,
+        scale: i32,
+        fractional_scale: u32,
+    ) -> u32 {
+        if width <= 0 || height <= 0 || scale <= 0 || fractional_scale == 0 {
             return 0;
         }
         self.state.output_width = width;
         self.state.output_height = height;
         self.state.output_scale = scale;
+        self.state.output_fractional_scale = fractional_scale;
         let mut updated = 0u32;
         for output in self.state.outputs.iter().filter(|output| output.is_alive()) {
             output.mode(
@@ -4640,6 +5109,20 @@ impl CompositorCore {
                 self.state.output_event_count = self.state.output_event_count.saturating_add(2);
             }
             updated = updated.saturating_add(1);
+        }
+        for surface in self.state.surfaces.iter().filter(|surface| surface.is_alive()) {
+            if surface.version() >= 6 {
+                surface.preferred_buffer_scale(scale);
+                surface.preferred_buffer_transform(wl_output::Transform::Normal);
+            }
+        }
+        for fractional in self
+            .state
+            .fractional_scales
+            .iter()
+            .filter(|fractional| fractional.is_alive())
+        {
+            fractional.preferred_scale(fractional_scale);
         }
         self.reconfigure_reactive_popups();
         updated
@@ -5114,15 +5597,37 @@ impl CompositorCore {
             }
             if vertical != 0.0 {
                 let discrete = (-vertical).round() as i32;
-                if pointer.version() >= 5 && discrete != 0 {
+                if pointer.version() >= 8 && discrete != 0 {
+                    pointer.axis_value120(
+                        wl_pointer::Axis::VerticalScroll,
+                        discrete.saturating_mul(120),
+                    );
+                } else if pointer.version() >= 5 && discrete != 0 {
                     pointer.axis_discrete(wl_pointer::Axis::VerticalScroll, discrete);
+                }
+                if pointer.version() >= 9 {
+                    pointer.axis_relative_direction(
+                        wl_pointer::Axis::VerticalScroll,
+                        wl_pointer::AxisRelativeDirection::Identical,
+                    );
                 }
                 pointer.axis(time, wl_pointer::Axis::VerticalScroll, -vertical * 15.0);
             }
             if horizontal != 0.0 {
                 let discrete = horizontal.round() as i32;
-                if pointer.version() >= 5 && discrete != 0 {
+                if pointer.version() >= 8 && discrete != 0 {
+                    pointer.axis_value120(
+                        wl_pointer::Axis::HorizontalScroll,
+                        discrete.saturating_mul(120),
+                    );
+                } else if pointer.version() >= 5 && discrete != 0 {
                     pointer.axis_discrete(wl_pointer::Axis::HorizontalScroll, discrete);
+                }
+                if pointer.version() >= 9 {
+                    pointer.axis_relative_direction(
+                        wl_pointer::Axis::HorizontalScroll,
+                        wl_pointer::AxisRelativeDirection::Identical,
+                    );
                 }
                 pointer.axis(time, wl_pointer::Axis::HorizontalScroll, horizontal * 15.0);
             }
@@ -6643,6 +7148,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn crops_and_scales_viewport_after_buffer_transform() {
+        let source = test_frame(4, 2, &[1, 2, 3, 4, 5, 6, 7, 8]);
+
+        let frame = apply_viewport_to_frame(
+            source,
+            Some(ViewportSource {
+                x: 1.0,
+                y: 0.0,
+                width: 2.0,
+                height: 2.0,
+            }),
+            Some((4, 4)),
+        )
+        .expect("valid viewport");
+        assert_eq!((frame.width, frame.height), (4, 4));
+        assert_eq!(&frame.pixels[0..4], &[2, 0, 0, 0]);
+        assert_eq!(&frame.pixels[60..64], &[7, 0, 0, 0]);
+        assert_eq!((original_buffer_frame(&frame).width, original_buffer_frame(&frame).height), (4, 2));
+    }
+
+    #[test]
+    fn rejects_fractional_viewport_source_without_destination() {
+        let source = test_frame(2, 2, &[0; 16]);
+        assert!(matches!(
+            apply_viewport_to_frame(
+                source,
+                Some(ViewportSource {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 1.5,
+                    height: 2.0,
+                }),
+                None,
+            ),
+            Err(ViewportApplyError::BadSize)
+        ));
+    }
     #[test]
     fn clips_and_alpha_blends_popup_frames() {
         let mut destination = CommittedFrame {

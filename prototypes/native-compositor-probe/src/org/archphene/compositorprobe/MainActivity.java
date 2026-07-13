@@ -253,6 +253,7 @@ public final class MainActivity extends Activity {
                     throw new IllegalStateException("wl_surface creation was not dispatched");
                 }
 
+
                 if (nativeSendShmPoolRequest(client.getFd(), 10, 40, 11) != 0) {
                     throw new IllegalStateException("SHM pool FD transfer");
                 }
@@ -290,6 +291,7 @@ public final class MainActivity extends Activity {
                     throw new IllegalStateException("Android bitmap did not match the XRGB SHM frame");
                 }
                 presentNextFrame(core, input, 14, renderedFrame, frameView);
+
 
                 output.write(destroyShmResourcesAndSyncRequest());
                 output.flush();
@@ -1160,6 +1162,7 @@ public final class MainActivity extends Activity {
                     throw new IllegalStateException("xdg destruction lifecycle failed");
                 }
             }
+            renderedFrame = runViewportProbe(frameView);
             passed = true;
             message = "Native Wayland compositor passed\n"
                     + "registry, Android bitmap, xdg toplevel, keyboard input, "
@@ -1190,6 +1193,122 @@ public final class MainActivity extends Activity {
         });
     }
 
+    private Bitmap runViewportProbe(ImageView frameView) throws Exception {
+        long core = nativeCreateCore();
+        if (core == 0) {
+            throw new IllegalStateException("viewport display creation");
+        }
+        try {
+            ParcelFileDescriptor[] pair = ParcelFileDescriptor.createSocketPair();
+        try (ParcelFileDescriptor client = pair[0];
+                FileInputStream input = new FileInputStream(client.getFileDescriptor());
+                FileOutputStream output = new FileOutputStream(client.getFileDescriptor())) {
+            int serverFd = pair[1].detachFd();
+            pair[1].close();
+            if (nativeAdoptClient(core, serverFd) != 0) {
+                throw new IllegalStateException("viewport client adoption");
+            }
+            output.write(getRegistryAndSyncRequest());
+            output.flush();
+            dispatch(core);
+            RegistryGlobals globals = readGlobals(input, 3);
+            output.write(bindGlobalAndSyncRequest(
+                    globals.compositor, "wl_compositor", 4, 5));
+            output.write(bindGlobalAndSyncRequest(globals.shm, "wl_shm", 6, 7));
+            output.flush();
+            dispatch(core);
+            readUntilCallback(input, 5);
+            readShmFormatsUntilCallback(input, 6, 7);
+            output.write(createSurfaceAndSyncRequest());
+            output.flush();
+            dispatch(core);
+            readUntilCallback(input, 9);
+            if (nativeSendShmPoolRequest(client.getFd(), 10, 40, 11) != 0) {
+                throw new IllegalStateException("viewport SHM pool FD transfer");
+            }
+            dispatch(core);
+            readUntilCallback(input, 11);
+            output.write(createShmBufferAndSyncRequest());
+            output.flush();
+            dispatch(core);
+            readUntilCallback(input, 13);
+            output.write(commitShmFrameAndSyncRequest());
+            output.flush();
+            dispatch(core);
+            readFrameCommitUntilSync(input, 12, 14, 15);
+            readDeleteId(input, 15);
+            Bitmap frame = Bitmap.createBitmap(4, 2, Bitmap.Config.ARGB_8888);
+            if (nativeCopyLastFrameToBitmap(core, frame) != 0) {
+                throw new IllegalStateException("viewport source frame was not readable");
+            }
+            presentNextFrame(core, input, 14, frame, frameView);
+
+            output.write(bindGlobalAndSyncRequest(
+                    globals.viewporter, "wp_viewporter", 16, 17));
+            output.flush();
+            dispatch(core);
+            readUntilCallback(input, 17);
+            output.write(createViewportAndSyncRequest());
+            output.flush();
+            dispatch(core);
+            readUntilCallback(input, 19);
+            output.write(bindGlobalAndSyncRequest(
+                    globals.fractionalScaleManager,
+                    "wp_fractional_scale_manager_v1",
+                    20,
+                    21));
+            output.flush();
+            dispatch(core);
+            readUntilCallback(input, 21);
+            output.write(createFractionalScaleAndSyncRequest());
+            output.flush();
+            dispatch(core);
+            readFractionalScaleUntilCallback(input, 22, 23, 120);
+
+            output.write(applyViewportAndSyncRequest());
+            output.flush();
+            dispatch(core);
+            readUnpresentedFrameUntilSync(input, 24, 25);
+            readDeleteId(input, 25);
+            if (nativeLastFrameWidth(core) != 4
+                    || nativeLastFrameHeight(core) != 4
+                    || nativePendingDamageCount(core) != 1) {
+                throw new IllegalStateException("wp_viewport crop and destination were not applied");
+            }
+            Bitmap viewportFrame = Bitmap.createBitmap(4, 4, Bitmap.Config.ARGB_8888);
+            int viewportCopy = nativeCopyLastFrameToBitmap(core, viewportFrame);
+            int viewportFirst = viewportFrame.getPixel(0, 0);
+            int viewportLast = viewportFrame.getPixel(3, 3);
+            if (viewportCopy != 0
+                    || viewportFirst != 0xff070605
+                    || viewportLast != 0xff232221) {
+                throw new IllegalStateException(
+                        "wp_viewport pixels did not match the crop: copy="
+                                + viewportCopy
+                                + " first=" + Integer.toHexString(viewportFirst)
+                                + " last=" + Integer.toHexString(viewportLast));
+            }
+            presentNextFrame(core, input, 24, viewportFrame, frameView);
+            output.write(resetViewportAndSyncRequest());
+            output.flush();
+            dispatch(core);
+            readUntilCallback(input, 26);
+            if (nativeLastFrameWidth(core) != 4
+                    || nativeLastFrameHeight(core) != 2
+                    || nativePendingDamageCount(core) != 1) {
+                throw new IllegalStateException("wp_viewport reset did not restore buffer size");
+            }
+            Bitmap resetFrame = Bitmap.createBitmap(4, 2, Bitmap.Config.ARGB_8888);
+            if (nativeCopyLastFrameToBitmap(core, resetFrame) != 0) {
+                throw new IllegalStateException("reset viewport frame was not readable");
+            }
+            presentNextFrame(core, input, 0, resetFrame, frameView);
+            return resetFrame;
+            }
+        } finally {
+            nativeDestroyCore(core);
+        }
+    }
     private static byte[] getRegistryAndSyncRequest() {
         ByteBuffer request = buffer(24);
         putHeader(request, 1, 1, 12);
@@ -1212,7 +1331,8 @@ public final class MainActivity extends Activity {
         request.put(interfaceName);
         request.put((byte) 0);
         while (request.position() < 8 + 4 + 4 + paddedLength) request.put((byte) 0);
-        request.putInt(Math.min(global.version, 6));
+        int supportedVersion = "wl_seat".equals(interfaceValue) ? 9 : 6;
+        request.putInt(Math.min(global.version, supportedVersion));
         request.putInt(objectId);
         putHeader(request, 1, 0, 12);
         request.putInt(callbackId);
@@ -1228,6 +1348,64 @@ public final class MainActivity extends Activity {
         return request.array();
     }
 
+    private static byte[] createViewportAndSyncRequest() {
+        ByteBuffer request = buffer(28);
+        putHeader(request, 16, 1, 16);
+        request.putInt(18);
+        request.putInt(8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(19);
+        return request.array();
+    }
+
+    private static byte[] createFractionalScaleAndSyncRequest() {
+        ByteBuffer request = buffer(28);
+        putHeader(request, 20, 1, 16);
+        request.putInt(22);
+        request.putInt(8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(23);
+        return request.array();
+    }
+
+    private static byte[] applyViewportAndSyncRequest() {
+        ByteBuffer request = buffer(96);
+        putHeader(request, 18, 1, 24);
+        request.putInt(256);
+        request.putInt(0);
+        request.putInt(512);
+        request.putInt(512);
+        putHeader(request, 18, 2, 16);
+        request.putInt(4);
+        request.putInt(4);
+        putHeader(request, 8, 9, 24);
+        request.putInt(0);
+        request.putInt(0);
+        request.putInt(4);
+        request.putInt(2);
+        putHeader(request, 8, 3, 12);
+        request.putInt(24);
+        putHeader(request, 8, 6, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(25);
+        return request.array();
+    }
+
+    private static byte[] resetViewportAndSyncRequest() {
+        ByteBuffer request = buffer(60);
+        putHeader(request, 18, 1, 24);
+        request.putInt(-256);
+        request.putInt(-256);
+        request.putInt(-256);
+        request.putInt(-256);
+        putHeader(request, 18, 2, 16);
+        request.putInt(-1);
+        request.putInt(-1);
+        putHeader(request, 8, 6, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(26);
+        return request.array();
+    }
     private static byte[] destroySurfaceAndSyncRequest() {
         ByteBuffer request = buffer(20);
         putHeader(request, 8, 0, 8);
@@ -1851,6 +2029,8 @@ public final class MainActivity extends Activity {
         Global seat = null;
         Global dataDeviceManager = null;
         Global textInputManager = null;
+        Global viewporter = null;
+        Global fractionalScaleManager = null;
         Global output = null;
         while (true) {
             Message message = readMessage(input);
@@ -1882,6 +2062,10 @@ public final class MainActivity extends Activity {
                     dataDeviceManager = new Global(name, version);
                 } else if ("zwp_text_input_manager_v3".equals(interfaceName)) {
                     textInputManager = new Global(name, version);
+                } else if ("wp_viewporter".equals(interfaceName)) {
+                    viewporter = new Global(name, version);
+                } else if ("wp_fractional_scale_manager_v1".equals(interfaceName)) {
+                    fractionalScaleManager = new Global(name, version);
                 } else if ("wl_output".equals(interfaceName)) {
                     output = new Global(name, version);
                 }
@@ -1894,11 +2078,14 @@ public final class MainActivity extends Activity {
                         || seat == null
                         || dataDeviceManager == null
                         || textInputManager == null
+                        || viewporter == null
+                        || fractionalScaleManager == null
                         || output == null) {
                     throw new IllegalStateException("required Wayland globals not advertised");
                 }
                 return new RegistryGlobals(compositor, subcompositor, shm, xdgWmBase, seat,
-                        dataDeviceManager, textInputManager, output);
+                        dataDeviceManager, textInputManager, viewporter,
+                        fractionalScaleManager, output);
             }
         }
     }
@@ -2500,13 +2687,21 @@ public final class MainActivity extends Activity {
             int fixedValue,
             int time)
             throws Exception {
-        Message discreteMessage = readPointerMessage(input, pointerId, 8);
-        ByteBuffer discreteBody =
-                ByteBuffer.wrap(discreteMessage.body).order(ByteOrder.nativeOrder());
-        if (discreteMessage.body.length != 8
-                || discreteBody.getInt() != axis
-                || discreteBody.getInt() != discrete) {
-            throw new IllegalStateException("invalid wl_pointer.axis_discrete event");
+        Message value120Message = readPointerMessage(input, pointerId, 9);
+        ByteBuffer value120Body =
+                ByteBuffer.wrap(value120Message.body).order(ByteOrder.nativeOrder());
+        if (value120Message.body.length != 8
+                || value120Body.getInt() != axis
+                || value120Body.getInt() != discrete * 120) {
+            throw new IllegalStateException("invalid wl_pointer.axis_value120 event");
+        }
+        Message relativeDirectionMessage = readPointerMessage(input, pointerId, 10);
+        ByteBuffer relativeDirectionBody = ByteBuffer.wrap(relativeDirectionMessage.body)
+                .order(ByteOrder.nativeOrder());
+        if (relativeDirectionMessage.body.length != 8
+                || relativeDirectionBody.getInt() != axis
+                || relativeDirectionBody.getInt() != 0) {
+            throw new IllegalStateException("invalid wl_pointer.axis_relative_direction event");
         }
         Message axisMessage = readPointerMessage(input, pointerId, 4);
         ByteBuffer axisBody = ByteBuffer.wrap(axisMessage.body).order(ByteOrder.nativeOrder());
@@ -2750,6 +2945,46 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private static void readFractionalScaleUntilCallback(
+            FileInputStream input,
+            int fractionalScaleId,
+            int callbackId,
+            int expectedScale)
+            throws Exception {
+        boolean preferred = false;
+        while (true) {
+            Message message = readMessage(input);
+            throwIfDisplayError(message);
+            if (message.objectId == fractionalScaleId && message.opcode == 0) {
+                preferred = message.body.length == 4
+                        && ByteBuffer.wrap(message.body)
+                                .order(ByteOrder.nativeOrder()).getInt() == expectedScale;
+            }
+            if (message.objectId == callbackId && message.opcode == 0) {
+                if (!preferred) {
+                    throw new IllegalStateException(
+                            "fractional-scale preferred_scale event was incomplete");
+                }
+                return;
+            }
+        }
+    }
+
+    private static void readUnpresentedFrameUntilSync(
+            FileInputStream input, int frameCallbackId, int syncCallbackId)
+            throws Exception {
+        while (true) {
+            Message message = readMessage(input);
+            throwIfDisplayError(message);
+            if (message.objectId == frameCallbackId && message.opcode == 0) {
+                throw new IllegalStateException(
+                        "viewport frame completed before Android presentation");
+            }
+            if (message.objectId == syncCallbackId && message.opcode == 0) {
+                return;
+            }
+        }
+    }
     private static void readFrameCommitUntilSync(
             FileInputStream input, int bufferId, int frameCallbackId, int syncCallbackId)
             throws Exception {
@@ -2940,6 +3175,8 @@ public final class MainActivity extends Activity {
         final Global seat;
         final Global dataDeviceManager;
         final Global textInputManager;
+        final Global viewporter;
+        final Global fractionalScaleManager;
         final Global output;
 
         RegistryGlobals(
@@ -2950,6 +3187,8 @@ public final class MainActivity extends Activity {
                 Global seat,
                 Global dataDeviceManager,
                 Global textInputManager,
+                Global viewporter,
+                Global fractionalScaleManager,
                 Global output) {
             this.compositor = compositor;
             this.subcompositor = subcompositor;
@@ -2958,6 +3197,8 @@ public final class MainActivity extends Activity {
             this.seat = seat;
             this.dataDeviceManager = dataDeviceManager;
             this.textInputManager = textInputManager;
+            this.viewporter = viewporter;
+            this.fractionalScaleManager = fractionalScaleManager;
             this.output = output;
         }
     }
