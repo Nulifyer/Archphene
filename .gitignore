@@ -213,3 +213,5 @@ reports/
 *.trace
 *.dump
 *.core
+/native/**/target/
+!/native/**/Cargo.lock

@@ -1,6 +1,6 @@
 # Wayland compositor reference review
 
-Date: 2026-07-11
+Date: 2026-07-13
 
 ## Scope
 
@@ -9,6 +9,8 @@ This review compares the Archphene Android bridge with compositor behavior in:
 - Hyprland commit `a51a369fd3f139ed3a66a84cdf0a0e2ce4e7fa55`
 - niri commit `0777769e719b7c9b7c980d4ea66288bfbb4da5b3`
 - Smithay commit `3021f619e2ae4dab8bfb1e21f3f210923b9b6582`
+- KWin commit `41024dc64db542dae3e0d0d4aacd184402dfe33a`
+- Mutter commit `c1e931f2c9dd76c0f6f495082d6e0bc9436a485a`
 - xdg-shell version 7
 
 The goal is not to embed a desktop environment. Hyprland and niri are references for the compositor-side state machines that the Android-owned bridge must provide.
@@ -76,14 +78,18 @@ Hyprland independently tracks popup trees, nested children, mapping, damage, eff
 
 ## Architecture recommendation
 
-Continue the Java compositor only through P0 because it gives fast emulator feedback. Before broadening to P1/P2, move protocol parsing and state into a native compositor library behind the existing JNI boundary.
+Use a Rust native core based on wayland-server's pure-Rust backend behind a narrow JNI boundary. Android owns Activity/window integration and creates the app-local socket; the native core adopts accepted client FDs and owns Wayland display, resource, and protocol state.
 
-Two viable paths are:
+This path was selected because it cross-compiles without a device libwayland-server or libffi dependency, while preserving a route to reuse Smithay state-machine components as protocol coverage grows. KWin, Mutter, Hyprland, niri, and Smithay remain behavior and test references rather than runtime dependencies.
 
-1. A small C/C++ `libwayland-server` compositor core. This fits the current JNI/native build path and allows only the protocols Archphene exposes.
-2. A Rust Smithay core. This supplies tested seat, popup, surface-tree, selection, text-input, and protocol machinery, but adds a larger Rust/NDK integration and dependency surface.
+Validated bootstrap slices:
 
-Smithay is the stronger semantic reference. A small `libwayland-server` core is likely the lower-risk first production implementation for this project. Hyprland and niri should remain test/reference sources, not runtime dependencies.
+- x86_64 and AArch64 Android shared-library builds in the pinned Podman NDK/Rust image;
+- Android socket-pair FD adoption into the native display;
+- wl_display.sync round trips on emulator and Samsung device;
+- wl_registry discovery, wl_compositor global bind, and wl_surface create/destroy lifecycle on both the x86_64 emulator and AArch64 Samsung device.
+
+Migration order is registry/globals, SHM/pools/buffers, surfaces/regions, xdg-shell, seats/input, popups/subsurfaces, clipboard/text input, output/scaling, then GPU presentation.
 
 ## Test gates
 

@@ -35,7 +35,7 @@ Each wrapped Linux application receives a normal Android package identity, UID, 
 | KCalc | Qt 6 / KDE Frameworks | x86_64 | Android 16 emulator | GUI, menus, keyboard, clipboard, theme, resize |
 | KCalc | Qt 6 / KDE Frameworks | AArch64 | Samsung Galaxy S22 Ultra, Android 15 | GUI, menus, keyboard, clipboard, freeform resize |
 | Mousepad | GTK 3 | x86_64 | Android 16 emulator | Editing, dialogs, IME, document open/save/reopen |
-| Archphene manager | Android | x86_64 and AArch64 | Emulator and Samsung device | Catalog, versions, updates, settings, APK replacement plumbing |
+| Archphene manager | Android | x86_64 | Android 16 emulator | Catalog, package transaction, versions, updates, settings, and production self-update |
 
 These results prove the bridge on the listed targets only. They do not establish compatibility with every Android device, Linux application, GPU driver, or GrapheneOS release.
 
@@ -97,7 +97,8 @@ APK assembly, signing, and releases run in Linux.
 
 ```powershell
 ./scripts/install-apk.ps1 -Serial emulator-5554
-`$([Environment]::NewLine)
+```
+
 Development builds use a persistent ignored debug key and remain debuggable for automated `run-as` tests. GitHub Releases use the separate non-debuggable release profile documented in [Publishing releases](docs/releases.md).
 
 ### Regression tests
@@ -123,7 +124,7 @@ The physical suite expects the curated ARM64 package/runtime workspace and a com
 - GrapheneOS-on-Pixel, Android 16 KB page-size devices, and generic laptop hardware remain unvalidated.
 - Archphene does not provide GrapheneOS firmware, verified boot, kernel hardening, or security updates on unsupported hardware.
 
-See the [roadmap](docs/roadmap.md) for the detailed engineering and security backlog.
+See [Current project status](docs/project-status.md) for validated evidence and remaining work, and the [roadmap](docs/roadmap.md) for engineering order.
 
 ## Roadmap
 

@@ -12,3 +12,4 @@ Dated Android permission, storage, transport, home, and document bridge evidence
 - [Persisted Tree Background Bridge Emulator Results](persisted-tree-background-bridge-emulator-results.md)
 - [Split Storage Bridge Emulator Results](split-storage-bridge-emulator-results.md)
 - [Storage Access Framework bridge emulator results](storage-access-framework-bridge-emulator-results.md)
+- [Native compositor Android probe](native-compositor-android-probe-2026-07-13.md)

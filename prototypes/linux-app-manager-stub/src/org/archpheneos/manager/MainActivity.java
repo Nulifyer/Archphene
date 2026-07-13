@@ -778,7 +778,7 @@ public final class MainActivity extends Activity {
 
     private int versionButtonIcon(ManagerStateStore.Snapshot state) {
         switch (state.status) {
-            case "current": return android.R.drawable.checkbox_on_background;
+            case "current": return R.drawable.version_current;
             case "update": return android.R.drawable.stat_sys_download_done;
             case "error": return android.R.drawable.stat_notify_error;
             default: return android.R.drawable.ic_popup_sync;
@@ -1493,6 +1493,7 @@ public final class MainActivity extends Activity {
         }
         item.setCompoundDrawablePadding(dp(2));
         item.setGravity(Gravity.CENTER);
+        item.setPadding(0, dp(4), 0, 0);
         item.setOnClickListener(view -> action.run());
         return item;
     }

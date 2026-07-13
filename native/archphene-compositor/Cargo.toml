@@ -1,0 +1,17 @@
+[package]
+name = "archphene-compositor"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wayland-server = "0.31.10"
+
+[profile.release]
+lto = "thin"
+panic = "abort"
+strip = "symbols"

@@ -38,6 +38,22 @@ Use `-ReleaseBuild` only with the ignored production credentials created by
 scripts directly on Ubuntu. The output is
 `prototypes/linux-app-manager-stub/out-linux/archphene.apk`.
 
+### Native compositor probe
+
+Build each ABI entirely in Podman:
+
+```powershell
+./scripts/build-native-compositor-probe-podman.ps1 -AndroidAbi x86_64
+./scripts/build-native-compositor-probe-podman.ps1 -AndroidAbi arm64-v8a
+```
+
+Then use Windows only for ADB installation and result collection:
+
+```powershell
+./scripts/test-native-compositor-probe.ps1 -AndroidAbi x86_64 -Serial emulator-5554
+./scripts/test-native-compositor-probe.ps1 -AndroidAbi arm64-v8a -Serial <adb-serial>
+```
+
 ## Install from Windows
 
 Windows only needs to transfer and exercise the resulting APK:

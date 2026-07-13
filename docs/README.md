@@ -9,6 +9,8 @@ This directory contains current documentation for using, building, and developin
 - [Release APKs](releases.md)
 - [Security model](security.md)
 - [Roadmap](roadmap.md)
+- [Current project status](project-status.md)
+- [Terminal applications](terminal-apps.md)
 
 ## Developers
 
