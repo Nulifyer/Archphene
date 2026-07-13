@@ -139,6 +139,11 @@ struct XdgPositionerState {
 }
 
 impl XdgPositionerState {
+    fn has_constraint(&self, constraint: xdg_positioner::ConstraintAdjustment) -> bool {
+        self.constraint_adjustment
+            .is_some_and(|adjustments| adjustments.contains(constraint))
+    }
+
     fn anchor_has_edge(&self, edge: xdg_positioner::Anchor) -> bool {
         self.anchor.is_some_and(|anchor| match edge {
             xdg_positioner::Anchor::Top => matches!(
@@ -230,12 +235,142 @@ impl XdgPositionerState {
         }
         Some((x, y, width, height))
     }
+
+    fn flipped_horizontal(&self) -> Self {
+        let mut flipped = self.clone();
+        flipped.anchor = self.anchor.map(|anchor| match anchor {
+            xdg_positioner::Anchor::Left => xdg_positioner::Anchor::Right,
+            xdg_positioner::Anchor::Right => xdg_positioner::Anchor::Left,
+            xdg_positioner::Anchor::TopLeft => xdg_positioner::Anchor::TopRight,
+            xdg_positioner::Anchor::TopRight => xdg_positioner::Anchor::TopLeft,
+            xdg_positioner::Anchor::BottomLeft => xdg_positioner::Anchor::BottomRight,
+            xdg_positioner::Anchor::BottomRight => xdg_positioner::Anchor::BottomLeft,
+            _ => anchor,
+        });
+        flipped.gravity = self.gravity.map(|gravity| match gravity {
+            xdg_positioner::Gravity::Left => xdg_positioner::Gravity::Right,
+            xdg_positioner::Gravity::Right => xdg_positioner::Gravity::Left,
+            xdg_positioner::Gravity::TopLeft => xdg_positioner::Gravity::TopRight,
+            xdg_positioner::Gravity::TopRight => xdg_positioner::Gravity::TopLeft,
+            xdg_positioner::Gravity::BottomLeft => xdg_positioner::Gravity::BottomRight,
+            xdg_positioner::Gravity::BottomRight => xdg_positioner::Gravity::BottomLeft,
+            _ => gravity,
+        });
+        flipped
+    }
+
+    fn flipped_vertical(&self) -> Self {
+        let mut flipped = self.clone();
+        flipped.anchor = self.anchor.map(|anchor| match anchor {
+            xdg_positioner::Anchor::Top => xdg_positioner::Anchor::Bottom,
+            xdg_positioner::Anchor::Bottom => xdg_positioner::Anchor::Top,
+            xdg_positioner::Anchor::TopLeft => xdg_positioner::Anchor::BottomLeft,
+            xdg_positioner::Anchor::TopRight => xdg_positioner::Anchor::BottomRight,
+            xdg_positioner::Anchor::BottomLeft => xdg_positioner::Anchor::TopLeft,
+            xdg_positioner::Anchor::BottomRight => xdg_positioner::Anchor::TopRight,
+            _ => anchor,
+        });
+        flipped.gravity = self.gravity.map(|gravity| match gravity {
+            xdg_positioner::Gravity::Top => xdg_positioner::Gravity::Bottom,
+            xdg_positioner::Gravity::Bottom => xdg_positioner::Gravity::Top,
+            xdg_positioner::Gravity::TopLeft => xdg_positioner::Gravity::BottomLeft,
+            xdg_positioner::Gravity::TopRight => xdg_positioner::Gravity::BottomRight,
+            xdg_positioner::Gravity::BottomLeft => xdg_positioner::Gravity::TopLeft,
+            xdg_positioner::Gravity::BottomRight => xdg_positioner::Gravity::TopRight,
+            _ => gravity,
+        });
+        flipped
+    }
+
+    fn constrained_geometry(&self, bounds: PopupBounds) -> Option<(i32, i32, i32, i32)> {
+        let mut adjusted_positioner = self.clone();
+        let mut geometry = adjusted_positioner.geometry()?;
+
+        if self.has_constraint(xdg_positioner::ConstraintAdjustment::FlipX)
+            && horizontal_overflow(geometry, bounds) > 0
+        {
+            let flipped = adjusted_positioner.flipped_horizontal();
+            let flipped_geometry = flipped.geometry()?;
+            if horizontal_overflow(flipped_geometry, bounds) < horizontal_overflow(geometry, bounds)
+            {
+                adjusted_positioner = flipped;
+                geometry = flipped_geometry;
+            }
+        }
+        if self.has_constraint(xdg_positioner::ConstraintAdjustment::FlipY)
+            && vertical_overflow(geometry, bounds) > 0
+        {
+            let flipped = adjusted_positioner.flipped_vertical();
+            let flipped_geometry = flipped.geometry()?;
+            if vertical_overflow(flipped_geometry, bounds) < vertical_overflow(geometry, bounds) {
+                geometry = flipped_geometry;
+            }
+        }
+
+        if self.has_constraint(xdg_positioner::ConstraintAdjustment::SlideX) {
+            geometry.0 = slide_axis(geometry.0, geometry.2, bounds.left, bounds.right);
+        }
+        if self.has_constraint(xdg_positioner::ConstraintAdjustment::SlideY) {
+            geometry.1 = slide_axis(geometry.1, geometry.3, bounds.top, bounds.bottom);
+        }
+        if self.has_constraint(xdg_positioner::ConstraintAdjustment::ResizeX) {
+            (geometry.0, geometry.2) =
+                resize_axis(geometry.0, geometry.2, bounds.left, bounds.right);
+        }
+        if self.has_constraint(xdg_positioner::ConstraintAdjustment::ResizeY) {
+            (geometry.1, geometry.3) =
+                resize_axis(geometry.1, geometry.3, bounds.top, bounds.bottom);
+        }
+        Some(geometry)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PopupBounds {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+fn axis_overflow(position: i32, size: i32, minimum: i32, maximum: i32) -> i64 {
+    let start = i64::from(position);
+    let end = start + i64::from(size);
+    (i64::from(minimum) - start).max(0) + (end - i64::from(maximum)).max(0)
+}
+
+fn horizontal_overflow(geometry: (i32, i32, i32, i32), bounds: PopupBounds) -> i64 {
+    axis_overflow(geometry.0, geometry.2, bounds.left, bounds.right)
+}
+
+fn vertical_overflow(geometry: (i32, i32, i32, i32), bounds: PopupBounds) -> i64 {
+    axis_overflow(geometry.1, geometry.3, bounds.top, bounds.bottom)
+}
+
+fn slide_axis(position: i32, size: i32, minimum: i32, maximum: i32) -> i32 {
+    let available = maximum.saturating_sub(minimum);
+    if size >= available {
+        minimum
+    } else {
+        position.clamp(minimum, maximum.saturating_sub(size))
+    }
+}
+
+fn resize_axis(position: i32, size: i32, minimum: i32, maximum: i32) -> (i32, i32) {
+    let available = maximum.saturating_sub(minimum).max(1);
+    let start = position.max(minimum).min(maximum.saturating_sub(1));
+    let end = position
+        .saturating_add(size)
+        .min(maximum)
+        .max(start.saturating_add(1));
+    (start, end.saturating_sub(start).min(available).max(1))
 }
 
 struct XdgPopupData {
     xdg_surface: XdgSurface,
     parent: XdgSurface,
     positioner: Mutex<XdgPositionerState>,
+    applied_geometry: Mutex<Option<(i32, i32, i32, i32)>>,
     grabbed: AtomicBool,
     dismissed: AtomicBool,
 }
@@ -812,6 +947,7 @@ impl Dispatch<XdgSurface, XdgSurfaceData> for CompositorState {
                         xdg_surface: resource.clone(),
                         parent,
                         positioner: Mutex::new(positioner_state),
+                        applied_geometry: Mutex::new(None),
                         grabbed: AtomicBool::new(false),
                         dismissed: AtomicBool::new(false),
                     },
@@ -1014,17 +1150,22 @@ impl Dispatch<XdgPopup, XdgPopupData> for CompositorState {
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
                     .clone();
-                let Some((x, y, width, height)) = positioner.geometry() else {
+                let Some(geometry) = constrained_popup_geometry(state, data, &positioner) else {
                     resource.post_error(
                         xdg_popup::Error::InvalidGrab,
                         "xdg_popup repositioner is incomplete",
                     );
                     return;
                 };
+                let (x, y, width, height) = geometry;
                 *data
                     .positioner
                     .lock()
                     .unwrap_or_else(|error| error.into_inner()) = positioner;
+                *data
+                    .applied_geometry
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = Some(geometry);
                 state.next_configure_serial = state.next_configure_serial.wrapping_add(1).max(1);
                 let serial = state.next_configure_serial;
                 if let Some(xdg_data) = data.xdg_surface.data::<XdgSurfaceData>() {
@@ -1824,11 +1965,13 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                         if xdg_state.pending_configures.is_empty()
                             && xdg_state.acknowledged_configure.is_none()
                         {
-                            let Some((x, y, width, height)) = popup_data
+                            let positioner = popup_data
                                 .positioner
                                 .lock()
                                 .unwrap_or_else(|error| error.into_inner())
-                                .geometry()
+                                .clone();
+                            let Some(geometry) =
+                                constrained_popup_geometry(state, popup_data, &positioner)
                             else {
                                 popup.post_error(
                                     xdg_popup::Error::InvalidGrab,
@@ -1836,6 +1979,11 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                                 );
                                 return;
                             };
+                            let (x, y, width, height) = geometry;
+                            *popup_data
+                                .applied_geometry
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner()) = Some(geometry);
                             state.next_configure_serial =
                                 state.next_configure_serial.wrapping_add(1).max(1);
                             let serial = state.next_configure_serial;
@@ -1979,6 +2127,35 @@ impl Dispatch<WlRegion, RegionData> for CompositorState {
     }
 }
 
+fn popup_local_geometry(data: &XdgPopupData) -> Option<(i32, i32, i32, i32)> {
+    data.applied_geometry
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .or_else(|| {
+            data.positioner
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .geometry()
+        })
+}
+
+fn popup_constraint_bounds(state: &CompositorState, data: &XdgPopupData) -> Option<PopupBounds> {
+    let (parent_x, parent_y) = xdg_surface_origin(state, &data.parent, 0)?;
+    Some(PopupBounds {
+        left: parent_x.saturating_neg(),
+        top: parent_y.saturating_neg(),
+        right: state.output_width.saturating_sub(parent_x),
+        bottom: state.output_height.saturating_sub(parent_y),
+    })
+}
+
+fn constrained_popup_geometry(
+    state: &CompositorState,
+    data: &XdgPopupData,
+    positioner: &XdgPositionerState,
+) -> Option<(i32, i32, i32, i32)> {
+    positioner.constrained_geometry(popup_constraint_bounds(state, data)?)
+}
 fn xdg_surface_origin(
     state: &CompositorState,
     xdg_surface: &XdgSurface,
@@ -2003,11 +2180,7 @@ fn xdg_surface_origin(
             let popup_data = popup.data::<XdgPopupData>()?;
             let (parent_x, parent_y) =
                 xdg_surface_origin(state, &popup_data.parent, depth.saturating_add(1))?;
-            let (x, y, _, _) = popup_data
-                .positioner
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .geometry()?;
+            let (x, y, _, _) = popup_local_geometry(popup_data)?;
             Some((parent_x.saturating_add(x), parent_y.saturating_add(y)))
         }
         None => None,
@@ -2020,11 +2193,7 @@ fn popup_geometry_in_root(
 ) -> Option<(i32, i32, i32, i32)> {
     let data = popup.data::<XdgPopupData>()?;
     let (parent_x, parent_y) = xdg_surface_origin(state, &data.parent, 0)?;
-    let (x, y, width, height) = data
-        .positioner
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .geometry()?;
+    let (x, y, width, height) = popup_local_geometry(data)?;
     Some((
         parent_x.saturating_add(x),
         parent_y.saturating_add(y),
@@ -2399,7 +2568,70 @@ impl CompositorCore {
             }
             updated = updated.saturating_add(1);
         }
+        self.reconfigure_reactive_popups();
         updated
+    }
+
+    fn reconfigure_reactive_popups(&mut self) {
+        let popups = self.state.popups.clone();
+        let mut geometry_changed = false;
+        for popup in popups
+            .iter()
+            .filter(|popup| popup.is_alive())
+            .filter(|popup| {
+                popup.data::<XdgPopupData>().is_some_and(|data| {
+                    !data.dismissed.load(Ordering::Acquire)
+                        && data
+                            .positioner
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .reactive
+                })
+            })
+        {
+            let Some(data) = popup.data::<XdgPopupData>() else {
+                continue;
+            };
+            let old_geometry = *data
+                .applied_geometry
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if old_geometry.is_none() {
+                continue;
+            }
+            let positioner = data
+                .positioner
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone();
+            let Some(geometry) = constrained_popup_geometry(&self.state, data, &positioner) else {
+                continue;
+            };
+            if old_geometry == Some(geometry) {
+                continue;
+            }
+            *data
+                .applied_geometry
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some(geometry);
+            self.state.next_configure_serial =
+                self.state.next_configure_serial.wrapping_add(1).max(1);
+            let serial = self.state.next_configure_serial;
+            if let Some(xdg_data) = data.xdg_surface.data::<XdgSurfaceData>() {
+                xdg_data
+                    .state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .pending_configures
+                    .push_back(serial);
+            }
+            popup.configure(geometry.0, geometry.1, geometry.2, geometry.3);
+            data.xdg_surface.configure(serial);
+            geometry_changed = true;
+        }
+        if geometry_changed {
+            update_composited_frame(&mut self.state);
+        }
     }
 
     pub fn seat_bind_count(&self) -> u32 {
@@ -2476,53 +2708,9 @@ impl CompositorCore {
             .collect()
     }
 
-    fn xdg_surface_origin(&self, xdg_surface: &XdgSurface, depth: usize) -> Option<(i32, i32)> {
-        if depth > self.state.popups.len() {
-            return None;
-        }
-        let xdg_data = xdg_surface.data::<XdgSurfaceData>()?;
-        let surface_data = xdg_data.wl_surface.data::<SurfaceData>()?;
-        let (role, popup) = {
-            let surface = surface_data
-                .inner
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            (surface.role, surface.xdg_popup.clone())
-        };
-        match role {
-            Some(SurfaceRole::XdgToplevel) => Some((0, 0)),
-            Some(SurfaceRole::XdgPopup) => {
-                let popup = popup?;
-                let popup_data = popup.data::<XdgPopupData>()?;
-                let (parent_x, parent_y) =
-                    self.xdg_surface_origin(&popup_data.parent, depth.saturating_add(1))?;
-                let (x, y, _, _) = popup_data
-                    .positioner
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .geometry()?;
-                Some((parent_x.saturating_add(x), parent_y.saturating_add(y)))
-            }
-            None => None,
-        }
-    }
-
     fn popup_geometry_in_root(&self, popup: &XdgPopup) -> Option<(i32, i32, i32, i32)> {
-        let data = popup.data::<XdgPopupData>()?;
-        let (parent_x, parent_y) = self.xdg_surface_origin(&data.parent, 0)?;
-        let (x, y, width, height) = data
-            .positioner
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .geometry()?;
-        Some((
-            parent_x.saturating_add(x),
-            parent_y.saturating_add(y),
-            width,
-            height,
-        ))
+        popup_geometry_in_root(&self.state, popup)
     }
-
     fn popup_pointer_target(&self, x: f64, y: f64) -> Option<(WlSurface, f64, f64)> {
         let grab = self.state.popup_grab.as_ref().filter(|grab| grab.active)?;
         for popup in grab.stack.iter().rev().filter(|popup| popup.is_alive()) {
@@ -3510,6 +3698,79 @@ mod tests {
 
         assert_eq!(destination.pixels, [10, 20, 30, 0, 75, 85, 95, 0]);
     }
+    fn test_positioner(
+        size: (i32, i32),
+        anchor_rect: (i32, i32, i32, i32),
+        adjustment: xdg_positioner::ConstraintAdjustment,
+    ) -> XdgPositionerState {
+        XdgPositionerState {
+            size: Some(size),
+            anchor_rect: Some(anchor_rect),
+            anchor: Some(xdg_positioner::Anchor::TopLeft),
+            gravity: Some(xdg_positioner::Gravity::BottomRight),
+            constraint_adjustment: Some(adjustment),
+            ..XdgPositionerState::default()
+        }
+    }
+
+    fn test_bounds() -> PopupBounds {
+        PopupBounds {
+            left: 0,
+            top: 0,
+            right: 100,
+            bottom: 80,
+        }
+    }
+
+    #[test]
+    fn flips_popup_geometry_before_other_constraint_adjustments() {
+        let positioner = XdgPositionerState {
+            anchor: Some(xdg_positioner::Anchor::BottomRight),
+            gravity: Some(xdg_positioner::Gravity::BottomRight),
+            ..test_positioner(
+                (20, 10),
+                (90, 70, 10, 10),
+                xdg_positioner::ConstraintAdjustment::FlipX
+                    | xdg_positioner::ConstraintAdjustment::FlipY,
+            )
+        };
+
+        assert_eq!(
+            positioner.constrained_geometry(test_bounds()),
+            Some((70, 60, 20, 10))
+        );
+    }
+
+    #[test]
+    fn slides_popup_geometry_without_changing_its_size() {
+        let positioner = test_positioner(
+            (30, 20),
+            (95, 75, 1, 1),
+            xdg_positioner::ConstraintAdjustment::SlideX
+                | xdg_positioner::ConstraintAdjustment::SlideY,
+        );
+
+        assert_eq!(
+            positioner.constrained_geometry(test_bounds()),
+            Some((70, 60, 30, 20))
+        );
+    }
+
+    #[test]
+    fn resizes_popup_geometry_to_the_output_bounds() {
+        let positioner = test_positioner(
+            (130, 100),
+            (-10, -5, 1, 1),
+            xdg_positioner::ConstraintAdjustment::ResizeX
+                | xdg_positioner::ConstraintAdjustment::ResizeY,
+        );
+
+        assert_eq!(
+            positioner.constrained_geometry(test_bounds()),
+            Some((0, 0, 100, 80))
+        );
+    }
+
     #[test]
     fn creates_wayland_display_and_reports_protocol_version() {
         let core = CompositorCore::new().expect("Wayland display");
