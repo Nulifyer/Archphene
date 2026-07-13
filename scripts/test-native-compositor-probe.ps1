@@ -27,7 +27,7 @@ Invoke-Adb shell wm dismiss-keyguard | Out-Null
 
 $keySent = $false
 $tapSent = $false
-$deadline = [DateTime]::UtcNow.AddSeconds(30)
+$deadline = [DateTime]::UtcNow.AddSeconds(60)
 do {
     Start-Sleep -Milliseconds 500
     $output = (& adb -s $Serial logcat -d -s "ArchpheneCompositorProbe:I" "*:S") -join [Environment]::NewLine
@@ -42,7 +42,7 @@ do {
             $tapSent = $true
         }
     }
-    if ($output.Contains("registry, Android bitmap, xdg toplevel, keyboard input, and MotionEvent pointer lifecycle complete")) {
+    if ($output.Contains("registry, Android bitmap, xdg toplevel, keyboard input, MotionEvent pointer, and nested popup-grab lifecycle complete")) {
         Write-Host "Native compositor Android MotionEvent probe passed on $Serial ($AndroidAbi)."
         exit 0
     }

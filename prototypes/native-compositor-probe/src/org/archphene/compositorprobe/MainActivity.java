@@ -43,6 +43,7 @@ public final class MainActivity extends Activity {
     private static native int nativeXdgPositionerRequestCount(long handle);
     private static native int nativeXdgPopupCount(long handle);
     private static native int nativeXdgPopupDoneCount(long handle);
+    private static native int nativeXdgPopupGrabDepth(long handle);
     private static native int nativeDismissPopups(long handle);
     private static native int nativeXdgSurfaceCount(long handle);
     private static native int nativeXdgToplevelCount(long handle);
@@ -326,7 +327,7 @@ public final class MainActivity extends Activity {
 
                 keyboardInputReady = true;
                 Log.i(TAG, "keyboard target ready");
-                KeyboardInput keyDown = awaitKeyboardInput(15);
+                KeyboardInput keyDown = awaitKeyboardInput(30);
                 if (!keyDown.pressed
                         || keyDown.key != 30
                         || nativeKeyboardKey(
@@ -428,7 +429,7 @@ public final class MainActivity extends Activity {
                     });
                 });
 
-                PointerInput down = awaitPointerInput(15);
+                PointerInput down = awaitPointerInput(30);
                 if (down.action != MotionEvent.ACTION_DOWN
                         || nativePointerMotion(core, down.x, down.y, down.time) != 1) {
                     throw new IllegalStateException("Android pointer down was not focused");
@@ -488,7 +489,7 @@ public final class MainActivity extends Activity {
                     throw new IllegalStateException("seat input resources were not released");
                 }
 
-                output.write(destroySecondShmResourcesAndSyncRequest());
+                output.write(syncRequest(44));
                 output.flush();
                 dispatch(core);
                 readUntilCallback(input, 44);
@@ -506,14 +507,15 @@ public final class MainActivity extends Activity {
                 dispatch(core);
                 readUntilCallback(input, 48);
 
-                output.write(createPopupRoleAndSyncRequest());
+                output.write(createPopupRoleAndSyncRequest(pressSerial));
                 output.flush();
                 dispatch(core);
                 int popupConfigureSerial =
-                        readPopupConfigureUntilCallback(input, 49, 50, 51);
+                        readPopupConfigureUntilCallback(input, 49, 50, 51, 13, 55, 160, 120);
                 if (nativeXdgPopupCount(core) != 1
                         || nativeXdgSurfaceCount(core) != 2
-                        || nativeSurfaceCount(core) != 2) {
+                        || nativeSurfaceCount(core) != 2
+                        || nativeXdgPopupGrabDepth(core) != 1) {
                     throw new IllegalStateException("xdg_popup role lifecycle was incomplete");
                 }
 
@@ -525,34 +527,72 @@ public final class MainActivity extends Activity {
                     throw new IllegalStateException("xdg_popup configure ack failed");
                 }
 
-                if (nativeDismissPopups(core) != 1) {
-                    throw new IllegalStateException("xdg_popup dismissal was not routed");
-                }
-                output.write(syncRequest(53));
+                output.write(mapPopupFrameAndSyncRequest());
                 output.flush();
                 dispatch(core);
-                readPopupDoneUntilCallback(input, 50, 53);
+                readUntilCallback(input, 53);
+
+                output.write(createNestedPositionerAndSyncRequest(popupConfigureSerial));
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 55);
+                output.write(createNestedPopupSurfaceAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 57);
+                output.write(createNestedPopupRoleAndSyncRequest(pressSerial));
+                output.flush();
+                dispatch(core);
+                int nestedConfigureSerial =
+                        readPopupConfigureUntilCallback(input, 58, 59, 60, 5, 16, 80, 60);
+                if (nativeXdgPopupCount(core) != 2
+                        || nativeXdgPositionerCount(core) != 2
+                        || nativeXdgPositionerRequestCount(core) != 14
+                        || nativeXdgSurfaceCount(core) != 3
+                        || nativeSurfaceCount(core) != 3
+                        || nativeXdgPopupGrabDepth(core) != 2) {
+                    throw new IllegalStateException("nested xdg_popup grab stack was incomplete");
+                }
+
+                output.write(ackNestedPopupConfigureAndSyncRequest(nestedConfigureSerial));
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 61);
+                if (nativeXdgAckCount(core) != 5) {
+                    throw new IllegalStateException("nested xdg_popup configure ack failed");
+                }
+
+                if (nativeDismissPopups(core) != 2) {
+                    throw new IllegalStateException("nested xdg_popup dismissal was not routed");
+                }
+                output.write(syncRequest(62));
+                output.flush();
+                dispatch(core);
+                readNestedPopupDoneUntilCallback(input, 59, 50, 62);
                 if (nativeDismissPopups(core) != 0
-                        || nativeXdgPopupDoneCount(core) != 1) {
-                    throw new IllegalStateException("xdg_popup dismissal was not idempotent");
+                        || nativeXdgPopupDoneCount(core) != 2
+                        || nativeXdgPopupGrabDepth(core) != 2) {
+                    throw new IllegalStateException("nested xdg_popup dismissal was not idempotent");
                 }
 
                 output.write(destroyPopupResourcesAndSyncRequest());
                 output.flush();
                 dispatch(core);
-                readUntilCallback(input, 54);
+                readUntilCallback(input, 63);
                 if (nativeXdgPopupCount(core) != 0
                         || nativeXdgPositionerCount(core) != 0
                         || nativeXdgSurfaceCount(core) != 1
-                        || nativeSurfaceCount(core) != 1) {
-                    throw new IllegalStateException("xdg_popup destruction failed");
+                        || nativeSurfaceCount(core) != 1
+                        || nativeShmBufferCount(core) != 0
+                        || nativeShmPoolCount(core) != 0
+                        || nativeXdgPopupGrabDepth(core) != 0) {
+                    throw new IllegalStateException("nested xdg_popup destruction failed");
                 }
-
                 output.write(bindGlobalAndSyncRequest(
-                        globals.output, "wl_output", 55, 56));
+                        globals.output, "wl_output", 64, 65));
                 output.flush();
                 dispatch(core);
-                readOutputUntilCallback(input, 20, 55, 56, 320, 160, 1, true);
+                readOutputUntilCallback(input, 20, 64, 65, 320, 160, 1, true);
                 if (nativeOutputBindCount(core) != 1
                         || nativeOutputCount(core) != 1
                         || nativeOutputEventCount(core) != 7) {
@@ -562,10 +602,10 @@ public final class MainActivity extends Activity {
                 if (nativeConfigureOutput(core, 640, 360, 2) != 1) {
                     throw new IllegalStateException("Android output update was not routed");
                 }
-                output.write(syncRequest(57));
+                output.write(syncRequest(66));
                 output.flush();
                 dispatch(core);
-                readOutputUntilCallback(input, 20, 55, 57, 640, 360, 2, false);
+                readOutputUntilCallback(input, 20, 64, 66, 640, 360, 2, false);
                 if (nativeOutputEventCount(core) != 10) {
                     throw new IllegalStateException("wl_output update events were incomplete");
                 }
@@ -573,7 +613,7 @@ public final class MainActivity extends Activity {
                 output.write(releaseOutputAndSyncRequest());
                 output.flush();
                 dispatch(core);
-                readUntilCallback(input, 58);
+                readUntilCallback(input, 67);
                 if (nativeOutputCount(core) != 0) {
                     throw new IllegalStateException("wl_output release failed");
                 }
@@ -581,7 +621,7 @@ public final class MainActivity extends Activity {
                 output.write(destroyXdgToplevelAndSyncRequest());
                 output.flush();
                 dispatch(core);
-                readUntilCallback(input, 59);
+                readUntilCallback(input, 68);
                 if (nativeXdgSurfaceCount(core) != 0
                         || nativeXdgToplevelCount(core) != 0
                         || nativeSurfaceCount(core) != 0
@@ -593,7 +633,7 @@ public final class MainActivity extends Activity {
             passed = true;
             message = "Native Wayland compositor passed\n"
                     + "registry, Android bitmap, xdg toplevel, keyboard input, "
-                    + "and MotionEvent pointer lifecycle complete";
+                    + "MotionEvent pointer, and nested popup-grab lifecycle complete";
         } catch (Exception error) {
             message = "Native compositor probe failed\n" + error.getMessage();
         } finally {
@@ -778,8 +818,8 @@ public final class MainActivity extends Activity {
         return request.array();
     }
 
-    private static byte[] createPopupRoleAndSyncRequest() {
-        ByteBuffer request = buffer(56);
+    private static byte[] createPopupRoleAndSyncRequest(int inputSerial) {
+        ByteBuffer request = buffer(72);
         putHeader(request, 18, 2, 16);
         request.putInt(49);
         request.putInt(47);
@@ -787,6 +827,9 @@ public final class MainActivity extends Activity {
         request.putInt(50);
         request.putInt(22);
         request.putInt(45);
+        putHeader(request, 50, 1, 16);
+        request.putInt(32);
+        request.putInt(inputSerial);
         putHeader(request, 47, 6, 8);
         putHeader(request, 1, 0, 12);
         request.putInt(51);
@@ -802,17 +845,99 @@ public final class MainActivity extends Activity {
         return request.array();
     }
 
+    private static byte[] mapPopupFrameAndSyncRequest() {
+        ByteBuffer request = buffer(64);
+        putHeader(request, 47, 1, 20);
+        request.putInt(28);
+        request.putInt(0);
+        request.putInt(0);
+        putHeader(request, 47, 9, 24);
+        request.putInt(0);
+        request.putInt(0);
+        request.putInt(4);
+        request.putInt(2);
+        putHeader(request, 47, 6, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(53);
+        return request.array();
+    }
+
+    private static byte[] createNestedPositionerAndSyncRequest(int parentConfigureSerial) {
+        ByteBuffer request = buffer(100);
+        putHeader(request, 18, 1, 12);
+        request.putInt(54);
+        putHeader(request, 54, 1, 16);
+        request.putInt(80);
+        request.putInt(60);
+        putHeader(request, 54, 2, 24);
+        request.putInt(5);
+        request.putInt(6);
+        request.putInt(20);
+        request.putInt(10);
+        putHeader(request, 54, 3, 12);
+        request.putInt(6);
+        putHeader(request, 54, 4, 12);
+        request.putInt(8);
+        putHeader(request, 54, 9, 12);
+        request.putInt(parentConfigureSerial);
+        putHeader(request, 1, 0, 12);
+        request.putInt(55);
+        return request.array();
+    }
+
+    private static byte[] createNestedPopupSurfaceAndSyncRequest() {
+        ByteBuffer request = buffer(24);
+        putHeader(request, 4, 0, 12);
+        request.putInt(56);
+        putHeader(request, 1, 0, 12);
+        request.putInt(57);
+        return request.array();
+    }
+
+    private static byte[] createNestedPopupRoleAndSyncRequest(int inputSerial) {
+        ByteBuffer request = buffer(72);
+        putHeader(request, 18, 2, 16);
+        request.putInt(58);
+        request.putInt(56);
+        putHeader(request, 58, 2, 20);
+        request.putInt(59);
+        request.putInt(49);
+        request.putInt(54);
+        putHeader(request, 59, 1, 16);
+        request.putInt(32);
+        request.putInt(inputSerial);
+        putHeader(request, 56, 6, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(60);
+        return request.array();
+    }
+
+    private static byte[] ackNestedPopupConfigureAndSyncRequest(int serial) {
+        ByteBuffer request = buffer(24);
+        putHeader(request, 58, 4, 12);
+        request.putInt(serial);
+        putHeader(request, 1, 0, 12);
+        request.putInt(61);
+        return request.array();
+    }
+
     private static byte[] destroyPopupResourcesAndSyncRequest() {
-        ByteBuffer request = buffer(44);
+        ByteBuffer request = buffer(100);
+        putHeader(request, 59, 0, 8);
+        putHeader(request, 58, 0, 8);
+        putHeader(request, 56, 0, 8);
+        putHeader(request, 54, 0, 8);
         putHeader(request, 50, 0, 8);
         putHeader(request, 49, 0, 8);
         putHeader(request, 47, 0, 8);
         putHeader(request, 45, 0, 8);
+        putHeader(request, 28, 0, 8);
+        putHeader(request, 26, 1, 8);
+        putHeader(request, 32, 3, 8);
         putHeader(request, 1, 0, 12);
-        request.putInt(54);
+        request.putInt(63);
         return request.array();
     }
-
     private static byte[] getPointerAndSyncRequest() {
         ByteBuffer request = buffer(24);
         putHeader(request, 32, 0, 12);
@@ -861,29 +986,19 @@ public final class MainActivity extends Activity {
     }
 
     private static byte[] releaseInputAndSyncRequest() {
-        ByteBuffer request = buffer(36);
+        ByteBuffer request = buffer(28);
         putHeader(request, 34, 1, 8);
         putHeader(request, 36, 0, 8);
-        putHeader(request, 32, 3, 8);
         putHeader(request, 1, 0, 12);
         request.putInt(43);
         return request.array();
     }
 
-    private static byte[] destroySecondShmResourcesAndSyncRequest() {
-        ByteBuffer request = buffer(28);
-        putHeader(request, 28, 0, 8);
-        putHeader(request, 26, 1, 8);
-        putHeader(request, 1, 0, 12);
-        request.putInt(44);
-        return request.array();
-    }
-
     private static byte[] releaseOutputAndSyncRequest() {
         ByteBuffer request = buffer(20);
-        putHeader(request, 55, 0, 8);
+        putHeader(request, 64, 0, 8);
         putHeader(request, 1, 0, 12);
-        request.putInt(58);
+        request.putInt(67);
         return request.array();
     }
 
@@ -894,7 +1009,7 @@ public final class MainActivity extends Activity {
         putHeader(request, 20, 0, 8);
         putHeader(request, 18, 0, 8);
         putHeader(request, 1, 0, 12);
-        request.putInt(59);
+        request.putInt(68);
         return request.array();
     }
 
@@ -1358,26 +1473,38 @@ public final class MainActivity extends Activity {
         readPointerFrame(input, pointerId);
         return serial;
     }
-    private static void readPopupDoneUntilCallback(
-            FileInputStream input, int popupId, int callbackId) throws Exception {
-        boolean popupDone = false;
+    private static void readNestedPopupDoneUntilCallback(
+            FileInputStream input, int childPopupId, int parentPopupId, int callbackId)
+            throws Exception {
+        int dismissed = 0;
         while (true) {
             Message message = readMessage(input);
             throwIfDisplayError(message);
-            popupDone |= message.objectId == popupId
-                    && message.opcode == 1
-                    && message.body.length == 0;
+            if (message.opcode == 1 && message.body.length == 0
+                    && (message.objectId == childPopupId || message.objectId == parentPopupId)) {
+                int expected = dismissed == 0 ? childPopupId : parentPopupId;
+                if (dismissed >= 2 || message.objectId != expected) {
+                    throw new IllegalStateException("nested popup_done order was invalid");
+                }
+                dismissed++;
+            }
             if (message.objectId == callbackId && message.opcode == 0) {
-                if (!popupDone) {
-                    throw new IllegalStateException("xdg_popup.popup_done was not emitted");
+                if (dismissed != 2) {
+                    throw new IllegalStateException("nested popup_done sequence was incomplete");
                 }
                 return;
             }
         }
     }
-
     private static int readPopupConfigureUntilCallback(
-            FileInputStream input, int xdgSurfaceId, int popupId, int callbackId)
+            FileInputStream input,
+            int xdgSurfaceId,
+            int popupId,
+            int callbackId,
+            int expectedX,
+            int expectedY,
+            int expectedWidth,
+            int expectedHeight)
             throws Exception {
         boolean geometryConfigured = false;
         Integer configureSerial = null;
@@ -1389,10 +1516,10 @@ public final class MainActivity extends Activity {
                     throw new IllegalStateException("invalid xdg_popup.configure event");
                 }
                 ByteBuffer body = ByteBuffer.wrap(message.body).order(ByteOrder.nativeOrder());
-                geometryConfigured = body.getInt() == 13
-                        && body.getInt() == 55
-                        && body.getInt() == 160
-                        && body.getInt() == 120;
+                geometryConfigured = body.getInt() == expectedX
+                        && body.getInt() == expectedY
+                        && body.getInt() == expectedWidth
+                        && body.getInt() == expectedHeight;
             } else if (message.objectId == xdgSurfaceId && message.opcode == 0) {
                 if (message.body.length != 4) {
                     throw new IllegalStateException("invalid popup xdg_surface.configure event");

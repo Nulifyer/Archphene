@@ -57,6 +57,8 @@ pub struct CompositorState {
     xdg_popup_count: u32,
     xdg_popup_done_count: u32,
     popups: Vec<XdgPopup>,
+    popup_grab: Option<PopupGrabState>,
+    popup_grab_serial: Option<PopupGrabSerial>,
     xdg_surface_count: u32,
     xdg_toplevel_count: u32,
     xdg_ack_count: u32,
@@ -230,7 +232,21 @@ struct XdgPopupData {
     xdg_surface: XdgSurface,
     parent: XdgSurface,
     positioner: Mutex<XdgPositionerState>,
+    grabbed: AtomicBool,
     dismissed: AtomicBool,
+}
+
+struct PopupGrabSerial {
+    serial: u32,
+    surface: WlSurface,
+}
+
+struct PopupGrabState {
+    seat: WlSeat,
+    root: WlSurface,
+    serial: u32,
+    stack: Vec<XdgPopup>,
+    active: bool,
 }
 
 struct XdgSurfaceData {
@@ -792,6 +808,7 @@ impl Dispatch<XdgSurface, XdgSurfaceData> for CompositorState {
                         xdg_surface: resource.clone(),
                         parent,
                         positioner: Mutex::new(positioner_state),
+                        grabbed: AtomicBool::new(false),
                         dismissed: AtomicBool::new(false),
                     },
                 );
@@ -866,13 +883,118 @@ impl Dispatch<XdgPopup, XdgPopupData> for CompositorState {
         _data_init: &mut DataInit<'_, Self>,
     ) {
         match request {
-            xdg_popup::Request::Destroy => {}
+            xdg_popup::Request::Destroy => {
+                if data.grabbed.load(Ordering::Acquire)
+                    && state
+                        .popup_grab
+                        .as_ref()
+                        .and_then(|grab| grab.stack.last())
+                        .is_some_and(|topmost| topmost.id() != resource.id())
+                {
+                    if let Some(xdg_data) = data.xdg_surface.data::<XdgSurfaceData>() {
+                        xdg_data.wm_base.post_error(
+                            xdg_wm_base::Error::NotTheTopmostPopup,
+                            "nested xdg_popups must be destroyed topmost first",
+                        );
+                    }
+                }
+            }
             xdg_popup::Request::Grab { seat, serial } => {
-                if serial == 0 || !seat.id().same_client_as(&data.parent.id()) {
+                let already_mapped = data
+                    .xdg_surface
+                    .data::<XdgSurfaceData>()
+                    .and_then(|xdg_data| xdg_data.wl_surface.data::<SurfaceData>())
+                    .is_some_and(|surface_data| {
+                        surface_data
+                            .inner
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .committed_frame
+                            .is_some()
+                    });
+                let serial_matches_client =
+                    state.popup_grab_serial.as_ref().is_some_and(|candidate| {
+                        candidate.serial == serial
+                            && candidate.surface.id().same_client_as(&data.parent.id())
+                    });
+                let serial_extends_grab = state.popup_grab.as_ref().is_some_and(|grab| {
+                    grab.active
+                        && grab.serial == serial
+                        && grab.seat.id() == seat.id()
+                        && grab.root.id().same_client_as(&data.parent.id())
+                });
+                let is_topmost_popup = state
+                    .popups
+                    .iter()
+                    .rev()
+                    .find(|popup| popup.id().same_client_as(&resource.id()))
+                    .is_some_and(|popup| popup.id() == resource.id());
+                if serial == 0
+                    || already_mapped
+                    || !seat.id().same_client_as(&data.parent.id())
+                    || (!serial_matches_client && !serial_extends_grab)
+                    || !is_topmost_popup
+                    || data.grabbed.load(Ordering::Acquire)
+                {
                     resource.post_error(
                         xdg_popup::Error::InvalidGrab,
-                        "xdg_popup grab requires the parent seat and a valid serial",
+                        "xdg_popup grab requires an unmapped topmost popup and a valid input serial",
                     );
+                    return;
+                }
+
+                let Some(parent_data) = data.parent.data::<XdgSurfaceData>() else {
+                    resource.post_error(xdg_popup::Error::InvalidGrab, "popup parent is unknown");
+                    return;
+                };
+                let parent_role =
+                    parent_data
+                        .wl_surface
+                        .data::<SurfaceData>()
+                        .and_then(|surface_data| {
+                            surface_data
+                                .inner
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner())
+                                .role
+                        });
+                match state.popup_grab.as_mut() {
+                    None if parent_role == Some(SurfaceRole::XdgToplevel) => {
+                        state.popup_grab = Some(PopupGrabState {
+                            seat,
+                            root: parent_data.wl_surface.clone(),
+                            serial,
+                            stack: vec![resource.clone()],
+                            active: true,
+                        });
+                    }
+                    Some(grab)
+                        if grab.active
+                            && grab.seat.id() == seat.id()
+                            && parent_role == Some(SurfaceRole::XdgPopup)
+                            && grab.stack.last().is_some_and(|parent_popup| {
+                                parent_popup.data::<XdgPopupData>().is_some_and(
+                                    |parent_popup_data| {
+                                        parent_popup_data.xdg_surface.id() == data.parent.id()
+                                            && parent_popup_data.grabbed.load(Ordering::Acquire)
+                                    },
+                                )
+                            }) =>
+                    {
+                        grab.stack.push(resource.clone());
+                    }
+                    _ => {
+                        resource.post_error(
+                            xdg_popup::Error::InvalidGrab,
+                            "popup parent is not the active grab root or topmost grabbed popup",
+                        );
+                        return;
+                    }
+                }
+                state.popup_grab_serial = None;
+                data.grabbed.store(true, Ordering::Release);
+                if let Some(xdg_data) = data.xdg_surface.data::<XdgSurfaceData>() {
+                    set_keyboard_focus(state, Some(xdg_data.wl_surface.clone()));
                 }
             }
             xdg_popup::Request::Reposition { positioner, token } => {
@@ -917,7 +1039,31 @@ impl Dispatch<XdgPopup, XdgPopupData> for CompositorState {
         }
     }
 
-    fn destroyed(state: &mut Self, _client: ClientId, _resource: &XdgPopup, data: &XdgPopupData) {
+    fn destroyed(state: &mut Self, _client: ClientId, resource: &XdgPopup, data: &XdgPopupData) {
+        let mut restored_focus = None;
+        let mut clear_grab = false;
+        if data.grabbed.load(Ordering::Acquire) {
+            if let Some(grab) = state.popup_grab.as_mut() {
+                if grab
+                    .stack
+                    .last()
+                    .is_some_and(|popup| popup.id() == resource.id())
+                {
+                    grab.stack.pop();
+                    restored_focus = if grab.active {
+                        grab.stack
+                            .last()
+                            .and_then(|popup| popup.data::<XdgPopupData>())
+                            .and_then(|popup_data| popup_data.xdg_surface.data::<XdgSurfaceData>())
+                            .map(|xdg_data| xdg_data.wl_surface.clone())
+                            .or_else(|| Some(grab.root.clone()))
+                    } else {
+                        Some(grab.root.clone())
+                    };
+                    clear_grab = grab.stack.is_empty();
+                }
+            }
+        }
         if let Some(xdg_data) = data.xdg_surface.data::<XdgSurfaceData>() {
             xdg_data
                 .state
@@ -934,7 +1080,13 @@ impl Dispatch<XdgPopup, XdgPopupData> for CompositorState {
                 surface.xdg_configured = false;
             }
         }
-        state.popups.retain(|popup| popup.id() != _resource.id());
+        state.popups.retain(|popup| popup.id() != resource.id());
+        if clear_grab {
+            state.popup_grab = None;
+        }
+        if let Some(surface) = restored_focus {
+            set_keyboard_focus(state, Some(surface));
+        }
         state.xdg_popup_count = state.xdg_popup_count.saturating_sub(1);
     }
 }
@@ -1903,18 +2055,55 @@ impl CompositorCore {
         self.state.xdg_popup_done_count
     }
 
+    pub fn xdg_popup_grab_depth(&self) -> u32 {
+        self.state.popup_grab.as_ref().map_or(0, |grab| {
+            u32::try_from(grab.stack.len()).unwrap_or(u32::MAX)
+        })
+    }
+
     pub fn dismiss_popups(&mut self) -> u32 {
         let mut dismissed = 0u32;
-        for popup in self.state.popups.iter().filter(|popup| popup.is_alive()) {
+        for popup in self
+            .state
+            .popups
+            .iter()
+            .rev()
+            .filter(|popup| popup.is_alive())
+        {
             let Some(data) = popup.data::<XdgPopupData>() else {
                 continue;
             };
             if !data.dismissed.swap(true, Ordering::AcqRel) {
+                if let Some(surface_data) = data
+                    .xdg_surface
+                    .data::<XdgSurfaceData>()
+                    .and_then(|xdg_data| xdg_data.wl_surface.data::<SurfaceData>())
+                {
+                    surface_data
+                        .inner
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .committed_frame = None;
+                }
                 popup.popup_done();
                 dismissed = dismissed.saturating_add(1);
             }
         }
         self.state.xdg_popup_done_count = self.state.xdg_popup_done_count.saturating_add(dismissed);
+        let root = self.state.popup_grab.as_mut().and_then(|grab| {
+            if grab.active {
+                grab.active = false;
+                Some(grab.root.clone())
+            } else {
+                None
+            }
+        });
+        if let Some(root) = root {
+            self.state.pointer_focus_surface = Some(root.clone());
+            self.state.pointer_inside = false;
+            self.state.pointer_pressed = false;
+            set_keyboard_focus(&mut self.state, Some(root));
+        }
         dismissed
     }
 
@@ -2062,6 +2251,11 @@ impl CompositorCore {
             return 0;
         }
         let serial = self.next_input_serial();
+        if pressed {
+            if let Some(surface) = self.state.keyboard_focus_surface.clone() {
+                self.state.popup_grab_serial = Some(PopupGrabSerial { serial, surface });
+            }
+        }
         let key_state = if pressed {
             wl_keyboard::KeyState::Pressed
         } else {
@@ -2123,10 +2317,13 @@ impl CompositorCore {
         if !self.state.pointer_inside || self.state.pointer_pressed == pressed {
             return 0;
         }
-        let Some((_surface, pointers)) = self.focused_pointer_resources() else {
+        let Some((surface, pointers)) = self.focused_pointer_resources() else {
             return 0;
         };
         let serial = self.next_input_serial();
+        if pressed {
+            self.state.popup_grab_serial = Some(PopupGrabSerial { serial, surface });
+        }
         let button_state = if pressed {
             wl_pointer::ButtonState::Pressed
         } else {
@@ -2532,6 +2729,18 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
         return -1;
     };
     i32::try_from(core.xdg_popup_done_count()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeXdgPopupGrabDepth(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.xdg_popup_grab_depth()).unwrap_or(i32::MAX)
 }
 
 #[unsafe(no_mangle)]
@@ -2948,6 +3157,7 @@ mod tests {
         assert_eq!(core.xdg_positioner_request_count(), 0);
         assert_eq!(core.xdg_popup_count(), 0);
         assert_eq!(core.xdg_popup_done_count(), 0);
+        assert_eq!(core.xdg_popup_grab_depth(), 0);
         assert_eq!(core.xdg_surface_count(), 0);
         assert_eq!(core.xdg_toplevel_count(), 0);
         assert_eq!(core.xdg_ack_count(), 0);

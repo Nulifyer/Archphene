@@ -39,12 +39,12 @@ Hyprland independently tracks popup trees, nested children, mapping, damage, eff
 
 ### P0: finish xdg popup semantics
 
-- Validate `xdg_popup.grab` against the serial from the triggering input event.
-- Track one explicit popup grab per seat, with root surface and ordered popup stack.
-- Enforce parent/topmost ordering for nested popups.
+- [x] Validate `xdg_popup.grab` against the serial from the triggering input event.
+- [x] Track one explicit popup grab per seat, with root surface and ordered popup stack.
+- [x] Enforce parent/topmost ordering for nested popups.
 - Route pointer events to any surface from the owning client while the grab is active.
-- Send `xdg_popup.popup_done` on outside press, Back/Escape, Activity focus loss, or invalidated parent.
-- Restore pointer and keyboard focus to the root after dismissal.
+- [~] Send `xdg_popup.popup_done` child-first and idempotently, and finish wiring outside press, Back/Escape, Activity focus loss, and invalidated-parent triggers.
+- [x] Restore pointer and keyboard focus to the root after dismissal.
 - Use each surface's effective input region rather than buffer bounds alone.
 - [x] Implement `xdg_popup.reposition` and `repositioned(token)`. The bridge now applies the new positioner state, constrains the popup, acknowledges the token, and emits popup and surface configure events in protocol order.
 
@@ -89,7 +89,7 @@ Validated bootstrap slices:
 - wl_display.sync round trips on emulator and Samsung device;
 - wl_registry discovery, wl_compositor, wl_shm, and xdg_wm_base binds, SHM format events and FD transfer, checked padded-stride frame copies, wl_surface commit/release/callback, XRGB-to-Android bitmap conversion, exact pixel checks, visible presentation, and resource lifecycles on both the x86_64 emulator and AArch64 Samsung device;
 - xdg_toplevel permanent-role assignment, the client initial bufferless commit, ordered toplevel/surface configure events, exact serial acknowledgement before buffer attachment, post-ack SHM presentation, and role-before-surface teardown on both targets;
-- pointer-only wl_seat metadata, per-client wl_pointer resources, mapped-toplevel focus, and Android MotionEvent routing through a serialized compositor queue to exact enter/motion/BTN_LEFT/leave events, increasing serials, and frame boundaries on both targets.
+- pointer-and-keyboard wl_seat metadata, per-client input resources, mapped-surface focus, Android MotionEvent and hardware-key routing, valid input-serial popup grabs, nested topmost grab stacks, and child-first idempotent dismissal/teardown with exact wire checks on both targets.
 
 Migration order is registry/globals, SHM/pools/buffers, surfaces/regions, xdg-shell, seats/input, popups/subsurfaces, clipboard/text input, output/scaling, then GPU presentation.
 
