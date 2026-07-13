@@ -100,6 +100,8 @@ struct SurfaceState {
     pending_buffer: Option<Option<SurfaceBuffer>>,
     pending_damage: bool,
     pending_callbacks: Vec<WlCallback>,
+    pending_input_region: Option<Option<RegionState>>,
+    committed_input_region: Option<RegionState>,
     committed_frame: Option<Arc<CommittedFrame>>,
     has_xdg_surface: bool,
     role: Option<SurfaceRole>,
@@ -537,7 +539,50 @@ fn copy_last_frame_to_bitmap(
     0
 }
 
-pub struct RegionData;
+#[derive(Clone, Copy)]
+struct RegionRectangle {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+
+impl RegionRectangle {
+    fn contains(self, x: f64, y: f64) -> bool {
+        x >= f64::from(self.x)
+            && y >= f64::from(self.y)
+            && x < f64::from(self.x.saturating_add(self.width))
+            && y < f64::from(self.y.saturating_add(self.height))
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RegionOperation {
+    Add(RegionRectangle),
+    Subtract(RegionRectangle),
+}
+
+#[derive(Clone, Default)]
+struct RegionState {
+    operations: Vec<RegionOperation>,
+}
+
+impl RegionState {
+    fn contains(&self, x: f64, y: f64) -> bool {
+        self.operations
+            .iter()
+            .fold(false, |inside, operation| match operation {
+                RegionOperation::Add(rectangle) if rectangle.contains(x, y) => true,
+                RegionOperation::Subtract(rectangle) if rectangle.contains(x, y) => false,
+                _ => inside,
+            })
+    }
+}
+
+#[derive(Default)]
+pub struct RegionData {
+    inner: Mutex<RegionState>,
+}
 
 struct ShmPoolInner {
     file: File,
@@ -1811,7 +1856,7 @@ impl Dispatch<WlCompositor, ()> for CompositorState {
                 state.surface_count = state.surface_count.saturating_add(1);
             }
             wl_compositor::Request::CreateRegion { id } => {
-                data_init.init(id, RegionData);
+                data_init.init(id, RegionData::default());
             }
             _ => unreachable!("wl_compositor request added without an implementation"),
         }
@@ -1870,9 +1915,28 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 let mut surface = data.inner.lock().unwrap_or_else(|error| error.into_inner());
                 surface.pending_callbacks.push(callback);
             }
-            wl_surface::Request::SetOpaqueRegion { .. }
-            | wl_surface::Request::SetInputRegion { .. }
-            | wl_surface::Request::Offset { .. } => {}
+            wl_surface::Request::SetInputRegion { region } => {
+                let region = match region {
+                    Some(region) => {
+                        let Some(region_data) = region.data::<RegionData>() else {
+                            return;
+                        };
+                        Some(
+                            region_data
+                                .inner
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner())
+                                .clone(),
+                        )
+                    }
+                    None => None,
+                };
+                data.inner
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .pending_input_region = Some(region);
+            }
+            wl_surface::Request::SetOpaqueRegion { .. } | wl_surface::Request::Offset { .. } => {}
             wl_surface::Request::SetBufferTransform { transform } => {
                 if !matches!(transform, WEnum::Value(_)) {
                     resource.post_error(
@@ -1992,6 +2056,9 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                             xdg_surface.configure(serial);
                         }
                     }
+                }
+                if let Some(input_region) = surface.pending_input_region.take() {
+                    surface.committed_input_region = input_region;
                 }
                 if let Some(assignment) = surface.pending_buffer.take() {
                     surface.committed_frame = match assignment {
@@ -2114,17 +2181,64 @@ impl Dispatch<WlRegion, RegionData> for CompositorState {
     fn request(
         _state: &mut Self,
         _client: &Client,
-        resource: &WlRegion,
+        _resource: &WlRegion,
         request: wl_region::Request,
-        _data: &RegionData,
+        data: &RegionData,
         _handle: &DisplayHandle,
         _data_init: &mut DataInit<'_, Self>,
     ) {
-        match request {
-            wl_region::Request::Destroy => {}
-            _ => resource.post_error(0u32, format!("unsupported region request: {request:?}")),
+        let operation = match request {
+            wl_region::Request::Destroy => return,
+            wl_region::Request::Add {
+                x,
+                y,
+                width,
+                height,
+            } if width > 0 && height > 0 => Some(RegionOperation::Add(RegionRectangle {
+                x,
+                y,
+                width,
+                height,
+            })),
+            wl_region::Request::Subtract {
+                x,
+                y,
+                width,
+                height,
+            } if width > 0 && height > 0 => Some(RegionOperation::Subtract(RegionRectangle {
+                x,
+                y,
+                width,
+                height,
+            })),
+            wl_region::Request::Add { .. } | wl_region::Request::Subtract { .. } => None,
+            _ => unreachable!("wl_region request added without an implementation"),
+        };
+        if let Some(operation) = operation {
+            data.inner
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .operations
+                .push(operation);
         }
     }
+}
+
+fn surface_accepts_pointer(
+    surface: &SurfaceState,
+    x: f64,
+    y: f64,
+    width: i32,
+    height: i32,
+) -> bool {
+    x >= 0.0
+        && y >= 0.0
+        && x < f64::from(width)
+        && y < f64::from(height)
+        && surface
+            .committed_input_region
+            .as_ref()
+            .is_none_or(|region| region.contains(x, y))
 }
 
 fn popup_local_geometry(data: &XdgPopupData) -> Option<(i32, i32, i32, i32)> {
@@ -2719,28 +2833,35 @@ impl CompositorCore {
                 continue;
             }
             let xdg_data = data.xdg_surface.data::<XdgSurfaceData>()?;
+            let (popup_x, popup_y, width, height) = self.popup_geometry_in_root(popup)?;
+            let local_x = x - f64::from(popup_x);
+            let local_y = y - f64::from(popup_y);
             let surface_data = xdg_data.wl_surface.data::<SurfaceData>()?;
-            let mapped = surface_data
+            let surface = surface_data
                 .inner
                 .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .committed_frame
-                .is_some();
-            if !mapped {
-                continue;
-            }
-            let (popup_x, popup_y, width, height) = self.popup_geometry_in_root(popup)?;
-            let popup_x = f64::from(popup_x);
-            let popup_y = f64::from(popup_y);
-            if x >= popup_x
-                && y >= popup_y
-                && x < popup_x + f64::from(width)
-                && y < popup_y + f64::from(height)
+                .unwrap_or_else(|error| error.into_inner());
+            if surface.committed_frame.is_some()
+                && surface_accepts_pointer(&surface, local_x, local_y, width, height)
             {
-                return Some((xdg_data.wl_surface.clone(), x - popup_x, y - popup_y));
+                return Some((xdg_data.wl_surface.clone(), local_x, local_y));
             }
         }
-        Some((grab.root.clone(), x, y))
+
+        let surface_data = grab.root.data::<SurfaceData>()?;
+        let surface = surface_data
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        surface.committed_frame.as_ref()?;
+        surface_accepts_pointer(
+            &surface,
+            x,
+            y,
+            self.state.output_width,
+            self.state.output_height,
+        )
+        .then(|| (grab.root.clone(), x, y))
     }
 
     fn pointer_local_coordinates(&self, surface: &WlSurface, x: f64, y: f64) -> (f64, f64) {
@@ -2759,6 +2880,41 @@ impl CompositorCore {
         }
         (x, y)
     }
+    fn pointer_target_for_surface(
+        &self,
+        surface: WlSurface,
+        x: f64,
+        y: f64,
+    ) -> Option<(WlSurface, f64, f64)> {
+        let (local_x, local_y) = self.pointer_local_coordinates(&surface, x, y);
+        let popup_dimensions = self
+            .state
+            .popups
+            .iter()
+            .filter(|popup| popup.is_alive())
+            .find_map(|popup| {
+                let data = popup.data::<XdgPopupData>()?;
+                let xdg_data = data.xdg_surface.data::<XdgSurfaceData>()?;
+                (xdg_data.wl_surface.id() == surface.id())
+                    .then(|| {
+                        self.popup_geometry_in_root(popup)
+                            .map(|geometry| (geometry.2, geometry.3))
+                    })
+                    .flatten()
+            });
+        let surface_data = surface.data::<SurfaceData>()?;
+        let surface_state = surface_data
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        surface_state.committed_frame.as_ref()?;
+        let (width, height) =
+            popup_dimensions.unwrap_or((self.state.output_width, self.state.output_height));
+        let accepts = surface_accepts_pointer(&surface_state, local_x, local_y, width, height);
+        drop(surface_state);
+        accepts.then_some((surface, local_x, local_y))
+    }
+
     fn focused_pointer_resources(&self) -> Option<(WlSurface, Vec<WlPointer>)> {
         let surface = self.state.pointer_focus_surface.clone()?;
         let pointers: Vec<_> = self
@@ -2782,16 +2938,38 @@ impl CompositorCore {
                 let (local_x, local_y) = self.pointer_local_coordinates(&surface, x, y);
                 (surface, local_x, local_y)
             })
+        } else if self
+            .state
+            .popup_grab
+            .as_ref()
+            .is_some_and(|grab| grab.active)
+        {
+            self.popup_pointer_target(x, y)
         } else {
-            self.popup_pointer_target(x, y).or_else(|| {
-                self.state.pointer_focus_surface.clone().map(|surface| {
-                    let (local_x, local_y) = self.pointer_local_coordinates(&surface, x, y);
-                    (surface, local_x, local_y)
-                })
-            })
+            self.state
+                .pointer_focus_surface
+                .clone()
+                .and_then(|surface| self.pointer_target_for_surface(surface, x, y))
         };
         let Some((surface, local_x, local_y)) = target else {
-            return 0;
+            if self.state.pointer_pressed || !self.state.pointer_inside {
+                return 0;
+            }
+            let Some(previous) = self.state.pointer_focus_surface.clone() else {
+                return 0;
+            };
+            let serial = self.next_input_serial();
+            for pointer in self.pointer_resources_for_surface(&previous) {
+                pointer.leave(serial, &previous);
+                if pointer.version() >= 5 {
+                    pointer.frame();
+                }
+            }
+            self.state.pointer_inside = false;
+            self.state.pointer_x = x;
+            self.state.pointer_y = y;
+            self.state.pointer_event_count = self.state.pointer_event_count.saturating_add(1);
+            return 1;
         };
 
         let focus_changed = self
@@ -3769,6 +3947,49 @@ mod tests {
             positioner.constrained_geometry(test_bounds()),
             Some((0, 0, 100, 80))
         );
+    }
+
+    #[test]
+    fn applies_region_add_subtract_and_readd_in_order() {
+        let mut region = RegionState::default();
+        let left_half = RegionRectangle {
+            x: 0,
+            y: 0,
+            width: 5,
+            height: 10,
+        };
+        region
+            .operations
+            .push(RegionOperation::Add(RegionRectangle {
+                x: 0,
+                y: 0,
+                width: 10,
+                height: 10,
+            }));
+        region.operations.push(RegionOperation::Subtract(left_half));
+        assert!(!region.contains(2.0, 2.0));
+        assert!(region.contains(7.0, 2.0));
+
+        region.operations.push(RegionOperation::Add(left_half));
+        assert!(region.contains(2.0, 2.0));
+        assert!(!region.contains(10.0, 2.0));
+    }
+
+    #[test]
+    fn intersects_committed_input_region_with_surface_bounds() {
+        let mut surface = SurfaceState::default();
+        surface.committed_input_region = Some(RegionState {
+            operations: vec![RegionOperation::Add(RegionRectangle {
+                x: 1,
+                y: 0,
+                width: 2,
+                height: 2,
+            })],
+        });
+
+        assert!(!surface_accepts_pointer(&surface, 0.0, 1.0, 2, 2));
+        assert!(surface_accepts_pointer(&surface, 1.0, 1.0, 2, 2));
+        assert!(!surface_accepts_pointer(&surface, 2.0, 1.0, 2, 2));
     }
 
     #[test]

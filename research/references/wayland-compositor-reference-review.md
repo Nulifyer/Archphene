@@ -45,7 +45,7 @@ Hyprland independently tracks popup trees, nested children, mapping, damage, eff
 - [x] Route pointer motion and buttons to root, parent-popup, and nested-popup surfaces from the owning client while the grab is active, using surface-local coordinates.
 - [~] Send `xdg_popup.popup_done` child-first and idempotently, and finish wiring outside press, Back/Escape, Activity focus loss, and invalidated-parent triggers.
 - [x] Restore pointer and keyboard focus to the root after dismissal.
-- Use each surface's effective input region rather than buffer bounds alone.
+- [x] Snapshot `wl_region` add/subtract state at `set_input_region`, latch it on commit, intersect it with surface bounds, and use it for root/parent/nested popup hit testing and fall-through.
 - [x] Implement `xdg_popup.reposition` and `repositioned(token)`, persist the applied configure geometry, apply output-bound flip/slide/resize adjustments in protocol order, and reconfigure reactive popups when Android output bounds change.
 
 ### P1: real surface trees
@@ -97,7 +97,7 @@ Migration order is registry/globals, SHM/pools/buffers, surfaces/regions, xdg-sh
 
 - Press/release remains on the original surface when a popup maps between events.
 - File, Edit, Settings, and Help remain open after a tap.
-- [x] Moving and clicking between root, parent-popup, and nested-popup surfaces follows owner-events semantics in the native wire probe.
+- [x] Moving and clicking between root, parent-popup, and nested-popup surfaces follows owner-events semantics in the native wire probe. Committed input-region exclusions fall through to the next eligible surface.
 - Outside press sends `popup_done` exactly once and restores root focus.
 - Nested submenu dismissal removes only the topmost popup when appropriate.
 - [x] Popup reposition tokens are acknowledged, and flip/slide/resize plus reactive output-bound changes keep configure, pixels, and input coordinates aligned.
