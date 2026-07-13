@@ -38,6 +38,8 @@ public final class MainActivity extends Activity {
     private static native int nativeReceiveKeyboardKeymap(int socketFd, int keyboardId);
     private static native int nativeDispatchOnce(long handle);
     private static native int nativeCompositorBindCount(long handle);
+    private static native int nativeSubcompositorBindCount(long handle);
+    private static native int nativeSubsurfaceCount(long handle);
     private static native int nativeXdgWmBaseBindCount(long handle);
     private static native int nativeXdgPositionerCount(long handle);
     private static native int nativeXdgPositionerRequestCount(long handle);
@@ -661,10 +663,72 @@ public final class MainActivity extends Activity {
                     throw new IllegalStateException("nested xdg_popup dismissal was not idempotent");
                 }
 
+                output.write(bindGlobalAndSyncRequest(
+                        globals.subcompositor, "wl_subcompositor", 68, 69));
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 69);
+                if (nativeSubcompositorBindCount(core) != 1) {
+                    throw new IllegalStateException("wl_subcompositor bind was not dispatched");
+                }
+                output.write(createSynchronizedSubsurfaceAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 72);
+                if (nativeSubsurfaceCount(core) != 1
+                        || nativeSurfaceCount(core) != 4
+                        || nativeLastFrameChecksum(core) != 656) {
+                    throw new IllegalStateException("synchronized child commit leaked before parent");
+                }
+                output.write(commitSubsurfaceParentAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 73);
+                if (nativeLastFrameChecksum(core) != 584
+                        || nativeCopyLastFrameToBitmap(core, renderedFrame) != 0
+                        || renderedFrame.getPixel(1, 0) != 0xff030201
+                        || renderedFrame.getPixel(3, 1) != 0xff232221) {
+                    throw new IllegalStateException(
+                            "subsurface tree pixels were not composed checksum="
+                                    + nativeLastFrameChecksum(core)
+                                    + " p10=" + Integer.toHexString(renderedFrame.getPixel(1, 0))
+                                    + " p31=" + Integer.toHexString(renderedFrame.getPixel(3, 1)));
+                }
+                output.write(desyncAndUnmapSubsurfaceAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 74);
+                if (nativeLastFrameChecksum(core) != 656) {
+                    throw new IllegalStateException("desynchronized child unmap waited for parent");
+                }
+                output.write(remapDesynchronizedSubsurfaceAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 75);
+                if (nativeLastFrameChecksum(core) != 584) {
+                    throw new IllegalStateException("desynchronized child remap waited for parent");
+                }
+                if (nativePointerMotion(core, 2, 1, 9007) != 1) {
+                    throw new IllegalStateException("subsurface pointer routing failed");
+                }
+                dispatch(core);
+                readPointerLeaveAndFrame(input, 34, 20);
+                readPointerEnterAndFrame(input, 34, 70, 1, 1);
+                expectedPointerEvents++;
+                output.write(destroySubsurfaceAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 76);
+                if (nativeSubsurfaceCount(core) != 0
+                        || nativeSurfaceCount(core) != 3
+                        || nativeLastFrameChecksum(core) != 656) {
+                    throw new IllegalStateException("wl_subsurface teardown failed");
+                }
+
                 output.write(destroyPopupResourcesAndSyncRequest());
                 output.flush();
                 dispatch(core);
-                readUntilCallback(input, 68);
+                readUntilCallback(input, 77);
                 if (nativeXdgPopupCount(core) != 0
                         || nativeXdgPositionerCount(core) != 0
                         || nativeXdgSurfaceCount(core) != 1
@@ -680,10 +744,10 @@ public final class MainActivity extends Activity {
                     throw new IllegalStateException("unbound Android output reset was not retained");
                 }
                 output.write(bindGlobalAndSyncRequest(
-                        globals.output, "wl_output", 69, 70));
+                        globals.output, "wl_output", 78, 79));
                 output.flush();
                 dispatch(core);
-                readOutputUntilCallback(input, 20, 69, 70, 320, 160, 1, true);
+                readOutputUntilCallback(input, 20, 78, 79, 320, 160, 1, true);
                 if (nativeOutputBindCount(core) != 1
                         || nativeOutputCount(core) != 1
                         || nativeOutputEventCount(core) != 7) {
@@ -693,10 +757,10 @@ public final class MainActivity extends Activity {
                 if (nativeConfigureOutput(core, 640, 360, 2) != 1) {
                     throw new IllegalStateException("Android output update was not routed");
                 }
-                output.write(syncRequest(71));
+                output.write(syncRequest(80));
                 output.flush();
                 dispatch(core);
-                readOutputUntilCallback(input, 20, 69, 71, 640, 360, 2, false);
+                readOutputUntilCallback(input, 20, 78, 80, 640, 360, 2, false);
                 if (nativeOutputEventCount(core) != 10) {
                     throw new IllegalStateException("wl_output update events were incomplete");
                 }
@@ -704,7 +768,7 @@ public final class MainActivity extends Activity {
                 output.write(releaseOutputAndSyncRequest());
                 output.flush();
                 dispatch(core);
-                readUntilCallback(input, 72);
+                readUntilCallback(input, 81);
                 if (nativeOutputCount(core) != 0) {
                     throw new IllegalStateException("wl_output release failed");
                 }
@@ -712,7 +776,7 @@ public final class MainActivity extends Activity {
                 output.write(destroyXdgToplevelAndSyncRequest());
                 output.flush();
                 dispatch(core);
-                readUntilCallback(input, 73);
+                readUntilCallback(input, 82);
                 if (nativeXdgSurfaceCount(core) != 0
                         || nativeXdgToplevelCount(core) != 0
                         || nativeSurfaceCount(core) != 0
@@ -724,7 +788,7 @@ public final class MainActivity extends Activity {
             passed = true;
             message = "Native Wayland compositor passed\n"
                     + "registry, Android bitmap, xdg toplevel, keyboard input, "
-                    + "MotionEvent pointer, and nested popup-grab lifecycle complete";
+                    + "MotionEvent pointer, nested popup grabs, and synchronized subsurface trees complete";
         } catch (Exception error) {
             message = "Native compositor probe failed\n" + error.getMessage();
         } finally {
@@ -1052,6 +1116,82 @@ public final class MainActivity extends Activity {
         return request.array();
     }
 
+    private static byte[] createSynchronizedSubsurfaceAndSyncRequest() {
+        ByteBuffer request = buffer(124);
+        putHeader(request, 4, 0, 12);
+        request.putInt(70);
+        putHeader(request, 68, 1, 20);
+        request.putInt(71);
+        request.putInt(70);
+        request.putInt(20);
+        putHeader(request, 71, 1, 16);
+        request.putInt(1);
+        request.putInt(0);
+        putHeader(request, 71, 2, 12);
+        request.putInt(20);
+        putHeader(request, 70, 1, 20);
+        request.putInt(28);
+        request.putInt(0);
+        request.putInt(0);
+        putHeader(request, 70, 9, 24);
+        request.putInt(0);
+        request.putInt(0);
+        request.putInt(4);
+        request.putInt(2);
+        putHeader(request, 70, 6, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(72);
+        return request.array();
+    }
+
+    private static byte[] commitSubsurfaceParentAndSyncRequest() {
+        ByteBuffer request = buffer(20);
+        putHeader(request, 20, 6, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(73);
+        return request.array();
+    }
+
+    private static byte[] desyncAndUnmapSubsurfaceAndSyncRequest() {
+        ByteBuffer request = buffer(48);
+        putHeader(request, 71, 5, 8);
+        putHeader(request, 70, 1, 20);
+        request.putInt(0);
+        request.putInt(0);
+        request.putInt(0);
+        putHeader(request, 70, 6, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(74);
+        return request.array();
+    }
+
+    private static byte[] remapDesynchronizedSubsurfaceAndSyncRequest() {
+        ByteBuffer request = buffer(64);
+        putHeader(request, 70, 1, 20);
+        request.putInt(28);
+        request.putInt(0);
+        request.putInt(0);
+        putHeader(request, 70, 9, 24);
+        request.putInt(0);
+        request.putInt(0);
+        request.putInt(4);
+        request.putInt(2);
+        putHeader(request, 70, 6, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(75);
+        return request.array();
+    }
+
+    private static byte[] destroySubsurfaceAndSyncRequest() {
+        ByteBuffer request = buffer(36);
+        putHeader(request, 71, 0, 8);
+        putHeader(request, 70, 0, 8);
+        putHeader(request, 68, 0, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(76);
+        return request.array();
+    }
+
     private static byte[] destroyPopupResourcesAndSyncRequest() {
         ByteBuffer request = buffer(108);
         putHeader(request, 61, 0, 8);
@@ -1067,7 +1207,7 @@ public final class MainActivity extends Activity {
         putHeader(request, 34, 1, 8);
         putHeader(request, 32, 3, 8);
         putHeader(request, 1, 0, 12);
-        request.putInt(68);
+        request.putInt(77);
         return request.array();
     }
     private static byte[] getPointerAndSyncRequest() {
@@ -1127,9 +1267,9 @@ public final class MainActivity extends Activity {
 
     private static byte[] releaseOutputAndSyncRequest() {
         ByteBuffer request = buffer(20);
-        putHeader(request, 69, 0, 8);
+        putHeader(request, 78, 0, 8);
         putHeader(request, 1, 0, 12);
-        request.putInt(72);
+        request.putInt(81);
         return request.array();
     }
 
@@ -1140,7 +1280,7 @@ public final class MainActivity extends Activity {
         putHeader(request, 20, 0, 8);
         putHeader(request, 18, 0, 8);
         putHeader(request, 1, 0, 12);
-        request.putInt(73);
+        request.putInt(82);
         return request.array();
     }
     private static byte[] createShmBufferAndSyncRequest() {
@@ -1189,6 +1329,7 @@ public final class MainActivity extends Activity {
             throws Exception {
         Global compositor = null;
         Global shm = null;
+        Global subcompositor = null;
         Global xdgWmBase = null;
         Global seat = null;
         Global output = null;
@@ -1210,6 +1351,8 @@ public final class MainActivity extends Activity {
                 String interfaceName = new String(encoded, 0, length - 1, StandardCharsets.UTF_8);
                 if ("wl_compositor".equals(interfaceName)) {
                     compositor = new Global(name, version);
+                } else if ("wl_subcompositor".equals(interfaceName)) {
+                    subcompositor = new Global(name, version);
                 } else if ("wl_shm".equals(interfaceName)) {
                     shm = new Global(name, version);
                 } else if ("xdg_wm_base".equals(interfaceName)) {
@@ -1223,12 +1366,13 @@ public final class MainActivity extends Activity {
             if (message.objectId == callbackId && message.opcode == 0) {
                 if (compositor == null
                         || shm == null
+                        || subcompositor == null
                         || xdgWmBase == null
                         || seat == null
                         || output == null) {
                     throw new IllegalStateException("required Wayland globals not advertised");
                 }
-                return new RegistryGlobals(compositor, shm, xdgWmBase, seat, output);
+                return new RegistryGlobals(compositor, subcompositor, shm, xdgWmBase, seat, output);
             }
         }
     }
@@ -1910,6 +2054,7 @@ public final class MainActivity extends Activity {
     }
     private static final class RegistryGlobals {
         final Global compositor;
+        final Global subcompositor;
         final Global shm;
         final Global xdgWmBase;
         final Global seat;
@@ -1917,11 +2062,13 @@ public final class MainActivity extends Activity {
 
         RegistryGlobals(
                 Global compositor,
+                Global subcompositor,
                 Global shm,
                 Global xdgWmBase,
                 Global seat,
                 Global output) {
             this.compositor = compositor;
+            this.subcompositor = subcompositor;
             this.shm = shm;
             this.xdgWmBase = xdgWmBase;
             this.seat = seat;

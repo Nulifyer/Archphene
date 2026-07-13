@@ -50,9 +50,9 @@ Hyprland independently tracks popup trees, nested children, mapping, damage, eff
 
 ### P1: real surface trees
 
-- [~] `wl_subcompositor` and `wl_subsurface` objects, parent-relative positioning, stacking, rendering, and input routing are implemented. Finish synchronized/desynchronized pending-state latching.
-- Preserve atomic parent commits: synchronized child buffers and position/stack changes must become visible only with the parent commit.
-- [~] Compose clipped nested popup SHM buffers in protocol stacking order with ARGB/XRGB source-over blending; subsurface composition remains.
+- [x] Implement `wl_subcompositor` and recursive `wl_subsurface` roles with acyclic parenting, validated sibling stacking, parent-relative positioning, rendering, effective-region input routing, and synchronized/desynchronized cached-state latching.
+- [x] Preserve atomic parent commits: synchronized child buffers, input regions, callbacks, positions, and ordered stack changes become visible with the parent commit; effectively desynchronized trees apply independently.
+- [x] Compose clipped nested popup and recursive subsurface SHM buffers in protocol stacking order with ARGB/XRGB source-over blending.
 - Apply damage per surface instead of rebuilding a single flattened bitmap after every commit.
 - Send output enter/leave and scale updates to every surface in the tree.
 
@@ -101,7 +101,7 @@ Migration order is registry/globals, SHM/pools/buffers, surfaces/regions, xdg-sh
 - Outside press sends `popup_done` exactly once and restores root focus.
 - Nested submenu dismissal removes only the topmost popup when appropriate.
 - [x] Popup reposition tokens are acknowledged, and flip/slide/resize plus reactive output-bound changes keep configure, pixels, and input coordinates aligned.
-- Subsurface commits obey sync/desync and stacking rules.
+- [x] Subsurface commits obey effective ancestor sync/desync, parent-position, and stacking rules in the native wire probe.
 - Scale and input coordinates remain aligned at Android densities 1.0, 2.625, and 3.0.
 - Clipboard and IME data cross only their Android broker APIs and remain under the app UID.
 - [x] Pointer enter, motion, press, release, leave, and frame ordering remains exact with system-injected Android MotionEvent input on emulator and Samsung.

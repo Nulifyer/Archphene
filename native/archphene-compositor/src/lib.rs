@@ -25,6 +25,8 @@ use wayland_server::protocol::wl_region::{self, WlRegion};
 use wayland_server::protocol::wl_seat::{self, WlSeat};
 use wayland_server::protocol::wl_shm::{self, WlShm};
 use wayland_server::protocol::wl_shm_pool::{self, WlShmPool};
+use wayland_server::protocol::wl_subcompositor::{self, WlSubcompositor};
+use wayland_server::protocol::wl_subsurface::{self, WlSubsurface};
 use wayland_server::protocol::wl_surface::{self, WlSurface};
 use wayland_server::{
     Client, DataInit, Dispatch, Display, DisplayHandle, GlobalDispatch, New, Resource, WEnum,
@@ -47,6 +49,9 @@ pub struct CompositorState {
     last_buffer_checksum: u32,
     surface_count: u32,
     surface_commit_count: u32,
+    subcompositor_binds: u32,
+    subsurface_count: u32,
+    subsurfaces: Vec<WlSubsurface>,
     last_frame_width: u32,
     last_frame_height: u32,
     last_frame_checksum: u32,
@@ -102,12 +107,19 @@ struct SurfaceState {
     pending_callbacks: Vec<WlCallback>,
     pending_input_region: Option<Option<RegionState>>,
     committed_input_region: Option<RegionState>,
+    cached_input_region: Option<Option<RegionState>>,
     committed_frame: Option<Arc<CommittedFrame>>,
+    cached_frame: Option<Option<Arc<CommittedFrame>>>,
+    cached_callbacks: Vec<WlCallback>,
     has_xdg_surface: bool,
     role: Option<SurfaceRole>,
     xdg_surface: Option<XdgSurface>,
     xdg_toplevel: Option<XdgToplevel>,
     xdg_popup: Option<XdgPopup>,
+    subsurface: Option<WlSubsurface>,
+    children_below: Vec<WlSurface>,
+    children_above: Vec<WlSurface>,
+    pending_subsurface_stack: Vec<(WlSurface, WlSurface, bool)>,
     xdg_configured: bool,
 }
 
@@ -115,6 +127,7 @@ struct SurfaceState {
 enum SurfaceRole {
     XdgToplevel,
     XdgPopup,
+    Subsurface,
 }
 
 #[derive(Default)]
@@ -388,6 +401,14 @@ struct PopupGrabState {
     serial: u32,
     stack: Vec<XdgPopup>,
     active: bool,
+}
+
+struct SubsurfaceData {
+    surface: WlSurface,
+    parent: WlSurface,
+    position: Mutex<(i32, i32)>,
+    pending_position: Mutex<Option<(i32, i32)>>,
+    synchronized: AtomicBool,
 }
 
 struct XdgSurfaceData {
@@ -1616,6 +1637,20 @@ impl GlobalDispatch<WlCompositor, ()> for CompositorState {
     }
 }
 
+impl GlobalDispatch<WlSubcompositor, ()> for CompositorState {
+    fn bind(
+        state: &mut Self,
+        _handle: &DisplayHandle,
+        _client: &Client,
+        resource: New<WlSubcompositor>,
+        _global_data: &(),
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        data_init.init(resource, ());
+        state.subcompositor_binds = state.subcompositor_binds.saturating_add(1);
+    }
+}
+
 impl GlobalDispatch<WlShm, ()> for CompositorState {
     fn bind(
         state: &mut Self,
@@ -1840,6 +1875,394 @@ fn validate_buffer_geometry(
     Ok(offset..end)
 }
 
+fn subsurface_parent(surface: &WlSurface) -> Option<WlSurface> {
+    let data = surface.data::<SurfaceData>()?;
+    let subsurface = data
+        .inner
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .subsurface
+        .clone()?;
+    subsurface
+        .data::<SubsurfaceData>()
+        .map(|data| data.parent.clone())
+}
+
+fn subsurface_would_cycle(child: &WlSurface, parent: &WlSurface, surface_count: u32) -> bool {
+    let mut candidate = Some(parent.clone());
+    for _ in 0..=surface_count {
+        let Some(surface) = candidate else {
+            return false;
+        };
+        if surface.id() == child.id() {
+            return true;
+        }
+        candidate = subsurface_parent(&surface);
+    }
+    true
+}
+
+fn subsurface_effectively_synchronized(surface: &WlSurface, surface_count: u32) -> bool {
+    let mut candidate = Some(surface.clone());
+    for _ in 0..=surface_count {
+        let Some(surface) = candidate else {
+            return false;
+        };
+        let Some(surface_data) = surface.data::<SurfaceData>() else {
+            return false;
+        };
+        let subsurface = surface_data
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .subsurface
+            .clone();
+        let Some(subsurface) = subsurface else {
+            return false;
+        };
+        let Some(data) = subsurface.data::<SubsurfaceData>() else {
+            return false;
+        };
+        if data.synchronized.load(Ordering::Acquire) {
+            return true;
+        }
+        candidate = Some(data.parent.clone());
+    }
+    true
+}
+
+fn apply_cached_subsurface_tree(
+    state: &CompositorState,
+    surface: &WlSurface,
+    depth: usize,
+    apply_parent_state: bool,
+    callbacks: &mut Vec<WlCallback>,
+) {
+    if depth > state.surface_count as usize {
+        return;
+    }
+    let Some(surface_data) = surface.data::<SurfaceData>() else {
+        return;
+    };
+    let subsurface = surface_data
+        .inner
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .subsurface
+        .clone();
+    if apply_parent_state {
+        if let Some(data) = subsurface
+            .as_ref()
+            .and_then(|subsurface| subsurface.data::<SubsurfaceData>())
+        {
+            if let Some(position) = data
+                .pending_position
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take()
+            {
+                *data
+                    .position
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = position;
+            }
+        }
+    }
+    let children = {
+        let mut surface = surface_data
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(input_region) = surface.cached_input_region.take() {
+            surface.committed_input_region = input_region;
+        }
+        if let Some(frame) = surface.cached_frame.take() {
+            surface.committed_frame = frame;
+        }
+        callbacks.append(&mut surface.cached_callbacks);
+        surface
+            .children_below
+            .iter()
+            .chain(surface.children_above.iter())
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    for child in children.iter().filter(|child| child.is_alive()) {
+        apply_cached_subsurface_tree(
+            state,
+            child,
+            depth.saturating_add(1),
+            apply_parent_state,
+            callbacks,
+        );
+    }
+}
+
+fn apply_cached_subsurface_children(
+    state: &CompositorState,
+    parent: &WlSurface,
+) -> Vec<WlCallback> {
+    let Some(parent_data) = parent.data::<SurfaceData>() else {
+        return Vec::new();
+    };
+    let children = {
+        let mut parent_state = parent_data
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let pending_stack = std::mem::take(&mut parent_state.pending_subsurface_stack);
+        for (surface, sibling, above) in pending_stack {
+            apply_subsurface_order(&mut parent_state, &surface, &sibling, parent, above);
+        }
+        parent_state
+            .children_below
+            .iter()
+            .chain(parent_state.children_above.iter())
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let mut callbacks = Vec::new();
+    for child in children.iter().filter(|child| child.is_alive()) {
+        apply_cached_subsurface_tree(state, child, 0, true, &mut callbacks);
+    }
+    callbacks
+}
+
+impl Dispatch<WlSubcompositor, ()> for CompositorState {
+    fn request(
+        state: &mut Self,
+        _client: &Client,
+        resource: &WlSubcompositor,
+        request: wl_subcompositor::Request,
+        _data: &(),
+        _handle: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            wl_subcompositor::Request::Destroy => {}
+            wl_subcompositor::Request::GetSubsurface {
+                id,
+                surface,
+                parent,
+            } => {
+                if surface.id() == parent.id()
+                    || !surface.id().same_client_as(&parent.id())
+                    || subsurface_would_cycle(&surface, &parent, state.surface_count)
+                {
+                    resource.post_error(
+                        wl_subcompositor::Error::BadSurface,
+                        "wl_subsurface parent must be an acyclic surface from the same client",
+                    );
+                    return;
+                }
+                let Some(surface_data) = surface.data::<SurfaceData>() else {
+                    resource.post_error(
+                        wl_subcompositor::Error::BadSurface,
+                        "wl_subsurface child surface is unknown",
+                    );
+                    return;
+                };
+                let Some(parent_data) = parent.data::<SurfaceData>() else {
+                    resource.post_error(
+                        wl_subcompositor::Error::BadSurface,
+                        "wl_subsurface parent surface is unknown",
+                    );
+                    return;
+                };
+                let mut child_state = surface_data
+                    .inner
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                if child_state.role.is_some() {
+                    resource.post_error(
+                        wl_subcompositor::Error::BadSurface,
+                        "wl_surface already has a role",
+                    );
+                    return;
+                }
+                let subsurface = data_init.init(
+                    id,
+                    SubsurfaceData {
+                        surface: surface.clone(),
+                        parent: parent.clone(),
+                        position: Mutex::new((0, 0)),
+                        pending_position: Mutex::new(None),
+                        synchronized: AtomicBool::new(true),
+                    },
+                );
+                child_state.role = Some(SurfaceRole::Subsurface);
+                child_state.subsurface = Some(subsurface.clone());
+                drop(child_state);
+                parent_data
+                    .inner
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .children_above
+                    .push(surface);
+                state.subsurfaces.push(subsurface);
+                state.subsurface_count = state.subsurface_count.saturating_add(1);
+            }
+            _ => unreachable!("wl_subcompositor request added without an implementation"),
+        }
+    }
+}
+
+fn subsurface_sibling_is_valid(data: &SubsurfaceData, sibling: &WlSurface) -> bool {
+    sibling.id() != data.surface.id()
+        && (sibling.id() == data.parent.id()
+            || subsurface_parent(sibling).is_some_and(|parent| parent.id() == data.parent.id()))
+}
+
+fn apply_subsurface_order(
+    parent: &mut SurfaceState,
+    surface: &WlSurface,
+    sibling: &WlSurface,
+    parent_surface: &WlSurface,
+    above: bool,
+) -> bool {
+    parent
+        .children_below
+        .retain(|candidate| candidate.id() != surface.id());
+    parent
+        .children_above
+        .retain(|candidate| candidate.id() != surface.id());
+    if sibling.id() == parent_surface.id() {
+        if above {
+            parent.children_above.insert(0, surface.clone());
+        } else {
+            parent.children_below.push(surface.clone());
+        }
+        return true;
+    }
+    let target = if let Some(index) = parent
+        .children_below
+        .iter()
+        .position(|candidate| candidate.id() == sibling.id())
+    {
+        (&mut parent.children_below, index)
+    } else if let Some(index) = parent
+        .children_above
+        .iter()
+        .position(|candidate| candidate.id() == sibling.id())
+    {
+        (&mut parent.children_above, index)
+    } else {
+        return false;
+    };
+    let insertion = if above { target.1 + 1 } else { target.1 };
+    target.0.insert(insertion, surface.clone());
+    true
+}
+impl Dispatch<WlSubsurface, SubsurfaceData> for CompositorState {
+    fn request(
+        state: &mut Self,
+        _client: &Client,
+        resource: &WlSubsurface,
+        request: wl_subsurface::Request,
+        data: &SubsurfaceData,
+        _handle: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            wl_subsurface::Request::Destroy => {}
+            wl_subsurface::Request::SetPosition { x, y } => {
+                *data
+                    .pending_position
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = Some((x, y));
+            }
+            wl_subsurface::Request::PlaceAbove { sibling } => {
+                if !subsurface_sibling_is_valid(data, &sibling) {
+                    resource.post_error(
+                        wl_subsurface::Error::BadSurface,
+                        "stacking sibling must be the parent or one of its subsurfaces",
+                    );
+                    return;
+                }
+                if let Some(parent_data) = data.parent.data::<SurfaceData>() {
+                    parent_data
+                        .inner
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .pending_subsurface_stack
+                        .push((data.surface.clone(), sibling, true));
+                }
+            }
+            wl_subsurface::Request::PlaceBelow { sibling } => {
+                if !subsurface_sibling_is_valid(data, &sibling) {
+                    resource.post_error(
+                        wl_subsurface::Error::BadSurface,
+                        "stacking sibling must be the parent or one of its subsurfaces",
+                    );
+                    return;
+                }
+                if let Some(parent_data) = data.parent.data::<SurfaceData>() {
+                    parent_data
+                        .inner
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .pending_subsurface_stack
+                        .push((data.surface.clone(), sibling, false));
+                }
+            }
+            wl_subsurface::Request::SetSync => {
+                data.synchronized.store(true, Ordering::Release);
+            }
+            wl_subsurface::Request::SetDesync => {
+                data.synchronized.store(false, Ordering::Release);
+                if !subsurface_effectively_synchronized(&data.surface, state.surface_count) {
+                    let mut callbacks = Vec::new();
+                    apply_cached_subsurface_tree(state, &data.surface, 0, false, &mut callbacks);
+                    update_composited_frame(state);
+                    for callback in callbacks {
+                        callback.done(0);
+                    }
+                }
+            }
+            _ => unreachable!("wl_subsurface request added without an implementation"),
+        }
+    }
+
+    fn destroyed(
+        state: &mut Self,
+        _client: ClientId,
+        resource: &WlSubsurface,
+        data: &SubsurfaceData,
+    ) {
+        if let Some(parent_data) = data.parent.data::<SurfaceData>() {
+            let mut parent = parent_data
+                .inner
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            parent
+                .children_below
+                .retain(|surface| surface.id() != data.surface.id());
+            parent
+                .children_above
+                .retain(|surface| surface.id() != data.surface.id());
+        }
+        if let Some(surface_data) = data.surface.data::<SurfaceData>() {
+            let mut surface = surface_data
+                .inner
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if surface
+                .subsurface
+                .as_ref()
+                .is_some_and(|subsurface| subsurface.id() == resource.id())
+            {
+                surface.subsurface = None;
+                surface.role = None;
+            }
+        }
+        state
+            .subsurfaces
+            .retain(|subsurface| subsurface.id() != resource.id());
+        state.subsurface_count = state.subsurface_count.saturating_sub(1);
+        update_composited_frame(state);
+    }
+}
+
 impl Dispatch<WlCompositor, ()> for CompositorState {
     fn request(
         state: &mut Self,
@@ -2057,11 +2480,9 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                         }
                     }
                 }
-                if let Some(input_region) = surface.pending_input_region.take() {
-                    surface.committed_input_region = input_region;
-                }
-                if let Some(assignment) = surface.pending_buffer.take() {
-                    surface.committed_frame = match assignment {
+                let input_region_update = surface.pending_input_region.take();
+                let frame_update = if let Some(assignment) = surface.pending_buffer.take() {
+                    Some(match assignment {
                         Some(buffer) => match buffer.inner.snapshot() {
                             Ok(frame) => {
                                 if buffer.resource.is_alive() {
@@ -2078,13 +2499,41 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                             }
                         },
                         None => None,
-                    };
-                }
-                let callbacks = std::mem::take(&mut surface.pending_callbacks);
+                    })
+                } else {
+                    None
+                };
+                let mut callbacks = std::mem::take(&mut surface.pending_callbacks);
                 surface.pending_damage = false;
+                let role = surface.role;
+                drop(surface);
+
+                if role == Some(SurfaceRole::Subsurface)
+                    && subsurface_effectively_synchronized(resource, state.surface_count)
+                {
+                    let mut surface = data.inner.lock().unwrap_or_else(|error| error.into_inner());
+                    if let Some(input_region) = input_region_update {
+                        surface.cached_input_region = Some(input_region);
+                    }
+                    if let Some(frame) = frame_update {
+                        surface.cached_frame = Some(frame);
+                    }
+                    surface.cached_callbacks.append(&mut callbacks);
+                    state.surface_commit_count = state.surface_commit_count.saturating_add(1);
+                    return;
+                }
+
+                let mut surface = data.inner.lock().unwrap_or_else(|error| error.into_inner());
+                if let Some(input_region) = input_region_update {
+                    surface.committed_input_region = input_region;
+                }
+                if let Some(frame) = frame_update {
+                    surface.committed_frame = frame;
+                }
                 let latest_frame = surface.committed_frame.clone();
-                let is_xdg_toplevel = surface.role == Some(SurfaceRole::XdgToplevel);
-                let publishes_root_frame = is_xdg_toplevel || !surface.has_xdg_surface;
+                let is_xdg_toplevel = role == Some(SurfaceRole::XdgToplevel);
+                let publishes_root_frame = role != Some(SurfaceRole::Subsurface)
+                    && (is_xdg_toplevel || !surface.has_xdg_surface);
                 let has_frame = latest_frame.is_some();
                 drop(surface);
 
@@ -2116,6 +2565,7 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                         set_keyboard_focus(state, None);
                     }
                 }
+                callbacks.extend(apply_cached_subsurface_children(state, resource));
                 update_composited_frame(state);
                 for callback in callbacks {
                     callback.done(0);
@@ -2224,6 +2674,144 @@ impl Dispatch<WlRegion, RegionData> for CompositorState {
     }
 }
 
+fn surface_origin_in_root(
+    state: &CompositorState,
+    surface: &WlSurface,
+    depth: usize,
+) -> Option<(i32, i32)> {
+    if depth > state.surface_count as usize {
+        return None;
+    }
+    if state
+        .root_surface
+        .as_ref()
+        .is_some_and(|root| root.id() == surface.id())
+    {
+        return Some((0, 0));
+    }
+    let surface_data = surface.data::<SurfaceData>()?;
+    let (role, xdg_surface, subsurface) = {
+        let surface = surface_data
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        (
+            surface.role,
+            surface.xdg_surface.clone(),
+            surface.subsurface.clone(),
+        )
+    };
+    match role {
+        Some(SurfaceRole::XdgToplevel) => Some((0, 0)),
+        Some(SurfaceRole::XdgPopup) => xdg_surface_origin(state, &xdg_surface?, 0),
+        Some(SurfaceRole::Subsurface) => {
+            let subsurface = subsurface?;
+            let data = subsurface.data::<SubsurfaceData>()?;
+            let (parent_x, parent_y) =
+                surface_origin_in_root(state, &data.parent, depth.saturating_add(1))?;
+            let (x, y) = *data
+                .position
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            Some((parent_x.saturating_add(x), parent_y.saturating_add(y)))
+        }
+        None => None,
+    }
+}
+
+fn surface_tree_pointer_target(
+    state: &CompositorState,
+    surface: &WlSurface,
+    origin_x: i32,
+    origin_y: i32,
+    width: i32,
+    height: i32,
+    pointer_x: f64,
+    pointer_y: f64,
+    depth: usize,
+) -> Option<(WlSurface, f64, f64)> {
+    if depth > state.surface_count as usize {
+        return None;
+    }
+    let local_x = pointer_x - f64::from(origin_x);
+    let local_y = pointer_y - f64::from(origin_y);
+    let surface_data = surface.data::<SurfaceData>()?;
+    let (accepts_parent, children_below, children_above) = {
+        let surface = surface_data
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        (
+            surface.committed_frame.is_some()
+                && surface_accepts_pointer(&surface, local_x, local_y, width, height),
+            surface.children_below.clone(),
+            surface.children_above.clone(),
+        )
+    };
+    for child in children_above.iter().rev().filter(|child| child.is_alive()) {
+        if let Some(target) = subsurface_tree_pointer_target(
+            state,
+            child,
+            origin_x,
+            origin_y,
+            pointer_x,
+            pointer_y,
+            depth.saturating_add(1),
+        ) {
+            return Some(target);
+        }
+    }
+
+    if accepts_parent {
+        return Some((surface.clone(), local_x, local_y));
+    }
+    for child in children_below.iter().rev().filter(|child| child.is_alive()) {
+        if let Some(target) = subsurface_tree_pointer_target(
+            state,
+            child,
+            origin_x,
+            origin_y,
+            pointer_x,
+            pointer_y,
+            depth.saturating_add(1),
+        ) {
+            return Some(target);
+        }
+    }
+    None
+}
+
+fn subsurface_tree_pointer_target(
+    state: &CompositorState,
+    surface: &WlSurface,
+    parent_x: i32,
+    parent_y: i32,
+    pointer_x: f64,
+    pointer_y: f64,
+    depth: usize,
+) -> Option<(WlSurface, f64, f64)> {
+    let (x, y) = subsurface_position(surface)?;
+    let surface_data = surface.data::<SurfaceData>()?;
+    let dimensions = surface_data
+        .inner
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .committed_frame
+        .as_ref()
+        .map(|frame| (frame.width as i32, frame.height as i32))?;
+    surface_tree_pointer_target(
+        state,
+        surface,
+        parent_x.saturating_add(x),
+        parent_y.saturating_add(y),
+        dimensions.0,
+        dimensions.1,
+        pointer_x,
+        pointer_y,
+        depth,
+    )
+}
+
 fn surface_accepts_pointer(
     surface: &SurfaceState,
     x: f64,
@@ -2297,7 +2885,7 @@ fn xdg_surface_origin(
             let (x, y, _, _) = popup_local_geometry(popup_data)?;
             Some((parent_x.saturating_add(x), parent_y.saturating_add(y)))
         }
-        None => None,
+        Some(SurfaceRole::Subsurface) | None => None,
     }
 }
 
@@ -2376,6 +2964,104 @@ fn blend_popup_frame(
     }
 }
 
+fn subsurface_position(surface: &WlSurface) -> Option<(i32, i32)> {
+    let data = surface.data::<SurfaceData>()?;
+    let subsurface = data
+        .inner
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .subsurface
+        .clone()?;
+    let subsurface = subsurface.data::<SubsurfaceData>()?;
+    Some(
+        *subsurface
+            .position
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()),
+    )
+}
+
+fn blend_surface_tree(
+    state: &CompositorState,
+    destination: &mut CommittedFrame,
+    surface: &WlSurface,
+    x: i32,
+    y: i32,
+    configured_width: i32,
+    configured_height: i32,
+    depth: usize,
+) {
+    if depth > state.surface_count as usize {
+        return;
+    }
+    let Some(surface_data) = surface.data::<SurfaceData>() else {
+        return;
+    };
+    let (frame, children_below, children_above) = {
+        let surface = surface_data
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        (
+            surface.committed_frame.clone(),
+            surface.children_below.clone(),
+            surface.children_above.clone(),
+        )
+    };
+    for child in children_below.iter().filter(|child| child.is_alive()) {
+        blend_subsurface_tree(state, destination, child, x, y, depth.saturating_add(1));
+    }
+    if let Some(frame) = frame {
+        blend_popup_frame(
+            destination,
+            &frame,
+            x,
+            y,
+            configured_width,
+            configured_height,
+        );
+    }
+    for child in children_above.iter().filter(|child| child.is_alive()) {
+        blend_subsurface_tree(state, destination, child, x, y, depth.saturating_add(1));
+    }
+}
+
+fn blend_subsurface_tree(
+    state: &CompositorState,
+    destination: &mut CommittedFrame,
+    surface: &WlSurface,
+    parent_x: i32,
+    parent_y: i32,
+    depth: usize,
+) {
+    let Some((x, y)) = subsurface_position(surface) else {
+        return;
+    };
+    let Some(surface_data) = surface.data::<SurfaceData>() else {
+        return;
+    };
+    let dimensions = surface_data
+        .inner
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .committed_frame
+        .as_ref()
+        .map(|frame| (frame.width as i32, frame.height as i32));
+    let Some((width, height)) = dimensions else {
+        return;
+    };
+    blend_surface_tree(
+        state,
+        destination,
+        surface,
+        parent_x.saturating_add(x),
+        parent_y.saturating_add(y),
+        width,
+        height,
+        depth,
+    );
+}
+
 fn update_composited_frame(state: &mut CompositorState) {
     let Some(root) = state.root_frame.as_ref() else {
         state.last_frame = None;
@@ -2388,8 +3074,26 @@ fn update_composited_frame(state: &mut CompositorState) {
         width: root.width,
         height: root.height,
         format: root.format,
-        pixels: root.pixels.clone(),
+        pixels: if root.format == wl_shm::Format::Argb8888 {
+            vec![0; root.pixels.len()]
+        } else {
+            root.pixels.clone()
+        },
     };
+    if let Some(root_surface) = state.root_surface.as_ref() {
+        blend_surface_tree(
+            state,
+            &mut composed,
+            root_surface,
+            0,
+            0,
+            root.width as i32,
+            root.height as i32,
+            0,
+        );
+    } else {
+        composed.pixels.clone_from(&root.pixels);
+    }
     for popup in state.popups.iter().filter(|popup| popup.is_alive()) {
         let Some(data) = popup.data::<XdgPopupData>() else {
             continue;
@@ -2400,21 +3104,20 @@ fn update_composited_frame(state: &mut CompositorState) {
         let Some(xdg_data) = data.xdg_surface.data::<XdgSurfaceData>() else {
             continue;
         };
-        let Some(surface_data) = xdg_data.wl_surface.data::<SurfaceData>() else {
+
+        let Some((x, y, width, height)) = popup_geometry_in_root(state, popup) else {
             continue;
         };
-        let frame = surface_data
-            .inner
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .committed_frame
-            .clone();
-        let (Some(frame), Some((x, y, width, height))) =
-            (frame, popup_geometry_in_root(state, popup))
-        else {
-            continue;
-        };
-        blend_popup_frame(&mut composed, &frame, x, y, width, height);
+        blend_surface_tree(
+            state,
+            &mut composed,
+            &xdg_data.wl_surface,
+            x,
+            y,
+            width,
+            height,
+            0,
+        );
     }
     state.last_frame_width = composed.width;
     state.last_frame_height = composed.height;
@@ -2429,6 +3132,9 @@ impl CompositorCore {
         display
             .handle()
             .create_global::<CompositorState, WlCompositor, _>(6, ());
+        display
+            .handle()
+            .create_global::<CompositorState, WlSubcompositor, _>(1, ());
         display
             .handle()
             .create_global::<CompositorState, WlShm, _>(1, ());
@@ -2481,6 +3187,14 @@ impl CompositorCore {
 
     pub fn compositor_bind_count(&self) -> u32 {
         self.state.compositor_binds
+    }
+
+    pub fn subcompositor_bind_count(&self) -> u32 {
+        self.state.subcompositor_binds
+    }
+
+    pub fn subsurface_count(&self) -> u32 {
+        self.state.subsurface_count
     }
 
     pub fn xdg_wm_base_bind_count(&self) -> u32 {
@@ -2834,87 +3548,37 @@ impl CompositorCore {
             }
             let xdg_data = data.xdg_surface.data::<XdgSurfaceData>()?;
             let (popup_x, popup_y, width, height) = self.popup_geometry_in_root(popup)?;
-            let local_x = x - f64::from(popup_x);
-            let local_y = y - f64::from(popup_y);
-            let surface_data = xdg_data.wl_surface.data::<SurfaceData>()?;
-            let surface = surface_data
-                .inner
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            if surface.committed_frame.is_some()
-                && surface_accepts_pointer(&surface, local_x, local_y, width, height)
-            {
-                return Some((xdg_data.wl_surface.clone(), local_x, local_y));
+            if let Some(target) = surface_tree_pointer_target(
+                &self.state,
+                &xdg_data.wl_surface,
+                popup_x,
+                popup_y,
+                width,
+                height,
+                x,
+                y,
+                0,
+            ) {
+                return Some(target);
             }
         }
-
-        let surface_data = grab.root.data::<SurfaceData>()?;
-        let surface = surface_data
-            .inner
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        surface.committed_frame.as_ref()?;
-        surface_accepts_pointer(
-            &surface,
-            x,
-            y,
+        surface_tree_pointer_target(
+            &self.state,
+            &grab.root,
+            0,
+            0,
             self.state.output_width,
             self.state.output_height,
+            x,
+            y,
+            0,
         )
-        .then(|| (grab.root.clone(), x, y))
     }
-
     fn pointer_local_coordinates(&self, surface: &WlSurface, x: f64, y: f64) -> (f64, f64) {
-        for popup in self.state.popups.iter().filter(|popup| popup.is_alive()) {
-            let Some(data) = popup.data::<XdgPopupData>() else {
-                continue;
-            };
-            let Some(xdg_data) = data.xdg_surface.data::<XdgSurfaceData>() else {
-                continue;
-            };
-            if xdg_data.wl_surface.id() == surface.id() {
-                if let Some((popup_x, popup_y, _, _)) = self.popup_geometry_in_root(popup) {
-                    return (x - f64::from(popup_x), y - f64::from(popup_y));
-                }
-            }
-        }
-        (x, y)
+        surface_origin_in_root(&self.state, surface, 0)
+            .map(|(origin_x, origin_y)| (x - f64::from(origin_x), y - f64::from(origin_y)))
+            .unwrap_or((x, y))
     }
-    fn pointer_target_for_surface(
-        &self,
-        surface: WlSurface,
-        x: f64,
-        y: f64,
-    ) -> Option<(WlSurface, f64, f64)> {
-        let (local_x, local_y) = self.pointer_local_coordinates(&surface, x, y);
-        let popup_dimensions = self
-            .state
-            .popups
-            .iter()
-            .filter(|popup| popup.is_alive())
-            .find_map(|popup| {
-                let data = popup.data::<XdgPopupData>()?;
-                let xdg_data = data.xdg_surface.data::<XdgSurfaceData>()?;
-                (xdg_data.wl_surface.id() == surface.id())
-                    .then(|| {
-                        self.popup_geometry_in_root(popup)
-                            .map(|geometry| (geometry.2, geometry.3))
-                    })
-                    .flatten()
-            });
-        let surface_data = surface.data::<SurfaceData>()?;
-        let surface_state = surface_data
-            .inner
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        surface_state.committed_frame.as_ref()?;
-        let (width, height) =
-            popup_dimensions.unwrap_or((self.state.output_width, self.state.output_height));
-        let accepts = surface_accepts_pointer(&surface_state, local_x, local_y, width, height);
-        drop(surface_state);
-        accepts.then_some((surface, local_x, local_y))
-    }
-
     fn focused_pointer_resources(&self) -> Option<(WlSurface, Vec<WlPointer>)> {
         let surface = self.state.pointer_focus_surface.clone()?;
         let pointers: Vec<_> = self
@@ -2946,10 +3610,19 @@ impl CompositorCore {
         {
             self.popup_pointer_target(x, y)
         } else {
-            self.state
-                .pointer_focus_surface
-                .clone()
-                .and_then(|surface| self.pointer_target_for_surface(surface, x, y))
+            self.state.root_surface.as_ref().and_then(|root| {
+                surface_tree_pointer_target(
+                    &self.state,
+                    root,
+                    0,
+                    0,
+                    self.state.output_width,
+                    self.state.output_height,
+                    x,
+                    y,
+                    0,
+                )
+            })
         };
         let Some((surface, local_x, local_y)) = target else {
             if self.state.pointer_pressed || !self.state.pointer_inside {
@@ -3379,6 +4052,30 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
         return -1;
     };
     i32::try_from(core.compositor_bind_count()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeSubcompositorBindCount(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.subcompositor_bind_count()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeSubsurfaceCount(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.subsurface_count()).unwrap_or(i32::MAX)
 }
 
 #[unsafe(no_mangle)]
@@ -3997,6 +4694,8 @@ mod tests {
         let core = CompositorCore::new().expect("Wayland display");
         assert!(!core.is_stopping());
         assert_eq!(core.compositor_bind_count(), 0);
+        assert_eq!(core.subcompositor_bind_count(), 0);
+        assert_eq!(core.subsurface_count(), 0);
         assert_eq!(core.xdg_wm_base_bind_count(), 0);
         assert_eq!(core.xdg_positioner_count(), 0);
         assert_eq!(core.xdg_positioner_request_count(), 0);
