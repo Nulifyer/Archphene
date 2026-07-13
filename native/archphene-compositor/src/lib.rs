@@ -19,6 +19,7 @@ use wayland_server::protocol::wl_buffer::{self, WlBuffer};
 use wayland_server::protocol::wl_callback::{self, WlCallback};
 use wayland_server::protocol::wl_compositor::{self, WlCompositor};
 use wayland_server::protocol::wl_keyboard::{self, WlKeyboard};
+use wayland_server::protocol::wl_output::{self, WlOutput};
 use wayland_server::protocol::wl_pointer::{self, WlPointer};
 use wayland_server::protocol::wl_region::{self, WlRegion};
 use wayland_server::protocol::wl_seat::{self, WlSeat};
@@ -58,6 +59,12 @@ pub struct CompositorState {
     xdg_toplevel_count: u32,
     xdg_ack_count: u32,
     next_configure_serial: u32,
+    output_binds: u32,
+    output_event_count: u32,
+    output_width: i32,
+    output_height: i32,
+    output_scale: i32,
+    outputs: Vec<WlOutput>,
     seat_binds: u32,
     pointer_count: u32,
     pointer_event_count: u32,
@@ -1048,6 +1055,76 @@ fn set_keyboard_focus(state: &mut CompositorState, surface: Option<WlSurface>) {
     }
 }
 
+impl GlobalDispatch<WlOutput, ()> for CompositorState {
+    fn bind(
+        state: &mut Self,
+        _handle: &DisplayHandle,
+        _client: &Client,
+        resource: New<WlOutput>,
+        _global_data: &(),
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        let output = data_init.init(resource, ());
+        output.geometry(
+            0,
+            0,
+            70,
+            140,
+            wl_output::Subpixel::Unknown,
+            "Archphene".into(),
+            "Android display".into(),
+            wl_output::Transform::Normal,
+        );
+        output.mode(
+            wl_output::Mode::Current | wl_output::Mode::Preferred,
+            state.output_width,
+            state.output_height,
+            60_000,
+        );
+        if output.version() >= 4 {
+            output.name("Archphene-0".into());
+            output.description("Archphene Android application viewport".into());
+        }
+        if output.version() >= 2 {
+            output.scale(state.output_scale);
+            output.done();
+        }
+        if let Some(surface) = state
+            .keyboard_focus_surface
+            .as_ref()
+            .or(state.pointer_focus_surface.as_ref())
+            .filter(|surface| output.id().same_client_as(&surface.id()))
+        {
+            surface.enter(&output);
+            state.output_event_count = state.output_event_count.saturating_add(1);
+        }
+        state.output_binds = state.output_binds.saturating_add(1);
+        state.output_event_count = state.output_event_count.saturating_add(6);
+        state.outputs.push(output);
+    }
+}
+
+impl Dispatch<WlOutput, ()> for CompositorState {
+    fn request(
+        _state: &mut Self,
+        _client: &Client,
+        _resource: &WlOutput,
+        request: wl_output::Request,
+        _data: &(),
+        _handle: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            wl_output::Request::Release => {}
+            _ => unreachable!("wl_output request added without an implementation"),
+        }
+    }
+
+    fn destroyed(state: &mut Self, _client: ClientId, resource: &WlOutput, _data: &()) {
+        state.outputs.retain(|output| output.id() != resource.id());
+    }
+}
+
 impl GlobalDispatch<WlSeat, ()> for CompositorState {
     fn bind(
         state: &mut Self,
@@ -1755,9 +1832,18 @@ impl CompositorCore {
         display
             .handle()
             .create_global::<CompositorState, WlSeat, _>(7, ());
+        display
+            .handle()
+            .create_global::<CompositorState, WlOutput, _>(4, ());
+        let state = CompositorState {
+            output_width: 320,
+            output_height: 160,
+            output_scale: 1,
+            ..CompositorState::default()
+        };
         Ok(Self {
             display,
-            state: CompositorState::default(),
+            state,
             stopping: AtomicBool::new(false),
         })
     }
@@ -1870,6 +1956,44 @@ impl CompositorCore {
             .pending_configures
             .len();
         u32::try_from(count).unwrap_or(u32::MAX)
+    }
+
+    pub fn output_bind_count(&self) -> u32 {
+        self.state.output_binds
+    }
+
+    pub fn output_event_count(&self) -> u32 {
+        self.state.output_event_count
+    }
+
+    pub fn output_count(&self) -> u32 {
+        u32::try_from(self.state.outputs.len()).unwrap_or(u32::MAX)
+    }
+
+    pub fn configure_output(&mut self, width: i32, height: i32, scale: i32) -> u32 {
+        if width <= 0 || height <= 0 || scale <= 0 {
+            return 0;
+        }
+        self.state.output_width = width;
+        self.state.output_height = height;
+        self.state.output_scale = scale;
+        let mut updated = 0u32;
+        for output in self.state.outputs.iter().filter(|output| output.is_alive()) {
+            output.mode(
+                wl_output::Mode::Current | wl_output::Mode::Preferred,
+                width,
+                height,
+                60_000,
+            );
+            self.state.output_event_count = self.state.output_event_count.saturating_add(1);
+            if output.version() >= 2 {
+                output.scale(scale);
+                output.done();
+                self.state.output_event_count = self.state.output_event_count.saturating_add(2);
+            }
+            updated = updated.saturating_add(1);
+        }
+        updated
     }
 
     pub fn seat_bind_count(&self) -> u32 {
@@ -2436,6 +2560,57 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeOutputBindCount(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.output_bind_count()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeOutputCount(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.output_count()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeOutputEventCount(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.output_event_count()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeConfigureOutput(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+    width: i32,
+    height: i32,
+    scale: i32,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+        return -1;
+    };
+    i32::try_from(core.configure_output(width, height, scale)).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeSeatBindCount(
     _environment: *mut std::ffi::c_void,
     _activity: *mut std::ffi::c_void,
@@ -2727,6 +2902,9 @@ mod tests {
         assert_eq!(core.xdg_toplevel_count(), 0);
         assert_eq!(core.xdg_ack_count(), 0);
         assert_eq!(core.focused_pending_configure_count(), 0);
+        assert_eq!(core.output_bind_count(), 0);
+        assert_eq!(core.output_count(), 0);
+        assert_eq!(core.output_event_count(), 0);
         assert_eq!(core.seat_bind_count(), 0);
         assert_eq!(core.pointer_count(), 0);
         assert_eq!(core.pointer_event_count(), 0);

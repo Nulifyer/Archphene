@@ -48,6 +48,11 @@ public final class MainActivity extends Activity {
     private static native int nativeConfigureFocusedToplevel(
             long handle, int width, int height);
     private static native int nativePendingConfigureCount(long handle);
+    private static native int nativeOutputBindCount(long handle);
+    private static native int nativeOutputCount(long handle);
+    private static native int nativeOutputEventCount(long handle);
+    private static native int nativeConfigureOutput(
+            long handle, int width, int height, int scale);
     private static native int nativeSeatBindCount(long handle);
     private static native int nativePointerCount(long handle);
     private static native int nativeKeyboardCount(long handle);
@@ -529,10 +534,40 @@ public final class MainActivity extends Activity {
                     throw new IllegalStateException("xdg_popup destruction failed");
                 }
 
+                output.write(bindGlobalAndSyncRequest(
+                        globals.output, "wl_output", 54, 55));
+                output.flush();
+                dispatch(core);
+                readOutputUntilCallback(input, 20, 54, 55, 320, 160, 1, true);
+                if (nativeOutputBindCount(core) != 1
+                        || nativeOutputCount(core) != 1
+                        || nativeOutputEventCount(core) != 7) {
+                    throw new IllegalStateException("wl_output initial state was incomplete");
+                }
+
+                if (nativeConfigureOutput(core, 640, 360, 2) != 1) {
+                    throw new IllegalStateException("Android output update was not routed");
+                }
+                output.write(syncRequest(56));
+                output.flush();
+                dispatch(core);
+                readOutputUntilCallback(input, 20, 54, 56, 640, 360, 2, false);
+                if (nativeOutputEventCount(core) != 10) {
+                    throw new IllegalStateException("wl_output update events were incomplete");
+                }
+
+                output.write(releaseOutputAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 57);
+                if (nativeOutputCount(core) != 0) {
+                    throw new IllegalStateException("wl_output release failed");
+                }
+
                 output.write(destroyXdgToplevelAndSyncRequest());
                 output.flush();
                 dispatch(core);
-                readUntilCallback(input, 54);
+                readUntilCallback(input, 58);
                 if (nativeXdgSurfaceCount(core) != 0
                         || nativeXdgToplevelCount(core) != 0
                         || nativeSurfaceCount(core) != 0
@@ -830,6 +865,14 @@ public final class MainActivity extends Activity {
         return request.array();
     }
 
+    private static byte[] releaseOutputAndSyncRequest() {
+        ByteBuffer request = buffer(20);
+        putHeader(request, 54, 0, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(57);
+        return request.array();
+    }
+
     private static byte[] destroyXdgToplevelAndSyncRequest() {
         ByteBuffer request = buffer(44);
         putHeader(request, 23, 0, 8);
@@ -837,7 +880,7 @@ public final class MainActivity extends Activity {
         putHeader(request, 20, 0, 8);
         putHeader(request, 18, 0, 8);
         putHeader(request, 1, 0, 12);
-        request.putInt(54);
+        request.putInt(58);
         return request.array();
     }
 
@@ -889,6 +932,7 @@ public final class MainActivity extends Activity {
         Global shm = null;
         Global xdgWmBase = null;
         Global seat = null;
+        Global output = null;
         while (true) {
             Message message = readMessage(input);
             throwIfDisplayError(message);
@@ -913,13 +957,19 @@ public final class MainActivity extends Activity {
                     xdgWmBase = new Global(name, version);
                 } else if ("wl_seat".equals(interfaceName)) {
                     seat = new Global(name, version);
+                } else if ("wl_output".equals(interfaceName)) {
+                    output = new Global(name, version);
                 }
             }
             if (message.objectId == callbackId && message.opcode == 0) {
-                if (compositor == null || shm == null || xdgWmBase == null || seat == null) {
+                if (compositor == null
+                        || shm == null
+                        || xdgWmBase == null
+                        || seat == null
+                        || output == null) {
                     throw new IllegalStateException("required Wayland globals not advertised");
                 }
-                return new RegistryGlobals(compositor, shm, xdgWmBase, seat);
+                return new RegistryGlobals(compositor, shm, xdgWmBase, seat, output);
             }
         }
     }
@@ -943,6 +993,77 @@ public final class MainActivity extends Activity {
             throw new IllegalStateException(
                     "unexpected wl_display.delete_id " + deletedId + ", expected " + expectedId);
         }
+    }
+
+    private static void readOutputUntilCallback(
+            FileInputStream input,
+            int surfaceId,
+            int outputId,
+            int callbackId,
+            int expectedWidth,
+            int expectedHeight,
+            int expectedScale,
+            boolean initial)
+            throws Exception {
+        boolean geometry = false;
+        boolean mode = false;
+        boolean scale = false;
+        boolean done = false;
+        boolean named = false;
+        boolean described = false;
+        boolean entered = false;
+        while (true) {
+            Message message = readMessage(input);
+            throwIfDisplayError(message);
+            if (message.objectId == outputId && message.opcode == 0) {
+                geometry = message.body.length >= 32;
+            } else if (message.objectId == outputId && message.opcode == 1) {
+                if (message.body.length != 16) {
+                    throw new IllegalStateException("invalid wl_output.mode event");
+                }
+                ByteBuffer body = ByteBuffer.wrap(message.body).order(ByteOrder.nativeOrder());
+                mode = body.getInt() == 3
+                        && body.getInt() == expectedWidth
+                        && body.getInt() == expectedHeight
+                        && body.getInt() == 60_000;
+            } else if (message.objectId == outputId && message.opcode == 2) {
+                done = message.body.length == 0;
+            } else if (message.objectId == outputId && message.opcode == 3) {
+                scale = message.body.length == 4
+                        && ByteBuffer.wrap(message.body)
+                                .order(ByteOrder.nativeOrder()).getInt() == expectedScale;
+            } else if (message.objectId == outputId && message.opcode == 4) {
+                named = readString(message.body).equals("Archphene-0");
+            } else if (message.objectId == outputId && message.opcode == 5) {
+                described = readString(message.body)
+                        .equals("Archphene Android application viewport");
+            } else if (message.objectId == surfaceId && message.opcode == 0) {
+                entered = message.body.length == 4
+                        && ByteBuffer.wrap(message.body)
+                                .order(ByteOrder.nativeOrder()).getInt() == outputId;
+            }
+            if (message.objectId == callbackId && message.opcode == 0) {
+                if (!mode || !scale || !done
+                        || (initial && (!geometry || !named || !described || !entered))) {
+                    throw new IllegalStateException("wl_output event sequence was incomplete");
+                }
+                return;
+            }
+        }
+    }
+
+    private static String readString(byte[] encodedBody) {
+        ByteBuffer body = ByteBuffer.wrap(encodedBody).order(ByteOrder.nativeOrder());
+        if (body.remaining() < 4) {
+            return "";
+        }
+        int length = body.getInt();
+        if (length <= 0 || length > body.remaining()) {
+            return "";
+        }
+        byte[] encoded = new byte[length];
+        body.get(encoded);
+        return new String(encoded, 0, length - 1, StandardCharsets.UTF_8);
     }
 
     private static void readSeatUntilCallback(
@@ -1481,12 +1602,19 @@ public final class MainActivity extends Activity {
         final Global shm;
         final Global xdgWmBase;
         final Global seat;
+        final Global output;
 
-        RegistryGlobals(Global compositor, Global shm, Global xdgWmBase, Global seat) {
+        RegistryGlobals(
+                Global compositor,
+                Global shm,
+                Global xdgWmBase,
+                Global seat,
+                Global output) {
             this.compositor = compositor;
             this.shm = shm;
             this.xdgWmBase = xdgWmBase;
             this.seat = seat;
+            this.output = output;
         }
     }
     private static final class Global {
