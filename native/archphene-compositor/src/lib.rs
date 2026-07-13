@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use wayland_server::protocol::wl_compositor::{self, WlCompositor};
 use wayland_server::protocol::wl_region::{self, WlRegion};
+use wayland_server::protocol::wl_shm::{self, WlShm};
 use wayland_server::protocol::wl_surface::{self, WlSurface};
 use wayland_server::{
     Client, DataInit, Dispatch, Display, DisplayHandle, GlobalDispatch, New, Resource,
@@ -21,6 +22,7 @@ pub struct CompositorCore {
 #[derive(Default)]
 pub struct CompositorState {
     compositor_binds: u32,
+    shm_binds: u32,
     surface_count: u32,
 }
 
@@ -41,6 +43,35 @@ impl GlobalDispatch<WlCompositor, ()> for CompositorState {
     }
 }
 
+impl GlobalDispatch<WlShm, ()> for CompositorState {
+    fn bind(
+        state: &mut Self,
+        _handle: &DisplayHandle,
+        _client: &Client,
+        resource: New<WlShm>,
+        _global_data: &(),
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        let shm = data_init.init(resource, ());
+        shm.format(wl_shm::Format::Argb8888);
+        shm.format(wl_shm::Format::Xrgb8888);
+        state.shm_binds = state.shm_binds.saturating_add(1);
+    }
+}
+
+impl Dispatch<WlShm, ()> for CompositorState {
+    fn request(
+        _state: &mut Self,
+        _client: &Client,
+        resource: &WlShm,
+        request: wl_shm::Request,
+        _data: &(),
+        _handle: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+        resource.post_error(0u32, format!("unsupported SHM request: {request:?}"));
+    }
+}
 impl Dispatch<WlCompositor, ()> for CompositorState {
     fn request(
         state: &mut Self,
@@ -108,6 +139,9 @@ impl CompositorCore {
         display
             .handle()
             .create_global::<CompositorState, WlCompositor, _>(6, ());
+        display
+            .handle()
+            .create_global::<CompositorState, WlShm, _>(1, ());
         Ok(Self {
             display,
             state: CompositorState::default(),
@@ -142,6 +176,10 @@ impl CompositorCore {
 
     pub fn compositor_bind_count(&self) -> u32 {
         self.state.compositor_binds
+    }
+
+    pub fn shm_bind_count(&self) -> u32 {
+        self.state.shm_binds
     }
 
     pub fn surface_count(&self) -> u32 {
@@ -217,6 +255,17 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeShmBindCount(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.shm_bind_count()).unwrap_or(i32::MAX)
+}
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeSurfaceCount(
     _environment: *mut std::ffi::c_void,
     _activity: *mut std::ffi::c_void,
@@ -249,6 +298,7 @@ mod tests {
         let core = CompositorCore::new().expect("Wayland display");
         assert!(!core.is_stopping());
         assert_eq!(core.compositor_bind_count(), 0);
+        assert_eq!(core.shm_bind_count(), 0);
         assert_eq!(core.surface_count(), 0);
         assert_eq!(archphene_compositor_protocol_version(), 1);
     }

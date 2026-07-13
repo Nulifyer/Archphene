@@ -8,13 +8,14 @@ The native library uses wayland-server 0.31.13 with its pure-Rust backend. Andro
 
 ## Protocol sequence
 
-1. Create the native display and advertise wl_compositor version 6.
+1. Create the native display and advertise wl_compositor version 6 and wl_shm version 1.
 2. Adopt an Android socket file descriptor as a Wayland client.
 3. Request wl_registry and complete wl_display.sync.
 4. Find and bind wl_compositor.
-5. Create wl_surface and confirm native live-surface count is one.
-6. Destroy wl_surface and confirm native live-surface count returns to zero.
-7. Decode and report any wl_display.error deterministically.
+5. Find and bind wl_shm; receive ARGB8888 and XRGB8888 format events.
+6. Create wl_surface and confirm native live-surface count is one.
+7. Destroy wl_surface and confirm native live-surface count returns to zero.
+8. Decode and report any wl_display.error deterministically.
 
 ## Build boundary
 
@@ -26,8 +27,8 @@ Windows performs only ADB device selection, APK installation, launch, and logcat
 
 | Target | Device | Result |
 |---|---|---|
-| x86_64 | Android 16 emulator, emulator-5554 | Passed registry, compositor bind, and surface create/destroy |
-| arm64-v8a | Samsung Galaxy S22 Ultra, RFCT90AEEFA | Passed registry, compositor bind, and surface create/destroy |
+| x86_64 | Android 16 emulator, emulator-5554 | Passed registry, compositor/SHM binds, format events, and surface create/destroy |
+| arm64-v8a | Samsung Galaxy S22 Ultra, RFCT90AEEFA | Passed registry, compositor/SHM binds, format events, and surface create/destroy |
 
 The arm64 result is emitted through a structured logcat marker, so it remains observable when Samsung System UI covers the Activity with the lock screen.
 

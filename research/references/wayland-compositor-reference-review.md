@@ -87,7 +87,7 @@ Validated bootstrap slices:
 - x86_64 and AArch64 Android shared-library builds in the pinned Podman NDK/Rust image;
 - Android socket-pair FD adoption into the native display;
 - wl_display.sync round trips on emulator and Samsung device;
-- wl_registry discovery, wl_compositor global bind, and wl_surface create/destroy lifecycle on both the x86_64 emulator and AArch64 Samsung device.
+- wl_registry discovery, wl_compositor and wl_shm global binds, SHM format events, and wl_surface create/destroy lifecycle on both the x86_64 emulator and AArch64 Samsung device.
 
 Migration order is registry/globals, SHM/pools/buffers, surfaces/regions, xdg-shell, seats/input, popups/subsurfaces, clipboard/text input, output/scaling, then GPU presentation.
 

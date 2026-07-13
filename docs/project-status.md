@@ -11,7 +11,7 @@ This page separates validated behavior from planned platform work. Package searc
 | Manager self-update | Public GitHub Releases discovery, bounded download, SHA-256 verification, signer/package validation, Android confirmation, replacement, restart reconciliation, and 0.9.0 to 1.0.0 device test |
 | KCalc package transaction | x86_64 Arch dependency resolution, package-signature verification, closure staging, wrapper assembly, persistent Android Keystore signing, and PackageInstaller installation performed at manager runtime |
 | Qt and GTK bridge prototypes | KCalc and Mousepad GUI, input, popups, dialogs, clipboard/IME, resizing, and selected document workflows on the listed test devices |
-| Native compositor bootstrap | Rust wayland-server core cross-compiles for Android x86_64 and AArch64; Android socket-FD adoption and wl_display.sync pass on both; registry discovery, wl_compositor bind, and wl_surface create/destroy pass on both |
+| Native compositor bootstrap | Rust wayland-server core cross-compiles for Android x86_64 and AArch64; Android socket-FD adoption and wl_display.sync pass on both; registry discovery, wl_compositor and wl_shm binds, ARGB/XRGB format events, and wl_surface create/destroy pass on both |
 | Manager status UI | Static current-version state, active spinner, and separate download/install progress are implemented |
 
 ## In progress

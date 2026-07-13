@@ -20,6 +20,7 @@ public final class MainActivity extends Activity {
     private static native int nativeAdoptClient(long handle, int fd);
     private static native int nativeDispatchOnce(long handle);
     private static native int nativeCompositorBindCount(long handle);
+    private static native int nativeShmBindCount(long handle);
     private static native int nativeSurfaceCount(long handle);
     private static native void nativeDestroyCore(long handle);
 
@@ -55,20 +56,28 @@ public final class MainActivity extends Activity {
                 output.flush();
                 dispatch(core);
 
-                Global compositor = readCompositorGlobal(input, 3);
-                output.write(bindCompositorAndSyncRequest(compositor, 5));
+                RegistryGlobals globals = readGlobals(input, 3);
+                output.write(bindGlobalAndSyncRequest(
+                        globals.compositor, "wl_compositor", 4, 5));
                 output.flush();
                 dispatch(core);
                 readUntilCallback(input, 5);
-
                 if (nativeCompositorBindCount(core) != 1) {
                     throw new IllegalStateException("wl_compositor bind was not dispatched");
+                }
+
+                output.write(bindGlobalAndSyncRequest(globals.shm, "wl_shm", 6, 7));
+                output.flush();
+                dispatch(core);
+                readShmFormatsUntilCallback(input, 6, 7);
+                if (nativeShmBindCount(core) != 1) {
+                    throw new IllegalStateException("wl_shm bind was not dispatched");
                 }
 
                 output.write(createSurfaceAndSyncRequest());
                 output.flush();
                 dispatch(core);
-                readUntilCallback(input, 7);
+                readUntilCallback(input, 9);
                 if (nativeSurfaceCount(core) != 1) {
                     throw new IllegalStateException("wl_surface creation was not dispatched");
                 }
@@ -76,14 +85,14 @@ public final class MainActivity extends Activity {
                 output.write(destroySurfaceAndSyncRequest());
                 output.flush();
                 dispatch(core);
-                readUntilCallback(input, 8);
+                readUntilCallback(input, 10);
                 if (nativeSurfaceCount(core) != 0) {
                     throw new IllegalStateException("wl_surface destruction was not dispatched");
                 }
             }
             passed = true;
             message = "Native Wayland compositor passed\n"
-                    + "registry, compositor bind, and surface lifecycle complete";
+                    + "registry, compositor/SHM binds, and surface lifecycle complete";
         } catch (Exception error) {
             message = "Native compositor probe failed\n" + error.getMessage();
         } finally {
@@ -109,8 +118,9 @@ public final class MainActivity extends Activity {
         return request.array();
     }
 
-    private static byte[] bindCompositorAndSyncRequest(Global global, int callbackId) {
-        byte[] interfaceName = "wl_compositor".getBytes(StandardCharsets.UTF_8);
+    private static byte[] bindGlobalAndSyncRequest(
+            Global global, String interfaceValue, int objectId, int callbackId) {
+        byte[] interfaceName = interfaceValue.getBytes(StandardCharsets.UTF_8);
         int stringLength = interfaceName.length + 1;
         int paddedLength = (stringLength + 3) & ~3;
         int bindSize = 8 + 4 + 4 + paddedLength + 4 + 4;
@@ -122,7 +132,7 @@ public final class MainActivity extends Activity {
         request.put((byte) 0);
         while (request.position() < 8 + 4 + 4 + paddedLength) request.put((byte) 0);
         request.putInt(Math.min(global.version, 6));
-        request.putInt(4);
+        request.putInt(objectId);
         putHeader(request, 1, 0, 12);
         request.putInt(callbackId);
         return request.array();
@@ -131,23 +141,24 @@ public final class MainActivity extends Activity {
     private static byte[] createSurfaceAndSyncRequest() {
         ByteBuffer request = buffer(24);
         putHeader(request, 4, 0, 12);
-        request.putInt(6);
+        request.putInt(8);
         putHeader(request, 1, 0, 12);
-        request.putInt(7);
+        request.putInt(9);
         return request.array();
     }
 
     private static byte[] destroySurfaceAndSyncRequest() {
         ByteBuffer request = buffer(20);
-        putHeader(request, 6, 0, 8);
+        putHeader(request, 8, 0, 8);
         putHeader(request, 1, 0, 12);
-        request.putInt(8);
+        request.putInt(10);
         return request.array();
     }
 
-    private static Global readCompositorGlobal(FileInputStream input, int callbackId)
+    private static RegistryGlobals readGlobals(FileInputStream input, int callbackId)
             throws Exception {
         Global compositor = null;
+        Global shm = null;
         while (true) {
             Message message = readMessage(input);
             throwIfDisplayError(message);
@@ -166,13 +177,15 @@ public final class MainActivity extends Activity {
                 String interfaceName = new String(encoded, 0, length - 1, StandardCharsets.UTF_8);
                 if ("wl_compositor".equals(interfaceName)) {
                     compositor = new Global(name, version);
+                } else if ("wl_shm".equals(interfaceName)) {
+                    shm = new Global(name, version);
                 }
             }
             if (message.objectId == callbackId && message.opcode == 0) {
-                if (compositor == null) {
-                    throw new IllegalStateException("wl_compositor global not advertised");
+                if (compositor == null || shm == null) {
+                    throw new IllegalStateException("required Wayland globals not advertised");
                 }
-                return compositor;
+                return new RegistryGlobals(compositor, shm);
             }
         }
     }
@@ -182,6 +195,27 @@ public final class MainActivity extends Activity {
             Message message = readMessage(input);
             throwIfDisplayError(message);
             if (message.objectId == callbackId && message.opcode == 0) return;
+        }
+    }
+
+    private static void readShmFormatsUntilCallback(
+            FileInputStream input, int shmId, int callbackId) throws Exception {
+        boolean foundArgb8888 = false;
+        boolean foundXrgb8888 = false;
+        while (true) {
+            Message message = readMessage(input);
+            throwIfDisplayError(message);
+            if (message.objectId == shmId && message.opcode == 0 && message.body.length == 4) {
+                int format = ByteBuffer.wrap(message.body).order(ByteOrder.nativeOrder()).getInt();
+                foundArgb8888 |= format == 0;
+                foundXrgb8888 |= format == 1;
+            }
+            if (message.objectId == callbackId && message.opcode == 0) {
+                if (!foundArgb8888 || !foundXrgb8888) {
+                    throw new IllegalStateException("required wl_shm formats not advertised");
+                }
+                return;
+            }
         }
     }
 
@@ -237,6 +271,15 @@ public final class MainActivity extends Activity {
         buffer.putInt((size << 16) | opcode);
     }
 
+    private static final class RegistryGlobals {
+        final Global compositor;
+        final Global shm;
+
+        RegistryGlobals(Global compositor, Global shm) {
+            this.compositor = compositor;
+            this.shm = shm;
+        }
+    }
     private static final class Global {
         final int name;
         final int version;
