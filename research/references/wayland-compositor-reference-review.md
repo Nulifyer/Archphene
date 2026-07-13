@@ -88,7 +88,8 @@ Validated bootstrap slices:
 - Android socket-pair FD adoption into the native display;
 - wl_display.sync round trips on emulator and Samsung device;
 - wl_registry discovery, wl_compositor, wl_shm, and xdg_wm_base binds, SHM format events and FD transfer, checked padded-stride frame copies, wl_surface commit/release/callback, XRGB-to-Android bitmap conversion, exact pixel checks, visible presentation, and resource lifecycles on both the x86_64 emulator and AArch64 Samsung device;
-- xdg_toplevel permanent-role assignment, the client initial bufferless commit, ordered toplevel/surface configure events, exact serial acknowledgement before buffer attachment, post-ack SHM presentation, and role-before-surface teardown on both targets.
+- xdg_toplevel permanent-role assignment, the client initial bufferless commit, ordered toplevel/surface configure events, exact serial acknowledgement before buffer attachment, post-ack SHM presentation, and role-before-surface teardown on both targets;
+- pointer-only wl_seat metadata, per-client wl_pointer resources, mapped-toplevel focus, enter/motion/BTN_LEFT events with increasing serials and frame boundaries, and release teardown on both targets.
 
 Migration order is registry/globals, SHM/pools/buffers, surfaces/regions, xdg-shell, seats/input, popups/subsurfaces, clipboard/text input, output/scaling, then GPU presentation.
 
@@ -103,3 +104,4 @@ Migration order is registry/globals, SHM/pools/buffers, surfaces/regions, xdg-sh
 - Subsurface commits obey sync/desync and stacking rules.
 - Scale and input coordinates remain aligned at Android densities 1.0, 2.625, and 3.0.
 - Clipboard and IME data cross only their Android broker APIs and remain under the app UID.
+- Pointer enter, motion, press, release, and frame ordering remains exact when Android MotionEvent routing replaces synthetic injection.

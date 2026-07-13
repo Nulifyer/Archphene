@@ -30,6 +30,11 @@ public final class MainActivity extends Activity {
     private static native int nativeXdgSurfaceCount(long handle);
     private static native int nativeXdgToplevelCount(long handle);
     private static native int nativeXdgAckCount(long handle);
+    private static native int nativeSeatBindCount(long handle);
+    private static native int nativePointerCount(long handle);
+    private static native int nativePointerEventCount(long handle);
+    private static native int nativeInjectPointerSequence(
+            long handle, int x, int y, int time);
     private static native int nativeShmBindCount(long handle);
     private static native int nativeShmPoolCount(long handle);
     private static native int nativeShmBufferCount(long handle);
@@ -212,14 +217,47 @@ public final class MainActivity extends Activity {
                     throw new IllegalStateException("configured xdg frame was not committed");
                 }
 
+                output.write(bindGlobalAndSyncRequest(globals.seat, "wl_seat", 32, 33));
+                output.flush();
+                dispatch(core);
+                readSeatUntilCallback(input, 32, 33);
+                if (nativeSeatBindCount(core) != 1) {
+                    throw new IllegalStateException("wl_seat bind was not dispatched");
+                }
+
+                output.write(getPointerAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 35);
+                if (nativePointerCount(core) != 1) {
+                    throw new IllegalStateException("wl_pointer was not constructed");
+                }
+
+                if (nativeInjectPointerSequence(core, 10, 20, 1234) != 4) {
+                    throw new IllegalStateException("native pointer sequence was not emitted");
+                }
+                dispatch(core);
+                readPointerSequence(input, 34, 20);
+                if (nativePointerEventCount(core) != 4) {
+                    throw new IllegalStateException("native pointer events were not counted");
+                }
+
+                output.write(releasePointerSeatAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 36);
+                if (nativePointerCount(core) != 0) {
+                    throw new IllegalStateException("wl_pointer release was not dispatched");
+                }
+
                 output.write(destroySecondShmResourcesAndSyncRequest());
                 output.flush();
                 dispatch(core);
-                readUntilCallback(input, 32);
+                readUntilCallback(input, 37);
                 output.write(destroyXdgToplevelAndSyncRequest());
                 output.flush();
                 dispatch(core);
-                readUntilCallback(input, 33);
+                readUntilCallback(input, 38);
                 if (nativeXdgSurfaceCount(core) != 0
                         || nativeXdgToplevelCount(core) != 0
                         || nativeSurfaceCount(core) != 0
@@ -230,7 +268,7 @@ public final class MainActivity extends Activity {
             }
             passed = true;
             message = "Native Wayland compositor passed\n"
-                    + "registry, Android bitmap, and xdg toplevel lifecycle complete";
+                    + "registry, Android bitmap, xdg toplevel, and pointer lifecycle complete";
         } catch (Exception error) {
             message = "Native compositor probe failed\n" + error.getMessage();
         } finally {
@@ -362,12 +400,29 @@ public final class MainActivity extends Activity {
         return request.array();
     }
 
+    private static byte[] getPointerAndSyncRequest() {
+        ByteBuffer request = buffer(24);
+        putHeader(request, 32, 0, 12);
+        request.putInt(34);
+        putHeader(request, 1, 0, 12);
+        request.putInt(35);
+        return request.array();
+    }
+
+    private static byte[] releasePointerSeatAndSyncRequest() {
+        ByteBuffer request = buffer(28);
+        putHeader(request, 34, 1, 8);
+        putHeader(request, 32, 3, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(36);
+        return request.array();
+    }
     private static byte[] destroySecondShmResourcesAndSyncRequest() {
         ByteBuffer request = buffer(28);
         putHeader(request, 28, 0, 8);
         putHeader(request, 26, 1, 8);
         putHeader(request, 1, 0, 12);
-        request.putInt(32);
+        request.putInt(37);
         return request.array();
     }
 
@@ -378,7 +433,7 @@ public final class MainActivity extends Activity {
         putHeader(request, 20, 0, 8);
         putHeader(request, 18, 0, 8);
         putHeader(request, 1, 0, 12);
-        request.putInt(33);
+        request.putInt(38);
         return request.array();
     }
 
@@ -429,6 +484,7 @@ public final class MainActivity extends Activity {
         Global compositor = null;
         Global shm = null;
         Global xdgWmBase = null;
+        Global seat = null;
         while (true) {
             Message message = readMessage(input);
             throwIfDisplayError(message);
@@ -451,13 +507,15 @@ public final class MainActivity extends Activity {
                     shm = new Global(name, version);
                 } else if ("xdg_wm_base".equals(interfaceName)) {
                     xdgWmBase = new Global(name, version);
+                } else if ("wl_seat".equals(interfaceName)) {
+                    seat = new Global(name, version);
                 }
             }
             if (message.objectId == callbackId && message.opcode == 0) {
-                if (compositor == null || shm == null || xdgWmBase == null) {
+                if (compositor == null || shm == null || xdgWmBase == null || seat == null) {
                     throw new IllegalStateException("required Wayland globals not advertised");
                 }
-                return new RegistryGlobals(compositor, shm, xdgWmBase);
+                return new RegistryGlobals(compositor, shm, xdgWmBase, seat);
             }
         }
     }
@@ -470,6 +528,93 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private static void readSeatUntilCallback(
+            FileInputStream input, int seatId, int callbackId) throws Exception {
+        boolean pointerOnly = false;
+        boolean named = false;
+        while (true) {
+            Message message = readMessage(input);
+            throwIfDisplayError(message);
+            if (message.objectId == seatId && message.opcode == 0) {
+                if (message.body.length != 4) {
+                    throw new IllegalStateException("invalid wl_seat.capabilities event");
+                }
+                int capabilities = ByteBuffer.wrap(message.body)
+                        .order(ByteOrder.nativeOrder()).getInt();
+                pointerOnly = capabilities == 1;
+            } else if (message.objectId == seatId && message.opcode == 1) {
+                ByteBuffer body = ByteBuffer.wrap(message.body).order(ByteOrder.nativeOrder());
+                int length = body.getInt();
+                if (length <= 0 || length > body.remaining()) {
+                    throw new IllegalStateException("invalid wl_seat.name event");
+                }
+                byte[] encoded = new byte[length];
+                body.get(encoded);
+                named = "Archphene".equals(
+                        new String(encoded, 0, length - 1, StandardCharsets.UTF_8));
+            }
+            if (message.objectId == callbackId && message.opcode == 0) {
+                if (!pointerOnly || !named) {
+                    throw new IllegalStateException("wl_seat metadata was incomplete");
+                }
+                return;
+            }
+        }
+    }
+
+    private static void readPointerSequence(
+            FileInputStream input, int pointerId, int surfaceId) throws Exception {
+        int[] expectedOpcodes = {0, 5, 2, 5, 3, 5, 3, 5};
+        int enterSerial = 0;
+        int pressSerial = 0;
+        for (int expectedOpcode : expectedOpcodes) {
+            Message message;
+            do {
+                message = readMessage(input);
+                throwIfDisplayError(message);
+            } while (message.objectId == 1 && message.opcode == 1);
+            if (message.objectId != pointerId || message.opcode != expectedOpcode) {
+                throw new IllegalStateException(
+                        "unexpected wl_pointer event object=" + message.objectId
+                                + " opcode=" + message.opcode
+                                + " expected=" + expectedOpcode);
+            }
+            ByteBuffer body = ByteBuffer.wrap(message.body).order(ByteOrder.nativeOrder());
+            if (expectedOpcode == 0) {
+                enterSerial = body.getInt();
+                if (enterSerial == 0
+                        || body.getInt() != surfaceId
+                        || body.getInt() != 10 * 256
+                        || body.getInt() != 20 * 256) {
+                    throw new IllegalStateException("invalid wl_pointer.enter event");
+                }
+            } else if (expectedOpcode == 2) {
+                if (body.getInt() != 1234
+                        || body.getInt() != 11 * 256
+                        || body.getInt() != 21 * 256) {
+                    throw new IllegalStateException("invalid wl_pointer.motion event");
+                }
+            } else if (expectedOpcode == 3) {
+                int serial = body.getInt();
+                int time = body.getInt();
+                int button = body.getInt();
+                int state = body.getInt();
+                if (button != 272) {
+                    throw new IllegalStateException("invalid wl_pointer button code");
+                }
+                if (pressSerial == 0) {
+                    pressSerial = serial;
+                    if (serial <= enterSerial || time != 1234 || state != 1) {
+                        throw new IllegalStateException("invalid wl_pointer press event");
+                    }
+                } else if (serial <= pressSerial || time != 1235 || state != 0) {
+                    throw new IllegalStateException("invalid wl_pointer release event");
+                }
+            } else if (message.body.length != 0) {
+                throw new IllegalStateException("invalid wl_pointer.frame event");
+            }
+        }
+    }
     private static int readXdgConfigureUntilCallback(
             FileInputStream input, int xdgSurfaceId, int toplevelId, int callbackId)
             throws Exception {
@@ -595,11 +740,13 @@ public final class MainActivity extends Activity {
         final Global compositor;
         final Global shm;
         final Global xdgWmBase;
+        final Global seat;
 
-        RegistryGlobals(Global compositor, Global shm, Global xdgWmBase) {
+        RegistryGlobals(Global compositor, Global shm, Global xdgWmBase, Global seat) {
             this.compositor = compositor;
             this.shm = shm;
             this.xdgWmBase = xdgWmBase;
+            this.seat = seat;
         }
     }
     private static final class Global {

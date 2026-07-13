@@ -15,7 +15,9 @@ use wayland_protocols::xdg::shell::server::xdg_wm_base::{self, XdgWmBase};
 use wayland_server::protocol::wl_buffer::{self, WlBuffer};
 use wayland_server::protocol::wl_callback::{self, WlCallback};
 use wayland_server::protocol::wl_compositor::{self, WlCompositor};
+use wayland_server::protocol::wl_pointer::{self, WlPointer};
 use wayland_server::protocol::wl_region::{self, WlRegion};
+use wayland_server::protocol::wl_seat::{self, WlSeat};
 use wayland_server::protocol::wl_shm::{self, WlShm};
 use wayland_server::protocol::wl_shm_pool::{self, WlShmPool};
 use wayland_server::protocol::wl_surface::{self, WlSurface};
@@ -49,6 +51,12 @@ pub struct CompositorState {
     xdg_toplevel_count: u32,
     xdg_ack_count: u32,
     next_configure_serial: u32,
+    seat_binds: u32,
+    pointer_count: u32,
+    pointer_event_count: u32,
+    next_input_serial: u32,
+    pointers: Vec<WlPointer>,
+    pointer_focus_surface: Option<WlSurface>,
 }
 
 #[derive(Default)]
@@ -546,6 +554,77 @@ impl Dispatch<XdgToplevel, XdgToplevelData> for CompositorState {
     }
 }
 
+impl GlobalDispatch<WlSeat, ()> for CompositorState {
+    fn bind(
+        state: &mut Self,
+        _handle: &DisplayHandle,
+        _client: &Client,
+        resource: New<WlSeat>,
+        _global_data: &(),
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        let seat = data_init.init(resource, ());
+        state.seat_binds = state.seat_binds.saturating_add(1);
+        if seat.version() >= 2 {
+            seat.name("Archphene".into());
+        }
+        seat.capabilities(wl_seat::Capability::Pointer);
+    }
+}
+
+impl Dispatch<WlSeat, ()> for CompositorState {
+    fn request(
+        state: &mut Self,
+        _client: &Client,
+        resource: &WlSeat,
+        request: wl_seat::Request,
+        _data: &(),
+        _handle: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            wl_seat::Request::GetPointer { id } => {
+                let pointer = data_init.init(id, ());
+                state.pointer_count = state.pointer_count.saturating_add(1);
+                state.pointers.push(pointer);
+            }
+            wl_seat::Request::GetKeyboard { .. } => resource.post_error(
+                wl_seat::Error::MissingCapability,
+                "keyboard capability is not advertised yet",
+            ),
+            wl_seat::Request::GetTouch { .. } => resource.post_error(
+                wl_seat::Error::MissingCapability,
+                "touch capability is not advertised yet",
+            ),
+            wl_seat::Request::Release => {}
+            _ => unreachable!("wl_seat request added without an implementation"),
+        }
+    }
+}
+
+impl Dispatch<WlPointer, ()> for CompositorState {
+    fn request(
+        _state: &mut Self,
+        _client: &Client,
+        _resource: &WlPointer,
+        request: wl_pointer::Request,
+        _data: &(),
+        _handle: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            wl_pointer::Request::SetCursor { .. } | wl_pointer::Request::Release => {}
+            _ => unreachable!("wl_pointer request added without an implementation"),
+        }
+    }
+
+    fn destroyed(state: &mut Self, _client: ClientId, resource: &WlPointer, _data: &()) {
+        state
+            .pointers
+            .retain(|pointer| pointer.id() != resource.id());
+        state.pointer_count = state.pointer_count.saturating_sub(1);
+    }
+}
 impl GlobalDispatch<WlCompositor, ()> for CompositorState {
     fn bind(
         state: &mut Self,
@@ -951,6 +1030,8 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 let callbacks = std::mem::take(&mut surface.pending_callbacks);
                 surface.pending_damage = false;
                 let latest_frame = surface.committed_frame.clone();
+                let is_xdg_toplevel = surface.role == Some(SurfaceRole::XdgToplevel);
+                let has_frame = latest_frame.is_some();
                 let metrics = latest_frame.as_ref().map(|frame| {
                     let checksum = frame.pixels.iter().fold(0u32, |checksum, value| {
                         checksum.wrapping_add(u32::from(*value))
@@ -961,6 +1042,17 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
 
                 state.surface_commit_count = state.surface_commit_count.saturating_add(1);
                 state.last_frame = latest_frame;
+                if is_xdg_toplevel {
+                    if has_frame {
+                        state.pointer_focus_surface = Some(resource.clone());
+                    } else if state
+                        .pointer_focus_surface
+                        .as_ref()
+                        .is_some_and(|focused| focused.id() == resource.id())
+                    {
+                        state.pointer_focus_surface = None;
+                    }
+                }
                 if let Some((width, height, checksum)) = metrics {
                     state.last_frame_width = width;
                     state.last_frame_height = height;
@@ -978,7 +1070,14 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
         }
     }
 
-    fn destroyed(state: &mut Self, _client: ClientId, _resource: &WlSurface, _data: &SurfaceData) {
+    fn destroyed(state: &mut Self, _client: ClientId, resource: &WlSurface, _data: &SurfaceData) {
+        if state
+            .pointer_focus_surface
+            .as_ref()
+            .is_some_and(|focused| focused.id() == resource.id())
+        {
+            state.pointer_focus_surface = None;
+        }
         state.surface_count = state.surface_count.saturating_sub(1);
         if state.surface_count == 0 {
             state.last_frame = None;
@@ -1034,6 +1133,9 @@ impl CompositorCore {
         display
             .handle()
             .create_global::<CompositorState, XdgWmBase, _>(6, ());
+        display
+            .handle()
+            .create_global::<CompositorState, WlSeat, _>(7, ());
         Ok(Self {
             display,
             state: CompositorState::default(),
@@ -1084,6 +1186,72 @@ impl CompositorCore {
 
     pub fn xdg_ack_count(&self) -> u32 {
         self.state.xdg_ack_count
+    }
+
+    pub fn seat_bind_count(&self) -> u32 {
+        self.state.seat_binds
+    }
+
+    pub fn pointer_count(&self) -> u32 {
+        self.state.pointer_count
+    }
+
+    pub fn pointer_event_count(&self) -> u32 {
+        self.state.pointer_event_count
+    }
+
+    pub fn inject_pointer_sequence(&mut self, x: f64, y: f64, time: u32) -> u32 {
+        let Some(surface) = self.state.pointer_focus_surface.clone() else {
+            return 0;
+        };
+        let pointers: Vec<_> = self
+            .state
+            .pointers
+            .iter()
+            .filter(|pointer| pointer.is_alive() && pointer.id().same_client_as(&surface.id()))
+            .cloned()
+            .collect();
+        if pointers.is_empty() {
+            return 0;
+        }
+
+        self.state.next_input_serial = self.state.next_input_serial.wrapping_add(1).max(1);
+        let enter_serial = self.state.next_input_serial;
+        self.state.next_input_serial = self.state.next_input_serial.wrapping_add(1).max(1);
+        let press_serial = self.state.next_input_serial;
+        self.state.next_input_serial = self.state.next_input_serial.wrapping_add(1).max(1);
+        let release_serial = self.state.next_input_serial;
+
+        for pointer in pointers {
+            pointer.enter(enter_serial, &surface, x, y);
+            if pointer.version() >= 5 {
+                pointer.frame();
+            }
+            pointer.motion(time, x + 1.0, y + 1.0);
+            if pointer.version() >= 5 {
+                pointer.frame();
+            }
+            pointer.button(
+                press_serial,
+                time,
+                272,
+                wl_pointer::ButtonState::Pressed.into(),
+            );
+            if pointer.version() >= 5 {
+                pointer.frame();
+            }
+            pointer.button(
+                release_serial,
+                time.saturating_add(1),
+                272,
+                wl_pointer::ButtonState::Released.into(),
+            );
+            if pointer.version() >= 5 {
+                pointer.frame();
+            }
+        }
+        self.state.pointer_event_count = self.state.pointer_event_count.saturating_add(4);
+        4
     }
 
     pub fn shm_bind_count(&self) -> u32 {
@@ -1343,6 +1511,61 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeSeatBindCount(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.seat_bind_count()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativePointerCount(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.pointer_count()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativePointerEventCount(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.pointer_event_count()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeInjectPointerSequence(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+    x: i32,
+    y: i32,
+    time: i32,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+        return -1;
+    };
+    i32::try_from(core.inject_pointer_sequence(
+        f64::from(x),
+        f64::from(y),
+        u32::try_from(time).unwrap_or(0),
+    ))
+    .unwrap_or(i32::MAX)
+}
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeShmBindCount(
     _environment: *mut std::ffi::c_void,
     _activity: *mut std::ffi::c_void,
@@ -1512,6 +1735,9 @@ mod tests {
         assert_eq!(core.xdg_surface_count(), 0);
         assert_eq!(core.xdg_toplevel_count(), 0);
         assert_eq!(core.xdg_ack_count(), 0);
+        assert_eq!(core.seat_bind_count(), 0);
+        assert_eq!(core.pointer_count(), 0);
+        assert_eq!(core.pointer_event_count(), 0);
         assert_eq!(core.shm_bind_count(), 0);
         assert_eq!(core.shm_pool_count(), 0);
         assert_eq!(core.shm_buffer_count(), 0);
