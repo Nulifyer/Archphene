@@ -423,6 +423,27 @@ struct XdgSurfaceState {
     role_active: bool,
     pending_configures: VecDeque<u32>,
     acknowledged_configure: Option<u32>,
+    pending_window_geometry: Option<WindowGeometry>,
+    committed_window_geometry: Option<WindowGeometry>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WindowGeometry {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+
+impl XdgSurfaceState {
+    fn commit_window_geometry(&mut self) -> bool {
+        let Some(geometry) = self.pending_window_geometry.take() else {
+            return false;
+        };
+        let changed = self.committed_window_geometry != Some(geometry);
+        self.committed_window_geometry = Some(geometry);
+        changed
+    }
 }
 
 struct XdgToplevelData {
@@ -1022,12 +1043,27 @@ impl Dispatch<XdgSurface, XdgSurfaceData> for CompositorState {
                 surface_state.xdg_popup = Some(popup);
                 state.xdg_popup_count = state.xdg_popup_count.saturating_add(1);
             }
-            xdg_surface::Request::SetWindowGeometry { width, height, .. } => {
+            xdg_surface::Request::SetWindowGeometry {
+                x,
+                y,
+                width,
+                height,
+            } => {
                 if width <= 0 || height <= 0 {
                     resource.post_error(
                         xdg_surface::Error::InvalidSize,
                         "window geometry must be positive",
                     );
+                } else {
+                    data.state
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .pending_window_geometry = Some(WindowGeometry {
+                        x,
+                        y,
+                        width,
+                        height,
+                    });
                 }
             }
             xdg_surface::Request::AckConfigure { serial } => {
@@ -1245,6 +1281,8 @@ impl Dispatch<XdgPopup, XdgPopupData> for CompositorState {
                 resource.configure(x, y, width, height);
                 resource.repositioned(token);
                 data.xdg_surface.configure(serial);
+                reconfigure_reactive_popups(state, Some(&data.xdg_surface));
+                update_composited_frame(state);
             }
             _ => unreachable!("xdg_popup request added without an implementation"),
         }
@@ -2506,7 +2544,19 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 let mut callbacks = std::mem::take(&mut surface.pending_callbacks);
                 surface.pending_damage = false;
                 let role = surface.role;
+                let xdg_surface = surface.xdg_surface.clone();
                 drop(surface);
+                let parent_geometry_changed = xdg_surface.as_ref().is_some_and(|xdg_surface| {
+                    xdg_surface
+                        .data::<XdgSurfaceData>()
+                        .is_some_and(|xdg_data| {
+                            xdg_data
+                                .state
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner())
+                                .commit_window_geometry()
+                        })
+                });
 
                 if role == Some(SurfaceRole::Subsurface)
                     && subsurface_effectively_synchronized(resource, state.surface_count)
@@ -2543,7 +2593,7 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                     state.root_frame = latest_frame;
                 }
                 if is_xdg_toplevel {
-                    if has_frame {
+                    if has_frame && state.popup_grab.as_ref().is_none_or(|grab| !grab.active) {
                         if state
                             .pointer_focus_surface
                             .as_ref()
@@ -2554,10 +2604,11 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                         }
                         state.pointer_focus_surface = Some(resource.clone());
                         set_keyboard_focus(state, Some(resource.clone()));
-                    } else if state
-                        .pointer_focus_surface
-                        .as_ref()
-                        .is_some_and(|focused| focused.id() == resource.id())
+                    } else if !has_frame
+                        && state
+                            .pointer_focus_surface
+                            .as_ref()
+                            .is_some_and(|focused| focused.id() == resource.id())
                     {
                         state.pointer_focus_surface = None;
                         state.pointer_inside = false;
@@ -2566,6 +2617,9 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                     }
                 }
                 callbacks.extend(apply_cached_subsurface_children(state, resource));
+                if parent_geometry_changed {
+                    reconfigure_reactive_popups(state, xdg_surface.as_ref());
+                }
                 update_composited_frame(state);
                 for callback in callbacks {
                     callback.done(0);
@@ -3126,6 +3180,68 @@ fn update_composited_frame(state: &mut CompositorState) {
     });
     state.last_frame = Some(Arc::new(composed));
 }
+
+fn reconfigure_reactive_popups(state: &mut CompositorState, changed_parent: Option<&XdgSurface>) {
+    let popups = state.popups.clone();
+    let mut changed_parents = changed_parent.iter().copied().cloned().collect::<Vec<_>>();
+    let mut geometry_changed = false;
+    for popup in popups.iter().filter(|popup| popup.is_alive()) {
+        let Some(data) = popup.data::<XdgPopupData>() else {
+            continue;
+        };
+        if data.dismissed.load(Ordering::Acquire) {
+            continue;
+        }
+        let positioner = data
+            .positioner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        if !positioner.reactive
+            || (changed_parent.is_some()
+                && !changed_parents
+                    .iter()
+                    .any(|parent| parent.id() == data.parent.id()))
+        {
+            continue;
+        }
+        let old_geometry = *data
+            .applied_geometry
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if old_geometry.is_none() {
+            continue;
+        }
+        let Some(geometry) = constrained_popup_geometry(state, data, &positioner) else {
+            continue;
+        };
+        if old_geometry == Some(geometry) {
+            continue;
+        }
+        *data
+            .applied_geometry
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(geometry);
+        state.next_configure_serial = state.next_configure_serial.wrapping_add(1).max(1);
+        let serial = state.next_configure_serial;
+        if let Some(xdg_data) = data.xdg_surface.data::<XdgSurfaceData>() {
+            xdg_data
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .pending_configures
+                .push_back(serial);
+        }
+        popup.configure(geometry.0, geometry.1, geometry.2, geometry.3);
+        data.xdg_surface.configure(serial);
+        changed_parents.push(data.xdg_surface.clone());
+        geometry_changed = true;
+    }
+    if geometry_changed {
+        update_composited_frame(state);
+    }
+}
+
 impl CompositorCore {
     pub fn new() -> std::io::Result<Self> {
         let display = Display::new().map_err(|error| std::io::Error::other(error.to_string()))?;
@@ -3309,17 +3425,51 @@ impl CompositorCore {
     }
 
     fn focused_xdg_resources(&self) -> Option<(XdgSurface, XdgToplevel)> {
-        let surface = self
+        let mut surface = self
             .state
             .keyboard_focus_surface
             .as_ref()
-            .or(self.state.pointer_focus_surface.as_ref())?;
-        let surface_data = surface.data::<SurfaceData>()?;
-        let surface = surface_data
-            .inner
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        Some((surface.xdg_surface.clone()?, surface.xdg_toplevel.clone()?))
+            .or(self.state.pointer_focus_surface.as_ref())?
+            .clone();
+        for _ in 0..=self.state.surface_count {
+            let surface_data = surface.data::<SurfaceData>()?;
+            let (xdg_surface, toplevel, popup, subsurface) = {
+                let surface_state = surface_data
+                    .inner
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                (
+                    surface_state.xdg_surface.clone(),
+                    surface_state.xdg_toplevel.clone(),
+                    surface_state.xdg_popup.clone(),
+                    surface_state.subsurface.clone(),
+                )
+            };
+            if let (Some(xdg_surface), Some(toplevel)) = (xdg_surface, toplevel) {
+                return Some((xdg_surface, toplevel));
+            }
+            if let Some(parent) = popup
+                .and_then(|popup| popup.data::<XdgPopupData>().map(|data| data.parent.clone()))
+                .and_then(|parent| {
+                    parent
+                        .data::<XdgSurfaceData>()
+                        .map(|data| data.wl_surface.clone())
+                })
+            {
+                surface = parent;
+                continue;
+            }
+            if let Some(parent) = subsurface.and_then(|subsurface| {
+                subsurface
+                    .data::<SubsurfaceData>()
+                    .map(|data| data.parent.clone())
+            }) {
+                surface = parent;
+                continue;
+            }
+            return None;
+        }
+        None
     }
 
     pub fn configure_focused_toplevel(&mut self, width: i32, height: i32) -> u32 {
@@ -3401,65 +3551,7 @@ impl CompositorCore {
     }
 
     fn reconfigure_reactive_popups(&mut self) {
-        let popups = self.state.popups.clone();
-        let mut geometry_changed = false;
-        for popup in popups
-            .iter()
-            .filter(|popup| popup.is_alive())
-            .filter(|popup| {
-                popup.data::<XdgPopupData>().is_some_and(|data| {
-                    !data.dismissed.load(Ordering::Acquire)
-                        && data
-                            .positioner
-                            .lock()
-                            .unwrap_or_else(|error| error.into_inner())
-                            .reactive
-                })
-            })
-        {
-            let Some(data) = popup.data::<XdgPopupData>() else {
-                continue;
-            };
-            let old_geometry = *data
-                .applied_geometry
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            if old_geometry.is_none() {
-                continue;
-            }
-            let positioner = data
-                .positioner
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .clone();
-            let Some(geometry) = constrained_popup_geometry(&self.state, data, &positioner) else {
-                continue;
-            };
-            if old_geometry == Some(geometry) {
-                continue;
-            }
-            *data
-                .applied_geometry
-                .lock()
-                .unwrap_or_else(|error| error.into_inner()) = Some(geometry);
-            self.state.next_configure_serial =
-                self.state.next_configure_serial.wrapping_add(1).max(1);
-            let serial = self.state.next_configure_serial;
-            if let Some(xdg_data) = data.xdg_surface.data::<XdgSurfaceData>() {
-                xdg_data
-                    .state
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .pending_configures
-                    .push_back(serial);
-            }
-            popup.configure(geometry.0, geometry.1, geometry.2, geometry.3);
-            data.xdg_surface.configure(serial);
-            geometry_changed = true;
-        }
-        if geometry_changed {
-            update_composited_frame(&mut self.state);
-        }
+        reconfigure_reactive_popups(&mut self.state, None);
     }
 
     pub fn seat_bind_count(&self) -> u32 {
@@ -4687,6 +4779,35 @@ mod tests {
         assert!(!surface_accepts_pointer(&surface, 0.0, 1.0, 2, 2));
         assert!(surface_accepts_pointer(&surface, 1.0, 1.0, 2, 2));
         assert!(!surface_accepts_pointer(&surface, 2.0, 1.0, 2, 2));
+    }
+
+    #[test]
+    fn latches_window_geometry_only_on_surface_commit() {
+        let first = WindowGeometry {
+            x: 1,
+            y: 2,
+            width: 300,
+            height: 200,
+        };
+        let second = WindowGeometry {
+            x: 3,
+            y: 4,
+            width: 640,
+            height: 360,
+        };
+        let mut state = XdgSurfaceState::default();
+
+        state.pending_window_geometry = Some(first);
+        assert_eq!(state.committed_window_geometry, None);
+        assert!(state.commit_window_geometry());
+        assert_eq!(state.committed_window_geometry, Some(first));
+        assert_eq!(state.pending_window_geometry, None);
+
+        state.pending_window_geometry = Some(first);
+        assert!(!state.commit_window_geometry());
+        state.pending_window_geometry = Some(second);
+        assert!(state.commit_window_geometry());
+        assert_eq!(state.committed_window_geometry, Some(second));
     }
 
     #[test]

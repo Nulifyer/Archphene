@@ -29,7 +29,8 @@ The native library uses wayland-server 0.31.13 with its pure-Rust backend. Andro
 19. Publish the Android frame center, inject a system-level ADB tap there, queue its real MotionEvent objects onto the compositor thread, and assert wl_pointer enter, BTN_LEFT press/release, leave, frame boundaries, coordinates, timestamps, and increasing serials.
 20. Release wl_pointer and wl_seat and confirm the pointer live count returns to zero.
 21. Destroy the role object before xdg_surface, then destroy wl_surface and xdg_wm_base; confirm every xdg, surface, pool, and buffer live count returns to zero.
-22. Decode and report any wl_display.error deterministically.
+22. While a popup owns focus, resolve the root xdg_toplevel, send a resize configure, acknowledge it, stage xdg_surface window geometry, and apply it only with the parent wl_surface.commit without stealing popup focus.
+23. Decode and report any wl_display.error deterministically.
 
 ## Build boundary
 
@@ -41,8 +42,8 @@ Windows performs only ADB device selection, APK installation, launch, and logcat
 
 | Target | Device | Result |
 |---|---|---|
-| x86_64 | Android 16 emulator, emulator-5554 | Passed frame/pixel presentation, xdg configure/ack, system-injected Android MotionEvent routing, exact pointer wire events, and ordered teardown |
-| arm64-v8a | Samsung Galaxy S22 Ultra, RFCT90AEEFA | Passed frame/pixel presentation, xdg configure/ack, system-injected Android MotionEvent routing, wrapped 32-bit timestamps, exact pointer wire events, and ordered teardown |
+| x86_64 | Android 16 emulator, emulator-5554 | Passed frame/pixel presentation, xdg configure/ack, committed parent window geometry, popup-focus preservation, system-injected Android MotionEvent routing, exact pointer wire events, and ordered teardown |
+| arm64-v8a | Samsung Galaxy S22 Ultra, RFCT90AEEFA | Passed frame/pixel presentation, xdg configure/ack, committed parent window geometry, popup-focus preservation, system-injected Android MotionEvent routing, wrapped 32-bit timestamps, exact pointer wire events, and ordered teardown |
 
 The arm64 result is emitted through a structured logcat marker, so it remains observable when Samsung System UI covers the Activity with the lock screen.
 
@@ -55,4 +56,4 @@ The arm64 result is emitted through a structured logcat marker, so it remains ob
 
 ## Boundary
 
-This renders protocol test frames and validates Android MotionEvent/hardware-key routing, XKB transfer, configure queues, map/unmap, positioners, live output state, nested popup grabs/dismissal, output-bound popup flip/slide/resize constraints, reactive popup reconfiguration, committed wl_region add/subtract input snapshots, effective-region root/popup fall-through, synchronized recursive subsurface composition and local-coordinate input routing, root-to-nested-popup pointer/button routing with persisted local coordinates, and exact clipped popup SHM composition/restoration pixels, but it does not yet run an application through the native core. Frame callbacks fire after the native copy and must be paced by Android Choreographer/presentation. The probe serializes JNI access through one compositor thread; this must become a reusable service boundary. Touch, scroll axes, cursor roles, parent-geometry reactive constraints, damage/transform/scale state, clipboard, text input, continuous presentation, and wrapper integration remain.
+This renders protocol test frames and validates Android MotionEvent/hardware-key routing, XKB transfer, configure queues, map/unmap, positioners, live output state, nested popup grabs/dismissal, output-bound popup flip/slide/resize constraints, reactive output and committed-parent-geometry popup reconfiguration, popup-focus preservation across root commits, committed wl_region add/subtract input snapshots, effective-region root/popup fall-through, synchronized recursive subsurface composition and local-coordinate input routing, root-to-nested-popup pointer/button routing with persisted local coordinates, and exact clipped popup SHM composition/restoration pixels, but it does not yet run an application through the native core. Frame callbacks fire after the native copy and must be paced by Android Choreographer/presentation. The probe serializes JNI access through one compositor thread; this must become a reusable service boundary. Touch, scroll axes, cursor roles, commit-gated popup configure application, damage/transform/scale state, clipboard, text input, continuous presentation, and wrapper integration remain.

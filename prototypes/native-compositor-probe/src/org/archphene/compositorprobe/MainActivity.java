@@ -551,6 +551,27 @@ public final class MainActivity extends Activity {
                 readPointerEnterAndFrame(input, 34, 47, 1, 1);
                 expectedPointerEvents++;
 
+                int popupFocusedResizeSerial = nativeConfigureFocusedToplevel(core, 4, 2);
+                if (popupFocusedResizeSerial <= 0) {
+                    throw new IllegalStateException("popup focus did not resolve to its root toplevel");
+                }
+                output.write(syncRequest(54));
+                output.flush();
+                dispatch(core);
+                readToplevelConfigureUntilCallback(
+                        input, 22, 23, 54, popupFocusedResizeSerial, 4, 2);
+                readDeleteId(input, 54);
+                output.write(commitParentWindowGeometryAndSyncRequest(
+                        popupFocusedResizeSerial, 54));
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 54);
+                readDeleteId(input, 54);
+                if (nativePendingConfigureCount(core) != 0
+                        || nativeXdgAckCount(core) != 5) {
+                    throw new IllegalStateException("committed parent window geometry was not applied");
+                }
+
                 if (nativeConfigureOutput(core, 5, 2, 1) != 0) {
                     throw new IllegalStateException("reactive unbound output update was not retained");
                 }
@@ -563,7 +584,7 @@ public final class MainActivity extends Activity {
                 output.flush();
                 dispatch(core);
                 readUntilCallback(input, 55);
-                if (nativeXdgAckCount(core) != 5
+                if (nativeXdgAckCount(core) != 6
                         || nativeLastFrameChecksum(core) != 584
                         || nativeCopyLastFrameToBitmap(core, renderedFrame) != 0
                         || renderedFrame.getPixel(3, 0) != 0xff030201) {
@@ -602,7 +623,7 @@ public final class MainActivity extends Activity {
                 output.flush();
                 dispatch(core);
                 readUntilCallback(input, 63);
-                if (nativeXdgAckCount(core) != 6) {
+                if (nativeXdgAckCount(core) != 7) {
                     throw new IllegalStateException("nested xdg_popup configure ack failed");
                 }
                 output.write(mapNestedPopupFrameAndSyncRequest());
@@ -788,7 +809,8 @@ public final class MainActivity extends Activity {
             passed = true;
             message = "Native Wayland compositor passed\n"
                     + "registry, Android bitmap, xdg toplevel, keyboard input, "
-                    + "MotionEvent pointer, nested popup grabs, and synchronized subsurface trees complete";
+                    + "MotionEvent pointer, nested popup grabs, synchronized subsurface trees, "
+                    + "and committed parent geometry complete";
         } catch (Exception error) {
             message = "Native compositor probe failed\n" + error.getMessage();
         } finally {
@@ -887,6 +909,22 @@ public final class MainActivity extends Activity {
         ByteBuffer request = buffer(24);
         putHeader(request, 22, 4, 12);
         request.putInt(configureSerial);
+        putHeader(request, 1, 0, 12);
+        request.putInt(callbackId);
+        return request.array();
+    }
+
+    private static byte[] commitParentWindowGeometryAndSyncRequest(
+            int configureSerial, int callbackId) {
+        ByteBuffer request = buffer(56);
+        putHeader(request, 22, 4, 12);
+        request.putInt(configureSerial);
+        putHeader(request, 22, 3, 24);
+        request.putInt(0);
+        request.putInt(0);
+        request.putInt(4);
+        request.putInt(2);
+        putHeader(request, 20, 6, 8);
         putHeader(request, 1, 0, 12);
         request.putInt(callbackId);
         return request.array();
@@ -1830,6 +1868,39 @@ public final class MainActivity extends Activity {
                     throw new IllegalStateException("xdg_popup configure sequence was incomplete");
                 }
                 return configureSerial;
+            }
+        }
+    }
+
+    private static void readToplevelConfigureUntilCallback(
+            FileInputStream input,
+            int xdgSurfaceId,
+            int toplevelId,
+            int callbackId,
+            int expectedSerial,
+            int expectedWidth,
+            int expectedHeight)
+            throws Exception {
+        boolean sizeConfigured = false;
+        boolean serialConfigured = false;
+        while (true) {
+            Message message = readMessage(input);
+            throwIfDisplayError(message);
+            if (message.objectId == toplevelId && message.opcode == 0) {
+                ByteBuffer body = ByteBuffer.wrap(message.body).order(ByteOrder.nativeOrder());
+                sizeConfigured = body.remaining() >= 12
+                        && body.getInt() == expectedWidth
+                        && body.getInt() == expectedHeight;
+            } else if (message.objectId == xdgSurfaceId && message.opcode == 0) {
+                serialConfigured = message.body.length == 4
+                        && ByteBuffer.wrap(message.body)
+                                .order(ByteOrder.nativeOrder()).getInt() == expectedSerial;
+            }
+            if (message.objectId == callbackId && message.opcode == 0) {
+                if (!sizeConfigured || !serialConfigured) {
+                    throw new IllegalStateException("root toplevel configure sequence was incomplete");
+                }
+                return;
             }
         }
     }

@@ -46,7 +46,7 @@ Hyprland independently tracks popup trees, nested children, mapping, damage, eff
 - [~] Send `xdg_popup.popup_done` child-first and idempotently, and finish wiring outside press, Back/Escape, Activity focus loss, and invalidated-parent triggers.
 - [x] Restore pointer and keyboard focus to the root after dismissal.
 - [x] Snapshot `wl_region` add/subtract state at `set_input_region`, latch it on commit, intersect it with surface bounds, and use it for root/parent/nested popup hit testing and fall-through.
-- [x] Implement `xdg_popup.reposition` and `repositioned(token)`, persist the applied configure geometry, apply output-bound flip/slide/resize adjustments in protocol order, and reconfigure reactive popups when Android output bounds change.
+- [x] Implement `xdg_popup.reposition` and `repositioned(token)`, persist the applied configure geometry, apply output-bound flip/slide/resize adjustments in protocol order, reconfigure reactive popups when Android output bounds change, latch xdg window geometry only on parent commit, propagate parent-placement changes to reactive descendants, and preserve popup focus across root commits.
 
 ### P1: real surface trees
 
@@ -89,7 +89,7 @@ Validated bootstrap slices:
 - wl_display.sync round trips on emulator and Samsung device;
 - wl_registry discovery, wl_compositor, wl_shm, and xdg_wm_base binds, SHM format events and FD transfer, checked padded-stride frame copies, wl_surface commit/release/callback, XRGB-to-Android bitmap conversion, exact pixel checks, visible presentation, and resource lifecycles on both the x86_64 emulator and AArch64 Samsung device;
 - xdg_toplevel permanent-role assignment, the client initial bufferless commit, ordered toplevel/surface configure events, exact serial acknowledgement before buffer attachment, post-ack SHM presentation, and role-before-surface teardown on both targets;
-- pointer-and-keyboard wl_seat metadata, per-client input resources, mapped-surface focus, Android MotionEvent and hardware-key routing, valid input-serial popup grabs, nested topmost grab stacks, persisted output-constrained popup geometry shared by configure/composition/input, reactive output-bound reconfiguration, and child-first idempotent dismissal/teardown with exact wire checks on both targets.
+- pointer-and-keyboard wl_seat metadata, per-client input resources, mapped-surface focus, Android MotionEvent and hardware-key routing, valid input-serial popup grabs, nested topmost grab stacks, persisted output-constrained popup geometry shared by configure/composition/input, reactive output-bound and committed-parent-geometry reconfiguration, popup-focus preservation across root commits, and child-first idempotent dismissal/teardown with exact wire checks on both targets.
 
 Migration order is registry/globals, SHM/pools/buffers, surfaces/regions, xdg-shell, seats/input, popups/subsurfaces, clipboard/text input, output/scaling, then GPU presentation.
 
@@ -101,6 +101,7 @@ Migration order is registry/globals, SHM/pools/buffers, surfaces/regions, xdg-sh
 - Outside press sends `popup_done` exactly once and restores root focus.
 - Nested submenu dismissal removes only the topmost popup when appropriate.
 - [x] Popup reposition tokens are acknowledged, and flip/slide/resize plus reactive output-bound changes keep configure, pixels, and input coordinates aligned.
+- [x] Parent window geometry is double-buffered until `wl_surface.commit`; root configure/commit while a popup owns focus preserves the grab, and parent-placement changes propagate to reactive descendants.
 - [x] Subsurface commits obey effective ancestor sync/desync, parent-position, and stacking rules in the native wire probe.
 - Scale and input coordinates remain aligned at Android densities 1.0, 2.625, and 3.0.
 - Clipboard and IME data cross only their Android broker APIs and remain under the app UID.
