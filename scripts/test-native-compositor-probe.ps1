@@ -26,8 +26,8 @@ $deadline = [DateTime]::UtcNow.AddSeconds(20)
 do {
     Start-Sleep -Milliseconds 500
     $output = (& adb -s $Serial logcat -d -s "ArchpheneCompositorProbe:I" "*:S") -join [Environment]::NewLine
-    if ($output.Contains("registry, SHM FD/buffer, and surface lifecycles complete")) {
-        Write-Host "Native compositor SHM FD/buffer lifecycle probe passed on $Serial ($AndroidAbi)."
+    if ($output.Contains("registry, SHM frame commit, callback, and lifecycles complete")) {
+        Write-Host "Native compositor SHM frame-commit probe passed on $Serial ($AndroidAbi)."
         exit 0
     }
     if ($output.Contains("Native compositor probe failed")) {

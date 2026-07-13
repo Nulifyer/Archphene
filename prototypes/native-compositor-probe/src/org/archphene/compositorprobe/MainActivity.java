@@ -27,6 +27,10 @@ public final class MainActivity extends Activity {
     private static native int nativeShmBufferCount(long handle);
     private static native int nativeLastBufferChecksum(long handle);
     private static native int nativeSurfaceCount(long handle);
+    private static native int nativeSurfaceCommitCount(long handle);
+    private static native int nativeLastFrameWidth(long handle);
+    private static native int nativeLastFrameHeight(long handle);
+    private static native int nativeLastFrameChecksum(long handle);
     private static native void nativeDestroyCore(long handle);
 
     @Override
@@ -87,19 +91,11 @@ public final class MainActivity extends Activity {
                     throw new IllegalStateException("wl_surface creation was not dispatched");
                 }
 
-                output.write(destroySurfaceAndSyncRequest());
-                output.flush();
-                dispatch(core);
-                readUntilCallback(input, 10);
-                if (nativeSurfaceCount(core) != 0) {
-                    throw new IllegalStateException("wl_surface destruction was not dispatched");
-                }
-
-                if (nativeSendShmPoolRequest(client.getFd(), 11, 32, 12) != 0) {
+                if (nativeSendShmPoolRequest(client.getFd(), 10, 40, 11) != 0) {
                     throw new IllegalStateException("SHM pool FD transfer");
                 }
                 dispatch(core);
-                readUntilCallback(input, 12);
+                readUntilCallback(input, 11);
                 if (nativeShmPoolCount(core) != 1) {
                     throw new IllegalStateException("wl_shm_pool creation was not dispatched");
                 }
@@ -107,22 +103,41 @@ public final class MainActivity extends Activity {
                 output.write(createShmBufferAndSyncRequest());
                 output.flush();
                 dispatch(core);
-                readUntilCallback(input, 14);
-                if (nativeShmBufferCount(core) != 1 || nativeLastBufferChecksum(core) != 528) {
+                readUntilCallback(input, 13);
+                if (nativeShmBufferCount(core) != 1 || nativeLastBufferChecksum(core) != 820) {
                     throw new IllegalStateException("wl_buffer creation did not expose SHM pixels");
+                }
+
+                output.write(commitShmFrameAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                readFrameCommitUntilCallback(input, 12, 14, 15);
+                if (nativeSurfaceCommitCount(core) != 1
+                        || nativeLastFrameWidth(core) != 4
+                        || nativeLastFrameHeight(core) != 2
+                        || nativeLastFrameChecksum(core) != 656) {
+                    throw new IllegalStateException("wl_surface commit did not snapshot the SHM frame");
                 }
 
                 output.write(destroyShmResourcesAndSyncRequest());
                 output.flush();
                 dispatch(core);
-                readUntilCallback(input, 15);
+                readUntilCallback(input, 16);
                 if (nativeShmBufferCount(core) != 0 || nativeShmPoolCount(core) != 0) {
                     throw new IllegalStateException("SHM resources were not destroyed");
+                }
+
+                output.write(destroySurfaceAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 17);
+                if (nativeSurfaceCount(core) != 0) {
+                    throw new IllegalStateException("wl_surface destruction was not dispatched");
                 }
             }
             passed = true;
             message = "Native Wayland compositor passed\n"
-                    + "registry, SHM FD/buffer, and surface lifecycles complete";
+                    + "registry, SHM frame commit, callback, and lifecycles complete";
         } catch (Exception error) {
             message = "Native compositor probe failed\n" + error.getMessage();
         } finally {
@@ -181,30 +196,49 @@ public final class MainActivity extends Activity {
         ByteBuffer request = buffer(20);
         putHeader(request, 8, 0, 8);
         putHeader(request, 1, 0, 12);
-        request.putInt(10);
+        request.putInt(17);
         return request.array();
     }
 
     private static byte[] createShmBufferAndSyncRequest() {
         ByteBuffer request = buffer(44);
-        putHeader(request, 11, 0, 32);
-        request.putInt(13);
+        putHeader(request, 10, 0, 32);
+        request.putInt(12);
         request.putInt(0);
         request.putInt(4);
         request.putInt(2);
-        request.putInt(16);
+        request.putInt(24);
         request.putInt(0);
         putHeader(request, 1, 0, 12);
+        request.putInt(13);
+        return request.array();
+    }
+
+    private static byte[] commitShmFrameAndSyncRequest() {
+        ByteBuffer request = buffer(76);
+        putHeader(request, 8, 1, 20);
+        request.putInt(12);
+        request.putInt(0);
+        request.putInt(0);
+        putHeader(request, 8, 9, 24);
+        request.putInt(0);
+        request.putInt(0);
+        request.putInt(4);
+        request.putInt(2);
+        putHeader(request, 8, 3, 12);
         request.putInt(14);
+        putHeader(request, 8, 6, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(15);
         return request.array();
     }
 
     private static byte[] destroyShmResourcesAndSyncRequest() {
         ByteBuffer request = buffer(28);
-        putHeader(request, 13, 0, 8);
-        putHeader(request, 11, 1, 8);
+        putHeader(request, 12, 0, 8);
+        putHeader(request, 10, 1, 8);
         putHeader(request, 1, 0, 12);
-        request.putInt(15);
+        request.putInt(16);
         return request.array();
     }
 
@@ -248,6 +282,25 @@ public final class MainActivity extends Activity {
             Message message = readMessage(input);
             throwIfDisplayError(message);
             if (message.objectId == callbackId && message.opcode == 0) return;
+        }
+    }
+
+    private static void readFrameCommitUntilCallback(
+            FileInputStream input, int bufferId, int frameCallbackId, int syncCallbackId)
+            throws Exception {
+        boolean bufferReleased = false;
+        boolean frameDone = false;
+        while (true) {
+            Message message = readMessage(input);
+            throwIfDisplayError(message);
+            bufferReleased |= message.objectId == bufferId && message.opcode == 0;
+            frameDone |= message.objectId == frameCallbackId && message.opcode == 0;
+            if (message.objectId == syncCallbackId && message.opcode == 0) {
+                if (!bufferReleased || !frameDone) {
+                    throw new IllegalStateException("frame commit events were incomplete");
+                }
+                return;
+            }
         }
     }
 

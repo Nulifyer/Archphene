@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use wayland_server::protocol::wl_buffer::{self, WlBuffer};
+use wayland_server::protocol::wl_callback::{self, WlCallback};
 use wayland_server::protocol::wl_compositor::{self, WlCompositor};
 use wayland_server::protocol::wl_region::{self, WlRegion};
 use wayland_server::protocol::wl_shm::{self, WlShm};
@@ -35,9 +36,40 @@ pub struct CompositorState {
     shm_buffer_count: u32,
     last_buffer_checksum: u32,
     surface_count: u32,
+    surface_commit_count: u32,
+    last_frame_width: u32,
+    last_frame_height: u32,
+    last_frame_checksum: u32,
 }
 
-pub struct SurfaceData;
+#[derive(Default)]
+pub struct SurfaceData {
+    inner: Mutex<SurfaceState>,
+}
+
+#[derive(Default)]
+struct SurfaceState {
+    pending_buffer: Option<Option<SurfaceBuffer>>,
+    pending_damage: bool,
+    pending_callbacks: Vec<WlCallback>,
+    committed_frame: Option<CommittedFrame>,
+}
+
+#[derive(Clone)]
+struct SurfaceBuffer {
+    resource: WlBuffer,
+    inner: Arc<ShmBufferInner>,
+}
+
+struct CommittedFrame {
+    width: u32,
+    height: u32,
+    #[allow(dead_code)]
+    format: wl_shm::Format,
+    #[allow(dead_code)]
+    pixels: Vec<u8>,
+}
+
 pub struct RegionData;
 
 struct ShmPoolInner {
@@ -49,11 +81,51 @@ pub struct ShmPoolData {
     inner: Arc<Mutex<ShmPoolInner>>,
 }
 
-pub struct ShmBufferData {
-    #[allow(dead_code)]
+struct ShmBufferInner {
     pool: Arc<Mutex<ShmPoolInner>>,
-    #[allow(dead_code)]
-    range: Range<usize>,
+    offset: usize,
+    width: usize,
+    height: usize,
+    stride: usize,
+    format: wl_shm::Format,
+}
+
+pub struct ShmBufferData {
+    inner: Arc<ShmBufferInner>,
+}
+
+impl ShmBufferInner {
+    fn snapshot(&self) -> io::Result<CommittedFrame> {
+        const MAX_FRAME_BYTES: usize = 128 * 1024 * 1024;
+        let row_bytes = self
+            .width
+            .checked_mul(4)
+            .ok_or_else(|| io::Error::other("SHM row size overflow"))?;
+        let frame_bytes = row_bytes
+            .checked_mul(self.height)
+            .ok_or_else(|| io::Error::other("SHM frame size overflow"))?;
+        if frame_bytes > MAX_FRAME_BYTES {
+            return Err(io::Error::other("SHM frame exceeds the bridge limit"));
+        }
+        let mut pixels = vec![0u8; frame_bytes];
+        let pool = self.pool.lock().unwrap_or_else(|error| error.into_inner());
+        for (row, destination) in pixels.chunks_exact_mut(row_bytes).enumerate() {
+            let source_offset = self
+                .offset
+                .checked_add(
+                    row.checked_mul(self.stride)
+                        .ok_or_else(|| io::Error::other("SHM source offset overflow"))?,
+                )
+                .ok_or_else(|| io::Error::other("SHM source offset overflow"))?;
+            pool.file.read_exact_at(destination, source_offset as u64)?;
+        }
+        Ok(CommittedFrame {
+            width: self.width as u32,
+            height: self.height as u32,
+            format: self.format,
+            pixels,
+        })
+    }
 }
 
 impl GlobalDispatch<WlCompositor, ()> for CompositorState {
@@ -159,13 +231,15 @@ impl Dispatch<WlShmPool, ShmPoolData> for CompositorState {
                 stride,
                 format,
             } => {
-                match format {
-                    WEnum::Value(wl_shm::Format::Argb8888 | wl_shm::Format::Xrgb8888) => {}
+                let format = match format {
+                    WEnum::Value(value @ (wl_shm::Format::Argb8888 | wl_shm::Format::Xrgb8888)) => {
+                        value
+                    }
                     _ => {
                         resource.post_error(wl_shm::Error::InvalidFormat, "unsupported SHM format");
                         return;
                     }
-                }
+                };
                 let guard = data.inner.lock().unwrap_or_else(|error| error.into_inner());
                 let Ok(range) = validate_buffer_geometry(guard.size, offset, width, height, stride)
                 else {
@@ -186,11 +260,24 @@ impl Dispatch<WlShmPool, ShmPoolData> for CompositorState {
                     checksum.wrapping_add(u32::from(*value))
                 });
                 drop(guard);
+                let (Ok(width), Ok(height), Ok(stride)) = (
+                    usize::try_from(width),
+                    usize::try_from(height),
+                    usize::try_from(stride),
+                ) else {
+                    unreachable!("validated SHM geometry became invalid");
+                };
                 data_init.init(
                     id,
                     ShmBufferData {
-                        pool: Arc::clone(&data.inner),
-                        range,
+                        inner: Arc::new(ShmBufferInner {
+                            pool: Arc::clone(&data.inner),
+                            offset: range.start,
+                            width,
+                            height,
+                            stride,
+                            format,
+                        }),
                     },
                 );
                 state.shm_buffer_count = state.shm_buffer_count.saturating_add(1);
@@ -278,6 +365,7 @@ fn validate_buffer_geometry(
     }
     Ok(offset..end)
 }
+
 impl Dispatch<WlCompositor, ()> for CompositorState {
     fn request(
         state: &mut Self,
@@ -290,7 +378,7 @@ impl Dispatch<WlCompositor, ()> for CompositorState {
     ) {
         match request {
             wl_compositor::Request::CreateSurface { id } => {
-                data_init.init(id, SurfaceData);
+                data_init.init(id, SurfaceData::default());
                 state.surface_count = state.surface_count.saturating_add(1);
             }
             wl_compositor::Request::CreateRegion { id } => {
@@ -303,22 +391,143 @@ impl Dispatch<WlCompositor, ()> for CompositorState {
 
 impl Dispatch<WlSurface, SurfaceData> for CompositorState {
     fn request(
-        _state: &mut Self,
+        state: &mut Self,
         _client: &Client,
         resource: &WlSurface,
         request: wl_surface::Request,
-        _data: &SurfaceData,
+        data: &SurfaceData,
         _handle: &DisplayHandle,
-        _data_init: &mut DataInit<'_, Self>,
+        data_init: &mut DataInit<'_, Self>,
     ) {
         match request {
             wl_surface::Request::Destroy => {}
-            _ => resource.post_error(0u32, format!("unsupported surface request: {request:?}")),
+            wl_surface::Request::Attach { buffer, x, y } => {
+                if resource.version() >= 5 && (x != 0 || y != 0) {
+                    resource.post_error(
+                        wl_surface::Error::InvalidOffset,
+                        "wl_surface.attach offset must be zero at version 5 or newer",
+                    );
+                    return;
+                }
+                let assignment = match buffer {
+                    Some(buffer) => {
+                        let Some(buffer_data) = buffer.data::<ShmBufferData>() else {
+                            resource.post_error(
+                                wl_surface::Error::NoBuffer,
+                                "buffer was not created by a supported bridge allocator",
+                            );
+                            return;
+                        };
+                        let inner = Arc::clone(&buffer_data.inner);
+                        Some(SurfaceBuffer {
+                            resource: buffer,
+                            inner,
+                        })
+                    }
+                    None => None,
+                };
+                let mut surface = data.inner.lock().unwrap_or_else(|error| error.into_inner());
+                surface.pending_buffer = Some(assignment);
+            }
+            wl_surface::Request::Damage { width, height, .. }
+            | wl_surface::Request::DamageBuffer { width, height, .. } => {
+                if width > 0 && height > 0 {
+                    let mut surface = data.inner.lock().unwrap_or_else(|error| error.into_inner());
+                    surface.pending_damage = true;
+                }
+            }
+            wl_surface::Request::Frame { callback } => {
+                let callback = data_init.init(callback, ());
+                let mut surface = data.inner.lock().unwrap_or_else(|error| error.into_inner());
+                surface.pending_callbacks.push(callback);
+            }
+            wl_surface::Request::SetOpaqueRegion { .. }
+            | wl_surface::Request::SetInputRegion { .. }
+            | wl_surface::Request::Offset { .. } => {}
+            wl_surface::Request::SetBufferTransform { transform } => {
+                if !matches!(transform, WEnum::Value(_)) {
+                    resource.post_error(
+                        wl_surface::Error::InvalidTransform,
+                        "unknown buffer transform",
+                    );
+                }
+            }
+            wl_surface::Request::SetBufferScale { scale } => {
+                if scale < 1 {
+                    resource.post_error(
+                        wl_surface::Error::InvalidScale,
+                        "buffer scale must be positive",
+                    );
+                }
+            }
+            wl_surface::Request::Commit => {
+                let mut surface = data.inner.lock().unwrap_or_else(|error| error.into_inner());
+                if let Some(assignment) = surface.pending_buffer.take() {
+                    surface.committed_frame = match assignment {
+                        Some(buffer) => match buffer.inner.snapshot() {
+                            Ok(frame) => {
+                                if buffer.resource.is_alive() {
+                                    buffer.resource.release();
+                                }
+                                Some(frame)
+                            }
+                            Err(error) => {
+                                resource.post_error(
+                                    wl_surface::Error::InvalidSize,
+                                    format!("could not snapshot SHM frame: {error}"),
+                                );
+                                return;
+                            }
+                        },
+                        None => None,
+                    };
+                }
+                let callbacks = std::mem::take(&mut surface.pending_callbacks);
+                surface.pending_damage = false;
+                let metrics = surface.committed_frame.as_ref().map(|frame| {
+                    let checksum = frame.pixels.iter().fold(0u32, |checksum, value| {
+                        checksum.wrapping_add(u32::from(*value))
+                    });
+                    (frame.width, frame.height, checksum)
+                });
+                drop(surface);
+
+                state.surface_commit_count = state.surface_commit_count.saturating_add(1);
+                if let Some((width, height, checksum)) = metrics {
+                    state.last_frame_width = width;
+                    state.last_frame_height = height;
+                    state.last_frame_checksum = checksum;
+                } else {
+                    state.last_frame_width = 0;
+                    state.last_frame_height = 0;
+                    state.last_frame_checksum = 0;
+                }
+                for callback in callbacks {
+                    callback.done(0);
+                }
+            }
+            _ => unreachable!("wl_surface request added without an implementation"),
         }
     }
 
     fn destroyed(state: &mut Self, _client: ClientId, _resource: &WlSurface, _data: &SurfaceData) {
         state.surface_count = state.surface_count.saturating_sub(1);
+    }
+}
+
+impl Dispatch<WlCallback, ()> for CompositorState {
+    fn request(
+        _state: &mut Self,
+        _client: &Client,
+        _resource: &WlCallback,
+        request: wl_callback::Request,
+        _data: &(),
+        _handle: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            _ => unreachable!("wl_callback has no client requests"),
+        }
     }
 }
 
@@ -402,6 +611,22 @@ impl CompositorCore {
 
     pub fn surface_count(&self) -> u32 {
         self.state.surface_count
+    }
+
+    pub fn surface_commit_count(&self) -> u32 {
+        self.state.surface_commit_count
+    }
+
+    pub fn last_frame_width(&self) -> u32 {
+        self.state.last_frame_width
+    }
+
+    pub fn last_frame_height(&self) -> u32 {
+        self.state.last_frame_height
+    }
+
+    pub fn last_frame_checksum(&self) -> u32 {
+        self.state.last_frame_checksum
     }
 }
 
@@ -636,6 +861,54 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeSurfaceCommitCount(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.surface_commit_count()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeLastFrameWidth(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.last_frame_width()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeLastFrameHeight(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.last_frame_height()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeLastFrameChecksum(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.last_frame_checksum()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeDestroyCore(
     _environment: *mut std::ffi::c_void,
     _activity: *mut std::ffi::c_void,
@@ -654,6 +927,7 @@ mod tests {
     #[test]
     fn validates_shm_buffer_geometry() {
         assert_eq!(validate_buffer_geometry(32, 0, 4, 2, 16), Ok(0..32));
+        assert_eq!(validate_buffer_geometry(40, 0, 4, 2, 24), Ok(0..40));
         assert!(validate_buffer_geometry(31, 0, 4, 2, 16).is_err());
         assert!(validate_buffer_geometry(32, -1, 4, 2, 16).is_err());
         assert!(validate_buffer_geometry(32, 0, 4, 2, 15).is_err());
@@ -670,6 +944,10 @@ mod tests {
         assert_eq!(core.shm_buffer_count(), 0);
         assert_eq!(core.last_buffer_checksum(), 0);
         assert_eq!(core.surface_count(), 0);
+        assert_eq!(core.surface_commit_count(), 0);
+        assert_eq!(core.last_frame_width(), 0);
+        assert_eq!(core.last_frame_height(), 0);
+        assert_eq!(core.last_frame_checksum(), 0);
         assert_eq!(archphene_compositor_protocol_version(), 1);
     }
 }
