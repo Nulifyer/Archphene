@@ -136,15 +136,8 @@ public final class ApkUpdateInstaller {
 
     private static void download(Activity activity, URL url, File destination,
             ProgressCallback callback, Operation operation) throws Exception {
-        HttpURLConnection connection = (HttpURLConnection) url.openConnection();
-        operation.connection = connection;
-        connection.setConnectTimeout(15_000);
-        connection.setReadTimeout(30_000);
-        connection.setInstanceFollowRedirects(false);
+        HttpURLConnection connection = openDownload(url, operation);
         try {
-            if (connection.getResponseCode() != 200) {
-                throw new IllegalStateException("APK download HTTP " + connection.getResponseCode());
-            }
             long declared = connection.getContentLengthLong();
             if (declared <= 0 || declared > 512L * 1024 * 1024) {
                 throw new IllegalStateException("Invalid APK download size");
@@ -177,6 +170,48 @@ public final class ApkUpdateInstaller {
         }
     }
 
+    private static HttpURLConnection openDownload(URL initial, Operation operation)
+            throws Exception {
+        URL current = initial;
+        String initialHost = initial.getHost().toLowerCase(java.util.Locale.ROOT);
+        for (int redirects = 0; redirects <= 4; redirects++) {
+            validateDownloadUrl(current, initialHost, redirects > 0);
+            HttpURLConnection connection = (HttpURLConnection) current.openConnection();
+            operation.connection = connection;
+            connection.setConnectTimeout(15_000);
+            connection.setReadTimeout(30_000);
+            connection.setInstanceFollowRedirects(false);
+            connection.setRequestProperty("User-Agent", "Archphene/1.0");
+            int status = connection.getResponseCode();
+            if (status == 301 || status == 302 || status == 303
+                    || status == 307 || status == 308) {
+                String location = connection.getHeaderField("Location");
+                connection.disconnect();
+                if (location == null) throw new SecurityException("APK redirect has no target");
+                current = new URL(current, location);
+                continue;
+            }
+            if (status != 200) {
+                connection.disconnect();
+                throw new IllegalStateException("APK download HTTP " + status);
+            }
+            return connection;
+        }
+        throw new SecurityException("Too many APK download redirects");
+    }
+
+    private static void validateDownloadUrl(URL url, String initialHost, boolean redirected) {
+        if (!"https".equals(url.getProtocol()) || url.getUserInfo() != null
+                || url.getRef() != null) {
+            throw new SecurityException("Unsafe APK download URL");
+        }
+        String host = url.getHost().toLowerCase(java.util.Locale.ROOT);
+        if (!redirected || host.equals(initialHost)) return;
+        boolean githubRelease = "github.com".equals(initialHost)
+                && ("release-assets.githubusercontent.com".equals(host)
+                || "objects.githubusercontent.com".equals(host));
+        if (!githubRelease) throw new SecurityException("Untrusted APK download redirect");
+    }
     private static void verifyIdentity(Context context, File apk, String expectedPackage,
             String expectedSignerSha256) throws Exception {
         PackageManager packages = context.getPackageManager();

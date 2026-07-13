@@ -9,7 +9,7 @@ Archphene is a research project for running unmodified Arch Linux desktop applic
 Each wrapped Linux application receives a normal Android package identity, UID, private data directory, lifecycle, and permission boundary. An Android-owned Wayland bridge renders the Linux interface and brokers Android features such as input, clipboard, documents, themes, rotation, and freeform resizing.
 
 > [!WARNING]
-> Archphene is an active prototype, not a production application store. KCalc and Mousepad are working proofs. The manager does **not yet download an arbitrary pacman package and build its wrapper entirely on-device**. GrapheneOS-specific behavior has not been validated on a supported Pixel.
+> Archphene is an active prototype, not a production application store. The manager now installs KCalc from a signed Arch transaction entirely on-device, but broad package, toolkit, ABI, and device compatibility is not complete. GrapheneOS-specific behavior has not been validated on a supported Pixel.
 
 <p align="center">
   <img src="docs/images/archphene-manager.png" width="360" alt="Archphene app manager showing Archphene, KCalc, and Mousepad as Android applications">
@@ -25,7 +25,8 @@ Each wrapped Linux application receives a normal Android package identity, UID, 
 - Brokers user-visible files through Android's Storage Access Framework while keeping background application state private.
 - Exposes a Linux Home document provider for Android file managers and sharing workflows.
 - Provides an Archphene manager UI with package search, update checks, version history, pinning, prerelease policy, repository settings, and Android-confirmed APK installation.
-- Verifies package names, hashes, signer continuity, version ordering, HTTPS sources, and download limits before opening an Android `PackageInstaller` session.
+- Verifies package names, hashes, Arch signatures, signer continuity, version ordering, HTTPS sources, and download limits before opening an Android PackageInstaller session.
+- Resolves, downloads, verifies, stages, closure-reduces, wraps, signs, and installs KCalc from Arch repositories at manager runtime; the manager APK contains reusable tools and bridge templates, not KCalc.
 
 ## Tested applications
 
@@ -74,11 +75,24 @@ Download the APK and checksum from [GitHub Releases](https://github.com/Nulifyer
 
 Release APKs are signed with a dedicated persistent Archphene release key and are built with `android:debuggable="false"`.
 
-The current release installs the manager. Until on-device package conversion is complete, Linux application wrappers still come from the repository's development build pipeline rather than being generated automatically for every package by the installed manager.
+The manager can generate and install the tested x86_64 Qt/KCalc wrapper on-device. Other packages remain subject to toolkit, ABI, bridge-capability, and wrapper-template compatibility checks; package search does not imply that every Arch package is currently runnable.
 
 ## Build from source
 
-### Manager APK
+### Linux release build
+
+Release CI builds the Arch runtime, patched glibc, wrapper template, and signed manager APK on Linux. The same path can run under Podman or Docker:
+
+    bash scripts/build-ci-package-runtime.sh
+    KEYSTORE_PATH=/path/to/key \
+    KEYSTORE_PASSWORD=... \
+    KEY_ALIAS=... \
+    KEY_PASSWORD=... \
+    bash scripts/build-linux-manager-apk.sh
+
+Output: prototypes/linux-app-manager-stub/out-linux/archphene.apk.
+
+### Windows emulator/device adapter
 
 Requirements:
 
@@ -120,8 +134,8 @@ The physical suite expects the curated ARM64 package/runtime workspace and a com
 
 ## Current limitations
 
-- The manager cannot yet resolve, verify, wrap, sign, and install arbitrary pacman packages entirely on-device.
-- Manager APK replacement is tested, but GitHub Releases discovery and download are not yet a complete production self-update flow.
+- The complete on-device transaction is proven for x86_64 KCalc/Qt. Arbitrary packages still need toolkit detection, capability policy, additional wrapper templates, ABI filtering, and compatibility reporting.
+- GitHub Releases discovery, checksum validation, bounded download, signer/package verification, Android confirmation, replacement, and restart reconciliation are implemented. A first public release asset is still required for a live positive GitHub download test.
 - KCalc and Mousepad still contain duplicated prototype Java Wayland compositor implementations. A shared native compositor is required before broad application support.
 - The current wrappers duplicate large runtime closures per Android UID.
 - GPU acceleration, audio, printing, camera, drag-and-drop, accessibility, keyrings, and many desktop portals are incomplete or absent.
@@ -137,7 +151,7 @@ See the [roadmap](docs/roadmap.md) for the detailed engineering and security bac
 1. Move the duplicated Java compositor into one shared native Wayland core with generated protocol bindings.
 2. Implement atomic runtime packaging, process-group lifecycle management, and 16 KB page-size validation.
 3. Complete the multi-document Android storage broker and manager-owned shared user-document provider.
-4. Add on-device Arch/Arch Linux ARM repository synchronization, dependency resolution, signature verification, package extraction, wrapper generation, and persistent per-device signing.
+4. Expand the proven x86_64 KCalc on-device transaction to Arch Linux ARM, toolkit-aware templates, capability policy, and failure-isolated package scheduling.
 5. Generate Android manifests and permission brokers from package capabilities.
 6. Expand compatibility to GPU-accelerated editors, browsers, creative applications, audio, and desktop/freeform multi-window use.
 7. Validate supported GrapheneOS Pixels without claiming GrapheneOS-equivalent security on other devices.

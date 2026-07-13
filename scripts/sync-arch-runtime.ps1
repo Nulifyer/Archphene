@@ -51,7 +51,8 @@ function Read-Desc([string]$Path, [string]$Repo) {
 function Download-File([string]$Url, [string]$OutFile) {
     if ((Test-Path -LiteralPath $OutFile) -and -not $Refresh) { return }
     Write-Host "download $Url"
-    & curl.exe -L --fail --retry 3 --retry-delay 2 -o $OutFile $Url
+    $curl = if ($IsWindows) { "curl.exe" } else { "curl" }
+    & $curl -L --fail --retry 3 --retry-delay 2 -o $OutFile $Url
     if ($LASTEXITCODE -ne 0) { throw "curl failed for $Url" }
 }
 

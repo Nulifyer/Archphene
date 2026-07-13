@@ -52,7 +52,12 @@ public final class LinuxAppUpdateCoordinator {
         }
         try {
             ArchPackageUpdateChecker.Result result;
-            if (app.updateUrl.startsWith("archphene-wrapper://")) {
+            if (app.updateUrl.startsWith("archphene-github://")) {
+                GitHubReleaseClient.Artifact latest = GitHubReleaseClient.latest(context);
+                result = new ArchPackageUpdateChecker.Result(latest.version,
+                        GitHubReleaseClient.compareVersions(
+                                latest.version, app.sourceVersion) > 0);
+            } else if (app.updateUrl.startsWith("archphene-wrapper://")) {
                 WrapperRepositoryClient.Artifact latest = WrapperRepositoryClient.latest(
                         context, app.packageName);
                 result = new ArchPackageUpdateChecker.Result(latest.version,

@@ -58,6 +58,8 @@ Obtainium seeds its GitHub project URL as an ordinary tracked app on the first n
 
 After process restart, Obtainium reloads Android's real installed package information and reconciles it with persisted app metadata. Archphene uses the same lifecycle principle while keeping its manager entry synthetic and non-removable: catalog load reads the manager's actual Android version and now clears stale checking or update-available state when the installed version equals the previously discovered version. Android confirmation remains mandatory for manager replacement.
 
+Obtainium represents download progress as 0 through 100 and installation as an indeterminate sentinel, replacing the row's normal trailing state with a progress control. Archphene now follows the same single-state principle for self-update: the version action becomes an Updating spinner while the richer download/install stage indicator remains available below it.
+
 ## Security and licensing conclusions
 
 Obtainium's source is GPL-3.0. This work reimplements architectural ideas and Android interaction patterns in the existing Java manager; it does not copy Obtainium Dart/Flutter code, assets, branding, or translations. Directly incorporating its implementation would require a deliberate GPL-3.0 compatibility decision for the distributed combined work.

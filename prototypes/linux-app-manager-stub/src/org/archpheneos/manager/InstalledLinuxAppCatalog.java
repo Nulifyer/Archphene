@@ -53,7 +53,7 @@ public final class InstalledLinuxAppCatalog {
                 managerInfo.versionName == null ? "unknown" : managerInfo.versionName);
         managerMetadata.putString("org.archphene.runtime.abi", "Android");
         managerMetadata.putString("org.archphene.source.update_url",
-                "archphene-wrapper://" + context.getPackageName());
+                "archphene-github://Nulifyer/Archphene");
         Intent managerLaunch = packages.getLaunchIntentForPackage(context.getPackageName());
         if (managerLaunch != null) {
             result.add(new Entry(context.getPackageName(), "Archphene",

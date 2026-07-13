@@ -1,0 +1,77 @@
+{
+  "schema": "org.archphene.prebuilt-bridge.v1",
+  "architecture": "x86_64",
+  "purpose": "Qt Wayland Android bridge template",
+  "files": [
+    {
+      "name": "libarchphene_frame_client.so",
+      "bytes": 16200,
+      "sha256": "54a378433c17cd4e0f80e6f9e40dc27afb8f3a14127507a261bba1c6b951bbe3"
+    },
+    {
+      "name": "libarchphene_qt_clipboard_probe.so",
+      "bytes": 23616,
+      "sha256": "e1974aa4ddb45fc7ec8b2071a1e6bf9555ddbf911613140e6466feb3317b5438"
+    },
+    {
+      "name": "libarchphene_shm_frame_client.so",
+      "bytes": 15336,
+      "sha256": "190735ac0941d2ad66619f1acd8b79c2f8e468e7610591d8df0014e2c86cfec7"
+    },
+    {
+      "name": "libarchphene_wayland_android_api_client.so",
+      "bytes": 9536,
+      "sha256": "4e1000e98438473742695a9f55086c1ad40802eaa99446321799e26618535a9b"
+    },
+    {
+      "name": "libarchphene_wayland_android_api_render_client.so",
+      "bytes": 13752,
+      "sha256": "2352b74b8deeba90ae54cab36e0a6972383927fe67880c1ec40f7183e878e004"
+    },
+    {
+      "name": "libarchphene_wayland_android_api_xdg_client.so",
+      "bytes": 23888,
+      "sha256": "fb321a1aecc295b9155990a8b7ba5339d1c487d3d38a5595853b059971c9641a"
+    },
+    {
+      "name": "libarchphene_wayland_api_client.so",
+      "bytes": 9520,
+      "sha256": "821d9fd4efd4ac5b12e90efb235a50fb2dd541f878d41123860bd672e8a259b7"
+    },
+    {
+      "name": "libarchphene_wayland_client_android.so",
+      "bytes": 19648,
+      "sha256": "7a5b27fdb86e3d5722bfbcbd66b6a6aa489447247f653fe31eda5eb318283760"
+    },
+    {
+      "name": "libarchphene_wayland_evented_client.so",
+      "bytes": 14352,
+      "sha256": "eec1bf652147986350cc2b3e30b40c56718645a86fdcff9a7310b27673ef28ff"
+    },
+    {
+      "name": "libarchphene_wayland_jni.so",
+      "bytes": 7312,
+      "sha256": "be997a528c0fbcd5e0cc8981d9875fc9536e72fbfaf9599fea49bf868e98edea"
+    },
+    {
+      "name": "libarchphene_wayland_shm_client.so",
+      "bytes": 13792,
+      "sha256": "ec89ea5340cd7254d2802f30427bedc8818554efa98432637e14b2e229dd744a"
+    },
+    {
+      "name": "libarchphene_wayland_socket_probe.so",
+      "bytes": 8520,
+      "sha256": "b21a439e5694a47213007770da793d74b7ccca8294264f9d4eee17615b526b6f"
+    },
+    {
+      "name": "libarchphene_wayland_xdg_client.so",
+      "bytes": 23048,
+      "sha256": "efa387021b2353f03f7fa584af69e92b41024b943c459b6bb747c283e9eaa465"
+    },
+    {
+      "name": "libarchphene_xdg_shell.so",
+      "bytes": 113832,
+      "sha256": "a64c84d26477bd809cd0c1bf1ca9e44cf63d06d1dfc0552ffe63c5b68758e845"
+    }
+  ]
+}

@@ -6,7 +6,7 @@ Archphene runs a Linux desktop application as a child process of a normal Androi
 
 ### Archphene manager
 
-The manager discovers wrapped Linux applications through Android package metadata. It provides package search, update checks, version selection and pinning, prerelease policy, repository settings, and verified APK installation. APK replacement plumbing is tested, but GitHub Releases discovery and download are not yet a complete production self-update flow.
+The manager discovers wrapped Linux applications through Android package metadata. It provides package search, update checks, version selection and pinning, prerelease policy, repository settings, verified APK installation, and GitHub Releases self-update discovery. Release assets are checksum-validated, package/signer-validated, and installed through Android confirmation.
 
 The target product flow is:
 
@@ -18,7 +18,7 @@ Arch repository metadata
   -> Android PackageInstaller
 ```
 
-On-device arbitrary package conversion is not complete. Current KCalc and Mousepad wrappers are produced by repository development scripts.
+The full on-device transaction is proven for x86_64 KCalc: Arch resolution, signature verification, staging, closure reduction, wrapper assembly, persistent Android Keystore signing, and PackageInstaller installation. Mousepad and broad arbitrary-package support still require additional toolkit templates, ABI support, and capability policy.
 
 ### Wrapper application
 

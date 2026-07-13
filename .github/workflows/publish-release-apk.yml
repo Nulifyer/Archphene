@@ -20,7 +20,7 @@ concurrency:
 jobs:
   publish:
     name: Build and attach signed APK
-    runs-on: windows-latest
+    runs-on: ubuntu-24.04
     env:
       RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
       GH_TOKEN: ${{ github.token }}
@@ -45,61 +45,60 @@ jobs:
         uses: android-actions/setup-android@v3
 
       - name: Install Android platform and build tools
-        shell: pwsh
-        run: |
-          sdkmanager.bat "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+        run: sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Verify Linux container engine
+        run: docker version
+
+      - name: Build verified Arch runtime and patched glibc
+        run: bash scripts/build-ci-package-runtime.sh
 
       - name: Resolve release version
-        shell: pwsh
         run: |
-          if ($env:RELEASE_TAG -notmatch '^v(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?$') {
-            throw "Release tag must use vMAJOR.MINOR.PATCH syntax"
-          }
-          $versionName = $env:RELEASE_TAG.Substring(1)
-          $runNumber = [int64]$env:GITHUB_RUN_NUMBER
-          if ($runNumber -ge 1000000000) {
-            throw "GitHub run number exceeds Android versionCode range"
-          }
-          $versionCode = 1000000000 + $runNumber
-          "VERSION_NAME=$versionName" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          "VERSION_CODE=$versionCode" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          "APK_NAME=Archphene-$versionName.apk" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          if [[ "$RELEASE_TAG" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)([-+][0-9A-Za-z.-]+)?$ ]]; then
+            version_name="${RELEASE_TAG#v}"
+          else
+            echo "Release tag must use vMAJOR.MINOR.PATCH syntax" >&2
+            exit 1
+          fi
+          if (( GITHUB_RUN_NUMBER >= 1000000000 )); then
+            echo "GitHub run number exceeds Android versionCode range" >&2
+            exit 1
+          fi
+          {
+            echo "VERSION_NAME=$version_name"
+            echo "VERSION_CODE=$((1000000000 + GITHUB_RUN_NUMBER))"
+            echo "APK_NAME=Archphene-$version_name.apk"
+          } >> "$GITHUB_ENV"
 
       - name: Restore release signing key
-        shell: pwsh
         run: |
-          foreach ($name in @("KEYSTORE_BASE64", "KEYSTORE_PASSWORD", "KEY_ALIAS", "KEY_PASSWORD")) {
-            if ([string]::IsNullOrWhiteSpace((Get-Item "Env:$name").Value)) {
-              throw "Required release signing secret $name is missing"
+          for name in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            [[ -n "${!name}" ]] || {
+              echo "Required release signing secret $name is missing" >&2
+              exit 1
             }
-          }
-          $keyPath = Join-Path $env:RUNNER_TEMP "archphene-release.keystore"
-          [IO.File]::WriteAllBytes($keyPath, [Convert]::FromBase64String($env:KEYSTORE_BASE64))
-          "KEYSTORE_PATH=$keyPath" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          done
+          key_path="$RUNNER_TEMP/archphene-release.keystore"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$key_path"
+          echo "KEYSTORE_PATH=$key_path" >> "$GITHUB_ENV"
 
-      - name: Build signed Archphene APK
-        shell: pwsh
-        run: |
-          ./scripts/build-install-linux-manager-stub.ps1 -SkipInstall -ReleaseBuild `
-            -AndroidSdk $env:ANDROID_HOME `
-            -VersionCode ([int]$env:VERSION_CODE) `
-            -VersionName $env:VERSION_NAME `
-            -KeystorePath $env:KEYSTORE_PATH `
-            -KeystorePassword $env:KEYSTORE_PASSWORD `
-            -KeyAlias $env:KEY_ALIAS `
-            -KeyPassword $env:KEY_PASSWORD
+      - name: Build signed Archphene APK on Linux
+        run: bash scripts/build-linux-manager-apk.sh
 
       - name: Verify and name release artifact
-        shell: pwsh
         run: |
-          $source = "prototypes/linux-app-manager-stub/out/archpheneos-manager.apk"
-          $asset = Join-Path $env:RUNNER_TEMP $env:APK_NAME
-          Copy-Item -LiteralPath $source -Destination $asset
-          & "$env:ANDROID_HOME/build-tools/36.0.0/apksigner.bat" verify --verbose --print-certs $asset
-          if ($LASTEXITCODE -ne 0) { throw "APK signature verification failed" }
-          $hash = (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  $env:APK_NAME" | Set-Content -LiteralPath "$asset.sha256" -NoNewline -Encoding ascii
-          "APK_PATH=$asset" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          source="prototypes/linux-app-manager-stub/out-linux/archphene.apk"
+          asset="$RUNNER_TEMP/$APK_NAME"
+          cp "$source" "$asset"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" \
+            verify --verbose --print-certs "$asset"
+          sha256sum "$asset" | sed "s|  .*|  $APK_NAME|" \
+            > "$asset.sha256"
+          {
+            echo "APK_PATH=$asset"
+            echo "APK_SHA256_PATH=$asset.sha256"
+          } >> "$GITHUB_ENV"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
@@ -107,10 +106,8 @@ jobs:
           name: Archphene-${{ env.VERSION_NAME }}
           path: |
             ${{ env.APK_PATH }}
-            ${{ env.APK_PATH }}.sha256
+            ${{ env.APK_SHA256_PATH }}
           if-no-files-found: error
 
       - name: Attach APK to GitHub Release
-        shell: pwsh
-        run: |
-          gh release upload $env:RELEASE_TAG $env:APK_PATH "$env:APK_PATH.sha256" --clobber
+        run: gh release upload "$RELEASE_TAG" "$APK_PATH" "$APK_SHA256_PATH" --clobber

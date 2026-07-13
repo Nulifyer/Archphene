@@ -97,6 +97,7 @@ public final class MainActivity extends Activity {
         handleTestPackageRuntimeIntent();
         handleTestWrapperSigningIntent();
         handleTestWrapperAssemblyIntent();
+        handleTestGitHubReleaseIntent();
     }
 
     @Override
@@ -385,15 +386,23 @@ public final class MainActivity extends Activity {
         details.addView(runtimeView, matchWrap());
         top.addView(details, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
 
-        Button version = actionButton(versionButtonText(app, state), versionButtonIcon(state));
-        version.setAllCaps(false);
-        version.setContentDescription(versionButtonDescription(app, state));
-        version.setEnabled(!app.updateUrl.isEmpty() && !"checking".equals(state.status));
-        version.setOnClickListener(view -> checkOne(app));
-        styleVersionButton(version, state);
-        top.addView(version, new LinearLayout.LayoutParams(dp(126), dp(42)));
+        boolean installing = app.packageName.equals(activeInstallPackage)
+                && activeInstallOperation != null;
+        if (installing) {
+            top.addView(installingAction(activeInstallPhase == ApkUpdateInstaller.Phase.DOWNLOAD
+                    ? "Updating " + activeInstallPercent + "%" : "Updating..."),
+                    new LinearLayout.LayoutParams(dp(126), dp(42)));
+        } else {
+            Button version = actionButton(versionButtonText(app, state), versionButtonIcon(state));
+            version.setAllCaps(false);
+            version.setContentDescription(versionButtonDescription(app, state));
+            version.setEnabled(!app.updateUrl.isEmpty() && !"checking".equals(state.status));
+            version.setOnClickListener(view -> checkOne(app));
+            styleVersionButton(version, state);
+            top.addView(version, new LinearLayout.LayoutParams(dp(126), dp(42)));
+        }
         card.addView(top, matchWrap());
-        if (app.packageName.equals(activeInstallPackage) && activeInstallOperation != null) {
+        if (installing) {
             LinearLayout transfer = new LinearLayout(this);
             transfer.setGravity(Gravity.CENTER_VERTICAL);
             TwoStageProgressView progress = new TwoStageProgressView(this,
@@ -742,6 +751,25 @@ public final class MainActivity extends Activity {
         buildOperation.setCancellationHook(worker::interrupt);
         worker.start();
     }
+    private View installingAction(String label) {
+        LinearLayout action = new LinearLayout(this);
+        action.setGravity(Gravity.CENTER);
+        action.setPadding(dp(8), 0, dp(8), 0);
+        action.setBackground(rounded(COLOR_SURFACE_ACTIVE, 18));
+        ProgressBar spinner = new ProgressBar(this, null,
+                android.R.attr.progressBarStyleSmall);
+        spinner.setIndeterminateTintList(ColorStateList.valueOf(COLOR_PRIMARY));
+        action.addView(spinner, new LinearLayout.LayoutParams(dp(20), dp(20)));
+        TextView status = text(label, 11, COLOR_PRIMARY);
+        status.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams textParams =
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        textParams.leftMargin = dp(6);
+        action.addView(status, textParams);
+        action.setContentDescription(label);
+        return action;
+    }
+
     private String versionButtonText(InstalledLinuxAppCatalog.Entry app,
             ManagerStateStore.Snapshot state) {
         if ("checking".equals(state.status)) return "Checking";
@@ -952,11 +980,9 @@ public final class MainActivity extends Activity {
                 if ("archphene".equals(app.sourceType)) {
                     found = new ArrayList<>();
                     found.add(app.sourceVersion);
-                    for (WrapperRepositoryClient.Artifact artifact
-                            : WrapperRepositoryClient.versions(this, app.packageName)) {
+                    for (GitHubReleaseClient.Artifact artifact
+                            : GitHubReleaseClient.versions(this)) {
                         if (!found.contains(artifact.version)) found.add(artifact.version);
-                        ManagerStateStore.setVersionHealth(this, app.packageName,
-                                artifact.version, artifact.health);
                     }
                 } else {
                     String packageName = app.sourceId.substring(app.sourceId.lastIndexOf('/') + 1);
@@ -1006,6 +1032,12 @@ public final class MainActivity extends Activity {
         }
         new Thread(() -> {
             try {
+                if ("archphene".equals(app.sourceType)) {
+                    GitHubReleaseClient.Artifact release =
+                            GitHubReleaseClient.find(this, version);
+                    runOnUiThread(() -> startManagerReleaseInstall(app, release));
+                    return;
+                }
                 WrapperRepositoryClient.Artifact artifact = WrapperRepositoryClient.find(
                         this, app.packageName, version);
                 runOnUiThread(() -> {
@@ -1021,6 +1053,27 @@ public final class MainActivity extends Activity {
         }, "wrapper-artifact-lookup").start();
     }
 
+    private void startManagerReleaseInstall(InstalledLinuxAppCatalog.Entry app,
+            GitHubReleaseClient.Artifact release) {
+        showAppsPage();
+        activeInstallPackage = app.packageName;
+        activeInstallOperation = ApkUpdateInstaller.installWithProgress(this,
+                release.apkUrl, release.sha256, app.packageName,
+                (phase, percent, status, terminal) -> {
+                    activeInstallPhase = phase;
+                    activeInstallPercent = percent;
+                    activeInstallStatus = status;
+                    if (terminal) {
+                        activeInstallOperation = null;
+                        activeInstallPackage = "";
+                        showBanner(status, phase == ApkUpdateInstaller.Phase.ERROR);
+                        loadCatalog();
+                    } else if (currentPage == 0) {
+                        renderAppList();
+                    }
+                });
+        renderAppList();
+    }
     private void startArtifactInstall(InstalledLinuxAppCatalog.Entry app,
             WrapperRepositoryClient.Artifact artifact) {
         showAppsPage();
@@ -1242,6 +1295,31 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private void handleTestGitHubReleaseIntent() {
+        if (!getIntent().getBooleanExtra("archphene_test_github_releases", false)) return;
+        new Thread(() -> {
+            try {
+                GitHubReleaseClient.verifyParserForTest();
+                String testHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+                if (!testHash.equals(GitHubReleaseClient.parseChecksum(
+                        testHash + "  Archphene-1.0.0.apk",
+                        "Archphene-1.0.0.apk"))) {
+                    throw new SecurityException("Checksum parser mismatch");
+                }
+                if (GitHubReleaseClient.compareVersions("1.1.0", "1.0.9") <= 0
+                        || GitHubReleaseClient.compareVersions("1.0.0-rc1", "1.0.0") >= 0) {
+                    throw new SecurityException("Release version ordering mismatch");
+                }
+                int count = GitHubReleaseClient.versions(this).size();
+                runOnUiThread(() -> showBanner("GitHub Releases discovery passed: "
+                        + count + " eligible releases", false));
+            } catch (Exception error) {
+                android.util.Log.e("ArchpheneManager", "GitHub Releases discovery failed", error);
+                runOnUiThread(() -> showBanner("GitHub Releases discovery failed: "
+                        + error.getMessage(), true));
+            }
+        }, "archphene-github-release-test").start();
+    }
     private void handleTestWrapperAssemblyIntent() {
         String sourcePackage = getIntent().getStringExtra("archphene_test_assemble_qt");
         if (sourcePackage == null) return;

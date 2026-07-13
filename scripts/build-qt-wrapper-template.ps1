@@ -39,9 +39,37 @@ Run-Native { & (Join-Path $BuildTools "d8.bat") --lib (Join-Path $Sdk "platforms
 Copy-Item (Join-Path $Out "dex/classes.dex") (Join-Path $Out "stage/classes.dex")
 Copy-Item (Join-Path $App "assets/fonts.conf") (Join-Path $Out "stage/assets/fonts.conf")
 Copy-Item (Join-Path $App "assets/kcalc.PKGINFO") (Join-Path $Out "stage/assets/kcalc.PKGINFO")
-Get-ChildItem (Join-Path $App "lib/x86_64") -File | Where-Object {
-    $_.Name -like "libarchphene_*" -and $_.Name -notin @("libarchphene_kcalc.so","libarchphene_ld.so","libarchphene_ld.so.orig","libarchphene_syscall_probe.so")
-} | Copy-Item -Destination (Join-Path $Out "stage/lib/x86_64")
+$PrebuiltBridge = Join-Path $Root "prebuilt/qt-bridge/x86_64"
+if (Test-Path -LiteralPath $PrebuiltBridge -PathType Container) {
+    $PrebuiltManifestPath = Join-Path $Root "prebuilt/qt-bridge/manifest.json"
+    if (-not (Test-Path -LiteralPath $PrebuiltManifestPath -PathType Leaf)) {
+        throw "Prebuilt bridge manifest missing: $PrebuiltManifestPath"
+    }
+    $PrebuiltManifest = Get-Content -LiteralPath $PrebuiltManifestPath -Raw | ConvertFrom-Json
+    if ($PrebuiltManifest.schema -ne "org.archphene.prebuilt-bridge.v1" -or
+            $PrebuiltManifest.architecture -ne "x86_64") {
+        throw "Unsupported prebuilt bridge manifest"
+    }
+    $ExpectedNames = @($PrebuiltManifest.files | ForEach-Object { $_.name } | Sort-Object)
+    $ActualNames = @(Get-ChildItem -LiteralPath $PrebuiltBridge -File -Filter "*.so" |
+        ForEach-Object { $_.Name } | Sort-Object)
+    if (($ExpectedNames -join ",") -ne ($ActualNames -join ",")) {
+        throw "Prebuilt bridge files do not match manifest"
+    }
+    foreach ($Entry in $PrebuiltManifest.files) {
+        $Source = Join-Path $PrebuiltBridge $Entry.name
+        $Length = (Get-Item -LiteralPath $Source).Length
+        $Hash = (Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($Length -ne [int64]$Entry.bytes -or $Hash -ne $Entry.sha256) {
+            throw "Prebuilt bridge verification failed: $($Entry.name)"
+        }
+        Copy-Item -LiteralPath $Source -Destination (Join-Path $Out "stage/lib/x86_64")
+    }
+} else {
+    Get-ChildItem (Join-Path $App "lib/x86_64") -File | Where-Object {
+        $_.Name -like "libarchphene_*" -and $_.Name -notin @("libarchphene_kcalc.so","libarchphene_ld.so","libarchphene_ld.so.orig","libarchphene_syscall_probe.so")
+    } | Copy-Item -Destination (Join-Path $Out "stage/lib/x86_64")
+}
 Push-Location (Join-Path $Out "stage")
 $entries = Get-ChildItem -Recurse -File | ForEach-Object { $_.FullName.Substring((Get-Location).Path.Length + 1) }
 Run-Native { & jar uf "..\unsigned.apk" $entries } "add template bridge files"
