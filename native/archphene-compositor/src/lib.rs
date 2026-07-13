@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io;
 use std::mem::{size_of, zeroed};
@@ -107,7 +108,7 @@ struct XdgSurfaceData {
 #[derive(Default)]
 struct XdgSurfaceState {
     role_active: bool,
-    pending_configure: Option<u32>,
+    pending_configures: VecDeque<u32>,
     acknowledged_configure: Option<u32>,
 }
 
@@ -457,15 +458,19 @@ impl Dispatch<XdgSurface, XdgSurfaceData> for CompositorState {
             }
             xdg_surface::Request::AckConfigure { serial } => {
                 let mut xdg_state = data.state.lock().unwrap_or_else(|error| error.into_inner());
-                if xdg_state.pending_configure != Some(serial) {
+                let Some(position) = xdg_state
+                    .pending_configures
+                    .iter()
+                    .position(|pending| *pending == serial)
+                else {
                     resource.post_error(
                         xdg_surface::Error::InvalidSerial,
-                        "ack_configure did not match the pending serial",
+                        "ack_configure did not match a pending serial",
                     );
                     return;
-                }
+                };
+                xdg_state.pending_configures.drain(..=position);
                 xdg_state.acknowledged_configure = Some(serial);
-                xdg_state.pending_configure = None;
                 if let Some(surface_data) = data.wl_surface.data::<SurfaceData>() {
                     surface_data
                         .inner
@@ -548,7 +553,7 @@ impl Dispatch<XdgToplevel, XdgToplevelData> for CompositorState {
                     .lock()
                     .unwrap_or_else(|error| error.into_inner());
                 xdg_state.role_active = false;
-                xdg_state.pending_configure = None;
+                xdg_state.pending_configures.clear();
                 xdg_state.acknowledged_configure = None;
             }
             if let Some(wl_surface_data) = surface_data.wl_surface.data::<SurfaceData>() {
@@ -1113,13 +1118,13 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                             .state
                             .lock()
                             .unwrap_or_else(|error| error.into_inner());
-                        if xdg_state.pending_configure.is_none()
+                        if xdg_state.pending_configures.is_empty()
                             && xdg_state.acknowledged_configure.is_none()
                         {
                             state.next_configure_serial =
                                 state.next_configure_serial.wrapping_add(1).max(1);
                             let serial = state.next_configure_serial;
-                            xdg_state.pending_configure = Some(serial);
+                            xdg_state.pending_configures.push_back(serial);
                             toplevel.configure(0, 0, Vec::new());
                             xdg_surface.configure(serial);
                         }
@@ -1331,6 +1336,59 @@ impl CompositorCore {
 
     pub fn xdg_ack_count(&self) -> u32 {
         self.state.xdg_ack_count
+    }
+
+    fn focused_xdg_resources(&self) -> Option<(XdgSurface, XdgToplevel)> {
+        let surface = self
+            .state
+            .keyboard_focus_surface
+            .as_ref()
+            .or(self.state.pointer_focus_surface.as_ref())?;
+        let surface_data = surface.data::<SurfaceData>()?;
+        let surface = surface_data
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        Some((surface.xdg_surface.clone()?, surface.xdg_toplevel.clone()?))
+    }
+
+    pub fn configure_focused_toplevel(&mut self, width: i32, height: i32) -> u32 {
+        if width <= 0 || height <= 0 {
+            return 0;
+        }
+        let Some((xdg_surface, toplevel)) = self.focused_xdg_resources() else {
+            return 0;
+        };
+        let Some(xdg_data) = xdg_surface.data::<XdgSurfaceData>() else {
+            return 0;
+        };
+        self.state.next_configure_serial = self.state.next_configure_serial.wrapping_add(1).max(1);
+        let serial = self.state.next_configure_serial;
+        xdg_data
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .pending_configures
+            .push_back(serial);
+        toplevel.configure(width, height, Vec::new());
+        xdg_surface.configure(serial);
+        serial
+    }
+
+    pub fn focused_pending_configure_count(&self) -> u32 {
+        let Some((xdg_surface, _)) = self.focused_xdg_resources() else {
+            return 0;
+        };
+        let Some(xdg_data) = xdg_surface.data::<XdgSurfaceData>() else {
+            return 0;
+        };
+        let count = xdg_data
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .pending_configures
+            .len();
+        u32::try_from(count).unwrap_or(u32::MAX)
     }
 
     pub fn seat_bind_count(&self) -> u32 {
@@ -1835,6 +1893,32 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeConfigureFocusedToplevel(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+    width: i32,
+    height: i32,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+        return -1;
+    };
+    i32::try_from(core.configure_focused_toplevel(width, height)).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativePendingConfigureCount(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+        return -1;
+    };
+    i32::try_from(core.focused_pending_configure_count()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeSeatBindCount(
     _environment: *mut std::ffi::c_void,
     _activity: *mut std::ffi::c_void,
@@ -2122,6 +2206,7 @@ mod tests {
         assert_eq!(core.xdg_surface_count(), 0);
         assert_eq!(core.xdg_toplevel_count(), 0);
         assert_eq!(core.xdg_ack_count(), 0);
+        assert_eq!(core.focused_pending_configure_count(), 0);
         assert_eq!(core.seat_bind_count(), 0);
         assert_eq!(core.pointer_count(), 0);
         assert_eq!(core.pointer_event_count(), 0);

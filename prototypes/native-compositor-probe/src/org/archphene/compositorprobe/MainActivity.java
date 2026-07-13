@@ -42,6 +42,9 @@ public final class MainActivity extends Activity {
     private static native int nativeXdgSurfaceCount(long handle);
     private static native int nativeXdgToplevelCount(long handle);
     private static native int nativeXdgAckCount(long handle);
+    private static native int nativeConfigureFocusedToplevel(
+            long handle, int width, int height);
+    private static native int nativePendingConfigureCount(long handle);
     private static native int nativeSeatBindCount(long handle);
     private static native int nativePointerCount(long handle);
     private static native int nativeKeyboardCount(long handle);
@@ -251,7 +254,7 @@ public final class MainActivity extends Activity {
                     throw new IllegalStateException("xdg toplevel role was not constructed");
                 }
 
-                output.write(ackXdgConfigureAndSyncRequest(configureSerial));
+                output.write(ackXdgConfigureAndSyncRequest(configureSerial, 25));
                 output.flush();
                 dispatch(core);
                 readUntilCallback(input, 25);
@@ -338,10 +341,51 @@ public final class MainActivity extends Activity {
                     throw new IllegalStateException("wl_keyboard key lifecycle was incomplete");
                 }
 
+                int firstResizeSerial = nativeConfigureFocusedToplevel(core, 8, 4);
+                int secondResizeSerial = nativeConfigureFocusedToplevel(core, 12, 6);
+                if (firstResizeSerial <= 0 || secondResizeSerial <= firstResizeSerial) {
+                    throw new IllegalStateException("xdg resize serial generation failed");
+                }
+                output.write(syncRequest(38));
+                output.flush();
+                dispatch(core);
+                readQueuedConfiguresUntilCallback(
+                        input,
+                        22,
+                        23,
+                        38,
+                        firstResizeSerial,
+                        8,
+                        4,
+                        secondResizeSerial,
+                        12,
+                        6);
+                if (nativePendingConfigureCount(core) != 2) {
+                    throw new IllegalStateException("xdg configure queue did not retain both entries");
+                }
+
+                output.write(ackXdgConfigureAndSyncRequest(firstResizeSerial, 39));
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 39);
+                if (nativePendingConfigureCount(core) != 1
+                        || nativeXdgAckCount(core) != 2) {
+                    throw new IllegalStateException("first queued configure ack was not retained");
+                }
+
+                output.write(ackXdgConfigureAndSyncRequest(secondResizeSerial, 40));
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 40);
+                if (nativePendingConfigureCount(core) != 0
+                        || nativeXdgAckCount(core) != 3) {
+                    throw new IllegalStateException("xdg configure queue did not drain");
+                }
+
                 output.write(unmapXdgToplevelAndSyncRequest());
                 output.flush();
                 dispatch(core);
-                readKeyboardUnmapUntilCallback(input, 36, 20, 38);
+                readKeyboardUnmapUntilCallback(input, 36, 20, 41);
                 if (nativeLastFrameWidth(core) != 0
                         || nativeLastFrameHeight(core) != 0
                         || nativeKeyboardEventCount(core) != 7) {
@@ -351,7 +395,7 @@ public final class MainActivity extends Activity {
                 output.write(remapXdgToplevelAndSyncRequest());
                 output.flush();
                 dispatch(core);
-                readKeyboardRemapUntilCallback(input, 36, 20, 28, 39);
+                readKeyboardRemapUntilCallback(input, 36, 20, 28, 42);
                 if (nativeLastFrameWidth(core) != 4
                         || nativeLastFrameHeight(core) != 2
                         || nativeLastFrameChecksum(core) != 656
@@ -428,7 +472,7 @@ public final class MainActivity extends Activity {
                 output.write(releaseInputAndSyncRequest());
                 output.flush();
                 dispatch(core);
-                readUntilCallback(input, 40);
+                readUntilCallback(input, 43);
                 if (nativePointerCount(core) != 0 || nativeKeyboardCount(core) != 0) {
                     throw new IllegalStateException("seat input resources were not released");
                 }
@@ -436,11 +480,11 @@ public final class MainActivity extends Activity {
                 output.write(destroySecondShmResourcesAndSyncRequest());
                 output.flush();
                 dispatch(core);
-                readUntilCallback(input, 41);
+                readUntilCallback(input, 44);
                 output.write(destroyXdgToplevelAndSyncRequest());
                 output.flush();
                 dispatch(core);
-                readUntilCallback(input, 42);
+                readUntilCallback(input, 45);
                 if (nativeXdgSurfaceCount(core) != 0
                         || nativeXdgToplevelCount(core) != 0
                         || nativeSurfaceCount(core) != 0
@@ -546,12 +590,20 @@ public final class MainActivity extends Activity {
         return request.array();
     }
 
-    private static byte[] ackXdgConfigureAndSyncRequest(int configureSerial) {
+    private static byte[] ackXdgConfigureAndSyncRequest(
+            int configureSerial, int callbackId) {
         ByteBuffer request = buffer(24);
         putHeader(request, 22, 4, 12);
         request.putInt(configureSerial);
         putHeader(request, 1, 0, 12);
-        request.putInt(25);
+        request.putInt(callbackId);
+        return request.array();
+    }
+
+    private static byte[] syncRequest(int callbackId) {
+        ByteBuffer request = buffer(12);
+        putHeader(request, 1, 0, 12);
+        request.putInt(callbackId);
         return request.array();
     }
 
@@ -614,7 +666,7 @@ public final class MainActivity extends Activity {
         request.putInt(0);
         putHeader(request, 20, 6, 8);
         putHeader(request, 1, 0, 12);
-        request.putInt(38);
+        request.putInt(41);
         return request.array();
     }
 
@@ -631,7 +683,7 @@ public final class MainActivity extends Activity {
         request.putInt(2);
         putHeader(request, 20, 6, 8);
         putHeader(request, 1, 0, 12);
-        request.putInt(39);
+        request.putInt(42);
         return request.array();
     }
 
@@ -641,7 +693,7 @@ public final class MainActivity extends Activity {
         putHeader(request, 36, 0, 8);
         putHeader(request, 32, 3, 8);
         putHeader(request, 1, 0, 12);
-        request.putInt(40);
+        request.putInt(43);
         return request.array();
     }
 
@@ -650,7 +702,7 @@ public final class MainActivity extends Activity {
         putHeader(request, 28, 0, 8);
         putHeader(request, 26, 1, 8);
         putHeader(request, 1, 0, 12);
-        request.putInt(41);
+        request.putInt(44);
         return request.array();
     }
 
@@ -661,7 +713,7 @@ public final class MainActivity extends Activity {
         putHeader(request, 20, 0, 8);
         putHeader(request, 18, 0, 8);
         putHeader(request, 1, 0, 12);
-        request.putInt(42);
+        request.putInt(45);
         return request.array();
     }
 
@@ -1047,6 +1099,56 @@ public final class MainActivity extends Activity {
         readPointerFrame(input, pointerId);
         return serial;
     }
+    private static void readQueuedConfiguresUntilCallback(
+            FileInputStream input,
+            int xdgSurfaceId,
+            int toplevelId,
+            int callbackId,
+            int firstSerial,
+            int firstWidth,
+            int firstHeight,
+            int secondSerial,
+            int secondWidth,
+            int secondHeight)
+            throws Exception {
+        int completed = 0;
+        boolean awaitingSurfaceConfigure = false;
+        while (true) {
+            Message message = readMessage(input);
+            throwIfDisplayError(message);
+            if (message.objectId == toplevelId && message.opcode == 0) {
+                if (awaitingSurfaceConfigure || completed >= 2 || message.body.length < 12) {
+                    throw new IllegalStateException("invalid queued xdg_toplevel.configure event");
+                }
+                ByteBuffer body = ByteBuffer.wrap(message.body).order(ByteOrder.nativeOrder());
+                int expectedWidth = completed == 0 ? firstWidth : secondWidth;
+                int expectedHeight = completed == 0 ? firstHeight : secondHeight;
+                if (body.getInt() != expectedWidth || body.getInt() != expectedHeight) {
+                    throw new IllegalStateException("queued xdg_toplevel.configure size mismatch");
+                }
+                awaitingSurfaceConfigure = true;
+            } else if (message.objectId == xdgSurfaceId && message.opcode == 0) {
+                if (!awaitingSurfaceConfigure || message.body.length != 4) {
+                    throw new IllegalStateException("orphan queued xdg_surface.configure event");
+                }
+                int serial = ByteBuffer.wrap(message.body)
+                        .order(ByteOrder.nativeOrder()).getInt();
+                int expectedSerial = completed == 0 ? firstSerial : secondSerial;
+                if (serial != expectedSerial) {
+                    throw new IllegalStateException("queued xdg configure serial mismatch");
+                }
+                completed++;
+                awaitingSurfaceConfigure = false;
+            }
+            if (message.objectId == callbackId && message.opcode == 0) {
+                if (completed != 2 || awaitingSurfaceConfigure) {
+                    throw new IllegalStateException("xdg configure queue events were incomplete");
+                }
+                return;
+            }
+        }
+    }
+
     private static int readXdgConfigureUntilCallback(
             FileInputStream input, int xdgSurfaceId, int toplevelId, int callbackId)
             throws Exception {
