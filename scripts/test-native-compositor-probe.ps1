@@ -42,7 +42,7 @@ do {
             $tapSent = $true
         }
     }
-    if ($output.Contains("registry, Android bitmap, xdg toplevel, keyboard input, MotionEvent pointer, nested popup grabs, synchronized subsurface trees, committed parent geometry, and clipboard selection lifecycle complete")) {
+    if ($output.Contains("registry, Android bitmap, xdg toplevel, keyboard input, MotionEvent pointer, nested popup grabs, synchronized subsurface trees, committed parent geometry, and bidirectional demand-driven Android clipboard complete")) {
         Write-Host "Native compositor Android MotionEvent probe passed on $Serial ($AndroidAbi)."
         exit 0
     }

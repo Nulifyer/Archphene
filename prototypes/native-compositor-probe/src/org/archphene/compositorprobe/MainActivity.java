@@ -1,6 +1,9 @@
 package org.archphene.compositorprobe;
 
 import android.app.Activity;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.os.Bundle;
@@ -36,6 +39,8 @@ public final class MainActivity extends Activity {
     private static native int nativeSendShmPoolRequest(
             int socketFd, int poolId, int poolSize, int callbackId);
     private static native int nativeReceiveKeyboardKeymap(int socketFd, int keyboardId);
+    private static native int nativeSendDataOfferReceive(int socketFd, int offerId);
+    private static native int nativeReceiveDataSourceSend(int socketFd, int sourceId);
     private static native int nativeDispatchOnce(long handle);
     private static native int nativeCompositorBindCount(long handle);
     private static native int nativeSubcompositorBindCount(long handle);
@@ -63,6 +68,10 @@ public final class MainActivity extends Activity {
     private static native int nativeDataSourceCount(long handle);
     private static native int nativeDataDeviceCount(long handle);
     private static native int nativeDataOfferCount(long handle);
+    private static native int nativeSetClipboardActive(long handle, boolean active);
+    private static native int nativeOfferAndroidClipboardText(long handle);
+    private static native int nativeTakeAndroidPasteFd(long handle);
+    private static native int nativeTakeLinuxCopyFd(long handle);
     private static native int nativePointerCount(long handle);
     private static native int nativeKeyboardCount(long handle);
     private static native int nativeKeyboardEventCount(long handle);
@@ -824,14 +833,48 @@ public final class MainActivity extends Activity {
                 output.flush();
                 dispatch(core);
                 readUntilCallback(input, 86);
+                readDeleteId(input, 86);
                 if (nativeDataDeviceManagerBindCount(core) != 1) {
                     throw new IllegalStateException(
                             "wl_data_device_manager bind was not dispatched");
                 }
 
+                if (nativeSetClipboardActive(core, true) != 1) {
+                    throw new IllegalStateException("Android clipboard broker did not activate");
+                }
+                ClipboardManager clipboard = (ClipboardManager)
+                        getSystemService(Context.CLIPBOARD_SERVICE);
+
                 output.write(createDataSelectionAndSyncRequest(keyPressSerial));
                 output.flush();
                 dispatch(core);
+                String linuxClipboard = "ARCHPHENE_WAYLAND_TO_ANDROID";
+                if (nativeReceiveDataSourceSend(client.getFd(), 87)
+                        != linuxClipboard.getBytes(StandardCharsets.UTF_8).length) {
+                    throw new IllegalStateException(
+                            "Wayland clipboard source FD transfer failed");
+                }
+                int linuxCopyFd = nativeTakeLinuxCopyFd(core);
+                if (linuxCopyFd < 0 || nativeTakeLinuxCopyFd(core) != -1
+                        || nativeTakeAndroidPasteFd(core) != -1) {
+                    throw new IllegalStateException(
+                            "Linux clipboard copy request queue was invalid");
+                }
+                try (ParcelFileDescriptor source = ParcelFileDescriptor.adoptFd(linuxCopyFd);
+                        FileInputStream sourceStream =
+                                new FileInputStream(source.getFileDescriptor())) {
+                    byte[] linuxClipboardBytes = readExact(
+                            sourceStream,
+                            linuxClipboard.getBytes(StandardCharsets.UTF_8).length);
+                    if (!linuxClipboard.equals(
+                            new String(linuxClipboardBytes, StandardCharsets.UTF_8))) {
+                        throw new IllegalStateException(
+                                "Wayland clipboard copy payload mismatch");
+                    }
+                }
+                clipboard.setPrimaryClip(
+                        ClipData.newPlainText("Archphene Linux app", linuxClipboard));
+
                 int dataOfferId = readDataSelectionUntilCallback(input, 88, 89);
                 if (nativeDataSourceCount(core) != 1
                         || nativeDataDeviceCount(core) != 1
@@ -845,13 +888,68 @@ public final class MainActivity extends Activity {
                 dispatch(core);
                 readClearedDataSelectionUntilCallback(input, 87, 88, 90);
 
-                output.write(destroyDataSelectionAndSyncRequest(dataOfferId));
+                String expectedClipboard = "ARCHPHENE_ANDROID_TO_WAYLAND";
+                clipboard.setPrimaryClip(
+                        ClipData.newPlainText("Archphene probe", expectedClipboard));
+                if (nativeOfferAndroidClipboardText(core) != 1
+                        || nativeTakeAndroidPasteFd(core) != -1
+                        || nativeTakeLinuxCopyFd(core) != -1) {
+                    throw new IllegalStateException(
+                            "Android clipboard was accessed before a Wayland receive request");
+                }
+                output.write(syncRequest(91));
                 output.flush();
                 dispatch(core);
-                readUntilCallback(input, 91);
+                int androidOfferId = readDataSelectionUntilCallback(input, 88, 91);
+
+                int clientReadFd = nativeSendDataOfferReceive(client.getFd(), androidOfferId);
+                if (clientReadFd < 0) {
+                    throw new IllegalStateException("Wayland clipboard receive FD transfer");
+                }
+                dispatch(core);
+                int androidWriteFd = nativeTakeAndroidPasteFd(core);
+                if (androidWriteFd < 0 || nativeTakeAndroidPasteFd(core) != -1) {
+                    throw new IllegalStateException(
+                            "Android clipboard paste request queue was invalid");
+                }
+                CharSequence clipboardValue = clipboard.getPrimaryClip()
+                        .getItemAt(0).coerceToText(this);
+                byte[] clipboardBytes = clipboardValue.toString()
+                        .getBytes(StandardCharsets.UTF_8);
+                try (ParcelFileDescriptor destination =
+                                ParcelFileDescriptor.adoptFd(androidWriteFd);
+                        FileOutputStream destinationStream =
+                                new FileOutputStream(destination.getFileDescriptor())) {
+                    destinationStream.write(clipboardBytes);
+                }
+                try (ParcelFileDescriptor source = ParcelFileDescriptor.adoptFd(clientReadFd);
+                        FileInputStream sourceStream =
+                                new FileInputStream(source.getFileDescriptor())) {
+                    byte[] receivedClipboard = readExact(sourceStream, clipboardBytes.length);
+                    if (!java.util.Arrays.equals(receivedClipboard, clipboardBytes)) {
+                        throw new IllegalStateException(
+                                "Android clipboard paste payload mismatch");
+                    }
+                }
+
+                if (nativeSetClipboardActive(core, false) != 0) {
+                    throw new IllegalStateException("Android clipboard broker did not deactivate");
+                }
+                output.write(syncRequest(92));
+                output.flush();
+                dispatch(core);
+                readNullSelectionUntilCallback(input, 88, 92);
+
+                output.write(destroyDataSelectionAndSyncRequest(
+                        dataOfferId, androidOfferId));
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 93);
                 if (nativeDataSourceCount(core) != 0
                         || nativeDataDeviceCount(core) != 0
-                        || nativeDataOfferCount(core) != 0) {
+                        || nativeDataOfferCount(core) != 0
+                        || nativeTakeAndroidPasteFd(core) != -1
+                        || nativeTakeLinuxCopyFd(core) != -1) {
                     throw new IllegalStateException(
                             "wl_data_device selection resources leaked");
                 }
@@ -860,7 +958,7 @@ public final class MainActivity extends Activity {
             message = "Native Wayland compositor passed\n"
                     + "registry, Android bitmap, xdg toplevel, keyboard input, "
                     + "MotionEvent pointer, nested popup grabs, synchronized subsurface trees, "
-                    + "committed parent geometry, and clipboard selection lifecycle complete";
+                    + "committed parent geometry, and bidirectional demand-driven Android clipboard complete";
         } catch (Exception error) {
             message = "Native compositor probe failed\n" + error.getMessage();
         } finally {
@@ -1018,14 +1116,16 @@ public final class MainActivity extends Activity {
         return request.array();
     }
 
-    private static byte[] destroyDataSelectionAndSyncRequest(int offerId) {
-        ByteBuffer request = buffer(44);
-        putHeader(request, offerId, 2, 8);
+    private static byte[] destroyDataSelectionAndSyncRequest(
+            int waylandOfferId, int androidOfferId) {
+        ByteBuffer request = buffer(52);
+        putHeader(request, waylandOfferId, 2, 8);
+        putHeader(request, androidOfferId, 2, 8);
         putHeader(request, 87, 1, 8);
         putHeader(request, 88, 2, 8);
         putHeader(request, 83, 3, 8);
         putHeader(request, 1, 0, 12);
-        request.putInt(91);
+        request.putInt(93);
         return request.array();
     }
     private static byte[] createSecondShmBufferAndSyncRequest() {
@@ -1591,6 +1691,27 @@ public final class MainActivity extends Activity {
             throw new IllegalStateException("unterminated Wayland string");
         }
         return new String(encoded, 0, length - 1, StandardCharsets.UTF_8);
+    }
+    private static void readNullSelectionUntilCallback(
+            FileInputStream input, int dataDeviceId, int callbackId) throws Exception {
+        boolean cleared = false;
+        while (true) {
+            Message message = readMessage(input);
+            throwIfDisplayError(message);
+            if (message.objectId == dataDeviceId
+                    && message.opcode == 5
+                    && message.body.length == 4) {
+                cleared |= ByteBuffer.wrap(message.body)
+                        .order(ByteOrder.nativeOrder()).getInt() == 0;
+            }
+            if (message.objectId == callbackId && message.opcode == 0) {
+                if (!cleared) {
+                    throw new IllegalStateException(
+                            "Android clipboard selection was not withdrawn");
+                }
+                return;
+            }
+        }
     }
     private static void readUntilCallback(FileInputStream input, int callbackId) throws Exception {
         while (true) {

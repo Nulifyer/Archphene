@@ -1,9 +1,9 @@
 use std::collections::VecDeque;
 use std::fs::File;
-use std::io;
+use std::io::{self, Write};
 use std::mem::{size_of, zeroed};
 use std::ops::Range;
-use std::os::fd::{AsFd, AsRawFd, FromRawFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::os::unix::fs::FileExt;
 use std::os::unix::net::UnixStream;
 use std::ptr;
@@ -70,6 +70,7 @@ pub struct CompositorState {
     popups: Vec<XdgPopup>,
     popup_grab: Option<PopupGrabState>,
     popup_grab_serial: Option<PopupGrabSerial>,
+    selection_serials: VecDeque<PopupGrabSerial>,
     xdg_surface_count: u32,
     xdg_toplevel_count: u32,
     xdg_ack_count: u32,
@@ -103,6 +104,10 @@ pub struct CompositorState {
     data_devices: Vec<WlDataDevice>,
     data_offers: Vec<WlDataOffer>,
     selection_source: Option<WlDataSource>,
+    clipboard_active: bool,
+    android_clipboard_offered: bool,
+    pending_android_paste_fds: VecDeque<File>,
+    pending_linux_copy_fds: VecDeque<File>,
 }
 
 const XKB_KEYMAP: &[u8] = concat!(include_str!("archphene-us.xkb"), "\0").as_bytes();
@@ -157,8 +162,14 @@ struct DataDeviceData {
     seat: WlSeat,
 }
 
+#[derive(Clone)]
+enum ClipboardOfferSource {
+    Wayland(WlDataSource),
+    Android,
+}
+
 struct DataOfferData {
-    source: WlDataSource,
+    source: ClipboardOfferSource,
     mime_types: Vec<String>,
 }
 
@@ -1494,49 +1505,124 @@ fn set_keyboard_focus(state: &mut CompositorState, surface: Option<WlSurface>) {
     }
 }
 
-fn publish_selection(
+const TEXT_MIME_TYPES: [&str; 2] = ["text/plain;charset=utf-8", "text/plain"];
+
+fn create_cloexec_pipe() -> io::Result<(File, File)> {
+    let mut descriptors = [-1; 2];
+    if unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe {
+        (
+            File::from_raw_fd(descriptors[0]),
+            File::from_raw_fd(descriptors[1]),
+        )
+    })
+}
+
+fn publish_offer_to_device(
+    state: &mut CompositorState,
+    handle: &DisplayHandle,
+    device: &WlDataDevice,
+    source: ClipboardOfferSource,
+    mime_types: Vec<String>,
+) {
+    if !device.is_alive() {
+        return;
+    }
+    let Ok(client) = handle.get_client(device.id()) else {
+        return;
+    };
+    let Ok(offer) = client.create_resource::<WlDataOffer, _, CompositorState>(
+        handle,
+        device.version().min(3),
+        DataOfferData {
+            source,
+            mime_types: mime_types.clone(),
+        },
+    ) else {
+        return;
+    };
+    device.data_offer(&offer);
+    for mime_type in mime_types {
+        offer.offer(mime_type);
+    }
+    device.selection(Some(&offer));
+    state.data_offer_count = state.data_offer_count.saturating_add(1);
+    state.data_offers.push(offer);
+}
+
+fn publish_wayland_selection(
     state: &mut CompositorState,
     handle: &DisplayHandle,
     source: Option<&WlDataSource>,
 ) {
-    let devices = state.data_devices.clone();
-    for device in devices.iter().filter(|device| device.is_alive()) {
-        let Some(source) = source.filter(|source| source.is_alive()) else {
+    let Some(source) = source.filter(|source| source.is_alive()) else {
+        for device in state.data_devices.iter().filter(|device| device.is_alive()) {
             device.selection(None);
-            continue;
-        };
-        let Some(source_data) = source.data::<DataSourceData>() else {
-            device.selection(None);
-            continue;
-        };
-        let mime_types = source_data
-            .mime_types
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone();
-        let Ok(client) = handle.get_client(device.id()) else {
-            continue;
-        };
-        let Ok(offer) = client.create_resource::<WlDataOffer, _, CompositorState>(
-            handle,
-            device.version().min(3),
-            DataOfferData {
-                source: source.clone(),
-                mime_types: mime_types.clone(),
-            },
-        ) else {
-            continue;
-        };
-        device.data_offer(&offer);
-        for mime_type in mime_types {
-            offer.offer(mime_type);
         }
-        device.selection(Some(&offer));
-        state.data_offer_count = state.data_offer_count.saturating_add(1);
-        state.data_offers.push(offer);
+        return;
+    };
+    let Some(source_data) = source.data::<DataSourceData>() else {
+        return;
+    };
+    let mime_types = source_data
+        .mime_types
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    let devices = state.data_devices.clone();
+    for device in &devices {
+        publish_offer_to_device(
+            state,
+            handle,
+            device,
+            ClipboardOfferSource::Wayland(source.clone()),
+            mime_types.clone(),
+        );
     }
 }
 
+fn publish_android_selection(state: &mut CompositorState, handle: &DisplayHandle) {
+    let mime_types = TEXT_MIME_TYPES
+        .iter()
+        .map(|mime_type| (*mime_type).to_owned())
+        .collect::<Vec<_>>();
+    let devices = state.data_devices.clone();
+    for device in &devices {
+        publish_offer_to_device(
+            state,
+            handle,
+            device,
+            ClipboardOfferSource::Android,
+            mime_types.clone(),
+        );
+    }
+}
+
+fn queue_linux_copy(state: &mut CompositorState, source: &WlDataSource) {
+    if !state.clipboard_active || !source.is_alive() {
+        return;
+    }
+    let Some(source_data) = source.data::<DataSourceData>() else {
+        return;
+    };
+    let mime_types = source_data
+        .mime_types
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let Some(mime_type) = TEXT_MIME_TYPES
+        .iter()
+        .find(|candidate| mime_types.iter().any(|offered| offered == **candidate))
+    else {
+        return;
+    };
+    let Ok((read_end, write_end)) = create_cloexec_pipe() else {
+        return;
+    };
+    source.send((*mime_type).to_owned(), write_end.as_fd());
+    state.pending_linux_copy_fds.push_back(read_end);
+}
 impl GlobalDispatch<WlDataDeviceManager, ()> for CompositorState {
     fn bind(
         state: &mut Self,
@@ -1558,7 +1644,7 @@ impl Dispatch<WlDataDeviceManager, ()> for CompositorState {
         _resource: &WlDataDeviceManager,
         request: wl_data_device_manager::Request,
         _data: &(),
-        _handle: &DisplayHandle,
+        handle: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
         match request {
@@ -1570,7 +1656,19 @@ impl Dispatch<WlDataDeviceManager, ()> for CompositorState {
             wl_data_device_manager::Request::GetDataDevice { id, seat } => {
                 let device = data_init.init(id, DataDeviceData { seat });
                 state.data_device_count = state.data_device_count.saturating_add(1);
-                state.data_devices.push(device);
+                state.data_devices.push(device.clone());
+                if state.clipboard_active && state.android_clipboard_offered {
+                    publish_offer_to_device(
+                        state,
+                        handle,
+                        &device,
+                        ClipboardOfferSource::Android,
+                        TEXT_MIME_TYPES
+                            .iter()
+                            .map(|mime_type| (*mime_type).to_owned())
+                            .collect(),
+                    );
+                }
             }
             wl_data_device_manager::Request::Release => {}
             _ => unreachable!("wl_data_device_manager request added without an implementation"),
@@ -1638,7 +1736,14 @@ impl Dispatch<WlDataDevice, DataDeviceData> for CompositorState {
     ) {
         match request {
             wl_data_device::Request::SetSelection { source, serial } => {
-                if serial == 0 || !data.seat.id().same_client_as(&resource.id()) {
+                let valid_serial = state.selection_serials.iter().any(|candidate| {
+                    candidate.serial == serial
+                        && candidate.surface.id().same_client_as(&resource.id())
+                });
+                if serial == 0
+                    || !data.seat.id().same_client_as(&resource.id())
+                    || !valid_serial
+                {
                     return;
                 }
                 if let Some(source) = source.as_ref() {
@@ -1662,8 +1767,12 @@ impl Dispatch<WlDataDevice, DataDeviceData> for CompositorState {
                         previous.cancelled();
                     }
                 }
+                state.android_clipboard_offered = false;
                 state.selection_source = source.clone();
-                publish_selection(state, handle, source.as_ref());
+                if let Some(source) = source.as_ref() {
+                    queue_linux_copy(state, source);
+                }
+                publish_wayland_selection(state, handle, source.as_ref());
             }
             wl_data_device::Request::StartDrag { .. } | wl_data_device::Request::Release => {}
             _ => unreachable!("wl_data_device request added without an implementation"),
@@ -1685,7 +1794,7 @@ impl Dispatch<WlDataDevice, DataDeviceData> for CompositorState {
 
 impl Dispatch<WlDataOffer, DataOfferData> for CompositorState {
     fn request(
-        _state: &mut Self,
+        state: &mut Self,
         _client: &Client,
         _resource: &WlDataOffer,
         request: wl_data_offer::Request,
@@ -1695,8 +1804,17 @@ impl Dispatch<WlDataOffer, DataOfferData> for CompositorState {
     ) {
         match request {
             wl_data_offer::Request::Receive { mime_type, fd } => {
-                if data.mime_types.contains(&mime_type) && data.source.is_alive() {
-                    data.source.send(mime_type, fd.as_fd());
+                if !data.mime_types.contains(&mime_type) {
+                    return;
+                }
+                match &data.source {
+                    ClipboardOfferSource::Wayland(source) if source.is_alive() => {
+                        source.send(mime_type, fd.as_fd());
+                    }
+                    ClipboardOfferSource::Android if state.clipboard_active => {
+                        state.pending_android_paste_fds.push_back(File::from(fd));
+                    }
+                    ClipboardOfferSource::Wayland(_) | ClipboardOfferSource::Android => {}
                 }
             }
             wl_data_offer::Request::Destroy
@@ -1719,7 +1837,6 @@ impl Dispatch<WlDataOffer, DataOfferData> for CompositorState {
         state.data_offer_count = state.data_offer_count.saturating_sub(1);
     }
 }
-
 impl GlobalDispatch<WlOutput, ()> for CompositorState {
     fn bind(
         state: &mut Self,
@@ -3862,6 +3979,61 @@ impl CompositorCore {
     pub fn data_offer_count(&self) -> u32 {
         self.state.data_offer_count
     }
+    pub fn set_clipboard_active(&mut self, active: bool) -> u32 {
+        self.state.clipboard_active = active;
+        if !active {
+            self.state.pending_android_paste_fds.clear();
+            self.state.pending_linux_copy_fds.clear();
+            if self.state.android_clipboard_offered {
+                self.state.android_clipboard_offered = false;
+                for device in self
+                    .state
+                    .data_devices
+                    .iter()
+                    .filter(|device| device.is_alive())
+                {
+                    device.selection(None);
+                }
+            }
+        }
+        u32::from(active)
+    }
+
+    pub fn offer_android_clipboard_text(&mut self) -> u32 {
+        if !self.state.clipboard_active {
+            return 0;
+        }
+        if let Some(previous) = self.state.selection_source.take()
+            && previous.is_alive()
+        {
+            previous.cancelled();
+        }
+        self.state.android_clipboard_offered = true;
+        let handle = self.display.handle();
+        publish_android_selection(&mut self.state, &handle);
+        u32::try_from(
+            self.state
+                .data_devices
+                .iter()
+                .filter(|device| device.is_alive())
+                .count(),
+        )
+        .unwrap_or(u32::MAX)
+    }
+
+    pub fn take_android_paste_fd(&mut self) -> RawFd {
+        self.state
+            .pending_android_paste_fds
+            .pop_front()
+            .map_or(-1, IntoRawFd::into_raw_fd)
+    }
+
+    pub fn take_linux_copy_fd(&mut self) -> RawFd {
+        self.state
+            .pending_linux_copy_fds
+            .pop_front()
+            .map_or(-1, IntoRawFd::into_raw_fd)
+    }
 
     pub fn pointer_count(&self) -> u32 {
         self.state.pointer_count
@@ -3900,8 +4072,9 @@ impl CompositorCore {
             return 0;
         }
         let serial = self.next_input_serial();
-        if pressed {
-            if let Some(surface) = self.state.keyboard_focus_surface.clone() {
+        if let Some(surface) = self.state.keyboard_focus_surface.clone() {
+            self.remember_selection_serial(serial, surface.clone());
+            if pressed {
                 self.state.popup_grab_serial = Some(PopupGrabSerial { serial, surface });
             }
         }
@@ -3991,6 +4164,15 @@ impl CompositorCore {
     fn next_input_serial(&mut self) -> u32 {
         self.state.next_input_serial = self.state.next_input_serial.wrapping_add(1).max(1);
         self.state.next_input_serial
+    }
+    fn remember_selection_serial(&mut self, serial: u32, surface: WlSurface) {
+        const MAX_RECENT_SERIALS: usize = 32;
+        self.state
+            .selection_serials
+            .push_back(PopupGrabSerial { serial, surface });
+        while self.state.selection_serials.len() > MAX_RECENT_SERIALS {
+            self.state.selection_serials.pop_front();
+        }
     }
 
     pub fn pointer_motion(&mut self, x: f64, y: f64, time: u32) -> u32 {
@@ -4101,6 +4283,7 @@ impl CompositorCore {
             return 0;
         };
         let serial = self.next_input_serial();
+        self.remember_selection_serial(serial, surface.clone());
         if pressed {
             self.state.popup_grab_serial = Some(PopupGrabSerial { serial, surface });
         }
@@ -4307,6 +4490,140 @@ fn receive_probe_keymap(socket_fd: RawFd, keyboard_id: u32) -> io::Result<usize>
     Ok(keymap.len())
 }
 
+fn receive_probe_data_source_send(
+    socket_fd: RawFd,
+    source_id: u32,
+    expected_mime_type: &str,
+    payload: &[u8],
+) -> io::Result<usize> {
+    let mut header_bytes = [0u8; 8];
+    let mut io_vector = libc::iovec {
+        iov_base: header_bytes.as_mut_ptr().cast(),
+        iov_len: header_bytes.len(),
+    };
+    let control_size = unsafe { libc::CMSG_SPACE(size_of::<RawFd>() as u32) } as usize;
+    let control_words = control_size.div_ceil(size_of::<usize>());
+    let mut control = vec![0usize; control_words];
+    let mut message: libc::msghdr = unsafe { zeroed() };
+    message.msg_iov = &mut io_vector;
+    message.msg_iovlen = 1;
+    message.msg_control = control.as_mut_ptr().cast();
+    message.msg_controllen = control_size;
+
+    let received = loop {
+        let result = unsafe { libc::recvmsg(socket_fd, &mut message, libc::MSG_WAITALL) };
+        if result >= 0 {
+            break result as usize;
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    };
+    if received != header_bytes.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "incomplete wl_data_source.send header",
+        ));
+    }
+    let object = u32::from_ne_bytes(header_bytes[0..4].try_into().expect("fixed header"));
+    let word = u32::from_ne_bytes(header_bytes[4..8].try_into().expect("fixed header"));
+    let size = (word >> 16) as usize;
+    if object != source_id || word & 0xffff != 1 || size < 12 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid wl_data_source.send event",
+        ));
+    }
+
+    let control_message = unsafe { libc::CMSG_FIRSTHDR(&message) };
+    if control_message.is_null()
+        || unsafe { (*control_message).cmsg_level } != libc::SOL_SOCKET
+        || unsafe { (*control_message).cmsg_type } != libc::SCM_RIGHTS
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "wl_data_source.send did not include an FD",
+        ));
+    }
+    let received_fd =
+        unsafe { ptr::read_unaligned(libc::CMSG_DATA(control_message).cast::<RawFd>()) };
+    if received_fd < 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "wl_data_source.send FD was invalid",
+        ));
+    }
+    let mut destination = unsafe { File::from_raw_fd(received_fd) };
+
+    let mut body = vec![0u8; size - 8];
+    let mut offset = 0usize;
+    while offset < body.len() {
+        let count = unsafe {
+            libc::recv(
+                socket_fd,
+                body[offset..].as_mut_ptr().cast(),
+                body.len() - offset,
+                libc::MSG_WAITALL,
+            )
+        };
+        if count <= 0 {
+            return Err(if count == 0 {
+                io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "incomplete wl_data_source.send body",
+                )
+            } else {
+                io::Error::last_os_error()
+            });
+        }
+        offset += count as usize;
+    }
+    let length = u32::from_ne_bytes(body[0..4].try_into().expect("fixed string length")) as usize;
+    if length == 0 || length > body.len() - 4 || body[4 + length - 1] != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid wl_data_source.send MIME type",
+        ));
+    }
+    let mime_type = std::str::from_utf8(&body[4..4 + length - 1])
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    if mime_type != expected_mime_type {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unexpected wl_data_source.send MIME type",
+        ));
+    }
+    destination.write_all(payload)?;
+    Ok(payload.len())
+}
+fn send_probe_data_offer_receive(
+    socket_fd: RawFd,
+    offer_id: u32,
+    mime_type: &str,
+) -> io::Result<RawFd> {
+    let (read_end, write_end) = create_cloexec_pipe()?;
+    let encoded = mime_type.as_bytes();
+    let length = encoded.len().saturating_add(1);
+    let padded_length = length.saturating_add(3) & !3;
+    let size = 8usize
+        .saturating_add(4)
+        .saturating_add(padded_length);
+    let size = u16::try_from(size)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "MIME type is too long"))?;
+    let mut request = Vec::with_capacity(usize::from(size));
+    append_wayland_header(&mut request, offer_id, 1, size);
+    request.extend_from_slice(
+        &u32::try_from(length)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "MIME type is too long"))?
+            .to_ne_bytes(),
+    );
+    request.extend_from_slice(encoded);
+    request.push(0);
+    request.resize(usize::from(size), 0);
+    send_fd(socket_fd, &request, write_end.as_raw_fd())?;
+    Ok(read_end.into_raw_fd())
+}
 fn send_probe_shm_pool_request(
     socket_fd: RawFd,
     pool_id: u32,
@@ -4408,6 +4725,40 @@ pub extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeSen
     }
 }
 
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeReceiveDataSourceSend(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    socket_fd: i32,
+    source_id: i32,
+) -> i32 {
+    const PAYLOAD: &[u8] = b"ARCHPHENE_WAYLAND_TO_ANDROID";
+    let Ok(source_id) = u32::try_from(source_id) else {
+        return -1;
+    };
+    match receive_probe_data_source_send(
+        socket_fd,
+        source_id,
+        TEXT_MIME_TYPES[0],
+        PAYLOAD,
+    ) {
+        Ok(size) => i32::try_from(size).unwrap_or(i32::MAX),
+        Err(_) => -2,
+    }
+}
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeSendDataOfferReceive(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    socket_fd: i32,
+    offer_id: i32,
+) -> i32 {
+    if offer_id == 0 {
+        return -1;
+    }
+    send_probe_data_offer_receive(socket_fd, offer_id as u32, TEXT_MIME_TYPES[0])
+        .unwrap_or(-2)
+}
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeReceiveKeyboardKeymap(
     _environment: *mut std::ffi::c_void,
@@ -4730,6 +5081,55 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
         return -1;
     };
     i32::try_from(core.data_offer_count()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeSetClipboardActive(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+    active: u8,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+        return -1;
+    };
+    i32::try_from(core.set_clipboard_active(active != 0)).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeOfferAndroidClipboardText(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+        return -1;
+    };
+    i32::try_from(core.offer_android_clipboard_text()).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeTakeAndroidPasteFd(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+        return -1;
+    };
+    core.take_android_paste_fd()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeTakeLinuxCopyFd(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+        return -1;
+    };
+    core.take_linux_copy_fd()
 }
 
 #[unsafe(no_mangle)]
@@ -5165,7 +5565,7 @@ mod tests {
 
     #[test]
     fn creates_wayland_display_and_reports_protocol_version() {
-        let core = CompositorCore::new().expect("Wayland display");
+        let mut core = CompositorCore::new().expect("Wayland display");
         assert!(!core.is_stopping());
         assert_eq!(core.compositor_bind_count(), 0);
         assert_eq!(core.subcompositor_bind_count(), 0);
@@ -5188,6 +5588,11 @@ mod tests {
         assert_eq!(core.data_source_count(), 0);
         assert_eq!(core.data_device_count(), 0);
         assert_eq!(core.data_offer_count(), 0);
+        assert_eq!(core.take_android_paste_fd(), -1);
+        assert_eq!(core.take_linux_copy_fd(), -1);
+        assert_eq!(core.set_clipboard_active(true), 1);
+        assert_eq!(core.offer_android_clipboard_text(), 0);
+        assert_eq!(core.set_clipboard_active(false), 0);
         assert_eq!(core.pointer_count(), 0);
         assert_eq!(core.pointer_event_count(), 0);
         assert_eq!(core.keyboard_count(), 0);
