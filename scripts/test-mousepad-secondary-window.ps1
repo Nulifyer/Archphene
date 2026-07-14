@@ -65,9 +65,16 @@ $mainId = [int]$main.Groups[1].Value
 $mainWidth = [int]$main.Groups[2].Value
 $mainHeight = [int]$main.Groups[3].Value
 $mainBounds = Read-ActiveImageBounds "mousepad-freeform-main"
-$edit = Map-Point $mainBounds $mainWidth $mainHeight 51 46
+$settledFrames = [regex]::Matches((Read-BridgeLog), 'output frame=([0-9]+)x([0-9]+)')
+if ($settledFrames.Count -eq 0) {
+    throw "Mousepad did not publish a settled freeform frame"
+}
+$settledFrame = $settledFrames[$settledFrames.Count - 1]
+$mainWidth = [int]$settledFrame.Groups[1].Value
+$mainHeight = [int]$settledFrame.Groups[2].Value
+$edit = Map-Point $mainBounds $mainWidth $mainHeight 90 76
 Adb @("shell", "input", "tap", [string]$edit[0], [string]$edit[1]) | Out-Null
-Wait-BridgeLog 'popup registry=.*358,406,1,0' 10 | Out-Null
+Wait-BridgeLog 'popup registry=.*:\d+,\d+,\d+,\d+,[1-9]\d*,[1-9]\d*,1,0;' 10 | Out-Null
 Adb @("shell", "input", "keyevent", "KEYCODE_MOVE_END") | Out-Null
 Adb @("shell", "input", "keyevent", "KEYCODE_ENTER") | Out-Null
 

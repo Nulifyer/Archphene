@@ -183,7 +183,12 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 oldLeft, oldTop, oldRight, oldBottom) -> {
             int width = Math.max(1, right - left);
             int height = Math.max(1, bottom - top);
-            if (session != null) session.configure(width, height, 1);
+            if (session != null) {
+                session.configure(width, height, 1);
+                if (independentWindows && primaryFrame != null) {
+                    session.configureWindow(primaryFrame.window.id, width, height);
+                }
+            }
             if (width > 1 && height > 1 && launched.compareAndSet(false, true)) {
                 if (runtimeProbeUri == null) launch(width, height);
                 else if (runtimeLoaderUri == null) runRuntimeFdProbe(runtimeProbeUri);
@@ -319,13 +324,16 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         }
         if (nextPrimary != null) {
             primaryFrame = nextPrimary;
-            long bitmapArea = (long) nextPrimary.bitmap.getWidth() * nextPrimary.bitmap.getHeight();
-            long viewportArea = (long) compositorView.getWidth() * compositorView.getHeight();
-            boolean compact = viewportArea > 0 && bitmapArea * 2 < viewportArea;
-            compositorView.setScaleType(compact
-                    ? ImageView.ScaleType.FIT_CENTER
-                    : ImageView.ScaleType.FIT_XY);
+            int viewportWidth = compositorView.getWidth();
+            int viewportHeight = compositorView.getHeight();
+            compositorView.setScaleType(ImageView.ScaleType.FIT_CENTER);
             compositorView.setImageBitmap(nextPrimary.bitmap);
+            if (session != null && viewportWidth > 1 && viewportHeight > 1
+                    && (nextPrimary.bitmap.getWidth() != viewportWidth
+                            || nextPrimary.bitmap.getHeight() != viewportHeight)) {
+                session.configureWindow(
+                        nextPrimary.window.id, viewportWidth, viewportHeight);
+            }
         }
 
         Set<Integer> mapped = new HashSet<>();
@@ -436,8 +444,11 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             }
             int maxWidth = Math.max(1, (int) (getResources().getDisplayMetrics().widthPixels * 0.95f));
             int maxHeight = Math.max(1, (int) (getResources().getDisplayMetrics().heightPixels * 0.90f));
-            int width = Math.min(maxWidth, Math.max(1, Math.round(frameWidth * scale)));
-            int height = Math.min(maxHeight, Math.max(1, Math.round(frameHeight * scale)));
+            float fittedScale = Math.min(scale, Math.min(
+                    maxWidth / (float) frameWidth,
+                    maxHeight / (float) frameHeight));
+            int width = Math.max(1, Math.round(frameWidth * fittedScale));
+            int height = Math.max(1, Math.round(frameHeight * fittedScale));
             if (width != layoutWidth || height != layoutHeight) {
                 layoutWidth = width;
                 layoutHeight = height;
@@ -700,10 +711,9 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         if ("gtk3".equals(toolkit)) {
             File root = new File(getFilesDir(), "linux-runtime/root");
             env.put("GDK_BACKEND", "wayland");
-            int gdkScale = appScale > 1f ? 2 : 1;
-            env.put("GDK_SCALE", Integer.toString(gdkScale));
-            env.put("GDK_DPI_SCALE", String.format(Locale.US, "%.3f",
-                    appScale * fontScale / gdkScale));
+            env.put("GDK_SCALE", "1");
+            env.put("GDK_DPI_SCALE", "1.0");
+            writeGtkTheme(configDir, dark, fontPointSize, appScale);
             env.put("GTK_IM_MODULE", "wayland");
             env.put("GTK_IM_MODULE_FILE", new File(
                     runtimeLib, "gtk-3.0/3.0.0/immodules.cache").getAbsolutePath());
@@ -730,6 +740,33 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         }
     }
 
+    private void writeGtkTheme(File configDir, boolean dark,
+            int fontPointSize, float appScale) throws IOException {
+        File gtkConfig = new File(configDir, "gtk-3.0");
+        gtkConfig.mkdirs();
+        int uiFontSize = Math.max(fontPointSize, Math.round(fontPointSize * appScale));
+        int controlHeight = Math.max(32, Math.round(28f * appScale));
+        int scrollbarSize = Math.max(14, Math.round(12f * appScale));
+        String settings = "[Settings]\n"
+                + "gtk-theme-name=" + (dark ? "Adwaita-dark" : "Adwaita") + "\n"
+                + "gtk-icon-theme-name=Adwaita\n"
+                + "gtk-font-name=Noto Sans " + fontPointSize + "\n"
+                + "gtk-application-prefer-dark-theme=" + dark + "\n"
+                + "gtk-menu-images=false\n"
+                + "gtk-button-images=false\n";
+        writeText(new File(gtkConfig, "settings.ini"), settings);
+        String css = "* {\n"
+                + "  font-size: " + uiFontSize + "px;\n"
+                + "}\n"
+                + "button, entry, combobox, menuitem {\n"
+                + "  min-height: " + controlHeight + "px;\n"
+                + "}\n"
+                + "scrollbar slider {\n"
+                + "  min-width: " + scrollbarSize + "px;\n"
+                + "  min-height: " + scrollbarSize + "px;\n"
+                + "}\n";
+        writeText(new File(gtkConfig, "gtk.css"), css);
+    }
     private void writeKdeTheme(File configDir, boolean dark) throws IOException {
         String foreground = dark ? "239,240,241" : "35,38,41";
         String inactive = dark ? "174,181,185" : "91,99,104";

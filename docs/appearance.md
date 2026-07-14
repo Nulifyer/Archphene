@@ -18,7 +18,7 @@ Changes apply on the next Linux app launch. Automatic geometry scale is 150% on 
 
 Qt 6 apps load the `archphene` QPA platform-theme and widget-style plugins. They supply the application palette, color-scheme hint, proportional and fixed fonts, mobile-sized text editors, style choice, and icon-theme hints. The bridge writes role-based Window, View, Button, Selection, and Tooltip colors rather than recoloring individual applications. The platform-theme plugin uses Qt private QPA interfaces and must be rebuilt against the exact Qt minor version in the runtime closure.
 
-GTK 3 apps receive the equivalent dark/light selection, GDK geometry and text scaling, and runtime data paths. A native GTK settings broker remains future work; current GTK support uses the toolkit's Adwaita themes.
+GTK 3 apps receive equivalent dark/light selection and runtime data paths through generated GTK settings.ini and gtk.css files. The bridge keeps Wayland buffers at the native Android viewport size while scaling toolkit fonts, touch targets, and scrollbars from the same geometry and text policy used for Qt. A native GTK settings broker remains future work; current GTK support uses the toolkit's Adwaita themes.
 
 ## Rebuild the Qt plugin
 

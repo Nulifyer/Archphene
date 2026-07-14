@@ -78,6 +78,7 @@ Start-Sleep -Seconds 5
 
 Invoke-Adb @("shell", "input", "keycombination", "113", "123") "move to document end" | Out-Null
 Invoke-Adb @("shell", "input", "keyevent", "66") "insert newline" | Out-Null
+Start-Sleep -Milliseconds 500
 Invoke-Adb @("shell", "input", "text", $Marker) "type workflow marker" | Out-Null
 Invoke-Adb @("shell", "input", "keycombination", "113", "47") "save Mousepad document" | Out-Null
 Wait-For {
