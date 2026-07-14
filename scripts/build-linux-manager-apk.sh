@@ -117,14 +117,27 @@ while IFS=$'\t' read -r name relative; do
 done < "$resolved"
 cp "$glibc/ld-linux-x86-64.so.2" "$package_libs/libarchphene_ld.so"
 cp "$glibc/libc.so.6" "$package_libs/libarchphene_runtime_libc.so"
-printf '%s  %s\n' \
-  '6adbf15a76ef673ee66b8af66b3717383cbefea55c9d65809d909c7597fe099b' "$package_libs/libarchphene_dynamic_probe.so" \
-  'd1763646c97e95ed93ad72c43365cab8747a83170c849002002c7675749a1915' "$package_libs/libarchphene_ld.so" \
-  '1e31d1a9cb4ddf13d1bb61ed0be1e4e04309b32d1f6f1f0a68820f2e3099101a' "$package_libs/libarchphene_runtime_libc.so" \
-  | sha256sum --check --status || { echo 'runtime module catalog hash mismatch' >&2; exit 1; }
 find "$glibc" -maxdepth 1 -type f \
   ! -name 'source-commit.txt' ! -name 'runtime-manifest.tsv' \
   ! -name 'ld-linux-x86-64.so.2' -exec cp {} "$package_libs/" \;
+catalog="$package_assets/runtime-modules.tsv"
+printf '# org.archphene.runtime-modules.v1\n' > "$catalog"
+add_runtime_module() {
+  local role="$1" file="$2" library="$3" link_name="$4" hash size
+  [[ -f "$file" ]] || { echo "runtime module missing: $file" >&2; exit 1; }
+  hash="$(sha256sum "$file" | cut -d ' ' -f 1)"
+  size="$(stat -c '%s' "$file")"
+  printf '%s\t%s\t%s\t%s\t%s\n' \
+    "$role" "$hash" "$size" "$library" "$link_name" >> "$catalog"
+}
+add_runtime_module static-probe "$package_libs/libarchphene_runtime_probe.so" \
+  libarchphene_runtime_probe.so program
+add_runtime_module dynamic-probe "$package_libs/libarchphene_dynamic_probe.so" \
+  libarchphene_dynamic_probe.so program
+add_runtime_module glibc-loader "$package_libs/libarchphene_ld.so" \
+  libarchphene_ld.so ld-linux-x86-64.so.2
+add_runtime_module glibc-libc "$package_libs/libarchphene_runtime_libc.so" \
+  libarchphene_runtime_libc.so libc.so.6
 
 "$bt/aapt2" compile --dir "$app/res" -o "$out/compiled/res.zip"
 "$bt/aapt2" link -o "$out/unsigned.apk" -I "$platform" \

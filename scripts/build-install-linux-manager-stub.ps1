@@ -65,7 +65,8 @@ if ($ReleaseBuild) {
 Run-Native { & (Join-Path $BuildTools "aapt2.exe") compile --dir (Join-Path $App "res") -o (Join-Path $Out "compiled/res.zip") } "aapt2 compile"
 $PackageRuntimeStage = Join-Path $Out "package-runtime"
 $PackageLibDir = Join-Path $PackageRuntimeStage "lib/x86_64"
-New-Item -ItemType Directory -Force -Path $PackageLibDir | Out-Null
+$PackageAssetDir = Join-Path $PackageRuntimeStage "assets/package-runtime"
+New-Item -ItemType Directory -Force -Path $PackageLibDir, $PackageAssetDir | Out-Null
 Copy-Item -LiteralPath (Join-Path $App "assets/payload-hello-linux-amd64") `
     -Destination (Join-Path $PackageLibDir "libarchphene_runtime_probe.so") -Force
 Copy-Item -LiteralPath (Join-Path $App "assets/payload-hello-dynamic-amd64") `
@@ -80,8 +81,6 @@ if ($IncludePackageRuntime) {
             throw "Package runtime input missing: $required"
         }
     }
-    $PackageAssetDir = Join-Path $PackageRuntimeStage "assets/package-runtime"
-    New-Item -ItemType Directory -Force -Path $PackageAssetDir | Out-Null
     $KeyringDir = Join-Path $Root "tooling/downloads/arch-runtime-archlinux-keyring-x86_64/runtime-root/usr/share/pacman/keyrings"
     foreach ($name in @("archlinux.gpg", "archlinux-revoked", "archlinux-trusted")) {
         $source = Join-Path $KeyringDir $name
@@ -124,21 +123,35 @@ if ($IncludePackageRuntime) {
         -Destination (Join-Path $PackageLibDir "libarchphene_ld.so") -Force
     Copy-Item -LiteralPath (Join-Path $PatchedGlibc "libc.so.6") `
         -Destination (Join-Path $PackageLibDir "libarchphene_runtime_libc.so") -Force
-    $RuntimeModuleHashes = @{
-        "libarchphene_dynamic_probe.so" = "6adbf15a76ef673ee66b8af66b3717383cbefea55c9d65809d909c7597fe099b"
-        "libarchphene_ld.so" = "d1763646c97e95ed93ad72c43365cab8747a83170c849002002c7675749a1915"
-        "libarchphene_runtime_libc.so" = "1e31d1a9cb4ddf13d1bb61ed0be1e4e04309b32d1f6f1f0a68820f2e3099101a"
-    }
-    foreach ($module in $RuntimeModuleHashes.GetEnumerator()) {
-        $actual = (Get-FileHash (Join-Path $PackageLibDir $module.Key) -Algorithm SHA256).Hash
-        if ($actual -ne $module.Value) { throw "Runtime module catalog hash mismatch: $($module.Key)" }
-    }
     Get-ChildItem -LiteralPath $PatchedGlibc -File | Where-Object {
         $_.Name -notin @("runtime-manifest.tsv", "source-commit.txt", "ld-linux-x86-64.so.2")
     } | ForEach-Object {
         Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $PackageLibDir $_.Name) -Force
     }
 }
+
+$RuntimeModules = @(
+    @{ Role = "static-probe"; Library = "libarchphene_runtime_probe.so"; Link = "program" }
+    @{ Role = "dynamic-probe"; Library = "libarchphene_dynamic_probe.so"; Link = "program" }
+)
+if ($IncludePackageRuntime) {
+    $RuntimeModules += @(
+        @{ Role = "glibc-loader"; Library = "libarchphene_ld.so"; Link = "ld-linux-x86-64.so.2" }
+        @{ Role = "glibc-libc"; Library = "libarchphene_runtime_libc.so"; Link = "libc.so.6" }
+    )
+}
+$RuntimeCatalog = foreach ($module in $RuntimeModules) {
+    $file = Join-Path $PackageLibDir $module.Library
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+        throw "Runtime module missing: $($module.Library)"
+    }
+    $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+    $size = (Get-Item -LiteralPath $file).Length
+    "$($module.Role)`t$hash`t$size`t$($module.Library)`t$($module.Link)"
+}
+[IO.File]::WriteAllText((Join-Path $PackageAssetDir "runtime-modules.tsv"),
+        "# org.archphene.runtime-modules.v1`n" + ($RuntimeCatalog -join "`n") + "`n",
+        [Text.UTF8Encoding]::new($false))
 
 $Assets = Join-Path $App "assets"
 Run-Native { & (Join-Path $BuildTools "aapt2.exe") link -o (Join-Path $Out "unsigned.apk") -I (Join-Path $Sdk "platforms/android-36/android.jar") --version-code $VersionCode --version-name $VersionName --manifest $BuildManifest --java (Join-Path $Out "gen") -A $Assets (Join-Path $Out "compiled/res.zip") } "aapt2 link"

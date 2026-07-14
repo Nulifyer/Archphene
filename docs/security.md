@@ -34,7 +34,7 @@ Production manager releases are built non-debuggable and signed with a dedicated
 ## Important limitations
 
 - The manager performs complete on-device resolution, verification, wrapper generation, and signing for the validated x86_64 KCalc template, but not yet for arbitrary packages, toolkits, or ABIs.
-- A static ELF and a dynamic program with its patched-glibc loader/libc now execute from manager-owned, hash-verified, read-only descriptors under a separate wrapper UID. Complete application dependency closures still use mutable app-private extraction and need generated catalogs, atomic runtime packs, and durable brokered grants.
+- A static ELF and a dynamic program with its patched-glibc loader/libc now execute from manager-owned, hash-verified, read-only descriptors under a separate wrapper UID. Complete application dependency closures still use mutable app-private extraction and need catalog expansion, atomic runtime packs, and durable brokered grants.
 - The prototype Java Wayland parsers are not yet a hardened protocol boundary.
 - GrapheneOS-specific hardening has not been validated on a supported Pixel.
 - Running on stock Android does not provide GrapheneOS firmware, verified boot policy, exploit mitigations, or security updates.

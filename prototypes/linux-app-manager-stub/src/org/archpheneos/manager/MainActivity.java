@@ -1309,32 +1309,33 @@ public final class MainActivity extends Activity {
         if (packageName == null) return;
         String action = getIntent().getStringExtra("archphene_test_runtime_module_action");
         try {
-            if ("launch".equals(action)) {
-                Intent launch = new Intent(Intent.ACTION_VIEW, RuntimeModuleProvider.PROBE_URI);
+            if ("verify_catalog".equals(action)) {
+                RuntimeModuleCatalog.verifyParserForTest();
+                android.util.Log.i("ArchpheneRuntime", "Runtime catalog parser passed");
+            } else if ("launch".equals(action)) {
+                Uri probe = RuntimeModuleProvider.uriForRole(this, "static-probe");
+                Intent launch = new Intent(Intent.ACTION_VIEW, probe);
                 launch.setClassName(packageName, packageName + ".MainActivity");
                 launch.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                launch.putExtra("archphene_test_runtime_module_uri",
-                        RuntimeModuleProvider.PROBE_URI.toString());
+                launch.putExtra("archphene_test_runtime_module_uri", probe.toString());
                 startActivity(launch);
                 android.util.Log.i("ArchpheneRuntime", "Launched runtime module for "
                         + packageName);
             } else if ("launch_dynamic".equals(action)) {
-                Intent launch = new Intent(Intent.ACTION_VIEW,
-                        RuntimeModuleProvider.DYNAMIC_PROBE_URI);
+                Uri program = RuntimeModuleProvider.uriForRole(this, "dynamic-probe");
+                Uri loader = RuntimeModuleProvider.uriForRole(this, "glibc-loader");
+                Uri libc = RuntimeModuleProvider.uriForRole(this, "glibc-libc");
+                Intent launch = new Intent(Intent.ACTION_VIEW, program);
                 launch.setClassName(packageName, packageName + ".MainActivity");
                 android.content.ClipData modules = android.content.ClipData.newUri(
-                        getContentResolver(), "Archphene runtime modules",
-                        RuntimeModuleProvider.DYNAMIC_PROBE_URI);
-                modules.addItem(new android.content.ClipData.Item(RuntimeModuleProvider.LOADER_URI));
-                modules.addItem(new android.content.ClipData.Item(RuntimeModuleProvider.LIBC_URI));
+                        getContentResolver(), "Archphene runtime modules", program);
+                modules.addItem(new android.content.ClipData.Item(loader));
+                modules.addItem(new android.content.ClipData.Item(libc));
                 launch.setClipData(modules);
                 launch.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                launch.putExtra("archphene_test_runtime_module_uri",
-                        RuntimeModuleProvider.DYNAMIC_PROBE_URI.toString());
-                launch.putExtra("archphene_test_runtime_loader_uri",
-                        RuntimeModuleProvider.LOADER_URI.toString());
-                launch.putExtra("archphene_test_runtime_libc_uri",
-                        RuntimeModuleProvider.LIBC_URI.toString());
+                launch.putExtra("archphene_test_runtime_module_uri", program.toString());
+                launch.putExtra("archphene_test_runtime_loader_uri", loader.toString());
+                launch.putExtra("archphene_test_runtime_libc_uri", libc.toString());
                 startActivity(launch);
                 android.util.Log.i("ArchpheneRuntime", "Launched glibc runtime modules for "
                         + packageName);

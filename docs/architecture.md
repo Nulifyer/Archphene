@@ -47,9 +47,9 @@ Official Arch Linux supplies x86_64 packages. AArch64 experiments use the separa
 
 ### Shared runtime modules
 
-The manager exposes exact content-hash runtime modules through a non-exported, read-only `ContentProvider`. It launches a wrapper with explicit temporary URI read grants carried as `ClipData`. The wrapper validates each ELF descriptor. For dynamic programs, the native launcher creates a wrapper-private symlink view over inherited descriptors and invokes the manager-owned patched glibc loader with that view as its library path. The process runs under the wrapper's Android UID without copying the program, loader, or libc into the wrapper sandbox.
+Linux and Windows builds generate a bounded runtime-module catalog from the exact packaged bytes and place it inside the signed manager APK. The provider rejects malformed fields, duplicate roles or hashes, traversal names, unknown URIs, and out-of-bounds sizes before opening a module. It then exposes exact content-hash modules through a non-exported, read-only `ContentProvider` and launches wrappers with temporary URI read grants carried as `ClipData`. For dynamic programs, the native launcher creates a wrapper-private symlink view over inherited descriptors and invokes the manager-owned patched glibc loader with that view as its library path. The process runs under the wrapper's Android UID without copying the program, loader, or libc into the wrapper sandbox.
 
-The emulator validates both a static ELF and a dynamically linked fixture using three descriptors: program, patched loader, and libc. This is not yet a complete shared Qt/GTK runtime. A production broker still needs a generated signed module catalog, arbitrary transitive-library resolution, atomic versioned packs, grant/revocation state across process death and reboot, and garbage collection that respects running processes.
+The emulator validates catalog parser rejection cases plus a static ELF and a dynamically linked fixture using three descriptors: program, patched loader, and libc. This is not yet a complete shared Qt/GTK runtime. A production broker still needs catalog generation from arbitrary verified dependency graphs, atomic versioned packs, grant/revocation state across process death and reboot, and garbage collection that respects running processes.
 
 ### Storage
 
