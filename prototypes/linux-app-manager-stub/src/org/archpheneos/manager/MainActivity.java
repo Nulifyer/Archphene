@@ -1318,8 +1318,28 @@ public final class MainActivity extends Activity {
                 startActivity(launch);
                 android.util.Log.i("ArchpheneRuntime", "Launched runtime module for "
                         + packageName);
+            } else if ("launch_dynamic".equals(action)) {
+                Intent launch = new Intent(Intent.ACTION_VIEW,
+                        RuntimeModuleProvider.DYNAMIC_PROBE_URI);
+                launch.setClassName(packageName, packageName + ".MainActivity");
+                android.content.ClipData modules = android.content.ClipData.newUri(
+                        getContentResolver(), "Archphene runtime modules",
+                        RuntimeModuleProvider.DYNAMIC_PROBE_URI);
+                modules.addItem(new android.content.ClipData.Item(RuntimeModuleProvider.LOADER_URI));
+                modules.addItem(new android.content.ClipData.Item(RuntimeModuleProvider.LIBC_URI));
+                launch.setClipData(modules);
+                launch.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                launch.putExtra("archphene_test_runtime_module_uri",
+                        RuntimeModuleProvider.DYNAMIC_PROBE_URI.toString());
+                launch.putExtra("archphene_test_runtime_loader_uri",
+                        RuntimeModuleProvider.LOADER_URI.toString());
+                launch.putExtra("archphene_test_runtime_libc_uri",
+                        RuntimeModuleProvider.LIBC_URI.toString());
+                startActivity(launch);
+                android.util.Log.i("ArchpheneRuntime", "Launched glibc runtime modules for "
+                        + packageName);
             } else if ("revoke".equals(action)) {
-                RuntimeModuleProvider.revokeProbe(this);
+                RuntimeModuleProvider.revokeAll(this);
                 android.util.Log.i("ArchpheneRuntime", "Revoked runtime module from "
                         + packageName);
                 showBanner("Runtime module access revoked from " + packageName, false);

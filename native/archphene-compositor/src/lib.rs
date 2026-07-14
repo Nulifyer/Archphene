@@ -8334,6 +8334,231 @@ fn run_runtime_fd(executable_fd: i32) -> (i32, Vec<u8>) {
 }
 
 #[cfg(target_os = "android")]
+fn run_glibc_fds(
+    program_fd: i32,
+    loader_fd: i32,
+    libc_fd: i32,
+    link_root: &[u8],
+) -> (i32, Vec<u8>) {
+    let Ok(link_root) = std::str::from_utf8(link_root) else {
+        return (-libc::EINVAL, Vec::new());
+    };
+    let link_root = PathBuf::from(link_root);
+    let source_fds = [program_fd, loader_fd, libc_fd];
+    if source_fds.iter().any(|fd| *fd < 0) {
+        return (-libc::EBADF, Vec::new());
+    }
+    let mut inherited = Vec::with_capacity(source_fds.len());
+    for source in source_fds {
+        let fd = unsafe { libc::dup(source) };
+        if fd < 0 {
+            for opened in inherited.drain(..) {
+                unsafe { libc::close(opened) };
+            }
+            return (
+                -io::Error::last_os_error()
+                    .raw_os_error()
+                    .unwrap_or(libc::EIO),
+                Vec::new(),
+            );
+        }
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } < 0 {
+            unsafe { libc::close(fd) };
+            for opened in inherited.drain(..) {
+                unsafe { libc::close(opened) };
+            }
+            return (
+                -io::Error::last_os_error()
+                    .raw_os_error()
+                    .unwrap_or(libc::EIO),
+                Vec::new(),
+            );
+        }
+        inherited.push(fd);
+    }
+
+    let links = [
+        link_root.join("program"),
+        link_root.join("ld-linux-x86-64.so.2"),
+        link_root.join("libc.so.6"),
+    ];
+    for (link, fd) in links.iter().zip(inherited.iter()) {
+        let _ = std::fs::remove_file(link);
+        if std::os::unix::fs::symlink(format!("/proc/self/fd/{fd}"), link).is_err() {
+            for opened in inherited.drain(..) {
+                unsafe { libc::close(opened) };
+            }
+            for created in &links {
+                let _ = std::fs::remove_file(created);
+            }
+            return (-libc::EIO, Vec::new());
+        }
+    }
+
+    let cleanup = |fds: &mut Vec<i32>| {
+        for opened in fds.drain(..) {
+            unsafe { libc::close(opened) };
+        }
+        for link in &links {
+            let _ = std::fs::remove_file(link);
+        }
+    };
+    let loader = match std::ffi::CString::new(links[1].as_os_str().as_encoded_bytes()) {
+        Ok(value) => value,
+        Err(_) => {
+            cleanup(&mut inherited);
+            return (-libc::EINVAL, Vec::new());
+        }
+    };
+    let library_path = std::ffi::CString::new("--library-path").unwrap();
+    let directory = match std::ffi::CString::new(link_root.as_os_str().as_encoded_bytes()) {
+        Ok(value) => value,
+        Err(_) => {
+            cleanup(&mut inherited);
+            return (-libc::EINVAL, Vec::new());
+        }
+    };
+    let program = match std::ffi::CString::new(links[0].as_os_str().as_encoded_bytes()) {
+        Ok(value) => value,
+        Err(_) => {
+            cleanup(&mut inherited);
+            return (-libc::EINVAL, Vec::new());
+        }
+    };
+    let arguments = [
+        loader.as_ptr(),
+        library_path.as_ptr(),
+        directory.as_ptr(),
+        program.as_ptr(),
+        ptr::null(),
+    ];
+    let mut pipe = [-1; 2];
+    if unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        for opened in inherited.drain(..) {
+            unsafe { libc::close(opened) };
+        }
+        for link in &links {
+            let _ = std::fs::remove_file(link);
+        }
+        return (
+            -io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(libc::EIO),
+            Vec::new(),
+        );
+    }
+
+    let child = unsafe { libc::fork() };
+    if child == 0 {
+        unsafe {
+            libc::close(pipe[0]);
+            libc::dup2(pipe[1], libc::STDOUT_FILENO);
+            libc::dup2(pipe[1], libc::STDERR_FILENO);
+            if pipe[1] > libc::STDERR_FILENO {
+                libc::close(pipe[1]);
+            }
+            unsafe extern "C" {
+                static mut environ: *mut *mut libc::c_char;
+            }
+            libc::execve(
+                loader.as_ptr(),
+                arguments.as_ptr(),
+                environ.cast::<*const libc::c_char>(),
+            );
+            let message = b"glibc runtime exec failed\n";
+            libc::write(
+                libc::STDERR_FILENO,
+                message.as_ptr().cast::<libc::c_void>(),
+                message.len(),
+            );
+            libc::_exit(126);
+        }
+    }
+    unsafe { libc::close(pipe[1]) };
+    for opened in inherited.drain(..) {
+        unsafe { libc::close(opened) };
+    }
+    if child < 0 {
+        unsafe { libc::close(pipe[0]) };
+        for link in &links {
+            let _ = std::fs::remove_file(link);
+        }
+        return (
+            -io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(libc::EIO),
+            Vec::new(),
+        );
+    }
+
+    let mut output = Vec::new();
+    let mut buffer = [0u8; 1024];
+    loop {
+        let count = unsafe {
+            libc::read(
+                pipe[0],
+                buffer.as_mut_ptr().cast::<libc::c_void>(),
+                buffer.len(),
+            )
+        };
+        if count == 0 {
+            break;
+        }
+        if count < 0 {
+            if io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            break;
+        }
+        let count = usize::try_from(count).unwrap_or(0);
+        let remaining = 8191usize.saturating_sub(output.len());
+        output.extend_from_slice(&buffer[..count.min(remaining)]);
+    }
+    unsafe { libc::close(pipe[0]) };
+    let mut status = 0;
+    while unsafe { libc::waitpid(child, &mut status, 0) } < 0 {
+        if io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            for link in &links {
+                let _ = std::fs::remove_file(link);
+            }
+            return (-libc::ECHILD, output);
+        }
+    }
+    for link in &links {
+        let _ = std::fs::remove_file(link);
+    }
+    let exit_code = if libc::WIFEXITED(status) {
+        libc::WEXITSTATUS(status)
+    } else if libc::WIFSIGNALED(status) {
+        128 + libc::WTERMSIG(status)
+    } else {
+        -libc::ECHILD
+    };
+    (exit_code, output)
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_bridge_RuntimeFdLauncher_nativeRunGlibc(
+    environment: *mut std::ffi::c_void,
+    _class: *mut std::ffi::c_void,
+    program_fd: i32,
+    loader_fd: i32,
+    libc_fd: i32,
+    link_directory: jbyteArray,
+    output: jbyteArray,
+) -> i32 {
+    let Some(link_directory) = java_byte_array(environment, link_directory) else {
+        return -libc::EINVAL;
+    };
+    let (exit_code, captured) = run_glibc_fds(program_fd, loader_fd, libc_fd, &link_directory);
+    if copy_to_java_byte_array(environment, output, &captured) < 0 {
+        return -libc::EFAULT;
+    }
+    exit_code
+}
+#[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_org_archphene_bridge_RuntimeFdLauncher_nativeRunFd(
     environment: *mut std::ffi::c_void,

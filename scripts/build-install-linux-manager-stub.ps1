@@ -68,6 +68,8 @@ $PackageLibDir = Join-Path $PackageRuntimeStage "lib/x86_64"
 New-Item -ItemType Directory -Force -Path $PackageLibDir | Out-Null
 Copy-Item -LiteralPath (Join-Path $App "assets/payload-hello-linux-amd64") `
     -Destination (Join-Path $PackageLibDir "libarchphene_runtime_probe.so") -Force
+Copy-Item -LiteralPath (Join-Path $App "assets/payload-hello-dynamic-amd64") `
+    -Destination (Join-Path $PackageLibDir "libarchphene_dynamic_probe.so") -Force
 if ($IncludePackageRuntime) {
     $RuntimeWork = Join-Path $Root "tooling/downloads/arch-runtime-pacman-x86_64"
     $RuntimeRoot = Join-Path $RuntimeWork "runtime-root"
@@ -120,6 +122,17 @@ if ($IncludePackageRuntime) {
     }
     Copy-Item -LiteralPath (Join-Path $PatchedGlibc "ld-linux-x86-64.so.2") `
         -Destination (Join-Path $PackageLibDir "libarchphene_ld.so") -Force
+    Copy-Item -LiteralPath (Join-Path $PatchedGlibc "libc.so.6") `
+        -Destination (Join-Path $PackageLibDir "libarchphene_runtime_libc.so") -Force
+    $RuntimeModuleHashes = @{
+        "libarchphene_dynamic_probe.so" = "6adbf15a76ef673ee66b8af66b3717383cbefea55c9d65809d909c7597fe099b"
+        "libarchphene_ld.so" = "d1763646c97e95ed93ad72c43365cab8747a83170c849002002c7675749a1915"
+        "libarchphene_runtime_libc.so" = "1e31d1a9cb4ddf13d1bb61ed0be1e4e04309b32d1f6f1f0a68820f2e3099101a"
+    }
+    foreach ($module in $RuntimeModuleHashes.GetEnumerator()) {
+        $actual = (Get-FileHash (Join-Path $PackageLibDir $module.Key) -Algorithm SHA256).Hash
+        if ($actual -ne $module.Value) { throw "Runtime module catalog hash mismatch: $($module.Key)" }
+    }
     Get-ChildItem -LiteralPath $PatchedGlibc -File | Where-Object {
         $_.Name -notin @("runtime-manifest.tsv", "source-commit.txt", "ld-linux-x86-64.so.2")
     } | ForEach-Object {

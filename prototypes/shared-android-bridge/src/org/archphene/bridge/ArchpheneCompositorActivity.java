@@ -60,6 +60,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     private String toolkit;
     private String dataAssets;
     private String runtimeProbeUri;
+    private String runtimeLoaderUri;
+    private String runtimeLibcUri;
     private final Map<Integer, SecondaryWindow> secondaryWindows = new HashMap<>();
     private boolean independentWindows;
     private ArchpheneCompositorSession.WindowFrame primaryFrame;
@@ -69,6 +71,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         super.onCreate(state);
         readMetadata();
         runtimeProbeUri = getIntent().getStringExtra("archphene_test_runtime_module_uri");
+        runtimeLoaderUri = getIntent().getStringExtra("archphene_test_runtime_loader_uri");
+        runtimeLibcUri = getIntent().getStringExtra("archphene_test_runtime_libc_uri");
         independentWindows = shouldUseIndependentWindows();
         documentSession = new AndroidDocumentSession(this, logTag);
         getWindow().setStatusBarColor(Color.TRANSPARENT);
@@ -158,7 +162,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             if (session != null) session.configure(width, height, 1);
             if (width > 1 && height > 1 && launched.compareAndSet(false, true)) {
                 if (runtimeProbeUri == null) launch(width, height);
-                else runRuntimeFdProbe(runtimeProbeUri);
+                else if (runtimeLoaderUri == null) runRuntimeFdProbe(runtimeProbeUri);
+                else runRuntimeGlibcProbe(runtimeProbeUri, runtimeLoaderUri, runtimeLibcUri);
             }
         });
     }
@@ -435,6 +440,19 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         }, "archphene-runtime-fd-probe").start();
     }
 
+    private void runRuntimeGlibcProbe(String program, String loader, String libc) {
+        new Thread(() -> {
+            try {
+                RuntimeFdLauncher.Result result = RuntimeFdLauncher.runGlibc(
+                        getContentResolver(), android.net.Uri.parse(program),
+                        android.net.Uri.parse(loader), android.net.Uri.parse(libc), getCacheDir());
+                Log.i("ArchpheneRuntime", "Runtime glibc probe exit=" + result.exitCode
+                        + " output=" + result.output.replace('\n', ' '));
+            } catch (Exception error) {
+                Log.e("ArchpheneRuntime", "Runtime glibc probe failed", error);
+            }
+        }, "archphene-runtime-glibc-probe").start();
+    }
     private void launch(int width, int height) {
         File runtimeDir = new File(getFilesDir(), "wayland-runtime");
         runtimeDir.mkdirs();

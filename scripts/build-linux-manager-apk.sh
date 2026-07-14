@@ -101,6 +101,8 @@ package_assets="$out/package-runtime/assets/package-runtime"
 package_libs="$out/package-runtime/lib/x86_64"
 cp "$root/prototypes/linux-app-manager-stub/assets/payload-hello-linux-amd64" \
   "$package_libs/libarchphene_runtime_probe.so"
+cp "$root/prototypes/linux-app-manager-stub/assets/payload-hello-dynamic-amd64" \
+  "$package_libs/libarchphene_dynamic_probe.so"
 for name in archlinux.gpg archlinux-revoked archlinux-trusted; do
   cp "$keyrings/$name" "$package_assets/$name"
 done
@@ -114,6 +116,12 @@ while IFS=$'\t' read -r name relative; do
   cp "$runtime_root/$relative" "$package_libs/$name" || exit 1
 done < "$resolved"
 cp "$glibc/ld-linux-x86-64.so.2" "$package_libs/libarchphene_ld.so"
+cp "$glibc/libc.so.6" "$package_libs/libarchphene_runtime_libc.so"
+printf '%s  %s\n' \
+  '6adbf15a76ef673ee66b8af66b3717383cbefea55c9d65809d909c7597fe099b' "$package_libs/libarchphene_dynamic_probe.so" \
+  'd1763646c97e95ed93ad72c43365cab8747a83170c849002002c7675749a1915' "$package_libs/libarchphene_ld.so" \
+  '1e31d1a9cb4ddf13d1bb61ed0be1e4e04309b32d1f6f1f0a68820f2e3099101a' "$package_libs/libarchphene_runtime_libc.so" \
+  | sha256sum --check --status || { echo 'runtime module catalog hash mismatch' >&2; exit 1; }
 find "$glibc" -maxdepth 1 -type f \
   ! -name 'source-commit.txt' ! -name 'runtime-manifest.tsv' \
   ! -name 'ld-linux-x86-64.so.2' -exec cp {} "$package_libs/" \;

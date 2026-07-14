@@ -47,9 +47,9 @@ Official Arch Linux supplies x86_64 packages. AArch64 experiments use the separa
 
 ### Shared runtime modules
 
-The manager can expose an exact content-hash runtime module through a non-exported, read-only `ContentProvider`. It launches a wrapper with an explicit temporary URI read grant. The wrapper validates the ELF descriptor and the shared native launcher executes `/proc/self/fd/<n>` after clearing close-on-exec. The process therefore runs under the wrapper's Android UID without copying that module into the wrapper sandbox.
+The manager exposes exact content-hash runtime modules through a non-exported, read-only `ContentProvider`. It launches a wrapper with explicit temporary URI read grants carried as `ClipData`. The wrapper validates each ELF descriptor. For dynamic programs, the native launcher creates a wrapper-private symlink view over inherited descriptors and invokes the manager-owned patched glibc loader with that view as its library path. The process runs under the wrapper's Android UID without copying the program, loader, or libc into the wrapper sandbox.
 
-This is currently a validated static-ELF mechanism, not a complete shared glibc/Qt runtime. A production runtime broker still needs a signed module catalog, atomic versioned packs, descriptor-based dynamic-library resolution, grant/revocation state across process death and reboot, and garbage collection that respects running processes.
+The emulator validates both a static ELF and a dynamically linked fixture using three descriptors: program, patched loader, and libc. This is not yet a complete shared Qt/GTK runtime. A production broker still needs a generated signed module catalog, arbitrary transitive-library resolution, atomic versioned packs, grant/revocation state across process death and reboot, and garbage collection that respects running processes.
 
 ### Storage
 

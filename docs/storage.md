@@ -159,9 +159,9 @@ Terminal-style apps such as `btop` should usually need only app-private paths pl
 
 ## Validated Runtime Descriptor Proof
 
-The manager APK now contains one immutable static x86_64 ELF identified by its SHA-256 digest. A non-exported provider accepts only that exact URI and read mode, verifies the canonical file path, size, and digest, and returns a read-only descriptor. The manager grants that URI only on an explicit wrapper launch. The shared native launcher executes the descriptor through `/proc/self/fd` under the wrapper UID.
+The manager APK now contains a bounded catalog of immutable x86_64 modules identified by SHA-256 digest. A non-exported provider accepts only exact catalog URIs and read mode, verifies canonical file paths, sizes, and digests, and returns read-only descriptors. The manager grants those URIs only on an explicit wrapper launch. The native launcher can execute one static descriptor directly or invoke a dynamic program through shared patched-loader and libc descriptors.
 
-The emulator regression proves both sides of the boundary: direct access from KCalc is denied, while an explicit launch-time read grant permits execution without placing a copy in KCalc's private directory. This does not yet provide a complete shared Linux runtime because a dynamically linked application also needs its loader and transitive libraries. It also does not yet provide durable cold-start or post-reboot access.
+The emulator regression proves both sides of the boundary: direct access from KCalc is denied, while explicit launch-time grants permit a static ELF and a dynamically linked glibc fixture to execute without placing copies in KCalc's private directory. The dynamic path uses a wrapper-private symlink view over inherited program, loader, and libc descriptors. Complete application closures, generated catalogs, durable cold-start access, and post-reboot reconciliation remain unfinished.
 
 ## Next Milestones
 

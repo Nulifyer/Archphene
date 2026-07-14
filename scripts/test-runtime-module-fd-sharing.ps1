@@ -6,6 +6,9 @@ $Adb = Join-Path $Root "tooling/android-sdk/platform-tools/adb.exe"
 $Manager = "org.archpheneos.manager"
 $Wrapper = "org.archphene.linux.kcalc"
 $Uri = "content://org.archpheneos.manager.runtime/v1/76136d0afafb480c67517dea36450ec28b120ab4b73c29e036c74c6a2c00101c"
+$DynamicUri = "content://org.archpheneos.manager.runtime/v1/6adbf15a76ef673ee66b8af66b3717383cbefea55c9d65809d909c7597fe099b"
+$LoaderUri = "content://org.archpheneos.manager.runtime/v1/d1763646c97e95ed93ad72c43365cab8747a83170c849002002c7675749a1915"
+$LibcUri = "content://org.archpheneos.manager.runtime/v1/1e31d1a9cb4ddf13d1bb61ed0be1e4e04309b32d1f6f1f0a68820f2e3099101a"
 
 function Adb([string[]]$Arguments) {
     $output = & $Adb -s $Serial @Arguments 2>&1
@@ -56,7 +59,27 @@ try {
         throw "Manager launch did not record the wrapper target"
     }
 
-    Write-Host "Runtime FD sharing passed on ${Serial}: manager UID $managerUid -> wrapper UID $wrapperUid; denied without grant and executed without a wrapper copy."
+    Adb @("logcat", "-c") | Out-Null
+    Adb @("shell", "am", "force-stop", $Wrapper) | Out-Null
+    Adb @("shell", "am", "force-stop", $Manager) | Out-Null
+    Adb @("shell", "am", "start", "-W", "-n", "$Wrapper/.MainActivity",
+        "--es", "archphene_test_runtime_module_uri", $DynamicUri,
+        "--es", "archphene_test_runtime_loader_uri", $LoaderUri,
+        "--es", "archphene_test_runtime_libc_uri", $LibcUri) | Out-Null
+    Wait-RuntimeLog "Runtime glibc probe failed" | Out-Null
+
+    Adb @("logcat", "-c") | Out-Null
+    Adb @("shell", "am", "force-stop", $Wrapper) | Out-Null
+    Adb @("shell", "am", "force-stop", $Manager) | Out-Null
+    Adb @("shell", "am", "start", "-W", "-n", "$Manager/.MainActivity",
+        "--es", "archphene_test_runtime_module_package", $Wrapper,
+        "--es", "archphene_test_runtime_module_action", "launch_dynamic") | Out-Null
+    $dynamic = Wait-RuntimeLog "Runtime glibc probe exit=0 output=hello from shared glibc closure" 20
+    if ($dynamic -notmatch "Launched glibc runtime modules for $([regex]::Escape($Wrapper))") {
+        throw "Manager glibc launch did not record the wrapper target"
+    }
+
+    Write-Host "Runtime FD sharing passed on ${Serial}: manager UID $managerUid -> wrapper UID $wrapperUid; static and glibc modules denied without grants and executed without wrapper copies."
 } finally {
     Adb @("shell", "am", "force-stop", $Wrapper) | Out-Null
     Adb @("shell", "am", "force-stop", $Manager) | Out-Null
