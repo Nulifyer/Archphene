@@ -1,10 +1,12 @@
-param([string]$Serial = "emulator-5554")
+param(
+    [string]$Serial = "emulator-5554",
+    [string]$Wrapper = "org.archphene.linux.kcalc"
+)
 
 $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $Adb = Join-Path $Root "tooling/android-sdk/platform-tools/adb.exe"
 $Manager = "org.archpheneos.manager"
-$Wrapper = "org.archphene.linux.kcalc"
 function RuntimeUri([string]$Path) {
     $hash = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
     return "content://org.archpheneos.manager.runtime/v1/$hash"
@@ -34,8 +36,11 @@ function Wait-RuntimeLog([string]$Pattern, [int]$Seconds = 10) {
 $packages = (Adb @("shell", "cmd", "package", "list", "packages", "-U")) -join "`n"
 $managerUid = [regex]::Match($packages, "package:$([regex]::Escape($Manager)) uid:(\d+)").Groups[1].Value
 $wrapperUid = [regex]::Match($packages, "package:$([regex]::Escape($Wrapper)) uid:(\d+)").Groups[1].Value
-if (-not $managerUid -or -not $wrapperUid) { throw "Manager and KCalc must be installed" }
+if (-not $managerUid -or -not $wrapperUid) { throw "Manager and runtime wrapper must be installed" }
 if ($managerUid -eq $wrapperUid) { throw "Runtime test requires distinct Android UIDs" }
+$WrapperActivity = Adb @("shell", "cmd", "package", "resolve-activity", "--brief", $Wrapper) |
+    Where-Object { $_ -match '^[^\s]+/[^\s]+$' } | Select-Object -Last 1
+if (-not $WrapperActivity) { throw "Runtime wrapper has no resolved launcher Activity" }
 
 try {
     Adb @("shell", "am", "force-stop", $Manager) | Out-Null
@@ -53,7 +58,7 @@ try {
 
     Adb @("logcat", "-c") | Out-Null
     Adb @("shell", "am", "force-stop", $Wrapper) | Out-Null
-    Adb @("shell", "am", "start", "-W", "-n", "$Wrapper/.MainActivity",
+    Adb @("shell", "am", "start", "-W", "-n", $WrapperActivity,
         "--es", "archphene_test_runtime_module_uri", $Uri) | Out-Null
     $denied = Wait-RuntimeLog "Runtime FD probe failed"
     if ($denied -match "Runtime FD probe exit=0") {
@@ -74,7 +79,7 @@ try {
     Adb @("logcat", "-c") | Out-Null
     Adb @("shell", "am", "force-stop", $Wrapper) | Out-Null
     Adb @("shell", "am", "force-stop", $Manager) | Out-Null
-    Adb @("shell", "am", "start", "-W", "-n", "$Wrapper/.MainActivity",
+    Adb @("shell", "am", "start", "-W", "-n", $WrapperActivity,
         "--es", "archphene_test_runtime_module_uri", $DynamicUri,
         "--es", "archphene_test_runtime_loader_uri", $LoaderUri,
         "--es", "archphene_test_runtime_libc_uri", $LibcUri) | Out-Null
@@ -87,11 +92,23 @@ try {
         "--es", "archphene_test_runtime_module_package", $Wrapper,
         "--es", "archphene_test_runtime_module_action", "launch_dynamic") | Out-Null
     $dynamic = Wait-RuntimeLog "Runtime glibc probe exit=0 output=hello from shared glibc closure" 20
-    if ($dynamic -notmatch "Launched glibc runtime modules for $([regex]::Escape($Wrapper))") {
+    if ($dynamic -notmatch "Launched glibc runtime set with 1 libraries for $([regex]::Escape($Wrapper))") {
         throw "Manager glibc launch did not record the wrapper target"
     }
 
-    Write-Host "Runtime FD sharing passed on ${Serial}: manager UID $managerUid -> wrapper UID $wrapperUid; static and glibc modules denied without grants and executed without wrapper copies."
+    Adb @("logcat", "-c") | Out-Null
+    Adb @("shell", "am", "force-stop", $Wrapper) | Out-Null
+    Adb @("shell", "am", "force-stop", $Manager) | Out-Null
+    Adb @("shell", "am", "start", "-W", "-n", "$Manager/.MainActivity",
+        "--es", "archphene_test_runtime_module_package", $Wrapper,
+        "--es", "archphene_test_runtime_module_action", "launch_dynamic_transitive") | Out-Null
+    $transitive = Wait-RuntimeLog `
+        "Runtime glibc probe exit=0 output=hello from transitive runtime module" 20
+    if ($transitive -notmatch "Launched glibc runtime set with 2 libraries for $([regex]::Escape($Wrapper))") {
+        throw "Manager transitive-library launch did not record the wrapper target"
+    }
+
+    Write-Host "Runtime FD sharing passed on ${Serial}: manager UID $managerUid -> wrapper UID $wrapperUid; static, glibc, and transitive-library modules were denied without grants and executed without wrapper copies."
 } finally {
     Adb @("shell", "am", "force-stop", $Wrapper) | Out-Null
     Adb @("shell", "am", "force-stop", $Manager) | Out-Null

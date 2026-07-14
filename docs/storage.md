@@ -161,7 +161,7 @@ Terminal-style apps such as `btop` should usually need only app-private paths pl
 
 Linux and Windows builds generate a bounded catalog from the exact immutable x86_64 module bytes and place it inside the signed manager APK. The parser rejects malformed, duplicate, traversing, unknown, and out-of-bounds entries. A non-exported provider accepts only exact catalog URIs and read mode, verifies canonical file paths, sizes, and digests, and returns read-only descriptors. The manager grants those URIs only on an explicit wrapper launch.
 
-The emulator regression proves parser rejection and both sides of the access boundary: direct access from KCalc is denied, while explicit launch-time grants permit a static ELF and a dynamically linked glibc fixture to execute without wrapper copies. The dynamic path uses a wrapper-private symlink view over inherited program, loader, and libc descriptors. Arbitrary dependency-graph catalogs, complete application closures, durable cold-start access, and post-reboot reconciliation remain unfinished.
+The emulator regression proves parser rejection and both sides of the access boundary: direct wrapper access is denied, while explicit launch-time grants permit a static ELF, a patched-glibc fixture, and a program with a separately granted `DT_NEEDED` library to execute without wrapper copies. The dynamic path accepts a bounded descriptor/basename set and creates a wrapper-private symlink view over inherited program, loader, and library descriptors. Package-derived dependency-graph catalogs, complete application closures, durable cold-start access, and post-reboot reconciliation remain unfinished.
 
 ## Next Milestones
 

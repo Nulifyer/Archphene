@@ -1303,6 +1303,16 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private Intent runtimeModuleLaunchIntent(String packageName, Uri module) {
+        Intent launch = getPackageManager().getLaunchIntentForPackage(packageName);
+        if (launch == null || launch.getComponent() == null) {
+            throw new IllegalArgumentException("Runtime wrapper has no launcher Activity");
+        }
+        launch.setAction(Intent.ACTION_VIEW);
+        launch.setData(module);
+        return launch;
+    }
+
     private void handleTestRuntimeModuleIntent() {
         String packageName = getIntent().getStringExtra(
                 "archphene_test_runtime_module_package");
@@ -1314,31 +1324,43 @@ public final class MainActivity extends Activity {
                 android.util.Log.i("ArchpheneRuntime", "Runtime catalog parser passed");
             } else if ("launch".equals(action)) {
                 Uri probe = RuntimeModuleProvider.uriForRole(this, "static-probe");
-                Intent launch = new Intent(Intent.ACTION_VIEW, probe);
-                launch.setClassName(packageName, packageName + ".MainActivity");
+                Intent launch = runtimeModuleLaunchIntent(packageName, probe);
                 launch.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
                 launch.putExtra("archphene_test_runtime_module_uri", probe.toString());
                 startActivity(launch);
                 android.util.Log.i("ArchpheneRuntime", "Launched runtime module for "
                         + packageName);
-            } else if ("launch_dynamic".equals(action)) {
-                Uri program = RuntimeModuleProvider.uriForRole(this, "dynamic-probe");
+            } else if ("launch_dynamic".equals(action)
+                    || "launch_dynamic_transitive".equals(action)) {
+                boolean transitive = "launch_dynamic_transitive".equals(action);
+                Uri program = RuntimeModuleProvider.uriForRole(this,
+                        transitive ? "transitive-probe" : "dynamic-probe");
                 Uri loader = RuntimeModuleProvider.uriForRole(this, "glibc-loader");
-                Uri libc = RuntimeModuleProvider.uriForRole(this, "glibc-libc");
-                Intent launch = new Intent(Intent.ACTION_VIEW, program);
-                launch.setClassName(packageName, packageName + ".MainActivity");
+                String[] libraryRoles = transitive
+                        ? new String[] {"glibc-libc", "transitive-probe-library"}
+                        : new String[] {"glibc-libc"};
+                String[] libraryUris = new String[libraryRoles.length];
+                String[] libraryNames = new String[libraryRoles.length];
+                Intent launch = runtimeModuleLaunchIntent(packageName, program);
                 android.content.ClipData modules = android.content.ClipData.newUri(
                         getContentResolver(), "Archphene runtime modules", program);
                 modules.addItem(new android.content.ClipData.Item(loader));
-                modules.addItem(new android.content.ClipData.Item(libc));
+                for (int index = 0; index < libraryRoles.length; index++) {
+                    Uri library = RuntimeModuleProvider.uriForRole(this, libraryRoles[index]);
+                    libraryUris[index] = library.toString();
+                    libraryNames[index] = RuntimeModuleProvider.linkNameForRole(
+                            this, libraryRoles[index]);
+                    modules.addItem(new android.content.ClipData.Item(library));
+                }
                 launch.setClipData(modules);
                 launch.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
                 launch.putExtra("archphene_test_runtime_module_uri", program.toString());
                 launch.putExtra("archphene_test_runtime_loader_uri", loader.toString());
-                launch.putExtra("archphene_test_runtime_libc_uri", libc.toString());
+                launch.putExtra("archphene_test_runtime_library_uris", libraryUris);
+                launch.putExtra("archphene_test_runtime_library_names", libraryNames);
                 startActivity(launch);
-                android.util.Log.i("ArchpheneRuntime", "Launched glibc runtime modules for "
-                        + packageName);
+                android.util.Log.i("ArchpheneRuntime", "Launched glibc runtime set with "
+                        + libraryRoles.length + " libraries for " + packageName);
             } else if ("revoke".equals(action)) {
                 RuntimeModuleProvider.revokeAll(this);
                 android.util.Log.i("ArchpheneRuntime", "Revoked runtime module from "

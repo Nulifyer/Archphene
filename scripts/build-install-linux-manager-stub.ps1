@@ -71,6 +71,10 @@ Copy-Item -LiteralPath (Join-Path $App "assets/payload-hello-linux-amd64") `
     -Destination (Join-Path $PackageLibDir "libarchphene_runtime_probe.so") -Force
 Copy-Item -LiteralPath (Join-Path $App "assets/payload-hello-dynamic-amd64") `
     -Destination (Join-Path $PackageLibDir "libarchphene_dynamic_probe.so") -Force
+Copy-Item -LiteralPath (Join-Path $App "assets/payload-hello-transitive-amd64") `
+    -Destination (Join-Path $PackageLibDir "libarchphene_transitive_probe.so") -Force
+Copy-Item -LiteralPath (Join-Path $App "assets/payload-runtime-dependency-amd64") `
+    -Destination (Join-Path $PackageLibDir "libarchphene_probe_dependency.so") -Force
 if ($IncludePackageRuntime) {
     $RuntimeWork = Join-Path $Root "tooling/downloads/arch-runtime-pacman-x86_64"
     $RuntimeRoot = Join-Path $RuntimeWork "runtime-root"
@@ -133,6 +137,8 @@ if ($IncludePackageRuntime) {
 $RuntimeModules = @(
     @{ Role = "static-probe"; Library = "libarchphene_runtime_probe.so"; Link = "program" }
     @{ Role = "dynamic-probe"; Library = "libarchphene_dynamic_probe.so"; Link = "program" }
+    @{ Role = "transitive-probe"; Library = "libarchphene_transitive_probe.so"; Link = "program" }
+    @{ Role = "transitive-probe-library"; Library = "libarchphene_probe_dependency.so"; Link = "libarchphene_probe_dependency.so" }
 )
 if ($IncludePackageRuntime) {
     $RuntimeModules += @(

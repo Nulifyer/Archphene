@@ -103,6 +103,10 @@ cp "$root/prototypes/linux-app-manager-stub/assets/payload-hello-linux-amd64" \
   "$package_libs/libarchphene_runtime_probe.so"
 cp "$root/prototypes/linux-app-manager-stub/assets/payload-hello-dynamic-amd64" \
   "$package_libs/libarchphene_dynamic_probe.so"
+cp "$root/prototypes/linux-app-manager-stub/assets/payload-hello-transitive-amd64" \
+  "$package_libs/libarchphene_transitive_probe.so"
+cp "$root/prototypes/linux-app-manager-stub/assets/payload-runtime-dependency-amd64" \
+  "$package_libs/libarchphene_probe_dependency.so"
 for name in archlinux.gpg archlinux-revoked archlinux-trusted; do
   cp "$keyrings/$name" "$package_assets/$name"
 done
@@ -134,6 +138,11 @@ add_runtime_module static-probe "$package_libs/libarchphene_runtime_probe.so" \
   libarchphene_runtime_probe.so program
 add_runtime_module dynamic-probe "$package_libs/libarchphene_dynamic_probe.so" \
   libarchphene_dynamic_probe.so program
+add_runtime_module transitive-probe "$package_libs/libarchphene_transitive_probe.so" \
+  libarchphene_transitive_probe.so program
+add_runtime_module transitive-probe-library \
+  "$package_libs/libarchphene_probe_dependency.so" \
+  libarchphene_probe_dependency.so libarchphene_probe_dependency.so
 add_runtime_module glibc-loader "$package_libs/libarchphene_ld.so" \
   libarchphene_ld.so ld-linux-x86-64.so.2
 add_runtime_module glibc-libc "$package_libs/libarchphene_runtime_libc.so" \

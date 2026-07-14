@@ -61,7 +61,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     private String dataAssets;
     private String runtimeProbeUri;
     private String runtimeLoaderUri;
-    private String runtimeLibcUri;
+    private String[] runtimeLibraryUris;
+    private String[] runtimeLibraryNames;
     private final Map<Integer, SecondaryWindow> secondaryWindows = new HashMap<>();
     private boolean independentWindows;
     private ArchpheneCompositorSession.WindowFrame primaryFrame;
@@ -72,7 +73,15 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         readMetadata();
         runtimeProbeUri = getIntent().getStringExtra("archphene_test_runtime_module_uri");
         runtimeLoaderUri = getIntent().getStringExtra("archphene_test_runtime_loader_uri");
-        runtimeLibcUri = getIntent().getStringExtra("archphene_test_runtime_libc_uri");
+        runtimeLibraryUris = getIntent().getStringArrayExtra(
+                "archphene_test_runtime_library_uris");
+        runtimeLibraryNames = getIntent().getStringArrayExtra(
+                "archphene_test_runtime_library_names");
+        String legacyLibc = getIntent().getStringExtra("archphene_test_runtime_libc_uri");
+        if (runtimeLibraryUris == null && legacyLibc != null) {
+            runtimeLibraryUris = new String[] {legacyLibc};
+            runtimeLibraryNames = new String[] {"libc.so.6"};
+        }
         independentWindows = shouldUseIndependentWindows();
         documentSession = new AndroidDocumentSession(this, logTag);
         getWindow().setStatusBarColor(Color.TRANSPARENT);
@@ -163,7 +172,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             if (width > 1 && height > 1 && launched.compareAndSet(false, true)) {
                 if (runtimeProbeUri == null) launch(width, height);
                 else if (runtimeLoaderUri == null) runRuntimeFdProbe(runtimeProbeUri);
-                else runRuntimeGlibcProbe(runtimeProbeUri, runtimeLoaderUri, runtimeLibcUri);
+                else runRuntimeGlibcProbe(runtimeProbeUri, runtimeLoaderUri,
+                        runtimeLibraryUris, runtimeLibraryNames);
             }
         });
     }
@@ -440,12 +450,21 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         }, "archphene-runtime-fd-probe").start();
     }
 
-    private void runRuntimeGlibcProbe(String program, String loader, String libc) {
+    private void runRuntimeGlibcProbe(String program, String loader,
+            String[] libraryUris, String[] libraryNames) {
         new Thread(() -> {
             try {
+                if (libraryUris == null || libraryNames == null
+                        || libraryUris.length != libraryNames.length) {
+                    throw new IllegalArgumentException("Runtime library intent is malformed");
+                }
+                android.net.Uri[] libraries = new android.net.Uri[libraryUris.length];
+                for (int index = 0; index < libraryUris.length; index++) {
+                    libraries[index] = android.net.Uri.parse(libraryUris[index]);
+                }
                 RuntimeFdLauncher.Result result = RuntimeFdLauncher.runGlibc(
                         getContentResolver(), android.net.Uri.parse(program),
-                        android.net.Uri.parse(loader), android.net.Uri.parse(libc), getCacheDir());
+                        android.net.Uri.parse(loader), libraries, libraryNames, getCacheDir());
                 Log.i("ArchpheneRuntime", "Runtime glibc probe exit=" + result.exitCode
                         + " output=" + result.output.replace('\n', ' '));
             } catch (Exception error) {
