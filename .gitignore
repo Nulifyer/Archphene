@@ -119,6 +119,7 @@ netsim.ini
 /tooling/glibc-debian-*/
 /tooling/musl-alpine-*/
 /tooling/signing/
+/tooling/screenshots/
 
 # Go caches / generated binaries
 /tooling/go-cache/

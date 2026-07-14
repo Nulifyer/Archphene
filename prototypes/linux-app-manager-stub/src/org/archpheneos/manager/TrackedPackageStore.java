@@ -32,15 +32,18 @@ public final class TrackedPackageStore {
     public static synchronized void add(Context context, ArchPackageRepository.PackageResult entry) {
         List<ArchPackageRepository.PackageResult> current = list(context);
         for (ArchPackageRepository.PackageResult value : current) {
-            if (value.name.equals(entry.name) && value.architecture.equals(entry.architecture)) return;
+            if (value.repository.equals(entry.repository) && value.name.equals(entry.name)
+                    && value.architecture.equals(entry.architecture)) return;
         }
         current.add(entry);
         write(context, current);
     }
 
-    public static synchronized void remove(Context context, String name, String architecture) {
+    public static synchronized void remove(Context context, String repository, String name,
+            String architecture) {
         List<ArchPackageRepository.PackageResult> current = list(context);
-        current.removeIf(value -> value.name.equals(name) && value.architecture.equals(architecture));
+        current.removeIf(value -> value.repository.equals(repository)
+                && value.name.equals(name) && value.architecture.equals(architecture));
         write(context, current);
     }
 

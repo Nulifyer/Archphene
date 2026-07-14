@@ -8339,6 +8339,8 @@ const MAX_RUNTIME_LIBRARIES: usize = 510;
 const MAX_RUNTIME_LIBRARY_MANIFEST: usize = 128 * 1024;
 #[cfg(any(target_os = "android", test))]
 const MAX_RUNTIME_LINK_NAME: usize = 128;
+const MAX_RUNTIME_ENVIRONMENT_MANIFEST: usize = 32 * 1024;
+const MAX_RUNTIME_ENVIRONMENT_VARIABLES: usize = 64;
 
 #[cfg(any(target_os = "android", test))]
 fn valid_runtime_link_name(name: &[u8]) -> bool {
@@ -8396,6 +8398,54 @@ fn parse_runtime_library_manifest(manifest: &[u8]) -> Result<Vec<(i32, String)>,
     Ok(modules)
 }
 
+#[cfg(any(target_os = "android", test))]
+fn parse_runtime_environment(
+    manifest: &[u8],
+) -> Result<Vec<(std::ffi::CString, std::ffi::CString)>, i32> {
+    if manifest.is_empty() {
+        return Ok(Vec::new());
+    }
+    if manifest.len() > MAX_RUNTIME_ENVIRONMENT_MANIFEST || !manifest.ends_with(b"\n") {
+        return Err(libc::EINVAL);
+    }
+    let mut result = Vec::new();
+    for line in manifest[..manifest.len() - 1].split(|byte| *byte == b'\n') {
+        let Some(separator) = line.iter().position(|byte| *byte == b'=') else {
+            return Err(libc::EINVAL);
+        };
+        let key = &line[..separator];
+        let value = &line[separator + 1..];
+        if key.is_empty()
+            || key.len() > 64
+            || !key[0].is_ascii_uppercase()
+            || !key
+                .iter()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || *byte == b'_')
+            || value.len() > 4096
+            || value.iter().any(|byte| matches!(*byte, b'\0' | b'\r'))
+            || result.len() >= MAX_RUNTIME_ENVIRONMENT_VARIABLES
+        {
+            return Err(libc::EINVAL);
+        }
+        let key = std::ffi::CString::new(key).map_err(|_| libc::EINVAL)?;
+        let value = std::ffi::CString::new(value).map_err(|_| libc::EINVAL)?;
+        if result.iter().any(|(existing, _)| existing == &key) {
+            return Err(libc::EEXIST);
+        }
+        result.push((key, value));
+    }
+    Ok(result)
+}
+
+#[cfg(any(target_os = "android", test))]
+fn runtime_plugin_alias(name: &str) -> Option<&'static str> {
+    match name {
+        "libqwayland.so" => Some("platforms"),
+        "libxdg-shell.so" => Some("wayland-shell-integration"),
+        _ => None,
+    }
+}
+
 #[cfg(target_os = "android")]
 fn cleanup_runtime_fd_view(inherited: &mut Vec<i32>, links: &[PathBuf]) {
     for opened in inherited.drain(..) {
@@ -8412,9 +8462,14 @@ fn run_glibc_fds(
     loader_fd: i32,
     library_manifest: &[u8],
     link_root: &[u8],
+    environment_manifest: &[u8],
 ) -> (i32, Vec<u8>) {
     let libraries = match parse_runtime_library_manifest(library_manifest) {
         Ok(libraries) => libraries,
+        Err(error) => return (-error, Vec::new()),
+    };
+    let environment = match parse_runtime_environment(environment_manifest) {
+        Ok(environment) => environment,
         Err(error) => return (-error, Vec::new()),
     };
     let Ok(link_root) = std::str::from_utf8(link_root) else {
@@ -8453,16 +8508,44 @@ fn run_glibc_fds(
         inherited.push(fd);
     }
 
-    let links = link_names
+    let mut links = link_names
         .iter()
         .map(|name| link_root.join(name))
         .collect::<Vec<_>>();
-    for (link, fd) in links.iter().zip(inherited.iter()) {
+    for (index, (link, fd)) in links.iter().zip(inherited.iter()).enumerate() {
+        let target = if index == 0 {
+            link_root.join(".program")
+        } else if index == 1 {
+            PathBuf::from(format!("/proc/self/fd/{fd}"))
+        } else {
+            link_root.join(format!(".library-{}", index - 2))
+        };
         let _ = std::fs::remove_file(link);
-        if std::os::unix::fs::symlink(format!("/proc/self/fd/{fd}"), link).is_err() {
+        if std::os::unix::fs::symlink(target, link).is_err() {
             cleanup_runtime_fd_view(&mut inherited, &links);
             return (-libc::EIO, Vec::new());
         }
+    }
+    let base_link_count = links.len();
+    for index in 0..base_link_count {
+        let name = &link_names[index];
+        let Some(directory) = runtime_plugin_alias(name) else {
+            continue;
+        };
+        let plugin_directory = link_root.join(directory);
+        if std::fs::create_dir_all(&plugin_directory).is_err() {
+            cleanup_runtime_fd_view(&mut inherited, &links);
+            return (-libc::EIO, Vec::new());
+        }
+        let alias = plugin_directory.join(name);
+        let _ = std::fs::remove_file(&alias);
+        if std::os::unix::fs::symlink(link_root.join(format!(".library-{}", index - 2)), &alias)
+            .is_err()
+        {
+            cleanup_runtime_fd_view(&mut inherited, &links);
+            return (-libc::EIO, Vec::new());
+        }
+        links.push(alias);
     }
 
     let loader = match std::ffi::CString::new(links[1].as_os_str().as_encoded_bytes()) {
@@ -8512,6 +8595,12 @@ fn run_glibc_fds(
             if pipe[1] > libc::STDERR_FILENO {
                 libc::close(pipe[1]);
             }
+            for (key, value) in &environment {
+                if libc::setenv(key.as_ptr(), value.as_ptr(), 1) != 0 {
+                    libc::_exit(125);
+                }
+            }
+
             unsafe extern "C" {
                 static mut environ: *mut *mut libc::c_char;
             }
@@ -8562,8 +8651,17 @@ fn run_glibc_fds(
             break;
         }
         let count = usize::try_from(count).unwrap_or(0);
-        let remaining = 8191usize.saturating_sub(output.len());
-        output.extend_from_slice(&buffer[..count.min(remaining)]);
+        let limit = 64 * 1024 - 1usize;
+        if count >= limit {
+            output.clear();
+            output.extend_from_slice(&buffer[count - limit..count]);
+        } else {
+            let overflow = output.len().saturating_add(count).saturating_sub(limit);
+            if overflow > 0 {
+                output.drain(..overflow);
+            }
+            output.extend_from_slice(&buffer[..count]);
+        }
     }
     unsafe { libc::close(pipe[0]) };
     let mut status = 0;
@@ -8593,16 +8691,23 @@ pub unsafe extern "system" fn Java_org_archphene_bridge_RuntimeFdLauncher_native
     loader_fd: i32,
     library_manifest: jbyteArray,
     link_directory: jbyteArray,
+    runtime_environment: jbyteArray,
     output: jbyteArray,
 ) -> i32 {
-    let (Some(library_manifest), Some(link_directory)) = (
+    let (Some(library_manifest), Some(link_directory), Some(runtime_environment)) = (
         java_byte_array(environment, library_manifest),
         java_byte_array(environment, link_directory),
+        java_byte_array(environment, runtime_environment),
     ) else {
         return -libc::EINVAL;
     };
-    let (exit_code, captured) =
-        run_glibc_fds(program_fd, loader_fd, &library_manifest, &link_directory);
+    let (exit_code, captured) = run_glibc_fds(
+        program_fd,
+        loader_fd,
+        &library_manifest,
+        &link_directory,
+        &runtime_environment,
+    );
     if copy_to_java_byte_array(environment, output, &captured) < 0 {
         return -libc::EFAULT;
     }
@@ -9491,6 +9596,41 @@ mod tests {
                 (15, "libarchphene_probe_dependency.so".to_owned()),
             ]
         );
+    }
+
+    #[test]
+    fn maps_runtime_plugins_to_standard_qt_directories() {
+        assert_eq!(runtime_plugin_alias("libqwayland.so"), Some("platforms"));
+        assert_eq!(
+            runtime_plugin_alias("libxdg-shell.so"),
+            Some("wayland-shell-integration")
+        );
+        assert_eq!(runtime_plugin_alias("libQt6Core.so.6"), None);
+    }
+
+    #[test]
+    fn parses_bounded_runtime_environment() {
+        let environment = parse_runtime_environment(
+            b"HOME=/data/user/0/app/files/linux-home\nWAYLAND_DISPLAY=wayland-0\n",
+        )
+        .expect("valid runtime environment");
+        assert_eq!(environment.len(), 2);
+        assert_eq!(environment[0].0.to_bytes(), b"HOME");
+        assert_eq!(environment[1].1.to_bytes(), b"wayland-0");
+    }
+
+    #[test]
+    fn rejects_unsafe_runtime_environment() {
+        for manifest in [
+            b"home=/tmp\n".as_slice(),
+            b"HOME=/tmp",
+            b"HOME=/tmp\nHOME=/other\n",
+            b"BAD-NAME=value\n",
+            b"=value\n",
+            b"HOME=/tmp\0bad\n",
+        ] {
+            assert!(parse_runtime_environment(manifest).is_err(), "{manifest:?}");
+        }
     }
 
     #[test]

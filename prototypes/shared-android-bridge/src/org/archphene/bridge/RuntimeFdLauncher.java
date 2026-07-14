@@ -8,8 +8,10 @@ import java.io.FileInputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /** Executes immutable runtime modules supplied by Android content descriptors. */
@@ -31,7 +33,7 @@ public final class RuntimeFdLauncher {
 
     public static Result run(ContentResolver resolver, Uri uri) throws Exception {
         try (ParcelFileDescriptor descriptor = openElf(resolver, uri)) {
-            byte[] output = new byte[8192];
+            byte[] output = new byte[64 * 1024];
             int exitCode = nativeRunFd(descriptor.getFd(), output);
             return result(exitCode, output);
         }
@@ -46,6 +48,13 @@ public final class RuntimeFdLauncher {
     public static Result runGlibc(ContentResolver resolver, Uri programUri,
             Uri loaderUri, Uri[] libraryUris, String[] libraryNames, File cacheRoot)
             throws Exception {
+        return runGlibc(resolver, programUri, loaderUri, libraryUris, libraryNames,
+                cacheRoot, java.util.Collections.emptyMap());
+    }
+
+    public static Result runGlibc(ContentResolver resolver, Uri programUri,
+            Uri loaderUri, Uri[] libraryUris, String[] libraryNames, File cacheRoot,
+            Map<String, String> environment) throws Exception {
         if (libraryUris == null || libraryNames == null
                 || libraryUris.length != libraryNames.length
                 || libraryUris.length == 0 || libraryUris.length > MAX_LIBRARIES) {
@@ -56,7 +65,8 @@ public final class RuntimeFdLauncher {
         if (!links.mkdir()) throw new IllegalStateException("Could not create runtime FD view");
         List<ParcelFileDescriptor> descriptors = new ArrayList<>(libraryUris.length + 2);
         try {
-            ParcelFileDescriptor program = openElf(resolver, programUri);
+            ParcelFileDescriptor program = materializeElf(resolver, programUri,
+                    new File(links, ".program"));
             descriptors.add(program);
             ParcelFileDescriptor loader = openElf(resolver, loaderUri);
             descriptors.add(loader);
@@ -67,15 +77,25 @@ public final class RuntimeFdLauncher {
                         || !linkNames.add(libraryNames[index])) {
                     throw new SecurityException("Unsafe or duplicate runtime library name");
                 }
-                ParcelFileDescriptor library = openElf(resolver, libraryUris[index]);
+                ParcelFileDescriptor library = materializeElf(resolver, libraryUris[index],
+                        new File(links, ".library-" + index));
                 descriptors.add(library);
                 manifest.append(library.getFd()).append('\t')
                         .append(libraryNames[index]).append('\n');
             }
-            byte[] output = new byte[8192];
+            Map<String, String> launchEnvironment = new HashMap<>(environment);
+            if (launchEnvironment.containsKey("QT_QPA_PLATFORM_PLUGIN_PATH")) {
+                launchEnvironment.put("QT_QPA_PLATFORM_PLUGIN_PATH",
+                        new File(links, "platforms").getAbsolutePath());
+                String fallback = launchEnvironment.get("QT_PLUGIN_PATH");
+                launchEnvironment.put("QT_PLUGIN_PATH", links.getAbsolutePath()
+                        + (fallback == null || fallback.isEmpty() ? "" : ":" + fallback));
+            }
+            byte[] output = new byte[64 * 1024];
             int exitCode = nativeRunGlibc(program.getFd(), loader.getFd(),
                     manifest.toString().getBytes(StandardCharsets.UTF_8),
-                    links.getAbsolutePath().getBytes(StandardCharsets.UTF_8), output);
+                    links.getAbsolutePath().getBytes(StandardCharsets.UTF_8),
+                    encodeEnvironment(launchEnvironment), output);
             return result(exitCode, output);
         } finally {
             for (int index = descriptors.size() - 1; index >= 0; index--) {
@@ -91,6 +111,28 @@ public final class RuntimeFdLauncher {
             }
             links.delete();
         }
+    }
+
+    private static byte[] encodeEnvironment(Map<String, String> environment) {
+        if (environment == null || environment.size() > 64) {
+            throw new IllegalArgumentException("Invalid runtime environment");
+        }
+        StringBuilder manifest = new StringBuilder();
+        for (Map.Entry<String, String> entry : environment.entrySet()) {
+            String key = entry.getKey();
+            String value = entry.getValue();
+            if (key == null || !key.matches("[A-Z][A-Z0-9_]{0,63}")
+                    || value == null || value.length() > 4096
+                    || value.indexOf('\n') >= 0 || value.indexOf('\r') >= 0
+                    || value.indexOf('\0') >= 0) {
+                throw new SecurityException("Unsafe runtime environment entry");
+            }
+            manifest.append(key).append('=').append(value).append('\n');
+            if (manifest.length() > 32 * 1024) {
+                throw new SecurityException("Runtime environment exceeds bounds");
+            }
+        }
+        return manifest.toString().getBytes(StandardCharsets.UTF_8);
     }
 
     private static boolean safeLinkName(String value) {
@@ -109,6 +151,34 @@ public final class RuntimeFdLauncher {
         return true;
     }
 
+    private static ParcelFileDescriptor materializeElf(ContentResolver resolver, Uri uri,
+            File temporary) throws Exception {
+        try (ParcelFileDescriptor source = openElf(resolver, uri);
+                ParcelFileDescriptor duplicate = ParcelFileDescriptor.dup(
+                        source.getFileDescriptor());
+                FileInputStream input = new FileInputStream(duplicate.getFileDescriptor());
+                java.io.FileOutputStream output = new java.io.FileOutputStream(temporary)) {
+            long total = 0;
+            byte[] buffer = new byte[64 * 1024];
+            int count;
+            while ((count = input.read(buffer)) != -1) {
+                total += count;
+                if (total > 2L * 1024 * 1024 * 1024) {
+                    throw new SecurityException("Runtime module exceeds bounds");
+                }
+                output.write(buffer, 0, count);
+            }
+            if (total <= 0) throw new SecurityException("Runtime module is empty");
+            output.getFD().sync();
+        }
+        android.system.Os.chmod(temporary.getAbsolutePath(), 0500);
+        ParcelFileDescriptor descriptor = ParcelFileDescriptor.open(
+                temporary, ParcelFileDescriptor.MODE_READ_ONLY);
+        // Keep the verified wrapper-private inode named until the child exits. Desktop
+        // frameworks use late dlopen(), after they may have closed inherited descriptors.
+        return descriptor;
+    }
+
     private static ParcelFileDescriptor openElf(ContentResolver resolver, Uri uri)
             throws Exception {
         ParcelFileDescriptor descriptor = resolver.openFileDescriptor(uri, "r");
@@ -123,6 +193,8 @@ public final class RuntimeFdLauncher {
                     throw new SecurityException("Runtime module is not an ELF file");
                 }
             }
+            android.system.Os.lseek(descriptor.getFileDescriptor(), 0,
+                    android.system.OsConstants.SEEK_SET);
             return descriptor;
         } catch (Exception error) {
             descriptor.close();
@@ -139,5 +211,6 @@ public final class RuntimeFdLauncher {
 
     private static native int nativeRunFd(int fd, byte[] output);
     private static native int nativeRunGlibc(int programFd, int loaderFd,
-            byte[] libraryManifest, byte[] linkDirectory, byte[] output);
+            byte[] libraryManifest, byte[] linkDirectory, byte[] environment,
+            byte[] output);
 }

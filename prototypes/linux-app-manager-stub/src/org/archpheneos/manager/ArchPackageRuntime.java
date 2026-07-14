@@ -16,6 +16,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
@@ -69,11 +70,14 @@ public final class ArchPackageRuntime {
         public final String sourcePackage;
         public final List<ResolvedPackage> packages;
         public final File root;
+        public final String runtimePackId;
 
-        StagedTransaction(String sourcePackage, List<ResolvedPackage> packages, File root) {
+        StagedTransaction(String sourcePackage, List<ResolvedPackage> packages, File root,
+                String runtimePackId) {
             this.sourcePackage = sourcePackage;
-            this.packages = packages;
+            this.packages = Collections.unmodifiableList(new ArrayList<>(packages));
             this.root = root;
+            this.runtimePackId = runtimePackId;
         }
     }
 
@@ -101,6 +105,11 @@ public final class ArchPackageRuntime {
 
     public static synchronized List<ResolvedPackage> resolve(Context context, String packageName)
             throws Exception {
+        return resolve(context, packageName, new String[0]);
+    }
+
+    private static List<ResolvedPackage> resolve(Context context, String packageName,
+            String... bridgePackages) throws Exception {
         if (packageName == null || !packageName.matches("[a-zA-Z0-9@._+:-]{1,128}")) {
             throw new IllegalArgumentException("Invalid Arch package name");
         }
@@ -118,10 +127,18 @@ public final class ArchPackageRuntime {
                 + "[core]\nServer = https://geo.mirror.pkgbuild.com/core/os/x86_64\n\n"
                 + "[extra]\nServer = https://geo.mirror.pkgbuild.com/extra/os/x86_64\n");
         String separator = "__ARCHPHENE__";
-        Result result = pacman(context, "--config", config.getPath(), "--root", root.getPath(),
+        ArrayList<String> arguments = new ArrayList<>(Arrays.asList(
+                "--config", config.getPath(), "--root", root.getPath(),
                 "--dbpath", database.getPath(), "--cachedir", cache.getPath(), "-Sp",
                 "--print-format", "%n" + separator + "%v" + separator + "%r" + separator
-                        + "%l" + separator + "%f", packageName);
+                        + "%l" + separator + "%f", packageName));
+        for (String bridgePackage : bridgePackages) {
+            if (bridgePackage == null || !bridgePackage.matches("[a-zA-Z0-9@._+:-]{1,128}")) {
+                throw new IllegalArgumentException("Invalid bridge package name");
+            }
+            arguments.add(bridgePackage);
+        }
+        Result result = pacman(context, arguments.toArray(new String[0]));
         if (result.exitCode != 0) {
             throw new IllegalStateException("Arch dependency resolution failed\n" + result.output);
         }
@@ -168,7 +185,7 @@ public final class ArchPackageRuntime {
 
     public static synchronized StagedTransaction stageTransaction(Context context,
             String packageName) throws Exception {
-        List<ResolvedPackage> packages = resolve(context, packageName);
+        List<ResolvedPackage> packages = resolve(context, packageName, "qt6-wayland");
         File staging = new File(state(context), "staging/" + packageName);
         deleteRecursively(staging);
         File root = new File(staging, "root");
@@ -187,7 +204,9 @@ public final class ArchPackageRuntime {
             deleteRecursively(staging);
             throw new SecurityException("Resolved package has no safe desktop executable");
         }
-        return new StagedTransaction(packageName, packages, root);
+        RuntimePackStore.Pack pack = RuntimePackStore.build(
+                context, packageName, packages, root);
+        return new StagedTransaction(packageName, packages, root, pack.id);
     }
 
     private static void stageVerifiedArchive(Context context, File archive, File root,

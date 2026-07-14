@@ -10,6 +10,7 @@ import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.Insets;
 import android.graphics.drawable.ColorDrawable;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
@@ -49,6 +50,10 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     private static final String META_TOOLKIT = "org.archphene.bridge.toolkit";
     private static final String META_TAG = "org.archphene.bridge.log_tag";
     private static final String META_DATA_ASSETS = "org.archphene.bridge.data_assets";
+    private static final Uri RUNTIME_PROVIDER = Uri.parse(
+            "content://org.archpheneos.manager.runtime");
+    private static final String ACTIVE_PACK_METHOD =
+            "org.archphene.runtime.ACTIVE_PACK_V1";
 
     private final AtomicBoolean launched = new AtomicBoolean();
     private ArchpheneInputView compositorView;
@@ -63,6 +68,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     private String runtimeLoaderUri;
     private String[] runtimeLibraryUris;
     private String[] runtimeLibraryNames;
+    private boolean runtimeGui;
     private final Map<Integer, SecondaryWindow> secondaryWindows = new HashMap<>();
     private boolean independentWindows;
     private ArchpheneCompositorSession.WindowFrame primaryFrame;
@@ -77,11 +83,13 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 "archphene_test_runtime_library_uris");
         runtimeLibraryNames = getIntent().getStringArrayExtra(
                 "archphene_test_runtime_library_names");
+        runtimeGui = getIntent().getBooleanExtra("archphene_runtime_gui", false);
         String legacyLibc = getIntent().getStringExtra("archphene_test_runtime_libc_uri");
         if (runtimeLibraryUris == null && legacyLibc != null) {
             runtimeLibraryUris = new String[] {legacyLibc};
             runtimeLibraryNames = new String[] {"libc.so.6"};
         }
+        if (runtimeProbeUri == null) loadManagerRuntimePack();
         independentWindows = shouldUseIndependentWindows();
         documentSession = new AndroidDocumentSession(this, logTag);
         getWindow().setStatusBarColor(Color.TRANSPARENT);
@@ -172,10 +180,36 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             if (width > 1 && height > 1 && launched.compareAndSet(false, true)) {
                 if (runtimeProbeUri == null) launch(width, height);
                 else if (runtimeLoaderUri == null) runRuntimeFdProbe(runtimeProbeUri);
+                else if (runtimeGui) launchRuntimeGlibc(width, height);
                 else runRuntimeGlibcProbe(runtimeProbeUri, runtimeLoaderUri,
                         runtimeLibraryUris, runtimeLibraryNames);
             }
         });
+    }
+
+    private void loadManagerRuntimePack() {
+        try {
+            Bundle runtime = getContentResolver().call(
+                    RUNTIME_PROVIDER, ACTIVE_PACK_METHOD, null, null);
+            if (runtime == null) return;
+            String program = runtime.getString("program_uri");
+            String loader = runtime.getString("loader_uri");
+            String[] libraries = runtime.getStringArray("library_uris");
+            String[] names = runtime.getStringArray("library_names");
+            if (program == null || loader == null || libraries == null || names == null
+                    || libraries.length == 0 || libraries.length != names.length) {
+                throw new SecurityException("Manager returned an invalid runtime pack");
+            }
+            runtimeProbeUri = program;
+            runtimeLoaderUri = loader;
+            runtimeLibraryUris = libraries;
+            runtimeLibraryNames = names;
+            runtimeGui = true;
+            Log.i(logTag, "Loaded manager-owned runtime pack "
+                    + runtime.getString("pack_id", "unknown"));
+        } catch (Exception unavailable) {
+            Log.d(logTag, "No manager-owned runtime pack; using packaged payload");
+        }
     }
 
     private void installInputRouting() {
@@ -472,6 +506,69 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             }
         }, "archphene-runtime-glibc-probe").start();
     }
+    private void launchRuntimeGlibc(int width, int height) {
+        File runtimeDir = new File(getFilesDir(), "wayland-runtime");
+        runtimeDir.mkdirs();
+        File socket = new File(runtimeDir, "wayland-0");
+        session.start(socket, width, height);
+        new Thread(() -> {
+            try {
+                if (runtimeLibraryUris == null || runtimeLibraryNames == null
+                        || runtimeLibraryUris.length != runtimeLibraryNames.length) {
+                    throw new IllegalArgumentException("Runtime library intent is malformed");
+                }
+                android.net.Uri[] libraries = new android.net.Uri[runtimeLibraryUris.length];
+                for (int index = 0; index < runtimeLibraryUris.length; index++) {
+                    if (runtimeLibraryUris[index] == null) {
+                        throw new IllegalArgumentException("Runtime library URI is missing");
+                    }
+                    libraries[index] = android.net.Uri.parse(runtimeLibraryUris[index]);
+                }
+                File runtimeLib = new File(getFilesDir(), "linux-runtime/lib");
+                prepareRuntime(runtimeLib);
+                File home = new File(getFilesDir(), "linux-home");
+                File cache = new File(home, ".cache");
+                File config = new File(home, ".config");
+                File tmp = new File(getCacheDir(), "linux-tmp");
+                home.mkdirs();
+                cache.mkdirs();
+                config.mkdirs();
+                tmp.mkdirs();
+                Map<String, String> environment = new HashMap<>();
+                environment.put("GLIBC_TUNABLES", "glibc.pthread.rseq=0");
+                environment.put("HOME", home.getAbsolutePath());
+                environment.put("XDG_CACHE_HOME", cache.getAbsolutePath());
+                environment.put("XDG_CONFIG_HOME", config.getAbsolutePath());
+                environment.put("XDG_RUNTIME_DIR", runtimeDir.getAbsolutePath());
+                environment.put("WAYLAND_DISPLAY", "wayland-0");
+                environment.put("TMPDIR", tmp.getAbsolutePath());
+                File fontconfig = copyAsset("fonts.conf",
+                        new File(getFilesDir(), "fontconfig/fonts.conf"));
+                environment.put("FONTCONFIG_FILE", fontconfig.getAbsolutePath());
+                environment.put("FONTCONFIG_PATH", fontconfig.getParentFile().getAbsolutePath());
+                applyToolkitEnvironment(environment, runtimeLib, config);
+                RuntimeFdLauncher.Result result = RuntimeFdLauncher.runGlibc(
+                        getContentResolver(), android.net.Uri.parse(runtimeProbeUri),
+                        android.net.Uri.parse(runtimeLoaderUri), libraries,
+                        runtimeLibraryNames, getCacheDir(), environment);
+                Log.i("ArchpheneRuntime", "Runtime GUI exit=" + result.exitCode);
+                logRuntimeOutput(result.output);
+            } catch (Throwable error) {
+                Log.e("ArchpheneRuntime", "Could not launch runtime GUI", error);
+            }
+        }, "archphene-runtime-gui").start();
+    }
+
+    private static void logRuntimeOutput(String output) {
+        if (output == null || output.isEmpty()) return;
+        int chunk = 3000;
+        for (int offset = 0; offset < output.length(); offset += chunk) {
+            int end = Math.min(output.length(), offset + chunk);
+            Log.i("ArchpheneRuntime", "Runtime output "
+                    + (offset / chunk + 1) + ": " + output.substring(offset, end));
+        }
+    }
+
     private void launch(int width, int height) {
         File runtimeDir = new File(getFilesDir(), "wayland-runtime");
         runtimeDir.mkdirs();

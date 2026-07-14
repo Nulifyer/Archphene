@@ -5,6 +5,7 @@
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
         </intent>
+        <provider android:authorities="org.archpheneos.manager.runtime" />
     </queries>
     <uses-sdk android:minSdkVersion="23" android:targetSdkVersion="36" />
     <uses-permission android:name="android.permission.INTERNET" />
@@ -32,9 +33,10 @@
         <provider
             android:name="org.archpheneos.manager.RuntimeModuleProvider"
             android:authorities="org.archpheneos.manager.runtime"
-            android:exported="false"
+            android:exported="true"
             android:grantUriPermissions="true">
             <grant-uri-permission android:pathPrefix="/v1/" />
+            <grant-uri-permission android:pathPrefix="/pack/v1/" />
         </provider>
 
         <service

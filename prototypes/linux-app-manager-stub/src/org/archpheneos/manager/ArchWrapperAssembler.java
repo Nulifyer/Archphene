@@ -29,6 +29,7 @@ public final class ArchWrapperAssembler {
     private static final String PACKAGE_PLACEHOLDER =
             "org.archphene.linux.p00000000000000000000000000000000";
     private static final int ENTRY_LIMIT = 256 * 1024 * 1024;
+    private static final long ZIP_EPOCH_MILLIS = 1577836800000L;
 
     public static final class Result {
         public final String packageName;
@@ -57,12 +58,11 @@ public final class ArchWrapperAssembler {
                 || !sourcePackage.matches("[a-zA-Z0-9@._+:-]{1,128}")) {
             throw new IllegalArgumentException("Invalid wrapper source identity");
         }
-        String packageName = "org.archphene.linux.p"
-                + sha256((repository + "/" + sourcePackage).getBytes(StandardCharsets.UTF_8))
-                        .substring(0, 32);
+        String packageName = packageNameFor(repository, sourcePackage);
         File output = new File(context.getCacheDir(), "generated-" + sourcePackage + ".apk");
         File unsigned = new File(context.getCacheDir(), "generated-" + sourcePackage + ".unsigned.apk");
         rebuildTemplate(context, packageName, sourcePackage, runtimeRoot, unsigned);
+        verifyStoredEntryAlignment(unsigned, "resources.arsc", 4);
         ArchWrapperSigner.Result signed = ArchWrapperSigner.sign(context, unsigned, output);
         PackageInfo parsed = context.getPackageManager().getPackageArchiveInfo(output.getPath(),
                 PackageManager.GET_SIGNING_CERTIFICATES);
@@ -74,6 +74,16 @@ public final class ArchWrapperAssembler {
         return new Result(packageName, output, sha256(output), signed.signerSha256);
     }
 
+    static String packageNameFor(String repository, String sourcePackage) throws Exception {
+        if (repository == null || sourcePackage == null
+                || !repository.matches("[a-z0-9-]{1,32}")
+                || !sourcePackage.matches("[a-zA-Z0-9@._+:-]{1,128}")) {
+            throw new IllegalArgumentException("Invalid wrapper source identity");
+        }
+        return "org.archphene.linux.p"
+                + sha256((repository + "/" + sourcePackage).getBytes(StandardCharsets.UTF_8))
+                        .substring(0, 32);
+    }
     private static void rebuildTemplate(Context context, String packageName, String sourcePackage,
             File runtimeRoot, File output) throws Exception {
         byte[] placeholder = PACKAGE_PLACEHOLDER.getBytes(StandardCharsets.UTF_8);
@@ -101,7 +111,7 @@ public final class ArchWrapperAssembler {
                     patched = true;
                 }
                 ZipEntry next = new ZipEntry(name);
-                next.setTime(0);
+                next.setTime(ZIP_EPOCH_MILLIS);
                 if (entry.getMethod() == ZipEntry.STORED || "resources.arsc".equals(name)) {
                     CRC32 crc = new CRC32();
                     crc.update(value);
@@ -119,7 +129,7 @@ public final class ArchWrapperAssembler {
                 for (Map.Entry<String, File> nativeFile : collectNativeFiles(
                         context, runtimeRoot, sourcePackage).entrySet()) {
                     ZipEntry next = new ZipEntry("lib/x86_64/" + nativeFile.getKey());
-                    next.setTime(0);
+                    next.setTime(ZIP_EPOCH_MILLIS);
                     zip.putNextEntry(next);
                     try (InputStream file = new FileInputStream(nativeFile.getValue())) {
                         byte[] buffer = new byte[64 * 1024];
@@ -136,7 +146,7 @@ public final class ArchWrapperAssembler {
         }
     }
 
-    private static Map<String, File> collectNativeFiles(Context context, File runtimeRoot,
+    static Map<String, File> collectNativeFiles(Context context, File runtimeRoot,
             String sourcePackage) throws Exception {
         File canonicalRoot = runtimeRoot.getCanonicalFile();
         File libraryRoot = new File(canonicalRoot, "usr/lib").getCanonicalFile();
@@ -163,10 +173,13 @@ public final class ArchWrapperAssembler {
         HashSet<String> visited = new HashSet<>();
         addNative(result, "libarchphene_kcalc.so", executable);
         pending.add(executable);
-        File waylandPlugin = candidates.get("libqwayland.so");
-        if (waylandPlugin != null) {
-            addNative(result, "libqwayland.so", waylandPlugin);
-            pending.add(waylandPlugin);
+        for (String pluginName : new String[] {"libqwayland.so", "libxdg-shell.so"}) {
+            File plugin = candidates.get(pluginName);
+            if (plugin == null) {
+                throw new SecurityException("Missing Qt bridge plugin " + pluginName);
+            }
+            addNative(result, pluginName, plugin);
+            pending.add(plugin);
         }
         while (!pending.isEmpty()) {
             File current = pending.removeFirst().getCanonicalFile();
@@ -305,6 +318,45 @@ public final class ArchWrapperAssembler {
             return input.read() == 0x7f && input.read() == 'E'
                     && input.read() == 'L' && input.read() == 'F';
         }
+    }
+
+    private static void verifyStoredEntryAlignment(File archive, String target, int alignment)
+            throws Exception {
+        if (!archive.isFile() || archive.length() <= 0 || archive.length() > 512L * 1024 * 1024) {
+            throw new SecurityException("Generated wrapper archive exceeds bounds");
+        }
+        byte[] expected = target.getBytes(StandardCharsets.UTF_8);
+        try (RandomAccessFile input = new RandomAccessFile(archive, "r")) {
+            long limit = input.length() - 30;
+            for (long offset = 0; offset <= limit; offset++) {
+                input.seek(offset);
+                if (readUnsignedIntLe(input) != 0x04034b50L) continue;
+                input.skipBytes(4);
+                int method = readUnsignedShortLe(input);
+                input.skipBytes(16);
+                int nameLength = readUnsignedShortLe(input);
+                int extraLength = readUnsignedShortLe(input);
+                if (nameLength != expected.length || nameLength > 4096 || extraLength > 65535) {
+                    continue;
+                }
+                byte[] name = new byte[nameLength];
+                input.readFully(name);
+                if (!java.util.Arrays.equals(name, expected)) continue;
+                long dataOffset = offset + 30L + nameLength + extraLength;
+                if (method != ZipEntry.STORED || dataOffset % alignment != 0) {
+                    throw new SecurityException("Generated wrapper entry is not safely aligned");
+                }
+                return;
+            }
+        }
+        throw new SecurityException("Generated wrapper resources entry is missing");
+    }
+
+    private static long readUnsignedIntLe(RandomAccessFile input) throws Exception {
+        return (long) input.readUnsignedByte()
+                | (long) input.readUnsignedByte() << 8
+                | (long) input.readUnsignedByte() << 16
+                | (long) input.readUnsignedByte() << 24;
     }
 
     private static void alignStoredEntry(ZipEntry entry, long offset, String name, int alignment) {
