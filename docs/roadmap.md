@@ -11,7 +11,9 @@ Archphene is moving from application-specific proofs toward a package-driven And
    - select the desktop entrypoint, icon, toolkit, ABI, and capabilities;
    - generate a wrapper APK from a reusable template;
    - sign with a persistent per-device identity;
-   - install through Android `PackageInstaller`.
+   - install through Android PackageInstaller;
+   - preserve per-package progress, cancellation, retry, and process-death reconciliation;
+   - allow bounded parallel preparation while serializing wrapper mutation, signing, and Android confirmation.
 
 2. **Shared Wayland compositor**
    - replace duplicated KCalc and Mousepad Java implementations;

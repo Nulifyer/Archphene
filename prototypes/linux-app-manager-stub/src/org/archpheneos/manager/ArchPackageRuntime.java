@@ -22,10 +22,13 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 public final class ArchPackageRuntime {
     private static final int OUTPUT_LIMIT = 16 * 1024 * 1024;
     private static final String ASSET_ROOT = "package-runtime/";
+    private static final ConcurrentHashMap<String, Object> DOWNLOAD_LOCKS =
+            new ConcurrentHashMap<>();
 
     public static final class Result {
         public final int exitCode;
@@ -81,6 +84,10 @@ public final class ArchPackageRuntime {
         }
     }
 
+    public interface ProgressCallback {
+        void onProgress(int percent, String status);
+    }
+
     private ArchPackageRuntime() {}
 
     public static boolean available(Context context) {
@@ -108,8 +115,8 @@ public final class ArchPackageRuntime {
         return resolve(context, packageName, new String[0]);
     }
 
-    private static List<ResolvedPackage> resolve(Context context, String packageName,
-            String... bridgePackages) throws Exception {
+    private static synchronized List<ResolvedPackage> resolve(Context context,
+            String packageName, String... bridgePackages) throws Exception {
         if (packageName == null || !packageName.matches("[a-zA-Z0-9@._+:-]{1,128}")) {
             throw new IllegalArgumentException("Invalid Arch package name");
         }
@@ -165,6 +172,14 @@ public final class ArchPackageRuntime {
 
     public static Verification downloadAndVerify(Context context, ResolvedPackage value)
             throws Exception {
+        Object lock = DOWNLOAD_LOCKS.computeIfAbsent(value.filename, ignored -> new Object());
+        synchronized (lock) {
+            return downloadAndVerifyLocked(context, value);
+        }
+    }
+
+    private static Verification downloadAndVerifyLocked(Context context,
+            ResolvedPackage value) throws Exception {
         validatePackageUrl(value.url, value.repository);
         File downloads = directory(state(context), "downloads");
         String safeName = value.filename.replace(':', '_');
@@ -183,18 +198,31 @@ public final class ArchPackageRuntime {
         return verifyPackage(context, packageFile, signatureFile);
     }
 
-    public static synchronized StagedTransaction stageTransaction(Context context,
-            String packageName) throws Exception {
+    public static StagedTransaction stageTransaction(Context context, String packageName)
+            throws Exception {
+        return stageTransaction(context, packageName, (percent, status) -> {});
+    }
+
+    public static StagedTransaction stageTransaction(Context context, String packageName,
+            ProgressCallback progress) throws Exception {
+        if (progress == null) throw new IllegalArgumentException("Progress callback is required");
+        progress.onProgress(5, "Resolving signed Arch transaction");
         List<ResolvedPackage> packages = resolve(context, packageName, "qt6-wayland");
         File staging = new File(state(context), "staging/" + packageName);
         deleteRecursively(staging);
         File root = new File(staging, "root");
         if (!root.mkdirs()) throw new IllegalStateException("Could not create transaction root");
         File downloads = directory(state(context), "downloads");
-        for (ResolvedPackage value : packages) {
+        for (int index = 0; index < packages.size(); index++) {
+            if (Thread.currentThread().isInterrupted()) throw new InterruptedException();
+            ResolvedPackage value = packages.get(index);
+            int base = 10 + index * 50 / packages.size();
+            progress.onProgress(base, "Downloading and verifying " + value.name
+                    + " (" + (index + 1) + "/" + packages.size() + ")");
             android.util.Log.i("ArchphenePackages", "staging " + value.repository + "/"
                     + value.name + " " + value.version);
             downloadAndVerify(context, value);
+            progress.onProgress(Math.min(59, base + 1), "Staging verified " + value.name);
             File archive = new File(downloads, value.filename.replace(':', '_'));
             stageVerifiedArchive(context, archive, root, packageName);
         }
@@ -204,8 +232,10 @@ public final class ArchPackageRuntime {
             deleteRecursively(staging);
             throw new SecurityException("Resolved package has no safe desktop executable");
         }
+        progress.onProgress(62, "Publishing verified runtime pack");
         RuntimePackStore.Pack pack = RuntimePackStore.build(
                 context, packageName, packages, root);
+        progress.onProgress(65, "Runtime pack ready");
         return new StagedTransaction(packageName, packages, root, pack.id);
     }
 
@@ -291,7 +321,8 @@ public final class ArchPackageRuntime {
         List<String> command = new ArrayList<>(Arrays.asList(loader.getPath(),
                 "--library-path", nativeDir.getPath(), tool.getPath(),
                 "-xOf", archive.getPath(), entry));
-        File error = new File(state(context), "bsdtar-extract.err");
+        File error = new File(state(context), "bsdtar-extract-"
+                + Thread.currentThread().getId() + ".err");
         ProcessBuilder builder = new ProcessBuilder(command);
         builder.directory(state(context));
         builder.redirectOutput(destination);

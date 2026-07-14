@@ -114,10 +114,10 @@ The physical suite expects the curated ARM64 package/runtime workspace and a com
 
 ## Current limitations
 
-- The complete on-device transaction is proven for x86_64 KCalc/Qt. Arbitrary packages still need toolkit detection, capability policy, additional wrapper templates, ABI filtering, and compatibility reporting.
+- The complete on-device transaction is proven for x86_64 KCalc/Qt with durable per-package jobs, list/detail progress, cancellation, retry, bounded parallel preparation, serialized signing/installation, isolated failures, and process-death reconciliation. Arbitrary packages still need desktop-entry/toolkit detection, capability policy, additional wrapper templates, ABI filtering, and compatibility reporting.
 - GitHub Releases discovery, checksum validation, bounded download, signer/package verification, Android confirmation, replacement, and restart reconciliation are implemented. The Linux workflow published and checksummed the first `v1.0.0` APK.
 - KCalc and Mousepad now use one shared Android Activity/InputConnection/clipboard host and Rust native compositor. Broad application support still requires more protocols, toolkit templates, and device coverage.
-- Manager-owned, hash-addressed runtime modules now execute under a separate wrapper UID through explicit read-only URI grants. Linux and Windows builds generate a bounded module catalog inside the signed manager APK, and the emulator proves static execution plus patched-glibc execution with a separately granted `DT_NEEDED` library. Package-derived Qt/GTK closure catalogs, durable relaunch grants, and atomic runtime-pack updates remain incomplete.
+- Verified package closures now publish as manager-owned immutable content-addressed runtime packs. A caller-authenticated provider grants exact read-only modules to the generated wrapper UID, cold KCalc app-drawer launch is validated, untrusted shell access is rejected, and the generated wrapper is 629 KB instead of 57 MB. Running-process leases, complete uninstall reconciliation, and 4 KB/16 KB validation remain incomplete.
 - GPU acceleration, audio, printing, camera, drag-and-drop, accessibility, keyrings, and many desktop portals are incomplete or absent.
 - Android permissions require explicit bridge APIs; a Linux syscall cannot directly trigger an Android runtime permission prompt.
 - Secondary Linux toplevels use a shared parent/child registry with composited phone behavior and separate Android dialogs in tablet/freeform mode. Sustained vendor desktop-mode policy and multi-display behavior still need validation.
@@ -129,9 +129,9 @@ See [Current project status](docs/project-status.md) for validated evidence and 
 ## Roadmap
 
 1. Expand the shared native compositor beyond the validated SHM Qt/GTK path with GPU buffers, richer shell/input protocols, and broader application regressions.
-2. Expand the validated generated catalog and bounded transitive-library FD path into package-derived, atomic, content-addressed runtime packs with durable brokered grants, process-group lifecycle management, and 16 KB page-size validation.
+2. Add running-process leases, uninstall reconciliation, process-group cleanup, extraction reuse, and 4 KB/16 KB validation to the package-derived content-addressed runtime-pack broker.
 3. Complete the multi-document Android storage broker and manager-owned shared user-document provider.
-4. Expand the proven x86_64 KCalc on-device transaction to Arch Linux ARM, toolkit-aware templates, capability policy, and failure-isolated package scheduling.
+4. Expand the proven failure-isolated x86_64 KCalc job flow to Arch Linux ARM, toolkit-aware templates, generic metadata, and capability policy.
 5. Generate Android manifests and permission brokers from package capabilities.
 6. Expand compatibility to GPU-accelerated editors, browsers, creative applications, audio, and desktop/freeform multi-window use.
 7. Validate supported GrapheneOS Pixels without claiming GrapheneOS-equivalent security on other devices.

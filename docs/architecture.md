@@ -20,18 +20,20 @@ Arch repository metadata
 
 The full on-device transaction is proven for x86_64 KCalc: Arch resolution, signature verification, staging, closure reduction, wrapper assembly, persistent Android Keystore signing, and PackageInstaller installation. Mousepad and broad arbitrary-package support still require additional toolkit templates, ABI support, and capability policy.
 
+Package conversions run as durable per-package jobs. Two package preparation jobs may overlap, while wrapper mutation/signing and Android installation confirmation use fair single-slot gates. State is committed before phase transitions, failures and cancellation are isolated by canonical package identity, and startup reconciles an Android install that completed after the manager process stopped.
+
 ### Wrapper application
 
 Each Linux application is installed as a distinct APK with:
 
 - a stable Android package name and signing identity;
-- its Linux executable and ABI-specific runtime closure;
+- a thin Android code/resource shell without Linux runtime payloads;
 - an Android Activity and launcher entry;
 - bridge capability and package-source metadata;
 - private Android storage for background state;
 - Android document brokers for user-visible files.
 
-Separate APK identities preserve Android's per-app UID and lifecycle boundaries, but currently duplicate substantial runtime data.
+Separate APK identities preserve Android's per-app UID and lifecycle boundaries. Linux executables, the patched glibc loader, and shared libraries remain in manager-owned immutable packs rather than being duplicated in each generated APK.
 
 ### Wayland bridge
 
@@ -45,11 +47,13 @@ Arch glibc and application libraries run inside the Android app sandbox. Source-
 
 Official Arch Linux supplies x86_64 packages. AArch64 experiments use the separate Arch Linux ARM project and trust roots.
 
-### Shared runtime modules
+### Shared runtime packs
 
-Linux and Windows builds generate a bounded runtime-module catalog from the exact packaged bytes and place it inside the signed manager APK. The provider rejects malformed fields, duplicate roles or hashes, traversal names, unknown URIs, and out-of-bounds sizes before opening a module. It then exposes exact content-hash modules through a non-exported, read-only `ContentProvider` and launches wrappers with temporary URI read grants carried as `ClipData`. For dynamic programs, the bridge validates a bounded set of dependency basenames in both Java and native code, creates a wrapper-private symlink view over inherited descriptors, and invokes the manager-owned patched glibc loader with that view as its library path. The process runs under the wrapper's Android UID without copying the program, loader, or libraries into the wrapper sandbox.
+After package signature and extraction checks, the manager reduces the dependency closure and publishes an immutable pack under the SHA-256 of its bounded manifest. Publication uses a staging directory plus atomic rename. A separate atomic binding selects the active pack for one deterministic Android package identity.
 
-The emulator validates catalog parser rejection cases, a static ELF, a patched-glibc program, and a second program whose `DT_NEEDED` dependency is supplied as a fourth granted descriptor. This proves a bounded arbitrary library set, not yet a complete shared Qt/GTK runtime. A production broker still needs catalog generation from arbitrary verified dependency graphs, atomic versioned packs, grant/revocation state across process death and reboot, and garbage collection that respects running processes.
+Generated wrappers do not contain the Linux closure. On launch they call an exported manager provider with their Android package identity. The provider authenticates the Binder calling UID against the installed package, verifies the active binding and every manifest/file hash, and returns only exact read-only module descriptors with explicit URI grants. Untrusted shell access and package-name impersonation are rejected. The wrapper builds a private descriptor-backed symlink view and invokes the manager-owned patched glibc loader while the Linux process remains under the wrapper UID.
+
+The emulator validates a cold app-drawer KCalc launch from the manager-owned pack, a separately supplied `DT_NEEDED` dependency, provider rejection for an untrusted caller, and reduction of the generated KCalc wrapper from 57,205,287 bytes to 628,675 bytes. Remaining lifecycle work is running-process leases, uninstall reconciliation on every path, process-tree cleanup, and 4 KB/16 KB page-size validation.
 
 ### Storage
 

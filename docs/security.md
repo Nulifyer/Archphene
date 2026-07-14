@@ -33,8 +33,9 @@ Production manager releases are built non-debuggable and signed with a dedicated
 
 ## Important limitations
 
-- The manager performs complete on-device resolution, verification, wrapper generation, and signing for the validated x86_64 KCalc template, but not yet for arbitrary packages, toolkits, or ABIs.
-- Static and patched-glibc programs now execute from manager-owned, hash-verified, read-only descriptors under a separate wrapper UID, including a separately granted `DT_NEEDED` library. Complete application dependency graphs still use mutable app-private extraction and need package-derived catalogs, atomic runtime packs, and durable brokered grants.
+- The manager performs complete on-device resolution, verification, durable phase tracking, wrapper generation, persistent signing, and Android installation for the validated x86_64 KCalc template. Arbitrary packages still need generic desktop-entry/toolkit/capability detection and additional ABI templates.
+- Package-derived dependency closures now execute from manager-owned, immutable content-addressed packs through caller-authenticated, read-only descriptors under the separate wrapper UID. Running-process leases, complete uninstall reconciliation, process-tree cleanup, and 4 KB/16 KB page-size validation remain incomplete.
+- Per-package jobs persist phase, percent, bounded diagnostics, generated package identity, runtime-pack identity, and artifact time before installer handoff. Recovery activates a completed install only when Android reports an update newer than the recorded artifacts; otherwise it fails closed into an explicit retry state.
 - The prototype Java Wayland parsers are not yet a hardened protocol boundary.
 - GrapheneOS-specific hardening has not been validated on a supported Pixel.
 - Running on stock Android does not provide GrapheneOS firmware, verified boot policy, exploit mitigations, or security updates.

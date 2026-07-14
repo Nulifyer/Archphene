@@ -74,6 +74,9 @@ public final class MainActivity extends Activity {
     private ApkUpdateInstaller.Phase activeInstallPhase = ApkUpdateInstaller.Phase.DOWNLOAD;
     private int activeInstallPercent;
     private String activeInstallStatus = "";
+    private LinearLayout packageJobDetail;
+    private String packageJobDetailId = "";
+    private InstalledLinuxAppCatalog.Entry packageJobDetailApp;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -90,6 +93,7 @@ public final class MainActivity extends Activity {
             getWindow().getDecorView().setSystemUiVisibility(darkTheme ? 0 : lightBars);
         }
         buildShell();
+        PackageInstallJobStore.recoverInterruptedOnce(this);
         LinuxAppManagerService.schedule(this, ManagerStateStore.backgroundChecksEnabled(this));
         new Thread(() -> {
             try {
@@ -365,6 +369,14 @@ public final class MainActivity extends Activity {
 
     private View createAppRow(InstalledLinuxAppCatalog.Entry app,
             ManagerStateStore.Snapshot state) {
+        String jobId = PackageInstallJobStore.key(app);
+        PackageInstallJobStore.Snapshot job = jobId.isEmpty()
+                ? null : PackageInstallJobStore.read(this, jobId);
+        boolean packageInstalling = job != null && job.active();
+        boolean artifactInstalling = app.packageName.equals(activeInstallPackage)
+                && activeInstallOperation != null;
+        boolean installing = packageInstalling || artifactInstalling;
+
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
         card.setPadding(dp(10), dp(8), dp(8), dp(8));
@@ -379,8 +391,7 @@ public final class MainActivity extends Activity {
         } catch (Exception ignored) {
             icon.setImageResource(android.R.drawable.sym_def_app_icon);
         }
-        int iconSize = dp(44);
-        top.addView(icon, new LinearLayout.LayoutParams(iconSize, iconSize));
+        top.addView(icon, new LinearLayout.LayoutParams(dp(44), dp(44)));
 
         LinearLayout details = new LinearLayout(this);
         details.setOrientation(LinearLayout.VERTICAL);
@@ -403,14 +414,23 @@ public final class MainActivity extends Activity {
             runtimeView.setContentDescription("Pinned to " + pinnedVersion + ". " + runtime);
         }
         details.addView(runtimeView, matchWrap());
-        top.addView(details, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        top.addView(details, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1));
 
-        boolean installing = app.packageName.equals(activeInstallPackage)
-                && activeInstallOperation != null;
         if (installing) {
-            top.addView(installingAction(activeInstallPhase == ApkUpdateInstaller.Phase.DOWNLOAD
-                    ? "Updating " + activeInstallPercent + "%" : "Updating..."),
+            ApkUpdateInstaller.Phase phase = packageInstalling ? job.phase : activeInstallPhase;
+            int percent = packageInstalling ? job.percent : activeInstallPercent;
+            String label = phase == ApkUpdateInstaller.Phase.DOWNLOAD
+                    ? "Preparing " + percent + "%" : "Installing...";
+            top.addView(installingAction(label),
                     new LinearLayout.LayoutParams(dp(126), dp(42)));
+        } else if (job != null && job.retryable()) {
+            Button retry = actionButton("Retry", android.R.drawable.stat_notify_error);
+            retry.setTextColor(COLOR_ERROR);
+            retry.setContentDescription("Retry " + app.label + ". " + job.status
+                    + (job.error.isEmpty() ? "" : ". " + job.error));
+            retry.setOnClickListener(view -> startOnDevicePackageInstall(packageSource(app)));
+            top.addView(retry, new LinearLayout.LayoutParams(dp(126), dp(42)));
         } else {
             Button version = actionButton(versionButtonText(app, state), versionButtonIcon(state));
             version.setAllCaps(false);
@@ -424,25 +444,50 @@ public final class MainActivity extends Activity {
         if (installing) {
             LinearLayout transfer = new LinearLayout(this);
             transfer.setGravity(Gravity.CENTER_VERTICAL);
+            ApkUpdateInstaller.Phase phase = packageInstalling ? job.phase : activeInstallPhase;
+            int percent = packageInstalling ? job.percent : activeInstallPercent;
+            String status = packageInstalling ? job.status : activeInstallStatus;
             TwoStageProgressView progress = new TwoStageProgressView(this,
                     COLOR_PRIMARY, COLOR_MUTED);
-            progress.setState(activeInstallPhase, activeInstallPercent, activeInstallStatus);
+            progress.setState(phase, percent, status);
             transfer.addView(progress, new LinearLayout.LayoutParams(0, dp(48), 1));
-            if (activeInstallOperation.canCancel()) {
+            ApkUpdateInstaller.Operation operation = packageInstalling
+                    ? PackageInstallCoordinator.operation(jobId) : activeInstallOperation;
+            if (operation != null && operation.canCancel()) {
                 Button cancel = actionButton("Cancel", android.R.drawable.ic_menu_close_clear_cancel);
                 cancel.setOnClickListener(view -> {
-                    if (activeInstallOperation != null) activeInstallOperation.cancel();
+                    if (packageInstalling) PackageInstallCoordinator.cancel(jobId);
+                    else if (activeInstallOperation != null) activeInstallOperation.cancel();
                 });
                 transfer.addView(cancel, new LinearLayout.LayoutParams(dp(96), dp(38)));
             }
             card.addView(transfer, spacedWrap(dp(4)));
+        } else if (job != null && job.retryable()) {
+            TextView error = text(job.error.isEmpty() ? job.status : job.error, 11, COLOR_ERROR);
+            error.setMaxLines(2);
+            card.addView(error, spacedWrap(dp(4)));
         }
 
         return card;
     }
 
+    private ArchPackageRepository.PackageResult packageSource(
+            InstalledLinuxAppCatalog.Entry app) {
+        int separator = app.sourceId.indexOf('/');
+        if (separator <= 0 || separator == app.sourceId.length() - 1
+                || !app.runtimeAbi.toLowerCase(Locale.ROOT).startsWith("glibc-")) {
+            throw new IllegalArgumentException("Installed app has no pacman source identity");
+        }
+        return new ArchPackageRepository.PackageResult(
+                app.sourceId.substring(separator + 1), app.sourceId.substring(0, separator),
+                app.runtimeAbi.substring(6), app.sourceVersion, "", false);
+    }
     private View createTrackedRow(ArchPackageRepository.PackageResult app) {
         String stateKey = "tracked:" + app.name + ":" + app.architecture;
+        String jobId = PackageInstallJobStore.key(app);
+        PackageInstallJobStore.Snapshot job = PackageInstallJobStore.read(this, jobId);
+        boolean artifactInstalling = stateKey.equals(activeInstallPackage)
+                && activeInstallOperation != null;
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
         card.setPadding(dp(10), dp(8), dp(8), dp(8));
@@ -464,23 +509,58 @@ public final class MainActivity extends Activity {
         details.addView(text(pinned.isEmpty() ? "Not installed" : "Not installed | Pinned " + pinned,
                 10, pinned.isEmpty() ? COLOR_MUTED : COLOR_WARNING), matchWrap());
         top.addView(details, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        Button version = actionButton(app.version, android.R.drawable.stat_sys_download_done);
-        version.setEnabled(false);
-        top.addView(version, new LinearLayout.LayoutParams(dp(126), dp(42)));
+        if (job.active() || artifactInstalling) {
+            String label = artifactInstalling
+                    ? activeInstallPhase == ApkUpdateInstaller.Phase.DOWNLOAD
+                    ? "Downloading " + activeInstallPercent + "%" : "Installing..."
+                    : PackageInstallJobStore.QUEUED.equals(job.state) ? "Queued"
+                    : job.phase == ApkUpdateInstaller.Phase.DOWNLOAD
+                    ? "Preparing " + job.percent + "%" : "Installing...";
+            top.addView(installingAction(label),
+                    new LinearLayout.LayoutParams(dp(126), dp(42)));
+        } else {
+            String label = PackageInstallJobStore.ERROR.equals(job.state) ? "Failed"
+                    : PackageInstallJobStore.CANCELLED.equals(job.state) ? "Cancelled"
+                    : app.version;
+            int iconId = job.retryable() ? android.R.drawable.stat_notify_error
+                    : android.R.drawable.stat_sys_download_done;
+            Button version = actionButton(label, iconId);
+            version.setEnabled(job.retryable());
+            if (job.retryable()) {
+                version.setTextColor(COLOR_ERROR);
+                version.setContentDescription("Retry " + app.name + ". " + job.status
+                        + (job.error.isEmpty() ? "" : ". " + job.error));
+                version.setOnClickListener(view -> startOnDevicePackageInstall(app));
+            }
+            top.addView(version, new LinearLayout.LayoutParams(dp(126), dp(42)));
+        }
         card.addView(top, matchWrap());
-        if (stateKey.equals(activeInstallPackage) && activeInstallOperation != null) {
+        if (job.active() || artifactInstalling) {
             LinearLayout transfer = new LinearLayout(this);
             transfer.setGravity(Gravity.CENTER_VERTICAL);
             TwoStageProgressView progress = new TwoStageProgressView(this,
                     COLOR_PRIMARY, COLOR_MUTED);
-            progress.setState(activeInstallPhase, activeInstallPercent, activeInstallStatus);
+            progress.setState(artifactInstalling ? activeInstallPhase : job.phase,
+                    artifactInstalling ? activeInstallPercent : job.percent,
+                    artifactInstalling ? activeInstallStatus : job.status);
             transfer.addView(progress, new LinearLayout.LayoutParams(0, dp(48), 1));
-            if (activeInstallOperation.canCancel()) {
-                Button cancel = actionButton("Cancel", android.R.drawable.ic_menu_close_clear_cancel);
-                cancel.setOnClickListener(view -> activeInstallOperation.cancel());
+            ApkUpdateInstaller.Operation operation = artifactInstalling
+                    ? activeInstallOperation : PackageInstallCoordinator.operation(jobId);
+            if (operation != null && operation.canCancel()) {
+                Button cancel = actionButton("Cancel",
+                        android.R.drawable.ic_menu_close_clear_cancel);
+                cancel.setOnClickListener(view -> {
+                    if (artifactInstalling) operation.cancel();
+                    else PackageInstallCoordinator.cancel(jobId);
+                });
                 transfer.addView(cancel, new LinearLayout.LayoutParams(dp(96), dp(38)));
             }
             card.addView(transfer, spacedWrap(dp(4)));
+        } else if (job.retryable()) {
+            String failure = job.error.isEmpty() ? job.status : job.error;
+            TextView error = text(failure, 11, COLOR_ERROR);
+            error.setMaxLines(2);
+            card.addView(error, spacedWrap(dp(4)));
         }
         return card;
     }
@@ -630,6 +710,8 @@ public final class MainActivity extends Activity {
 
     private void showPackageResultDetail(ArchPackageRepository.PackageResult app, boolean tracked) {
         currentPage = 4;
+        String jobId = PackageInstallJobStore.key(app);
+        PackageInstallJobStore.Snapshot job = PackageInstallJobStore.read(this, jobId);
         setAddVisible(false);
         content.removeAllViews();
         ScrollView scroll = new ScrollView(this);
@@ -667,10 +749,38 @@ public final class MainActivity extends Activity {
             showAppsPage();
         });
         page.addView(action, spacedWrap(dp(12)));
-        Button install = actionButton("Install", android.R.drawable.stat_sys_download_done);
+        if (!PackageInstallJobStore.IDLE.equals(job.state)
+                && !PackageInstallJobStore.COMPLETE.equals(job.state)) {
+            LinearLayout jobDetails = verticalSection();
+            jobDetails.addView(detailLine("Install state", job.state.replace('_', ' ')));
+            jobDetails.addView(detailLine("Current phase", job.status));
+            if (!job.error.isEmpty()) {
+                TextView error = text(job.error, 12, COLOR_ERROR);
+                jobDetails.addView(error, spacedWrap(dp(6)));
+            }
+            if (job.active()) {
+                TwoStageProgressView progress = new TwoStageProgressView(this,
+                        COLOR_PRIMARY, COLOR_MUTED);
+                progress.setState(job.phase, job.percent, job.status);
+                jobDetails.addView(progress, new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, dp(52)));
+                ApkUpdateInstaller.Operation operation =
+                        PackageInstallCoordinator.operation(jobId);
+                if (operation != null && operation.canCancel()) {
+                    Button cancel = actionButton("Cancel install",
+                            android.R.drawable.ic_menu_close_clear_cancel);
+                    cancel.setOnClickListener(view -> PackageInstallCoordinator.cancel(jobId));
+                    jobDetails.addView(cancel, spacedWrap(dp(8)));
+                }
+            }
+            page.addView(jobDetails, spacedWrap(dp(10)));
+        }
+        String installLabel = job.active() ? "Install in progress"
+                : job.retryable() ? "Retry install" : "Install";
+        Button install = actionButton(installLabel, android.R.drawable.stat_sys_download_done);
         boolean supported = "x86_64".equals(app.architecture)
                 && java.util.Arrays.asList(android.os.Build.SUPPORTED_ABIS).contains("x86_64");
-        install.setEnabled(supported);
+        install.setEnabled(supported && !job.active());
         install.setContentDescription(supported
                 ? "Resolve, verify, build, and install " + app.name
                 : app.name + " is not available for this device architecture");
@@ -717,85 +827,28 @@ public final class MainActivity extends Activity {
             return;
         }
         TrackedPackageStore.add(this, source);
-        showAppsPage();
-        String stateKey = "tracked:" + source.name + ":" + source.architecture;
-        ApkUpdateInstaller.Operation buildOperation = new ApkUpdateInstaller.Operation();
-        activeInstallPackage = stateKey;
-        activeInstallOperation = buildOperation;
-        activeInstallPhase = ApkUpdateInstaller.Phase.DOWNLOAD;
-        activeInstallPercent = 5;
-        activeInstallStatus = "Resolving signed Arch transaction";
-        renderAppList();
-        Thread worker = new Thread(() -> {
-            try {
-                ArchPackageRuntime.StagedTransaction staged =
-                        ArchPackageRuntime.stageTransaction(this, source.name);
-                if (Thread.currentThread().isInterrupted()) throw new InterruptedException();
-                runOnUiThread(() -> {
-                    activeInstallPercent = 70;
-                    activeInstallStatus = "Building Android wrapper";
-                    if (currentPage == 0) renderAppList();
-                });
-                ArchWrapperAssembler.Result result = ArchWrapperAssembler.assembleQt(
-                        this, source.repository, source.name);
-                if (Thread.currentThread().isInterrupted()) throw new InterruptedException();
-                runOnUiThread(() -> {
-                    activeInstallPhase = ApkUpdateInstaller.Phase.INSTALL;
-                    activeInstallPercent = 0;
-                    activeInstallStatus = "Verifying generated APK";
-                    activeInstallOperation = ApkUpdateInstaller.installWithProgress(this,
-                            result.apk.toURI().toString(), result.apkSha256,
-                            result.packageName, result.signerSha256,
-                            (phase, percent, status, terminal) -> {
-                                activeInstallPhase = phase;
-                                activeInstallPercent = percent;
-                                activeInstallStatus = status;
-                                if (terminal) {
-                                    if (phase == ApkUpdateInstaller.Phase.COMPLETE) {
-                                        try {
-                                            RuntimePackStore.activate(this, result.packageName,
-                                                    staged.runtimePackId);
-                                            RuntimePackStore.grantActive(this, result.packageName);
-                                            TrackedPackageStore.remove(this, source.repository,
-                                                    source.name, source.architecture);
-                                        } catch (Exception activationError) {
-                                            android.util.Log.e("ArchpheneRuntime",
-                                                    "Installed wrapper activation failed",
-                                                    activationError);
-                                            phase = ApkUpdateInstaller.Phase.ERROR;
-                                            status = "Installed APK but runtime activation failed: "
-                                                    + activationError.getMessage();
-                                        }
-                                    }
-                                    activeInstallOperation = null;
-                                    activeInstallPackage = "";
-                                    showBanner(status, phase == ApkUpdateInstaller.Phase.ERROR);
-                                    loadCatalog();
-                                } else if (currentPage == 0) {
-                                    renderAppList();
-                                }
-                            });
-                    if (currentPage == 0) renderAppList();
-                });
-            } catch (InterruptedException cancelled) {
-                runOnUiThread(() -> {
-                    activeInstallOperation = null;
-                    activeInstallPackage = "";
-                    showBanner("Package install cancelled", false);
-                    if (currentPage == 0) renderAppList();
-                });
-            } catch (Exception error) {
-                android.util.Log.e("ArchpheneManager", "On-device package install failed", error);
-                runOnUiThread(() -> {
-                    activeInstallOperation = null;
-                    activeInstallPackage = "";
-                    showBanner("Install failed: " + error.getMessage(), true);
-                    if (currentPage == 0) renderAppList();
-                });
+        boolean started = PackageInstallCoordinator.start(this, source, (state, terminal) -> {
+            if (terminal) {
+                boolean failed = PackageInstallJobStore.ERROR.equals(state.state);
+                String detail = state.error.isEmpty() ? state.status
+                        : state.status + ": " + state.error;
+                if (currentPage == 2 && state.id.equals(packageJobDetailId)) {
+                    renderPackageJobDetail();
+                }
+                showBanner(detail, failed);
+                loadCatalog();
+            } else if (currentPage == 0) {
+                renderAppList();
+            } else if (currentPage == 2 && state.id.equals(packageJobDetailId)) {
+                renderPackageJobDetail();
+            } else if (currentPage == 4) {
+                showPackageResultDetail(source, true);
             }
-        }, "archphene-package-install");
-        buildOperation.setCancellationHook(worker::interrupt);
-        worker.start();
+        });
+        if (!started) {
+            showBanner(source.name + " already has an active install job", false);
+        }
+        showAppsPage();
     }
     private View installingAction(String label) {
         LinearLayout action = new LinearLayout(this);
@@ -905,6 +958,9 @@ public final class MainActivity extends Activity {
         setAddVisible(false);
         content.removeAllViews();
         ManagerStateStore.Snapshot state = ManagerStateStore.read(this, app.packageName);
+        String packageJobId = PackageInstallJobStore.key(app);
+        PackageInstallJobStore.Snapshot packageJob = packageJobId.isEmpty()
+                ? null : PackageInstallJobStore.read(this, packageJobId);
         ScrollView scroll = new ScrollView(this);
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
@@ -985,6 +1041,11 @@ public final class MainActivity extends Activity {
         page.addView(versions, spacedWrap(dp(10)));
         populateVersionSelector(app, versionValues, versionAdapter, versionSelector,
                 versionHealth, selectedVersion, pinned);
+        packageJobDetail = verticalSection();
+        packageJobDetailId = packageJobId;
+        packageJobDetailApp = app;
+        renderPackageJobDetail();
+        page.addView(packageJobDetail, spacedWrap(dp(8)));
         LinearLayout source = verticalSection();
         source.addView(detailLine("Package source", app.sourceId));
         source.addView(detailLine("Runtime", app.runtimeAbi));
@@ -1015,6 +1076,50 @@ public final class MainActivity extends Activity {
         page.addView(actions, spacedWrap(dp(6)));
         scroll.addView(page);
         content.addView(scroll, frameMatch());
+    }
+
+    private void renderPackageJobDetail() {
+        if (packageJobDetail == null) return;
+        if (packageJobDetailId.isEmpty()) {
+            packageJobDetail.setVisibility(View.GONE);
+            return;
+        }
+        PackageInstallJobStore.Snapshot job = PackageInstallJobStore.read(
+                this, packageJobDetailId);
+        packageJobDetail.removeAllViews();
+        if (!job.active() && !job.retryable()) {
+            packageJobDetail.setVisibility(View.GONE);
+            return;
+        }
+        packageJobDetail.setVisibility(View.VISIBLE);
+        packageJobDetail.addView(detailLine("Install phase", job.status));
+        if (job.active()) {
+            TwoStageProgressView progress = new TwoStageProgressView(this,
+                    COLOR_PRIMARY, COLOR_MUTED);
+            progress.setState(job.phase, job.percent, job.status);
+            packageJobDetail.addView(progress, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(52)));
+            ApkUpdateInstaller.Operation operation =
+                    PackageInstallCoordinator.operation(packageJobDetailId);
+            if (operation != null && operation.canCancel()) {
+                Button cancel = actionButton("Cancel install",
+                        android.R.drawable.ic_menu_close_clear_cancel);
+                cancel.setOnClickListener(view ->
+                        PackageInstallCoordinator.cancel(packageJobDetailId));
+                packageJobDetail.addView(cancel, spacedWrap(dp(8)));
+            }
+            return;
+        }
+        TextView failure = text(job.error.isEmpty() ? job.status : job.error,
+                12, COLOR_ERROR);
+        packageJobDetail.addView(failure, spacedWrap(dp(6)));
+        if (packageJobDetailApp != null) {
+            Button retry = actionButton("Retry install",
+                    android.R.drawable.stat_notify_error);
+            retry.setOnClickListener(view ->
+                    startOnDevicePackageInstall(packageSource(packageJobDetailApp)));
+            packageJobDetail.addView(retry, spacedWrap(dp(8)));
+        }
     }
 
     private void populateVersionSelector(InstalledLinuxAppCatalog.Entry app,
@@ -1527,6 +1632,13 @@ public final class MainActivity extends Activity {
         if (!getIntent().getBooleanExtra("archphene_test_package_runtime", false)) return;
         new Thread(() -> {
             try {
+                if (getIntent().getBooleanExtra("archphene_test_package_jobs", false)) {
+                    PackageInstallJobStore.verifyForTest(this);
+                    PackageInstallCoordinator.verifySchedulingForTest();
+                    runOnUiThread(() -> showBanner(
+                            "Package job persistence and scheduler passed", false));
+                    return;
+                }
                 if (getIntent().getBooleanExtra("archphene_test_runtime_pack_parser", false)) {
                     RuntimePackStore.verifyParserForTest();
                     runOnUiThread(() -> showBanner("Runtime-pack parser passed", false));
