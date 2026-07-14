@@ -116,7 +116,7 @@ Write-Host "Gate passed: persistent Android signing identity"
 & $Adb -s $Serial install -r $GeneratedApk | Out-Host
 Assert-LastExitCode "Android KCalc update transaction"
 Write-Host "Gate passed: Android replacement install"
-& (Join-Path $PSScriptRoot "test-kcalc-clipboard.ps1") -Serial $Serial
+& (Join-Path $PSScriptRoot "test-kcalc-calculation.ps1") -Serial $Serial
 
 $Transaction = [ordered]@{
     schema = "org.archphene.update-transaction.v1"

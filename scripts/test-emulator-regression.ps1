@@ -14,7 +14,13 @@ $tests = @(
     @{ Name = "Linux manager repository search"; Command = { & "$PSScriptRoot/test-linux-manager-repository-search.ps1" -Serial $Serial } },
     @{ Name = "Linux manager version selector"; Command = { & "$PSScriptRoot/test-linux-manager-version-selector.ps1" -Serial $Serial } },
     @{ Name = "KCalc native menus"; Command = { & "$PSScriptRoot/test-kcalc-menu-switch.ps1" -Serial $Serial } },
-    @{ Name = "KCalc clipboard"; Command = { & "$PSScriptRoot/test-kcalc-clipboard.ps1" -Serial $Serial } },
+    @{ Name = "Native compositor protocols"; Command = {
+        & "$PSScriptRoot/build-install-native-compositor-probe.ps1" -Serial $Serial -AndroidAbi x86_64
+        if ($LASTEXITCODE -eq 0) {
+            & "$PSScriptRoot/test-native-compositor-probe.ps1" -Serial $Serial -AndroidAbi x86_64
+        }
+    } },
+    @{ Name = "KCalc calculation"; Command = { & "$PSScriptRoot/test-kcalc-calculation.ps1" -Serial $Serial } },
     @{ Name = "KCalc live resize"; Command = { & "$PSScriptRoot/test-kcalc-live-resize.ps1" -Serial $Serial } },
     @{ Name = "KCalc signed update transaction"; Command = { & "$PSScriptRoot/test-kcalc-update-transaction.ps1" -SkipBuild -Serial $Serial } }
 )
@@ -24,6 +30,7 @@ if (-not $SkipPackageInstaller) {
 if (-not $SkipDocumentWorkflow) {
     $tests += @{ Name = "Mousepad Android document workflow"; Command = { & "$PSScriptRoot/test-mousepad-android-document-workflow.ps1" -Serial $Serial } }
     $tests += @{ Name = "Mousepad open-dialog IME"; Command = { & "$PSScriptRoot/test-mousepad-open-dialog-ime.ps1" -Serial $Serial } }
+    $tests += @{ Name = "Mousepad secondary windows"; Command = { & "$PSScriptRoot/test-mousepad-secondary-window.ps1" -Serial $Serial } }
 }
 
 $results = @()

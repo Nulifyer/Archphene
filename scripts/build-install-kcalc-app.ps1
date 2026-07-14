@@ -73,13 +73,24 @@ $BuildManifest = Join-Path $Out "AndroidManifest.xml"
 
 $NativeLibDir = Join-Path $App "lib/$AndroidAbi"
 New-Item -ItemType Directory -Force -Path $NativeLibDir | Out-Null
+$NativeArchitecture = if ($AndroidAbi -eq "arm64-v8a") { "aarch64" } else { "x86_64" }
+& (Join-Path $PSScriptRoot "build-native-compositor-podman.ps1") `
+    -Architecture $NativeArchitecture -Release
+if ($LASTEXITCODE -ne 0) { throw "Shared native compositor build failed" }
+$NativeTarget = if ($AndroidAbi -eq "arm64-v8a") {
+    "aarch64-linux-android"
+} else {
+    "x86_64-linux-android"
+}
+Copy-Item -LiteralPath (Join-Path $Root `
+        "native/archphene-compositor/target/$NativeTarget/release/libarchphene_compositor.so") `
+    -Destination (Join-Path $NativeLibDir "libarchphene_compositor.so") -Force
 $NdkBin = Join-Path $Sdk "ndk/29.0.14206865/toolchains/llvm/prebuilt/windows-x86_64/bin"
 $ClangPrefix = if ($AndroidAbi -eq "arm64-v8a") { "aarch64" } else { "x86_64" }
 $Clang = Join-Path $NdkBin "$ClangPrefix-linux-android35-clang.cmd"
 $ArchRuntimeRoot = Join-Path $Root "tooling/downloads/arch-curated-kcalc-$LinuxArch/runtime-root"
 $ArchInclude = Join-Path $ArchRuntimeRoot "usr/include"
 $WaylandInclude = Join-Path $App "wayland-include"
-Run-Native { & $Clang -shared -fPIC -O2 -Wall -Wextra -o (Join-Path $NativeLibDir "libarchphene_wayland_jni.so") (Join-Path $App "wayland_socket_jni.c") } "clang build Wayland JNI socket"
 Run-Native { & $Clang -fPIE -pie -O2 -Wall -Wextra -o (Join-Path $NativeLibDir "libarchphene_wayland_socket_probe.so") (Join-Path $App "wayland_socket_probe.c") } "clang build Wayland socket probe"
 Run-Native { & $Clang -fPIE -pie -O2 -Wall -Wextra -o (Join-Path $NativeLibDir "libarchphene_frame_client.so") (Join-Path $App "archphene_frame_client.c") } "clang build Linux frame client"
 Run-Native { & $Clang -fPIE -pie -O2 -Wall -Wextra -o (Join-Path $NativeLibDir "libarchphene_shm_frame_client.so") (Join-Path $App "archphene_shm_frame_client.c") } "clang build Linux shm frame client"
@@ -116,7 +127,10 @@ try {
 Run-Native { & (Join-Path $BuildTools "aapt2.exe") compile --dir (Join-Path $App "res") -o (Join-Path $Out "compiled/res.zip") } "aapt2 compile"
 Run-Native { & (Join-Path $BuildTools "aapt2.exe") link -o (Join-Path $Out "unsigned.apk") -I (Join-Path $Sdk "platforms/android-36/android.jar") --version-code ([int]$Descriptor.android.versionCode) --version-name ([string]$Descriptor.android.versionName) --manifest $BuildManifest --java (Join-Path $Out "gen") (Join-Path $Out "compiled/res.zip") } "aapt2 link"
 
-$JavaFiles = Get-ChildItem -LiteralPath (Join-Path $App "src") -Recurse -Filter *.java | ForEach-Object { $_.FullName }
+$JavaFiles = @(
+    Get-ChildItem -LiteralPath (Join-Path $App "src") -Recurse -Filter *.java
+    Get-ChildItem -LiteralPath (Join-Path $Root "prototypes/shared-android-bridge/src") -Recurse -Filter *.java
+) | ForEach-Object { $_.FullName }
 Run-Native { & javac --release 17 -classpath (Join-Path $Sdk "platforms/android-36/android.jar") -d (Join-Path $Out "classes") $JavaFiles } "javac"
 
 $ClassFiles = Get-ChildItem -LiteralPath (Join-Path $Out "classes") -Recurse -Filter *.class | ForEach-Object { $_.FullName }

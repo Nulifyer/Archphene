@@ -58,7 +58,7 @@ try {
         throw "Manager did not receive PackageInstaller success"
     }
 
-    & (Join-Path $PSScriptRoot "test-kcalc-clipboard.ps1") -Serial $Serial
+    & (Join-Path $PSScriptRoot "test-kcalc-calculation.ps1") -Serial $Serial
     Write-Host "Manager PackageInstaller update passed with Android confirmation and KCalc health check."
 }
 finally {

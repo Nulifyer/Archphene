@@ -53,26 +53,26 @@ Hyprland independently tracks popup trees, nested children, mapping, damage, eff
 - [x] Implement `wl_subcompositor` and recursive `wl_subsurface` roles with acyclic parenting, validated sibling stacking, parent-relative positioning, rendering, effective-region input routing, and synchronized/desynchronized cached-state latching.
 - [x] Preserve atomic parent commits: synchronized child buffers, input regions, callbacks, positions, and ordered stack changes become visible with the parent commit; effectively desynchronized trees apply independently.
 - [x] Compose clipped nested popup and recursive subsurface SHM buffers in protocol stacking order with ARGB/XRGB source-over blending.
-- Apply damage per surface instead of rebuilding a single flattened bitmap after every commit.
-- Send output enter/leave and scale updates to every surface in the tree.
+- [x] Accumulate logical and buffer damage per surface, translate it through synchronized subsurface trees, clip it to the root, and drain it as one presentation batch.
+- [x] Send output enter/leave, mode, and scale updates to surfaces in the committed tree.
 
 ### P1: Android text and clipboard integration
 
-- [~] `zwp_text_input_v3` enable/disable state and Android IME retention are implemented and regression-tested for GTK search. Complete surrounding-text, preedit, cursor-rectangle, and delete-surrounding-text fidelity.
+- [x] `zwp_text_input_v3` enable/disable, surrounding text, UTF-8 preedit/commit, delete-surrounding, editor actions, content purpose/hints, and Android IME retention are regression-tested. Candidate-window placement from cursor rectangles remains future Android UI work.
 - [x] `wl_data_device_manager` text transfer is brokered through Android `ClipboardManager` in both directions with feedback-loop suppression.
 - Stream MIME payloads over descriptors; do not copy arbitrary clipboard data into bridge logs or global files.
 - Add drag-and-drop only after selection and offer lifecycle behavior is correct.
 
 ### P2: scaling and presentation
 
-- Add `wp_viewporter` and `wp_fractional_scale_v1`; retain `QT_FONT_DPI` only as a compatibility fallback.
-- Keep Android pixels, Wayland logical coordinates, buffer coordinates, and input coordinates as explicitly typed transforms.
-- Implement frame callbacks from Android Choreographer and add presentation feedback later.
-- Respect buffer scale, transform, viewport source/destination, and damage-buffer coordinates.
+- [x] Implement `wp_viewporter` and `wp_fractional_scale_v1`; retain `QT_FONT_DPI` only as a compatibility fallback.
+- [x] Keep Android pixels, Wayland logical coordinates, buffer coordinates, and input coordinates as explicit transforms in composition and input routing.
+- [x] Pace frame callbacks from Android Choreographer; presentation-time protocol feedback remains later work.
+- [x] Respect buffer scale, inverse buffer transform, viewport source/destination, and logical/buffer damage coordinates.
 
 ### P2: richer applications
 
-- Add relative pointer, pointer constraints, cursor shape, tablet, and gesture protocols when an application proves they are needed.
+- [~] Swipe, pinch, and hold gestures plus client cursor surfaces are implemented. Add relative pointer, pointer constraints, cursor-shape, and tablet protocols when an application proves they are needed.
 - Add dmabuf/EGL rendering after SHM correctness and lifecycle tests are stable.
 - Add layer shell only for applications that genuinely require desktop shell surfaces; it is not needed for ordinary Android-wrapped applications.
 
@@ -90,20 +90,21 @@ Validated bootstrap slices:
 - wl_registry discovery, wl_compositor, wl_shm, and xdg_wm_base binds, SHM format events and FD transfer, checked padded-stride frame copies, wl_surface commit/release/callback, XRGB-to-Android bitmap conversion, exact pixel checks, visible presentation, and resource lifecycles on both the x86_64 emulator and AArch64 Samsung device;
 - xdg_toplevel permanent-role assignment, the client initial bufferless commit, ordered toplevel/surface configure events, exact serial acknowledgement before buffer attachment, post-ack SHM presentation, and role-before-surface teardown on both targets;
 - pointer-and-keyboard wl_seat metadata, per-client input resources, mapped-surface focus, Android MotionEvent and hardware-key routing, valid input-serial popup grabs, nested topmost grab stacks, persisted output-constrained popup geometry shared by configure/composition/input, reactive output-bound and committed-parent-geometry reconfiguration, popup-focus preservation across root commits, and child-first idempotent dismissal/teardown with exact wire checks on both targets.
+- one shared Android host and native compositor now run KCalc, Mousepad, and the protocol probe; parent/child toplevel registration, composited phone behavior, separate freeform Dialog hosting, child input, close, and parent restoration are device-tested.
 
-Migration order is registry/globals, SHM/pools/buffers, surfaces/regions, xdg-shell, seats/input, popups/subsurfaces, clipboard/text input, output/scaling, then GPU presentation.
+Migration through output/scaling is complete for the validated SHM path. The next compositor tier is GPU presentation and application-driven protocol expansion.
 
 ## Test gates
 
 - Press/release remains on the original surface when a popup maps between events.
-- File, Edit, Settings, and Help remain open after a tap.
+- [x] KCalc File-to-Settings switching and Mousepad menus remain mapped and interactive after touch input.
 - [x] Moving and clicking between root, parent-popup, and nested-popup surfaces follows owner-events semantics in the native wire probe. Committed input-region exclusions fall through to the next eligible surface.
-- Outside press sends `popup_done` exactly once and restores root focus.
+- [x] Outside dismissal sends child-first `popup_done` once and restores root focus in the native probe.
 - Nested submenu dismissal removes only the topmost popup when appropriate.
 - [x] Popup reposition tokens are acknowledged, and flip/slide/resize plus reactive output-bound changes keep configure, pixels, and input coordinates aligned.
 - [x] Parent window geometry is double-buffered until `wl_surface.commit`; root configure/commit while a popup owns focus preserves the grab, and parent-placement changes propagate to reactive descendants.
 - [x] Repositioned and reactive popup geometry remains invisible until the matching configure is acknowledged and committed; pre-ack and post-commit pixels are asserted on both Android architectures.
 - [x] Subsurface commits obey effective ancestor sync/desync, parent-position, and stacking rules in the native wire probe.
 - Scale and input coordinates remain aligned at Android densities 1.0, 2.625, and 3.0.
-- Clipboard and IME data cross only their Android broker APIs and remain under the app UID.
+- [x] Clipboard and IME data cross only their Android broker APIs, remain under the app UID, and clipboard contents are read only after a Wayland receive request.
 - [x] Pointer enter, motion, press, release, leave, and frame ordering remains exact with system-injected Android MotionEvent input on emulator and Samsung.

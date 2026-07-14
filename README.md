@@ -116,11 +116,11 @@ The physical suite expects the curated ARM64 package/runtime workspace and a com
 
 - The complete on-device transaction is proven for x86_64 KCalc/Qt. Arbitrary packages still need toolkit detection, capability policy, additional wrapper templates, ABI filtering, and compatibility reporting.
 - GitHub Releases discovery, checksum validation, bounded download, signer/package verification, Android confirmation, replacement, and restart reconciliation are implemented. The Linux workflow published and checksummed the first `v1.0.0` APK.
-- KCalc and Mousepad still contain duplicated prototype Java Wayland compositor implementations. A shared native compositor is required before broad application support.
+- KCalc and Mousepad now use one shared Android Activity/InputConnection/clipboard host and Rust native compositor. Broad application support still requires more protocols, toolkit templates, and device coverage.
 - The current wrappers duplicate large runtime closures per Android UID.
 - GPU acceleration, audio, printing, camera, drag-and-drop, accessibility, keyrings, and many desktop portals are incomplete or absent.
 - Android permissions require explicit bridge APIs; a Linux syscall cannot directly trigger an Android runtime permission prompt.
-- Secondary Linux windows are currently mapped with prototype phone/freeform policies rather than a complete general window registry.
+- Secondary Linux toplevels use a shared parent/child registry with composited phone behavior and separate Android dialogs in tablet/freeform mode. Sustained vendor desktop-mode policy and multi-display behavior still need validation.
 - GrapheneOS-on-Pixel, Android 16 KB page-size devices, and generic laptop hardware remain unvalidated.
 - Archphene does not provide GrapheneOS firmware, verified boot, kernel hardening, or security updates on unsupported hardware.
 
@@ -128,7 +128,7 @@ See [Current project status](docs/project-status.md) for validated evidence and 
 
 ## Roadmap
 
-1. Move the duplicated Java compositor into one shared native Wayland core with generated protocol bindings.
+1. Expand the shared native compositor beyond the validated SHM Qt/GTK path with GPU buffers, richer shell/input protocols, and broader application regressions.
 2. Implement atomic runtime packaging, process-group lifecycle management, and 16 KB page-size validation.
 3. Complete the multi-document Android storage broker and manager-owned shared user-document provider.
 4. Expand the proven x86_64 KCalc on-device transaction to Arch Linux ARM, toolkit-aware templates, capability policy, and failure-isolated package scheduling.
@@ -143,7 +143,7 @@ See [Current project status](docs/project-status.md) for validated evidence and 
 | `prototypes/linux-app-manager-stub/` | Archphene Android manager |
 | `prototypes/kcalc-android-app/` | Qt/KDE wrapper and Wayland proof |
 | `prototypes/mousepad-android-app/` | GTK wrapper and document workflow proof |
-| `prototypes/shared-android-bridge/` | Shared bridge extraction work |
+| `prototypes/shared-android-bridge/` | Shared Android Activity, input, clipboard, window, and JNI host |
 | `patches/glibc/` | Android app-seccomp compatibility patches |
 | `scripts/` | Build, package, emulator, physical-device, and regression automation |
 | `docs/` | Current product, architecture, security, development, and release documentation |

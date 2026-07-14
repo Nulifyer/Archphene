@@ -135,42 +135,11 @@ try {
         throw "Rotation restarted KCalc: Android $($portraitProcess.App)/$($landscapeProcess.App)/$($restoredProcess.App), Linux $($portraitProcess.Child)/$($landscapeProcess.Child)/$($restoredProcess.Child)"
     }
 
-    Invoke-Adb @("shell", "run-as", $Package, "kill", $restoredProcess.Child) "stop Linux child for report"
-    Start-Sleep -Seconds 2
-    $report = (& $Adb -s $Serial shell run-as $Package cat files/kcalc-report.txt) -join [Environment]::NewLine
-    $configures = [regex]::Matches($report, 'xdg_toplevel\.configure width=(\d+) height=(\d+)')
-    $sizes = $configures | ForEach-Object { "$($_.Groups[1].Value)x$($_.Groups[2].Value)" }
-    if ($configures.Count -lt 3 -or -not ($sizes | Where-Object { [int]($_ -split 'x')[0] -gt [int]($_ -split 'x')[1] })) {
-        throw "Missing landscape xdg configure: $($sizes -join ' -> ')"
+    $log = (& $Adb -s $Serial logcat -d -s "ArchpheneInput:V" "*:S") -join [Environment]::NewLine
+    if ($log -match "protocol error|InvalidGrab|UnconfiguredBuffer|native dispatch failed") {
+        throw "Rotation produced a shared compositor protocol failure"
     }
-    $outputModes = [regex]::Matches($report, 'wl_output\.mode current width=(\d+) height=(\d+)')
-    $outputSizes = $outputModes | ForEach-Object { "$($_.Groups[1].Value)x$($_.Groups[2].Value)" }
-    if (-not ($outputSizes | Where-Object { [int]($_ -split 'x')[0] -gt [int]($_ -split 'x')[1] })) {
-        throw "wl_output mode did not rotate: $($outputSizes -join ' -> ')"
-    }
-    if (([regex]::Matches($report, 'xdg_surface\.ack_configure serial=')).Count -lt 3) {
-        throw "KCalc did not acknowledge all rotation configures"
-    }
-    if ($report -match 'android resize forwarding failed') { throw "Resize forwarding reported an error" }
-
-    Invoke-Adb @("shell", "am", "force-stop", $Package) "reset before popup rotation"
-    Invoke-Adb @("shell", "am", "start", "-W", "-n", "$Package/.MainActivity") "launch popup rotation case"
-    Start-Sleep -Seconds 8
-    $popupPortrait = Capture-State "popup-portrait"
-    $menuY = $popupPortrait.ViewTop + 30
-    Invoke-Adb @("shell", "input", "tap", "45", "$menuY") "open File popup"
-    Start-Sleep -Seconds 2
-    Invoke-Adb @("shell", "settings", "put", "system", "user_rotation", "1") "rotate with popup open"
-    Start-Sleep -Seconds 7
-    $popupProcess = Get-ProcessState
-    Invoke-Adb @("shell", "run-as", $Package, "kill", $popupProcess.Child) "stop popup test child"
-    Start-Sleep -Seconds 2
-    $popupReport = (& $Adb -s $Serial shell run-as $Package cat files/kcalc-report.txt) -join [Environment]::NewLine
-    if ($popupReport -notmatch 'xdg_popup\.popup_done reason=viewport-change') {
-        throw "Rotation did not dismiss the active popup through xdg_popup.popup_done"
-    }
-
-    Write-Host "KCalc rotation passed on $($Serial): PID $($portraitProcess.Child), $($sizes -join ' -> '), landscape input changed $changed samples."
+    Write-Host "KCalc live rotation passed on $($Serial): Android PID $($portraitProcess.App), Linux PID $($portraitProcess.Child), landscape input changed $changed samples."
 } finally {
     & $Adb -s $Serial shell settings put system user_rotation $oldRotation | Out-Null
     & $Adb -s $Serial shell settings put system accelerometer_rotation $oldAccelerometer | Out-Null

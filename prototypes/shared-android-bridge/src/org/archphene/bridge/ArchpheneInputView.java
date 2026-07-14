@@ -1,4 +1,4 @@
-package org.archphene.compositorprobe;
+package org.archphene.bridge;
 
 import android.content.Context;
 import android.os.Build;
@@ -13,22 +13,23 @@ import android.widget.ImageView;
 import java.nio.charset.StandardCharsets;
 
 /** Android editor endpoint for the focused Wayland text-input-v3 resource. */
-final class ArchpheneInputView extends ImageView {
-    interface InputSink {
+public final class ArchpheneInputView extends ImageView {
+    public interface InputSink {
         void preedit(String text, int cursorBeginBytes, int cursorEndBytes);
         void commit(String text);
         void deleteSurrounding(int beforeLength, int afterLength);
         void editorAction(int actionId);
+        boolean key(KeyEvent event);
     }
 
-    static final class EditorState {
-        final String surroundingText;
-        final int selectionStart;
-        final int selectionEnd;
-        final int contentHint;
-        final int contentPurpose;
+    public static final class EditorState {
+        public final String surroundingText;
+        public final int selectionStart;
+        public final int selectionEnd;
+        public final int contentHint;
+        public final int contentPurpose;
 
-        EditorState(
+        public EditorState(
                 String surroundingText,
                 int selectionStart,
                 int selectionEnd,
@@ -45,15 +46,20 @@ final class ArchpheneInputView extends ImageView {
     private final InputSink sink;
     private EditorState editorState = new EditorState("", 0, 0, 0, 0);
 
-    ArchpheneInputView(Context context, InputSink sink) {
+    public ArchpheneInputView(Context context, InputSink sink) {
         super(context);
         this.sink = sink;
         setFocusable(true);
         setFocusableInTouchMode(true);
     }
 
-    void setEditorState(EditorState state) {
+    public void setEditorState(EditorState state) {
         editorState = state;
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        return sink.key(event) || super.dispatchKeyEvent(event);
     }
 
     @Override
@@ -65,7 +71,9 @@ final class ArchpheneInputView extends ImageView {
     public InputConnection onCreateInputConnection(EditorInfo outAttrs) {
         EditorState state = editorState;
         outAttrs.inputType = androidInputType(state.contentHint, state.contentPurpose);
-        outAttrs.imeOptions = androidImeOptions(state.contentHint, state.contentPurpose);
+        outAttrs.imeOptions = androidImeOptions(state.contentHint, state.contentPurpose)
+                | EditorInfo.IME_FLAG_NO_EXTRACT_UI
+                | EditorInfo.IME_FLAG_NO_FULLSCREEN;
         outAttrs.initialSelStart = state.selectionStart;
         outAttrs.initialSelEnd = state.selectionEnd;
         if (Build.VERSION.SDK_INT >= 30) {
@@ -86,6 +94,7 @@ final class ArchpheneInputView extends ImageView {
             int end = Math.max(0, Math.min(state.selectionEnd, editable.length()));
             Selection.setSelection(editable, start, end);
         }
+
 
         @Override
         public boolean setComposingText(CharSequence text, int newCursorPosition) {

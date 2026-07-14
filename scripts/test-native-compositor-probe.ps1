@@ -34,7 +34,7 @@ do {
     Start-Sleep -Milliseconds 500
     $output = (& adb -s $Serial logcat -d -s "ArchpheneCompositorProbe:I" "*:S") -join [Environment]::NewLine
     if (-not $keySent -and $output.Contains("keyboard target ready")) {
-        Invoke-Adb shell input keyevent KEYCODE_A | Out-Null
+        Invoke-Adb shell input keyevent KEYCODE_DPAD_LEFT | Out-Null
         $keySent = $true
     }
     if (-not $tapSent) {

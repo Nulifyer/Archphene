@@ -1,6 +1,8 @@
 package org.archphene.compositorprobe;
 
 import android.app.Activity;
+import org.archphene.bridge.ArchpheneClipboardBroker;
+import org.archphene.bridge.ArchpheneInputView;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
@@ -16,6 +18,7 @@ import android.view.Gravity;
 import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
+import android.view.View;
 import android.view.PointerIcon;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
@@ -175,23 +178,27 @@ public final class MainActivity extends Activity {
     private static native int nativeCopyLastFrameToBitmap(long handle, Bitmap bitmap);
     private static native void nativeDestroyCore(long handle);
 
-    @Override
-    public boolean dispatchKeyEvent(KeyEvent event) {
+    private boolean routeKeyEvent(KeyEvent event) {
         int action = event.getAction();
         int linuxKey = toLinuxKeyCode(event.getKeyCode());
-        if (keyboardInputReady
-                && linuxKey != 0
-                && event.getRepeatCount() == 0
-                && (action == KeyEvent.ACTION_DOWN || action == KeyEvent.ACTION_UP)) {
-            keyboardInputs.offer(new KeyboardInput(
-                    linuxKey,
-                    action == KeyEvent.ACTION_DOWN,
-                    (int) event.getEventTime()));
-            Log.i(TAG, "KeyEvent key=" + linuxKey + " pressed="
-                    + (action == KeyEvent.ACTION_DOWN));
-            return true;
+        if (!keyboardInputReady
+                || linuxKey == 0
+                || event.getRepeatCount() != 0
+                || (action != KeyEvent.ACTION_DOWN && action != KeyEvent.ACTION_UP)) {
+            return false;
         }
-        return super.dispatchKeyEvent(event);
+        keyboardInputs.offer(new KeyboardInput(
+                linuxKey,
+                action == KeyEvent.ACTION_DOWN,
+                (int) event.getEventTime()));
+        Log.i(TAG, "KeyEvent key=" + linuxKey + " pressed="
+                + (action == KeyEvent.ACTION_DOWN));
+        return true;
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        return routeKeyEvent(event) || super.dispatchKeyEvent(event);
     }
 
     @Override
@@ -226,6 +233,11 @@ public final class MainActivity extends Activity {
                     public void editorAction(int actionId) {
                         if (imeInputReady) imeInputs.offer(ImeInput.editorAction(actionId));
                     }
+
+                    @Override
+                    public boolean key(KeyEvent event) {
+                        return routeKeyEvent(event);
+                    }
                 });
         frameView.setBackgroundColor(Color.DKGRAY);
         frameView.setScaleType(ImageView.ScaleType.FIT_XY);
@@ -244,9 +256,9 @@ public final class MainActivity extends Activity {
                             || action == MotionEvent.ACTION_MOVE
                             || action == MotionEvent.ACTION_UP
                             || action == MotionEvent.ACTION_CANCEL)) {
-                int localX = Math.round(event.getX());
-                int localY = Math.round(event.getY());
-                Log.i(TAG, "MotionEvent action=" + action + " local=" + localX + "," + localY);
+                int localX = mapInputX(view, event.getX());
+                int localY = mapInputY(view, event.getY());
+                Log.i(TAG, "MotionEvent action=" + action + " surface=" + localX + "," + localY);
                 pointerInputs.offer(new PointerInput(
                         action, localX, localY, time, 0.0f, 0.0f));
             }
@@ -256,8 +268,8 @@ public final class MainActivity extends Activity {
                         touchInputs.offer(new TouchInput(
                                 action,
                                 event.getPointerId(index),
-                                Math.round(event.getX(index)),
-                                Math.round(event.getY(index)),
+                                mapInputX(view, event.getX(index)),
+                                mapInputY(view, event.getY(index)),
                                 time));
                     }
                 } else if (action == MotionEvent.ACTION_DOWN
@@ -267,8 +279,8 @@ public final class MainActivity extends Activity {
                     touchInputs.offer(new TouchInput(
                             action,
                             event.getPointerId(actionIndex),
-                            Math.round(event.getX(actionIndex)),
-                            Math.round(event.getY(actionIndex)),
+                            mapInputX(view, event.getX(actionIndex)),
+                            mapInputY(view, event.getY(actionIndex)),
                             time));
                 } else if (action == MotionEvent.ACTION_CANCEL) {
                     touchInputs.offer(new TouchInput(action, -1, 0, 0, time));
@@ -590,28 +602,37 @@ public final class MainActivity extends Activity {
                     throw new IllegalStateException("wl_keyboard metadata lifecycle was incomplete");
                 }
 
+                CountDownLatch keyboardFocusReady = new CountDownLatch(1);
+                runOnUiThread(() -> {
+                    frameView.setFocusableInTouchMode(true);
+                    frameView.requestFocus();
+                    keyboardFocusReady.countDown();
+                });
+                if (!keyboardFocusReady.await(5, TimeUnit.SECONDS) || !frameView.hasFocus()) {
+                    throw new IllegalStateException("Android keyboard target did not gain focus");
+                }
                 keyboardInputReady = true;
                 Log.i(TAG, "keyboard target ready");
                 KeyboardInput keyDown = awaitKeyboardInput(30);
                 if (!keyDown.pressed
-                        || keyDown.key != 30
+                        || keyDown.key != 105
                         || nativeKeyboardKey(
                                 core, keyDown.key, true, keyDown.time) != 1) {
                     throw new IllegalStateException("Android key press was not routed");
                 }
                 dispatch(core);
                 int keyPressSerial = readKeyboardKey(
-                        input, 36, 30, true, keyDown.time);
+                        input, 36, 105, true, keyDown.time);
                 KeyboardInput keyUp = awaitKeyboardInput(5);
                 if (keyUp.pressed
-                        || keyUp.key != 30
+                        || keyUp.key != 105
                         || nativeKeyboardKey(
                                 core, keyUp.key, false, keyUp.time) != 1) {
                     throw new IllegalStateException("Android key release was not routed");
                 }
                 dispatch(core);
                 int keyReleaseSerial = readKeyboardKey(
-                        input, 36, 30, false, keyUp.time);
+                        input, 36, 105, false, keyUp.time);
                 keyboardInputReady = false;
                 if (keyReleaseSerial <= keyPressSerial
                         || nativeKeyboardEventCount(core) != 6) {
@@ -3732,6 +3753,7 @@ public final class MainActivity extends Activity {
             int expectedHeight)
             throws Exception {
         boolean geometryConfigured = false;
+        String actualGeometry = "missing";
         Integer configureSerial = null;
         while (true) {
             Message message = readMessage(input);
@@ -3741,10 +3763,16 @@ public final class MainActivity extends Activity {
                     throw new IllegalStateException("invalid xdg_popup.configure event");
                 }
                 ByteBuffer body = ByteBuffer.wrap(message.body).order(ByteOrder.nativeOrder());
-                geometryConfigured = body.getInt() == expectedX
-                        && body.getInt() == expectedY
-                        && body.getInt() == expectedWidth
-                        && body.getInt() == expectedHeight;
+                int actualX = body.getInt();
+                int actualY = body.getInt();
+                int actualWidth = body.getInt();
+                int actualHeight = body.getInt();
+                actualGeometry = actualX + "," + actualY + " "
+                        + actualWidth + "x" + actualHeight;
+                geometryConfigured = actualX == expectedX
+                        && actualY == expectedY
+                        && actualWidth == expectedWidth
+                        && actualHeight == expectedHeight;
             } else if (message.objectId == xdgSurfaceId && message.opcode == 0) {
                 if (message.body.length != 4) {
                     throw new IllegalStateException("invalid popup xdg_surface.configure event");
@@ -3756,7 +3784,11 @@ public final class MainActivity extends Activity {
                 if (!geometryConfigured
                         || configureSerial == null
                         || configureSerial == 0) {
-                    throw new IllegalStateException("xdg_popup configure sequence was incomplete");
+                    throw new IllegalStateException(
+                            "xdg_popup configure sequence was incomplete: expected "
+                                    + expectedX + "," + expectedY + " "
+                                    + expectedWidth + "x" + expectedHeight
+                                    + ", got " + actualGeometry);
                 }
                 return configureSerial;
             }
@@ -4039,6 +4071,21 @@ public final class MainActivity extends Activity {
         request.put(encoded);
         request.put((byte) 0);
         while (request.position() < end) request.put((byte) 0);
+    }
+    private static int mapInputX(View view, float x) {
+        int surfaceWidth = view instanceof ImageView imageView && imageView.getDrawable() != null
+                ? imageView.getDrawable().getIntrinsicWidth()
+                : view.getWidth();
+        return Math.max(0, Math.min(surfaceWidth - 1,
+                (int) Math.floor(x * surfaceWidth / Math.max(1, view.getWidth()))));
+    }
+
+    private static int mapInputY(View view, float y) {
+        int surfaceHeight = view instanceof ImageView imageView && imageView.getDrawable() != null
+                ? imageView.getDrawable().getIntrinsicHeight()
+                : view.getHeight();
+        return Math.max(0, Math.min(surfaceHeight - 1,
+                (int) Math.floor(y * surfaceHeight / Math.max(1, view.getHeight()))));
     }
     private static int toLinuxKeyCode(int androidKeyCode) {
         if (androidKeyCode >= KeyEvent.KEYCODE_A && androidKeyCode <= KeyEvent.KEYCODE_Z) {

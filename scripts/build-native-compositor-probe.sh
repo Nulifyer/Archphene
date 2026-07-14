@@ -23,7 +23,7 @@ mkdir -p "$out"/{gen,classes,dex,package/lib/$abi}
 
 "$bt/aapt2" link -o "$out/unsigned.apk" -I "$platform" \
   --manifest "$app/AndroidManifest.xml" --java "$out/gen"
-mapfile -d '' java_files < <(find "$app/src" "$out/gen" -type f -name '*.java' -print0)
+mapfile -d '' java_files < <(find "$app/src" "$root/prototypes/shared-android-bridge/src" "$out/gen" -type f -name '*.java' -print0)
 javac --release 17 -classpath "$platform" -d "$out/classes" "${java_files[@]}"
 mapfile -d '' class_files < <(find "$out/classes" -type f -name '*.class' -print0)
 "$bt/d8" --lib "$platform" --min-api 23 --output "$out/dex" "${class_files[@]}"

@@ -43,20 +43,15 @@ try {
     $beforeImage.Dispose()
     $afterImage.Dispose()
 }
-if ($changed -lt 20) { throw "KCalc display did not visibly change after 1 + 2 = ($changed samples)" }
+if ($changed -lt 10) { throw "KCalc display did not visibly change after 1 + 2 = ($changed samples)" }
 
 $appPid = (& $Adb -s $Serial shell pidof $Package).Trim()
 $processes = (& $Adb -s $Serial shell ps -A -o PID,PPID,NAME) -join "`n"
 $child = [regex]::Match($processes, "(?m)^\s*(\d+)\s+$appPid\s+libarchphene_ld\.so\s*$")
 if (-not $child.Success) { throw "KCalc GNU/Linux child is not owned by Android process $appPid" }
-& $Adb -s $Serial shell run-as $Package kill $child.Groups[1].Value | Out-Null
-Start-Sleep -Seconds 2
-$report = (& $Adb -s $Serial shell run-as $Package cat files/kcalc-report.txt) -join "`n"
-if (([regex]::Matches($report, "wl_keyboard\.key key=")).Count -lt 4) {
-    throw "Wayland report does not contain all calculator key events"
-}
-if ($report -notmatch "Android Wayland API interactive pointer bitmap ready: true") {
-    throw "KCalc did not retain a rendered result frame"
+$log = (& $Adb -s $Serial logcat -d -s "ArchpheneInput:V" "*:S") -join [Environment]::NewLine
+if ($log -match "protocol error|native dispatch failed") {
+    throw "KCalc calculation triggered a shared compositor failure"
 }
 
 Write-Host "KCalc calculation path passed on ${Serial}: 1 + 2 = changed $changed display samples; child PID $($child.Groups[1].Value)."

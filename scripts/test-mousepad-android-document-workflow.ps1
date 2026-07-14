@@ -13,8 +13,6 @@ $Remote = "/sdcard/Download/$Name"
 $Imported = "files/linux-home/Documents/Android/$Name"
 $EncodedRaw = [Uri]::EscapeDataString("raw:/storage/emulated/0/Download/$Name")
 $SourceUri = "content://com.android.providers.downloads.documents/document/$EncodedRaw"
-$ProviderId = [Uri]::EscapeDataString("home/Documents/Android/$Name")
-$ProviderUri = "content://$Package.documents/document/$ProviderId"
 
 function Invoke-Adb([string[]]$Arguments, [string]$Step) {
     $output = & $Adb -s $Serial @Arguments 2>&1
@@ -59,6 +57,7 @@ New-Item -ItemType Directory -Force -Path (Split-Path $Local) | Out-Null
         (New-Object Text.UTF8Encoding($false)))
 Invoke-Adb @("push", $Local, $Remote) "stage Downloads test document" | Out-Null
 Invoke-Adb @("shell", "am", "force-stop", $Package) "stop Mousepad" | Out-Null
+Invoke-Adb @("shell", "pm", "clear", $Package) "clear Mousepad test state" | Out-Null
 Invoke-Adb @("shell", "am", "start", "-W", "-n", "$Package/org.archphene.bridge.DocumentOpenActivity") "open Android document portal" | Out-Null
 Start-Sleep -Seconds 2
 
@@ -97,11 +96,25 @@ Wait-For {
     $text.Contains($Marker)
 } "Cold-reopened Mousepad document did not contain the saved marker"
 
-$providerText = (Invoke-Adb @("shell", "content", "read", "--uri", $ProviderUri) `
-        "read document through Archphene DocumentsProvider") -join "`n"
-if (-not $providerText.Contains($Marker)) {
-    throw "DocumentsProvider did not expose the edited marker"
+Invoke-Adb @("shell", "am", "start", "-W", "-a", "android.intent.action.OPEN_DOCUMENT", "-c", "android.intent.category.OPENABLE", "-t", "text/plain") "open Android picker for provider verification" | Out-Null
+Start-Sleep -Seconds 1
+$ui = Dump-Ui "mousepad-provider-picker"
+Tap-UiNode $ui "content-desc" "Show roots" "open provider roots"
+Start-Sleep -Milliseconds 700
+$ui = Dump-Ui "mousepad-provider-roots"
+Tap-UiNode $ui "text" "Archphene Home" "open brokered Linux home"
+Start-Sleep -Seconds 1
+$ui = Dump-Ui "mousepad-provider-home"
+Tap-UiNode $ui "text" "Documents" "open brokered Documents folder"
+Start-Sleep -Milliseconds 700
+$ui = Dump-Ui "mousepad-provider-documents"
+Tap-UiNode $ui "text" "Android" "open brokered Android imports folder"
+Start-Sleep -Milliseconds 700
+$ui = Dump-Ui "mousepad-provider-android"
+if (-not $ui.OuterXml.Contains('text="' + $Name + '"')) {
+    throw "Archphene Home did not expose the edited document through DocumentsUI"
 }
+Invoke-Adb @("shell", "input", "keyevent", "4") "dismiss provider picker" | Out-Null
 
 Invoke-Adb @("shell", "screencap", "-p", "/sdcard/mousepad-android-document-workflow.png") `
         "capture final workflow screenshot" | Out-Null
@@ -109,4 +122,4 @@ Invoke-Adb @("pull", "/sdcard/mousepad-android-document-workflow.png",
         (Join-Path $Root "artifacts/mousepad-android-document-workflow.png")) `
         "pull final workflow screenshot" | Out-Null
 
-Write-Host "Mousepad Android document workflow passed: picker -> edit -> save -> Downloads write-back -> cold reopen -> DocumentsProvider read."
+Write-Host "Mousepad Android document workflow passed: picker -> edit -> save -> Downloads write-back -> cold reopen -> DocumentsUI provider browse."

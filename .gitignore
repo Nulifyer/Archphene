@@ -103,7 +103,9 @@ netsim.ini
 /tooling/avd/
 /tooling/backups/
 /tooling/build/
+/tooling/cargo-home/
 /tooling/downloads/
+/tooling/emulator-home/
 /tooling/jadx-*/
 /tooling/jadx-cache/
 /tooling/jadx-config/

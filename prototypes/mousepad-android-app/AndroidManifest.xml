@@ -16,6 +16,10 @@
         <meta-data android:name="org.archphene.source.version" android:value="0.7.0-1" />
         <meta-data android:name="org.archphene.source.update_url" android:value="https://archlinux.org/packages/extra/x86_64/mousepad/json/" />
         <meta-data android:name="org.archphene.runtime.abi" android:value="glibc-x86_64" />
+        <meta-data android:name="org.archphene.bridge.payload" android:value="libarchphene_mousepad.so" />
+        <meta-data android:name="org.archphene.bridge.toolkit" android:value="gtk3" />
+        <meta-data android:name="org.archphene.bridge.log_tag" android:value="ArchpheneMousepad" />
+        <meta-data android:name="org.archphene.bridge.data_assets" android:value="mousepad-data.zip,glibc-gconv.zip" />
 
         <provider
             android:name="org.archphene.bridge.LinuxHomeDocumentsProvider"
@@ -37,7 +41,7 @@
             android:name="org.archphene.linux.mousepad.MainActivity"
             android:launchMode="singleTask"
             android:windowSoftInputMode="stateAlwaysHidden|adjustResize"
-            android:configChanges="orientation|screenSize|smallestScreenSize|keyboardHidden"
+            android:configChanges="density|fontScale|keyboard|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

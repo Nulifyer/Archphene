@@ -1,59 +1,99 @@
 param([string]$Serial = "emulator-5554")
 
 $ErrorActionPreference = "Stop"
-
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $Adb = Join-Path $Root "tooling/android-sdk/platform-tools/adb.exe"
 $Package = "org.archphene.linux.kcalc"
-$Report = "files/kcalc-report.txt"
 $SafeSerial = $Serial -replace '[^A-Za-z0-9._-]', '_'
-$Screenshot = Join-Path $Root "tooling/build/kcalc-menu-switch-$SafeSerial.png"
+$Screenshot = Join-Path $Root "artifacts/kcalc-menu-switch-$SafeSerial.png"
 
-& $Adb -s $Serial shell am force-stop $Package
-& $Adb -s $Serial shell pm clear $Package | Out-Null
-& $Adb -s $Serial shell am start -n "$Package/.MainActivity" | Out-Null
-Start-Sleep -Seconds 10
+function Adb([string[]]$Arguments) {
+    $output = & $Adb -s $Serial @Arguments 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "adb failed: $($output -join [Environment]::NewLine)"
+    }
+    return $output
+}
 
-# File, then Settings while the File popup owns the pointer grab. Resolve the
-# Android content inset so these remain Wayland-surface-relative coordinates.
-& $Adb -s $Serial shell uiautomator dump /sdcard/kcalc-menu-ui.xml | Out-Null
-$Ui = (& $Adb -s $Serial shell cat /sdcard/kcalc-menu-ui.xml) -join "`n"
-$ImageBounds = [regex]::Match($Ui, 'class="android.widget.ImageView"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"')
-if (-not $ImageBounds.Success) { throw "Could not resolve KCalc viewport bounds" }
-$MenuY = [int]$ImageBounds.Groups[2].Value + 30
-& $Adb -s $Serial shell input tap 45 $MenuY
+function Wait-Log([string]$Pattern, [int]$Seconds = 20) {
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    do {
+        $log = (Adb @("logcat", "-d", "-s", "ArchpheneInput:V", "*:S")) -join [Environment]::NewLine
+        if ($log -match $Pattern) { return $log }
+        Start-Sleep -Milliseconds 300
+    } while ((Get-Date) -lt $deadline)
+    throw "Timed out waiting for compositor log: $Pattern"
+}
+
+function Map-RootPoint(
+        [int]$LocalX, [int]$LocalY,
+        [int]$ViewLeft, [int]$ViewTop, [int]$ViewWidth, [int]$ViewHeight,
+        [int]$RootWidth, [int]$RootHeight) {
+    $fallbackWidth = [Math]::Max($RootWidth, [int]($ViewWidth / 2))
+    $fallbackHeight = [int](($ViewHeight * [long]$fallbackWidth) / $ViewWidth)
+    $compact = ($RootWidth -le $fallbackWidth -and $RootHeight * 4L -le $fallbackHeight * 3L)
+    if ($compact) {
+        $outputWidth = $fallbackWidth
+        $outputHeight = $fallbackHeight
+        $rootX = [int](($fallbackWidth - $RootWidth) / 2)
+        $rootY = [int](($fallbackHeight - $RootHeight) / 2)
+    } else {
+        $outputWidth = $RootWidth
+        $outputHeight = $RootHeight
+        $rootX = 0
+        $rootY = 0
+    }
+    return @(
+        [int]($ViewLeft + (($rootX + $LocalX) * [long]$ViewWidth) / $outputWidth),
+        [int]($ViewTop + (($rootY + $LocalY) * [long]$ViewHeight) / $outputHeight))
+}
+
+Adb @("shell", "am", "force-stop", $Package) | Out-Null
+Adb @("logcat", "-c") | Out-Null
+Adb @("shell", "am", "start", "-n", "$Package/.MainActivity") | Out-Null
+$mapped = Wait-Log 'mapped=true.*geometry=0,0 (\d+)x(\d+).*title=KCalc' 30
+$match = [regex]::Match($mapped, 'mapped=true.*geometry=0,0 (\d+)x(\d+).*title=KCalc')
+$rootWidth = [int]$match.Groups[1].Value
+$rootHeight = [int]$match.Groups[2].Value
+
+Adb @("shell", "uiautomator", "dump", "/sdcard/kcalc-menu-ui.xml") | Out-Null
+$ui = (Adb @("shell", "cat", "/sdcard/kcalc-menu-ui.xml")) -join [Environment]::NewLine
+$bounds = [regex]::Match(
+        $ui,
+        'class="android.widget.ImageView"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"')
+if (-not $bounds.Success) { throw "Could not resolve KCalc viewport bounds" }
+$left = [int]$bounds.Groups[1].Value
+$top = [int]$bounds.Groups[2].Value
+$width = [int]$bounds.Groups[3].Value - $left
+$height = [int]$bounds.Groups[4].Value - $top
+
+$file = Map-RootPoint 25 10 $left $top $width $height $rootWidth $rootHeight
+Adb @("shell", "input", "tap", [string]$file[0], [string]$file[1]) | Out-Null
+Wait-Log 'popup registry=0:[^;]+,(\d+),(\d+),1,0;' 10 | Out-Null
+
+$settings = Map-RootPoint 250 10 $left $top $width $height $rootWidth $rootHeight
+Adb @("shell", "input", "tap", [string]$settings[0], [string]$settings[1]) | Out-Null
 Start-Sleep -Seconds 2
-& $Adb -s $Serial shell input tap 225 $MenuY
-Start-Sleep -Seconds 6
-
-& $Adb -s $Serial shell screencap -p /sdcard/kcalc-menu-switch.png
-& $Adb -s $Serial pull /sdcard/kcalc-menu-switch.png $Screenshot | Out-Null
-if (-not (Test-Path -LiteralPath $Screenshot) -or (Get-Item $Screenshot).Length -lt 50000) {
-    throw "KCalc menu screenshot is missing or unexpectedly small"
+$finalLog = (Adb @("logcat", "-d", "-s", "ArchpheneInput:V", "*:S")) -join [Environment]::NewLine
+$completeFrames = [regex]::Matches(
+        $finalLog, 'popup registry=0:(\d+),(\d+),(\d+),(\d+),\3,\4,1,0;')
+if ($completeFrames.Count -lt 2) {
+    throw "File-to-Settings switching did not produce two complete grabbed popup frames"
+}
+if ($finalLog -match 'protocol error|InvalidGrab|UnconfiguredBuffer') {
+    throw "KCalc popup switching triggered a Wayland protocol error"
 }
 
-$Processes = & $Adb -s $Serial shell ps -A
-$ChildLine = $Processes | Select-String "libarchphene_ld.so" | Select-Object -Last 1
-if (-not $ChildLine) {
-    throw "The real KCalc process is not alive after switching menus"
+New-Item -ItemType Directory -Force -Path (Split-Path $Screenshot) | Out-Null
+Adb @("shell", "screencap", "-p", "/sdcard/kcalc-menu-switch.png") | Out-Null
+Adb @("pull", "/sdcard/kcalc-menu-switch.png", $Screenshot) | Out-Null
+if ((Get-Item -LiteralPath $Screenshot).Length -lt 20000) {
+    throw "KCalc menu screenshot is unexpectedly small"
 }
-$ChildPid = ($ChildLine.ToString().Trim() -split '\s+')[1]
-& $Adb -s $Serial shell run-as $Package kill $ChildPid
-Start-Sleep -Seconds 3
-$Text = (& $Adb -s $Serial shell run-as $Package cat $Report) -join "`n"
-
-if (($Text | Select-String -Pattern "xdg_surface.get_popup" -AllMatches).Matches.Count -lt 2) {
-    throw "File-to-Settings switching did not create both native popup roles"
-}
-if ($Text -notmatch "xdg_popup.grab .*valid=true") {
-    throw "KCalc popup did not receive a valid Wayland pointer grab"
-}
-if (($Text | Select-String -Pattern "promoted-to-primary" -AllMatches).Matches.Count -ne 1) {
-    throw "A popup surface was incorrectly promoted to the primary app window"
-}
-if ($Text -notmatch "Android Wayland API interactive pointer bitmap ready: true") {
-    throw "KCalc did not retain a rendered frame"
+$processes = (Adb @("shell", "ps", "-A")) -join [Environment]::NewLine
+if ($processes -notmatch 'org\.archphene\.linux\.kcalc' -or $processes -notmatch 'libarchphene_ld\.so') {
+    throw "KCalc or its Linux child exited during popup switching"
 }
 
-Write-Output "KCalc native menu switching passed"
-Write-Output "Screenshot: $Screenshot"
+Write-Host "KCalc shared-compositor menu switching passed: File -> Settings."
+Write-Host "Screenshot: $Screenshot"

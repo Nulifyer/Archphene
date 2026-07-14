@@ -36,7 +36,8 @@ if (-not $SkipInstall) {
 
 Run-Script "test-arm64-physical-device.ps1" @{ Serial = $Serial }
 Run-Script "test-kcalc-menu-switch.ps1" @{ Serial = $Serial }
-Run-Script "test-kcalc-clipboard.ps1" @{ Serial = $Serial }
+Run-Script "build-install-native-compositor-probe.ps1" @{ Serial = $Serial; AndroidAbi = "arm64-v8a" }
+Run-Script "test-native-compositor-probe.ps1" @{ Serial = $Serial; AndroidAbi = "arm64-v8a" }
 Run-Script "test-kcalc-calculation.ps1" @{ Serial = $Serial }
 Run-Script "test-kcalc-live-resize.ps1" @{ Serial = $Serial }
 Run-Script "test-kcalc-fd-lifecycle.ps1" @{ Serial = $Serial }

@@ -1,4 +1,4 @@
-package org.archphene.compositorprobe;
+package org.archphene.bridge;
 
 import android.content.ClipData;
 import android.content.ClipboardManager;
@@ -7,8 +7,8 @@ import android.content.Context;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /** Focus-scoped Android clipboard broker that never reads content on change callbacks. */
-final class ArchpheneClipboardBroker implements AutoCloseable {
-    interface Listener {
+public final class ArchpheneClipboardBroker implements AutoCloseable {
+    public interface Listener {
         void onExternalClipboardChanged();
     }
 
@@ -20,7 +20,7 @@ final class ArchpheneClipboardBroker implements AutoCloseable {
     private final String ownClipLabel;
     private volatile boolean active;
 
-    ArchpheneClipboardBroker(Context context, Listener listener) {
+    public ArchpheneClipboardBroker(Context context, Listener listener) {
         this.context = context;
         this.listener = listener;
         clipboard = (ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
@@ -35,17 +35,17 @@ final class ArchpheneClipboardBroker implements AutoCloseable {
         };
     }
 
-    void start() {
+    public void start() {
         if (active) return;
         active = true;
         clipboard.addPrimaryClipChangedListener(platformListener);
     }
 
-    void publishLinuxText(String text) {
+    public void publishLinuxText(String text) {
         clipboard.setPrimaryClip(ClipData.newPlainText(ownClipLabel, text));
     }
 
-    String readTextForWaylandPaste() {
+    public String readTextForWaylandPaste() {
         contentReadCount.incrementAndGet();
         if (!clipboard.hasPrimaryClip()) return "";
         ClipData clip = clipboard.getPrimaryClip();
@@ -54,7 +54,7 @@ final class ArchpheneClipboardBroker implements AutoCloseable {
         return text == null ? "" : text.toString();
     }
 
-    int contentReadCount() {
+    public int contentReadCount() {
         return contentReadCount.get();
     }
 

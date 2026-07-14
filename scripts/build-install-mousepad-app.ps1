@@ -1,6 +1,7 @@
 param(
     [switch]$SkipInstall,
-    [string]$DescriptorPath
+    [string]$DescriptorPath,
+    [string]$Serial = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -56,25 +57,141 @@ New-Item -ItemType Directory -Force -Path `
 
 $NativeLibDir = Join-Path $App "lib/x86_64"
 New-Item -ItemType Directory -Force -Path $NativeLibDir | Out-Null
+& (Join-Path $PSScriptRoot "build-native-compositor-podman.ps1") `
+    -Architecture x86_64 -Release
+if ($LASTEXITCODE -ne 0) { throw "Shared native compositor build failed" }
+Copy-Item -LiteralPath (Join-Path $Root `
+        "native/archphene-compositor/target/x86_64-linux-android/release/libarchphene_compositor.so") `
+    -Destination (Join-Path $NativeLibDir "libarchphene_compositor.so") -Force
 $NdkBin = Join-Path $Sdk "ndk/29.0.14206865/toolchains/llvm/prebuilt/windows-x86_64/bin"
 $Clang = Join-Path $NdkBin "x86_64-linux-android35-clang.cmd"
+$SvgLoaderPackage = Join-Path $Root "tooling/sources/librsvg-noglycin/librsvg-noglycin-2.62.3-1-x86_64.pkg.tar.zst"
+$PixbufCompatPackage = Join-Path $Root "tooling/sources/gdk-pixbuf2-noglycin/gdk-pixbuf2-noglycin-2.44.6-2-x86_64.pkg.tar.zst"
+foreach ($CompatPackage in @($SvgLoaderPackage, $PixbufCompatPackage)) {
+    if (-not (Test-Path -LiteralPath $CompatPackage)) {
+        throw "Arch GTK compatibility package is missing: $CompatPackage"
+    }
+}
+$SvgLoaderStage = Join-Path $Root "tooling/build/mousepad-svg-loader"
+if (Test-Path -LiteralPath $SvgLoaderStage) {
+    Remove-Item -LiteralPath $SvgLoaderStage -Recurse -Force
+}
+New-Item -ItemType Directory -Force -Path $SvgLoaderStage | Out-Null
+Run-Native { & tar -xf $SvgLoaderPackage -C $SvgLoaderStage "usr/lib/gdk-pixbuf-2.0/2.10.0/loaders/libpixbufloader_svg.so" "usr/lib/librsvg-2.so.2.62.3" } "extract librsvg compatibility runtime"
+Run-Native { & tar -xf $PixbufCompatPackage -C $SvgLoaderStage "usr/lib/libgdk_pixbuf-2.0.so.0.4400.6" } "extract GdkPixbuf compatibility runtime"
+Copy-Item -LiteralPath (Join-Path $SvgLoaderStage "usr/lib/gdk-pixbuf-2.0/2.10.0/loaders/libpixbufloader_svg.so") -Destination (Join-Path $NativeLibDir "libarchphene_pixbufloader_svg.so") -Force
+Get-ChildItem -LiteralPath $NativeLibDir -Filter "libgdk_pixbuf-2.0.so*" | Remove-Item -Force
+Get-ChildItem -LiteralPath $NativeLibDir -Filter "libglycin*" | Remove-Item -Force
+$PixbufRuntime = Join-Path $SvgLoaderStage "usr/lib/libgdk_pixbuf-2.0.so.0.4400.6"
+foreach ($Name in @("libgdk_pixbuf-2.0.so", "libgdk_pixbuf-2.0.so.0", "libgdk_pixbuf-2.0.so.0.4400.6")) {
+    Copy-Item -LiteralPath $PixbufRuntime -Destination (Join-Path $NativeLibDir $Name) -Force
+}
+$RsvgRuntime = Join-Path $SvgLoaderStage "usr/lib/librsvg-2.so.2.62.3"
+foreach ($Name in @("librsvg-2.so", "librsvg-2.so.2", "librsvg-2.so.2.62.3")) {
+    Copy-Item -LiteralPath $RsvgRuntime -Destination (Join-Path $NativeLibDir $Name) -Force
+}
+Remove-Item -LiteralPath (Join-Path $NativeLibDir "libarchphene_glycin_svg.so") -Force -ErrorAction SilentlyContinue
 $ArchRuntimeRoot = Join-Path $Root "tooling/downloads/arch-curated-mousepad-x86_64/runtime-root"
 $ArchInclude = Join-Path $ArchRuntimeRoot "usr/include"
+$MousepadDataSource = Join-Path $ArchRuntimeRoot "usr/share"
+$GtkPackage = Get-ChildItem -LiteralPath (Join-Path $Root "tooling/downloads/arch-curated-mousepad-x86_64/packages") `
+    -File -Filter "gtk3-*.pkg.tar.zst" | Select-Object -First 1
+if (-not $GtkPackage) {
+    throw "Resolved Arch gtk3 package is missing"
+}
+$GtkModuleStage = Join-Path $Root "tooling/build/mousepad-gtk-module"
+if (Test-Path -LiteralPath $GtkModuleStage) {
+    Remove-Item -LiteralPath $GtkModuleStage -Recurse -Force
+}
+New-Item -ItemType Directory -Force -Path $GtkModuleStage | Out-Null
+$PortableGtkPackage = Join-Path $GtkModuleStage "gtk3.pkg.tar.zst"
+Copy-Item -LiteralPath $GtkPackage.FullName -Destination $PortableGtkPackage
+Run-Native { & tar -xf $PortableGtkPackage -C $GtkModuleStage `
+        "usr/lib/gtk-3.0/3.0.0/immodules/im-wayland.so" } "extract GTK Wayland input module"
+$GtkWaylandModule = Join-Path $GtkModuleStage "usr/lib/gtk-3.0/3.0.0/immodules/im-wayland.so"
+Copy-Item -LiteralPath $GtkWaylandModule `
+    -Destination (Join-Path $NativeLibDir "libarchphene_im_wayland.so") -Force
+$MousepadDataAsset = Join-Path $App "assets/mousepad-data.zip"
+if (-not (Test-Path -LiteralPath $MousepadDataSource)) {
+    throw "Arch Mousepad data runtime is missing: $MousepadDataSource"
+}
+$PortableXkb = Join-Path $MousepadDataSource "xkeyboard-config-2"
+$PreservedXkb = Join-Path $Root "tooling/downloads/arch-curated-mousepad-x86_64/runtime-root-ntfs-symlinks/usr/share/xkeyboard-config-2"
+if (-not (Test-Path -LiteralPath $PortableXkb)) {
+    if (-not (Test-Path -LiteralPath $PreservedXkb)) {
+        throw "Arch xkeyboard-config data is missing: $PreservedXkb"
+    }
+    Copy-Item -LiteralPath $PreservedXkb -Destination $PortableXkb -Recurse
+}
+$XkbRules = Join-Path $PortableXkb "rules"
+foreach ($Alias in @(
+        @("xorg", "evdev"),
+        @("xorg.lst", "evdev.lst"),
+        @("xorg.xml", "evdev.xml"))) {
+    $AliasPath = Join-Path $XkbRules $Alias[0]
+    $TargetPath = Join-Path $XkbRules $Alias[1]
+    $AliasItem = Get-Item -LiteralPath $AliasPath -Force -ErrorAction SilentlyContinue
+    if ($AliasItem -and -not ($AliasItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -and $AliasItem.Length -gt 0) {
+        continue
+    }
+    Remove-Item -LiteralPath $AliasPath -Force -ErrorAction SilentlyContinue
+    Copy-Item -LiteralPath $TargetPath -Destination $AliasPath
+}
+$SchemaDirectory = Join-Path $MousepadDataSource "glib-2.0/schemas"
+$SchemaCache = Join-Path $SchemaDirectory "gschemas.compiled"
+$NewestSchema = Get-ChildItem -LiteralPath $SchemaDirectory -Filter *.xml -File |
+    Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+if (-not (Test-Path -LiteralPath $SchemaCache) -or
+        (Get-Item -LiteralPath $SchemaCache).LastWriteTimeUtc -lt $NewestSchema.LastWriteTimeUtc) {
+    podman run --rm -v "${Root}:/workspace" -w /workspace `
+        localhost/archphene-android-native:ndk29-rust1.88 `
+        glib-compile-schemas /workspace/tooling/downloads/arch-curated-mousepad-x86_64/runtime-root/usr/share/glib-2.0/schemas
+    if ($LASTEXITCODE -ne 0) { throw "GSettings schema compilation failed" }
+}
+if (-not (Test-Path -LiteralPath $SchemaCache)) {
+    throw "Compiled GSettings schema is missing"
+}
+$MimeDirectory = Join-Path $MousepadDataSource "mime"
+$MimeSource = Join-Path $MimeDirectory "packages/freedesktop.org.xml"
+$MimeCache = Join-Path $MimeDirectory "mime.cache"
+if (-not (Test-Path -LiteralPath $MimeCache) -or
+        (Get-Item -LiteralPath $MimeCache).LastWriteTimeUtc -lt (Get-Item -LiteralPath $MimeSource).LastWriteTimeUtc) {
+    podman run --rm -v "${Root}:/workspace" -w /workspace `
+        localhost/archphene-android-native:ndk29-rust1.88 `
+        update-mime-database /workspace/tooling/downloads/arch-curated-mousepad-x86_64/runtime-root/usr/share/mime
+    if ($LASTEXITCODE -ne 0) { throw "shared MIME database generation failed" }
+}
+if (-not (Test-Path -LiteralPath $MimeCache)) {
+    throw "Shared MIME database cache is missing"
+}
+$DataAssetStamp = @((Get-Item -LiteralPath $SchemaCache), (Get-Item -LiteralPath $MimeCache)) |
+    Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+if (-not (Test-Path -LiteralPath $MousepadDataAsset) -or
+        (Get-Item -LiteralPath $MousepadDataAsset).LastWriteTimeUtc -lt $DataAssetStamp.LastWriteTimeUtc) {
+    Push-Location $ArchRuntimeRoot
+    try {
+        Run-Native { & jar cf $MousepadDataAsset "usr/share" } "package Mousepad data runtime"
+    }
+    finally {
+        Pop-Location
+    }
+}
 $GconvRuntimeRoot = Join-Path $Root "tooling/downloads/arch-curated-kcalc-x86_64/runtime-root"
 $GconvSource = Join-Path $GconvRuntimeRoot "usr/lib/gconv"
 $GconvAsset = Join-Path $App "assets/glibc-gconv.zip"
 if (-not (Test-Path -LiteralPath $GconvSource)) {
     throw "Arch glibc gconv runtime is missing: $GconvSource"
 }
-Push-Location $GconvRuntimeRoot
-try {
-    Run-Native { & jar cf $GconvAsset "usr/lib/gconv" } "package glibc gconv runtime"
-}
-finally {
-    Pop-Location
+if (-not (Test-Path -LiteralPath $GconvAsset)) {
+    Push-Location $GconvRuntimeRoot
+    try {
+        Run-Native { & jar cf $GconvAsset "usr/lib/gconv" } "package glibc gconv runtime"
+    }
+    finally {
+        Pop-Location
+    }
 }
 $WaylandInclude = Join-Path $App "wayland-include"
-Run-Native { & $Clang -shared -fPIC -O2 -Wall -Wextra -o (Join-Path $NativeLibDir "libarchphene_wayland_jni.so") (Join-Path $App "wayland_socket_jni.c") } "clang build package-specific Wayland JNI"
 Run-Native { & $Clang -fPIE -pie -O2 -Wall -Wextra -o (Join-Path $NativeLibDir "libarchphene_frame_client.so") (Join-Path $App "archphene_frame_client.c") } "clang build Linux frame client"
 Run-Native { & $Clang -fPIE -pie -O2 -Wall -Wextra -o (Join-Path $NativeLibDir "libarchphene_shm_frame_client.so") (Join-Path $App "archphene_shm_frame_client.c") } "clang build Linux shm frame client"
 Run-Native { & $Clang -fPIE -pie -O2 -Wall -Wextra -o (Join-Path $NativeLibDir "libarchphene_wayland_shm_client.so") (Join-Path $App "archphene_wayland_shm_client.c") } "clang build raw Wayland shm client"
@@ -85,22 +202,13 @@ Run-Native { & $Clang -shared -fPIC -O2 -Wall -Wextra -I $WaylandInclude "-Wl,-s
 Run-Native { & $Clang -fPIE -pie -O2 -Wall -Wextra -I $WaylandInclude -L $NativeLibDir "-Wl,--allow-shlib-undefined" -o (Join-Path $NativeLibDir "libarchphene_wayland_android_api_client.so") (Join-Path $App "archphene_wayland_api_client.c") "-l:libarchphene_wayland_client_android.so" } "clang build Android Wayland API probe"
 Run-Native { & $Clang -fPIE -pie -O2 -Wall -Wextra -I $WaylandInclude -L $NativeLibDir "-Wl,--allow-shlib-undefined" -o (Join-Path $NativeLibDir "libarchphene_wayland_android_api_render_client.so") (Join-Path $App "archphene_wayland_api_render_client.c") "-l:libarchphene_wayland_client_android.so" } "clang build Android Wayland API render probe"
 Run-Native { & $Clang -fPIE -pie -O2 -Wall -Wextra -I $WaylandInclude -L $NativeLibDir "-Wl,--allow-shlib-undefined" -o (Join-Path $NativeLibDir "libarchphene_wayland_android_api_xdg_client.so") (Join-Path $App "archphene_wayland_api_xdg_client.c") "-l:libarchphene_wayland_client_android.so" } "clang build Android Wayland API xdg probe"
-$OldGoos = $env:GOOS
-$OldGoarch = $env:GOARCH
-$OldCgo = $env:CGO_ENABLED
-$OldGo111Module = $env:GO111MODULE
-try {
-    $env:GOOS = "linux"
-    $env:GOARCH = "amd64"
-    $env:CGO_ENABLED = "0"
-    $env:GO111MODULE = "off"
-    Run-Native { & go build -trimpath -ldflags "-s -w" -o (Join-Path $NativeLibDir "libarchphene_syscall_probe.so") (Join-Path $Root "prototypes/linux-payloads/syscall-probe/main.go") } "go build syscall probe"
-} finally {
-    $env:GOOS = $OldGoos
-    $env:GOARCH = $OldGoarch
-    $env:CGO_ENABLED = $OldCgo
-    $env:GO111MODULE = $OldGo111Module
-}
+podman run --rm -v "${Root}:/workspace" -w /workspace `
+    -e GOOS=linux -e GOARCH=amd64 -e CGO_ENABLED=0 -e GO111MODULE=off `
+    docker.io/library/golang:1.24 `
+    go build -trimpath -ldflags "-s -w" `
+        -o /workspace/prototypes/mousepad-android-app/lib/x86_64/libarchphene_syscall_probe.so `
+        /workspace/prototypes/linux-payloads/syscall-probe/main.go
+if ($LASTEXITCODE -ne 0) { throw "container Go syscall probe build failed" }
 
 Run-Native { & (Join-Path $BuildTools "aapt2.exe") compile --dir (Join-Path $App "res") -o (Join-Path $Out "compiled/res.zip") } "aapt2 compile"
 Run-Native { & (Join-Path $BuildTools "aapt2.exe") link -o (Join-Path $Out "unsigned.apk") -I (Join-Path $Sdk "platforms/android-36/android.jar") --version-code ([int]$Descriptor.android.versionCode) --version-name ([string]$Descriptor.android.versionName) --manifest (Join-Path $App "AndroidManifest.xml") --java (Join-Path $Out "gen") (Join-Path $Out "compiled/res.zip") } "aapt2 link"
@@ -142,8 +250,9 @@ Run-Native { & (Join-Path $BuildTools "apksigner.bat") verify --verbose (Join-Pa
 
 $Adb = Join-Path $Sdk "platform-tools/adb.exe"
 if (-not $SkipInstall) {
-    Run-Native { & $Adb install -r (Join-Path $Out "archpheneos-mousepad.apk") } "adb install"
-    Run-Native { & $Adb shell am start -n org.archphene.linux.mousepad/org.archphene.linux.mousepad.MainActivity } "adb launch"
+    if (-not $Serial) { throw "-Serial is required when installing with multiple ADB devices" }
+    Run-Native { & $Adb -s $Serial install -r (Join-Path $Out "archpheneos-mousepad.apk") } "adb install"
+    Run-Native { & $Adb -s $Serial shell am start -n org.archphene.linux.mousepad/org.archphene.linux.mousepad.MainActivity } "adb launch"
 }
 
 
