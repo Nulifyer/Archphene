@@ -37,13 +37,19 @@ Separate APK identities preserve Android's per-app UID and lifecycle boundaries,
 
 The Linux process connects to an app-local Wayland socket. The bridge maps Wayland surfaces, input, popups, dialogs, clipboard, IME, output changes, and Android window geometry into the Activity.
 
-KCalc and Mousepad currently contain separate Java compositor forks. Consolidating them into a shared native compositor with generated protocol bindings is the highest-priority bridge refactor.
+KCalc and Mousepad use the same Android Activity, input, clipboard, window host, and Rust native compositor. Application Activities contain only package metadata and inherit the shared bridge behavior.
 
 ### Runtime compatibility
 
 Arch glibc and application libraries run inside the Android app sandbox. Source-level glibc compatibility patches replace optional or blocked startup syscall forms. They do not change the Android UID, grant permissions, bypass SELinux, or modify the kernel.
 
 Official Arch Linux supplies x86_64 packages. AArch64 experiments use the separate Arch Linux ARM project and trust roots.
+
+### Shared runtime modules
+
+The manager can expose an exact content-hash runtime module through a non-exported, read-only `ContentProvider`. It launches a wrapper with an explicit temporary URI read grant. The wrapper validates the ELF descriptor and the shared native launcher executes `/proc/self/fd/<n>` after clearing close-on-exec. The process therefore runs under the wrapper's Android UID without copying that module into the wrapper sandbox.
+
+This is currently a validated static-ELF mechanism, not a complete shared glibc/Qt runtime. A production runtime broker still needs a signed module catalog, atomic versioned packs, descriptor-based dynamic-library resolution, grant/revocation state across process death and reboot, and garbage collection that respects running processes.
 
 ### Storage
 

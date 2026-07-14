@@ -59,6 +59,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     private String payload;
     private String toolkit;
     private String dataAssets;
+    private String runtimeProbeUri;
     private final Map<Integer, SecondaryWindow> secondaryWindows = new HashMap<>();
     private boolean independentWindows;
     private ArchpheneCompositorSession.WindowFrame primaryFrame;
@@ -67,6 +68,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         readMetadata();
+        runtimeProbeUri = getIntent().getStringExtra("archphene_test_runtime_module_uri");
         independentWindows = shouldUseIndependentWindows();
         documentSession = new AndroidDocumentSession(this, logTag);
         getWindow().setStatusBarColor(Color.TRANSPARENT);
@@ -155,7 +157,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             int height = Math.max(1, bottom - top);
             if (session != null) session.configure(width, height, 1);
             if (width > 1 && height > 1 && launched.compareAndSet(false, true)) {
-                launch(width, height);
+                if (runtimeProbeUri == null) launch(width, height);
+                else runRuntimeFdProbe(runtimeProbeUri);
             }
         });
     }
@@ -419,6 +422,19 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             });
         }
     }
+    private void runRuntimeFdProbe(String uriText) {
+        new Thread(() -> {
+            try {
+                RuntimeFdLauncher.Result result = RuntimeFdLauncher.run(
+                        getContentResolver(), android.net.Uri.parse(uriText));
+                Log.i("ArchpheneRuntime", "Runtime FD probe exit=" + result.exitCode
+                        + " output=" + result.output.replace('\n', ' '));
+            } catch (Exception error) {
+                Log.e("ArchpheneRuntime", "Runtime FD probe failed", error);
+            }
+        }, "archphene-runtime-fd-probe").start();
+    }
+
     private void launch(int width, int height) {
         File runtimeDir = new File(getFilesDir(), "wayland-runtime");
         runtimeDir.mkdirs();

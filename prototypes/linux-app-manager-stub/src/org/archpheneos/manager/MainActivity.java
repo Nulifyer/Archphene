@@ -98,6 +98,14 @@ public final class MainActivity extends Activity {
         handleTestWrapperSigningIntent();
         handleTestWrapperAssemblyIntent();
         handleTestGitHubReleaseIntent();
+        handleTestRuntimeModuleIntent();
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleTestRuntimeModuleIntent();
     }
 
     @Override
@@ -1292,6 +1300,35 @@ public final class MainActivity extends Activity {
     private void rescheduleBackgroundChecks() {
         if (ManagerStateStore.backgroundChecksEnabled(this)) {
             LinuxAppManagerService.schedule(this, true);
+        }
+    }
+
+    private void handleTestRuntimeModuleIntent() {
+        String packageName = getIntent().getStringExtra(
+                "archphene_test_runtime_module_package");
+        if (packageName == null) return;
+        String action = getIntent().getStringExtra("archphene_test_runtime_module_action");
+        try {
+            if ("launch".equals(action)) {
+                Intent launch = new Intent(Intent.ACTION_VIEW, RuntimeModuleProvider.PROBE_URI);
+                launch.setClassName(packageName, packageName + ".MainActivity");
+                launch.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                launch.putExtra("archphene_test_runtime_module_uri",
+                        RuntimeModuleProvider.PROBE_URI.toString());
+                startActivity(launch);
+                android.util.Log.i("ArchpheneRuntime", "Launched runtime module for "
+                        + packageName);
+            } else if ("revoke".equals(action)) {
+                RuntimeModuleProvider.revokeProbe(this);
+                android.util.Log.i("ArchpheneRuntime", "Revoked runtime module from "
+                        + packageName);
+                showBanner("Runtime module access revoked from " + packageName, false);
+            } else {
+                throw new IllegalArgumentException("Unknown runtime module action");
+            }
+        } catch (Exception error) {
+            android.util.Log.e("ArchpheneRuntime", "Runtime module grant failed", error);
+            showBanner("Runtime module grant failed: " + error.getMessage(), true);
         }
     }
 

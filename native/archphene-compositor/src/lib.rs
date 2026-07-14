@@ -8206,6 +8206,148 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     i32::try_from(core.ime_editor_action(action, time as u32)).unwrap_or(i32::MAX)
 }
 
+#[cfg(target_os = "android")]
+fn run_runtime_fd(executable_fd: i32) -> (i32, Vec<u8>) {
+    if executable_fd < 0 {
+        return (-libc::EBADF, Vec::new());
+    }
+    let inherited_fd = unsafe { libc::dup(executable_fd) };
+    if inherited_fd < 0 {
+        return (
+            -io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(libc::EIO),
+            Vec::new(),
+        );
+    }
+    let flags = unsafe { libc::fcntl(inherited_fd, libc::F_GETFD) };
+    if flags < 0
+        || unsafe { libc::fcntl(inherited_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } < 0
+    {
+        unsafe { libc::close(inherited_fd) };
+        return (
+            -io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(libc::EIO),
+            Vec::new(),
+        );
+    }
+    let executable = match std::ffi::CString::new(format!("/proc/self/fd/{inherited_fd}")) {
+        Ok(value) => value,
+        Err(_) => {
+            unsafe { libc::close(inherited_fd) };
+            return (-libc::EINVAL, Vec::new());
+        }
+    };
+    let argument = std::ffi::CString::new("archphene-runtime-module").unwrap();
+    let arguments = [argument.as_ptr(), ptr::null()];
+    let mut pipe = [-1; 2];
+    if unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        unsafe { libc::close(inherited_fd) };
+        return (
+            -io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(libc::EIO),
+            Vec::new(),
+        );
+    }
+
+    let child = unsafe { libc::fork() };
+    if child == 0 {
+        unsafe {
+            libc::close(pipe[0]);
+            libc::dup2(pipe[1], libc::STDOUT_FILENO);
+            libc::dup2(pipe[1], libc::STDERR_FILENO);
+            if pipe[1] > libc::STDERR_FILENO {
+                libc::close(pipe[1]);
+            }
+            unsafe extern "C" {
+                static mut environ: *mut *mut libc::c_char;
+            }
+            libc::execve(
+                executable.as_ptr(),
+                arguments.as_ptr(),
+                environ.cast::<*const libc::c_char>(),
+            );
+            let message = b"runtime module exec failed\n";
+            libc::write(
+                libc::STDERR_FILENO,
+                message.as_ptr().cast::<libc::c_void>(),
+                message.len(),
+            );
+            libc::_exit(126);
+        }
+    }
+    unsafe {
+        libc::close(pipe[1]);
+        libc::close(inherited_fd);
+    }
+    if child < 0 {
+        unsafe { libc::close(pipe[0]) };
+        return (
+            -io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(libc::EIO),
+            Vec::new(),
+        );
+    }
+
+    let mut output = Vec::new();
+    let mut buffer = [0u8; 1024];
+    loop {
+        let count = unsafe {
+            libc::read(
+                pipe[0],
+                buffer.as_mut_ptr().cast::<libc::c_void>(),
+                buffer.len(),
+            )
+        };
+        if count == 0 {
+            break;
+        }
+        if count < 0 {
+            if io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            break;
+        }
+        let count = usize::try_from(count).unwrap_or(0);
+        let remaining = 8191usize.saturating_sub(output.len());
+        output.extend_from_slice(&buffer[..count.min(remaining)]);
+    }
+    unsafe { libc::close(pipe[0]) };
+
+    let mut status = 0;
+    while unsafe { libc::waitpid(child, &mut status, 0) } < 0 {
+        if io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            return (-libc::ECHILD, output);
+        }
+    }
+    let exit_code = if libc::WIFEXITED(status) {
+        libc::WEXITSTATUS(status)
+    } else if libc::WIFSIGNALED(status) {
+        128 + libc::WTERMSIG(status)
+    } else {
+        -libc::ECHILD
+    };
+    (exit_code, output)
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_bridge_RuntimeFdLauncher_nativeRunFd(
+    environment: *mut std::ffi::c_void,
+    _class: *mut std::ffi::c_void,
+    fd: i32,
+    output: jbyteArray,
+) -> i32 {
+    let (exit_code, captured) = run_runtime_fd(fd);
+    if copy_to_java_byte_array(environment, output, &captured) < 0 {
+        return -libc::EFAULT;
+    }
+    exit_code
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_org_archphene_bridge_NativeCompositor_nativeCreate(
     environment: *mut std::ffi::c_void,

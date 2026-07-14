@@ -64,6 +64,10 @@ if ($ReleaseBuild) {
 [IO.File]::WriteAllText($BuildManifest, $ManifestText, [Text.UTF8Encoding]::new($false))
 Run-Native { & (Join-Path $BuildTools "aapt2.exe") compile --dir (Join-Path $App "res") -o (Join-Path $Out "compiled/res.zip") } "aapt2 compile"
 $PackageRuntimeStage = Join-Path $Out "package-runtime"
+$PackageLibDir = Join-Path $PackageRuntimeStage "lib/x86_64"
+New-Item -ItemType Directory -Force -Path $PackageLibDir | Out-Null
+Copy-Item -LiteralPath (Join-Path $App "assets/payload-hello-linux-amd64") `
+    -Destination (Join-Path $PackageLibDir "libarchphene_runtime_probe.so") -Force
 if ($IncludePackageRuntime) {
     $RuntimeWork = Join-Path $Root "tooling/downloads/arch-runtime-pacman-x86_64"
     $RuntimeRoot = Join-Path $RuntimeWork "runtime-root"
@@ -74,9 +78,8 @@ if ($IncludePackageRuntime) {
             throw "Package runtime input missing: $required"
         }
     }
-    $PackageLibDir = Join-Path $PackageRuntimeStage "lib/x86_64"
     $PackageAssetDir = Join-Path $PackageRuntimeStage "assets/package-runtime"
-    New-Item -ItemType Directory -Force -Path $PackageLibDir, $PackageAssetDir | Out-Null
+    New-Item -ItemType Directory -Force -Path $PackageAssetDir | Out-Null
     $KeyringDir = Join-Path $Root "tooling/downloads/arch-runtime-archlinux-keyring-x86_64/runtime-root/usr/share/pacman/keyrings"
     foreach ($name in @("archlinux.gpg", "archlinux-revoked", "archlinux-trusted")) {
         $source = Join-Path $KeyringDir $name
@@ -141,13 +144,11 @@ Push-Location (Join-Path $Out "dex")
 Run-Native { & jar uf "..\unsigned.apk" classes.dex } "jar update apk"
 Pop-Location
 
-if ($IncludePackageRuntime) {
-    Push-Location $PackageRuntimeStage
-    $PackageRuntimeFiles = Get-ChildItem -LiteralPath $PackageRuntimeStage -Recurse -File |
-        ForEach-Object { $_.FullName.Substring($PackageRuntimeStage.Length + 1) }
-    Run-Native { & jar uf "..\unsigned.apk" $PackageRuntimeFiles } "jar add package runtime"
-    Pop-Location
-}
+Push-Location $PackageRuntimeStage
+$PackageRuntimeFiles = Get-ChildItem -LiteralPath $PackageRuntimeStage -Recurse -File |
+    ForEach-Object { $_.FullName.Substring($PackageRuntimeStage.Length + 1) }
+Run-Native { & jar uf "..\unsigned.apk" $PackageRuntimeFiles } "jar add package runtime"
+Pop-Location
 
 $SigningDir = Join-Path $Root "tooling/signing"
 New-Item -ItemType Directory -Force -Path $SigningDir | Out-Null

@@ -157,6 +157,12 @@ Editors such as VS Code, Zed, GIMP, Blender, Kdenlive, and LibreOffice need a pr
 
 Terminal-style apps such as `btop` should usually need only app-private paths plus specific brokered capabilities, not broad storage.
 
+## Validated Runtime Descriptor Proof
+
+The manager APK now contains one immutable static x86_64 ELF identified by its SHA-256 digest. A non-exported provider accepts only that exact URI and read mode, verifies the canonical file path, size, and digest, and returns a read-only descriptor. The manager grants that URI only on an explicit wrapper launch. The shared native launcher executes the descriptor through `/proc/self/fd` under the wrapper UID.
+
+The emulator regression proves both sides of the boundary: direct access from KCalc is denied, while an explicit launch-time read grant permits execution without placing a copy in KCalc's private directory. This does not yet provide a complete shared Linux runtime because a dynamically linked application also needs its loader and transitive libraries. It also does not yet provide durable cold-start or post-reboot access.
+
 ## Next Milestones
 
 1. Implement a path broker that maps Linux paths to private files, runtime modules, and SAF grants.

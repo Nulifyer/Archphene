@@ -18,6 +18,8 @@ function Invoke-Native([string]$Step, [scriptblock]$Command) {
 }
 
 Invoke-Native "Podman availability check" { podman info --format "{{.Host.OS}}/{{.Host.Arch}}" }
+& (Join-Path $PSScriptRoot "build-native-compositor-podman.ps1") -Architecture x86_64 -Release
+if ($LASTEXITCODE -ne 0) { throw "Shared native compositor build failed" }
 
 $drive = $Root.Substring(0, 1).ToLowerInvariant()
 $rest = $Root.Substring(2).Replace("\", "/")

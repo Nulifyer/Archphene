@@ -9,6 +9,7 @@ $tests = @(
     @{ Name = "Linux manager update"; Command = { & "$PSScriptRoot/test-linux-manager-update.ps1" -Serial $Serial } },
     @{ Name = "Linux manager pull refresh"; Command = { & "$PSScriptRoot/test-linux-manager-pull-refresh.ps1" -Serial $Serial } },
     @{ Name = "Linux manager KCalc launch"; Command = { & "$PSScriptRoot/test-linux-manager-kcalc.ps1" -Serial $Serial } },
+    @{ Name = "Shared runtime FD execution"; Command = { & "$PSScriptRoot/test-runtime-module-fd-sharing.ps1" -Serial $Serial } },
     @{ Name = "Linux manager catalog isolation"; Command = { & "$PSScriptRoot/test-linux-manager-catalog.ps1" -Serial $Serial } },
     @{ Name = "Linux manager Obtainium workflow"; Command = { & "$PSScriptRoot/test-linux-manager-obtainium-workflow.ps1" -Serial $Serial } },
     @{ Name = "Linux manager repository search"; Command = { & "$PSScriptRoot/test-linux-manager-repository-search.ps1" -Serial $Serial } },

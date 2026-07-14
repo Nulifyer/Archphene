@@ -42,7 +42,7 @@ build_qt_template() {
     --manifest "$out/AndroidManifest.xml" --java "$out/gen" \
     "$out/compiled/res.zip"
 
-  mapfile -d '' java_files < <(find "$app/src" -type f -name '*.java' -print0)
+  mapfile -d '' java_files < <(find "$app/src" "$root/prototypes/shared-android-bridge/src" -type f -name '*.java' -print0)
   javac --release 17 -classpath "$platform" -d "$out/classes" "${java_files[@]}"
   mapfile -d '' class_files < <(find "$out/classes" -type f -name '*.class' -print0)
   "$bt/d8" --lib "$platform" --min-api 23 --output "$out/dex" "${class_files[@]}"
@@ -52,6 +52,9 @@ build_qt_template() {
   cp "$app/assets/kcalc.PKGINFO" "$out/stage/assets/kcalc.PKGINFO"
   (cd "$root/prebuilt/qt-bridge" && sha256sum --check SHA256SUMS)
   cp "$root"/prebuilt/qt-bridge/x86_64/*.so "$out/stage/lib/x86_64/"
+  compositor="$root/native/archphene-compositor/target/x86_64-linux-android/release/libarchphene_compositor.so"
+  [[ -f "$compositor" ]] || { echo "missing shared compositor: $compositor" >&2; exit 1; }
+  cp "$compositor" "$out/stage/lib/x86_64/libarchphene_compositor.so"
   (
     cd "$out/stage"
     mapfile -d '' entries < <(find . -type f -print0)
@@ -96,6 +99,8 @@ done
 
 package_assets="$out/package-runtime/assets/package-runtime"
 package_libs="$out/package-runtime/lib/x86_64"
+cp "$root/prototypes/linux-app-manager-stub/assets/payload-hello-linux-amd64" \
+  "$package_libs/libarchphene_runtime_probe.so"
 for name in archlinux.gpg archlinux-revoked archlinux-trusted; do
   cp "$keyrings/$name" "$package_assets/$name"
 done

@@ -22,6 +22,10 @@ $Sdk = Resolve-Path $SdkCandidate
 $BuildTools = Join-Path $Sdk "build-tools/36.0.0"
 $App = Join-Path $Root "prototypes/kcalc-android-app"
 $Out = Join-Path $Root "tooling/build/wrapper-templates/qt"
+& (Join-Path $PSScriptRoot "build-native-compositor-podman.ps1") -Architecture x86_64 -Release
+if ($LASTEXITCODE -ne 0) { throw "Shared native compositor build failed" }
+$Compositor = Join-Path $Root "native/archphene-compositor/target/x86_64-linux-android/release/libarchphene_compositor.so"
+if (-not (Test-Path -LiteralPath $Compositor -PathType Leaf)) { throw "Shared native compositor is missing" }
 if (Test-Path -LiteralPath $Out) { Remove-Item -LiteralPath $Out -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $Out,(Join-Path $Out "compiled"),(Join-Path $Out "gen"),(Join-Path $Out "classes"),(Join-Path $Out "dex"),(Join-Path $Out "stage/lib/x86_64"),(Join-Path $Out "stage/assets") | Out-Null
 
@@ -32,7 +36,10 @@ $manifest = $manifest.Replace('android:debuggable="true"', 'android:debuggable="
 [IO.File]::WriteAllText((Join-Path $Out "AndroidManifest.xml"),$manifest,[Text.UTF8Encoding]::new($false))
 Run-Native { & (Join-Path $BuildTools "aapt2.exe") compile --dir (Join-Path $App "res") -o (Join-Path $Out "compiled/res.zip") } "aapt2 compile template"
 Run-Native { & (Join-Path $BuildTools "aapt2.exe") link -o (Join-Path $Out "unsigned.apk") -I (Join-Path $Sdk "platforms/android-36/android.jar") --manifest (Join-Path $Out "AndroidManifest.xml") --java (Join-Path $Out "gen") (Join-Path $Out "compiled/res.zip") } "aapt2 link template"
-$javaFiles = Get-ChildItem (Join-Path $App "src") -Recurse -File -Filter *.java | ForEach-Object FullName
+$javaFiles = @(
+    Get-ChildItem -LiteralPath (Join-Path $App "src") -Recurse -File -Filter *.java
+    Get-ChildItem -LiteralPath (Join-Path $Root "prototypes/shared-android-bridge/src") -Recurse -File -Filter *.java
+) | ForEach-Object FullName
 Run-Native { & javac --release 17 -classpath (Join-Path $Sdk "platforms/android-36/android.jar") -d (Join-Path $Out "classes") $javaFiles } "javac template"
 $classFiles = Get-ChildItem (Join-Path $Out "classes") -Recurse -File -Filter *.class | ForEach-Object FullName
 Run-Native { & (Join-Path $BuildTools "d8.bat") --lib (Join-Path $Sdk "platforms/android-36/android.jar") --min-api 23 --output (Join-Path $Out "dex") $classFiles } "d8 template"
@@ -70,6 +77,7 @@ if (Test-Path -LiteralPath $PrebuiltBridge -PathType Container) {
         $_.Name -like "libarchphene_*" -and $_.Name -notin @("libarchphene_kcalc.so","libarchphene_ld.so","libarchphene_ld.so.orig","libarchphene_syscall_probe.so")
     } | Copy-Item -Destination (Join-Path $Out "stage/lib/x86_64")
 }
+Copy-Item -LiteralPath $Compositor -Destination (Join-Path $Out "stage/lib/x86_64/libarchphene_compositor.so") -Force
 Push-Location (Join-Path $Out "stage")
 $entries = Get-ChildItem -Recurse -File | ForEach-Object { $_.FullName.Substring((Get-Location).Path.Length + 1) }
 Run-Native { & jar uf "..\unsigned.apk" $entries } "add template bridge files"

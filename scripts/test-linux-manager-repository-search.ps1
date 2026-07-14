@@ -33,7 +33,7 @@ Tap-Pattern $ui 'content-desc="Search package repositories"' "repository search 
 $ui = Wait-Ui 'text="btop  [^"]+"' "repo-results" 20
 Tap-Pattern $ui 'text="btop  [^"]+"' "btop result"
 $ui = Wait-Ui 'text="Add to apps"' "repo-detail"
-foreach ($expected in @('text="Repository"', 'text="Architecture"', 'text="Wrapper artifact: not available"')) {
+foreach ($expected in @('text="Repository"', 'text="Architecture"', 'text="Wrapper: built and signed on this device"')) {
     if ($ui -notmatch $expected) { throw "Package detail missing $expected" }
 }
 Tap-Pattern $ui 'text="Add to apps"' "track btop"

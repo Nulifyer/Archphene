@@ -53,6 +53,17 @@ jobs:
       - name: Build verified Arch runtime and patched glibc
         run: bash scripts/build-ci-package-runtime.sh
 
+      - name: Build shared Android compositor
+        run: |
+          docker build -f containers/android-native.Containerfile \
+            -t archphene-android-native:release .
+          docker run --rm \
+            -v "$PWD:/workspace" \
+            -v archphene-cargo-registry:/opt/cargo/registry \
+            -w /workspace/native/archphene-compositor \
+            archphene-android-native:release \
+            bash -lc 'cargo build --target x86_64-linux-android --release --locked'
+
       - name: Resolve release version
         run: |
           if [[ "$RELEASE_TAG" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)([-+][0-9A-Za-z.-]+)?$ ]]; then
