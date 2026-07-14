@@ -4149,7 +4149,34 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                                 serial,
                                 popup_geometry: None,
                             });
-                            toplevel.configure(0, 0, Vec::new());
+                            let parented = toplevel.data::<XdgToplevelData>().is_some_and(|data| {
+                                data.parent
+                                    .lock()
+                                    .unwrap_or_else(|error| error.into_inner())
+                                    .is_some()
+                            });
+                            let maximize_primary = state.tile_toplevels
+                                && state.primary_toplevel.is_none()
+                                && !parented;
+                            let width = if maximize_primary {
+                                state.output_width
+                            } else {
+                                0
+                            };
+                            let height = if maximize_primary {
+                                state.output_height
+                            } else {
+                                0
+                            };
+                            let states = if maximize_primary {
+                                encode_xdg_toplevel_states(&[
+                                    xdg_toplevel::State::Maximized,
+                                    xdg_toplevel::State::Activated,
+                                ])
+                            } else {
+                                Vec::new()
+                            };
+                            toplevel.configure(width, height, states);
                             xdg_surface.configure(serial);
                         }
                     } else if let Some(xdg_surface) = surface.xdg_surface.as_ref() {
@@ -4399,9 +4426,11 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 let latest_frame = surface.committed_frame.clone();
                 let is_xdg_toplevel = role == Some(SurfaceRole::XdgToplevel);
                 let is_cursor = role == Some(SurfaceRole::Cursor);
-                let publishes_root_frame =
-                    !matches!(role, Some(SurfaceRole::Subsurface | SurfaceRole::Cursor))
-                        && (is_xdg_toplevel || !surface.has_xdg_surface);
+                let publishes_root_frame = surface_publishes_root_frame(
+                    role,
+                    surface.has_xdg_surface,
+                    state.primary_toplevel.is_some(),
+                );
                 let has_frame = latest_frame.is_some();
                 drop(surface);
 
@@ -4440,6 +4469,37 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                     if active {
                         state.root_surface = Some(resource.clone());
                         state.root_frame = latest_frame.clone();
+                    }
+                    if is_xdg_toplevel && !was_mapped {
+                        let parented = xdg_toplevel.as_ref().is_some_and(|toplevel| {
+                            toplevel.data::<XdgToplevelData>().is_some_and(|data| {
+                                data.parent
+                                    .lock()
+                                    .unwrap_or_else(|error| error.into_inner())
+                                    .is_some()
+                            })
+                        });
+                        if let (Some(toplevel), Some(frame)) =
+                            (xdg_toplevel.as_ref(), latest_frame.as_ref())
+                        {
+                            let (width, height) = surface_content_size(resource, frame);
+                            if secondary_toplevel_needs_output_size(
+                                parented,
+                                state.tile_toplevels,
+                                width,
+                                height,
+                                state.output_width,
+                                state.output_height,
+                            ) {
+                                queue_toplevel_configure(
+                                    state,
+                                    toplevel,
+                                    state.output_width,
+                                    state.output_height,
+                                    &[xdg_toplevel::State::Activated],
+                                );
+                            }
+                        }
                     }
                 } else if publishes_root_frame
                     && state
@@ -4674,10 +4734,115 @@ fn root_window_geometry(state: &CompositorState) -> Option<WindowGeometry> {
     window_geometry_for_surface(state.root_surface.as_ref()?)
 }
 
+fn surface_publishes_root_frame(
+    role: Option<SurfaceRole>,
+    has_xdg_surface: bool,
+    has_primary_toplevel: bool,
+) -> bool {
+    match role {
+        Some(SurfaceRole::XdgToplevel) => true,
+        None => !has_xdg_surface && !has_primary_toplevel,
+        Some(SurfaceRole::XdgPopup | SurfaceRole::Subsurface | SurfaceRole::Cursor) => false,
+    }
+}
+
 fn primary_surface(state: &CompositorState) -> Option<WlSurface> {
     state.primary_toplevel.as_ref().and_then(toplevel_surface)
 }
 
+fn managed_root_frame(state: &CompositorState) -> Option<(WlSurface, Arc<CommittedFrame>)> {
+    state
+        .active_toplevel
+        .as_ref()
+        .and_then(|toplevel| {
+            let surface = toplevel_surface(toplevel)?;
+            let frame = surface_frame(&surface)?;
+            Some((surface, frame))
+        })
+        .or_else(|| {
+            let surface = primary_surface(state)?;
+            let frame = surface_frame(&surface)?;
+            Some((surface, frame))
+        })
+}
+
+fn synchronize_managed_root(state: &mut CompositorState) {
+    let Some((surface, frame)) = managed_root_frame(state) else {
+        return;
+    };
+    if state
+        .root_surface
+        .as_ref()
+        .is_none_or(|root| root.id() != surface.id())
+    {
+        state.root_surface = Some(surface);
+        state.root_frame = Some(frame);
+    }
+}
+
+fn encode_xdg_toplevel_states(states: &[xdg_toplevel::State]) -> Vec<u8> {
+    let mut encoded = Vec::with_capacity(states.len() * std::mem::size_of::<u32>());
+    for state in states {
+        encoded.extend_from_slice(&(*state as u32).to_ne_bytes());
+    }
+    encoded
+}
+
+fn secondary_toplevel_needs_output_size(
+    parented: bool,
+    tile_toplevels: bool,
+    width: u32,
+    height: u32,
+    output_width: i32,
+    output_height: i32,
+) -> bool {
+    parented
+        && tile_toplevels
+        && output_width > 0
+        && output_height > 0
+        && (width > output_width as u32 || height > output_height as u32)
+}
+
+fn queue_toplevel_configure(
+    state: &mut CompositorState,
+    toplevel: &XdgToplevel,
+    width: i32,
+    height: i32,
+    states: &[xdg_toplevel::State],
+) -> u32 {
+    if width <= 0 || height <= 0 {
+        return 0;
+    }
+    let Some(surface) = toplevel_surface(toplevel) else {
+        return 0;
+    };
+    let Some(xdg_surface) = surface.data::<SurfaceData>().and_then(|data| {
+        data.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .xdg_surface
+            .clone()
+    }) else {
+        return 0;
+    };
+    let Some(xdg_data) = xdg_surface.data::<XdgSurfaceData>() else {
+        return 0;
+    };
+    state.next_configure_serial = state.next_configure_serial.wrapping_add(1).max(1);
+    let serial = state.next_configure_serial;
+    xdg_data
+        .state
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .pending_configures
+        .push_back(XdgConfigure {
+            serial,
+            popup_geometry: None,
+        });
+    toplevel.configure(width, height, encode_xdg_toplevel_states(states));
+    xdg_surface.configure(serial);
+    serial
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ToplevelLayout {
     output_width: u32,
@@ -4740,26 +4905,47 @@ fn calculate_toplevel_layout(
             overlay_primary: false,
         };
     };
-    let compact = root_width.saturating_mul(4) <= primary_width.saturating_mul(3)
-        && root_height.saturating_mul(4) <= primary_height.saturating_mul(3);
-    if !compact {
-        return ToplevelLayout {
-            output_width: root_width,
-            output_height: root_height,
-            root_x: root_geometry.x.saturating_neg(),
-            root_y: root_geometry.y.saturating_neg(),
-            root_width: root_frame_width as i32,
-            root_height: root_frame_height as i32,
-            overlay_primary: false,
+    let oversized = root_width > primary_width || root_height > primary_height;
+    let (content_width, content_height, frame_width, frame_height, geometry_x, geometry_y) =
+        if oversized {
+            let width_limited = u64::from(root_width) * u64::from(primary_height)
+                >= u64::from(root_height) * u64::from(primary_width);
+            let (numerator, denominator) = if width_limited {
+                (primary_width, root_width)
+            } else {
+                (primary_height, root_height)
+            };
+            let scale_u32 = |value: u32| {
+                ((u64::from(value) * u64::from(numerator)) / u64::from(denominator)).max(1) as u32
+            };
+            let scale_i32 = |value: i32| {
+                ((i64::from(value) * i64::from(numerator)) / i64::from(denominator)) as i32
+            };
+            (
+                scale_u32(root_width),
+                scale_u32(root_height),
+                scale_u32(root_frame_width),
+                scale_u32(root_frame_height),
+                scale_i32(root_geometry.x),
+                scale_i32(root_geometry.y),
+            )
+        } else {
+            (
+                root_width,
+                root_height,
+                root_frame_width,
+                root_frame_height,
+                root_geometry.x,
+                root_geometry.y,
+            )
         };
-    }
     ToplevelLayout {
         output_width: primary_width,
         output_height: primary_height,
-        root_x: ((primary_width.saturating_sub(root_width)) / 2) as i32 - root_geometry.x,
-        root_y: ((primary_height.saturating_sub(root_height)) / 2) as i32 - root_geometry.y,
-        root_width: root_frame_width as i32,
-        root_height: root_frame_height as i32,
+        root_x: ((primary_width.saturating_sub(content_width)) / 2) as i32 - geometry_x,
+        root_y: ((primary_height.saturating_sub(content_height)) / 2) as i32 - geometry_y,
+        root_width: frame_width as i32,
+        root_height: frame_height as i32,
         overlay_primary: true,
     }
 }
@@ -5291,6 +5477,7 @@ fn blend_subsurface_tree(
 }
 
 fn update_composited_frame(state: &mut CompositorState) {
+    synchronize_managed_root(state);
     let Some(root) = state.root_frame.as_ref() else {
         state.last_frame = None;
         state.last_frame_width = 0;
@@ -6069,6 +6256,30 @@ impl CompositorCore {
         serial
     }
 
+    fn configure_managed_toplevel(&mut self, width: i32, height: i32) -> bool {
+        let Some(toplevel) = self
+            .state
+            .active_toplevel
+            .clone()
+            .or_else(|| self.state.primary_toplevel.clone())
+        else {
+            return false;
+        };
+        let primary = self
+            .state
+            .primary_toplevel
+            .as_ref()
+            .is_some_and(|candidate| candidate.id() == toplevel.id());
+        let states = if primary {
+            vec![
+                xdg_toplevel::State::Maximized,
+                xdg_toplevel::State::Activated,
+            ]
+        } else {
+            vec![xdg_toplevel::State::Activated]
+        };
+        queue_toplevel_configure(&mut self.state, &toplevel, width, height, &states) != 0
+    }
     pub fn focused_pending_configure_count(&self) -> u32 {
         let Some((xdg_surface, _)) = self.focused_xdg_resources() else {
             return 0;
@@ -6157,6 +6368,9 @@ impl CompositorCore {
             fractional.preferred_scale(fractional_scale);
         }
         self.reconfigure_reactive_popups();
+        if self.state.tile_toplevels && self.configure_managed_toplevel(width, height) {
+            updated = updated.saturating_add(1);
+        }
         updated
     }
 
@@ -9584,6 +9798,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn encodes_xdg_toplevel_states_for_the_wire() {
+        let encoded = encode_xdg_toplevel_states(&[
+            xdg_toplevel::State::Maximized,
+            xdg_toplevel::State::Activated,
+        ]);
+        let values = encoded
+            .chunks_exact(4)
+            .map(|value| u32::from_ne_bytes(value.try_into().expect("state width")))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            values,
+            vec![
+                xdg_toplevel::State::Maximized as u32,
+                xdg_toplevel::State::Activated as u32,
+            ]
+        );
+    }
+
+    #[test]
     fn parses_bounded_runtime_library_manifests() {
         let modules = parse_runtime_library_manifest(
             b"14\tlibc.so.6\n15\tlibarchphene_probe_dependency.so\n",
@@ -10121,6 +10354,28 @@ mod tests {
     }
 
     #[test]
+    fn roleless_auxiliary_surface_cannot_replace_an_xdg_toplevel() {
+        assert!(surface_publishes_root_frame(None, false, false));
+        assert!(!surface_publishes_root_frame(None, false, true));
+        assert!(!surface_publishes_root_frame(None, true, false));
+        assert!(surface_publishes_root_frame(
+            Some(SurfaceRole::XdgToplevel),
+            true,
+            true,
+        ));
+        assert!(!surface_publishes_root_frame(
+            Some(SurfaceRole::XdgPopup),
+            true,
+            true,
+        ));
+        assert!(!surface_publishes_root_frame(
+            Some(SurfaceRole::Subsurface),
+            false,
+            true,
+        ));
+    }
+
+    #[test]
     fn centers_compact_startup_window_against_phone_output() {
         let layout = calculate_toplevel_layout(
             1080,
@@ -10178,8 +10433,9 @@ mod tests {
             },
             Some((540, 1102)),
         );
-        assert_eq!((chooser.output_width, chooser.output_height), (540, 900));
-        assert!(!chooser.overlay_primary);
+        assert_eq!((chooser.output_width, chooser.output_height), (540, 1102));
+        assert_eq!((chooser.root_x, chooser.root_y), (-10, 91));
+        assert!(chooser.overlay_primary);
     }
 
     #[test]
@@ -10201,6 +10457,43 @@ mod tests {
         );
         assert_eq!((layout.output_width, layout.output_height), (540, 1102));
         assert_eq!((layout.root_x, layout.root_y), (73, 268));
+        assert!(layout.overlay_primary);
+    }
+    #[test]
+    fn only_oversized_managed_secondary_windows_request_output_size() {
+        assert!(secondary_toplevel_needs_output_size(
+            true, true, 1332, 915, 1080, 2205,
+        ));
+        assert!(!secondary_toplevel_needs_output_size(
+            false, true, 1332, 915, 1080, 2205,
+        ));
+        assert!(!secondary_toplevel_needs_output_size(
+            true, false, 1332, 915, 1080, 2205,
+        ));
+        assert!(!secondary_toplevel_needs_output_size(
+            true, true, 900, 1200, 1080, 2205,
+        ));
+    }
+    #[test]
+    fn uniformly_fits_oversized_secondary_window_over_primary() {
+        let layout = calculate_toplevel_layout(
+            1080,
+            2205,
+            1332,
+            915,
+            1332,
+            915,
+            WindowGeometry {
+                x: 0,
+                y: 0,
+                width: 1332,
+                height: 915,
+            },
+            Some((1080, 2205)),
+        );
+        assert_eq!((layout.output_width, layout.output_height), (1080, 2205));
+        assert_eq!((layout.root_x, layout.root_y), (0, 732));
+        assert_eq!((layout.root_width, layout.root_height), (1080, 741));
         assert!(layout.overlay_primary);
     }
     #[test]

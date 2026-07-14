@@ -1,15 +1,22 @@
-param([string]$Serial = "emulator-5554")
+param(
+    [string]$Serial = "emulator-5554",
+    [string]$Package = "org.archphene.linux.p0392be9c9f103a39d951c2f39c3644d2"
+)
 
 $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $Adb = Join-Path $Root "tooling/android-sdk/platform-tools/adb.exe"
-$Package = "org.archphene.linux.kcalc"
 $SafeSerial = $Serial -replace '[^A-Za-z0-9._-]', '_'
 $Before = Join-Path $Root "tooling/build/kcalc-calculation-before-$SafeSerial.png"
 $After = Join-Path $Root "tooling/build/kcalc-calculation-after-$SafeSerial.png"
 
+$resolved = & $Adb -s $Serial shell cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER $Package
+if ($LASTEXITCODE -ne 0) { throw "Could not query launcher activity for $Package" }
+$Activity = ($resolved | Select-Object -Last 1).Trim()
+if ($Activity -notmatch '/') { throw "Could not resolve launcher activity for $Package" }
+
 & $Adb -s $Serial shell am force-stop $Package | Out-Null
-& $Adb -s $Serial shell am start -n "$Package/.MainActivity" | Out-Null
+& $Adb -s $Serial shell am start -n $Activity | Out-Null
 Start-Sleep -Seconds 8
 & $Adb -s $Serial shell screencap -p /sdcard/kcalc-before.png
 & $Adb -s $Serial pull /sdcard/kcalc-before.png $Before | Out-Null
@@ -47,8 +54,10 @@ if ($changed -lt 10) { throw "KCalc display did not visibly change after 1 + 2 =
 
 $appPid = (& $Adb -s $Serial shell pidof $Package).Trim()
 $processes = (& $Adb -s $Serial shell ps -A -o PID,PPID,NAME) -join "`n"
-$child = [regex]::Match($processes, "(?m)^\s*(\d+)\s+$appPid\s+libarchphene_ld\.so\s*$")
+$child = [regex]::Match($processes, "(?m)^\s*(\d+)\s+$appPid\s+\S+\s*$")
 if (-not $child.Success) { throw "KCalc GNU/Linux child is not owned by Android process $appPid" }
+$childExe = (& $Adb -s $Serial shell readlink "/proc/$($child.Groups[1].Value)/exe").Trim()
+if ($childExe -notmatch 'libarchphene_ld\.so$') { throw "KCalc child does not use the Archphene loader: $childExe" }
 $log = (& $Adb -s $Serial logcat -d -s "ArchpheneInput:V" "*:S") -join [Environment]::NewLine
 if ($log -match "protocol error|native dispatch failed") {
     throw "KCalc calculation triggered a shared compositor failure"

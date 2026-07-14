@@ -38,6 +38,16 @@ Use `-ReleaseBuild` only with the ignored production credentials created by
 scripts directly on Ubuntu. The output is
 `prototypes/linux-app-manager-stub/out-linux/archphene.apk`.
 
+### Qt platform theme
+
+Rebuild the exact-ABI Qt appearance plugin and refresh its prebuilt checksums:
+
+```powershell
+./scripts/build-qt-platform-theme-podman.ps1 -RebuildImage
+```
+
+The script uses the pinned Arch Linux snapshot and fails if Qt does not match the runtime manifest.
+
 ### Native compositor probe
 
 Build each ABI entirely in Podman:

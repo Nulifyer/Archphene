@@ -1323,6 +1323,40 @@ public final class MainActivity extends Activity {
             recreate();
         });
         appearance.addView(theme, matchWrap());
+        Button linuxTheme = actionButton(linuxThemeLabel(), android.R.drawable.ic_menu_day);
+        linuxTheme.setOnClickListener(view -> {
+            String current = ManagerStateStore.linuxThemeMode(this);
+            String next = "system".equals(current) ? "dark"
+                    : "dark".equals(current) ? "light" : "system";
+            ManagerStateStore.setLinuxThemeMode(this, next);
+            linuxTheme.setText(linuxThemeLabel());
+            showBanner("Linux app appearance applies the next time an app starts", false);
+        });
+        appearance.addView(linuxTheme, spacedWrap(dp(6)));
+        Button linuxScale = actionButton(linuxScaleLabel(), android.R.drawable.ic_menu_view);
+        linuxScale.setOnClickListener(view -> {
+            int current = ManagerStateStore.linuxScalePercent(this);
+            int next = current == 0 ? 100 : current == 100 ? 125
+                    : current == 125 ? 150 : current == 150 ? 175
+                    : current == 175 ? 200 : 0;
+            ManagerStateStore.setLinuxScalePercent(this, next);
+            linuxScale.setText(linuxScaleLabel());
+            showBanner("Linux app appearance applies the next time an app starts", false);
+        });
+        appearance.addView(linuxScale, spacedWrap(dp(6)));
+        Button linuxFont = actionButton(linuxFontLabel(), android.R.drawable.ic_menu_zoom);
+        linuxFont.setOnClickListener(view -> {
+            int current = ManagerStateStore.linuxFontPercent(this);
+            boolean phone = getResources().getConfiguration().smallestScreenWidthDp < 600;
+            int next = phone
+                    ? current == 100 ? 110 : current == 110 ? 120 : 100
+                    : current == 100 ? 110 : current == 110 ? 125
+                            : current == 125 ? 150 : 100;
+            ManagerStateStore.setLinuxFontPercent(this, next);
+            linuxFont.setText(linuxFontLabel());
+            showBanner("Linux app appearance applies the next time an app starts", false);
+        });
+        appearance.addView(linuxFont, spacedWrap(dp(6)));
         appearance.addView(settingToggle("Material You colors",
                 "Use Android system colors when available",
                 ManagerStateStore.materialYou(this), (button, checked) -> {
@@ -1395,6 +1429,21 @@ public final class MainActivity extends Activity {
         String mode = ManagerStateStore.themeMode(this);
         return "Theme: " + ("dark".equals(mode) ? "Dark"
                 : "light".equals(mode) ? "Light" : "System default");
+    }
+
+    private String linuxThemeLabel() {
+        String mode = ManagerStateStore.linuxThemeMode(this);
+        return "Linux app theme: " + ("dark".equals(mode) ? "Dark"
+                : "light".equals(mode) ? "Light" : "Follow Android");
+    }
+
+    private String linuxScaleLabel() {
+        int percent = ManagerStateStore.linuxScalePercent(this);
+        return "Linux app scale: " + (percent == 0 ? "Automatic" : percent + "%");
+    }
+
+    private String linuxFontLabel() {
+        return "Linux app text: " + ManagerStateStore.linuxFontPercent(this) + "%";
     }
 
     private void showRepositoryDialog(ManagedRepositoryStore.Repository repository) {
@@ -1802,7 +1851,7 @@ public final class MainActivity extends Activity {
         }
         item.setCompoundDrawablePadding(dp(2));
         item.setGravity(Gravity.CENTER);
-        item.setPadding(0, dp(4), 0, 0);
+        item.setPadding(0, dp(6), 0, 0);
         item.setOnClickListener(view -> action.run());
         return item;
     }

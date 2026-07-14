@@ -1,12 +1,12 @@
 param(
     [Parameter(Mandatory = $true)]
-    [string]$Serial
+    [string]$Serial,
+    [string]$Package = "org.archphene.linux.p0392be9c9f103a39d951c2f39c3644d2"
 )
 
 $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $Adb = Join-Path $Root "tooling/android-sdk/platform-tools/adb.exe"
-$Package = "org.archphene.linux.kcalc"
 $SafeSerial = $Serial -replace '[^A-Za-z0-9._-]', '_'
 $Build = Join-Path $Root "tooling/build"
 
@@ -15,13 +15,24 @@ function Invoke-Adb([string[]]$Arguments, [string]$Step) {
     if ($LASTEXITCODE -ne 0) { throw "$Step failed with exit code $LASTEXITCODE" }
 }
 
+function Resolve-LauncherActivity {
+    $resolved = & $Adb -s $Serial shell cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER $Package
+    if ($LASTEXITCODE -ne 0) { throw "Could not query launcher activity for $Package" }
+    $activity = ($resolved | Select-Object -Last 1).Trim()
+    if ($activity -notmatch '/') { throw "Could not resolve launcher activity for $Package" }
+    return $activity
+}
+
 function Get-ProcessState {
     $appPid = (& $Adb -s $Serial shell pidof $Package).Trim()
     if (-not $appPid) { throw "KCalc Android process is not running" }
     $processes = (& $Adb -s $Serial shell ps -A -o PID,PPID,NAME) -join [Environment]::NewLine
-    $match = [regex]::Match($processes, "(?m)^\s*(\d+)\s+$appPid\s+libarchphene_ld\.so\s*$")
+    $match = [regex]::Match($processes, "(?m)^\s*(\d+)\s+$appPid\s+\S+\s*$")
     if (-not $match.Success) { throw "KCalc Linux child is not owned by Android PID $appPid" }
-    [pscustomobject]@{ App = $appPid; Child = $match.Groups[1].Value }
+    $childPid = $match.Groups[1].Value
+    $childExe = (& $Adb -s $Serial shell readlink "/proc/$childPid/exe").Trim()
+    if ($childExe -notmatch 'libarchphene_ld\.so$') { throw "KCalc child does not use the Archphene loader: $childExe" }
+    [pscustomobject]@{ App = $appPid; Child = $childPid }
 }
 
 function Capture-State([string]$Name) {
@@ -88,6 +99,7 @@ function Count-ChangedSamples([string]$Before, [string]$After) {
     }
 }
 
+$Activity = Resolve-LauncherActivity
 $state = (& $Adb -s $Serial get-state 2>$null).Trim()
 if ($LASTEXITCODE -ne 0 -or $state -ne "device") { throw "$Serial is not an authorized ADB device" }
 $oldAccelerometer = (& $Adb -s $Serial shell settings get system accelerometer_rotation).Trim()
@@ -99,7 +111,7 @@ try {
     Invoke-Adb @("shell", "settings", "put", "system", "accelerometer_rotation", "0") "disable sensor rotation"
     Invoke-Adb @("shell", "settings", "put", "system", "user_rotation", "0") "force portrait"
     Invoke-Adb @("shell", "am", "force-stop", $Package) "force-stop KCalc"
-    Invoke-Adb @("shell", "am", "start", "-W", "-n", "$Package/.MainActivity") "cold-launch portrait KCalc"
+    Invoke-Adb @("shell", "am", "start", "-W", "-n", $Activity) "cold-launch portrait KCalc"
     Start-Sleep -Seconds 8
 
     $portraitProcess = Get-ProcessState
@@ -144,5 +156,5 @@ try {
     & $Adb -s $Serial shell settings put system user_rotation $oldRotation | Out-Null
     & $Adb -s $Serial shell settings put system accelerometer_rotation $oldAccelerometer | Out-Null
     & $Adb -s $Serial shell am force-stop $Package | Out-Null
-    & $Adb -s $Serial shell am start -n "$Package/.MainActivity" | Out-Null
+    & $Adb -s $Serial shell am start -n $Activity | Out-Null
 }

@@ -29,6 +29,8 @@ import java.util.List;
 public final class RuntimeModuleProvider extends ContentProvider {
     public static final String AUTHORITY = "org.archpheneos.manager.runtime";
     public static final String ACTIVE_PACK_METHOD = "org.archphene.runtime.ACTIVE_PACK_V1";
+    public static final String APPEARANCE_METHOD =
+            "org.archphene.runtime.APPEARANCE_V1";
     private final Map<String, File> verifiedModules = new HashMap<>();
 
     @Override
@@ -58,11 +60,12 @@ public final class RuntimeModuleProvider extends ContentProvider {
 
     @Override
     public Bundle call(String method, String arg, Bundle extras) {
-        if (!ACTIVE_PACK_METHOD.equals(method)) {
+        if (!ACTIVE_PACK_METHOD.equals(method) && !APPEARANCE_METHOD.equals(method)) {
             throw new UnsupportedOperationException("Unsupported runtime provider method");
         }
         try {
             String caller = requireWrapperCaller();
+            if (APPEARANCE_METHOD.equals(method)) return appearanceBundle();
             RuntimePackStore.Pack pack = RuntimePackStore.active(providerContext(), caller);
             RuntimePackStore.grantActive(providerContext(), caller);
             RuntimePackStore.Module program = pack.requireKind("program");
@@ -90,6 +93,15 @@ public final class RuntimeModuleProvider extends ContentProvider {
             failure.initCause(error);
             throw failure;
         }
+    }
+    private Bundle appearanceBundle() throws FileNotFoundException {
+        Context context = providerContext();
+        Bundle result = new Bundle();
+        result.putString("theme_mode", ManagerStateStore.linuxThemeMode(context));
+        result.putInt("scale_percent", ManagerStateStore.linuxScalePercent(context));
+        result.putInt("font_percent", ManagerStateStore.linuxFontPercent(context));
+        result.putBoolean("material_you", ManagerStateStore.materialYou(context));
+        return result;
     }
     @Override
     public ParcelFileDescriptor openFile(Uri uri, String mode) throws FileNotFoundException {

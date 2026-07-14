@@ -54,6 +54,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             "content://org.archpheneos.manager.runtime");
     private static final String ACTIVE_PACK_METHOD =
             "org.archphene.runtime.ACTIVE_PACK_V1";
+    private static final String APPEARANCE_METHOD =
+            "org.archphene.runtime.APPEARANCE_V1";
 
     private final AtomicBoolean launched = new AtomicBoolean();
     private ArchpheneInputView compositorView;
@@ -69,6 +71,10 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     private String[] runtimeLibraryUris;
     private String[] runtimeLibraryNames;
     private boolean runtimeGui;
+    private String appearanceTheme = "system";
+    private int appearanceScalePercent;
+    private int appearanceFontPercent = 100;
+    private boolean appearanceMaterialYou;
     private final Map<Integer, SecondaryWindow> secondaryWindows = new HashMap<>();
     private boolean independentWindows;
     private ArchpheneCompositorSession.WindowFrame primaryFrame;
@@ -89,6 +95,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             runtimeLibraryUris = new String[] {legacyLibc};
             runtimeLibraryNames = new String[] {"libc.so.6"};
         }
+        loadManagerAppearance();
         if (runtimeProbeUri == null) loadManagerRuntimePack();
         independentWindows = shouldUseIndependentWindows();
         documentSession = new AndroidDocumentSession(this, logTag);
@@ -209,6 +216,26 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                     + runtime.getString("pack_id", "unknown"));
         } catch (Exception unavailable) {
             Log.d(logTag, "No manager-owned runtime pack; using packaged payload");
+        }
+    }
+
+    private void loadManagerAppearance() {
+        try {
+            Bundle appearance = getContentResolver().call(
+                    RUNTIME_PROVIDER, APPEARANCE_METHOD, null, null);
+            if (appearance == null) return;
+            String theme = appearance.getString("theme_mode", "system");
+            appearanceTheme = "dark".equals(theme) || "light".equals(theme)
+                    ? theme : "system";
+            int scale = appearance.getInt("scale_percent", 0);
+            appearanceScalePercent = scale == 100 || scale == 125 || scale == 150
+                    || scale == 175 || scale == 200 ? scale : 0;
+            int font = appearance.getInt("font_percent", 100);
+            appearanceFontPercent = font == 110 || font == 120 || font == 125 || font == 150
+                    ? font : 100;
+            appearanceMaterialYou = appearance.getBoolean("material_you", false);
+        } catch (Exception unavailable) {
+            Log.d(logTag, "No manager appearance policy; using Android defaults");
         }
     }
 
@@ -635,15 +662,48 @@ public abstract class ArchpheneCompositorActivity extends Activity {
 
     private void applyToolkitEnvironment(
             Map<String, String> env, File runtimeLib, File configDir) throws IOException {
-        boolean dark = (getResources().getConfiguration().uiMode
-                & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
-        int dpi = Math.max(96, Math.min(384,
-                Math.round(96f * getResources().getDisplayMetrics().density)));
-        env.put("QT_FONT_DPI", Integer.toString(dpi));
+        Configuration configuration = getResources().getConfiguration();
+        boolean systemDark = (configuration.uiMode & Configuration.UI_MODE_NIGHT_MASK)
+                == Configuration.UI_MODE_NIGHT_YES;
+        boolean dark = "dark".equals(appearanceTheme)
+                || (!"light".equals(appearanceTheme) && systemDark);
+        int scalePercent = appearanceScalePercent;
+        if (scalePercent == 0) {
+            int smallestWidth = configuration.smallestScreenWidthDp;
+            scalePercent = smallestWidth >= 840 ? 100 : smallestWidth >= 600 ? 125 : 150;
+        }
+        float appScale = scalePercent / 100f;
+        float density = getResources().getDisplayMetrics().density;
+        float androidFontScale = density <= 0f ? 1f
+                : getResources().getDisplayMetrics().scaledDensity / density;
+        float fontScale = androidFontScale * appearanceFontPercent / 100f;
+        int basePointSize = configuration.smallestScreenWidthDp >= 840 ? 10
+                : configuration.smallestScreenWidthDp >= 600 ? 14 : 18;
+        int maximumPointSize = configuration.smallestScreenWidthDp < 600 ? 22 : 30;
+        int fontPointSize = Math.max(9,
+                Math.min(maximumPointSize, Math.round(basePointSize * fontScale)));
+        env.put("QT_SCALE_FACTOR", String.format(Locale.US, "%.2f", appScale));
+        env.put("QT_SCALE_FACTOR_ROUNDING_POLICY", "PassThrough");
+        env.put("QT_FONT_DPI", "96");
+        env.put("QT_QPA_PLATFORMTHEME", "archphene");
+        env.put("QT_STYLE_OVERRIDE", "archphene");
+        env.put("ARCHPHENE_FONT_POINT_SIZE", Integer.toString(fontPointSize));
         env.put("ARCHPHENE_COLOR_SCHEME", dark ? "dark" : "light");
+        File dataHome = new File(configDir.getParentFile(), ".local/share");
+        dataHome.mkdirs();
+        env.put("XDG_DATA_HOME", dataHome.getAbsolutePath());
+        Log.i(logTag, "Appearance theme=" + appearanceTheme + " resolved="
+                + (dark ? "dark" : "light") + " scale=" + scalePercent
+                + " font=" + appearanceFontPercent + " pointSize=" + fontPointSize
+                + " materialYou="
+                + appearanceMaterialYou);
         if ("gtk3".equals(toolkit)) {
             File root = new File(getFilesDir(), "linux-runtime/root");
             env.put("GDK_BACKEND", "wayland");
+            int gdkScale = appScale > 1f ? 2 : 1;
+            env.put("GDK_SCALE", Integer.toString(gdkScale));
+            env.put("GDK_DPI_SCALE", String.format(Locale.US, "%.3f",
+                    appScale * fontScale / gdkScale));
             env.put("GTK_IM_MODULE", "wayland");
             env.put("GTK_IM_MODULE_FILE", new File(
                     runtimeLib, "gtk-3.0/3.0.0/immodules.cache").getAbsolutePath());
@@ -672,23 +732,78 @@ public abstract class ArchpheneCompositorActivity extends Activity {
 
     private void writeKdeTheme(File configDir, boolean dark) throws IOException {
         String foreground = dark ? "239,240,241" : "35,38,41";
+        String inactive = dark ? "174,181,185" : "91,99,104";
         String window = dark ? "35,38,41" : "239,240,241";
+        String alternate = dark ? "42,46,50" : "246,247,248";
         String view = dark ? "27,30,32" : "255,255,255";
         String button = dark ? "49,54,59" : "239,240,241";
-        String palette = "[General]\nColorScheme=" + (dark ? "BreezeDark" : "BreezeLight")
-                + "\n\n[Colors:Window]\nBackgroundNormal=" + window
-                + "\nForegroundNormal=" + foreground
-                + "\n\n[Colors:View]\nBackgroundNormal=" + view
-                + "\nForegroundNormal=" + foreground
-                + "\nDecorationFocus=61,174,233\n"
-                + "\n[Colors:Button]\nBackgroundNormal=" + button
-                + "\nForegroundNormal=" + foreground
-                + "\nDecorationFocus=61,174,233\n"
-                + "\n[Colors:Selection]\nBackgroundNormal=61,174,233"
-                + "\nForegroundNormal=255,255,255\n";
-        writeText(new File(configDir, "kdeglobals"), palette);
+        String accent = dark ? "86,188,236" : "23,147,209";
+        String selectionForeground = dark ? "17,20,23" : "255,255,255";
+        if (appearanceMaterialYou && Build.VERSION.SDK_INT >= 31) {
+            foreground = rgb(getColor(dark ? android.R.color.system_neutral1_10
+                    : android.R.color.system_neutral1_900));
+            inactive = rgb(getColor(dark ? android.R.color.system_neutral1_200
+                    : android.R.color.system_neutral1_700));
+            window = rgb(getColor(dark ? android.R.color.system_neutral1_900
+                    : android.R.color.system_neutral1_10));
+            alternate = rgb(getColor(dark ? android.R.color.system_neutral1_800
+                    : android.R.color.system_neutral1_50));
+            view = window;
+            button = alternate;
+            accent = rgb(getColor(dark ? android.R.color.system_accent1_200
+                    : android.R.color.system_accent1_600));
+            selectionForeground = window;
+        }
+        String schemeName = dark ? "ArchpheneDark" : "ArchpheneLight";
+        StringBuilder palette = new StringBuilder();
+        palette.append("[General]\nName=Archphene ")
+                .append(dark ? "Dark" : "Light")
+                .append("\nColorScheme=").append(schemeName).append("\n\n");
+        appendColorSet(palette, "Window", window, alternate, foreground, inactive,
+                accent, foreground);
+        appendColorSet(palette, "View", view, alternate, foreground, inactive,
+                accent, foreground);
+        appendColorSet(palette, "Button", button, alternate, foreground, inactive,
+                accent, foreground);
+        appendColorSet(palette, "Selection", accent, accent, selectionForeground,
+                selectionForeground, accent, selectionForeground);
+        appendColorSet(palette, "Tooltip", button, alternate, foreground, inactive,
+                accent, foreground);
+        palette.append("[ColorEffects:Disabled]\n")
+                .append("Color=56,56,56\nColorAmount=0\nColorEffect=0\n")
+                .append("ContrastAmount=0.65\nContrastEffect=1\n")
+                .append("IntensityAmount=0.1\nIntensityEffect=2\n\n")
+                .append("[ColorEffects:Inactive]\n")
+                .append("ChangeSelectionColor=true\nColor=112,111,110\n")
+                .append("ColorAmount=0.025\nColorEffect=2\n")
+                .append("ContrastAmount=0.1\nContrastEffect=2\n")
+                .append("Enable=false\nIntensityAmount=0\nIntensityEffect=0\n");
+        writeText(new File(configDir, "kdeglobals"), palette.toString());
+        File schemes = new File(configDir.getParentFile(), ".local/share/color-schemes");
+        schemes.mkdirs();
+        writeText(new File(schemes, schemeName + ".colors"), palette.toString());
+    }
+    private static void appendColorSet(StringBuilder output, String name,
+            String background, String alternate, String foreground, String inactive,
+            String accent, String active) {
+        output.append("[Colors:").append(name).append("]\n")
+                .append("BackgroundNormal=").append(background).append('\n')
+                .append("BackgroundAlternate=").append(alternate).append('\n')
+                .append("ForegroundNormal=").append(foreground).append('\n')
+                .append("ForegroundInactive=").append(inactive).append('\n')
+                .append("ForegroundActive=").append(active).append('\n')
+                .append("ForegroundLink=").append(accent).append('\n')
+                .append("ForegroundVisited=").append(accent).append('\n')
+                .append("ForegroundNegative=218,68,83\n")
+                .append("ForegroundNeutral=246,116,0\n")
+                .append("ForegroundPositive=39,174,96\n")
+                .append("DecorationFocus=").append(accent).append('\n')
+                .append("DecorationHover=").append(accent).append("\n\n");
     }
 
+    private static String rgb(int color) {
+        return Color.red(color) + "," + Color.green(color) + "," + Color.blue(color);
+    }
     private void prepareRuntime(File runtimeLib) throws IOException {
         runtimeLib.mkdirs();
         deleteContents(runtimeLib);
@@ -709,6 +824,19 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 target.setReadable(true, false);
                 target.setExecutable(true, false);
             }
+        }
+        File platformTheme = new File(runtimeLib, "libarchphene_qt_platform_theme.so");
+        if (platformTheme.isFile()) {
+            File directory = new File(runtimeLib, "platformthemes");
+            directory.mkdirs();
+            copyFile(platformTheme,
+                    new File(directory, "libarchphene_qt_platform_theme.so"));
+        }
+        File style = new File(runtimeLib, "libarchphene_qt_style.so");
+        if (style.isFile()) {
+            File directory = new File(runtimeLib, "styles");
+            directory.mkdirs();
+            copyFile(style, new File(directory, "libarchphene_qt_style.so"));
         }
         File shell = new File(runtimeLib, "libarchphene_xdg_shell.so");
         if (shell.isFile()) {

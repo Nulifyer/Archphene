@@ -1,9 +1,11 @@
-param([string]$Serial = "emulator-5554")
+param(
+    [string]$Serial = "emulator-5554",
+    [string]$Package = "org.archphene.linux.p0392be9c9f103a39d951c2f39c3644d2"
+)
 
 $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $Adb = Join-Path $Root "tooling/android-sdk/platform-tools/adb.exe"
-$Package = "org.archphene.linux.kcalc"
 $SafeSerial = $Serial -replace '[^A-Za-z0-9._-]', '_'
 $Screenshot = Join-Path $Root "artifacts/kcalc-menu-switch-$SafeSerial.png"
 
@@ -13,6 +15,13 @@ function Adb([string[]]$Arguments) {
         throw "adb failed: $($output -join [Environment]::NewLine)"
     }
     return $output
+}
+
+function Resolve-LauncherActivity {
+    $resolved = Adb @("shell", "cmd", "package", "resolve-activity", "--brief", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER", $Package)
+    $activity = ($resolved | Select-Object -Last 1).Trim()
+    if ($activity -notmatch '/') { throw "Could not resolve launcher activity for $Package" }
+    return $activity
 }
 
 function Wait-Log([string]$Pattern, [int]$Seconds = 20) {
@@ -50,7 +59,8 @@ function Map-RootPoint(
 
 Adb @("shell", "am", "force-stop", $Package) | Out-Null
 Adb @("logcat", "-c") | Out-Null
-Adb @("shell", "am", "start", "-n", "$Package/.MainActivity") | Out-Null
+$activity = Resolve-LauncherActivity
+Adb @("shell", "am", "start", "-n", $activity) | Out-Null
 $mapped = Wait-Log 'mapped=true.*geometry=0,0 (\d+)x(\d+).*title=KCalc' 30
 $match = [regex]::Match($mapped, 'mapped=true.*geometry=0,0 (\d+)x(\d+).*title=KCalc')
 $rootWidth = [int]$match.Groups[1].Value
@@ -90,9 +100,15 @@ Adb @("pull", "/sdcard/kcalc-menu-switch.png", $Screenshot) | Out-Null
 if ((Get-Item -LiteralPath $Screenshot).Length -lt 20000) {
     throw "KCalc menu screenshot is unexpectedly small"
 }
-$processes = (Adb @("shell", "ps", "-A")) -join [Environment]::NewLine
-if ($processes -notmatch 'org\.archphene\.linux\.kcalc' -or $processes -notmatch 'libarchphene_ld\.so') {
+$appPid = ((Adb @("shell", "pidof", $Package)) | Select-Object -Last 1).Trim()
+$processes = (Adb @("shell", "ps", "-A", "-o", "PID,PPID,NAME")) -join [Environment]::NewLine
+$child = [regex]::Match($processes, "(?m)^\s*(\d+)\s+$appPid\s+\S+\s*$")
+if (-not $appPid -or -not $child.Success) {
     throw "KCalc or its Linux child exited during popup switching"
+}
+$childExe = ((Adb @("shell", "readlink", "/proc/$($child.Groups[1].Value)/exe")) | Select-Object -Last 1).Trim()
+if ($childExe -notmatch 'libarchphene_ld\.so$') {
+    throw "KCalc child does not use the Archphene loader: $childExe"
 }
 
 Write-Host "KCalc shared-compositor menu switching passed: File -> Settings."

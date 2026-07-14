@@ -195,6 +195,47 @@ public final class ManagerStateStore {
         preferences(context).edit().putBoolean("material-you", enabled).apply();
     }
 
+    public static String linuxThemeMode(Context context) {
+        String value = preferences(context).getString("linux-theme-mode", "system");
+        return "light".equals(value) || "dark".equals(value) ? value : "system";
+    }
+
+    public static void setLinuxThemeMode(Context context, String mode) {
+        String value = "light".equals(mode) || "dark".equals(mode) ? mode : "system";
+        preferences(context).edit().putString("linux-theme-mode", value).apply();
+    }
+
+    public static int linuxScalePercent(Context context) {
+        int value = preferences(context).getInt("linux-scale-percent", 0);
+        for (int allowed : new int[] {0, 100, 125, 150, 175, 200}) {
+            if (value == allowed) return value;
+        }
+        return 0;
+    }
+
+    public static void setLinuxScalePercent(Context context, int percent) {
+        int value = 0;
+        for (int allowed : new int[] {0, 100, 125, 150, 175, 200}) {
+            if (percent == allowed) value = allowed;
+        }
+        preferences(context).edit().putInt("linux-scale-percent", value).apply();
+    }
+
+    public static int linuxFontPercent(Context context) {
+        int value = preferences(context).getInt("linux-font-percent", 100);
+        for (int allowed : new int[] {100, 110, 120, 125, 150}) {
+            if (value == allowed) return value;
+        }
+        return 100;
+    }
+
+    public static void setLinuxFontPercent(Context context, int percent) {
+        int value = 100;
+        for (int allowed : new int[] {100, 110, 120, 125, 150}) {
+            if (percent == allowed) value = allowed;
+        }
+        preferences(context).edit().putInt("linux-font-percent", value).apply();
+    }
     public static boolean versionPrerelease(Context context, String packageName, String version) {
         return preferences(context).getBoolean(
                 "version-prerelease:" + packageName + ":" + version,

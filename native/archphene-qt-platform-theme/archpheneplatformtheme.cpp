@@ -1,0 +1,197 @@
+#include <QColor>
+#include <QDir>
+#include <QFont>
+#include <QPalette>
+#include <QSettings>
+#include <QStringList>
+#include <QVariant>
+#include <qpa/qplatformtheme.h>
+#include <qpa/qplatformthemeplugin.h>
+
+namespace {
+
+QColor readColor(QSettings &settings, const QString &group, const QString &key,
+        const QColor &fallback)
+{
+    const QVariant value = settings.value(group + QLatin1Char('/') + key);
+    QString encoded = value.toString();
+    if (encoded.isEmpty()) {
+        encoded = value.toStringList().join(QLatin1Char(','));
+    }
+    const QStringList parts = encoded.split(QLatin1Char(','));
+    if (parts.size() != 3) {
+        return fallback;
+    }
+    bool redOk = false;
+    bool greenOk = false;
+    bool blueOk = false;
+    const int red = parts[0].trimmed().toInt(&redOk);
+    const int green = parts[1].trimmed().toInt(&greenOk);
+    const int blue = parts[2].trimmed().toInt(&blueOk);
+    if (!redOk || !greenOk || !blueOk
+            || red < 0 || red > 255 || green < 0 || green > 255
+            || blue < 0 || blue > 255) {
+        return fallback;
+    }
+    return QColor(red, green, blue);
+}
+
+QColor blend(const QColor &foreground, const QColor &background, qreal amount)
+{
+    return QColor::fromRgbF(
+            foreground.redF() * amount + background.redF() * (1.0 - amount),
+            foreground.greenF() * amount + background.greenF() * (1.0 - amount),
+            foreground.blueF() * amount + background.blueF() * (1.0 - amount));
+}
+
+class ArchphenePlatformTheme final : public QPlatformTheme
+{
+public:
+    ArchphenePlatformTheme()
+    {
+        const bool dark = qEnvironmentVariable("ARCHPHENE_COLOR_SCHEME") == QLatin1String("dark");
+        const QString configHome = qEnvironmentVariable("XDG_CONFIG_HOME",
+                QDir::homePath() + QStringLiteral("/.config"));
+        QSettings settings(configHome + QStringLiteral("/kdeglobals"), QSettings::IniFormat);
+
+        const QColor fallbackWindow = dark ? QColor(35, 38, 41) : QColor(239, 240, 241);
+        const QColor fallbackView = dark ? QColor(27, 30, 32) : QColor(255, 255, 255);
+        const QColor fallbackButton = dark ? QColor(49, 54, 59) : QColor(239, 240, 241);
+        const QColor fallbackText = dark ? QColor(239, 240, 241) : QColor(35, 38, 41);
+        const QColor fallbackAccent = dark ? QColor(86, 188, 236) : QColor(23, 147, 209);
+
+        const QColor window = readColor(settings, QStringLiteral("Colors:Window"),
+                QStringLiteral("BackgroundNormal"), fallbackWindow);
+        const QColor windowText = readColor(settings, QStringLiteral("Colors:Window"),
+                QStringLiteral("ForegroundNormal"), fallbackText);
+        const QColor view = readColor(settings, QStringLiteral("Colors:View"),
+                QStringLiteral("BackgroundNormal"), fallbackView);
+        const QColor alternate = readColor(settings, QStringLiteral("Colors:View"),
+                QStringLiteral("BackgroundAlternate"), fallbackWindow);
+        const QColor text = readColor(settings, QStringLiteral("Colors:View"),
+                QStringLiteral("ForegroundNormal"), fallbackText);
+        const QColor link = readColor(settings, QStringLiteral("Colors:View"),
+                QStringLiteral("ForegroundLink"), fallbackAccent);
+        const QColor visited = readColor(settings, QStringLiteral("Colors:View"),
+                QStringLiteral("ForegroundVisited"), link);
+        const QColor button = readColor(settings, QStringLiteral("Colors:Button"),
+                QStringLiteral("BackgroundNormal"), fallbackButton);
+        const QColor buttonText = readColor(settings, QStringLiteral("Colors:Button"),
+                QStringLiteral("ForegroundNormal"), fallbackText);
+        const QColor highlight = readColor(settings, QStringLiteral("Colors:Selection"),
+                QStringLiteral("BackgroundNormal"), fallbackAccent);
+        const QColor highlightedText = readColor(settings, QStringLiteral("Colors:Selection"),
+                QStringLiteral("ForegroundNormal"), dark ? QColor(17, 20, 23) : QColor(Qt::white));
+        const QColor tooltip = readColor(settings, QStringLiteral("Colors:Tooltip"),
+                QStringLiteral("BackgroundNormal"), fallbackButton);
+        const QColor tooltipText = readColor(settings, QStringLiteral("Colors:Tooltip"),
+                QStringLiteral("ForegroundNormal"), fallbackText);
+
+        for (QPalette::ColorGroup group : {
+                QPalette::Active, QPalette::Inactive, QPalette::Disabled}) {
+            const bool disabled = group == QPalette::Disabled;
+            const qreal textAmount = disabled ? 0.48 : group == QPalette::Inactive ? 0.75 : 1.0;
+            const QColor groupWindowText = blend(windowText, window, textAmount);
+            const QColor groupText = blend(text, view, textAmount);
+            const QColor groupButtonText = blend(buttonText, button, textAmount);
+            m_palette.setColor(group, QPalette::Window, window);
+            m_palette.setColor(group, QPalette::WindowText, groupWindowText);
+            m_palette.setColor(group, QPalette::Base, view);
+            m_palette.setColor(group, QPalette::AlternateBase, alternate);
+            m_palette.setColor(group, QPalette::Text, groupText);
+            m_palette.setColor(group, QPalette::PlaceholderText, blend(text, view, 0.55));
+            m_palette.setColor(group, QPalette::Button, button);
+            m_palette.setColor(group, QPalette::ButtonText, groupButtonText);
+            m_palette.setColor(group, QPalette::Light, button.lighter(150));
+            m_palette.setColor(group, QPalette::Midlight, button.lighter(125));
+            m_palette.setColor(group, QPalette::Mid, button.darker(125));
+            m_palette.setColor(group, QPalette::Dark, button.darker(160));
+            m_palette.setColor(group, QPalette::Shadow, button.darker(220));
+            m_palette.setColor(group, QPalette::Highlight, highlight);
+            m_palette.setColor(group, QPalette::HighlightedText, highlightedText);
+            m_palette.setColor(group, QPalette::Link, link);
+            m_palette.setColor(group, QPalette::LinkVisited, visited);
+            m_palette.setColor(group, QPalette::ToolTipBase, tooltip);
+            m_palette.setColor(group, QPalette::ToolTipText, tooltipText);
+            m_palette.setColor(group, QPalette::BrightText, QColor(218, 68, 83));
+            m_palette.setColor(group, QPalette::Accent, highlight);
+        }
+
+        bool pointSizeOk = false;
+        int pointSize = qEnvironmentVariableIntValue(
+                "ARCHPHENE_FONT_POINT_SIZE", &pointSizeOk);
+        if (!pointSizeOk) {
+            pointSize = 18;
+        }
+        pointSize = qBound(9, pointSize, 30);
+        m_font.setFamilies({QStringLiteral("Noto Sans"), QStringLiteral("sans-serif")});
+        m_font.setPointSize(pointSize);
+        m_fixedFont.setFamilies(
+                {QStringLiteral("Noto Sans Mono"), QStringLiteral("monospace")});
+        m_fixedFont.setPointSize(pointSize);
+        m_scheme = dark ? Qt::ColorScheme::Dark : Qt::ColorScheme::Light;
+    }
+
+    const QPalette *palette(Palette) const override
+    {
+        return &m_palette;
+    }
+
+    const QFont *font(Font type) const override
+    {
+        return type == FixedFont ? &m_fixedFont : &m_font;
+    }
+
+    Qt::ColorScheme colorScheme() const override
+    {
+        return m_scheme;
+    }
+
+    QVariant themeHint(ThemeHint hint) const override
+    {
+        switch (hint) {
+        case StyleNames:
+            return QStringList{QStringLiteral("archphene"), QStringLiteral("fusion")};
+        case SystemIconThemeName:
+            return QStringLiteral("breeze");
+        case SystemIconFallbackThemeName:
+            return QStringLiteral("hicolor");
+        case WheelScrollLines:
+            return 3;
+        case UseFullScreenForPopupMenu:
+            return false;
+        case DialogButtonBoxButtonsHaveIcons:
+            return false;
+        case ShowShortcutsInContextMenus:
+            return true;
+        default:
+            return QPlatformTheme::themeHint(hint);
+        }
+    }
+
+private:
+    QPalette m_palette;
+    QFont m_font;
+    QFont m_fixedFont;
+    Qt::ColorScheme m_scheme = Qt::ColorScheme::Unknown;
+};
+
+class ArchphenePlatformThemePlugin final : public QPlatformThemePlugin
+{
+    Q_OBJECT
+    Q_PLUGIN_METADATA(
+            IID QPlatformThemeFactoryInterface_iid FILE "archpheneplatformtheme.json")
+
+public:
+    QPlatformTheme *create(const QString &key, const QStringList &) override
+    {
+        if (key.compare(QLatin1String("archphene"), Qt::CaseInsensitive) != 0) {
+            return nullptr;
+        }
+        return new ArchphenePlatformTheme;
+    }
+};
+
+} // namespace
+
+#include "archpheneplatformtheme.moc"
