@@ -93,6 +93,8 @@ pub struct CompositorState {
     root_surface: Option<WlSurface>,
     root_frame: Option<Arc<CommittedFrame>>,
     last_frame: Option<Arc<CommittedFrame>>,
+    popup_base_frame: Option<Arc<CommittedFrame>>,
+    popup_base_armed: bool,
     xdg_wm_base_binds: u32,
     xdg_positioner_count: u32,
     xdg_positioner_request_count: u32,
@@ -1574,6 +1576,17 @@ impl Dispatch<XdgSurface, XdgSurfaceData> for CompositorState {
                         dismissed: AtomicBool::new(false),
                     },
                 );
+                if !state.popups.iter().any(|candidate| {
+                    candidate.is_alive()
+                        && candidate
+                            .data::<XdgPopupData>()
+                            .is_some_and(|data| !data.dismissed.load(Ordering::Acquire))
+                }) {
+                    if state.popup_base_frame.is_none() {
+                        state.popup_base_frame = state.last_frame.clone();
+                    }
+                    state.popup_base_armed = false;
+                }
                 state.popups.push(popup.clone());
                 surface_state.xdg_popup = Some(popup);
                 state.xdg_popup_count = state.xdg_popup_count.saturating_add(1);
@@ -1690,14 +1703,20 @@ impl Dispatch<XdgPopup, XdgPopupData> for CompositorState {
                             .committed_frame
                             .is_some()
                     });
-                let serial_matches_client =
-                    state.popup_grab_serial.as_ref().is_some_and(|candidate| {
-                        candidate.serial == serial
-                            && candidate.surface.id().same_client_as(&data.parent.id())
-                    });
+                let pending_input_serial = state
+                    .popup_grab_serial
+                    .as_ref()
+                    .filter(|candidate| candidate.surface.id().same_client_as(&data.parent.id()));
+                let effective_serial = if serial == 0 {
+                    pending_input_serial.map_or(0, |candidate| candidate.serial)
+                } else {
+                    serial
+                };
+                let serial_matches_client = pending_input_serial
+                    .is_some_and(|candidate| candidate.serial == effective_serial);
                 let serial_extends_grab = state.popup_grab.as_ref().is_some_and(|grab| {
                     grab.active
-                        && grab.serial == serial
+                        && grab.serial == effective_serial
                         && grab.seat.id() == seat.id()
                         && grab.root.id().same_client_as(&data.parent.id())
                 });
@@ -1707,7 +1726,7 @@ impl Dispatch<XdgPopup, XdgPopupData> for CompositorState {
                     .rev()
                     .find(|popup| popup.id().same_client_as(&resource.id()))
                     .is_some_and(|popup| popup.id() == resource.id());
-                if serial == 0
+                if effective_serial == 0
                     || already_mapped
                     || !seat.id().same_client_as(&data.parent.id())
                     || (!serial_matches_client && !serial_extends_grab)
@@ -1741,7 +1760,7 @@ impl Dispatch<XdgPopup, XdgPopupData> for CompositorState {
                         state.popup_grab = Some(PopupGrabState {
                             seat,
                             root: parent_data.wl_surface.clone(),
-                            serial,
+                            serial: effective_serial,
                             stack: vec![resource.clone()],
                             active: true,
                         });
@@ -4494,7 +4513,7 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                                 queue_toplevel_configure(
                                     state,
                                     toplevel,
-                                    state.output_width,
+                                    secondary_toplevel_canvas_width(state.output_width),
                                     state.output_height,
                                     &[xdg_toplevel::State::Activated],
                                 );
@@ -4578,6 +4597,7 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 callbacks.extend(child_callbacks);
                 append_damage_batches(state, child_damage);
                 if parent_geometry_changed {
+                    state.window_change_serial = state.window_change_serial.wrapping_add(1).max(1);
                     reconfigure_reactive_popups(state, xdg_surface.as_ref());
                 }
                 update_composited_frame(state);
@@ -4792,7 +4812,7 @@ fn secondary_toplevel_needs_output_size(
     parented: bool,
     tile_toplevels: bool,
     width: u32,
-    height: u32,
+    _height: u32,
     output_width: i32,
     output_height: i32,
 ) -> bool {
@@ -4800,7 +4820,11 @@ fn secondary_toplevel_needs_output_size(
         && tile_toplevels
         && output_width > 0
         && output_height > 0
-        && (width > output_width as u32 || height > output_height as u32)
+        && width > output_width as u32
+}
+
+fn secondary_toplevel_canvas_width(output_width: i32) -> i32 {
+    output_width.saturating_mul(4).saturating_div(3).max(1)
 }
 
 fn queue_toplevel_configure(
@@ -4905,6 +4929,32 @@ fn calculate_toplevel_layout(
             overlay_primary: false,
         };
     };
+    let frame_overflows_geometry = root_frame_width > root_width.saturating_add(64)
+        || root_frame_height > root_height.saturating_add(64);
+    if frame_overflows_geometry {
+        let width_limited = u64::from(root_frame_width) * u64::from(primary_height)
+            >= u64::from(root_frame_height) * u64::from(primary_width);
+        let (numerator, denominator) = if width_limited {
+            (primary_width, root_frame_width)
+        } else {
+            (primary_height, root_frame_height)
+        };
+        let scaled_width = ((u64::from(root_frame_width) * u64::from(numerator))
+            / u64::from(denominator))
+        .max(1) as u32;
+        let scaled_height = ((u64::from(root_frame_height) * u64::from(numerator))
+            / u64::from(denominator))
+        .max(1) as u32;
+        return ToplevelLayout {
+            output_width: primary_width,
+            output_height: primary_height,
+            root_x: ((primary_width.saturating_sub(scaled_width)) / 2) as i32,
+            root_y: ((primary_height.saturating_sub(scaled_height)) / 2) as i32,
+            root_width: scaled_width as i32,
+            root_height: scaled_height as i32,
+            overlay_primary: true,
+        };
+    }
     let oversized = root_width > primary_width || root_height > primary_height;
     let (content_width, content_height, frame_width, frame_height, geometry_x, geometry_y) =
         if oversized {
@@ -4992,12 +5042,34 @@ fn root_surface_origin(state: &CompositorState) -> (i32, i32) {
     toplevel_layout(state).map_or((0, 0), |layout| (layout.root_x, layout.root_y))
 }
 
+fn scale_surface_coordinate(value: i32, target_extent: i32, source_extent: u32) -> i32 {
+    if target_extent <= 0 || source_extent == 0 {
+        value
+    } else {
+        ((i64::from(value) * i64::from(target_extent)) / i64::from(source_extent)) as i32
+    }
+}
+
 fn root_content_origin(state: &CompositorState) -> (i32, i32) {
     let (surface_x, surface_y) = root_surface_origin(state);
+    let Some(layout) = toplevel_layout(state) else {
+        return (surface_x, surface_y);
+    };
+    let Some(frame) = state.root_frame.as_ref() else {
+        return (surface_x, surface_y);
+    };
     root_window_geometry(state).map_or((surface_x, surface_y), |geometry| {
         (
-            surface_x.saturating_add(geometry.x),
-            surface_y.saturating_add(geometry.y),
+            surface_x.saturating_add(scale_surface_coordinate(
+                geometry.x,
+                layout.root_width,
+                frame.width,
+            )),
+            surface_y.saturating_add(scale_surface_coordinate(
+                geometry.y,
+                layout.root_height,
+                frame.height,
+            )),
         )
     })
 }
@@ -5066,6 +5138,14 @@ fn surface_origin_in_root(
     }
 }
 
+fn scale_input_coordinate(value: f64, target_extent: i32, source_extent: u32) -> f64 {
+    if target_extent <= 0 || source_extent == 0 {
+        value
+    } else {
+        value * f64::from(source_extent) / f64::from(target_extent)
+    }
+}
+
 fn surface_tree_pointer_target(
     state: &CompositorState,
     surface: &WlSurface,
@@ -5080,17 +5160,31 @@ fn surface_tree_pointer_target(
     if depth > state.surface_count as usize {
         return None;
     }
-    let local_x = pointer_x - f64::from(origin_x);
-    let local_y = pointer_y - f64::from(origin_y);
+    let target_x = pointer_x - f64::from(origin_x);
+    let target_y = pointer_y - f64::from(origin_y);
     let surface_data = surface.data::<SurfaceData>()?;
-    let (accepts_parent, children_below, children_above) = {
+    let (local_x, local_y, accepts_parent, children_below, children_above) = {
         let surface = surface_data
             .inner
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        let (source_width, source_height) = surface
+            .committed_frame
+            .as_ref()
+            .map_or((0, 0), |frame| (frame.width, frame.height));
+        let local_x = scale_input_coordinate(target_x, width, source_width);
+        let local_y = scale_input_coordinate(target_y, height, source_height);
         (
+            local_x,
+            local_y,
             surface.committed_frame.is_some()
-                && surface_accepts_pointer(&surface, local_x, local_y, width, height),
+                && surface_accepts_pointer(
+                    &surface,
+                    local_x,
+                    local_y,
+                    source_width as i32,
+                    source_height as i32,
+                ),
             surface.children_below.clone(),
             surface.children_above.clone(),
         )
@@ -5337,18 +5431,25 @@ fn blend_popup_frame(
     configured_width: i32,
     configured_height: i32,
 ) {
-    let source_width = source.width.min(configured_width.max(0) as u32);
-    let source_height = source.height.min(configured_height.max(0) as u32);
-    for source_y in 0..source_height {
-        let destination_y = i64::from(y) + i64::from(source_y);
+    let target_width = configured_width.max(0) as u32;
+    let target_height = configured_height.max(0) as u32;
+    if source.width == 0 || source.height == 0 || target_width == 0 || target_height == 0 {
+        return;
+    }
+    for target_y in 0..target_height {
+        let destination_y = i64::from(y) + i64::from(target_y);
         if destination_y < 0 || destination_y >= i64::from(destination.height) {
             continue;
         }
-        for source_x in 0..source_width {
-            let destination_x = i64::from(x) + i64::from(source_x);
+        let source_y =
+            ((u64::from(target_y) * u64::from(source.height)) / u64::from(target_height)) as u32;
+        for target_x in 0..target_width {
+            let destination_x = i64::from(x) + i64::from(target_x);
             if destination_x < 0 || destination_x >= i64::from(destination.width) {
                 continue;
             }
+            let source_x =
+                ((u64::from(target_x) * u64::from(source.width)) / u64::from(target_width)) as u32;
             let source_index = ((source_y * source.width + source_x) * 4) as usize;
             let destination_index =
                 ((destination_y as u32 * destination.width + destination_x as u32) * 4) as usize;
@@ -5495,11 +5596,26 @@ fn update_composited_frame(state: &mut CompositorState) {
         .and_then(|pixels| pixels.checked_mul(4))
         .and_then(|bytes| usize::try_from(bytes).ok())
         .unwrap_or(0);
+    let active_popups = state.popups.iter().any(|popup| {
+        popup.is_alive()
+            && popup
+                .data::<XdgPopupData>()
+                .is_some_and(|data| !data.dismissed.load(Ordering::Acquire))
+    });
+    let popup_base = if active_popups {
+        state.popup_base_frame.as_ref().filter(|frame| {
+            frame.width == layout.output_width && frame.height == layout.output_height
+        })
+    } else {
+        None
+    };
     let mut composed = CommittedFrame {
         width: layout.output_width,
         height: layout.output_height,
         format: root.format,
-        pixels: if !state.tile_toplevels
+        pixels: if let Some(base) = popup_base {
+            base.pixels.clone()
+        } else if !state.tile_toplevels
             && root.format != wl_shm::Format::Argb8888
             && pixel_count == root.pixels.len()
         {
@@ -5513,7 +5629,7 @@ fn update_composited_frame(state: &mut CompositorState) {
         state.last_frame = None;
         return;
     }
-    if layout.overlay_primary {
+    if popup_base.is_none() && layout.overlay_primary {
         if let Some(primary) = primary_surface(state) {
             if let Some(frame) = surface_frame(&primary) {
                 let geometry = window_geometry_for_surface(&primary).unwrap_or(WindowGeometry {
@@ -5541,7 +5657,9 @@ fn update_composited_frame(state: &mut CompositorState) {
         }
     }
     let root_surface = state.root_surface.clone();
-    if let Some(root_surface) = root_surface.as_ref() {
+    if popup_base.is_some() {
+        // The popup stack overlays the stable scene captured before the grab.
+    } else if let Some(root_surface) = root_surface.as_ref() {
         blend_surface_tree(
             state,
             &mut composed,
@@ -5586,14 +5704,18 @@ fn update_composited_frame(state: &mut CompositorState) {
             continue;
         };
         let (content_x, content_y) = root_content_origin(state);
+        let scaled_x = scale_surface_coordinate(x, layout.root_width, root.width);
+        let scaled_y = scale_surface_coordinate(y, layout.root_height, root.height);
+        let scaled_width = scale_surface_coordinate(width, layout.root_width, root.width);
+        let scaled_height = scale_surface_coordinate(height, layout.root_height, root.height);
         blend_surface_tree(
             state,
             &mut composed,
             &xdg_data.wl_surface,
-            x.saturating_add(content_x),
-            y.saturating_add(content_y),
-            width,
-            height,
+            scaled_x.saturating_add(content_x),
+            scaled_y.saturating_add(content_y),
+            scaled_width,
+            scaled_height,
             0,
         );
     }
@@ -5603,6 +5725,9 @@ fn update_composited_frame(state: &mut CompositorState) {
         checksum.wrapping_add(u32::from(*value))
     });
     state.last_frame = Some(Arc::new(composed));
+    if !active_popups && !state.popup_base_armed {
+        state.popup_base_frame = None;
+    }
 }
 fn xdg_toplevel_ancestor_surface(xdg_surface: &XdgSurface, depth: usize) -> Option<WlSurface> {
     if depth > 64 {
@@ -6100,6 +6225,14 @@ impl CompositorCore {
                     .len(),
             )
             .unwrap_or(i32::MAX),
+            11 => surface_frame(&surface).map_or(0, |frame| frame.width as i32),
+            12 => surface_frame(&surface).map_or(0, |frame| frame.height as i32),
+            13 => surface.data::<SurfaceData>().map_or(0, |data| {
+                data.inner
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .committed_buffer_scale
+            }),
             _ => -1,
         }
     }
@@ -6635,6 +6768,15 @@ impl CompositorCore {
         if let Some(surface) = self.state.keyboard_focus_surface.clone() {
             self.remember_selection_serial(serial, surface.clone());
             if pressed {
+                if self
+                    .state
+                    .popup_grab
+                    .as_ref()
+                    .is_none_or(|grab| !grab.active)
+                {
+                    self.state.popup_base_frame = self.state.last_frame.clone();
+                    self.state.popup_base_armed = true;
+                }
                 self.state.popup_grab_serial = Some(PopupGrabSerial { serial, surface });
             }
         }
@@ -6688,7 +6830,13 @@ impl CompositorCore {
             }
             let xdg_data = data.xdg_surface.data::<XdgSurfaceData>()?;
             let (popup_x, popup_y, width, height) = self.popup_geometry_in_root(popup)?;
-            let (root_x, root_y) = root_surface_origin(&self.state);
+            let layout = toplevel_layout(&self.state)?;
+            let root_frame = self.state.root_frame.as_ref()?;
+            let (root_x, root_y) = root_content_origin(&self.state);
+            let popup_x = scale_surface_coordinate(popup_x, layout.root_width, root_frame.width);
+            let popup_y = scale_surface_coordinate(popup_y, layout.root_height, root_frame.height);
+            let width = scale_surface_coordinate(width, layout.root_width, root_frame.width);
+            let height = scale_surface_coordinate(height, layout.root_height, root_frame.height);
             if let Some(target) = surface_tree_pointer_target(
                 &self.state,
                 &xdg_data.wl_surface,
@@ -6716,9 +6864,27 @@ impl CompositorCore {
         )
     }
     fn pointer_local_coordinates(&self, surface: &WlSurface, x: f64, y: f64) -> (f64, f64) {
-        surface_origin_in_root(&self.state, surface, 0)
-            .map(|(origin_x, origin_y)| (x - f64::from(origin_x), y - f64::from(origin_y)))
-            .unwrap_or((x, y))
+        let origin = surface_origin_in_root(&self.state, surface, 0);
+        let Some((origin_x, origin_y)) = origin else {
+            return (x, y);
+        };
+        let local_x = x - f64::from(origin_x);
+        let local_y = y - f64::from(origin_y);
+        if self
+            .state
+            .root_surface
+            .as_ref()
+            .is_some_and(|root| root.id() == surface.id())
+        {
+            if let Some(frame) = surface_frame(surface) {
+                let (target_width, target_height) = root_input_dimensions(&self.state);
+                return (
+                    scale_input_coordinate(local_x, target_width, frame.width),
+                    scale_input_coordinate(local_y, target_height, frame.height),
+                );
+            }
+        }
+        (local_x, local_y)
     }
     fn focused_pointer_resources(&self) -> Option<(WlSurface, Vec<WlPointer>)> {
         let surface = self.state.pointer_focus_surface.clone()?;
@@ -6894,6 +7060,15 @@ impl CompositorCore {
         }
         let serial = self.next_input_serial();
         self.remember_selection_serial(serial, surface.clone());
+        if self
+            .state
+            .popup_grab
+            .as_ref()
+            .is_none_or(|grab| !grab.active)
+        {
+            self.state.popup_base_frame = self.state.last_frame.clone();
+            self.state.popup_base_armed = true;
+        }
         self.state.popup_grab_serial = Some(PopupGrabSerial {
             serial,
             surface: surface.clone(),
@@ -7232,6 +7407,15 @@ impl CompositorCore {
         let serial = self.next_input_serial();
         self.remember_selection_serial(serial, surface.clone());
         if pressed {
+            if self
+                .state
+                .popup_grab
+                .as_ref()
+                .is_none_or(|grab| !grab.active)
+            {
+                self.state.popup_base_frame = self.state.last_frame.clone();
+                self.state.popup_base_armed = true;
+            }
             self.state.popup_grab_serial = Some(PopupGrabSerial { serial, surface });
         }
         let button_state = if pressed {
@@ -8570,6 +8754,15 @@ fn valid_runtime_link_name(name: &[u8]) -> bool {
 }
 
 #[cfg(any(target_os = "android", test))]
+fn safe_runtime_program_name(name: &[u8]) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && name.iter().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(*byte, b'@' | b'.' | b'_' | b'+' | b':' | b'-')
+        })
+}
+
+#[cfg(any(target_os = "android", test))]
 fn parse_runtime_library_manifest(manifest: &[u8]) -> Result<Vec<(i32, String)>, i32> {
     if manifest.is_empty()
         || manifest.len() > MAX_RUNTIME_LIBRARY_MANIFEST
@@ -8631,7 +8824,7 @@ fn parse_runtime_environment(
         let value = &line[separator + 1..];
         if key.is_empty()
             || key.len() > 64
-            || !key[0].is_ascii_uppercase()
+            || !(key[0].is_ascii_uppercase() || key[0] == b'_')
             || !key
                 .iter()
                 .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || *byte == b'_')
@@ -8677,6 +8870,7 @@ fn run_glibc_fds(
     library_manifest: &[u8],
     link_root: &[u8],
     environment_manifest: &[u8],
+    program_name: &[u8],
 ) -> (i32, Vec<u8>) {
     let libraries = match parse_runtime_library_manifest(library_manifest) {
         Ok(libraries) => libraries,
@@ -8685,6 +8879,13 @@ fn run_glibc_fds(
     let environment = match parse_runtime_environment(environment_manifest) {
         Ok(environment) => environment,
         Err(error) => return (-error, Vec::new()),
+    };
+    if !safe_runtime_program_name(program_name) {
+        return (-libc::EINVAL, Vec::new());
+    }
+    let program_name = match std::ffi::CString::new(program_name) {
+        Ok(value) => value,
+        Err(_) => return (-libc::EINVAL, Vec::new()),
     };
     let Ok(link_root) = std::str::from_utf8(link_root) else {
         return (-libc::EINVAL, Vec::new());
@@ -8770,6 +8971,7 @@ fn run_glibc_fds(
         }
     };
     let library_path = std::ffi::CString::new("--library-path").unwrap();
+    let argv0 = std::ffi::CString::new("--argv0").unwrap();
     let directory = match std::ffi::CString::new(link_root.as_os_str().as_encoded_bytes()) {
         Ok(value) => value,
         Err(_) => {
@@ -8788,6 +8990,8 @@ fn run_glibc_fds(
         loader.as_ptr(),
         library_path.as_ptr(),
         directory.as_ptr(),
+        argv0.as_ptr(),
+        program_name.as_ptr(),
         program.as_ptr(),
         ptr::null(),
     ];
@@ -8906,13 +9110,21 @@ pub unsafe extern "system" fn Java_org_archphene_bridge_RuntimeFdLauncher_native
     library_manifest: jbyteArray,
     link_directory: jbyteArray,
     runtime_environment: jbyteArray,
+    program_name: jbyteArray,
     output: jbyteArray,
 ) -> i32 {
-    let (Some(library_manifest), Some(link_directory), Some(runtime_environment)) = (
+    let (
+        Some(library_manifest),
+        Some(link_directory),
+        Some(runtime_environment),
+        Some(program_name),
+    ) = (
         java_byte_array(environment, library_manifest),
         java_byte_array(environment, link_directory),
         java_byte_array(environment, runtime_environment),
-    ) else {
+        java_byte_array(environment, program_name),
+    )
+    else {
         return -libc::EINVAL;
     };
     let (exit_code, captured) = run_glibc_fds(
@@ -8921,6 +9133,7 @@ pub unsafe extern "system" fn Java_org_archphene_bridge_RuntimeFdLauncher_native
         &library_manifest,
         &link_directory,
         &runtime_environment,
+        &program_name,
     );
     if copy_to_java_byte_array(environment, output, &captured) < 0 {
         return -libc::EFAULT;
@@ -9817,6 +10030,22 @@ mod tests {
     }
 
     #[test]
+    fn validates_runtime_program_names() {
+        assert!(safe_runtime_program_name(b"glmark2-es2-wayland"));
+        assert!(safe_runtime_program_name(b"app@profile:1"));
+        for name in [
+            b"".as_slice(),
+            b"../app",
+            b"app/name",
+            b"app name",
+            b"app\0name",
+        ] {
+            assert!(!safe_runtime_program_name(name), "{name:?}");
+        }
+        assert!(!safe_runtime_program_name(&vec![b'a'; 129]));
+    }
+
+    #[test]
     fn parses_bounded_runtime_library_manifests() {
         let modules = parse_runtime_library_manifest(
             b"14\tlibc.so.6\n15\tlibarchphene_probe_dependency.so\n",
@@ -9844,12 +10073,13 @@ mod tests {
     #[test]
     fn parses_bounded_runtime_environment() {
         let environment = parse_runtime_environment(
-            b"HOME=/data/user/0/app/files/linux-home\nWAYLAND_DISPLAY=wayland-0\n",
+            b"HOME=/data/user/0/app/files/linux-home\nWAYLAND_DISPLAY=wayland-0\n__EGL_VENDOR_LIBRARY_DIRS=/runtime/egl\n",
         )
         .expect("valid runtime environment");
-        assert_eq!(environment.len(), 2);
+        assert_eq!(environment.len(), 3);
         assert_eq!(environment[0].0.to_bytes(), b"HOME");
         assert_eq!(environment[1].1.to_bytes(), b"wayland-0");
+        assert_eq!(environment[2].0.to_bytes(), b"__EGL_VENDOR_LIBRARY_DIRS");
     }
 
     #[test]
@@ -10083,6 +10313,36 @@ mod tests {
             Err(ViewportApplyError::BadSize)
         ));
     }
+    #[test]
+    fn scales_frame_pixels_into_the_configured_rectangle() {
+        let source = CommittedFrame {
+            width: 2,
+            height: 1,
+            format: wl_shm::Format::Xrgb8888,
+            pixels: vec![10, 20, 30, 255, 200, 210, 220, 255],
+            source: None,
+        };
+        let mut destination = CommittedFrame {
+            width: 4,
+            height: 2,
+            format: wl_shm::Format::Argb8888,
+            pixels: vec![0; 4 * 2 * 4],
+            source: None,
+        };
+        blend_popup_frame(&mut destination, &source, 0, 0, 4, 2);
+        for row in 0..2 {
+            let offset = row * 16;
+            assert_eq!(
+                &destination.pixels[offset..offset + 8],
+                &[10, 20, 30, 255, 10, 20, 30, 255]
+            );
+            assert_eq!(
+                &destination.pixels[offset + 8..offset + 16],
+                &[200, 210, 220, 255, 200, 210, 220, 255]
+            );
+        }
+    }
+
     #[test]
     fn clips_and_alpha_blends_popup_frames() {
         let mut destination = CommittedFrame {
@@ -10460,20 +10720,19 @@ mod tests {
         assert!(layout.overlay_primary);
     }
     #[test]
-    fn only_oversized_managed_secondary_windows_request_output_size() {
+    fn only_wide_managed_secondary_windows_get_phone_canvas() {
         assert!(secondary_toplevel_needs_output_size(
-            true, true, 1332, 915, 1080, 2205,
-        ));
-        assert!(!secondary_toplevel_needs_output_size(
-            false, true, 1332, 915, 1080, 2205,
-        ));
-        assert!(!secondary_toplevel_needs_output_size(
-            true, false, 1332, 915, 1080, 2205,
+            true, true, 1242, 2205, 1080, 2205,
         ));
         assert!(!secondary_toplevel_needs_output_size(
             true, true, 900, 1200, 1080, 2205,
         ));
+        assert!(!secondary_toplevel_needs_output_size(
+            false, true, 1242, 2205, 1080, 2205,
+        ));
+        assert_eq!(secondary_toplevel_canvas_width(1080), 1440);
     }
+
     #[test]
     fn uniformly_fits_oversized_secondary_window_over_primary() {
         let layout = calculate_toplevel_layout(
@@ -10496,6 +10755,43 @@ mod tests {
         assert_eq!((layout.root_width, layout.root_height), (1080, 741));
         assert!(layout.overlay_primary);
     }
+    #[test]
+    fn fits_client_buffer_that_overflows_window_geometry() {
+        let layout = calculate_toplevel_layout(
+            1080,
+            2205,
+            1080,
+            2205,
+            2910,
+            2359,
+            WindowGeometry {
+                x: 26,
+                y: 23,
+                width: 1080,
+                height: 2205,
+            },
+            Some((1080, 2205)),
+        );
+        assert_eq!((layout.output_width, layout.output_height), (1080, 2205));
+        assert_eq!((layout.root_x, layout.root_y), (0, 665));
+        assert_eq!((layout.root_width, layout.root_height), (1080, 875));
+        assert!(layout.overlay_primary);
+    }
+
+    #[test]
+    fn maps_surface_popup_geometry_into_fitted_output() {
+        assert_eq!(scale_surface_coordinate(170, 1080, 1440), 127);
+        assert_eq!(scale_surface_coordinate(452, 1080, 1440), 339);
+        assert_eq!(scale_surface_coordinate(-26, 1080, 1440), -19);
+    }
+
+    #[test]
+    fn maps_fitted_output_coordinates_back_to_surface_coordinates() {
+        assert_eq!(scale_input_coordinate(0.0, 1080, 1492), 0.0);
+        assert!((scale_input_coordinate(540.0, 1080, 1492) - 746.0).abs() < 0.001);
+        assert!((scale_input_coordinate(1626.0, 1692, 2257) - 2168.960_993).abs() < 0.001);
+    }
+
     #[test]
     fn maps_pressed_evdev_keys_to_xkb_modifier_bits() {
         assert_eq!(CompositorCore::keyboard_modifier_mask(&[]), 0);

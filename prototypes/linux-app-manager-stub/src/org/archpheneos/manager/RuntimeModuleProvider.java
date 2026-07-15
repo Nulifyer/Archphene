@@ -64,11 +64,12 @@ public final class RuntimeModuleProvider extends ContentProvider {
             throw new UnsupportedOperationException("Unsupported runtime provider method");
         }
         try {
-            String caller = requireWrapperCaller();
             if (APPEARANCE_METHOD.equals(method)) return appearanceBundle();
+            String caller = requireWrapperCaller();
             RuntimePackStore.Pack pack = RuntimePackStore.active(providerContext(), caller);
             RuntimePackStore.grantActive(providerContext(), caller);
             RuntimePackStore.Module program = pack.requireKind("program");
+            RuntimePackStore.Module data = pack.data();
             Uri loader = uriForRole(providerContext(), "glibc-loader");
             providerContext().grantUriPermission(caller, loader,
                     Intent.FLAG_GRANT_READ_URI_PERMISSION);
@@ -83,9 +84,12 @@ public final class RuntimeModuleProvider extends ContentProvider {
             Bundle result = new Bundle();
             result.putString("pack_id", pack.id);
             result.putString("program_uri", program.uri(pack.id).toString());
+            result.putString("program_name", pack.executableName);
             result.putString("loader_uri", loader.toString());
             result.putStringArray("library_uris", libraryUris);
             result.putStringArray("library_names", libraryNames);
+            result.putString("toolkit", pack.toolkit());
+            if (data != null) result.putString("data_uri", data.uri(pack.id).toString());
             return result;
         } catch (Exception error) {
             SecurityException failure = new SecurityException(

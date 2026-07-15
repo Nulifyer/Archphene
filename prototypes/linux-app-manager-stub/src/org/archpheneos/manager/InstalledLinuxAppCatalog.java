@@ -22,6 +22,7 @@ public final class InstalledLinuxAppCatalog {
         public final String sourceType;
         public final String sourceId;
         public final String sourceVersion;
+        public final String executable;
         public final String runtimeAbi;
         public final String updateUrl;
         public final Intent launchIntent;
@@ -33,20 +34,24 @@ public final class InstalledLinuxAppCatalog {
                     metadata.getString("org.archphene.source.type", "unknown"),
                     metadata.getString("org.archphene.source.id", "unknown"),
                     metadata.getString("org.archphene.source.version", "unknown"),
+                    metadata.getString("org.archphene.source.executable",
+                            metadata.getString("org.archphene.source.id", "unknown")
+                                    .replaceFirst("^.*/", "")),
                     metadata.getString("org.archphene.runtime.abi", "unknown"),
                     metadata.getString("org.archphene.source.update_url", ""),
                     launchIntent, false);
         }
 
         Entry(String packageName, String label, String androidVersion, String sourceType,
-                String sourceId, String sourceVersion, String runtimeAbi, String updateUrl,
-                Intent launchIntent, boolean runtimeBound) {
+                String sourceId, String sourceVersion, String executable, String runtimeAbi,
+                String updateUrl, Intent launchIntent, boolean runtimeBound) {
             this.packageName = packageName;
             this.label = label;
             this.androidVersion = androidVersion;
             this.sourceType = sourceType;
             this.sourceId = sourceId;
             this.sourceVersion = sourceVersion;
+            this.executable = executable;
             this.runtimeAbi = runtimeAbi;
             this.updateUrl = updateUrl;
             this.launchIntent = launchIntent;
@@ -145,7 +150,7 @@ public final class InstalledLinuxAppCatalog {
                         android.os.Build.SUPPORTED_ABIS[0]);
                 return new Entry(packageName, label, androidVersion, "pacman",
                         source.repository + "/" + source.name, source.version,
-                        "glibc-" + architecture,
+                        pack.executableName, "glibc-" + architecture,
                         "https://archlinux.org/packages/" + source.repository + "/"
                                 + architecture + "/" + source.name + "/json/",
                         launchIntent, true);

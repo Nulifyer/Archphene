@@ -186,8 +186,8 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
         if (windowId != 0) activateWindow(windowId, source);
         events.offer(new Event(
                 POINTER_MOTION,
-                Math.round(mapCoordinate(x, source.getWidth(), targetWidth)),
-                Math.round(mapCoordinate(y, source.getHeight(), targetHeight)),
+                Math.round(mapCoordinate(x, source, targetWidth, true)),
+                Math.round(mapCoordinate(y, source, targetHeight, false)),
                 (int) time,
                 0,
                 ""));
@@ -224,7 +224,9 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
         if (windowId != 0 && event.getActionMasked() == MotionEvent.ACTION_DOWN) {
             activateWindow(windowId, source);
         }
-        routeGesture(event, source.getWidth(), source.getHeight(), targetWidth, targetHeight);
+        if (event.getActionMasked() == MotionEvent.ACTION_DOWN
+                && !insideDisplayedImage(source, event.getX(), event.getY())) return;
+        routeGesture(event, source, targetWidth, targetHeight);
         int action = event.getActionMasked();
         int time = (int) event.getEventTime();
         if (action == MotionEvent.ACTION_MOVE) {
@@ -232,8 +234,8 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
                 events.offer(new Event(
                         TOUCH_MOTION,
                         event.getPointerId(i),
-                        Math.round(mapCoordinate(event.getX(i), source.getWidth(), targetWidth)),
-                        Math.round(mapCoordinate(event.getY(i), source.getHeight(), targetHeight)),
+                        Math.round(mapCoordinate(event.getX(i), source, targetWidth, true)),
+                        Math.round(mapCoordinate(event.getY(i), source, targetHeight, false)),
                         time,
                         ""));
             }
@@ -252,8 +254,8 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
             events.offer(new Event(
                     type,
                     event.getPointerId(index),
-                    Math.round(mapCoordinate(event.getX(index), source.getWidth(), targetWidth)),
-                    Math.round(mapCoordinate(event.getY(index), source.getHeight(), targetHeight)),
+                    Math.round(mapCoordinate(event.getX(index), source, targetWidth, true)),
+                    Math.round(mapCoordinate(event.getY(index), source, targetHeight, false)),
                     time,
                     ""));
         }
@@ -261,17 +263,16 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
 
     private void routeGesture(
             MotionEvent event,
-            int sourceWidth,
-            int sourceHeight,
+            ArchpheneInputView source,
             int targetWidth,
             int targetHeight) {
         int action = event.getActionMasked();
         int time = (int) event.getEventTime();
         if (action == MotionEvent.ACTION_POINTER_DOWN && event.getPointerCount() == 2) {
-            float firstX = mapCoordinate(event.getX(0), sourceWidth, targetWidth);
-            float firstY = mapCoordinate(event.getY(0), sourceHeight, targetHeight);
-            float secondX = mapCoordinate(event.getX(1), sourceWidth, targetWidth);
-            float secondY = mapCoordinate(event.getY(1), sourceHeight, targetHeight);
+            float firstX = mapCoordinate(event.getX(0), source, targetWidth, true);
+            float firstY = mapCoordinate(event.getY(0), source, targetHeight, false);
+            float secondX = mapCoordinate(event.getX(1), source, targetWidth, true);
+            float secondY = mapCoordinate(event.getY(1), source, targetHeight, false);
             float dx = secondX - firstX;
             float dy = secondY - firstY;
             gestureInitialSpan = Math.max(1f, (float) Math.hypot(dx, dy));
@@ -287,10 +288,10 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
         }
         if (action == MotionEvent.ACTION_MOVE
                 && event.getPointerCount() >= 2 && gestureActive) {
-            float firstX = mapCoordinate(event.getX(0), sourceWidth, targetWidth);
-            float firstY = mapCoordinate(event.getY(0), sourceHeight, targetHeight);
-            float secondX = mapCoordinate(event.getX(1), sourceWidth, targetWidth);
-            float secondY = mapCoordinate(event.getY(1), sourceHeight, targetHeight);
+            float firstX = mapCoordinate(event.getX(0), source, targetWidth, true);
+            float firstY = mapCoordinate(event.getY(0), source, targetHeight, false);
+            float secondX = mapCoordinate(event.getX(1), source, targetWidth, true);
+            float secondY = mapCoordinate(event.getY(1), source, targetHeight, false);
             float centroidX = (firstX + secondX) / 2f;
             float centroidY = (firstY + secondY) / 2f;
             float dx = secondX - firstX;
@@ -415,6 +416,8 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
                                     + " primary=" + window.primary
                                     + " geometry=" + window.x + "," + window.y + " "
                                     + window.width + "x" + window.height
+                                    + " frame=" + window.frameWidth + "x" + window.frameHeight
+                                    + " bufferScale=" + window.bufferScale
                                     + " title=" + window.title
                                     + " appId=" + window.appId);
                         }
@@ -703,10 +706,45 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
         }
     }
 
-    private static float mapCoordinate(float value, int sourceSize, int targetSize) {
-        return targetSize > 0 && sourceSize > 0
-                ? value * targetSize / sourceSize
-                : value;
+    private static float mapCoordinate(float value, ArchpheneInputView source,
+            int targetSize, boolean horizontal) {
+        int sourceWidth = source.getWidth();
+        int sourceHeight = source.getHeight();
+        int sourceSize = horizontal ? sourceWidth : sourceHeight;
+        if (targetSize <= 0 || sourceSize <= 0 || source.getDrawable() == null
+                || source.getScaleType() != android.widget.ImageView.ScaleType.FIT_CENTER) {
+            return targetSize > 0 && sourceSize > 0
+                    ? value * targetSize / sourceSize : value;
+        }
+        int contentWidth = source.getDrawable().getIntrinsicWidth();
+        int contentHeight = source.getDrawable().getIntrinsicHeight();
+        if (contentWidth <= 0 || contentHeight <= 0) {
+            return value * targetSize / sourceSize;
+        }
+        float scale = Math.min(sourceWidth / (float) contentWidth,
+                sourceHeight / (float) contentHeight);
+        int contentSize = horizontal ? contentWidth : contentHeight;
+        float displayedSize = contentSize * scale;
+        float sourceOffset = (sourceSize - displayedSize) / 2f;
+        float local = Math.max(0f, Math.min(contentSize, (value - sourceOffset) / scale));
+        float targetOffset = Math.max(0f, (targetSize - contentSize) / 2f);
+        return targetOffset + local;
+    }
+
+    private static boolean insideDisplayedImage(
+            ArchpheneInputView source, float x, float y) {
+        if (source.getDrawable() == null
+                || source.getScaleType() != android.widget.ImageView.ScaleType.FIT_CENTER) return true;
+        int contentWidth = source.getDrawable().getIntrinsicWidth();
+        int contentHeight = source.getDrawable().getIntrinsicHeight();
+        if (contentWidth <= 0 || contentHeight <= 0
+                || source.getWidth() <= 0 || source.getHeight() <= 0) return true;
+        float scale = Math.min(source.getWidth() / (float) contentWidth,
+                source.getHeight() / (float) contentHeight);
+        float left = (source.getWidth() - contentWidth * scale) / 2f;
+        float top = (source.getHeight() - contentHeight * scale) / 2f;
+        return x >= left && x < left + contentWidth * scale
+                && y >= top && y < top + contentHeight * scale;
     }
     private static String readFd(int fd) {
         try (ParcelFileDescriptor descriptor = ParcelFileDescriptor.adoptFd(fd);

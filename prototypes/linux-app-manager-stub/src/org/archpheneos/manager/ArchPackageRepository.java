@@ -27,15 +27,39 @@ public final class ArchPackageRepository {
         public final String version;
         public final String description;
         public final boolean flaggedOutOfDate;
+        public final String matchedFile;
+        public final String executable;
 
         PackageResult(String name, String repository, String architecture, String version,
                 String description, boolean flaggedOutOfDate) {
+            this(name, repository, architecture, version, description, flaggedOutOfDate,
+                    "", name);
+        }
+
+        PackageResult(String name, String repository, String architecture, String version,
+                String description, boolean flaggedOutOfDate, String matchedFile) {
+            this(name, repository, architecture, version, description, flaggedOutOfDate,
+                    matchedFile, executableFromMatch(name, matchedFile));
+        }
+
+        PackageResult(String name, String repository, String architecture, String version,
+                String description, boolean flaggedOutOfDate, String matchedFile,
+                String executable) {
             this.name = name;
             this.repository = repository;
             this.architecture = architecture;
             this.version = version;
             this.description = description;
             this.flaggedOutOfDate = flaggedOutOfDate;
+            this.matchedFile = matchedFile;
+            this.executable = executable == null || !executable.matches("[a-zA-Z0-9@._+:-]{1,128}")
+                    ? name : executable;
+        }
+
+        private static String executableFromMatch(String packageName, String matchedFile) {
+            if (matchedFile == null || !matchedFile.startsWith("usr/bin/")) return packageName;
+            String candidate = matchedFile.substring("usr/bin/".length());
+            return candidate.indexOf('/') < 0 ? candidate : packageName;
         }
     }
 
@@ -59,6 +83,13 @@ public final class ArchPackageRepository {
                     value.optString("repo", "unknown"), value.optString("arch", "unknown"),
                     version, value.optString("pkgdesc", ""),
                     !value.isNull("flag_date") || !value.isNull("flagged_date")));
+        }
+        if (!result.isEmpty() || !ArchPackageRuntime.available(context)) return result;
+        for (ArchPackageRuntime.FileOwner owner : ArchPackageRuntime.searchFileOwners(
+                context, normalized)) {
+            result.add(new PackageResult(owner.name, owner.repository, "x86_64",
+                    owner.version, "", false, owner.path));
+            if (result.size() >= 50) break;
         }
         return result;
     }

@@ -22,7 +22,9 @@ public final class TrackedPackageStore {
                 result.add(new ArchPackageRepository.PackageResult(value.getString("name"),
                         value.getString("repository"), value.getString("architecture"),
                         value.getString("version"), value.optString("description", ""),
-                        value.optBoolean("flaggedOutOfDate", false)));
+                        value.optBoolean("flaggedOutOfDate", false),
+                        value.optString("matchedFile", ""),
+                        value.optString("executable", value.getString("name"))));
             }
         } catch (Exception ignored) {
         }
@@ -58,6 +60,8 @@ public final class TrackedPackageStore {
                 value.put("version", entry.version);
                 value.put("description", entry.description);
                 value.put("flaggedOutOfDate", entry.flaggedOutOfDate);
+                value.put("matchedFile", entry.matchedFile);
+                value.put("executable", entry.executable);
                 values.put(value);
             }
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()

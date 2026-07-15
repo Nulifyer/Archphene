@@ -24,6 +24,8 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 /** Immutable, content-addressed runtime packs derived from verified package closures. */
 final class RuntimePackStore {
@@ -33,6 +35,8 @@ final class RuntimePackStore {
     private static final int MAX_LINE = 1024;
     private static final long MAX_MODULE_SIZE = 2L * 1024 * 1024 * 1024;
     private static final long MAX_PACK_SIZE = 8L * 1024 * 1024 * 1024;
+    private static final int MAX_DATA_FILES = 100000;
+    private static final long MAX_DATA_BYTES = 2L * 1024 * 1024 * 1024;
     private static final long UNBOUND_PACK_GRACE_MS = 24L * 60 * 60 * 1000;
     private static final String SAFE_ID = "[a-zA-Z0-9@._+:-]{1,128}";
     private static final String SAFE_REPOSITORY = "[a-z0-9-]{1,32}";
@@ -64,15 +68,17 @@ final class RuntimePackStore {
     static final class Pack {
         final String id;
         final String sourcePackage;
+        final String executableName;
         final List<ArchPackageRuntime.ResolvedPackage> packages;
         final List<Module> modules;
         final File root;
 
-        Pack(String id, String sourcePackage,
+        Pack(String id, String sourcePackage, String executableName,
                 List<ArchPackageRuntime.ResolvedPackage> packages,
                 List<Module> modules, File root) {
             this.id = id;
             this.sourcePackage = sourcePackage;
+            this.executableName = executableName;
             this.packages = Collections.unmodifiableList(packages);
             this.modules = Collections.unmodifiableList(modules);
             this.root = root;
@@ -92,6 +98,23 @@ final class RuntimePackStore {
             }
             return result;
         }
+
+        Module data() {
+            for (Module module : modules) {
+                if ("data".equals(module.kind)) return module;
+            }
+            return null;
+        }
+
+        String toolkit() {
+            for (Module module : modules) {
+                if (module.linkName.startsWith("libQt6")) return "qt6";
+            }
+            for (Module module : modules) {
+                if (module.linkName.startsWith("libgtk-3")) return "gtk3";
+            }
+            return "wayland";
+        }
     }
 
     private static final class PendingModule {
@@ -110,12 +133,18 @@ final class RuntimePackStore {
 
     static synchronized Pack build(Context context, String sourcePackage,
             List<ArchPackageRuntime.ResolvedPackage> packages, File stagedRoot) throws Exception {
-        if (stagedRoot == null || sourcePackage == null || !sourcePackage.matches(SAFE_ID)) {
+        return build(context, sourcePackage, sourcePackage, packages, stagedRoot);
+    }
+
+    static synchronized Pack build(Context context, String sourcePackage, String executableName,
+            List<ArchPackageRuntime.ResolvedPackage> packages, File stagedRoot) throws Exception {
+        if (stagedRoot == null || sourcePackage == null || !sourcePackage.matches(SAFE_ID)
+                || executableName == null || !executableName.matches(SAFE_ID)) {
             throw new IllegalArgumentException("Invalid staged package transaction");
         }
         File canonicalRoot = stagedRoot.getCanonicalFile();
         File executable = new File(canonicalRoot,
-                "usr/bin/" + sourcePackage).getCanonicalFile();
+                "usr/bin/" + executableName).getCanonicalFile();
         if (!executable.isFile() || !inside(canonicalRoot, executable)) {
             throw new SecurityException("Runtime pack executable escapes staging root");
         }
@@ -125,12 +154,40 @@ final class RuntimePackStore {
         if (!loader.isFile() || !loader.getParentFile().equals(managerNative)) {
             throw new SecurityException("Runtime pack loader is unavailable");
         }
+        File pathBridge = new File(managerNative, "libarchphene_path_bridge.so")
+                .getCanonicalFile();
+        if (!pathBridge.isFile() || !pathBridge.getParentFile().equals(managerNative)) {
+            throw new SecurityException("Runtime path bridge is unavailable");
+        }
         Map<String, File> closure = ArchWrapperAssembler.collectNativeFiles(
-                context, canonicalRoot, sourcePackage);
+                context, canonicalRoot, sourcePackage, executableName);
+        File gtkSvgLoader = null;
+        if (closure.containsKey("libgtk-3.so.0")) {
+            File gtkPixbuf = new File(managerNative, "libarchphene_gtk3_pixbuf.so")
+                    .getCanonicalFile();
+            File gtkRsvg = new File(managerNative, "libarchphene_gtk3_rsvg.so")
+                    .getCanonicalFile();
+            gtkSvgLoader = new File(managerNative,
+                    "libarchphene_gtk3_pixbufloader_svg.so").getCanonicalFile();
+            for (File bridge : new File[] {gtkPixbuf, gtkRsvg, gtkSvgLoader}) {
+                if (!bridge.isFile() || !bridge.getParentFile().equals(managerNative)) {
+                    throw new SecurityException("GTK3 compatibility bridge is unavailable");
+                }
+            }
+            closure.put("libgdk_pixbuf-2.0.so.0", gtkPixbuf);
+            closure.put("librsvg-2.so.2", gtkRsvg);
+        }
         ArrayList<PendingModule> pending = new ArrayList<>();
         pending.add(new PendingModule("program", "program", executable));
         pending.add(new PendingModule("loader", "loader", loader));
         Set<String> names = new HashSet<>();
+        names.add("libarchphene_path_bridge.so");
+        pending.add(new PendingModule("library", "libarchphene_path_bridge.so", pathBridge));
+        if (gtkSvgLoader != null) {
+            names.add("libarchphene_pixbufloader_svg.so");
+            pending.add(new PendingModule("library", "libarchphene_pixbufloader_svg.so",
+                    gtkSvgLoader));
+        }
         for (Map.Entry<String, File> entry : closure.entrySet()) {
             File source = entry.getValue().getCanonicalFile();
             if (source.equals(executable) || source.equals(loader)) continue;
@@ -139,12 +196,6 @@ final class RuntimePackStore {
             }
             pending.add(new PendingModule("library", entry.getKey(), source));
         }
-        if (pending.size() < 3 || pending.size() > MAX_MODULES) {
-            throw new SecurityException("Runtime closure has an invalid module count");
-        }
-        pending.sort(Comparator.comparing((PendingModule value) -> kindOrder(value.kind))
-                .thenComparing(value -> value.linkName));
-
         File store = directory(context.getFilesDir(), "runtime-packs");
         File stagingRoot = directory(store, "staging");
         File packsRoot = directory(store, "packs");
@@ -153,7 +204,21 @@ final class RuntimePackStore {
         File moduleRoot = new File(temporary, "modules");
         if (!moduleRoot.mkdirs()) throw new IOException("Could not create runtime-pack staging");
         boolean published = false;
+        File dataArchive = null;
         try {
+            File dataRoot = new File(canonicalRoot, "usr/share");
+            if (dataRoot.isDirectory()) {
+                dataArchive = File.createTempFile("runtime-data-", ".zip", stagingRoot);
+                createDataArchive(canonicalRoot, dataRoot, dataArchive);
+                if (dataArchive.length() > 0) {
+                    pending.add(new PendingModule("data", "root.zip", dataArchive));
+                }
+            }
+            if (pending.size() < 3 || pending.size() > MAX_MODULES) {
+                throw new SecurityException("Runtime closure has an invalid module count");
+            }
+            pending.sort(Comparator.comparing((PendingModule value) -> kindOrder(value.kind))
+                    .thenComparing(value -> value.linkName));
             ArrayList<Module> modules = new ArrayList<>();
             long total = 0;
             for (PendingModule value : pending) {
@@ -163,7 +228,7 @@ final class RuntimePackStore {
                 modules.add(new Module(value.kind, copied.hash, copied.size,
                         value.linkName, copied.file));
             }
-            byte[] manifest = manifest(sourcePackage, packages, modules);
+            byte[] manifest = manifest(sourcePackage, executableName, packages, modules);
             String packId = sha256(manifest);
             File manifestFile = new File(temporary, "manifest.tsv");
             writeSynced(manifestFile, manifest);
@@ -179,6 +244,7 @@ final class RuntimePackStore {
             published = true;
             return load(context, packId);
         } finally {
+            if (dataArchive != null) dataArchive.delete();
             if (!published && temporary.exists()) deleteRecursively(temporary);
         }
     }
@@ -336,7 +402,8 @@ final class RuntimePackStore {
         String hashA = repeat('a', 64);
         String hashB = repeat('b', 64);
         String hashC = repeat('c', 64);
-        String valid = SCHEMA + "\nsource\tkcalc\npackage\textra\tkcalc\t1.0-1\n"
+        String valid = SCHEMA + "\nsource\tkcalc\nexecutable\tkcalc\n"
+                + "package\textra\tkcalc\t1.0-1\n"
                 + "module\tprogram\t" + hashA + "\t100\tprogram\n"
                 + "module\tloader\t" + hashB + "\t200\tloader\n"
                 + "module\tlibrary\t" + hashC + "\t300\tlibc.so.6\n";
@@ -361,8 +428,10 @@ final class RuntimePackStore {
         ArrayList<Module> modules = new ArrayList<>();
         Set<String> links = new HashSet<>();
         String sourcePackage = null;
+        String executableName = null;
         int programs = 0;
         int loaders = 0;
+        int dataModules = 0;
         long total = 0;
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(
                 new ByteArrayInputStream(manifest), StandardCharsets.UTF_8))) {
@@ -378,6 +447,11 @@ final class RuntimePackStore {
                         throw new IOException("Malformed runtime-pack source");
                     }
                     sourcePackage = fields[1];
+                } else if (fields.length == 2 && "executable".equals(fields[0])) {
+                    if (executableName != null || !fields[1].matches(SAFE_ID)) {
+                        throw new IOException("Malformed runtime-pack executable");
+                    }
+                    executableName = fields[1];
                 } else if (fields.length == 4 && "package".equals(fields[0])) {
                     if (!fields[1].matches(SAFE_REPOSITORY) || !fields[2].matches(SAFE_ID)
                             || !fields[3].matches(SAFE_ID) || packages.size() >= MAX_PACKAGES) {
@@ -388,7 +462,8 @@ final class RuntimePackStore {
                 } else if (fields.length == 5 && "module".equals(fields[0])) {
                     String kind = fields[1];
                     if (!("program".equals(kind) || "loader".equals(kind)
-                            || "library".equals(kind)) || !fields[2].matches(HASH)
+                            || "library".equals(kind) || "data".equals(kind))
+                            || !fields[2].matches(HASH)
                             || !safeLinkName(kind, fields[4]) || !links.add(fields[4])
                             || modules.size() >= MAX_MODULES) {
                         throw new IOException("Malformed runtime-pack module");
@@ -404,6 +479,7 @@ final class RuntimePackStore {
                     }
                     if ("program".equals(kind)) programs++;
                     if ("loader".equals(kind)) loaders++;
+                    if ("data".equals(kind)) dataModules++;
                     total = Math.addExact(total, size);
                     if (total > MAX_PACK_SIZE) throw new IOException("Runtime pack is too large");
                     File file = new File(new File(root, "modules"), fields[2]);
@@ -415,16 +491,18 @@ final class RuntimePackStore {
             }
         }
         if (sourcePackage == null || packages.isEmpty() || modules.size() < 3
-                || programs != 1 || loaders != 1) {
+                || programs != 1 || loaders != 1 || dataModules > 1) {
             throw new IOException("Runtime-pack manifest is incomplete");
         }
-        return new Pack(packId, sourcePackage, packages, modules, root);
+        if (executableName == null) executableName = sourcePackage;
+        return new Pack(packId, sourcePackage, executableName, packages, modules, root);
     }
 
-    private static byte[] manifest(String sourcePackage,
+    private static byte[] manifest(String sourcePackage, String executableName,
             List<ArchPackageRuntime.ResolvedPackage> packages, List<Module> modules)
             throws Exception {
-        if (!sourcePackage.matches(SAFE_ID) || packages.isEmpty()
+        if (!sourcePackage.matches(SAFE_ID) || executableName == null
+                || !executableName.matches(SAFE_ID) || packages.isEmpty()
                 || packages.size() > MAX_PACKAGES) {
             throw new SecurityException("Invalid runtime-pack package graph");
         }
@@ -433,7 +511,8 @@ final class RuntimePackStore {
                 -> value.repository).thenComparing(value -> value.name)
                 .thenComparing(value -> value.version));
         StringBuilder value = new StringBuilder(SCHEMA).append('\n')
-                .append("source\t").append(sourcePackage).append('\n');
+                .append("source\t").append(sourcePackage).append('\n')
+                .append("executable\t").append(executableName).append('\n');
         for (ArchPackageRuntime.ResolvedPackage entry : sortedPackages) {
             if (!entry.repository.matches(SAFE_REPOSITORY) || !entry.name.matches(SAFE_ID)
                     || !entry.version.matches(SAFE_ID)) {
@@ -450,6 +529,67 @@ final class RuntimePackStore {
         return value.toString().getBytes(StandardCharsets.UTF_8);
     }
 
+    private static final class DataBudget {
+        int files;
+        long bytes;
+    }
+
+    private static void createDataArchive(File stagedRoot, File dataRoot, File output)
+            throws Exception {
+        File canonicalRoot = stagedRoot.getCanonicalFile();
+        DataBudget budget = new DataBudget();
+        try (FileOutputStream file = new FileOutputStream(output);
+                ZipOutputStream zip = new ZipOutputStream(file)) {
+            addDataTree(canonicalRoot, dataRoot, "usr/share", zip, budget, new HashSet<>());
+            zip.finish();
+            zip.flush();
+            file.getFD().sync();
+        }
+    }
+
+    private static void addDataTree(File stagedRoot, File source, String relative,
+            ZipOutputStream zip, DataBudget budget, Set<String> stack) throws Exception {
+        File effective = source.getCanonicalFile();
+        if (!effective.equals(stagedRoot) && !inside(stagedRoot, effective)) {
+            throw new SecurityException("Runtime data symlink escapes staging root");
+        }
+        if (effective.isDirectory()) {
+            String canonical = effective.getPath();
+            if (!stack.add(canonical)) {
+                throw new SecurityException("Runtime data contains a symlink cycle");
+            }
+            ZipEntry directory = new ZipEntry(relative + "/");
+            directory.setTime(1577836800000L);
+            zip.putNextEntry(directory);
+            zip.closeEntry();
+            File[] children = effective.listFiles();
+            if (children == null) throw new IOException("Could not enumerate runtime data");
+            java.util.Arrays.sort(children, Comparator.comparing(File::getName));
+            for (File child : children) {
+                addDataTree(stagedRoot, child, relative + "/" + child.getName(),
+                        zip, budget, stack);
+            }
+            stack.remove(canonical);
+            return;
+        }
+        if (!effective.isFile()) {
+            throw new SecurityException("Runtime data contains an unsupported file type");
+        }
+        budget.files++;
+        budget.bytes = Math.addExact(budget.bytes, effective.length());
+        if (budget.files > MAX_DATA_FILES || budget.bytes > MAX_DATA_BYTES) {
+            throw new SecurityException("Runtime data exceeds archive bounds");
+        }
+        ZipEntry entry = new ZipEntry(relative);
+        entry.setTime(1577836800000L);
+        zip.putNextEntry(entry);
+        try (InputStream input = new FileInputStream(effective)) {
+            byte[] buffer = new byte[64 * 1024];
+            int read;
+            while ((read = input.read(buffer)) != -1) zip.write(buffer, 0, read);
+        }
+        zip.closeEntry();
+    }
     private static final class CopiedModule {
         final String hash;
         final long size;
@@ -512,13 +652,15 @@ final class RuntimePackStore {
     private static boolean safeLinkName(String kind, String value) {
         if ("program".equals(kind)) return "program".equals(value);
         if ("loader".equals(kind)) return "loader".equals(value);
+        if ("data".equals(kind)) return "root.zip".equals(value);
         return "library".equals(kind) && safeFileName(value);
     }
 
     private static int kindOrder(String kind) {
         if ("program".equals(kind)) return 0;
         if ("loader".equals(kind)) return 1;
-        return 2;
+        if ("library".equals(kind)) return 2;
+        return 3;
     }
 
     private static boolean inside(File root, File value) throws Exception {

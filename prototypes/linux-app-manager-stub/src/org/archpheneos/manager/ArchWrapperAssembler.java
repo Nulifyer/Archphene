@@ -49,19 +49,39 @@ public final class ArchWrapperAssembler {
 
     public static Result assembleQt(Context context, String repository, String sourcePackage)
             throws Exception {
-        return assembleQt(context, repository, sourcePackage, null);
+        return assembleQt(context, repository, sourcePackage, "0", sourcePackage, null);
     }
 
     public static Result assembleQt(Context context, String repository, String sourcePackage,
             File runtimeRoot) throws Exception {
+        return assembleQt(context, repository, sourcePackage, "0", sourcePackage, runtimeRoot);
+    }
+
+    public static Result assembleQt(Context context, String repository, String sourcePackage,
+            String sourceVersion) throws Exception {
+        return assembleQt(context, repository, sourcePackage, sourceVersion, sourcePackage, null);
+    }
+
+    public static Result assembleQt(Context context, String repository, String sourcePackage,
+            String sourceVersion, String executableName) throws Exception {
+        return assembleQt(context, repository, sourcePackage, sourceVersion, executableName, null);
+    }
+
+    private static Result assembleQt(Context context, String repository, String sourcePackage,
+            String sourceVersion, String executableName, File runtimeRoot) throws Exception {
         if (!repository.matches("[a-z0-9-]{1,32}")
-                || !sourcePackage.matches("[a-zA-Z0-9@._+:-]{1,128}")) {
+                || !sourcePackage.matches("[a-zA-Z0-9@._+:-]{1,128}")
+                || sourceVersion == null
+                || !sourceVersion.matches("[a-zA-Z0-9@._+:-]{1,128}")
+                || executableName == null
+                || !executableName.matches("[a-zA-Z0-9@._+:-]{1,128}")) {
             throw new IllegalArgumentException("Invalid wrapper source identity");
         }
         String packageName = packageNameFor(repository, sourcePackage);
         File output = new File(context.getCacheDir(), "generated-" + sourcePackage + ".apk");
         File unsigned = new File(context.getCacheDir(), "generated-" + sourcePackage + ".unsigned.apk");
-        rebuildTemplate(context, packageName, sourcePackage, runtimeRoot, unsigned);
+        rebuildTemplate(context, packageName, repository, sourcePackage, sourceVersion,
+                executableName, runtimeRoot, unsigned);
         verifyStoredEntryAlignment(unsigned, "resources.arsc", 4);
         ArchWrapperSigner.Result signed = ArchWrapperSigner.sign(context, unsigned, output);
         PackageInfo parsed = context.getPackageManager().getPackageArchiveInfo(output.getPath(),
@@ -84,8 +104,10 @@ public final class ArchWrapperAssembler {
                 + sha256((repository + "/" + sourcePackage).getBytes(StandardCharsets.UTF_8))
                         .substring(0, 32);
     }
-    private static void rebuildTemplate(Context context, String packageName, String sourcePackage,
-            File runtimeRoot, File output) throws Exception {
+    private static void rebuildTemplate(Context context, String packageName, String repository,
+            String sourcePackage, String sourceVersion, String executableName,
+            File runtimeRoot, File output)
+            throws Exception {
         byte[] placeholder = PACKAGE_PLACEHOLDER.getBytes(StandardCharsets.UTF_8);
         byte[] replacement = packageName.getBytes(StandardCharsets.UTF_8);
         byte[] placeholderUtf16 = PACKAGE_PLACEHOLDER.getBytes(StandardCharsets.UTF_16LE);
@@ -105,6 +127,13 @@ public final class ArchWrapperAssembler {
                 if (name.startsWith("META-INF/")) continue;
                 byte[] value = readEntry(input);
                 if ("AndroidManifest.xml".equals(name)) {
+                    value = replaceBinaryXmlString(value, "KCalc", displayName(sourcePackage));
+                    value = replaceBinaryXmlString(value, "extra/kcalc",
+                            repository + "/" + sourcePackage);
+                    value = replaceBinaryXmlString(value, "26.04.3-1", sourceVersion);
+                    value = replaceBinaryXmlString(value, "archphene-executable-placeholder",
+                            executableName);
+                    value = replaceBinaryXmlString(value, "ArchpheneKCalc", "ArchpheneLinuxApp");
                     int replacements = replaceAll(value, placeholder, replacement)
                             + replaceAll(value, placeholderUtf16, replacementUtf16);
                     if (replacements < 1) throw new SecurityException("Wrapper template package marker is missing");
@@ -148,9 +177,19 @@ public final class ArchWrapperAssembler {
 
     static Map<String, File> collectNativeFiles(Context context, File runtimeRoot,
             String sourcePackage) throws Exception {
+        return collectNativeFiles(context, runtimeRoot, sourcePackage, sourcePackage);
+    }
+
+    static Map<String, File> collectNativeFiles(Context context, File runtimeRoot,
+            String sourcePackage, String executableName) throws Exception {
+        if (sourcePackage == null || !sourcePackage.matches("[a-zA-Z0-9@._+-]{1,128}")
+                || executableName == null
+                || !executableName.matches("[a-zA-Z0-9@._+:-]{1,128}")) {
+            throw new IllegalArgumentException("Invalid desktop package identity");
+        }
         File canonicalRoot = runtimeRoot.getCanonicalFile();
         File libraryRoot = new File(canonicalRoot, "usr/lib").getCanonicalFile();
-        File executable = new File(canonicalRoot, "usr/bin/" + sourcePackage).getCanonicalFile();
+        File executable = new File(canonicalRoot, "usr/bin/" + executableName).getCanonicalFile();
         if (!libraryRoot.getPath().startsWith(canonicalRoot.getPath() + File.separator)
                 || !executable.isFile()) {
             throw new SecurityException("Invalid staged runtime root");
@@ -173,14 +212,86 @@ public final class ArchWrapperAssembler {
         HashSet<String> visited = new HashSet<>();
         addNative(result, "libarchphene_kcalc.so", executable);
         pending.add(executable);
-        for (String pluginName : new String[] {"libqwayland.so", "libxdg-shell.so"}) {
-            File plugin = candidates.get(pluginName);
-            if (plugin == null) {
-                throw new SecurityException("Missing Qt bridge plugin " + pluginName);
+        resolveDependencies(result, candidates, pending, visited);
+        for (String dynamicName : new String[] {
+                "libEGL.so", "libEGL.so.1", "libGLESv2.so", "libGLESv2.so.2"}) {
+            if (!containsAscii(executable, dynamicName)) continue;
+            File dynamic = candidates.get(dynamicName);
+            if (dynamic == null) {
+                throw new SecurityException("Missing runtime-loaded ELF dependency "
+                        + dynamicName + " required by " + executable.getName());
             }
-            addNative(result, pluginName, plugin);
-            pending.add(plugin);
+            addNative(result, dynamicName, dynamic);
+            pending.add(dynamic);
         }
+        resolveDependencies(result, candidates, pending, visited);
+        if (result.containsKey("libQt6Core.so.6")) {
+            for (String pluginName : new String[] {"libqwayland.so", "libxdg-shell.so"}) {
+                File plugin = candidates.get(pluginName);
+                if (plugin == null) {
+                    throw new SecurityException("Missing Qt bridge plugin " + pluginName);
+                }
+                addNative(result, pluginName, plugin);
+                pending.add(plugin);
+            }
+            resolveDependencies(result, candidates, pending, visited);
+        }
+        if (result.containsKey("libgtk-3.so.0")) {
+            for (String compatibilityName : new String[] {
+                    "libpng16.so.16", "libjpeg.so.8", "libtiff.so.6"}) {
+                if (result.containsKey(compatibilityName)) continue;
+                File compatibilityLibrary = candidates.get(compatibilityName);
+                if (compatibilityLibrary == null) {
+                    throw new SecurityException("Missing GTK3 bridge dependency "
+                            + compatibilityName);
+                }
+                addNative(result, compatibilityName, compatibilityLibrary);
+                pending.add(compatibilityLibrary);
+            }
+            resolveDependencies(result, candidates, pending, visited);
+            File pluginRoot = new File(libraryRoot, sourcePackage + "/plugins")
+                    .getCanonicalFile();
+            String pluginPrefix = pluginRoot.getPath() + File.separator;
+            if (pluginRoot.isDirectory()
+                    && pluginPrefix.startsWith(libraryRoot.getPath() + File.separator)) {
+                for (Map.Entry<String, File> entry : candidates.entrySet()) {
+                    File candidate = entry.getValue().getCanonicalFile();
+                    if (!candidate.getPath().startsWith(pluginPrefix)) continue;
+                    TreeMap<String, File> trial = new TreeMap<>(result);
+                    HashSet<String> trialVisited = new HashSet<>(visited);
+                    ArrayDeque<File> trialPending = new ArrayDeque<>();
+                    try {
+                        addNative(trial, entry.getKey(), candidate);
+                        trialPending.add(candidate);
+                        resolveDependencies(trial, candidates, trialPending, trialVisited);
+                        result.clear();
+                        result.putAll(trial);
+                        visited.clear();
+                        visited.addAll(trialVisited);
+                    } catch (SecurityException unavailableOptionalDependency) {
+                        android.util.Log.i("ArchphenePackages", "Skipping optional plugin "
+                                + entry.getKey() + ": "
+                                + unavailableOptionalDependency.getMessage());
+                    }
+                }
+            }
+        }        if (result.containsKey("libEGL.so.1") || result.containsKey("libEGL.so")) {
+            for (String providerName : new String[] {
+                    "libEGL_mesa.so.0", "swrast_dri.so", "kms_swrast_dri.so",
+                    "virtio_gpu_dri.so"}) {
+                File provider = candidates.get(providerName);
+                if (provider == null) continue;
+                addNative(result, providerName, provider);
+                pending.add(provider);
+            }
+            resolveDependencies(result, candidates, pending, visited);
+        }
+        return result;
+    }
+
+    private static void resolveDependencies(Map<String, File> result,
+            Map<String, File> candidates, ArrayDeque<File> pending, Set<String> visited)
+            throws Exception {
         while (!pending.isEmpty()) {
             File current = pending.removeFirst().getCanonicalFile();
             if (!visited.add(current.getPath())) continue;
@@ -195,7 +306,6 @@ public final class ArchWrapperAssembler {
                 pending.add(dependency);
             }
         }
-        return result;
     }
 
     private static void collectElfFiles(File root, File directory, Map<String, File> result,
@@ -313,6 +423,27 @@ public final class ArchWrapperAssembler {
         result.put(name, file.getCanonicalFile());
     }
 
+    private static boolean containsAscii(File file, String value) throws Exception {
+        byte[] expected = value.getBytes(StandardCharsets.US_ASCII);
+        int matched = 0;
+        try (InputStream input = new FileInputStream(file)) {
+            byte[] buffer = new byte[64 * 1024];
+            int count;
+            while ((count = input.read(buffer)) != -1) {
+                for (int index = 0; index < count; index++) {
+                    byte current = buffer[index];
+                    if (current == expected[matched]) {
+                        matched++;
+                        if (matched == expected.length) return true;
+                    } else {
+                        matched = current == expected[0] ? 1 : 0;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
     private static boolean isElf(File file) throws Exception {
         try (InputStream input = new FileInputStream(file)) {
             return input.read() == 0x7f && input.read() == 'E'
@@ -401,6 +532,205 @@ public final class ArchWrapperAssembler {
         return output.toByteArray();
     }
 
+    private static String displayName(String packageName) {
+        if ("kcalc".equals(packageName)) return "KCalc";
+        if ("glmark2".equals(packageName)) return "GLMark2";
+        String[] words = packageName.replace('_', '-').split("-");
+        StringBuilder result = new StringBuilder();
+        for (String word : words) {
+            if (word.isEmpty()) continue;
+            if (result.length() > 0) result.append(' ');
+            result.append(Character.toUpperCase(word.charAt(0))).append(word.substring(1));
+        }
+        return result.length() == 0 ? packageName : result.toString();
+    }
+
+    private static byte[] replaceBinaryXmlString(byte[] xml, String match, String replacement)
+            throws Exception {
+        if (getU16(xml, 0) != 0x0003 || getI32(xml, 4) != xml.length) {
+            throw new SecurityException("Wrapper template manifest is not valid binary XML");
+        }
+        int offset = getU16(xml, 2);
+        while (offset + 8 <= xml.length) {
+            int type = getU16(xml, offset);
+            int size = getI32(xml, offset + 4);
+            if (size < 8 || offset + size > xml.length) {
+                throw new SecurityException("Wrapper template contains an invalid XML chunk");
+            }
+            if (type == 0x0001) {
+                return replaceStringPoolEntry(xml, offset, match, replacement);
+            }
+            offset += size;
+        }
+        throw new SecurityException("Wrapper template string pool is missing");
+    }
+
+    private static byte[] replaceStringPoolEntry(byte[] xml, int poolOffset,
+            String match, String replacement) throws Exception {
+        int headerSize = getU16(xml, poolOffset + 2);
+        int poolSize = getI32(xml, poolOffset + 4);
+        int stringCount = getI32(xml, poolOffset + 8);
+        int flags = getI32(xml, poolOffset + 16);
+        int stringsStart = getI32(xml, poolOffset + 20);
+        int stylesStart = getI32(xml, poolOffset + 24);
+        if (headerSize < 28 || stringCount <= 0 || stringCount > 100000
+                || stringsStart < headerSize + stringCount * 4
+                || poolOffset + poolSize > xml.length) {
+            throw new SecurityException("Wrapper template has an invalid string pool");
+        }
+        boolean utf8 = (flags & 0x100) != 0;
+        int foundIndex = -1;
+        int oldStart = -1;
+        int oldEnd = -1;
+        for (int index = 0; index < stringCount; index++) {
+            int relative = getI32(xml, poolOffset + headerSize + index * 4);
+            int start = poolOffset + stringsStart + relative;
+            DecodedString decoded = decodePoolString(xml, start, utf8,
+                    poolOffset + poolSize);
+            if (match.equals(decoded.value)) {
+                if (foundIndex >= 0) {
+                    throw new SecurityException("Wrapper template string marker is ambiguous");
+                }
+                foundIndex = index;
+                oldStart = start;
+                oldEnd = decoded.end;
+            }
+        }
+        if (foundIndex < 0) {
+            throw new SecurityException("Wrapper template string marker is missing: " + match);
+        }
+        byte[] encoded = encodePoolString(replacement, utf8);
+        int rawDelta = encoded.length - (oldEnd - oldStart);
+        int unalignedPoolSize = poolSize + rawDelta;
+        int padding = (4 - (unalignedPoolSize & 3)) & 3;
+        int totalDelta = rawDelta + padding;
+        byte[] result = new byte[xml.length + totalDelta];
+        System.arraycopy(xml, 0, result, 0, oldStart);
+        System.arraycopy(encoded, 0, result, oldStart, encoded.length);
+        int afterString = oldStart + encoded.length;
+        int oldPoolEnd = poolOffset + poolSize;
+        System.arraycopy(xml, oldEnd, result, afterString, oldPoolEnd - oldEnd);
+        int newPoolEnd = oldPoolEnd + totalDelta;
+        System.arraycopy(xml, oldPoolEnd, result, newPoolEnd, xml.length - oldPoolEnd);
+        putI32(result, 4, xml.length + totalDelta);
+        putI32(result, poolOffset + 4, poolSize + totalDelta);
+        int replacedOffset = getI32(xml, poolOffset + headerSize + foundIndex * 4);
+        for (int index = 0; index < stringCount; index++) {
+            int position = poolOffset + headerSize + index * 4;
+            int relative = getI32(xml, position);
+            putI32(result, position, relative > replacedOffset ? relative + rawDelta : relative);
+        }
+        if (stylesStart != 0) putI32(result, poolOffset + 24, stylesStart + rawDelta);
+        return result;
+    }
+
+    private static final class DecodedString {
+        final String value;
+        final int end;
+
+        DecodedString(String value, int end) {
+            this.value = value;
+            this.end = end;
+        }
+    }
+
+    private static DecodedString decodePoolString(byte[] value, int offset, boolean utf8,
+            int limit) throws Exception {
+        if (utf8) {
+            int[] utf16Length = readLength8(value, offset, limit);
+            int[] byteLength = readLength8(value, utf16Length[1], limit);
+            int start = byteLength[1];
+            int end = start + byteLength[0];
+            if (end >= limit || value[end] != 0) {
+                throw new SecurityException("Wrapper template has a malformed UTF-8 string");
+            }
+            return new DecodedString(new String(value, start, byteLength[0],
+                    StandardCharsets.UTF_8), end + 1);
+        }
+        int[] length = readLength16(value, offset, limit);
+        int bytes = Math.multiplyExact(length[0], 2);
+        int end = length[1] + bytes;
+        if (end + 1 >= limit || value[end] != 0 || value[end + 1] != 0) {
+            throw new SecurityException("Wrapper template has a malformed UTF-16 string");
+        }
+        return new DecodedString(new String(value, length[1], bytes,
+                StandardCharsets.UTF_16LE), end + 2);
+    }
+
+    private static byte[] encodePoolString(String value, boolean utf8) throws Exception {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        if (utf8) {
+            byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+            writeLength8(output, value.length());
+            writeLength8(output, bytes.length);
+            output.write(bytes);
+            output.write(0);
+        } else {
+            byte[] bytes = value.getBytes(StandardCharsets.UTF_16LE);
+            writeLength16(output, value.length());
+            output.write(bytes);
+            output.write(0);
+            output.write(0);
+        }
+        return output.toByteArray();
+    }
+
+    private static int[] readLength8(byte[] value, int offset, int limit) {
+        if (offset >= limit) throw new SecurityException("Truncated string length");
+        int first = value[offset] & 0xff;
+        if ((first & 0x80) == 0) return new int[] {first, offset + 1};
+        if (offset + 1 >= limit) throw new SecurityException("Truncated string length");
+        return new int[] {((first & 0x7f) << 8) | (value[offset + 1] & 0xff), offset + 2};
+    }
+
+    private static int[] readLength16(byte[] value, int offset, int limit) {
+        if (offset + 1 >= limit) throw new SecurityException("Truncated string length");
+        int first = getU16(value, offset);
+        if ((first & 0x8000) == 0) return new int[] {first, offset + 2};
+        if (offset + 3 >= limit) throw new SecurityException("Truncated string length");
+        return new int[] {((first & 0x7fff) << 16) | getU16(value, offset + 2), offset + 4};
+    }
+
+    private static void writeLength8(ByteArrayOutputStream output, int length) {
+        if (length > 0x7fff) throw new SecurityException("String is too long");
+        if (length > 0x7f) output.write((length >> 8) | 0x80);
+        output.write(length & 0xff);
+    }
+
+    private static void writeLength16(ByteArrayOutputStream output, int length) {
+        if (length > 0x7fffffff) throw new SecurityException("String is too long");
+        if (length > 0x7fff) {
+            output.write((length >> 16) & 0xff);
+            output.write(((length >> 24) & 0x7f) | 0x80);
+        }
+        output.write(length & 0xff);
+        output.write((length >> 8) & 0xff);
+    }
+
+    private static int getU16(byte[] value, int offset) {
+        if (offset < 0 || offset + 2 > value.length) {
+            throw new SecurityException("Binary XML read exceeds bounds");
+        }
+        return (value[offset] & 0xff) | (value[offset + 1] & 0xff) << 8;
+    }
+
+    private static int getI32(byte[] value, int offset) {
+        if (offset < 0 || offset + 4 > value.length) {
+            throw new SecurityException("Binary XML read exceeds bounds");
+        }
+        return (value[offset] & 0xff) | (value[offset + 1] & 0xff) << 8
+                | (value[offset + 2] & 0xff) << 16 | value[offset + 3] << 24;
+    }
+
+    private static void putI32(byte[] value, int offset, int current) {
+        if (offset < 0 || offset + 4 > value.length) {
+            throw new SecurityException("Binary XML write exceeds bounds");
+        }
+        value[offset] = (byte) current;
+        value[offset + 1] = (byte) (current >> 8);
+        value[offset + 2] = (byte) (current >> 16);
+        value[offset + 3] = (byte) (current >> 24);
+    }
     private static int replaceAll(byte[] value, byte[] match, byte[] replacement) {
         int count = 0;
         for (int offset = 0; offset <= value.length - match.length; offset++) {

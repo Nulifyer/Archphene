@@ -33,6 +33,7 @@ $placeholder = "org.archphene.linux.p00000000000000000000000000000000"
 $manifest = [IO.File]::ReadAllText((Join-Path $App "AndroidManifest.xml"))
 $manifest = $manifest.Replace('package="org.archphene.linux.kcalc"', 'package="' + $placeholder + '"')
 $manifest = $manifest.Replace('android:debuggable="true"', 'android:debuggable="false"')
+$manifest = $manifest.Replace('@drawable/kcalc_icon', '@drawable/linux_app_icon')
 [IO.File]::WriteAllText((Join-Path $Out "AndroidManifest.xml"),$manifest,[Text.UTF8Encoding]::new($false))
 Run-Native { & (Join-Path $BuildTools "aapt2.exe") compile --dir (Join-Path $App "res") -o (Join-Path $Out "compiled/res.zip") } "aapt2 compile template"
 Run-Native { & (Join-Path $BuildTools "aapt2.exe") link -o (Join-Path $Out "unsigned.apk") -I (Join-Path $Sdk "platforms/android-36/android.jar") --manifest (Join-Path $Out "AndroidManifest.xml") --java (Join-Path $Out "gen") (Join-Path $Out "compiled/res.zip") } "aapt2 link template"

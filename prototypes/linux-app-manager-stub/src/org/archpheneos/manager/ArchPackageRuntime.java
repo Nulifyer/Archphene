@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -69,6 +70,19 @@ public final class ArchPackageRuntime {
         }
     }
 
+    public static final class FileOwner {
+        public final String repository;
+        public final String name;
+        public final String version;
+        public final String path;
+
+        FileOwner(String repository, String name, String version, String path) {
+            this.repository = repository;
+            this.name = name;
+            this.version = version;
+            this.path = path;
+        }
+    }
     public static final class StagedTransaction {
         public final String sourcePackage;
         public final List<ResolvedPackage> packages;
@@ -81,6 +95,13 @@ public final class ArchPackageRuntime {
             this.packages = Collections.unmodifiableList(new ArrayList<>(packages));
             this.root = root;
             this.runtimePackId = runtimePackId;
+        }
+
+        String sourceVersion() {
+            for (ResolvedPackage value : packages) {
+                if (sourcePackage.equals(value.name)) return value.version;
+            }
+            throw new IllegalStateException("Resolved transaction source package is missing");
         }
     }
 
@@ -110,6 +131,54 @@ public final class ArchPackageRuntime {
                 new File(sync, "extra.db"), 32 * 1024 * 1024L);
     }
 
+    public static synchronized List<FileOwner> searchFileOwners(Context context, String query)
+            throws Exception {
+        String normalized = query == null ? "" : query.trim();
+        if (!normalized.matches("[a-zA-Z0-9@._+:-]{2,128}")) {
+            throw new IllegalArgumentException("Invalid executable or file search");
+        }
+        File state = state(context);
+        File database = directory(state, "db");
+        File sync = directory(database, "sync");
+        refreshFileDatabaseIfNeeded("core", new File(sync, "core.files"), 8L * 1024 * 1024);
+        refreshFileDatabaseIfNeeded("extra", new File(sync, "extra.files"), 64L * 1024 * 1024);
+        File root = directory(state, "root");
+        File config = new File(state, "pacman.conf");
+        writePacmanConfig(config);
+        Result result = pacman(context, "--config", config.getPath(), "--root", root.getPath(),
+                "--dbpath", database.getPath(), "-F", "--machinereadable", normalized);
+        if (result.exitCode != 0 && result.output.trim().length() > 0) {
+            throw new IllegalStateException("Arch file search failed\n" + result.output);
+        }
+        return parseFileOwners(result.output);
+    }
+
+    private static void refreshFileDatabaseIfNeeded(String repository, File target, long limit)
+            throws Exception {
+        if (target.isFile() && target.length() > 0
+                && System.currentTimeMillis() - target.lastModified() < 24L * 60 * 60_000) return;
+        download("https://geo.mirror.pkgbuild.com/" + repository + "/os/x86_64/"
+                + repository + ".files", target, limit);
+    }
+
+    static List<FileOwner> parseFileOwners(String output) {
+        ArrayList<FileOwner> owners = new ArrayList<>();
+        LinkedHashSet<String> seen = new LinkedHashSet<>();
+        for (String line : output.split("\\r?\\n")) {
+            String[] fields = line.split("\\u0000", -1);
+            if (fields.length != 4 || !fields[0].matches("(?:core|extra)")
+                    || !fields[1].matches("[a-zA-Z0-9@._+:-]{1,128}")
+                    || fields[2].isEmpty() || !fields[3].matches("[a-zA-Z0-9@._+:/-]{1,512}")) {
+                continue;
+            }
+            String identity = fields[0] + "/" + fields[1];
+            if (seen.add(identity)) {
+                owners.add(new FileOwner(fields[0], fields[1], fields[2], fields[3]));
+            }
+            if (owners.size() >= 50) break;
+        }
+        return owners;
+    }
     public static synchronized List<ResolvedPackage> resolve(Context context, String packageName)
             throws Exception {
         return resolve(context, packageName, new String[0]);
@@ -129,10 +198,7 @@ public final class ArchPackageRuntime {
         File root = directory(state, "root");
         File cache = directory(state, "cache");
         File config = new File(state, "pacman.conf");
-        writeText(config, "[options]\nArchitecture = x86_64\n"
-                + "SigLevel = Required DatabaseOptional\nLocalFileSigLevel = Required\n\n"
-                + "[core]\nServer = https://geo.mirror.pkgbuild.com/core/os/x86_64\n\n"
-                + "[extra]\nServer = https://geo.mirror.pkgbuild.com/extra/os/x86_64\n");
+        writePacmanConfig(config);
         String separator = "__ARCHPHENE__";
         ArrayList<String> arguments = new ArrayList<>(Arrays.asList(
                 "--config", config.getPath(), "--root", root.getPath(),
@@ -170,6 +236,12 @@ public final class ArchPackageRuntime {
         return packages;
     }
 
+    private static void writePacmanConfig(File config) throws Exception {
+        writeText(config, "[options]\nArchitecture = x86_64\n"
+                + "SigLevel = Required DatabaseOptional\nLocalFileSigLevel = Required\n\n"
+                + "[core]\nServer = https://geo.mirror.pkgbuild.com/core/os/x86_64\n\n"
+                + "[extra]\nServer = https://geo.mirror.pkgbuild.com/extra/os/x86_64\n");
+    }
     public static Verification downloadAndVerify(Context context, ResolvedPackage value)
             throws Exception {
         Object lock = DOWNLOAD_LOCKS.computeIfAbsent(value.filename, ignored -> new Object());
@@ -205,9 +277,36 @@ public final class ArchPackageRuntime {
 
     public static StagedTransaction stageTransaction(Context context, String packageName,
             ProgressCallback progress) throws Exception {
+        return stageTransaction(context, packageName, packageName, progress);
+    }
+
+    public static StagedTransaction stageTransaction(Context context, String packageName,
+            String executableName, ProgressCallback progress) throws Exception {
         if (progress == null) throw new IllegalArgumentException("Progress callback is required");
+        if (executableName == null
+                || !executableName.matches("[a-zA-Z0-9@._+:-]{1,128}")) {
+            throw new IllegalArgumentException("Invalid desktop executable name");
+        }
         progress.onProgress(5, "Resolving signed Arch transaction");
-        List<ResolvedPackage> packages = resolve(context, packageName, "qt6-wayland");
+        List<ResolvedPackage> packages = resolve(context, packageName);
+        ArrayList<String> bridgePackages = new ArrayList<>();
+        if (containsPackage(packages, "qt6-base")
+                && !containsPackage(packages, "qt6-wayland")) {
+            bridgePackages.add("qt6-wayland");
+        }
+        if (containsPackage(packages, "gtk3")) {
+            if (!containsPackage(packages, "libjpeg-turbo")) {
+                bridgePackages.add("libjpeg-turbo");
+            }
+            if (!containsPackage(packages, "libtiff")) bridgePackages.add("libtiff");
+            if (!containsPackage(packages, "shared-mime-info")) {
+                bridgePackages.add("shared-mime-info");
+            }
+        }
+        if (!bridgePackages.isEmpty()) {
+            packages = resolve(context, packageName,
+                    bridgePackages.toArray(new String[0]));
+        }
         File staging = new File(state(context), "staging/" + packageName);
         deleteRecursively(staging);
         File root = new File(staging, "root");
@@ -224,9 +323,11 @@ public final class ArchPackageRuntime {
             downloadAndVerify(context, value);
             progress.onProgress(Math.min(59, base + 1), "Staging verified " + value.name);
             File archive = new File(downloads, value.filename.replace(':', '_'));
-            stageVerifiedArchive(context, archive, root, packageName);
+            stageVerifiedArchive(context, archive, root, executableName);
         }
-        File executable = new File(root, "usr/bin/" + packageName).getCanonicalFile();
+        progress.onProgress(60, "Preparing shared toolkit data");
+        prepareSharedData(context, root);
+        File executable = new File(root, "usr/bin/" + executableName).getCanonicalFile();
         if (!executable.isFile() || !executable.getPath().startsWith(root.getCanonicalPath()
                 + File.separator)) {
             deleteRecursively(staging);
@@ -234,24 +335,32 @@ public final class ArchPackageRuntime {
         }
         progress.onProgress(62, "Publishing verified runtime pack");
         RuntimePackStore.Pack pack = RuntimePackStore.build(
-                context, packageName, packages, root);
+                context, packageName, executableName, packages, root);
         progress.onProgress(65, "Runtime pack ready");
         return new StagedTransaction(packageName, packages, root, pack.id);
     }
 
     private static void stageVerifiedArchive(Context context, File archive, File root,
-            String packageName) throws Exception {
+            String executableName) throws Exception {
         Result namesResult = runTool(context, "libarchphene_bsdtar.so",
                 Arrays.asList("-tf", archive.getPath()));
         if (namesResult.exitCode != 0) {
             throw new SecurityException("Could not inspect verified Arch package archive");
         }
         String[] names = namesResult.output.split("\\r?\\n");
-        boolean hasSelectedEntry = false;
+        boolean containsExecutable = false;
         for (String entry : names) {
             validateArchivePath(entry);
-            if (isRuntimeLibraryEntry(entry) || entry.equals("usr/bin/" + packageName)) {
-                hasSelectedEntry = true;
+            if (entry.equals("usr/bin/" + executableName)) containsExecutable = true;
+        }
+        boolean hasSelectedEntry = containsExecutable;
+        if (!hasSelectedEntry) {
+            for (String entry : names) {
+                if (isRuntimeLibraryEntry(entry) || isRuntimeToolEntry(entry)
+                        || isSharedRuntimeDataEntry(entry)) {
+                    hasSelectedEntry = true;
+                    break;
+                }
             }
         }
         if (!hasSelectedEntry) return;
@@ -269,7 +378,10 @@ public final class ArchPackageRuntime {
             String entry = names[index];
             validateArchivePath(entry);
             boolean selected = isRuntimeLibraryEntry(entry)
-                    || entry.equals("usr/bin/" + packageName);
+                    || isRuntimeToolEntry(entry)
+                    || entry.equals("usr/bin/" + executableName)
+                    || containsExecutable && isSourceRuntimeDataEntry(entry)
+                    || isSharedRuntimeDataEntry(entry);
             if (!selected) continue;
             char type = verbose[index].isEmpty() ? '?' : verbose[index].charAt(0);
             File destination = safeStagingFile(root, entry);
@@ -312,6 +424,112 @@ public final class ArchPackageRuntime {
         if (entry.endsWith("/")) return true;
         String name = entry.substring(entry.lastIndexOf('/') + 1);
         return name.endsWith(".so") || name.contains(".so.");
+    }
+    private static boolean isSourceRuntimeDataEntry(String entry) {
+        return entry.equals("usr/share/") || entry.startsWith("usr/share/");
+    }
+
+    private static boolean isRuntimeToolEntry(String entry) {
+        return "usr/bin/glib-compile-schemas".equals(entry)
+                || "usr/bin/update-mime-database".equals(entry);
+    }
+
+    private static boolean isSharedRuntimeDataEntry(String entry) {
+        return entry.startsWith("usr/share/glvnd/egl_vendor.d/")
+                || entry.startsWith("usr/share/vulkan/icd.d/")
+                || entry.startsWith("usr/share/drirc.d/")
+                || entry.startsWith("usr/share/glib-2.0/schemas/")
+                || entry.startsWith("usr/share/X11/xkb/")
+                || entry.startsWith("usr/share/xkeyboard-config-2/")
+                || entry.startsWith("usr/share/mime/")
+                || entry.startsWith("usr/share/themes/")
+                || entry.startsWith("usr/share/icons/Adwaita/")
+                || entry.startsWith("usr/share/gtksourceview-");
+    }
+
+    private static void prepareSharedData(Context context, File root) throws Exception {
+        File nativeDir = new File(context.getApplicationInfo().nativeLibraryDir)
+                .getCanonicalFile();
+        File libraryPath = new File(root, "usr/lib").getCanonicalFile();
+
+        File schemas = new File(root, "usr/share/glib-2.0/schemas").getCanonicalFile();
+        File[] schemaFiles = schemas.isDirectory()
+                ? schemas.listFiles((directory, name) -> name.endsWith(".xml")) : null;
+        if (schemaFiles != null && schemaFiles.length > 0) {
+            File compiler = new File(root, "usr/bin/glib-compile-schemas").getCanonicalFile();
+            if (!compiler.isFile()) {
+                throw new SecurityException("Verified closure has schemas but no schema compiler");
+            }
+            String output = runSharedDataTool(context, root, nativeDir, libraryPath,
+                    Arrays.asList(compiler.getPath(), "--strict", schemas.getPath()));
+            File compiled = new File(schemas, "gschemas.compiled");
+            if (!compiled.isFile() || compiled.length() <= 0
+                    || compiled.length() > 16L * 1024 * 1024) {
+                throw new SecurityException("Could not compile verified GSettings schemas "
+                        + output);
+            }
+            android.util.Log.i("ArchphenePackages", "compiled " + schemaFiles.length
+                    + " verified GSettings schemas");
+        }
+
+        File mime = new File(root, "usr/share/mime").getCanonicalFile();
+        File mimePackages = new File(mime, "packages");
+        File[] mimeFiles = mimePackages.isDirectory()
+                ? mimePackages.listFiles((directory, name) -> name.endsWith(".xml")) : null;
+        if (mimeFiles != null && mimeFiles.length > 0) {
+            File updater = new File(root, "usr/bin/update-mime-database").getCanonicalFile();
+            if (!updater.isFile()) {
+                throw new SecurityException("Verified closure has MIME data but no cache builder");
+            }
+            String output = runSharedDataTool(context, root, nativeDir, libraryPath,
+                    Arrays.asList(updater.getPath(), mime.getPath()));
+            File cache = new File(mime, "mime.cache");
+            if (!cache.isFile() || cache.length() <= 0
+                    || cache.length() > 32L * 1024 * 1024) {
+                throw new SecurityException("Could not compile verified shared MIME database "
+                        + output);
+            }
+            android.util.Log.i("ArchphenePackages", "compiled " + mimeFiles.length
+                    + " verified shared MIME definitions");
+        }
+    }
+
+    private static String runSharedDataTool(Context context, File root, File nativeDir,
+            File libraryPath, List<String> arguments) throws Exception {
+        File loader = executable(nativeDir, "libarchphene_ld.so");
+        ArrayList<String> command = new ArrayList<>();
+        command.add(loader.getPath());
+        command.add("--library-path");
+        command.add(libraryPath.getPath());
+        command.addAll(arguments);
+        ProcessBuilder builder = new ProcessBuilder(command);
+        builder.directory(state(context));
+        builder.redirectErrorStream(true);
+        Map<String, String> environment = builder.environment();
+        environment.put("HOME", directory(state(context), "home").getPath());
+        environment.put("TMPDIR", directory(state(context), "tmp").getPath());
+        environment.put("LANG", "C");
+        environment.put("LC_ALL", "C");
+        environment.put("GLIBC_TUNABLES", "glibc.pthread.rseq=0");
+        environment.put("LD_PRELOAD", executable(nativeDir,
+                "libarchphene_path_bridge.so").getPath());
+        environment.put("ARCHPHENE_RUNTIME_ROOT", root.getPath());
+        Process process = builder.start();
+        String output;
+        try (InputStream input = process.getInputStream()) {
+            output = readBounded(input, 1024 * 1024);
+        }
+        int exitCode = process.waitFor();
+        if (exitCode != 0) {
+            throw new SecurityException("Verified shared-data tool failed (exit "
+                    + exitCode + ") " + output);
+        }
+        return output;
+    }    private static boolean containsPackage(List<ResolvedPackage> packages, String name) {
+        for (ResolvedPackage value : packages) {
+            if (name.equals(value.name)) return true;
+        }
+        return false;
     }
     private static void extractArchiveFile(Context context, File archive, String entry,
             File destination) throws Exception {
@@ -367,7 +585,7 @@ public final class ArchPackageRuntime {
         }
         String normalized = target;
         if (target.startsWith("/")) {
-            if (!target.startsWith("/usr/lib/")) {
+            if (!target.startsWith("/usr/lib/") && !target.startsWith("/usr/share/")) {
                 throw new SecurityException("Arch package contains an unsafe absolute symlink");
             }
             java.nio.file.Path logicalParent = java.nio.file.Paths.get("/" + entry).getParent();
@@ -626,6 +844,19 @@ public final class ArchPackageRuntime {
         return output.toString(StandardCharsets.UTF_8.name());
     }
 
+    static void releaseStaging(Context context, StagedTransaction staged) {
+        if (staged == null || staged.root == null) return;
+        try {
+            File stagingRoot = new File(state(context), "staging").getCanonicalFile();
+            File transaction = staged.root.getParentFile().getCanonicalFile();
+            if (!transaction.getParentFile().equals(stagingRoot)) {
+                throw new SecurityException("Transaction staging path is outside package state");
+            }
+            deleteRecursively(transaction);
+        } catch (Exception error) {
+            android.util.Log.w("ArchphenePackages", "Could not release transaction staging", error);
+        }
+    }
     private static void deleteRecursively(File file) {
         StructStat stat;
         try {

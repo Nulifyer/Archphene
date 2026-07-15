@@ -55,6 +55,16 @@ public final class RuntimeFdLauncher {
     public static Result runGlibc(ContentResolver resolver, Uri programUri,
             Uri loaderUri, Uri[] libraryUris, String[] libraryNames, File cacheRoot,
             Map<String, String> environment) throws Exception {
+        return runGlibc(resolver, programUri, loaderUri, libraryUris, libraryNames,
+                cacheRoot, environment, "program");
+    }
+
+    public static Result runGlibc(ContentResolver resolver, Uri programUri,
+            Uri loaderUri, Uri[] libraryUris, String[] libraryNames, File cacheRoot,
+            Map<String, String> environment, String programName) throws Exception {
+        if (programName == null || !programName.matches("[a-zA-Z0-9@._+:-]{1,128}")) {
+            throw new IllegalArgumentException("Invalid runtime program name");
+        }
         if (libraryUris == null || libraryNames == null
                 || libraryUris.length != libraryNames.length
                 || libraryUris.length == 0 || libraryUris.length > MAX_LIBRARIES) {
@@ -84,6 +94,12 @@ public final class RuntimeFdLauncher {
                         .append(libraryNames[index]).append('\n');
             }
             Map<String, String> launchEnvironment = new HashMap<>(environment);
+            launchEnvironment.put("ARCHPHENE_RUNTIME_LIB", links.getAbsolutePath());
+            launchEnvironment.putIfAbsent("LIBGL_DRIVERS_PATH", links.getAbsolutePath());
+            if (linkNames.contains("libarchphene_path_bridge.so")) {
+                launchEnvironment.put("LD_PRELOAD",
+                        new File(links, "libarchphene_path_bridge.so").getAbsolutePath());
+            }
             if (launchEnvironment.containsKey("QT_QPA_PLATFORM_PLUGIN_PATH")) {
                 launchEnvironment.put("QT_QPA_PLATFORM_PLUGIN_PATH",
                         new File(links, "platforms").getAbsolutePath());
@@ -95,7 +111,8 @@ public final class RuntimeFdLauncher {
             int exitCode = nativeRunGlibc(program.getFd(), loader.getFd(),
                     manifest.toString().getBytes(StandardCharsets.UTF_8),
                     links.getAbsolutePath().getBytes(StandardCharsets.UTF_8),
-                    encodeEnvironment(launchEnvironment), output);
+                    encodeEnvironment(launchEnvironment),
+                    programName.getBytes(StandardCharsets.UTF_8), output);
             return result(exitCode, output);
         } finally {
             for (int index = descriptors.size() - 1; index >= 0; index--) {
@@ -121,7 +138,7 @@ public final class RuntimeFdLauncher {
         for (Map.Entry<String, String> entry : environment.entrySet()) {
             String key = entry.getKey();
             String value = entry.getValue();
-            if (key == null || !key.matches("[A-Z][A-Z0-9_]{0,63}")
+            if (key == null || !key.matches("[A-Z_][A-Z0-9_]{0,63}")
                     || value == null || value.length() > 4096
                     || value.indexOf('\n') >= 0 || value.indexOf('\r') >= 0
                     || value.indexOf('\0') >= 0) {
@@ -212,5 +229,5 @@ public final class RuntimeFdLauncher {
     private static native int nativeRunFd(int fd, byte[] output);
     private static native int nativeRunGlibc(int programFd, int loaderFd,
             byte[] libraryManifest, byte[] linkDirectory, byte[] environment,
-            byte[] output);
+            byte[] programName, byte[] output);
 }

@@ -56,7 +56,7 @@ final class PackageInstallCoordinator {
                     ApkUpdateInstaller.Phase.DOWNLOAD, 3,
                     "Resolving signed Arch transaction", "", false);
             ArchPackageRuntime.StagedTransaction staged = ArchPackageRuntime.stageTransaction(
-                    activity.getApplicationContext(), source.name,
+                    activity.getApplicationContext(), source.name, source.executable,
                     (percent, status) -> update(activity, listener, id,
                             PackageInstallJobStore.RUNNING,
                             ApkUpdateInstaller.Phase.DOWNLOAD, percent, status, "", false));
@@ -72,8 +72,10 @@ final class PackageInstallCoordinator {
                 update(activity, listener, id, PackageInstallJobStore.RUNNING,
                         ApkUpdateInstaller.Phase.INSTALL, 15,
                         "Building and signing Android wrapper", "", false);
+                String resolvedVersion = staged.sourceVersion();
                 result = ArchWrapperAssembler.assembleQt(
-                        activity, source.repository, source.name);
+                        activity, source.repository, source.name, resolvedVersion,
+                        source.executable);
             } finally {
                 WRAPPER_MUTATION.release();
             }
@@ -154,6 +156,7 @@ final class PackageInstallCoordinator {
                         } else if (phase == ApkUpdateInstaller.Phase.ERROR) {
                             finalError = status;
                         }
+                        ArchPackageRuntime.releaseStaging(activity, staged);
                         releaseInstallSlot(installSlot);
                         ApkUpdateInstaller.Operation current = installed[0];
                         if (current != null) OPERATIONS.remove(id, current);
@@ -176,6 +179,7 @@ final class PackageInstallCoordinator {
             }
         } catch (Exception error) {
             OPERATIONS.remove(id, preparation);
+            ArchPackageRuntime.releaseStaging(activity, staged);
             releaseInstallSlot(installSlot);
             android.util.Log.e("ArchpheneManager",
                     "Android installer handoff failed for " + id, error);

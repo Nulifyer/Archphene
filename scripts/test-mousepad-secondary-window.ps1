@@ -54,6 +54,18 @@ function Map-Point([int[]]$Bounds, [int]$FrameWidth, [int]$FrameHeight,
         ($Bounds[1] + [Math]::Round($LocalY * $height / $FrameHeight)))
 }
 
+function Map-FitCenterPoint([int[]]$Bounds, [int]$ContentWidth, [int]$ContentHeight,
+        [int]$LocalX, [int]$LocalY) {
+    $viewWidth = $Bounds[2] - $Bounds[0]
+    $viewHeight = $Bounds[3] - $Bounds[1]
+    $scale = [Math]::Min($viewWidth / $ContentWidth, $viewHeight / $ContentHeight)
+    $left = ($viewWidth - $ContentWidth * $scale) / 2
+    $top = ($viewHeight - $ContentHeight * $scale) / 2
+    return @(
+        ($Bounds[0] + [Math]::Round($left + $LocalX * $scale)),
+        ($Bounds[1] + [Math]::Round($top + $LocalY * $scale)))
+}
+
 Adb @("shell", "pm", "clear", $Package) | Out-Null
 Adb @("logcat", "-c") | Out-Null
 Adb @("shell", "am", "start", "--windowingMode", "5", "-n", "$Package/.MainActivity") | Out-Null
@@ -64,6 +76,7 @@ $main = [regex]::Match(
 $mainId = [int]$main.Groups[1].Value
 $mainWidth = [int]$main.Groups[2].Value
 $mainHeight = [int]$main.Groups[3].Value
+$surfaceHeight = $mainHeight
 $mainBounds = Read-ActiveImageBounds "mousepad-freeform-main"
 $settledFrames = [regex]::Matches((Read-BridgeLog), 'output frame=([0-9]+)x([0-9]+)')
 if ($settledFrames.Count -eq 0) {
@@ -72,7 +85,7 @@ if ($settledFrames.Count -eq 0) {
 $settledFrame = $settledFrames[$settledFrames.Count - 1]
 $mainWidth = [int]$settledFrame.Groups[1].Value
 $mainHeight = [int]$settledFrame.Groups[2].Value
-$edit = Map-Point $mainBounds $mainWidth $mainHeight 90 76
+$edit = Map-FitCenterPoint $mainBounds $mainWidth $mainHeight 90 103
 Adb @("shell", "input", "tap", [string]$edit[0], [string]$edit[1]) | Out-Null
 Wait-BridgeLog 'popup registry=.*:\d+,\d+,\d+,\d+,[1-9]\d*,[1-9]\d*,1,0;' 10 | Out-Null
 Adb @("shell", "input", "keyevent", "KEYCODE_MOVE_END") | Out-Null
@@ -102,7 +115,10 @@ Adb @("logcat", "-c") | Out-Null
 $close = Map-Point $childBounds $childWidth $childHeight ($childWidth - 14) 13
 Adb @("shell", "input", "tap", [string]$close[0], [string]$close[1]) | Out-Null
 $closeLog = Wait-BridgeLog "window id=$mainId parent=0 mapped=true active=true primary=true" 10
-if ($closeLog -match "window id=$childId .*mapped=true") {
+$latestParent = $closeLog.LastIndexOf(
+    "window id=$mainId parent=0 mapped=true active=true primary=true")
+$latestRegistry = $closeLog.Substring($latestParent)
+if ($latestRegistry -match "window id=$childId .*mapped=true") {
     throw "Preferences child remained mapped after its close control"
 }
 $appPid = (Adb @("shell", "pidof", $Package)) -join ""

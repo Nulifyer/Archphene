@@ -67,7 +67,9 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     private String toolkit;
     private String dataAssets;
     private String runtimeProbeUri;
+    private String runtimeProgramName = "program";
     private String runtimeLoaderUri;
+    private String runtimeDataUri;
     private String[] runtimeLibraryUris;
     private String[] runtimeLibraryNames;
     private boolean runtimeGui;
@@ -99,8 +101,10 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         if (runtimeProbeUri == null) loadManagerRuntimePack();
         independentWindows = shouldUseIndependentWindows();
         documentSession = new AndroidDocumentSession(this, logTag);
-        getWindow().setStatusBarColor(Color.TRANSPARENT);
-        getWindow().setNavigationBarColor(Color.BLACK);
+        int systemChrome = resolvedDarkAppearance() ? Color.rgb(35, 38, 41)
+                : Color.rgb(239, 240, 241);
+        getWindow().setStatusBarColor(systemChrome);
+        getWindow().setNavigationBarColor(systemChrome);
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
                 | WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
 
@@ -133,7 +137,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                         return holder[0] != null && holder[0].key(event);
                     }
                 });
-        compositorView.setBackgroundColor(Color.BLACK);
+        compositorView.setBackgroundColor(systemChrome);
         compositorView.setScaleType(ImageView.ScaleType.FIT_XY);
         compositorView.setClickable(true);
 
@@ -166,7 +170,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         installInputRouting();
 
         FrameLayout root = new FrameLayout(this);
-        root.setBackgroundColor(Color.BLACK);
+        root.setBackgroundColor(systemChrome);
         root.addView(compositorView, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
@@ -178,6 +182,14 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             });
         }
         setContentView(root);
+        if (Build.VERSION.SDK_INT >= 30 && getWindow().getInsetsController() != null) {
+            int lightBars = resolvedDarkAppearance() ? 0
+                    : android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                            | android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+            getWindow().getInsetsController().setSystemBarsAppearance(lightBars,
+                    android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                            | android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS);
+        }
         root.requestApplyInsets();
         compositorView.addOnLayoutChangeListener((view, left, top, right, bottom,
                 oldLeft, oldTop, oldRight, oldBottom) -> {
@@ -213,9 +225,14 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 throw new SecurityException("Manager returned an invalid runtime pack");
             }
             runtimeProbeUri = program;
+            runtimeProgramName = runtime.getString("program_name", "program");
             runtimeLoaderUri = loader;
             runtimeLibraryUris = libraries;
             runtimeLibraryNames = names;
+            runtimeDataUri = runtime.getString("data_uri");
+            String runtimeToolkit = runtime.getString("toolkit");
+            if ("qt6".equals(runtimeToolkit) || "gtk3".equals(runtimeToolkit)
+                    || "wayland".equals(runtimeToolkit)) toolkit = runtimeToolkit;
             runtimeGui = true;
             Log.i(logTag, "Loaded manager-owned runtime pack "
                     + runtime.getString("pack_id", "unknown"));
@@ -580,6 +597,12 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 environment.put("XDG_RUNTIME_DIR", runtimeDir.getAbsolutePath());
                 environment.put("WAYLAND_DISPLAY", "wayland-0");
                 environment.put("TMPDIR", tmp.getAbsolutePath());
+                File runtimeRoot = new File(getFilesDir(), "linux-runtime/root");
+                environment.put("ARCHPHENE_RUNTIME_ROOT", runtimeRoot.getAbsolutePath());
+                environment.put("XDG_DATA_DIRS",
+                        new File(runtimeRoot, "usr/share").getAbsolutePath());
+                environment.put("__EGL_VENDOR_LIBRARY_DIRS", new File(runtimeRoot,
+                        "usr/share/glvnd/egl_vendor.d").getAbsolutePath());
                 File fontconfig = copyAsset("fonts.conf",
                         new File(getFilesDir(), "fontconfig/fonts.conf"));
                 environment.put("FONTCONFIG_FILE", fontconfig.getAbsolutePath());
@@ -588,7 +611,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 RuntimeFdLauncher.Result result = RuntimeFdLauncher.runGlibc(
                         getContentResolver(), android.net.Uri.parse(runtimeProbeUri),
                         android.net.Uri.parse(runtimeLoaderUri), libraries,
-                        runtimeLibraryNames, getCacheDir(), environment);
+                        runtimeLibraryNames, getCacheDir(), environment,
+                        runtimeProgramName);
                 Log.i("ArchpheneRuntime", "Runtime GUI exit=" + result.exitCode);
                 logRuntimeOutput(result.output);
             } catch (Throwable error) {
@@ -649,6 +673,10 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             env.put("XDG_CONFIG_HOME", config.getAbsolutePath());
             env.put("XDG_RUNTIME_DIR", waylandRuntime.getAbsolutePath());
             env.put("WAYLAND_DISPLAY", "wayland-0");
+            if (getIntent().getBooleanExtra("archphene.wayland_debug", false)) {
+                env.put("WAYLAND_DEBUG", "client");
+                Log.i(logTag, "Wayland client protocol trace enabled");
+            }
             env.put("TMPDIR", tmp.getAbsolutePath());
             File fontconfig = copyAsset("fonts.conf", new File(getFilesDir(), "fontconfig/fonts.conf"));
             env.put("FONTCONFIG_FILE", fontconfig.getAbsolutePath());
@@ -671,13 +699,16 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         }
     }
 
+    private boolean resolvedDarkAppearance() {
+        boolean systemDark = (getResources().getConfiguration().uiMode
+                & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
+        return "dark".equals(appearanceTheme)
+                || (!"light".equals(appearanceTheme) && systemDark);
+    }
     private void applyToolkitEnvironment(
             Map<String, String> env, File runtimeLib, File configDir) throws IOException {
         Configuration configuration = getResources().getConfiguration();
-        boolean systemDark = (configuration.uiMode & Configuration.UI_MODE_NIGHT_MASK)
-                == Configuration.UI_MODE_NIGHT_YES;
-        boolean dark = "dark".equals(appearanceTheme)
-                || (!"light".equals(appearanceTheme) && systemDark);
+        boolean dark = resolvedDarkAppearance();
         int scalePercent = appearanceScalePercent;
         if (scalePercent == 0) {
             int smallestWidth = configuration.smallestScreenWidthDp;
@@ -708,7 +739,14 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 + " font=" + appearanceFontPercent + " pointSize=" + fontPointSize
                 + " materialYou="
                 + appearanceMaterialYou);
-        if ("gtk3".equals(toolkit)) {
+        if ("wayland".equals(toolkit)) {
+            env.put("EGL_PLATFORM", "wayland");
+            env.put("EGL_LOG_LEVEL", "debug");
+            env.put("LIBGL_ALWAYS_SOFTWARE", "true");
+            env.put("LIBGL_DEBUG", "verbose");
+            env.put("GALLIUM_DRIVER", "llvmpipe");
+            env.put("MESA_DEBUG", "1");
+        } else if ("gtk3".equals(toolkit)) {
             File root = new File(getFilesDir(), "linux-runtime/root");
             env.put("GDK_BACKEND", "wayland");
             env.put("GDK_SCALE", "1");
@@ -723,12 +761,15 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             env.put("GTK_DATA_PREFIX", new File(root, "usr").getAbsolutePath());
             env.put("XDG_DATA_DIRS", new File(root, "usr/share").getAbsolutePath());
             env.put("GIO_USE_VFS", "local");
-            env.put("GDK_PIXBUF_MODULE_FILE", new File(
-                    runtimeLib, "gdk-pixbuf-2.0/2.10.0/loaders.cache").getAbsolutePath());
+
+
             env.put("GSETTINGS_SCHEMA_DIR", new File(
                     root, "usr/share/glib-2.0/schemas").getAbsolutePath());
-            env.put("XKB_CONFIG_ROOT", new File(
-                    root, "usr/share/xkeyboard-config-2").getAbsolutePath());
+            File xkbRoot = new File(root, "usr/share/X11/xkb");
+            if (!xkbRoot.isDirectory()) {
+                xkbRoot = new File(root, "usr/share/xkeyboard-config-2");
+            }
+            env.put("XKB_CONFIG_ROOT", xkbRoot.getAbsolutePath());
             env.put("MOUSEPAD_PLUGIN_PATH", new File(runtimeLib, "mousepad/plugins").getAbsolutePath());
             env.put("GCONV_PATH", new File(root, "usr/lib/gconv").getAbsolutePath());
         } else {
@@ -744,9 +785,14 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             int fontPointSize, float appScale) throws IOException {
         File gtkConfig = new File(configDir, "gtk-3.0");
         gtkConfig.mkdirs();
-        int uiFontSize = Math.max(fontPointSize, Math.round(fontPointSize * appScale));
-        int controlHeight = Math.max(32, Math.round(28f * appScale));
-        int scrollbarSize = Math.max(14, Math.round(12f * appScale));
+        int uiFontSize = Math.max(fontPointSize,
+                Math.round(fontPointSize * 4f / 3f * appScale));
+        int controlHeight = Math.max(Math.round(48f * appScale), uiFontSize + 20);
+        int titleButtonSize = Math.max(Math.round(52f * appScale), uiFontSize + 20);
+        int scrollbarSize = Math.max(18, Math.round(12f * appScale));
+        int menuBorder = Math.max(2, Math.round(1.25f * appScale));
+        String outline = dark ? "rgba(255,255,255,0.28)" : "rgba(0,0,0,0.24)";
+        String shadow = dark ? "rgba(0,0,0,0.72)" : "rgba(0,0,0,0.38)";
         String settings = "[Settings]\n"
                 + "gtk-theme-name=" + (dark ? "Adwaita-dark" : "Adwaita") + "\n"
                 + "gtk-icon-theme-name=Adwaita\n"
@@ -760,6 +806,29 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 + "}\n"
                 + "button, entry, combobox, menuitem {\n"
                 + "  min-height: " + controlHeight + "px;\n"
+                + "}\n"
+                + "menubar > menuitem {\n"
+                + "  padding: 8px 14px;\n"
+                + "}\n"
+                + "menu {\n"
+                + "  border: " + menuBorder + "px solid " + outline + ";\n"
+                + "  box-shadow: inset 0 0 0 1px " + outline
+                + ", 0 8px 24px " + shadow + ";\n"
+                + "  padding: 4px;\n"
+                + "}\n"
+                + "menu menuitem {\n"
+                + "  padding: 8px 14px;\n"
+                + "}\n"
+                + "headerbar {\n"
+                + "  min-height: " + titleButtonSize + "px;\n"
+                + "}\n"
+                + "headerbar button.titlebutton, headerbar .titlebutton {\n"
+                + "  min-width: " + titleButtonSize + "px;\n"
+                + "  min-height: " + titleButtonSize + "px;\n"
+                + "  padding: 4px;\n"
+                + "}\n"
+                + "headerbar button.titlebutton image, headerbar .titlebutton image {\n"
+                + "  -gtk-icon-transform: scale(1.5);\n"
                 + "}\n"
                 + "scrollbar slider {\n"
                 + "  min-width: " + scrollbarSize + "px;\n"
@@ -882,13 +951,16 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             copyFile(shell, new File(directory, "libxdg-shell.so"));
         }
         if ("gtk3".equals(toolkit)) prepareGtkRuntime(runtimeLib);
-        if (dataAssets != null && !dataAssets.isBlank()) {
+        if (runtimeDataUri != null || dataAssets != null && !dataAssets.isBlank()) {
             File root = new File(getFilesDir(), "linux-runtime/root");
             deleteContents(root);
             root.mkdirs();
-            for (String asset : dataAssets.split(",")) {
-                extractZipAsset(asset.trim(), root);
+            if (dataAssets != null && !dataAssets.isBlank()) {
+                for (String asset : dataAssets.split(",")) {
+                    extractZipAsset(asset.trim(), root);
+                }
             }
+            if (runtimeDataUri != null) extractZipUri(runtimeDataUri, root);
         }
     }
 
@@ -967,23 +1039,52 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     }
 
     private void extractZipAsset(String name, File root) throws IOException {
+        try (InputStream input = getAssets().open(name)) {
+            extractZip(input, root);
+        }
+    }
+
+    private void extractZipUri(String value, File root) throws IOException {
+        try (InputStream input = getContentResolver().openInputStream(Uri.parse(value))) {
+            if (input == null) throw new IOException("Runtime provider returned no data stream");
+            extractZip(input, root);
+        }
+    }
+
+    private static void extractZip(InputStream input, File root) throws IOException {
         String rootPath = root.getCanonicalPath() + File.separator;
-        try (ZipInputStream zip = new ZipInputStream(getAssets().open(name))) {
+        int entries = 0;
+        long total = 0;
+        try (ZipInputStream zip = new ZipInputStream(input)) {
             ZipEntry entry;
+            byte[] buffer = new byte[64 * 1024];
             while ((entry = zip.getNextEntry()) != null) {
+                if (++entries > 100000) throw new IOException("Runtime data has too many entries");
                 File target = new File(root, entry.getName()).getCanonicalFile();
                 if (!target.getPath().startsWith(rootPath)) {
                     throw new IOException("Archive path escapes runtime root");
                 }
                 if (entry.isDirectory()) {
-                    target.mkdirs();
+                    if (!target.isDirectory() && !target.mkdirs()) {
+                        throw new IOException("Could not create runtime data directory");
+                    }
                     continue;
                 }
                 File parent = target.getParentFile();
-                if (parent != null) parent.mkdirs();
-                try (OutputStream output = new FileOutputStream(target)) {
-                    copy(zip, output);
+                if (parent != null && !parent.isDirectory() && !parent.mkdirs()) {
+                    throw new IOException("Could not create runtime data parent");
                 }
+                try (OutputStream output = new FileOutputStream(target)) {
+                    int count;
+                    while ((count = zip.read(buffer)) != -1) {
+                        total += count;
+                        if (total > 2L * 1024 * 1024 * 1024) {
+                            throw new IOException("Runtime data exceeds extraction bounds");
+                        }
+                        output.write(buffer, 0, count);
+                    }
+                }
+                target.setReadable(true, false);
             }
         }
     }

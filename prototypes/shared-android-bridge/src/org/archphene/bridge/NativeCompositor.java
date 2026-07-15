@@ -203,6 +203,9 @@ public final class NativeCompositor implements AutoCloseable {
                 command(WINDOW_COMPONENT, index, 6),
                 command(WINDOW_COMPONENT, index, 7),
                 command(WINDOW_COMPONENT, index, 8),
+                command(WINDOW_COMPONENT, index, 11),
+                command(WINDOW_COMPONENT, index, 12),
+                command(WINDOW_COMPONENT, index, 13),
                 windowText(index, titleLength, 4),
                 windowText(index, appIdLength, 5));
     }
@@ -224,11 +227,15 @@ public final class NativeCompositor implements AutoCloseable {
         public final int y;
         public final int width;
         public final int height;
+        public final int frameWidth;
+        public final int frameHeight;
+        public final int bufferScale;
         public final String title;
         public final String appId;
 
         WindowInfo(int id, int parentId, boolean mapped, boolean active, boolean primary,
-                int x, int y, int width, int height, String title, String appId) {
+                int x, int y, int width, int height, int frameWidth, int frameHeight,
+                int bufferScale, String title, String appId) {
             this.id = id;
             this.parentId = parentId;
             this.mapped = mapped;
@@ -238,6 +245,9 @@ public final class NativeCompositor implements AutoCloseable {
             this.y = y;
             this.width = width;
             this.height = height;
+            this.frameWidth = frameWidth;
+            this.frameHeight = frameHeight;
+            this.bufferScale = bufferScale;
             this.title = title;
             this.appId = appId;
         }

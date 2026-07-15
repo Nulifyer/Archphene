@@ -1,0 +1,24 @@
+{
+  "schema": "org.archphene.prebuilt-bridge.v1",
+  "architecture": "x86_64",
+  "gtkVersion": "3.24",
+  "purpose": "GTK3 Android-compatible SVG and pixbuf bridge",
+  "source": "Archphene no-Glycin Arch compatibility packages",
+  "files": [
+    {
+      "name": "libarchphene_gtk3_pixbuf.so",
+      "bytes": 293576,
+      "sha256": "b98a6d597694a9301fa71fa89cb186123185b9420d8d937ab5f34435c1d02df4"
+    },
+    {
+      "name": "libarchphene_gtk3_pixbufloader_svg.so",
+      "bytes": 280176,
+      "sha256": "460819675a9e9c87b9644f4659c276afc8da5720cd385e81e5440c6dde76cf9e"
+    },
+    {
+      "name": "libarchphene_gtk3_rsvg.so",
+      "bytes": 4756856,
+      "sha256": "e77538a5e3e87f93a0082495a275b7363c47c03e12204ab3884c311d74ae410a"
+    }
+  ]
+}

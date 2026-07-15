@@ -36,6 +36,7 @@ build_qt_template() {
   sed \
     -e "s/package=\"org.archphene.linux.kcalc\"/package=\"$placeholder\"/" \
     -e 's/android:debuggable="true"/android:debuggable="false"/' \
+    -e 's/@drawable\/kcalc_icon/@drawable\/linux_app_icon/g' \
     "$app/AndroidManifest.xml" > "$out/AndroidManifest.xml"
   "$bt/aapt2" compile --dir "$app/res" -o "$out/compiled/res.zip"
   "$bt/aapt2" link -o "$out/unsigned.apk" -I "$platform" \
@@ -99,6 +100,11 @@ done
 
 package_assets="$out/package-runtime/assets/package-runtime"
 package_libs="$out/package-runtime/lib/x86_64"
+gcc -shared -fPIC -O2 -Wall -Wextra -Werror \
+  -o "$package_libs/libarchphene_path_bridge.so" \
+  "$root/native/archphene-glibc-path-bridge/path_bridge.c" -ldl
+(cd "$root/prebuilt/gtk3-compat" && sha256sum --check SHA256SUMS)
+cp "$root"/prebuilt/gtk3-compat/x86_64/*.so "$package_libs/"
 cp "$root/prototypes/linux-app-manager-stub/assets/payload-hello-linux-amd64" \
   "$package_libs/libarchphene_runtime_probe.so"
 cp "$root/prototypes/linux-app-manager-stub/assets/payload-hello-dynamic-amd64" \

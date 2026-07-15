@@ -172,6 +172,11 @@ window.xml
 !/prebuilt/qt-bridge/SHA256SUMS
 !/prebuilt/qt-bridge/x86_64/
 !/prebuilt/qt-bridge/x86_64/*.so
+!/prebuilt/gtk3-compat/
+!/prebuilt/gtk3-compat/manifest.json
+!/prebuilt/gtk3-compat/SHA256SUMS
+!/prebuilt/gtk3-compat/x86_64/
+!/prebuilt/gtk3-compat/x86_64/*.so
 # Android resource images are source assets, not test screenshots
 !prototypes/**/res/**/*.png
 

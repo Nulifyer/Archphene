@@ -44,8 +44,10 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.Locale;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public final class MainActivity extends Activity {
+    private static final int REQUEST_UNINSTALL_LINUX_APP = 0x4150;
     private static int COLOR_BACKGROUND = Color.rgb(248, 250, 252);
     private static int COLOR_SURFACE = Color.rgb(240, 243, 245);
     private static int COLOR_SURFACE_ACTIVE = Color.rgb(216, 238, 248);
@@ -77,6 +79,7 @@ public final class MainActivity extends Activity {
     private LinearLayout packageJobDetail;
     private String packageJobDetailId = "";
     private InstalledLinuxAppCatalog.Entry packageJobDetailApp;
+    private final AtomicInteger packageSearchGeneration = new AtomicInteger();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -127,6 +130,13 @@ public final class MainActivity extends Activity {
         if (content != null && currentPage == 0) loadCatalog();
     }
 
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQUEST_UNINSTALL_LINUX_APP) return;
+        loadCatalog();
+        if (resultCode == RESULT_OK) showBanner("App uninstalled", false);
+    }
     private void applySystemPalette() {
         String requestedTheme = ManagerStateStore.themeMode(this);
         darkTheme = "dark".equals(requestedTheme) || !"light".equals(requestedTheme)
@@ -480,7 +490,8 @@ public final class MainActivity extends Activity {
         }
         return new ArchPackageRepository.PackageResult(
                 app.sourceId.substring(separator + 1), app.sourceId.substring(0, separator),
-                app.runtimeAbi.substring(6), app.sourceVersion, "", false);
+                app.runtimeAbi.substring(6), app.sourceVersion, "", false,
+                "usr/bin/" + app.executable, app.executable);
     }
     private View createTrackedRow(ArchPackageRepository.PackageResult app) {
         String stateKey = "tracked:" + app.name + ":" + app.architecture;
@@ -666,6 +677,7 @@ public final class MainActivity extends Activity {
             Toast.makeText(this, "Enter at least two characters", Toast.LENGTH_SHORT).show();
             return;
         }
+        int generation = packageSearchGeneration.incrementAndGet();
         progress.setVisibility(View.VISIBLE);
         results.removeAllViews();
         new Thread(() -> {
@@ -673,6 +685,7 @@ public final class MainActivity extends Activity {
                 List<ArchPackageRepository.PackageResult> found =
                         ArchPackageRepository.search(this, normalized);
                 runOnUiThread(() -> {
+                    if (generation != packageSearchGeneration.get()) return;
                     progress.setVisibility(View.GONE);
                     for (ArchPackageRepository.PackageResult app : found) {
                         results.addView(createSearchResultRow(app), spacedWrap(dp(6)));
@@ -686,6 +699,7 @@ public final class MainActivity extends Activity {
                 });
             } catch (Exception e) {
                 runOnUiThread(() -> {
+                    if (generation != packageSearchGeneration.get()) return;
                     progress.setVisibility(View.GONE);
                     showBanner("Repository search failed: " + e.getMessage(), true);
                 });
@@ -703,6 +717,9 @@ public final class MainActivity extends Activity {
         row.addView(name, matchWrap());
         row.addView(text(app.repository + " | " + app.architecture, 11, COLOR_PRIMARY), matchWrap());
         if (!app.description.isEmpty()) row.addView(text(app.description, 12, COLOR_MUTED), matchWrap());
+        if (!app.matchedFile.isEmpty()) {
+            row.addView(text("Matched file: /" + app.matchedFile, 11, COLOR_MUTED), matchWrap());
+        }
         if (app.flaggedOutOfDate) row.addView(text("Flagged out of date", 11, COLOR_WARNING), matchWrap());
         row.setOnClickListener(view -> showPackageResultDetail(app, false));
         return row;
@@ -1025,6 +1042,8 @@ public final class MainActivity extends Activity {
             @Override public void onItemSelected(AdapterView<?> parent, View view,
                     int position, long id) {
                 selectedVersion[0] = versionValues.get(position);
+                installVersion.setText(selectedVersion[0].equals(app.sourceVersion)
+                        ? "Repair installed version" : "Install selected version");
                 versionHealth.setText(versionHealthLabel(app.packageName,
                         selectedVersion[0], app.sourceVersion, state.availableVersion));
 
@@ -1070,8 +1089,13 @@ public final class MainActivity extends Activity {
         actions.addView(androidSettings, spacedWrap(dp(8)));
         Button uninstall = actionButton("Uninstall app", android.R.drawable.ic_menu_delete);
         uninstall.setTextColor(COLOR_ERROR);
-        uninstall.setOnClickListener(view -> startActivity(new Intent(Intent.ACTION_DELETE,
-                Uri.parse("package:" + app.packageName))));
+        uninstall.setOnClickListener(view -> {
+            Intent request = new Intent(Intent.ACTION_UNINSTALL_PACKAGE,
+                    Uri.parse("package:" + app.packageName));
+            request.putExtra(Intent.EXTRA_RETURN_RESULT, true);
+            showAppsPage();
+            startActivityForResult(request, REQUEST_UNINSTALL_LINUX_APP);
+        });
         actions.addView(uninstall, spacedWrap(dp(8)));
         page.addView(actions, spacedWrap(dp(6)));
         scroll.addView(page);
@@ -1178,7 +1202,11 @@ public final class MainActivity extends Activity {
             if (!pinned.isEmpty() && !pinned.equals(version)) {
                 ManagerStateStore.setPinnedVersion(this, app.packageName, version);
             }
-            showBanner(app.label + " " + version + " is already installed", false);
+            if ("pacman".equals(app.sourceType)) {
+                startOnDevicePackageInstall(packageSource(app));
+            } else {
+                showBanner(app.label + " " + version + " is already installed", false);
+            }
             return;
         }
         new Thread(() -> {
@@ -1900,7 +1928,8 @@ public final class MainActivity extends Activity {
         button.setCompoundDrawablesWithIntrinsicBounds(R.drawable.back_arrow, 0, 0, 0);
         button.setCompoundDrawablePadding(dp(5));
         button.setAllCaps(false);
-        button.setTextColor(COLOR_PRIMARY);
+        button.setTextColor(COLOR_MUTED);
+        button.setCompoundDrawableTintList(ColorStateList.valueOf(COLOR_MUTED));
         button.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
         button.setPadding(0, 0, 0, 0);
         button.setMinHeight(0);
