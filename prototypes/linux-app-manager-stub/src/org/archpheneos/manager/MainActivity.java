@@ -44,6 +44,8 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.Locale;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public final class MainActivity extends Activity {
@@ -1980,10 +1982,89 @@ public final class MainActivity extends Activity {
         }, "archphene-wrapper-signing-test").start();
     }
 
+    private void verifyConcurrentPackageIsolation() throws Exception {
+        ArchPackageRepository.PackageResult success = null;
+        Set<String> installedNames = new HashSet<>();
+        for (ManagedPackageStore.Entry entry : ManagedPackageStore.list(this)) {
+            installedNames.add(entry.name);
+        }
+        for (String candidate : new String[] {"tree", "jq", "ripgrep"}) {
+            if (installedNames.contains(candidate)) continue;
+            for (ArchPackageRepository.PackageResult value
+                    : ArchPackageRepository.search(this, candidate)) {
+                if (candidate.equals(value.name) && "x86_64".equals(value.architecture)) {
+                    success = value;
+                    break;
+                }
+            }
+            if (success != null) break;
+        }
+        if (success == null) {
+            throw new IllegalStateException("No isolated CLI test package is available");
+        }
+        ArchPackageRepository.PackageResult failure = new ArchPackageRepository.PackageResult(
+                "archphene-package-does-not-exist", "extra", "x86_64", "0",
+                "Intentional failure-isolation fixture", false);
+        String successId = PackageInstallJobStore.key(success);
+        String failureId = PackageInstallJobStore.key(failure);
+        PackageInstallJobStore.clear(this, successId);
+        PackageInstallJobStore.clear(this, failureId);
+        CountDownLatch terminal = new CountDownLatch(2);
+        Set<String> completed = Collections.synchronizedSet(new HashSet<>());
+        PackageInstallCoordinator.Listener listener = (state, isTerminal) -> {
+            if (isTerminal && (successId.equals(state.id) || failureId.equals(state.id))
+                    && completed.add(state.id)) {
+                terminal.countDown();
+            }
+        };
+        boolean successStarted = false;
+        boolean failureStarted = false;
+        ManagedPackageStore.Entry installedByTest = null;
+        try {
+            successStarted = PackageInstallCoordinator.start(this, success, listener);
+            failureStarted = PackageInstallCoordinator.start(this, failure, listener);
+            if (!successStarted || !failureStarted) {
+                throw new IllegalStateException("Concurrent package jobs did not start");
+            }
+            if (!terminal.await(4, TimeUnit.MINUTES)) {
+                throw new IllegalStateException("Concurrent package jobs timed out");
+            }
+            PackageInstallJobStore.Snapshot succeeded = PackageInstallJobStore.read(this, successId);
+            PackageInstallJobStore.Snapshot failed = PackageInstallJobStore.read(this, failureId);
+            if (!PackageInstallJobStore.COMPLETE.equals(succeeded.state)
+                    || !PackageInstallJobStore.ERROR.equals(failed.state)
+                    || failed.error.isEmpty()
+                    || PackageInstallCoordinator.operation(successId) != null
+                    || PackageInstallCoordinator.operation(failureId) != null) {
+                throw new IllegalStateException("Package failure escaped its transaction boundary");
+            }
+            for (ManagedPackageStore.Entry entry : ManagedPackageStore.list(this)) {
+                if (entry.name.equals(success.name)) {
+                    installedByTest = entry;
+                    break;
+                }
+            }
+            if (installedByTest == null) {
+                throw new IllegalStateException("Successful CLI transaction was not published");
+            }
+        } finally {
+            if (successStarted) PackageInstallCoordinator.cancel(successId);
+            if (failureStarted) PackageInstallCoordinator.cancel(failureId);
+            if (installedByTest != null) ManagedPackageStore.remove(this, installedByTest);
+            PackageInstallJobStore.clear(this, successId);
+            PackageInstallJobStore.clear(this, failureId);
+        }
+    }
     private void handleTestPackageRuntimeIntent() {
         if (!getIntent().getBooleanExtra("archphene_test_package_runtime", false)) return;
         new Thread(() -> {
             try {
+                if (getIntent().getBooleanExtra("archphene_test_concurrent_packages", false)) {
+                    verifyConcurrentPackageIsolation();
+                    runOnUiThread(() -> showBanner(
+                            "Concurrent package failure isolation passed", false));
+                    return;
+                }
                 if (getIntent().getBooleanExtra("archphene_test_package_jobs", false)) {
                     SearchRanking.verifyForTest();
                     PackageInstallJobStore.verifyForTest(this);

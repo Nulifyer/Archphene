@@ -13,7 +13,7 @@ This is the prioritized completion queue for the Archphene Android application. 
   - [ ] Complete ABI and required bridge-capability metadata.
   - [ ] Generate package-specific Android metadata and resources.
   - [x] Persist and display bounded structured phase diagnostics, including legacy-job migration.
-  - [ ] Prove with real packages that one failed transaction does not block unrelated jobs.
+  - [x] Prove on the emulator with concurrent real package transactions that one resolution failure does not block an unrelated CLI package install.
 - [ ] Complete AArch64 package runtime support.
   - Integrate Arch Linux ARM repositories, keyrings, dependency resolution, and package verification.
   - Publish separate x86_64 and arm64-v8a release assets; accept any data packages but require matching ABI for native ELF files.
