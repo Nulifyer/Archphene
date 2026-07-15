@@ -1,4 +1,4 @@
-package org.archpheneos.manager;
+package org.archpheneos.terminal;
 
 import android.app.Activity;
 import android.content.ClipData;
@@ -74,8 +74,7 @@ public final class TerminalActivity extends Activity
         terminalView.setFocusable(true);
         terminalView.setFocusableInTouchMode(true);
         terminalView.setBackgroundColor(dark ? Color.rgb(13, 15, 17) : Color.WHITE);
-        fontPixels = Math.round(16f * getResources().getDisplayMetrics().scaledDensity
-                * ManagerStateStore.linuxFontPercent(this) / 100f);
+        fontPixels = Math.round(16f * getResources().getDisplayMetrics().scaledDensity);
         terminalView.setTextSize(fontPixels);
         root.addView(terminalView, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
@@ -128,7 +127,9 @@ public final class TerminalActivity extends Activity
                             || fields[1].contains("\n") || fields[1].contains("\r")) {
                         throw new SecurityException("Invalid terminal manager request");
                     }
-                    Intent manager = new Intent(TerminalActivity.this, MainActivity.class)
+                    Intent manager = new Intent("org.archpheneos.action.TERMINAL_REQUEST")
+                            .setClassName("org.archpheneos.manager",
+                                    "org.archpheneos.manager.TerminalRequestActivity")
                             .putExtra("archphene_terminal_action", fields[0])
                             .putExtra("archphene_terminal_query", fields[1])
                             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
@@ -152,9 +153,7 @@ public final class TerminalActivity extends Activity
     }
 
     private boolean isDark() {
-        String mode = ManagerStateStore.themeMode(this);
-        return "dark".equals(mode) || !"light".equals(mode)
-                && (getResources().getConfiguration().uiMode
+        return (getResources().getConfiguration().uiMode
                 & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
     }
 

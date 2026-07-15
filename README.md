@@ -83,13 +83,13 @@ The manager can generate and install the tested x86_64 Qt/KCalc wrapper on-devic
 
 ### Linux release build
 
-Release CI builds the Arch runtime, patched glibc, wrapper template, and signed manager APK on Linux. On Windows, the thin launcher runs those build phases inside Podman:
+Release CI builds the Arch runtime, patched glibc, wrapper template, isolated Terminal companion, and signed manager APK on Linux. The same-release-signed companion is embedded in the manager and installed through Android confirmation on first use. On Windows, the thin launcher runs those build phases inside Podman:
 
     ./scripts/build-manager-podman.ps1
 
 Use `-SkipRuntime` for manager-only rebuilds and `-ReleaseBuild` for a locally production-signed APK.
 
-Output: prototypes/linux-app-manager-stub/out-linux/archphene.apk.
+Outputs: `prototypes/linux-app-manager-stub/out-linux/archphene.apk` and the embedded companion source artifact at `prototypes/archphene-terminal-app/out-linux/archphene-terminal.apk`.
 
 ### Windows emulator/device adapter
 

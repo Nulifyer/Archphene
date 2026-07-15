@@ -31,6 +31,11 @@ public final class RuntimeModuleProvider extends ContentProvider {
     public static final String ACTIVE_PACK_METHOD = "org.archphene.runtime.ACTIVE_PACK_V1";
     public static final String APPEARANCE_METHOD =
             "org.archphene.runtime.APPEARANCE_V1";
+    public static final String TERMINAL_CATALOG_METHOD =
+            "org.archphene.runtime.TERMINAL_CATALOG_V1";
+    public static final String TERMINAL_PACK_METHOD =
+            "org.archphene.runtime.TERMINAL_PACK_V1";
+    private static final String TERMINAL_PACKAGE = "org.archpheneos.terminal";
     private final Map<String, File> verifiedModules = new HashMap<>();
 
     @Override
@@ -60,11 +65,15 @@ public final class RuntimeModuleProvider extends ContentProvider {
 
     @Override
     public Bundle call(String method, String arg, Bundle extras) {
-        if (!ACTIVE_PACK_METHOD.equals(method) && !APPEARANCE_METHOD.equals(method)) {
+        if (!ACTIVE_PACK_METHOD.equals(method) && !APPEARANCE_METHOD.equals(method)
+                && !TERMINAL_CATALOG_METHOD.equals(method)
+                && !TERMINAL_PACK_METHOD.equals(method)) {
             throw new UnsupportedOperationException("Unsupported runtime provider method");
         }
         try {
             if (APPEARANCE_METHOD.equals(method)) return appearanceBundle();
+            if (TERMINAL_CATALOG_METHOD.equals(method)) return terminalCatalogBundle();
+            if (TERMINAL_PACK_METHOD.equals(method)) return terminalPackBundle(arg);
             String caller = requireWrapperCaller();
             RuntimePackStore.Pack pack = RuntimePackStore.active(providerContext(), caller);
             RuntimePackStore.grantActive(providerContext(), caller);
@@ -96,6 +105,82 @@ public final class RuntimeModuleProvider extends ContentProvider {
                     "Caller has no active Archphene runtime pack");
             failure.initCause(error);
             throw failure;
+        }
+    }
+    private Bundle terminalCatalogBundle() throws Exception {
+        requireTerminalCaller();
+        List<ManagedPackageStore.Entry> entries = ManagedPackageStore.list(providerContext());
+        if (entries.size() > 512) throw new SecurityException("Too many Terminal packages");
+        String[] encoded = new String[entries.size()];
+        for (int index = 0; index < entries.size(); index++) {
+            ManagedPackageStore.Entry entry = entries.get(index);
+            encoded[index] = entry.runtimePackId + "\t" + entry.name + "\t"
+                    + entry.version + "\t" + entry.repository + "\t"
+                    + entry.executable + "\t" + String.join(",", entry.commands);
+        }
+        Bundle result = new Bundle();
+        result.putStringArray("packages", encoded);
+        return result;
+    }
+    private Bundle terminalPackBundle(String packId) throws Exception {
+        requireTerminalCaller();
+        if (packId == null || !ManagedPackageStore.packIds(providerContext()).contains(packId)) {
+            throw new SecurityException("Terminal runtime pack is not managed");
+        }
+        RuntimePackStore.Pack pack = RuntimePackStore.load(providerContext(), packId);
+        if (pack.modules.size() > 4096) throw new SecurityException("Terminal pack is too large");
+        int count = pack.modules.size();
+        String[] kinds = new String[count];
+        String[] names = new String[count];
+        String[] uris = new String[count];
+        String[] hashes = new String[count];
+        long[] sizes = new long[count];
+        for (int index = 0; index < count; index++) {
+            RuntimePackStore.Module module = pack.modules.get(index);
+            kinds[index] = module.kind;
+            names[index] = "program".equals(module.kind) ? pack.executableName : module.linkName;
+            uris[index] = module.uri(pack.id).toString();
+            hashes[index] = module.hash;
+            sizes[index] = module.size;
+        }
+        Bundle result = new Bundle();
+        result.putStringArray("kinds", kinds);
+        result.putStringArray("names", names);
+        result.putStringArray("uris", uris);
+        result.putStringArray("hashes", hashes);
+        result.putLongArray("sizes", sizes);
+        return result;
+    }
+    private String requireTerminalCaller() {
+        Context context;
+        try {
+            context = providerContext();
+        } catch (FileNotFoundException error) {
+            throw new SecurityException("Runtime provider is unavailable", error);
+        }
+        int uid = Binder.getCallingUid();
+        String[] packages = context.getPackageManager().getPackagesForUid(uid);
+        boolean ownsTerminal = false;
+        if (packages != null) {
+            for (String value : packages) {
+                if (TERMINAL_PACKAGE.equals(value)) {
+                    ownsTerminal = true;
+                    break;
+                }
+            }
+        }
+        if (!ownsTerminal || context.getPackageManager().checkSignatures(
+                context.getPackageName(), TERMINAL_PACKAGE) != PackageManager.SIGNATURE_MATCH) {
+            throw new SecurityException("Terminal caller is not signed by this Archphene manager");
+        }
+        return TERMINAL_PACKAGE;
+    }
+    private boolean isTerminalCaller() {
+        try {
+            requireTerminalCaller();
+            return true;
+        } catch (SecurityException ignored) {
+            return false;
         }
     }
     private Bundle appearanceBundle() throws FileNotFoundException {
@@ -201,6 +286,16 @@ public final class RuntimeModuleProvider extends ContentProvider {
     private File moduleForAuthorized(Uri uri) throws FileNotFoundException {
         if (Binder.getCallingUid() == android.os.Process.myUid()) return moduleFor(uri);
         try {
+            if (isTerminalCaller()) {
+                List<String> segments = uri == null ? java.util.Collections.emptyList()
+                        : uri.getPathSegments();
+                if (segments.size() != 4 || !"pack".equals(segments.get(0))
+                        || !"v1".equals(segments.get(1))
+                        || !ManagedPackageStore.packIds(providerContext()).contains(segments.get(2))) {
+                    throw new SecurityException("Terminal requested an unmanaged runtime pack");
+                }
+                return RuntimePackStore.requireUri(providerContext(), uri).file;
+            }
             String caller = requireWrapperCaller();
             RuntimePackStore.Pack pack = RuntimePackStore.active(providerContext(), caller);
             if (uriForRole(providerContext(), "glibc-loader").equals(uri)) {

@@ -13,7 +13,7 @@ import android.view.ViewParent;
 import android.view.WindowManager;
 import android.widget.PopupWindow;
 
-import org.archpheneos.manager.R;
+import org.archpheneos.terminal.R;
 import com.termux.view.TerminalView;
 import com.termux.view.support.PopupWindowCompatGingerbread;
 

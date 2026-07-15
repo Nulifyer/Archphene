@@ -78,6 +78,47 @@ build_qt_template() {
 
 build_qt_template
 
+build_terminal_app() {
+  local app="$root/prototypes/archphene-terminal-app"
+  local out="$app/out-linux"
+  local native="$root/native/archphene-terminal/out/x86_64/libtermux.so"
+  [[ -f "$native" ]] || { echo "terminal PTY library is missing" >&2; exit 1; }
+  rm -rf "$out"
+  mkdir -p "$out"/{compiled,gen,classes,dex,stage/lib/x86_64}
+
+  sed \
+    -e "s/android:versionCode=\"[^\"]*\"/android:versionCode=\"$version_code\"/" \
+    -e "s/android:versionName=\"[^\"]*\"/android:versionName=\"$version_name\"/" \
+    -e 's/android:debuggable="true"/android:debuggable="false"/' \
+    "$app/AndroidManifest.xml" > "$out/AndroidManifest.xml"
+  "$bt/aapt2" compile --dir "$app/res" -o "$out/compiled/res.zip"
+  "$bt/aapt2" link -o "$out/unsigned.apk" -I "$platform" \
+    --version-code "$version_code" --version-name "$version_name" \
+    --manifest "$out/AndroidManifest.xml" --java "$out/gen" \
+    "$out/compiled/res.zip"
+
+  mapfile -d '' java_files < <(find "$app/src" \
+    "$root/third_party/termux-terminal/src" "$out/gen" \
+    -type f -name '*.java' -print0)
+  javac --release 17 -classpath "$platform" -d "$out/classes" "${java_files[@]}"
+  mapfile -d '' class_files < <(find "$out/classes" -type f -name '*.class' -print0)
+  "$bt/d8" --lib "$platform" --min-api 23 --output "$out/dex" "${class_files[@]}"
+  cp "$out/dex/classes.dex" "$out/stage/classes.dex"
+  cp "$native" "$out/stage/lib/x86_64/libtermux.so"
+  (
+    cd "$out/stage"
+    mapfile -d '' entries < <(find . -type f -print0)
+    jar uf ../unsigned.apk "${entries[@]}"
+  )
+  "$bt/zipalign" -f 4 "$out/unsigned.apk" "$out/aligned.apk"
+  "$bt/apksigner" sign --ks "$KEYSTORE_PATH" --ks-key-alias "$KEY_ALIAS" \
+    --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEY_PASSWORD \
+    --out "$out/archphene-terminal.apk" "$out/aligned.apk"
+  "$bt/apksigner" verify --verbose --print-certs "$out/archphene-terminal.apk"
+}
+
+build_terminal_app
+
 app="$root/prototypes/linux-app-manager-stub"
 out="$app/out-linux"
 rm -rf "$out"
@@ -112,6 +153,7 @@ done
 
 package_assets="$out/package-runtime/assets/package-runtime"
 package_libs="$out/package-runtime/lib/x86_64"
+cp "$root/prototypes/archphene-terminal-app/out-linux/archphene-terminal.apk" "$package_assets/archphene-terminal.apk"
 gcc -shared -fPIC -O2 -Wall -Wextra -Werror \
   -o "$package_libs/libarchphene_path_bridge.so" \
   "$root/native/archphene-glibc-path-bridge/path_bridge.c" -ldl
@@ -139,9 +181,6 @@ while IFS=$'\t' read -r name relative; do
 done < "$resolved"
 cp "$glibc/ld-linux-x86-64.so.2" "$package_libs/libarchphene_ld.so"
 cp "$glibc/libc.so.6" "$package_libs/libarchphene_runtime_libc.so"
-terminal_pty="$root/native/archphene-terminal/out/x86_64/libtermux.so"
-[[ -f "$terminal_pty" ]] || { echo "terminal PTY library is missing" >&2; exit 1; }
-cp "$terminal_pty" "$package_libs/libtermux.so"
 find "$glibc" -maxdepth 1 -type f \
   ! -name 'source-commit.txt' ! -name 'runtime-manifest.tsv' \
   ! -name 'ld-linux-x86-64.so.2' -exec cp {} "$package_libs/" \;
@@ -202,3 +241,4 @@ fi
   --out "$out/archphene.apk" "$out/aligned.apk"
 "$bt/apksigner" verify --verbose --print-certs "$out/archphene.apk"
 echo "Linux-built Archphene APK: $out/archphene.apk"
+echo "Linux-built Terminal APK: $root/prototypes/archphene-terminal-app/out-linux/archphene-terminal.apk"

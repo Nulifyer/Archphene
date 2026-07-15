@@ -149,8 +149,8 @@ public final class InstalledLinuxAppCatalog {
         String update = "https://archlinux.org/packages/" + entry.repository + "/"
                 + entry.architecture + "/" + entry.name + "/json/";
         Intent terminal = new Intent(Intent.ACTION_MAIN)
-                .setClassName("org.archpheneos.manager",
-                        "org.archpheneos.manager.TerminalActivity")
+                .setClassName("org.archpheneos.terminal",
+                        "org.archpheneos.terminal.TerminalActivity")
                 .addCategory(Intent.CATEGORY_LAUNCHER);
         return new Entry(entry.stateKey(), entry.name, entry.version, "pacman",
                 entry.repository + "/" + entry.name, entry.version, entry.executable,

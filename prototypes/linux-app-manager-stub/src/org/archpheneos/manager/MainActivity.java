@@ -160,12 +160,10 @@ public final class MainActivity extends Activity {
         }
     }
     private void handleTerminalRequestIntent() {
-        Intent intent = getIntent();
-        String action = intent.getStringExtra("archphene_terminal_action");
-        String request = intent.getStringExtra("archphene_terminal_query");
-        if (action == null || request == null) return;
-        intent.removeExtra("archphene_terminal_action");
-        intent.removeExtra("archphene_terminal_query");
+        TerminalRequestStore.Request terminalRequest = TerminalRequestStore.take(this);
+        if (terminalRequest == null) return;
+        String action = terminalRequest.action;
+        String request = terminalRequest.query;
         String query = request.trim().split("\\s+", 2)[0];
         if (("install".equals(action) || "search".equals(action))
                 && query.matches("[a-zA-Z0-9@._+:-]{2,128}")) {
@@ -1226,8 +1224,32 @@ public final class MainActivity extends Activity {
         Button launch = actionButton(managed ? "Open Terminal" : "Launch",
                 android.R.drawable.ic_media_play);
         stylePrimaryButton(launch);
-        launch.setEnabled(app.launchIntent != null);
-        if (app.launchIntent != null) {
+        launch.setEnabled(managed || app.launchIntent != null);
+        if (managed) {
+            launch.setOnClickListener(view -> {
+                launch.setEnabled(false);
+                launch.setText("Preparing Terminal...");
+                TerminalCompanionInstaller.ensureInstalled(this,
+                        (phase, percent, status, terminal) -> {
+                            showBanner(status, phase == ApkUpdateInstaller.Phase.ERROR);
+                            if (phase == ApkUpdateInstaller.Phase.COMPLETE) {
+                                launch.setEnabled(true);
+                                launch.setText("Open Terminal");
+                                try {
+                                    TerminalCompanionInstaller.launch(this);
+                                } catch (Exception error) {
+                                    showBanner("Could not open Terminal: " + error.getMessage(), true);
+                                }
+                            } else if (phase == ApkUpdateInstaller.Phase.ERROR
+                                    || phase == ApkUpdateInstaller.Phase.CANCELLED) {
+                                launch.setEnabled(true);
+                                launch.setText("Open Terminal");
+                            } else {
+                                launch.setText(status + (percent > 0 ? " " + percent + "%" : ""));
+                            }
+                        });
+            });
+        } else if (app.launchIntent != null) {
             launch.setOnClickListener(view -> startActivity(app.launchIntent));
         }
         actions.addView(launch, matchWrap());

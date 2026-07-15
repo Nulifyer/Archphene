@@ -14,7 +14,7 @@ import android.view.View;
 
 import com.termux.terminal.TerminalBuffer;
 import com.termux.terminal.WcWidth;
-import org.archpheneos.manager.R;
+import org.archpheneos.terminal.R;
 import com.termux.view.TerminalView;
 
 public class TextSelectionCursorController implements CursorController {

@@ -1,6 +1,6 @@
 # Publishing Archphene APK releases
 
-GitHub Actions builds and attaches the signed manager APK whenever a GitHub Release is published. The release is produced entirely on Ubuntu: a signature-verifying Arch container builds the package runtime and patched glibc, then Linux Android SDK tools build, align, sign, and verify the APK.
+GitHub Actions builds and attaches the signed manager APK whenever a GitHub Release is published. The build also signs an isolated Terminal companion with the same release key and embeds it in the manager APK, so users need only the manager release asset. The release is produced entirely on Ubuntu: a signature-verifying Arch container builds the package runtime and patched glibc, then Linux Android SDK tools build, align, sign, and verify the APK.
 
 ## One-time signing setup
 
