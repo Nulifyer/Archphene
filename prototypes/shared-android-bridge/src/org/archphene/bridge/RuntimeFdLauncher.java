@@ -13,10 +13,12 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Executes immutable runtime modules supplied by Android content descriptors. */
 public final class RuntimeFdLauncher {
     private static final int MAX_LIBRARIES = 510;
+    private static final AtomicBoolean STALE_VIEWS_PURGED = new AtomicBoolean();
 
     public static final class Result {
         public final int exitCode;
@@ -78,6 +80,7 @@ public final class RuntimeFdLauncher {
                 || libraryUris.length == 0 || libraryUris.length > MAX_LIBRARIES) {
             throw new IllegalArgumentException("Invalid runtime library set");
         }
+        purgeStaleViews(cacheRoot);
         File links = new File(cacheRoot, "runtime-fd-" + android.os.Process.myPid()
                 + "-" + System.nanoTime());
         if (!links.mkdir()) throw new IllegalStateException("Could not create runtime FD view");
@@ -137,6 +140,21 @@ public final class RuntimeFdLauncher {
             }
             links.delete();
         }
+    }
+
+    private static void purgeStaleViews(File cacheRoot) {
+        if (!STALE_VIEWS_PURGED.compareAndSet(false, true)) return;
+        File[] entries = cacheRoot.listFiles((directory, name) -> name.startsWith("runtime-fd-"));
+        if (entries == null) return;
+        for (File entry : entries) deleteRecursively(entry);
+    }
+
+    private static void deleteRecursively(File path) {
+        File[] children = path.listFiles();
+        if (children != null) {
+            for (File child : children) deleteRecursively(child);
+        }
+        path.delete();
     }
 
     private static byte[] encodeArguments(List<String> arguments) {
