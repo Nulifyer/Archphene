@@ -38,6 +38,7 @@ public final class TerminalActivity extends Activity
     private TerminalSession terminalSession;
     private TextView title;
     private FileObserver requestObserver;
+    private TerminalDocumentBridge documentBridge;
     private final AtomicBoolean handlingRequest = new AtomicBoolean();
     private int fontPixels;
 
@@ -82,6 +83,8 @@ public final class TerminalActivity extends Activity
 
         try {
             TerminalEnvironment.Session environment = TerminalEnvironment.prepare(this);
+            documentBridge = new TerminalDocumentBridge(
+                    this, environment.home, this::reportBridgeMessage, savedInstanceState);
             terminalSession = new TerminalSession("/system/bin/sh",
                     environment.home.getAbsolutePath(), new String[] {"sh", "-i"},
                     environment.environment, 10000, this);
@@ -91,6 +94,20 @@ public final class TerminalActivity extends Activity
         } catch (Exception error) {
             Log.e(TAG, "Could not prepare terminal", error);
             title.setText("Terminal unavailable: " + safeMessage(error));
+        }
+    }
+
+    @Override
+    protected void onSaveInstanceState(Bundle state) {
+        if (documentBridge != null) documentBridge.saveState(state);
+        super.onSaveInstanceState(state);
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        if (documentBridge == null
+                || !documentBridge.onActivityResult(requestCode, resultCode, data)) {
+            super.onActivityResult(requestCode, resultCode, data);
         }
     }
 
@@ -122,18 +139,27 @@ public final class TerminalActivity extends Activity
                     request.delete();
                     String value = new String(bytes, StandardCharsets.UTF_8).trim();
                     String[] fields = value.split("\\t", 2);
-                    if (fields.length != 2 || !fields[0].matches("search|install|remove|upgrade")
+                    if (fields.length != 2
+                            || !fields[0].matches("search|install|remove|upgrade|import|export")
                             || fields[1].length() > 512
                             || fields[1].contains("\n") || fields[1].contains("\r")) {
-                        throw new SecurityException("Invalid terminal manager request");
+                        throw new SecurityException("Invalid terminal request");
                     }
-                    Intent manager = new Intent("org.archpheneos.action.TERMINAL_REQUEST")
-                            .setClassName("org.archpheneos.manager",
-                                    "org.archpheneos.manager.TerminalRequestActivity")
-                            .putExtra("archphene_terminal_action", fields[0])
-                            .putExtra("archphene_terminal_query", fields[1])
-                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-                    startActivity(manager);
+                    if ("import".equals(fields[0]) || "export".equals(fields[0])) {
+                        if (documentBridge == null) {
+                            throw new IllegalStateException("Document bridge is unavailable");
+                        }
+                        documentBridge.request(fields[0], fields[1]);
+                    } else {
+                        Intent manager = new Intent("org.archpheneos.action.TERMINAL_REQUEST")
+                                .setClassName("org.archpheneos.manager",
+                                        "org.archpheneos.manager.TerminalRequestActivity")
+                                .putExtra("archphene_terminal_action", fields[0])
+                                .putExtra("archphene_terminal_query", fields[1])
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                                        | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                        startActivity(manager);
+                    }
                 } catch (Exception error) {
                     Log.e(TAG, "Rejected terminal manager request", error);
                 } finally {
@@ -142,6 +168,17 @@ public final class TerminalActivity extends Activity
             }
         };
         requestObserver.startWatching();
+    }
+
+    private void reportBridgeMessage(String message) {
+        Log.i(TAG, message);
+        runOnUiThread(() -> {
+            if (terminalSession == null || terminalSession.getEmulator() == null) return;
+            byte[] output = ("\r\narchphene: " + message + "\r\n")
+                    .getBytes(StandardCharsets.UTF_8);
+            terminalSession.getEmulator().append(output, output.length);
+            terminalView.onScreenUpdated();
+        });
     }
 
     private void configureTerminalColors(boolean dark) {

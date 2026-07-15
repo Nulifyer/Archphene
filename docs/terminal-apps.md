@@ -27,6 +27,10 @@ Installing btop does not implicitly install curl. Commands become available only
 | `pacman -S <name>` | Open the package for user review and installation. |
 | `pacman -R <name>` | Open the installed package removal screen. |
 | `pacman -Syu` | Check installed packages; pinned versions remain unchanged. |
+| `archphene-import [home-directory]` | Choose an Android document and copy it into visible Terminal home storage. The default destination is the home Downloads directory. |
+| `archphene-export <home-file>` | Choose an Android save location and copy a visible Terminal home file through a scoped URI grant. |
+
+Imports use collision-safe names and publish only after a bounded copy completes. Exports require one visible regular file. Both operations reject dot-directories and paths outside Terminal home; neither requests broad storage access.
 
 Resolve, signature verification, runtime-pack construction, and errors continue through the manager job model and visible per-package progress. One package failure does not stop independent jobs.
 
@@ -45,7 +49,7 @@ The Terminal companion uses an ordinary Android application UID. It does not rec
 ## Remaining terminal work
 
 1. Add multiple sessions/tabs and a foreground-service lifecycle.
-2. Add brokered Documents/Downloads commands and explicit permission UX.
+2. Add persisted project-tree grants and stable Linux path mappings for repeated background access.
 3. Allow an installed Arch shell such as bash to replace the Bionic bootstrap shell.
 4. Stream manager job progress back to the invoking terminal command.
 5. Add capability metadata for packages requiring restricted `/proc`, devices, sockets, or Android bridge APIs.

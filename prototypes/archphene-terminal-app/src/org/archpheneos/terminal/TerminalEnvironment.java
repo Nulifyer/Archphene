@@ -304,6 +304,15 @@ final class TerminalEnvironment {
             rc.append("alias ").append(command.name).append("='_archphene_run ")
                     .append(command.packId).append(' ').append(command.name).append("'\n");
         }
+        rc.append("archphene-import() {\n")
+                .append("  _ap_target=\"$1\"\n")
+                .append("  [ -n \"$_ap_target\" ] || _ap_target=Downloads\n")
+                .append("  printf 'import\\t%s\\n' \"$_ap_target\" > ")
+                .append(quote(request.getAbsolutePath())).append("\n}\n");
+        rc.append("archphene-export() {\n")
+                .append("  [ \"$#\" -eq 1 ] || { echo 'usage: archphene-export <home-file>' >&2; return 2; }\n")
+                .append("  printf 'export\\t%s\\n' \"$1\" > ")
+                .append(quote(request.getAbsolutePath())).append("\n}\n");
         rc.append("pacman() {\n  case \"$1\" in\n")
                 .append("    -Q) cat ").append(quote(installed.getAbsolutePath())).append(" ;;\n")
                 .append("    -Qs) shift; grep -i -- \"$*\" ").append(quote(installed.getAbsolutePath())).append(" || true ;;\n")
