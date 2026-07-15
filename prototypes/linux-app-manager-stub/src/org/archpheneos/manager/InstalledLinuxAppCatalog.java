@@ -8,6 +8,7 @@ import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.os.Bundle;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -27,6 +28,8 @@ public final class InstalledLinuxAppCatalog {
         public final String updateUrl;
         public final Intent launchIntent;
         public final boolean runtimeBound;
+        public final String managedKind;
+        public final List<String> commands;
 
         Entry(String packageName, String label, String androidVersion, Bundle metadata,
                 Intent launchIntent) {
@@ -39,12 +42,13 @@ public final class InstalledLinuxAppCatalog {
                                     .replaceFirst("^.*/", "")),
                     metadata.getString("org.archphene.runtime.abi", "unknown"),
                     normalizedUpdateUrl(metadata),
-                    launchIntent, false);
+                    launchIntent, false, "", Collections.emptyList());
         }
 
         Entry(String packageName, String label, String androidVersion, String sourceType,
                 String sourceId, String sourceVersion, String executable, String runtimeAbi,
-                String updateUrl, Intent launchIntent, boolean runtimeBound) {
+                String updateUrl, Intent launchIntent, boolean runtimeBound,
+                String managedKind, List<String> commands) {
             this.packageName = packageName;
             this.label = label;
             this.androidVersion = androidVersion;
@@ -56,6 +60,8 @@ public final class InstalledLinuxAppCatalog {
             this.updateUrl = updateUrl;
             this.launchIntent = launchIntent;
             this.runtimeBound = runtimeBound;
+            this.managedKind = managedKind;
+            this.commands = Collections.unmodifiableList(new ArrayList<>(commands));
         }
     }
 
@@ -110,6 +116,11 @@ public final class InstalledLinuxAppCatalog {
             if (current == null || preferred(entry, current)) bySource.put(key, entry);
         }
         result.addAll(bySource.values());
+        for (ManagedPackageStore.Entry managed : ManagedPackageStore.list(context)) {
+            String key = pacmanSourceKey(managed.repository, managed.name,
+                    managed.architecture);
+            if (!bySource.containsKey(key)) result.add(fromManaged(packages, managed));
+        }
         result.sort(Comparator.comparing(entry -> entry.label, String.CASE_INSENSITIVE_ORDER));
         return result;
     }
@@ -134,6 +145,15 @@ public final class InstalledLinuxAppCatalog {
         return null;
     }
 
+    private static Entry fromManaged(PackageManager packages, ManagedPackageStore.Entry entry) {
+        String update = "https://archlinux.org/packages/" + entry.repository + "/"
+                + entry.architecture + "/" + entry.name + "/json/";
+        Intent terminal = packages.getLaunchIntentForPackage("org.archpheneos.terminal");
+        return new Entry(entry.stateKey(), entry.name, entry.version, "pacman",
+                entry.repository + "/" + entry.name, entry.version, entry.executable,
+                "glibc-" + entry.architecture, update, terminal, true,
+                entry.kind, entry.commands);
+    }
     private static Entry fromInstalled(Context context, String packageName, String label,
             String androidVersion, Bundle metadata, Intent launchIntent) {
         try {
@@ -153,7 +173,7 @@ public final class InstalledLinuxAppCatalog {
                         pack.executableName, "glibc-" + architecture,
                         "https://archlinux.org/packages/" + source.repository + "/"
                                 + architecture + "/" + source.name + "/json/",
-                        launchIntent, true);
+                        launchIntent, true, "", Collections.emptyList());
             }
         } catch (Exception ignored) {
             // Legacy wrappers have no manager-owned runtime binding.

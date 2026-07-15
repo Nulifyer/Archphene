@@ -860,12 +860,14 @@ public final class MainActivity extends Activity {
                     source.repository, source.name, source.architecture);
             String generatedPackage = ArchWrapperAssembler.packageNameFor(
                     source.repository, source.name);
-            if (installed != null && !generatedPackage.equals(installed.packageName)) {
+            if (installed != null && installed.managedKind.isEmpty()
+                    && !generatedPackage.equals(installed.packageName)) {
                 showBanner(source.name + " is already installed as " + installed.packageName
                         + ". Uninstall that legacy wrapper before installing it again.", true);
                 return;
             }
-            if (installed != null && !ArchWrapperSigner.signerSha256().equalsIgnoreCase(
+            if (installed != null && installed.managedKind.isEmpty()
+                    && !ArchWrapperSigner.signerSha256().equalsIgnoreCase(
                     ApkUpdateInstaller.installedSignerSha256(this, installed.packageName))) {
                 requestWrapperSignerMigration(source, installed.packageName);
                 return;
@@ -1064,6 +1066,7 @@ public final class MainActivity extends Activity {
     }
 
     private void showAppDetail(InstalledLinuxAppCatalog.Entry app) {
+        boolean managed = !app.managedKind.isEmpty();
         currentPage = 2;
         setAddVisible(false);
         content.removeAllViews();
@@ -1161,13 +1164,22 @@ public final class MainActivity extends Activity {
         LinearLayout source = verticalSection();
         source.addView(detailLine("Package source", app.sourceId));
         source.addView(detailLine("Runtime", app.runtimeAbi));
-        source.addView(detailLine("Android package", app.packageName));
+        if (managed) {
+            source.addView(detailLine("Environment", "Archphene Terminal"));
+            source.addView(detailLine("Commands", commandSummary(app.commands)));
+        } else {
+            source.addView(detailLine("Android package", app.packageName));
+        }
         page.addView(source, spacedWrap(dp(6)));
 
         LinearLayout actions = verticalSection();
-        Button launch = actionButton("Launch", android.R.drawable.ic_media_play);
+        Button launch = actionButton(managed ? "Open Terminal" : "Launch",
+                android.R.drawable.ic_media_play);
         stylePrimaryButton(launch);
-        launch.setOnClickListener(view -> startActivity(app.launchIntent));
+        launch.setEnabled(app.launchIntent != null);
+        if (app.launchIntent != null) {
+            launch.setOnClickListener(view -> startActivity(app.launchIntent));
+        }
         actions.addView(launch, matchWrap());
         Button check = actionButton("Check for update", android.R.drawable.ic_popup_sync);
         check.setOnClickListener(view -> LinuxAppUpdateCoordinator.checkOne(this, app,
@@ -1175,27 +1187,70 @@ public final class MainActivity extends Activity {
                     if (completed == total) showAppDetail(app);
                 }));
         actions.addView(check, spacedWrap(dp(8)));
-        Button androidSettings = actionButton("Android app settings", android.R.drawable.ic_menu_manage);
-        androidSettings.setOnClickListener(view -> startActivity(new Intent(
-                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                Uri.parse("package:" + app.packageName))));
-        actions.addView(androidSettings, spacedWrap(dp(8)));
-        Button uninstall = actionButton("Uninstall app", android.R.drawable.ic_menu_delete);
-        uninstall.setTextColor(COLOR_ERROR);
-        uninstall.setOnClickListener(view -> {
-            ManagerStateStore.setPendingUninstallPackage(this, app.packageName);
-            Intent request = new Intent(Intent.ACTION_UNINSTALL_PACKAGE,
-                    Uri.parse("package:" + app.packageName));
-            request.putExtra(Intent.EXTRA_RETURN_RESULT, true);
-            showAppsPage();
-            startActivityForResult(request, REQUEST_UNINSTALL_LINUX_APP);
-        });
-        actions.addView(uninstall, spacedWrap(dp(8)));
+        if (managed) {
+            Button remove = actionButton("Remove package", android.R.drawable.ic_menu_delete);
+            remove.setTextColor(COLOR_ERROR);
+            remove.setOnClickListener(view -> confirmManagedPackageRemoval(app));
+            actions.addView(remove, spacedWrap(dp(8)));
+        } else {
+            Button androidSettings = actionButton("Android app settings",
+                    android.R.drawable.ic_menu_manage);
+            androidSettings.setOnClickListener(view -> startActivity(new Intent(
+                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.parse("package:" + app.packageName))));
+            actions.addView(androidSettings, spacedWrap(dp(8)));
+            Button uninstall = actionButton("Uninstall app", android.R.drawable.ic_menu_delete);
+            uninstall.setTextColor(COLOR_ERROR);
+            uninstall.setOnClickListener(view -> {
+                ManagerStateStore.setPendingUninstallPackage(this, app.packageName);
+                Intent request = new Intent(Intent.ACTION_UNINSTALL_PACKAGE,
+                        Uri.parse("package:" + app.packageName));
+                request.putExtra(Intent.EXTRA_RETURN_RESULT, true);
+                showAppsPage();
+                startActivityForResult(request, REQUEST_UNINSTALL_LINUX_APP);
+            });
+            actions.addView(uninstall, spacedWrap(dp(8)));
+        }
         page.addView(actions, spacedWrap(dp(6)));
         scroll.addView(page);
         content.addView(scroll, frameMatch());
     }
 
+    private String commandSummary(List<String> commands) {
+        int shown = Math.min(8, commands.size());
+        String value = android.text.TextUtils.join(", ", commands.subList(0, shown));
+        return commands.size() > shown ? value + " +" + (commands.size() - shown) : value;
+    }
+
+    private void confirmManagedPackageRemoval(InstalledLinuxAppCatalog.Entry app) {
+        new AlertDialog.Builder(this)
+                .setTitle("Remove " + app.label + "?")
+                .setMessage("This removes the package from the shared Terminal environment. "
+                        + "Terminal home files are kept.")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Remove", (dialog, which) -> new Thread(() -> {
+                    try {
+                        ManagedPackageStore.Entry target = null;
+                        for (ManagedPackageStore.Entry entry : ManagedPackageStore.list(this)) {
+                            if (entry.stateKey().equals(app.packageName)) {
+                                target = entry;
+                                break;
+                            }
+                        }
+                        if (target == null) throw new IllegalStateException("Package is not installed");
+                        ManagedPackageStore.remove(this, target);
+                        PackageInstallJobStore.clear(this, PackageInstallJobStore.key(app));
+                        runOnUiThread(() -> {
+                            showBanner(app.label + " removed from Terminal", false);
+                            showAppsPage();
+                        });
+                    } catch (Exception error) {
+                        runOnUiThread(() -> showBanner("Could not remove " + app.label + ": "
+                                + error.getMessage(), true));
+                    }
+                }, "archphene-managed-package-remove").start())
+                .show();
+    }
     private void renderPackageJobDetail() {
         if (packageJobDetail == null) return;
         if (packageJobDetailId.isEmpty()) {
@@ -1833,6 +1888,8 @@ public final class MainActivity extends Activity {
                     verifyVersionButtonPolicyForTest();
                     ArchPackageClassifier.verifyForTest(this);
                     ManagerStateStore.verifyPendingReinstallForTest(this);
+                    ManagedPackageStore.verifyForTest(this);
+                    RuntimePackStore.verifyParserForTest();
                     runOnUiThread(() -> showBanner(
                             "Package job persistence and scheduler passed", false));
                     return;

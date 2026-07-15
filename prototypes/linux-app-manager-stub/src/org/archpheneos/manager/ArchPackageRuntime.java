@@ -350,7 +350,8 @@ public final class ArchPackageRuntime {
         }
         progress.onProgress(62, "Publishing verified runtime pack");
         RuntimePackStore.Pack pack = RuntimePackStore.build(
-                context, packageName, executableName, packages, root);
+                context, packageName, executableName, packages,
+                classification.commands, root);
         progress.onProgress(65, "Runtime pack ready");
         return new StagedTransaction(packageName, packages, root, pack.id, classification);
     }

@@ -99,6 +99,14 @@ final class RuntimePackStore {
             return result;
         }
 
+        List<Module> commands() {
+            ArrayList<Module> result = new ArrayList<>();
+            for (Module module : modules) {
+                if ("command".equals(module.kind)) result.add(module);
+            }
+            return result;
+        }
+
         Module data() {
             for (Module module : modules) {
                 if ("data".equals(module.kind)) return module;
@@ -138,16 +146,36 @@ final class RuntimePackStore {
 
     static synchronized Pack build(Context context, String sourcePackage, String executableName,
             List<ArchPackageRuntime.ResolvedPackage> packages, File stagedRoot) throws Exception {
+        return build(context, sourcePackage, executableName, packages,
+                Collections.singletonList(executableName), stagedRoot);
+    }
+
+    static synchronized Pack build(Context context, String sourcePackage, String executableName,
+            List<ArchPackageRuntime.ResolvedPackage> packages, List<String> commandNames,
+            File stagedRoot) throws Exception {
         if (stagedRoot == null || sourcePackage == null || !sourcePackage.matches(SAFE_ID)
-                || executableName == null || !executableName.matches(SAFE_ID)) {
+                || executableName == null || !executableName.matches(SAFE_ID)
+                || commandNames == null || commandNames.isEmpty()
+                || commandNames.size() > 512 || !commandNames.contains(executableName)) {
             throw new IllegalArgumentException("Invalid staged package transaction");
         }
         File canonicalRoot = stagedRoot.getCanonicalFile();
-        File executable = new File(canonicalRoot,
-                "usr/bin/" + executableName).getCanonicalFile();
-        if (!executable.isFile() || !inside(canonicalRoot, executable)) {
-            throw new SecurityException("Runtime pack executable escapes staging root");
+        ArrayList<File> commandFiles = new ArrayList<>();
+        HashSet<String> commandPaths = new HashSet<>();
+        HashSet<String> seenCommands = new HashSet<>();
+        for (String commandName : commandNames) {
+            if (!safeFileName(commandName) || !seenCommands.add(commandName)) {
+                throw new SecurityException("Runtime pack has an unsafe or duplicate command");
+            }
+            File command = new File(canonicalRoot, "usr/bin/" + commandName)
+                    .getCanonicalFile();
+            if (!command.isFile() || !inside(canonicalRoot, command)) {
+                throw new SecurityException("Runtime pack command escapes staging root");
+            }
+            commandFiles.add(command);
+            commandPaths.add(command.getPath());
         }
+        File executable = commandFiles.get(commandNames.indexOf(executableName));
         File managerNative = new File(context.getApplicationInfo().nativeLibraryDir)
                 .getCanonicalFile();
         File loader = new File(managerNative, "libarchphene_ld.so").getCanonicalFile();
@@ -159,8 +187,19 @@ final class RuntimePackStore {
         if (!pathBridge.isFile() || !pathBridge.getParentFile().equals(managerNative)) {
             throw new SecurityException("Runtime path bridge is unavailable");
         }
-        Map<String, File> closure = ArchWrapperAssembler.collectNativeFiles(
-                context, canonicalRoot, sourcePackage, executableName);
+        Map<String, File> closure = new HashMap<>();
+        for (String commandName : commandNames) {
+            Map<String, File> commandClosure = ArchWrapperAssembler.collectNativeFiles(
+                    context, canonicalRoot, sourcePackage, commandName);
+            for (Map.Entry<String, File> entry : commandClosure.entrySet()) {
+                File dependency = entry.getValue().getCanonicalFile();
+                if (commandPaths.contains(dependency.getPath())) continue;
+                File previous = closure.putIfAbsent(entry.getKey(), dependency);
+                if (previous != null && !previous.equals(dependency)) {
+                    throw new SecurityException("Commands require conflicting runtime libraries");
+                }
+            }
+        }
         File gtkSvgLoader = null;
         if (closure.containsKey("libgtk-3.so.0")) {
             File gtkPixbuf = new File(managerNative, "libarchphene_gtk3_pixbuf.so")
@@ -179,12 +218,26 @@ final class RuntimePackStore {
         }
         ArrayList<PendingModule> pending = new ArrayList<>();
         pending.add(new PendingModule("program", "program", executable));
-        pending.add(new PendingModule("loader", "loader", loader));
         Set<String> names = new HashSet<>();
-        names.add("libarchphene_path_bridge.so");
+        names.add("program");
+        for (int index = 0; index < commandNames.size(); index++) {
+            String commandName = commandNames.get(index);
+            if (commandName.equals(executableName)) continue;
+            if (!names.add(commandName)) {
+                throw new SecurityException("Runtime command link name collision");
+            }
+            pending.add(new PendingModule("command", commandName, commandFiles.get(index)));
+        }
+        pending.add(new PendingModule("loader", "loader", loader));
+        names.add("loader");
+        if (!names.add("libarchphene_path_bridge.so")) {
+            throw new SecurityException("Runtime path bridge link name collision");
+        }
         pending.add(new PendingModule("library", "libarchphene_path_bridge.so", pathBridge));
         if (gtkSvgLoader != null) {
-            names.add("libarchphene_pixbufloader_svg.so");
+            if (!names.add("libarchphene_pixbufloader_svg.so")) {
+                throw new SecurityException("GTK bridge link name collision");
+            }
             pending.add(new PendingModule("library", "libarchphene_pixbufloader_svg.so",
                     gtkSvgLoader));
         }
@@ -373,6 +426,7 @@ final class RuntimePackStore {
                 }
             }
         }
+        live.addAll(ManagedPackageStore.packIds(context));
         int removed = 0;
         File[] packDirectories = packs.listFiles();
         if (packDirectories != null) {
@@ -390,7 +444,12 @@ final class RuntimePackStore {
         return removed;
     }
 
+    static synchronized void releaseManagedPack(Context context, String packId) throws Exception {
+        deleteIfUnbound(context, packId);
+    }
+
     private static void deleteIfUnbound(Context context, String packId) throws Exception {
+        if (ManagedPackageStore.packIds(context).contains(packId)) return;
         File store = directory(context.getFilesDir(), "runtime-packs");
         File bindings = directory(store, "bindings");
         File[] bindingFiles = bindings.listFiles();
@@ -442,9 +501,11 @@ final class RuntimePackStore {
         String hashA = repeat('a', 64);
         String hashB = repeat('b', 64);
         String hashC = repeat('c', 64);
+        String hashD = repeat('d', 64);
         String valid = SCHEMA + "\nsource\tkcalc\nexecutable\tkcalc\n"
                 + "package\textra\tkcalc\t1.0-1\n"
                 + "module\tprogram\t" + hashA + "\t100\tprogram\n"
+                + "module\tcommand\t" + hashD + "\t50\tkcalc-cli\n"
                 + "module\tloader\t" + hashB + "\t200\tloader\n"
                 + "module\tlibrary\t" + hashC + "\t300\tlibc.so.6\n";
         parse("d" + repeat('0', 63), new File("."),
@@ -454,6 +515,7 @@ final class RuntimePackStore {
         expectRejected(valid.replace("module\tloader", "module\tlibrary"));
         expectRejected(valid.replace("module\tloader", "module\tprogram"));
         expectRejected(valid.replace("module\tlibrary", "module\tunknown"));
+        expectRejected(valid.replace("\tkcalc-cli\n", "\t../kcalc-cli\n"));
         expectRejected(valid.replace("\t300\t", "\t0\t"));
         expectRejected(valid.replace(SCHEMA, "# org.archphene.runtime-pack.v2"));
     }
@@ -501,7 +563,8 @@ final class RuntimePackStore {
                             fields[1], "", ""));
                 } else if (fields.length == 5 && "module".equals(fields[0])) {
                     String kind = fields[1];
-                    if (!("program".equals(kind) || "loader".equals(kind)
+                    if (!("program".equals(kind) || "command".equals(kind)
+                            || "loader".equals(kind)
                             || "library".equals(kind) || "data".equals(kind))
                             || !fields[2].matches(HASH)
                             || !safeLinkName(kind, fields[4]) || !links.add(fields[4])
@@ -691,6 +754,7 @@ final class RuntimePackStore {
 
     private static boolean safeLinkName(String kind, String value) {
         if ("program".equals(kind)) return "program".equals(value);
+        if ("command".equals(kind)) return safeFileName(value);
         if ("loader".equals(kind)) return "loader".equals(value);
         if ("data".equals(kind)) return "root.zip".equals(value);
         return "library".equals(kind) && safeFileName(value);
@@ -698,9 +762,10 @@ final class RuntimePackStore {
 
     private static int kindOrder(String kind) {
         if ("program".equals(kind)) return 0;
-        if ("loader".equals(kind)) return 1;
-        if ("library".equals(kind)) return 2;
-        return 3;
+        if ("command".equals(kind)) return 1;
+        if ("loader".equals(kind)) return 2;
+        if ("library".equals(kind)) return 3;
+        return 4;
     }
 
     private static boolean inside(File root, File value) throws Exception {

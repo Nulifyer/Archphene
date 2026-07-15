@@ -65,10 +65,24 @@ final class PackageInstallCoordinator {
                             PackageInstallJobStore.RUNNING,
                             ApkUpdateInstaller.Phase.DOWNLOAD, percent, status, "", false));
             checkInterrupted();
+            if (staged.classification.kind == ArchPackageClassifier.Kind.TERMINAL) {
+                update(activity, listener, id, PackageInstallJobStore.RUNNING,
+                        ApkUpdateInstaller.Phase.INSTALL, 90,
+                        "Publishing Terminal environment package", "", false);
+                ManagedPackageStore.install(activity, source, staged);
+                TrackedPackageStore.remove(activity, source.repository,
+                        source.name, source.architecture);
+                ArchPackageRuntime.releaseStaging(activity, staged);
+                OPERATIONS.remove(id, preparation);
+                update(activity, listener, id, PackageInstallJobStore.COMPLETE,
+                        ApkUpdateInstaller.Phase.COMPLETE, 100,
+                        "Installed in Archphene Terminal", "", true);
+                return;
+            }
             if (staged.classification.kind != ArchPackageClassifier.Kind.DESKTOP) {
                 ArchPackageRuntime.releaseStaging(activity, staged);
                 throw new UnsupportedOperationException(source.name
-                        + " is a terminal package. Install it into the Archphene Terminal environment.");
+                        + " does not provide a runnable command or desktop entry");
             }
 
             update(activity, listener, id, PackageInstallJobStore.RUNNING,
