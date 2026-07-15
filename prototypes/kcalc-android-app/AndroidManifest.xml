@@ -26,14 +26,40 @@
         <meta-data android:name="org.archphene.bridge.payload" android:value="libarchphene_kcalc.so" />
         <meta-data android:name="org.archphene.bridge.toolkit" android:value="qt6" />
         <meta-data android:name="org.archphene.bridge.log_tag" android:value="ArchpheneKCalc" />
+        <provider
+            android:name="org.archphene.bridge.LinuxHomeDocumentsProvider"
+            android:authorities="org.archphene.linux.kcalc.documents"
+            android:exported="true"
+            android:grantUriPermissions="true"
+            android:permission="android.permission.MANAGE_DOCUMENTS">
+            <intent-filter>
+                <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
+            </intent-filter>
+        </provider>
+
+        <activity
+            android:name="org.archphene.bridge.DocumentOpenActivity"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
+            android:exported="true" />
+
         <activity
             android:name="org.archphene.linux.kcalc.MainActivity"
             android:launchMode="singleTask"
+            android:windowSoftInputMode="stateAlwaysHidden|adjustResize"
             android:configChanges="density|fontScale|keyboard|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.EDIT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/*" />
+                <data android:mimeType="application/json" />
+                <data android:mimeType="application/xml" />
+                <data android:mimeType="application/yaml" />
             </intent-filter>
         </activity>
     </application>

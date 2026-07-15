@@ -32,6 +32,12 @@ New-Item -ItemType Directory -Force -Path $Out,(Join-Path $Out "compiled"),(Join
 $placeholder = "org.archphene.linux.p00000000000000000000000000000000"
 $manifest = [IO.File]::ReadAllText((Join-Path $App "AndroidManifest.xml"))
 $manifest = $manifest.Replace('package="org.archphene.linux.kcalc"', 'package="' + $placeholder + '"')
+$fixedAuthority = 'org.archphene.linux.kcalc.documents'
+$placeholderAuthority = $placeholder + '.documents'
+$manifest = $manifest.Replace($fixedAuthority, $placeholderAuthority)
+if ($manifest.Contains($fixedAuthority) -or -not $manifest.Contains($placeholderAuthority)) {
+    throw "Wrapper document-provider authority placeholder was not applied"
+}
 $manifest = $manifest.Replace('android:debuggable="true"', 'android:debuggable="false"')
 $manifest = $manifest.Replace('@drawable/kcalc_icon', '@drawable/linux_app_icon')
 [IO.File]::WriteAllText((Join-Path $Out "AndroidManifest.xml"),$manifest,[Text.UTF8Encoding]::new($false))
@@ -84,4 +90,8 @@ $entries = Get-ChildItem -Recurse -File | ForEach-Object { $_.FullName.Substring
 Run-Native { & jar uf "..\unsigned.apk" $entries } "add template bridge files"
 Pop-Location
 Run-Native { & (Join-Path $BuildTools "zipalign.exe") -f 4 (Join-Path $Out "unsigned.apk") (Join-Path $Out "qt-wrapper-template.apk") } "align template"
+$compiledManifest = (& (Join-Path $Sdk "cmdline-tools/latest/bin/apkanalyzer.bat") manifest print (Join-Path $Out "qt-wrapper-template.apk")) -join "`n"
+if ($LASTEXITCODE -ne 0 -or $compiledManifest -notmatch [regex]::Escape($placeholderAuthority) -or $compiledManifest -match [regex]::Escape($fixedAuthority)) {
+    throw "Compiled wrapper template has an invalid document-provider authority"
+}
 Write-Host "Qt wrapper template: $(Join-Path $Out "qt-wrapper-template.apk")"

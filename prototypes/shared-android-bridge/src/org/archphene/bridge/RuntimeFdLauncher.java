@@ -62,6 +62,14 @@ public final class RuntimeFdLauncher {
     public static Result runGlibc(ContentResolver resolver, Uri programUri,
             Uri loaderUri, Uri[] libraryUris, String[] libraryNames, File cacheRoot,
             Map<String, String> environment, String programName) throws Exception {
+        return runGlibc(resolver, programUri, loaderUri, libraryUris, libraryNames,
+                cacheRoot, environment, programName, java.util.Collections.emptyList());
+    }
+
+    public static Result runGlibc(ContentResolver resolver, Uri programUri,
+            Uri loaderUri, Uri[] libraryUris, String[] libraryNames, File cacheRoot,
+            Map<String, String> environment, String programName, List<String> arguments)
+            throws Exception {
         if (programName == null || !programName.matches("[a-zA-Z0-9@._+:-]{1,128}")) {
             throw new IllegalArgumentException("Invalid runtime program name");
         }
@@ -112,7 +120,8 @@ public final class RuntimeFdLauncher {
                     manifest.toString().getBytes(StandardCharsets.UTF_8),
                     links.getAbsolutePath().getBytes(StandardCharsets.UTF_8),
                     encodeEnvironment(launchEnvironment),
-                    programName.getBytes(StandardCharsets.UTF_8), output);
+                    programName.getBytes(StandardCharsets.UTF_8),
+                    encodeArguments(arguments), output);
             return result(exitCode, output);
         } finally {
             for (int index = descriptors.size() - 1; index >= 0; index--) {
@@ -128,6 +137,25 @@ public final class RuntimeFdLauncher {
             }
             links.delete();
         }
+    }
+
+    private static byte[] encodeArguments(List<String> arguments) {
+        if (arguments == null || arguments.size() > 32) {
+            throw new IllegalArgumentException("Invalid runtime argument list");
+        }
+        StringBuilder manifest = new StringBuilder();
+        for (String argument : arguments) {
+            if (argument == null || argument.length() > 4096
+                    || argument.indexOf('\n') >= 0 || argument.indexOf('\r') >= 0
+                    || argument.indexOf('\0') >= 0) {
+                throw new SecurityException("Unsafe runtime argument");
+            }
+            manifest.append(argument).append('\n');
+            if (manifest.length() > 32 * 1024) {
+                throw new SecurityException("Runtime arguments exceed bounds");
+            }
+        }
+        return manifest.toString().getBytes(StandardCharsets.UTF_8);
     }
 
     private static byte[] encodeEnvironment(Map<String, String> environment) {
@@ -229,5 +257,5 @@ public final class RuntimeFdLauncher {
     private static native int nativeRunFd(int fd, byte[] output);
     private static native int nativeRunGlibc(int programFd, int loaderFd,
             byte[] libraryManifest, byte[] linkDirectory, byte[] environment,
-            byte[] programName, byte[] output);
+            byte[] programName, byte[] arguments, byte[] output);
 }

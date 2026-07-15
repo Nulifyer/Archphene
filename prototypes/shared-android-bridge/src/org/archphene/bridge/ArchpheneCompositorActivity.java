@@ -608,11 +608,15 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 environment.put("FONTCONFIG_FILE", fontconfig.getAbsolutePath());
                 environment.put("FONTCONFIG_PATH", fontconfig.getParentFile().getAbsolutePath());
                 applyToolkitEnvironment(environment, runtimeLib, config);
+                File imported = documentSession.importDocument(getIntent());
+                List<String> arguments = imported == null
+                        ? java.util.Collections.emptyList()
+                        : java.util.Collections.singletonList(imported.getAbsolutePath());
                 RuntimeFdLauncher.Result result = RuntimeFdLauncher.runGlibc(
                         getContentResolver(), android.net.Uri.parse(runtimeProbeUri),
                         android.net.Uri.parse(runtimeLoaderUri), libraries,
                         runtimeLibraryNames, getCacheDir(), environment,
-                        runtimeProgramName);
+                        runtimeProgramName, arguments);
                 Log.i("ArchpheneRuntime", "Runtime GUI exit=" + result.exitCode);
                 logRuntimeOutput(result.output);
             } catch (Throwable error) {

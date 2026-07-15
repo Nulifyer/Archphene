@@ -5163,7 +5163,15 @@ fn surface_tree_pointer_target(
     let target_x = pointer_x - f64::from(origin_x);
     let target_y = pointer_y - f64::from(origin_y);
     let surface_data = surface.data::<SurfaceData>()?;
-    let (local_x, local_y, accepts_parent, children_below, children_above) = {
+    let (
+        local_x,
+        local_y,
+        source_width,
+        source_height,
+        accepts_parent,
+        children_below,
+        children_above,
+    ) = {
         let surface = surface_data
             .inner
             .lock()
@@ -5177,6 +5185,8 @@ fn surface_tree_pointer_target(
         (
             local_x,
             local_y,
+            source_width,
+            source_height,
             surface.committed_frame.is_some()
                 && surface_accepts_pointer(
                     &surface,
@@ -5195,6 +5205,10 @@ fn surface_tree_pointer_target(
             child,
             origin_x,
             origin_y,
+            source_width,
+            source_height,
+            width,
+            height,
             pointer_x,
             pointer_y,
             depth.saturating_add(1),
@@ -5212,6 +5226,10 @@ fn surface_tree_pointer_target(
             child,
             origin_x,
             origin_y,
+            source_width,
+            source_height,
+            width,
+            height,
             pointer_x,
             pointer_y,
             depth.saturating_add(1),
@@ -5222,11 +5240,16 @@ fn surface_tree_pointer_target(
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 fn subsurface_tree_pointer_target(
     state: &CompositorState,
     surface: &WlSurface,
     parent_x: i32,
     parent_y: i32,
+    parent_source_width: u32,
+    parent_source_height: u32,
+    parent_target_width: i32,
+    parent_target_height: i32,
     pointer_x: f64,
     pointer_y: f64,
     depth: usize,
@@ -5240,19 +5263,24 @@ fn subsurface_tree_pointer_target(
         .committed_frame
         .as_ref()
         .map(|frame| (frame.width as i32, frame.height as i32))?;
+    let target_x = scale_surface_coordinate(x, parent_target_width, parent_source_width);
+    let target_y = scale_surface_coordinate(y, parent_target_height, parent_source_height);
+    let target_width =
+        scale_surface_coordinate(dimensions.0, parent_target_width, parent_source_width);
+    let target_height =
+        scale_surface_coordinate(dimensions.1, parent_target_height, parent_source_height);
     surface_tree_pointer_target(
         state,
         surface,
-        parent_x.saturating_add(x),
-        parent_y.saturating_add(y),
-        dimensions.0,
-        dimensions.1,
+        parent_x.saturating_add(target_x),
+        parent_y.saturating_add(target_y),
+        target_width,
+        target_height,
         pointer_x,
         pointer_y,
         depth,
     )
 }
-
 fn surface_accepts_pointer(
     surface: &SurfaceState,
     x: f64,
@@ -5329,36 +5357,57 @@ fn popup_local_geometry(data: &XdgPopupData) -> Option<(i32, i32, i32, i32)> {
 fn popup_constraint_bounds(state: &CompositorState, data: &XdgPopupData) -> Option<PopupBounds> {
     let (parent_x, parent_y) = xdg_surface_origin(state, &data.parent, 0)?;
     let ancestor = xdg_toplevel_ancestor_surface(&data.parent, 0)?;
-    let is_root = state
+    if state
         .root_surface
         .as_ref()
-        .is_some_and(|root| root.id() == ancestor.id());
-    let (origin_x, origin_y, width, height) = if is_root {
+        .is_some_and(|root| root.id() == ancestor.id())
+    {
+        let layout = toplevel_layout(state)?;
+        let root = state.root_frame.as_ref()?;
         let (content_x, content_y) = root_content_origin(state);
-        (
-            parent_x.saturating_add(content_x),
-            parent_y.saturating_add(content_y),
-            state.output_width,
-            state.output_height,
-        )
-    } else {
-        let frame = surface_frame(&ancestor)?;
-        let (width, height) = surface_content_size(&ancestor, &frame);
-        (
-            parent_x,
-            parent_y,
-            i32::try_from(width).ok()?,
-            i32::try_from(height).ok()?,
-        )
-    };
+        let scale_bound = |value: i32, target: i32, source: u32, upper: bool| {
+            if target <= 0 || source == 0 {
+                return value;
+            }
+            let scaled = f64::from(value) * f64::from(source) / f64::from(target);
+            if upper {
+                scaled.ceil() as i32
+            } else {
+                scaled.floor() as i32
+            }
+        };
+        let left = scale_bound(-content_x, layout.root_width, root.width, false);
+        let top = scale_bound(-content_y, layout.root_height, root.height, false);
+        let right = scale_bound(
+            state.output_width.saturating_sub(content_x),
+            layout.root_width,
+            root.width,
+            true,
+        );
+        let bottom = scale_bound(
+            state.output_height.saturating_sub(content_y),
+            layout.root_height,
+            root.height,
+            true,
+        );
+        return Some(PopupBounds {
+            left: left.saturating_sub(parent_x),
+            top: top.saturating_sub(parent_y),
+            right: right.saturating_sub(parent_x),
+            bottom: bottom.saturating_sub(parent_y),
+        });
+    }
+    let frame = surface_frame(&ancestor)?;
+    let (width, height) = surface_content_size(&ancestor, &frame);
+    let width = i32::try_from(width).ok()?;
+    let height = i32::try_from(height).ok()?;
     Some(PopupBounds {
-        left: origin_x.saturating_neg(),
-        top: origin_y.saturating_neg(),
-        right: width.saturating_sub(origin_x),
-        bottom: height.saturating_sub(origin_y),
+        left: parent_x.saturating_neg(),
+        top: parent_y.saturating_neg(),
+        right: width.saturating_sub(parent_x),
+        bottom: height.saturating_sub(parent_y),
     })
 }
-
 fn constrained_popup_geometry(
     state: &CompositorState,
     data: &XdgPopupData,
@@ -5412,6 +5461,34 @@ fn popup_geometry_in_root(
     ))
 }
 
+fn surface_frame_layout(
+    surface: &WlSurface,
+    content_x: i32,
+    content_y: i32,
+    content_width: i32,
+    content_height: i32,
+) -> Option<(i32, i32, i32, i32)> {
+    let frame = surface_frame(surface)?;
+    let geometry = window_geometry_for_surface(surface).unwrap_or(WindowGeometry {
+        x: 0,
+        y: 0,
+        width: frame.width as i32,
+        height: frame.height as i32,
+    });
+    let geometry_width = u32::try_from(geometry.width).ok()?.max(1);
+    let geometry_height = u32::try_from(geometry.height).ok()?.max(1);
+    let offset_x = scale_surface_coordinate(geometry.x, content_width, geometry_width);
+    let offset_y = scale_surface_coordinate(geometry.y, content_height, geometry_height);
+    let frame_width = scale_surface_coordinate(frame.width as i32, content_width, geometry_width);
+    let frame_height =
+        scale_surface_coordinate(frame.height as i32, content_height, geometry_height);
+    Some((
+        content_x.saturating_sub(offset_x),
+        content_y.saturating_sub(offset_y),
+        frame_width,
+        frame_height,
+    ))
+}
 fn blend_channel(source: u8, source_alpha: u32, destination: u8, destination_alpha: u32) -> u8 {
     let inverse_source_alpha = 255 - source_alpha;
     let output_alpha = source_alpha + (destination_alpha * inverse_source_alpha + 127) / 255;
@@ -5523,8 +5600,22 @@ fn blend_surface_tree(
             surface.children_above.clone(),
         )
     };
+    let (source_width, source_height) = frame
+        .as_ref()
+        .map_or((0, 0), |frame| (frame.width, frame.height));
     for child in children_below.iter().filter(|child| child.is_alive()) {
-        blend_subsurface_tree(state, destination, child, x, y, depth.saturating_add(1));
+        blend_subsurface_tree(
+            state,
+            destination,
+            child,
+            x,
+            y,
+            source_width,
+            source_height,
+            configured_width,
+            configured_height,
+            depth.saturating_add(1),
+        );
     }
     if let Some(frame) = frame {
         blend_popup_frame(
@@ -5537,16 +5628,32 @@ fn blend_surface_tree(
         );
     }
     for child in children_above.iter().filter(|child| child.is_alive()) {
-        blend_subsurface_tree(state, destination, child, x, y, depth.saturating_add(1));
+        blend_subsurface_tree(
+            state,
+            destination,
+            child,
+            x,
+            y,
+            source_width,
+            source_height,
+            configured_width,
+            configured_height,
+            depth.saturating_add(1),
+        );
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn blend_subsurface_tree(
     state: &CompositorState,
     destination: &mut CommittedFrame,
     surface: &WlSurface,
     parent_x: i32,
     parent_y: i32,
+    parent_source_width: u32,
+    parent_source_height: u32,
+    parent_target_width: i32,
+    parent_target_height: i32,
     depth: usize,
 ) {
     let Some((x, y)) = subsurface_position(surface) else {
@@ -5565,18 +5672,22 @@ fn blend_subsurface_tree(
     let Some((width, height)) = dimensions else {
         return;
     };
+    let target_x = scale_surface_coordinate(x, parent_target_width, parent_source_width);
+    let target_y = scale_surface_coordinate(y, parent_target_height, parent_source_height);
+    let target_width = scale_surface_coordinate(width, parent_target_width, parent_source_width);
+    let target_height =
+        scale_surface_coordinate(height, parent_target_height, parent_source_height);
     blend_surface_tree(
         state,
         destination,
         surface,
-        parent_x.saturating_add(x),
-        parent_y.saturating_add(y),
-        width,
-        height,
+        parent_x.saturating_add(target_x),
+        parent_y.saturating_add(target_y),
+        target_width,
+        target_height,
         depth,
     );
 }
-
 fn update_composited_frame(state: &mut CompositorState) {
     synchronize_managed_root(state);
     let Some(root) = state.root_frame.as_ref() else {
@@ -5708,14 +5819,25 @@ fn update_composited_frame(state: &mut CompositorState) {
         let scaled_y = scale_surface_coordinate(y, layout.root_height, root.height);
         let scaled_width = scale_surface_coordinate(width, layout.root_width, root.width);
         let scaled_height = scale_surface_coordinate(height, layout.root_height, root.height);
+        let content_x = scaled_x.saturating_add(content_x);
+        let content_y = scaled_y.saturating_add(content_y);
+        let Some((surface_x, surface_y, surface_width, surface_height)) = surface_frame_layout(
+            &xdg_data.wl_surface,
+            content_x,
+            content_y,
+            scaled_width,
+            scaled_height,
+        ) else {
+            continue;
+        };
         blend_surface_tree(
             state,
             &mut composed,
             &xdg_data.wl_surface,
-            scaled_x.saturating_add(content_x),
-            scaled_y.saturating_add(content_y),
-            scaled_width,
-            scaled_height,
+            surface_x,
+            surface_y,
+            surface_width,
+            surface_height,
             0,
         );
     }
@@ -6051,7 +6173,6 @@ impl CompositorCore {
             _ => -1,
         }
     }
-
     pub fn xdg_popup_done_count(&self) -> u32 {
         self.state.xdg_popup_done_count
     }
@@ -6837,13 +6958,20 @@ impl CompositorCore {
             let popup_y = scale_surface_coordinate(popup_y, layout.root_height, root_frame.height);
             let width = scale_surface_coordinate(width, layout.root_width, root_frame.width);
             let height = scale_surface_coordinate(height, layout.root_height, root_frame.height);
+            let content_x = popup_x.saturating_add(root_x);
+            let content_y = popup_y.saturating_add(root_y);
+            let Some((surface_x, surface_y, surface_width, surface_height)) =
+                surface_frame_layout(&xdg_data.wl_surface, content_x, content_y, width, height)
+            else {
+                continue;
+            };
             if let Some(target) = surface_tree_pointer_target(
                 &self.state,
                 &xdg_data.wl_surface,
-                popup_x.saturating_add(root_x),
-                popup_y.saturating_add(root_y),
-                width,
-                height,
+                surface_x,
+                surface_y,
+                surface_width,
+                surface_height,
                 x,
                 y,
                 0,
@@ -8739,6 +8867,8 @@ const MAX_RUNTIME_LIBRARY_MANIFEST: usize = 128 * 1024;
 const MAX_RUNTIME_LINK_NAME: usize = 128;
 const MAX_RUNTIME_ENVIRONMENT_MANIFEST: usize = 32 * 1024;
 const MAX_RUNTIME_ENVIRONMENT_VARIABLES: usize = 64;
+const MAX_RUNTIME_ARGUMENT_MANIFEST: usize = 32 * 1024;
+const MAX_RUNTIME_ARGUMENTS: usize = 32;
 
 #[cfg(any(target_os = "android", test))]
 fn valid_runtime_link_name(name: &[u8]) -> bool {
@@ -8845,6 +8975,26 @@ fn parse_runtime_environment(
 }
 
 #[cfg(any(target_os = "android", test))]
+fn parse_runtime_arguments(manifest: &[u8]) -> Result<Vec<std::ffi::CString>, i32> {
+    if manifest.is_empty() {
+        return Ok(Vec::new());
+    }
+    if manifest.len() > MAX_RUNTIME_ARGUMENT_MANIFEST || !manifest.ends_with(b"\n") {
+        return Err(libc::EINVAL);
+    }
+    let mut result = Vec::new();
+    for argument in manifest[..manifest.len() - 1].split(|byte| *byte == b'\n') {
+        if argument.len() > 4096
+            || argument.iter().any(|byte| matches!(*byte, b'\0' | b'\r'))
+            || result.len() >= MAX_RUNTIME_ARGUMENTS
+        {
+            return Err(libc::EINVAL);
+        }
+        result.push(std::ffi::CString::new(argument).map_err(|_| libc::EINVAL)?);
+    }
+    Ok(result)
+}
+#[cfg(any(target_os = "android", test))]
 fn runtime_plugin_alias(name: &str) -> Option<&'static str> {
     match name {
         "libqwayland.so" => Some("platforms"),
@@ -8871,6 +9021,7 @@ fn run_glibc_fds(
     link_root: &[u8],
     environment_manifest: &[u8],
     program_name: &[u8],
+    argument_manifest: &[u8],
 ) -> (i32, Vec<u8>) {
     let libraries = match parse_runtime_library_manifest(library_manifest) {
         Ok(libraries) => libraries,
@@ -8878,6 +9029,10 @@ fn run_glibc_fds(
     };
     let environment = match parse_runtime_environment(environment_manifest) {
         Ok(environment) => environment,
+        Err(error) => return (-error, Vec::new()),
+    };
+    let runtime_arguments = match parse_runtime_arguments(argument_manifest) {
+        Ok(arguments) => arguments,
         Err(error) => return (-error, Vec::new()),
     };
     if !safe_runtime_program_name(program_name) {
@@ -8986,15 +9141,16 @@ fn run_glibc_fds(
             return (-libc::EINVAL, Vec::new());
         }
     };
-    let arguments = [
+    let mut arguments = vec![
         loader.as_ptr(),
         library_path.as_ptr(),
         directory.as_ptr(),
         argv0.as_ptr(),
         program_name.as_ptr(),
         program.as_ptr(),
-        ptr::null(),
     ];
+    arguments.extend(runtime_arguments.iter().map(|argument| argument.as_ptr()));
+    arguments.push(ptr::null());
     let mut pipe = [-1; 2];
     if unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
         let error = io::Error::last_os_error()
@@ -9111,6 +9267,7 @@ pub unsafe extern "system" fn Java_org_archphene_bridge_RuntimeFdLauncher_native
     link_directory: jbyteArray,
     runtime_environment: jbyteArray,
     program_name: jbyteArray,
+    runtime_arguments: jbyteArray,
     output: jbyteArray,
 ) -> i32 {
     let (
@@ -9118,11 +9275,13 @@ pub unsafe extern "system" fn Java_org_archphene_bridge_RuntimeFdLauncher_native
         Some(link_directory),
         Some(runtime_environment),
         Some(program_name),
+        Some(runtime_arguments),
     ) = (
         java_byte_array(environment, library_manifest),
         java_byte_array(environment, link_directory),
         java_byte_array(environment, runtime_environment),
         java_byte_array(environment, program_name),
+        java_byte_array(environment, runtime_arguments),
     )
     else {
         return -libc::EINVAL;
@@ -9134,6 +9293,7 @@ pub unsafe extern "system" fn Java_org_archphene_bridge_RuntimeFdLauncher_native
         &link_directory,
         &runtime_environment,
         &program_name,
+        &runtime_arguments,
     );
     if copy_to_java_byte_array(environment, output, &captured) < 0 {
         return -libc::EFAULT;
@@ -10082,6 +10242,29 @@ mod tests {
         assert_eq!(environment[2].0.to_bytes(), b"__EGL_VENDOR_LIBRARY_DIRS");
     }
 
+    #[test]
+    fn parses_bounded_runtime_arguments() {
+        let arguments = parse_runtime_arguments(
+            b"/data/user/0/app/files/linux-home/Documents/Android/example file.txt\n--line=4\n",
+        )
+        .expect("valid runtime arguments");
+        assert_eq!(arguments.len(), 2);
+        assert_eq!(
+            arguments[0].to_bytes(),
+            b"/data/user/0/app/files/linux-home/Documents/Android/example file.txt"
+        );
+        assert_eq!(arguments[1].to_bytes(), b"--line=4");
+    }
+
+    #[test]
+    fn rejects_unsafe_runtime_arguments() {
+        assert!(parse_runtime_arguments(b"unterminated").is_err());
+        assert!(parse_runtime_arguments(b"bad\0argument\n").is_err());
+        let oversized = vec![b'a'; 4097];
+        let mut manifest = oversized;
+        manifest.push(b'\n');
+        assert!(parse_runtime_arguments(&manifest).is_err());
+    }
     #[test]
     fn rejects_unsafe_runtime_environment() {
         for manifest in [

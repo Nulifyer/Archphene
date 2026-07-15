@@ -1,5 +1,6 @@
 param(
     [string]$Serial = "emulator-5554",
+    [string]$Package = "org.archphene.linux.p241d399e14343c53b8b766e9126776aa",
     [string]$Name = "archphene-android-workflow.txt",
     [string]$Marker = "archphenedocsync7419"
 )
@@ -7,10 +8,10 @@ param(
 $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $Adb = Join-Path $Root "tooling/android-sdk/platform-tools/adb.exe"
-$Package = "org.archphene.linux.mousepad"
 $Local = Join-Path $Root "artifacts/$Name"
 $Remote = "/sdcard/Download/$Name"
-$Imported = "files/linux-home/Documents/Android/$Name"
+$DataRoot = "/data/user/0/$Package"
+$Imported = "$DataRoot/files/linux-home/Documents/Android/$Name"
 $EncodedRaw = [Uri]::EscapeDataString("raw:/storage/emulated/0/Download/$Name")
 $SourceUri = "content://com.android.providers.downloads.documents/document/$EncodedRaw"
 
@@ -55,6 +56,8 @@ function Tap-UiNode([xml]$Ui, [string]$Attribute, [string]$Value, [string]$Step)
 New-Item -ItemType Directory -Force -Path (Split-Path $Local) | Out-Null
 [IO.File]::WriteAllText($Local, "Android workflow original`nsecond source line`n",
         (New-Object Text.UTF8Encoding($false)))
+Invoke-Adb @("root") "enable emulator root for production-wrapper inspection" | Out-Null
+Invoke-Adb @("wait-for-device") "wait for rooted emulator" | Out-Null
 Invoke-Adb @("push", $Local, $Remote) "stage Downloads test document" | Out-Null
 Invoke-Adb @("shell", "am", "force-stop", $Package) "stop Mousepad" | Out-Null
 Invoke-Adb @("shell", "pm", "clear", $Package) "clear Mousepad test state" | Out-Null
@@ -71,7 +74,7 @@ $ui = Dump-Ui "mousepad-document-picker-downloads"
 Tap-UiNode $ui "text" $Name "select Downloads document"
 
 Wait-For {
-    $result = & $Adb -s $Serial shell run-as $Package test -f $Imported 2>$null
+    $result = & $Adb -s $Serial shell test -f $Imported 2>$null
     $LASTEXITCODE -eq 0
 } "Mousepad did not import the Android document" 30
 Start-Sleep -Seconds 5
@@ -93,7 +96,7 @@ Invoke-Adb @("shell", "am", "start", "-W", "-a", "android.intent.action.EDIT",
         "-c", "android.intent.category.DEFAULT", "-t", "text/plain", "-d", $SourceUri, $Package) `
         "reopen persisted Android document" | Out-Null
 Wait-For {
-    $text = (& $Adb -s $Serial shell run-as $Package cat $Imported 2>$null) -join "`n"
+    $text = (& $Adb -s $Serial shell cat $Imported 2>$null) -join "`n"
     $text.Contains($Marker)
 } "Cold-reopened Mousepad document did not contain the saved marker"
 

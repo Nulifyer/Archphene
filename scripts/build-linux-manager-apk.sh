@@ -30,11 +30,14 @@ build_qt_template() {
   local app="$root/prototypes/kcalc-android-app"
   local out="$root/tooling/build/wrapper-templates/qt"
   local placeholder="org.archphene.linux.p00000000000000000000000000000000"
+  local fixed_authority="org.archphene.linux.kcalc.documents"
+  local placeholder_authority="$placeholder.documents"
   rm -rf "$out"
   mkdir -p "$out"/{compiled,gen,classes,dex,stage/lib/x86_64,stage/assets}
 
   sed \
     -e "s/package=\"org.archphene.linux.kcalc\"/package=\"$placeholder\"/" \
+    -e "s/$fixed_authority/$placeholder_authority/g" \
     -e 's/android:debuggable="true"/android:debuggable="false"/' \
     -e 's/@drawable\/kcalc_icon/@drawable\/linux_app_icon/g' \
     "$app/AndroidManifest.xml" > "$out/AndroidManifest.xml"
@@ -62,6 +65,12 @@ build_qt_template() {
     jar uf ../unsigned.apk "${entries[@]}"
   )
   "$bt/zipalign" -f 4 "$out/unsigned.apk" "$out/qt-wrapper-template.apk"
+  local compiled_manifest
+  compiled_manifest="$("$bt/aapt2" dump xmltree "$out/qt-wrapper-template.apk" --file AndroidManifest.xml)"
+  if [[ "$compiled_manifest" != *"$placeholder_authority"* || "$compiled_manifest" == *"$fixed_authority"* ]]; then
+    echo "compiled wrapper template has an invalid document-provider authority" >&2
+    exit 1
+  fi
 }
 
 build_qt_template
