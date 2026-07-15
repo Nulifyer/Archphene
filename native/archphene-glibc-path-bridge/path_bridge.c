@@ -14,6 +14,21 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+/* Android PTYs are valid even when this glibc build's isatty probe is rejected. */
+int isatty(int fd) {
+    typedef int (*function_type)(int);
+    function_type real = (function_type)dlsym(RTLD_NEXT, "isatty");
+    if (real != NULL && real(fd) != 0) return 1;
+
+    char descriptor[64];
+    char target[PATH_MAX];
+    int written = snprintf(descriptor, sizeof(descriptor), "/proc/self/fd/%d", fd);
+    if (written <= 0 || (size_t)written >= sizeof(descriptor)) return 0;
+    ssize_t length = readlink(descriptor, target, sizeof(target) - 1);
+    if (length <= 0 || (size_t)length >= sizeof(target)) return 0;
+    target[length] = '\0';
+    return strcmp(target, "/dev/tty") == 0 || strncmp(target, "/dev/pts/", 9) == 0;
+}
 static bool has_parent_component(const char *path) {
     const char *part = path;
     while ((part = strstr(part, "..")) != NULL) {

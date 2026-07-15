@@ -108,7 +108,8 @@ public final class MainActivity extends Activity {
             }
         }, "archphene-runtime-pack-gc").start();
         showAppsPage();
-        if (ManagerStateStore.checkOnLaunch(this)) checkAll();
+        handleTerminalRequestIntent();
+        if (ManagerStateStore.checkOnLaunch(this) && currentPage == 0) checkAll();
         handleTestInstallIntent();
         handleTestPackageRuntimeIntent();
         handleTestWrapperSigningIntent();
@@ -122,6 +123,7 @@ public final class MainActivity extends Activity {
         super.onNewIntent(intent);
         setIntent(intent);
         handleTestRuntimeModuleIntent();
+        handleTerminalRequestIntent();
     }
 
     @Override
@@ -156,6 +158,44 @@ public final class MainActivity extends Activity {
         if (reinstall != null) {
             content.postDelayed(() -> startOnDevicePackageInstall(reinstall), 300);
         }
+    }
+    private void handleTerminalRequestIntent() {
+        Intent intent = getIntent();
+        String action = intent.getStringExtra("archphene_terminal_action");
+        String request = intent.getStringExtra("archphene_terminal_query");
+        if (action == null || request == null) return;
+        intent.removeExtra("archphene_terminal_action");
+        intent.removeExtra("archphene_terminal_query");
+        String query = request.trim().split("\\s+", 2)[0];
+        if (("install".equals(action) || "search".equals(action))
+                && query.matches("[a-zA-Z0-9@._+:-]{2,128}")) {
+            showPackageSearchPage(query);
+            showBanner("Review the " + query + " package before installing", false);
+            return;
+        }
+        if ("remove".equals(action) && query.matches("[a-zA-Z0-9@._+:-]{1,128}")) {
+            try {
+                for (InstalledLinuxAppCatalog.Entry entry : InstalledLinuxAppCatalog.query(this)) {
+                    if (!entry.managedKind.isEmpty()
+                            && entry.sourceId.endsWith("/" + query)) {
+                        showAppDetail(entry);
+                        showBanner("Review the package removal", false);
+                        return;
+                    }
+                }
+                showBanner(query + " is not installed in Terminal", true);
+            } catch (Exception error) {
+                showBanner("Could not read Terminal packages: " + error.getMessage(), true);
+            }
+            return;
+        }
+        if ("upgrade".equals(action)) {
+            showAppsPage();
+            checkAll();
+            showBanner("Checked installed packages; pinned versions remain unchanged", false);
+            return;
+        }
+        showBanner("Unsupported Terminal package request", true);
     }
     private void applySystemPalette() {
         String requestedTheme = ManagerStateStore.themeMode(this);
@@ -631,6 +671,10 @@ public final class MainActivity extends Activity {
     }
 
     private void showPackageSearchPage() {
+        showPackageSearchPage("");
+    }
+
+    private void showPackageSearchPage(String initialQuery) {
         currentPage = 3;
         setAddVisible(false);
         setNavigationSelection(true);
@@ -676,6 +720,12 @@ public final class MainActivity extends Activity {
             return true;
         });
         content.addView(page, frameMatch());
+        if (initialQuery != null && !initialQuery.trim().isEmpty()) {
+            packageSearch.setText(initialQuery.trim());
+            packageSearch.setSelection(packageSearch.length());
+            packageSearch.post(() -> searchPackages(packageSearch.getText().toString(),
+                    results, progress));
+        }
     }
 
     private void searchPackages(String query, LinearLayout results, ProgressBar progress) {

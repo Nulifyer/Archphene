@@ -139,6 +139,9 @@ while IFS=$'\t' read -r name relative; do
 done < "$resolved"
 cp "$glibc/ld-linux-x86-64.so.2" "$package_libs/libarchphene_ld.so"
 cp "$glibc/libc.so.6" "$package_libs/libarchphene_runtime_libc.so"
+terminal_pty="$root/native/archphene-terminal/out/x86_64/libtermux.so"
+[[ -f "$terminal_pty" ]] || { echo "terminal PTY library is missing" >&2; exit 1; }
+cp "$terminal_pty" "$package_libs/libtermux.so"
 find "$glibc" -maxdepth 1 -type f \
   ! -name 'source-commit.txt' ! -name 'runtime-manifest.tsv' \
   ! -name 'ld-linux-x86-64.so.2' -exec cp {} "$package_libs/" \;

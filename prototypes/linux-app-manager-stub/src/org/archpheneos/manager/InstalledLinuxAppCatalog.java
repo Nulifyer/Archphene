@@ -148,7 +148,10 @@ public final class InstalledLinuxAppCatalog {
     private static Entry fromManaged(PackageManager packages, ManagedPackageStore.Entry entry) {
         String update = "https://archlinux.org/packages/" + entry.repository + "/"
                 + entry.architecture + "/" + entry.name + "/json/";
-        Intent terminal = packages.getLaunchIntentForPackage("org.archpheneos.terminal");
+        Intent terminal = new Intent(Intent.ACTION_MAIN)
+                .setClassName("org.archpheneos.manager",
+                        "org.archpheneos.manager.TerminalActivity")
+                .addCategory(Intent.CATEGORY_LAUNCHER);
         return new Entry(entry.stateKey(), entry.name, entry.version, "pacman",
                 entry.repository + "/" + entry.name, entry.version, entry.executable,
                 "glibc-" + entry.architecture, update, terminal, true,
