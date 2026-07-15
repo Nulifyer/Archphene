@@ -6,6 +6,10 @@ sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
 version_code="${VERSION_CODE:-10000}"
 version_name="${VERSION_NAME:-1.0.0}"
 build_tools_version="${ANDROID_BUILD_TOOLS_VERSION:-36.0.0}"
+app_debuggable="${DEBUGGABLE:-false}"
+[[ "$app_debuggable" == "true" || "$app_debuggable" == "false" ]] || {
+  echo "DEBUGGABLE must be true or false" >&2; exit 1;
+}
 
 if [[ -z "$sdk" || ! -d "$sdk" ]]; then
   echo "ANDROID_SDK_ROOT or ANDROID_HOME must point to an Android SDK" >&2
@@ -38,7 +42,7 @@ build_qt_template() {
   sed \
     -e "s/package=\"org.archphene.linux.kcalc\"/package=\"$placeholder\"/" \
     -e "s/$fixed_authority/$placeholder_authority/g" \
-    -e 's/android:debuggable="true"/android:debuggable="false"/' \
+    -e "s/android:debuggable=\"true\"/android:debuggable=\"$app_debuggable\"/" \
     -e 's/@drawable\/kcalc_icon/@drawable\/linux_app_icon_png/g' \
     "$app/AndroidManifest.xml" > "$out/AndroidManifest.xml"
   "$bt/aapt2" compile --dir "$app/res" -o "$out/compiled/res.zip"
@@ -89,7 +93,7 @@ build_terminal_app() {
   sed \
     -e "s/android:versionCode=\"[^\"]*\"/android:versionCode=\"$version_code\"/" \
     -e "s/android:versionName=\"[^\"]*\"/android:versionName=\"$version_name\"/" \
-    -e 's/android:debuggable="true"/android:debuggable="false"/' \
+    -e "s/android:debuggable=\"true\"/android:debuggable=\"$app_debuggable\"/" \
     "$app/AndroidManifest.xml" > "$out/AndroidManifest.xml"
   "$bt/aapt2" compile --dir "$app/res" -o "$out/compiled/res.zip"
   "$bt/aapt2" link -o "$out/unsigned.apk" -I "$platform" \
@@ -127,7 +131,7 @@ mkdir -p "$out"/{compiled,gen,classes,dex,package-runtime/lib/x86_64,package-run
 sed \
   -e "s/android:versionCode=\"[^\"]*\"/android:versionCode=\"$version_code\"/" \
   -e "s/android:versionName=\"[^\"]*\"/android:versionName=\"$version_name\"/" \
-  -e 's/android:debuggable="true"/android:debuggable="false"/' \
+  -e "s/android:debuggable=\"true\"/android:debuggable=\"$app_debuggable\"/" \
   "$app/AndroidManifest.xml" > "$out/AndroidManifest.xml"
 
 runtime_prefix="$root"

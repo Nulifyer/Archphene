@@ -28,6 +28,7 @@ jobs:
       KEYSTORE_PASSWORD: ${{ secrets.ARCHPHENE_RELEASE_STORE_PASSWORD }}
       KEY_ALIAS: ${{ secrets.ARCHPHENE_RELEASE_KEY_ALIAS }}
       KEY_PASSWORD: ${{ secrets.ARCHPHENE_RELEASE_KEY_PASSWORD }}
+      DEBUGGABLE: "false"
 
     steps:
       - name: Check out release tag

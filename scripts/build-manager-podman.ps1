@@ -83,12 +83,14 @@ try {
         $previousEnvironment[$entry.Key] = [Environment]::GetEnvironmentVariable($entry.Key, "Process")
         [Environment]::SetEnvironmentVariable($entry.Key, [string]$entry.Value, "Process")
     }
+    $debuggable = if ($ReleaseBuild) { "false" } else { "true" }
     $containerArgs = @(
         "run", "--rm",
         "-v", "${Root}:/workspace",
         "-w", "/workspace",
         "-e", "VERSION_CODE=$VersionCode",
         "-e", "VERSION_NAME=$VersionName",
+        "-e", "DEBUGGABLE=$debuggable",
         "-e", "KEYSTORE_PATH",
         "-e", "KEYSTORE_PASSWORD",
         "-e", "KEY_ALIAS",

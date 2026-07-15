@@ -33,10 +33,13 @@ For repeated manager-only changes, reuse the verified runtime artifact:
 ./scripts/build-manager-podman.ps1 -SkipRuntime
 ```
 
+Local builds are signed with the development key and remain debuggable so the explicit `archphene_test_*` emulator hooks work. Those hooks are ignored unless Android marks the installed APK debuggable.
+
 Use `-ReleaseBuild` only with the ignored production credentials created by
 `setup-github-release-signing.ps1`. GitHub Actions invokes the underlying Linux
-scripts directly on Ubuntu. The output is
-`prototypes/linux-app-manager-stub/out-linux/archphene.apk`.
+scripts directly on Ubuntu. Release builds force both APKs non-debuggable. The outputs are
+`prototypes/linux-app-manager-stub/out-linux/archphene.apk` and the companion
+`prototypes/archphene-terminal-app/out-linux/archphene-terminal.apk`; the latter is also embedded in the manager.
 
 ### Qt platform theme
 

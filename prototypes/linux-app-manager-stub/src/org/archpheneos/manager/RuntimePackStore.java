@@ -257,6 +257,7 @@ final class RuntimePackStore {
         File moduleRoot = new File(temporary, "modules");
         if (!moduleRoot.mkdirs()) throw new IOException("Could not create runtime-pack staging");
         boolean published = false;
+        File publishedPath = null;
         File dataArchive = null;
         try {
             File dataRoot = new File(canonicalRoot, "usr/share");
@@ -293,12 +294,20 @@ final class RuntimePackStore {
             if (destination.exists() || !temporary.renameTo(destination)) {
                 throw new IOException("Could not atomically publish runtime pack");
             }
+            publishedPath = destination;
             syncDirectory(packsRoot);
+            Pack verified = load(context, packId);
             published = true;
-            return load(context, packId);
+            return verified;
         } finally {
             if (dataArchive != null) dataArchive.delete();
-            if (!published && temporary.exists()) deleteRecursively(temporary);
+            if (!published) {
+                if (temporary.exists()) deleteRecursively(temporary);
+                if (publishedPath != null && publishedPath.exists()) {
+                    deleteRecursively(publishedPath);
+                    syncDirectory(packsRoot);
+                }
+            }
         }
     }
 

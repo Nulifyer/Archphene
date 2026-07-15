@@ -54,12 +54,14 @@ final class PackageInstallCoordinator {
             String id, ApkUpdateInstaller.Operation preparation, Listener listener) {
         Thread worker = Thread.currentThread();
         preparation.setCancellationHook(worker::interrupt);
+        ArchPackageRuntime.StagedTransaction staged = null;
+        boolean handedOff = false;
         try {
             checkInterrupted();
             update(activity, listener, id, PackageInstallJobStore.RUNNING,
                     ApkUpdateInstaller.Phase.DOWNLOAD, 3,
                     "Resolving signed Arch transaction", "", false);
-            ArchPackageRuntime.StagedTransaction staged = ArchPackageRuntime.stageTransaction(
+            staged = ArchPackageRuntime.stageTransaction(
                     activity.getApplicationContext(), source.name, source.executable,
                     (percent, status) -> update(activity, listener, id,
                             PackageInstallJobStore.RUNNING,
@@ -73,6 +75,7 @@ final class PackageInstallCoordinator {
                 TrackedPackageStore.remove(activity, source.repository,
                         source.name, source.architecture);
                 ArchPackageRuntime.releaseStaging(activity, staged);
+                staged = null;
                 OPERATIONS.remove(id, preparation);
                 update(activity, listener, id, PackageInstallJobStore.COMPLETE,
                         ApkUpdateInstaller.Phase.COMPLETE, 100,
@@ -81,6 +84,7 @@ final class PackageInstallCoordinator {
             }
             if (staged.classification.kind != ArchPackageClassifier.Kind.DESKTOP) {
                 ArchPackageRuntime.releaseStaging(activity, staged);
+                staged = null;
                 throw new UnsupportedOperationException(source.name
                         + " does not provide a runnable command or desktop entry");
             }
@@ -112,8 +116,12 @@ final class PackageInstallCoordinator {
             AtomicBoolean installSlot = new AtomicBoolean(true);
             try {
                 checkInterrupted();
-                MAIN.post(() -> beginAndroidInstall(activity, source, id, preparation,
-                        staged, result, listener, installSlot));
+                ArchPackageRuntime.StagedTransaction prepared = staged;
+                if (!MAIN.post(() -> beginAndroidInstall(activity, source, id, preparation,
+                        prepared, result, listener, installSlot))) {
+                    throw new IllegalStateException("Could not schedule Android installer handoff");
+                }
+                handedOff = true;
             } catch (Exception error) {
                 releaseInstallSlot(installSlot);
                 throw error;
@@ -130,6 +138,10 @@ final class PackageInstallCoordinator {
             update(activity, listener, id, PackageInstallJobStore.ERROR,
                     ApkUpdateInstaller.Phase.ERROR, 0,
                     "Package preparation failed", message(error), true);
+        } finally {
+            if (!handedOff && staged != null) {
+                ArchPackageRuntime.releaseStaging(activity, staged);
+            }
         }
     }
 
@@ -140,6 +152,7 @@ final class PackageInstallCoordinator {
             ArchWrapperAssembler.Result result, Listener listener,
             AtomicBoolean installSlot) {
         if (OPERATIONS.get(id) != preparation || !preparation.canCancel()) {
+            ArchPackageRuntime.releaseStaging(activity, staged);
             releaseInstallSlot(installSlot);
             update(activity, listener, id, PackageInstallJobStore.CANCELLED,
                     ApkUpdateInstaller.Phase.CANCELLED, 0,

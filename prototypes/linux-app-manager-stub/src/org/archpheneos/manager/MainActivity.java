@@ -110,22 +110,27 @@ public final class MainActivity extends Activity {
         showAppsPage();
         handleTerminalRequestIntent();
         if (ManagerStateStore.checkOnLaunch(this) && currentPage == 0) checkAll();
-        handleTestInstallIntent();
-        handleTestPackageRuntimeIntent();
-        handleTestWrapperSigningIntent();
-        handleTestWrapperAssemblyIntent();
-        handleTestGitHubReleaseIntent();
-        handleTestRuntimeModuleIntent();
+        if (testHooksEnabled()) {
+            handleTestInstallIntent();
+            handleTestPackageRuntimeIntent();
+            handleTestWrapperSigningIntent();
+            handleTestWrapperAssemblyIntent();
+            handleTestGitHubReleaseIntent();
+            handleTestRuntimeModuleIntent();
+        }
     }
 
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
-        handleTestRuntimeModuleIntent();
+        if (testHooksEnabled()) handleTestRuntimeModuleIntent();
         handleTerminalRequestIntent();
     }
-
+    private boolean testHooksEnabled() {
+        return (getApplicationInfo().flags
+                & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0;
+    }
     @Override
     protected void onResume() {
         super.onResume();
