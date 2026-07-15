@@ -134,8 +134,21 @@ public final class MainActivity extends Activity {
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode != REQUEST_UNINSTALL_LINUX_APP) return;
+        String uninstalledPackage = ManagerStateStore.takePendingUninstallPackage(this);
         loadCatalog();
-        if (resultCode == RESULT_OK) showBanner("App uninstalled", false);
+        if (resultCode == RESULT_OK) {
+            showBanner("App uninstalled", false);
+            if (!uninstalledPackage.isEmpty()) {
+                new Thread(() -> {
+                    try {
+                        RuntimePackStore.removeBinding(this, uninstalledPackage);
+                    } catch (Exception error) {
+                        android.util.Log.e("ArchpheneRuntime",
+                                "Could not release uninstalled app runtime", error);
+                    }
+                }, "archphene-uninstall-runtime-release").start();
+            }
+        }
     }
     private void applySystemPalette() {
         String requestedTheme = ManagerStateStore.themeMode(this);
@@ -1090,6 +1103,7 @@ public final class MainActivity extends Activity {
         Button uninstall = actionButton("Uninstall app", android.R.drawable.ic_menu_delete);
         uninstall.setTextColor(COLOR_ERROR);
         uninstall.setOnClickListener(view -> {
+            ManagerStateStore.setPendingUninstallPackage(this, app.packageName);
             Intent request = new Intent(Intent.ACTION_UNINSTALL_PACKAGE,
                     Uri.parse("package:" + app.packageName));
             request.putExtra(Intent.EXTRA_RETURN_RESULT, true);
@@ -1412,9 +1426,32 @@ public final class MainActivity extends Activity {
         Button clear = actionButton("Clear cache and refresh all",
                 android.R.drawable.ic_popup_sync);
         clear.setOnClickListener(view -> {
+            if (PackageInstallCoordinator.hasActiveOperations()) {
+                Toast.makeText(this, "Wait for package operations to finish",
+                        Toast.LENGTH_SHORT).show();
+                return;
+            }
+            clear.setEnabled(false);
             ManagedRepositoryStore.clearCache(this);
-            showAppsPage();
-            checkAll();
+            new Thread(() -> {
+                try {
+                    int removed = RuntimePackStore.garbageCollectNow(this);
+                    runOnUiThread(() -> {
+                        Toast.makeText(this, "Cache cleared; removed " + removed
+                                + " unused runtime packs", Toast.LENGTH_SHORT).show();
+                        showAppsPage();
+                        checkAll();
+                    });
+                } catch (Exception error) {
+                    android.util.Log.e("ArchpheneRuntime",
+                            "Manual runtime-pack cleanup failed", error);
+                    runOnUiThread(() -> {
+                        clear.setEnabled(true);
+                        Toast.makeText(this, "Could not clear runtime cache",
+                                Toast.LENGTH_LONG).show();
+                    });
+                }
+            }, "archphene-manual-cache-clear").start();
         });
         repositories.addView(clear, spacedWrap(dp(8)));
         page.addView(repositories, spacedWrap(dp(6)));

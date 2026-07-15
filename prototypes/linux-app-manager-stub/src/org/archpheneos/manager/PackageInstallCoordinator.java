@@ -41,6 +41,10 @@ final class PackageInstallCoordinator {
         return OPERATIONS.get(id);
     }
 
+    static boolean hasActiveOperations() {
+        return !OPERATIONS.isEmpty();
+    }
+
     static void cancel(String id) {
         ApkUpdateInstaller.Operation operation = OPERATIONS.get(id);
         if (operation != null) operation.cancel();

@@ -255,12 +255,19 @@ final class RuntimePackStore {
             throw new IllegalArgumentException("Invalid Android package binding");
         }
         Pack pack = load(context, packId);
+        Pack previous = null;
+        try {
+            previous = active(context, androidPackage);
+        } catch (FileNotFoundException ignored) {}
         File bindings = directory(directory(context.getFilesDir(), "runtime-packs"), "bindings");
         String bindingName = sha256(androidPackage.getBytes(StandardCharsets.UTF_8));
         File target = new File(bindings, bindingName + ".tsv");
         String value = "# org.archphene.runtime-binding.v1\n"
                 + "package\t" + androidPackage + "\npack\t" + pack.id + "\n";
         writeAtomically(target, value.getBytes(StandardCharsets.UTF_8));
+        if (previous != null && !previous.id.equals(pack.id)) {
+            deleteIfUnbound(context, previous.id);
+        }
     }
 
     static synchronized Pack active(Context context, String androidPackage) throws Exception {
@@ -325,11 +332,20 @@ final class RuntimePackStore {
                 context.revokeUriPermission(module.uri(active.id),
                         android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION);
             }
+            deleteIfUnbound(context, active.id);
         }
         garbageCollect(context);
     }
 
     static synchronized int garbageCollect(Context context) throws Exception {
+        return garbageCollect(context, UNBOUND_PACK_GRACE_MS);
+    }
+
+    static synchronized int garbageCollectNow(Context context) throws Exception {
+        return garbageCollect(context, 0);
+    }
+
+    private static int garbageCollect(Context context, long graceMs) throws Exception {
         File store = directory(context.getFilesDir(), "runtime-packs");
         File bindings = directory(store, "bindings");
         File packs = directory(store, "packs");
@@ -360,7 +376,7 @@ final class RuntimePackStore {
         int removed = 0;
         File[] packDirectories = packs.listFiles();
         if (packDirectories != null) {
-            long oldestRemovable = System.currentTimeMillis() - UNBOUND_PACK_GRACE_MS;
+            long oldestRemovable = System.currentTimeMillis() - Math.max(0, graceMs);
             for (File pack : packDirectories) {
                 if (!live.contains(pack.getName()) && pack.lastModified() < oldestRemovable) {
                     VERIFIED_PACKS.remove(pack.getName());
@@ -374,6 +390,30 @@ final class RuntimePackStore {
         return removed;
     }
 
+    private static void deleteIfUnbound(Context context, String packId) throws Exception {
+        File store = directory(context.getFilesDir(), "runtime-packs");
+        File bindings = directory(store, "bindings");
+        File[] bindingFiles = bindings.listFiles();
+        if (bindingFiles != null) {
+            for (File binding : bindingFiles) {
+                try {
+                    List<String> lines = readLines(binding, 4, MAX_LINE);
+                    if (lines.size() == 3 && ("pack\t" + packId).equals(lines.get(2))) {
+                        return;
+                    }
+                } catch (Exception ignored) {
+                    // Normal garbage collection removes malformed bindings.
+                }
+            }
+        }
+        File packs = directory(store, "packs");
+        File pack = new File(packs, packId).getCanonicalFile();
+        if (pack.isDirectory() && pack.getParentFile().equals(packs.getCanonicalFile())) {
+            VERIFIED_PACKS.remove(packId);
+            deleteRecursively(pack);
+            syncDirectory(packs);
+        }
+    }
     static Pack load(Context context, String packId) throws Exception {
         if (packId == null || !packId.matches(HASH)) {
             throw new FileNotFoundException("Invalid runtime-pack identity");

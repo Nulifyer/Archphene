@@ -236,6 +236,18 @@ public final class ManagerStateStore {
         }
         preferences(context).edit().putInt("linux-font-percent", value).apply();
     }
+    public static void setPendingUninstallPackage(Context context, String packageName) {
+        String value = packageName != null
+                && packageName.matches("[a-zA-Z0-9._]{3,255}") ? packageName : "";
+        preferences(context).edit().putString("pending-uninstall-package", value).commit();
+    }
+
+    public static String takePendingUninstallPackage(Context context) {
+        android.content.SharedPreferences state = preferences(context);
+        String value = state.getString("pending-uninstall-package", "");
+        state.edit().remove("pending-uninstall-package").commit();
+        return value == null ? "" : value;
+    }
     public static boolean versionPrerelease(Context context, String packageName, String version) {
         return preferences(context).getBoolean(
                 "version-prerelease:" + packageName + ":" + version,

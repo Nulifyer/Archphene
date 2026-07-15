@@ -719,15 +719,11 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             scalePercent = smallestWidth >= 840 ? 100 : smallestWidth >= 600 ? 125 : 150;
         }
         float appScale = scalePercent / 100f;
-        float density = getResources().getDisplayMetrics().density;
-        float androidFontScale = density <= 0f ? 1f
-                : getResources().getDisplayMetrics().scaledDensity / density;
-        float fontScale = androidFontScale * appearanceFontPercent / 100f;
-        int basePointSize = configuration.smallestScreenWidthDp >= 840 ? 10
-                : configuration.smallestScreenWidthDp >= 600 ? 14 : 18;
-        int maximumPointSize = configuration.smallestScreenWidthDp < 600 ? 22 : 30;
-        int fontPointSize = Math.max(9,
-                Math.min(maximumPointSize, Math.round(basePointSize * fontScale)));
+        float scaledDensity = getResources().getDisplayMetrics().scaledDensity;
+        float requestedBodyPixels = 16f * scaledDensity
+                * appearanceFontPercent / 100f;
+        int fontPointSize = Math.max(9, Math.min(30,
+                Math.round(requestedBodyPixels * 72f / 96f / appScale)));
         env.put("QT_SCALE_FACTOR", String.format(Locale.US, "%.2f", appScale));
         env.put("QT_SCALE_FACTOR_ROUNDING_POLICY", "PassThrough");
         env.put("QT_FONT_DPI", "96");
@@ -789,12 +785,14 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             int fontPointSize, float appScale) throws IOException {
         File gtkConfig = new File(configDir, "gtk-3.0");
         gtkConfig.mkdirs();
+        float density = getResources().getDisplayMetrics().density;
         int uiFontSize = Math.max(fontPointSize,
                 Math.round(fontPointSize * 4f / 3f * appScale));
-        int controlHeight = Math.max(Math.round(48f * appScale), uiFontSize + 20);
-        int titleButtonSize = Math.max(Math.round(52f * appScale), uiFontSize + 20);
-        int scrollbarSize = Math.max(18, Math.round(12f * appScale));
-        int menuBorder = Math.max(2, Math.round(1.25f * appScale));
+        int controlHeight = Math.max(Math.round(48f * density), uiFontSize + 20);
+        int titleButtonSize = Math.max(Math.round(48f * density), uiFontSize + 20);
+        int horizontalPadding = Math.max(14, Math.round(12f * density));
+        int scrollbarSize = Math.max(18, Math.round(12f * density));
+        int menuBorder = Math.max(2, Math.round(1f * density));
         String outline = dark ? "rgba(255,255,255,0.28)" : "rgba(0,0,0,0.24)";
         String shadow = dark ? "rgba(0,0,0,0.72)" : "rgba(0,0,0,0.38)";
         String settings = "[Settings]\n"
@@ -812,16 +810,22 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 + "  min-height: " + controlHeight + "px;\n"
                 + "}\n"
                 + "menubar > menuitem {\n"
-                + "  padding: 8px 14px;\n"
+                + "  min-height: " + controlHeight + "px;\n"
+                + "  padding: 0 " + horizontalPadding + "px;\n"
                 + "}\n"
-                + "menu {\n"
+                + ".csd menu, menu, .menu, .context-menu {\n"
                 + "  border: " + menuBorder + "px solid " + outline + ";\n"
                 + "  box-shadow: inset 0 0 0 1px " + outline
                 + ", 0 8px 24px " + shadow + ";\n"
                 + "  padding: 4px;\n"
                 + "}\n"
+                + ".csd.popup decoration {\n"
+                + "  box-shadow: 0 8px 24px " + shadow
+                + ", 0 0 0 " + menuBorder + "px " + outline + ";\n"
+                + "}\n"
                 + "menu menuitem {\n"
-                + "  padding: 8px 14px;\n"
+                + "  min-height: " + controlHeight + "px;\n"
+                + "  padding: 0 " + horizontalPadding + "px;\n"
                 + "}\n"
                 + "headerbar {\n"
                 + "  min-height: " + titleButtonSize + "px;\n"
@@ -831,8 +835,9 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 + "  min-height: " + titleButtonSize + "px;\n"
                 + "  padding: 4px;\n"
                 + "}\n"
-                + "headerbar button.titlebutton image, headerbar .titlebutton image {\n"
-                + "  -gtk-icon-transform: scale(1.5);\n"
+                + "headerbar button.titlebutton image, headerbar .titlebutton image,\n"
+                + ".titlebar button.titlebutton image, windowcontrols image {\n"
+                + "  -gtk-icon-transform: scale(3);\n"
                 + "}\n"
                 + "scrollbar slider {\n"
                 + "  min-width: " + scrollbarSize + "px;\n"

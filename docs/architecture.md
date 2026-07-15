@@ -53,7 +53,7 @@ After package signature and extraction checks, the manager reduces the dependenc
 
 Generated wrappers do not contain the Linux closure. On launch they call an exported manager provider with their Android package identity. The provider authenticates the Binder calling UID against the installed package, verifies the active binding and every manifest/file hash, and returns only exact read-only module descriptors with explicit URI grants. Untrusted shell access and package-name impersonation are rejected. The wrapper builds a private descriptor-backed symlink view and invokes the manager-owned patched glibc loader while the Linux process remains under the wrapper UID.
 
-The emulator validates a cold app-drawer KCalc launch from the manager-owned pack, a separately supplied `DT_NEEDED` dependency, provider rejection for an untrusted caller, and reduction of the generated KCalc wrapper from 57,205,287 bytes to 628,675 bytes. Remaining lifecycle work is running-process leases, uninstall reconciliation on every path, process-tree cleanup, and 4 KB/16 KB page-size validation.
+The emulator validates a cold app-drawer KCalc launch from the manager-owned pack, a separately supplied dependency, provider rejection for an untrusted caller, and reduction of the generated KCalc wrapper from 57,205,287 bytes to 628,675 bytes. Successful updates immediately remove superseded unreferenced packs, uninstall removes the released pack, and the manager cache action collects other unbound packs while package operations are idle. Remaining lifecycle work is running-process leases, uninstall reconciliation on every external path, process-tree cleanup, extraction reuse, and 4 KB/16 KB page-size validation.
 
 ### Storage
 
