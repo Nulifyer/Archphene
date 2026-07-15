@@ -10,6 +10,7 @@ This page separates validated behavior from planned platform work. Package searc
 |---|---|
 | Manager self-update | Public GitHub Releases discovery, bounded download, SHA-256 verification, signer/package validation, Android confirmation, replacement, restart reconciliation, and 0.9.0 to 1.0.0 device test |
 | General x86_64 package transactions | Arch dependency resolution, package-signature verification, closure staging, desktop/terminal classification, package-specific label/executable/icon/MIME/toolkit/ABI/capability metadata, generated APK validation, persistent Android Keystore signing, and PackageInstaller installation pass with KCalc, Mousepad, and CLI packages; a concurrent missing-package failure does not block an unrelated CLI transaction |
+| AArch64 runtime artifact | A cacheable Linux container resolves the current Arch Linux ARM pacman/GnuPG/libarchive closure, verifies every package with the pinned build-system key, reduces it to required AArch64 ELF objects, cross-builds patched glibc from the matching upstream commit, and emits a 70-file checksum catalog; manager embedding and Samsung package execution remain pending |
 | Qt and GTK bridge prototypes | KCalc and Mousepad GUI, input, popups, dialogs, clipboard/IME, resizing, and selected document workflows on the listed test devices |
 | Shared bridge runtime | KCalc, Mousepad, and the native probe compile against one Android Activity/InputConnection/clipboard/window host and one Rust compositor; the application Activities are metadata-only subclasses |
 | Shared runtime packs | Verified Arch dependency closures are published atomically as immutable content-addressed packs owned by the manager; an exported caller-authenticated provider grants exact read-only module URIs to the generated wrapper UID, cold app-drawer relaunch loads the active pack, untrusted shell access is rejected, superseded/manual-cache unbound packs are reclaimed, and the KCalc wrapper shrank from 57 MB to 629 KB |
@@ -21,7 +22,7 @@ This page separates validated behavior from planned platform work. Package searc
 
 ## In progress
 
-The debug manager and Terminal APKs are multi-ABI and run as arm64-v8a on the Samsung test device. This validates the Android control plane and PTY only; release assets must remain x86_64 until the Arch Linux ARM runtime, repositories, and trust roots are integrated.
+The debug manager and Terminal APKs are multi-ABI and run as arm64-v8a on the Samsung test device. A verified Arch Linux ARM runtime artifact now builds reproducibly, but it is not yet embedded or executed by the manager. Release assets must remain x86_64 until an ARM package transaction and generated desktop wrapper pass on Samsung.
 
 1. **Architecture support**
    - publish x86_64 and arm64-v8a manager/runtime artifacts;
