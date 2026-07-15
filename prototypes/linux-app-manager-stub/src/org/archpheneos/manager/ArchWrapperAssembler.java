@@ -58,25 +58,25 @@ public final class ArchWrapperAssembler {
     public static Result assembleQt(Context context, String repository, String sourcePackage)
             throws Exception {
         return assembleQt(context, repository, sourcePackage, "0", sourcePackage,
-                null, false);
+                displayName(sourcePackage), null, false);
     }
 
     public static Result assembleQt(Context context, String repository, String sourcePackage,
             File runtimeRoot) throws Exception {
         return assembleQt(context, repository, sourcePackage, "0", sourcePackage,
-                runtimeRoot, true);
+                displayName(sourcePackage), runtimeRoot, true);
     }
 
     public static Result assembleQt(Context context, String repository, String sourcePackage,
             String sourceVersion) throws Exception {
         return assembleQt(context, repository, sourcePackage, sourceVersion, sourcePackage,
-                null, false);
+                displayName(sourcePackage), null, false);
     }
 
     public static Result assembleQt(Context context, String repository, String sourcePackage,
             String sourceVersion, String executableName) throws Exception {
         return assembleQt(context, repository, sourcePackage, sourceVersion, executableName,
-                null, false);
+                displayName(sourcePackage), null, false);
     }
 
     public static Result assembleQtFromRuntimePack(Context context, String repository,
@@ -86,32 +86,53 @@ public final class ArchWrapperAssembler {
             throw new IllegalArgumentException("Runtime-pack staging root is required");
         }
         return assembleQt(context, repository, sourcePackage, sourceVersion, executableName,
-                runtimeRoot, false);
+                displayName(sourcePackage), runtimeRoot, false);
+    }
+
+    static Result assembleDesktopFromRuntimePack(Context context, String repository,
+            String sourcePackage, String sourceVersion,
+            ArchPackageClassifier.Result classification, File runtimeRoot) throws Exception {
+        if (runtimeRoot == null || classification == null
+                || classification.kind != ArchPackageClassifier.Kind.DESKTOP) {
+            throw new IllegalArgumentException("Desktop runtime-pack metadata is required");
+        }
+        return assembleQt(context, repository, sourcePackage, sourceVersion,
+                classification.executable, classification.displayName, runtimeRoot, false);
     }
 
     private static Result assembleQt(Context context, String repository, String sourcePackage,
-            String sourceVersion, String executableName, File runtimeRoot,
+            String sourceVersion, String executableName, String appLabel, File runtimeRoot,
             boolean embedNativeClosure) throws Exception {
         if (!repository.matches("[a-z0-9-]{1,32}")
                 || !sourcePackage.matches("[a-zA-Z0-9@._+:-]{1,128}")
                 || sourceVersion == null
                 || !sourceVersion.matches("[a-zA-Z0-9@._+:-]{1,128}")
                 || executableName == null
-                || !executableName.matches("[a-zA-Z0-9@._+:-]{1,128}")) {
+                || !executableName.matches("[a-zA-Z0-9@._+:-]{1,128}")
+                || !validDisplayName(appLabel)) {
             throw new IllegalArgumentException("Invalid wrapper source identity");
         }
         String packageName = packageNameFor(repository, sourcePackage);
         File output = new File(context.getCacheDir(), "generated-" + sourcePackage + ".apk");
         File unsigned = new File(context.getCacheDir(), "generated-" + sourcePackage + ".unsigned.apk");
         rebuildTemplate(context, packageName, repository, sourcePackage, sourceVersion,
-                executableName, runtimeRoot, embedNativeClosure, unsigned);
+                executableName, appLabel, runtimeRoot, embedNativeClosure, unsigned);
         verifyStoredEntryAlignment(unsigned, "resources.arsc", 4);
         ArchWrapperSigner.Result signed = ArchWrapperSigner.sign(context, unsigned, output);
         PackageInfo parsed = context.getPackageManager().getPackageArchiveInfo(output.getPath(),
                 PackageManager.GET_SIGNING_CERTIFICATES);
-        if (parsed == null || !packageName.equals(parsed.packageName)) {
+        if (parsed == null || !packageName.equals(parsed.packageName)
+                || parsed.applicationInfo == null) {
             output.delete();
             throw new SecurityException("Generated wrapper package identity mismatch");
+        }
+        parsed.applicationInfo.sourceDir = output.getPath();
+        parsed.applicationInfo.publicSourceDir = output.getPath();
+        CharSequence generatedLabel = parsed.applicationInfo.loadLabel(
+                context.getPackageManager());
+        if (generatedLabel == null || !appLabel.contentEquals(generatedLabel)) {
+            output.delete();
+            throw new SecurityException("Generated wrapper label mismatch");
         }
         unsigned.delete();
         return new Result(packageName, output, sha256(output), signed.signerSha256);
@@ -128,7 +149,7 @@ public final class ArchWrapperAssembler {
                         .substring(0, 32);
     }
     private static void rebuildTemplate(Context context, String packageName, String repository,
-            String sourcePackage, String sourceVersion, String executableName,
+            String sourcePackage, String sourceVersion, String executableName, String appLabel,
             File runtimeRoot, boolean embedNativeClosure, File output)
             throws Exception {
         byte[] placeholder = PACKAGE_PLACEHOLDER.getBytes(StandardCharsets.UTF_8);
@@ -157,7 +178,7 @@ public final class ArchWrapperAssembler {
                     iconPatched = true;
                 }
                 if ("AndroidManifest.xml".equals(name)) {
-                    value = replaceBinaryXmlString(value, "KCalc", displayName(sourcePackage));
+                    value = replaceBinaryXmlString(value, "KCalc", appLabel);
                     value = replaceBinaryXmlString(value, "extra/kcalc",
                             repository + "/" + sourcePackage);
                     value = replaceBinaryXmlString(value, "26.04.3-1", sourceVersion);
@@ -693,6 +714,14 @@ public final class ArchWrapperAssembler {
             }
         }
         return executableName;
+    }
+
+    private static boolean validDisplayName(String value) {
+        if (value == null || value.isBlank() || value.length() > 128) return false;
+        for (int index = 0; index < value.length(); index++) {
+            if (Character.isISOControl(value.charAt(index))) return false;
+        }
+        return true;
     }
 
     private static String displayName(String packageName) {

@@ -113,7 +113,7 @@ final class ArchPackageClassifier {
         if (!"Application".equals(values.get("Type"))) return null;
         String name = values.getOrDefault("Name", "").trim();
         String executable = execProgram(values.getOrDefault("Exec", ""));
-        if (name.isEmpty() || executable.isEmpty() || !commands.contains(executable)) return null;
+        if (!validDisplayName(name) || executable.isEmpty() || !commands.contains(executable)) return null;
         String tryExec = execProgram(values.getOrDefault("TryExec", ""));
         if (!tryExec.isEmpty() && !commands.contains(tryExec)) return null;
         return new DesktopEntry(executable, name,
@@ -121,6 +121,14 @@ final class ArchPackageClassifier {
                 booleanValue(values.get("Terminal")),
                 booleanValue(values.get("Hidden")),
                 booleanValue(values.get("NoDisplay")));
+    }
+
+    private static boolean validDisplayName(String value) {
+        if (value == null || value.isBlank() || value.length() > 128) return false;
+        for (int index = 0; index < value.length(); index++) {
+            if (Character.isISOControl(value.charAt(index))) return false;
+        }
+        return true;
     }
 
     static String execProgram(String value) {
@@ -219,7 +227,8 @@ final class ArchPackageClassifier {
         Result terminal = classify(root, "editor", "editor", sourceCommands);
         Result dependency = classify(root, "library", "library", Collections.emptySet());
         delete(root);
-        if (desktop.kind != Kind.DESKTOP || !"editor".equals(desktop.executable)
+        if (desktop.kind != Kind.DESKTOP || !"Editor".equals(desktop.displayName)
+                || !"editor".equals(desktop.executable)
                 || desktop.commands.size() != 1 || !desktop.commands.contains("editor")
                 || terminal.kind != Kind.TERMINAL || dependency.kind != Kind.DEPENDENCY
                 || !"quoted".equals(execProgram("\"/usr/bin/quoted\" %F"))) {

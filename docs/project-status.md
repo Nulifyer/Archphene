@@ -9,7 +9,7 @@ This page separates validated behavior from planned platform work. Package searc
 | Area | Evidence |
 |---|---|
 | Manager self-update | Public GitHub Releases discovery, bounded download, SHA-256 verification, signer/package validation, Android confirmation, replacement, restart reconciliation, and 0.9.0 to 1.0.0 device test |
-| KCalc package transaction | x86_64 Arch dependency resolution, package-signature verification, closure staging, wrapper assembly, persistent Android Keystore signing, and PackageInstaller installation performed at manager runtime |
+| KCalc package transaction | x86_64 Arch dependency resolution, package-signature verification, closure staging, selected desktop-entry label/executable propagation, generated APK identity/label validation, persistent Android Keystore signing, and PackageInstaller installation performed at manager runtime |
 | Qt and GTK bridge prototypes | KCalc and Mousepad GUI, input, popups, dialogs, clipboard/IME, resizing, and selected document workflows on the listed test devices |
 | Shared bridge runtime | KCalc, Mousepad, and the native probe compile against one Android Activity/InputConnection/clipboard/window host and one Rust compositor; the application Activities are metadata-only subclasses |
 | Shared runtime packs | Verified Arch dependency closures are published atomically as immutable content-addressed packs owned by the manager; an exported caller-authenticated provider grants exact read-only module URIs to the generated wrapper UID, cold app-drawer relaunch loads the active pack, untrusted shell access is rejected, superseded/manual-cache unbound packs are reclaimed, and the KCalc wrapper shrank from 57 MB to 629 KB |
@@ -22,7 +22,7 @@ This page separates validated behavior from planned platform work. Package searc
 ## In progress
 
 1. **General package transactions**
-   - detect desktop entrypoints, icons, toolkits, ABI requirements, and capabilities instead of assuming the KCalc Qt template;
+   - complete icon, MIME/document, ABI requirement, and bridge-capability metadata now that the selected desktop-entry label/executable and detected runtime toolkit flow through generic wrapper assembly;
    - generate generic package metadata and wrapper resources;
    - validate failure isolation with multiple real simultaneous package transactions.
 

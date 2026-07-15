@@ -100,9 +100,9 @@ final class PackageInstallCoordinator {
                         ApkUpdateInstaller.Phase.INSTALL, 15,
                         "Building and signing Android wrapper", "", false);
                 String resolvedVersion = staged.sourceVersion();
-                result = ArchWrapperAssembler.assembleQtFromRuntimePack(
+                result = ArchWrapperAssembler.assembleDesktopFromRuntimePack(
                         activity, source.repository, source.name, resolvedVersion,
-                        staged.classification.executable, staged.root);
+                        staged.classification, staged.root);
             } finally {
                 WRAPPER_MUTATION.release();
             }

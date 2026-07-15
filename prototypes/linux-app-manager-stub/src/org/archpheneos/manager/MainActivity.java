@@ -1926,18 +1926,19 @@ public final class MainActivity extends Activity {
         String sourcePackage = getIntent().getStringExtra("archphene_test_assemble_qt");
         if (sourcePackage == null) return;
         new Thread(() -> {
+            ArchPackageRuntime.StagedTransaction staged = null;
             try {
-                java.io.File runtimeRoot = null;
                 if (getIntent().getBooleanExtra("archphene_test_stage_transaction", false)) {
                     runOnUiThread(() -> showBanner("Resolving and verifying " + sourcePackage, false));
-                    ArchPackageRuntime.StagedTransaction staged =
-                            ArchPackageRuntime.stageTransaction(this, sourcePackage);
-                    runtimeRoot = staged.root;
+                    staged = ArchPackageRuntime.stageTransaction(this, sourcePackage);
                     android.util.Log.i("ArchpheneRuntime", "published pack "
                             + staged.runtimePackId + " for " + sourcePackage);
                 }
-                ArchWrapperAssembler.Result result = ArchWrapperAssembler.assembleQt(
-                        this, "extra", sourcePackage);
+                ArchWrapperAssembler.Result result = staged == null
+                        ? ArchWrapperAssembler.assembleQt(this, "extra", sourcePackage)
+                        : ArchWrapperAssembler.assembleDesktopFromRuntimePack(
+                                this, "extra", sourcePackage, staged.sourceVersion(),
+                                staged.classification, staged.root);
                 if (getIntent().getBooleanExtra("archphene_test_install_assembled", false)) {
                     runOnUiThread(() -> {
                         showBanner("Generated " + result.packageName + "\nOpening Android installer", false);
@@ -1955,6 +1956,8 @@ public final class MainActivity extends Activity {
             } catch (Exception e) {
                 android.util.Log.e("ArchpheneManager", "Wrapper assembly failed", e);
                 runOnUiThread(() -> showBanner("Wrapper assembly failed: " + e.getMessage(), true));
+            } finally {
+                if (staged != null) ArchPackageRuntime.releaseStaging(this, staged);
             }
         }, "archphene-wrapper-assembly-test").start();
     }
