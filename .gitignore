@@ -98,38 +98,15 @@ tmpAdbCmds/
 modem_simulator/
 netsim.ini
 
-# Repository-local SDKs, tools, downloads, and generated workspaces
-/tooling/android-sdk/
-/tooling/avd/
-/tooling/backups/
-/tooling/build/
-/tooling/cargo-home/
-/tooling/downloads/
-/tooling/emulator-home/
-/tooling/jadx-*/
-/tooling/jadx-cache/
-/tooling/jadx-config/
-/tooling/recovery-*/
-/tooling/reference/
-/tooling/source/
-/tooling/sources/
-/tooling/gtk3-extract/
-/tooling/gtk3.pkg.tar.zst
-/tooling/cfr-*.jar
-/tooling/glibc-debian-*/
-/tooling/musl-alpine-*/
-/tooling/signing/
-/tooling/screenshots/
+# Repository-local SDKs, generated workspaces, and external source checkouts
+/tooling/
+/references/
 
 # Go caches / generated binaries
-/tooling/go-cache/
-/tooling/go-appdata/
 **/*.test
 coverage.out
 
 # Zig caches
-/tooling/zig-cache/
-/tooling/zig-global-cache/
 .zig-cache/
 zig-out/
 out-linux/

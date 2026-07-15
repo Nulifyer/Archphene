@@ -12,6 +12,9 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.regex.Matcher;
@@ -72,26 +75,51 @@ public final class ArchPackageRepository {
                 + URLEncoder.encode(normalized, StandardCharsets.UTF_8.name());
         JSONObject root = new JSONObject(fetchCached(context, endpoint, 15 * 60_000L));
         JSONArray values = root.getJSONArray("results");
-        ArrayList<PackageResult> result = new ArrayList<>();
-        for (int i = 0; i < values.length() && result.size() < 50; i++) {
+        LinkedHashMap<String, PackageResult> candidates = new LinkedHashMap<>();
+        boolean exactPackage = false;
+        for (int i = 0; i < values.length(); i++) {
             JSONObject value = values.getJSONObject(i);
             String version = value.optString("pkgver", "");
             String release = value.optString("pkgrel", "");
             if (!release.isEmpty()) version += "-" + release;
             if (!VersionPolicy.allowed(context, version)) continue;
-            result.add(new PackageResult(value.getString("pkgname"),
+            PackageResult candidate = new PackageResult(value.getString("pkgname"),
                     value.optString("repo", "unknown"), value.optString("arch", "unknown"),
                     version, value.optString("pkgdesc", ""),
-                    !value.isNull("flag_date") || !value.isNull("flagged_date")));
+                    !value.isNull("flag_date") || !value.isNull("flagged_date"));
+            candidates.put(identity(candidate), candidate);
+            exactPackage |= candidate.name.equalsIgnoreCase(normalized);
         }
-        if (!result.isEmpty() || !ArchPackageRuntime.available(context)) return result;
-        for (ArchPackageRuntime.FileOwner owner : ArchPackageRuntime.searchFileOwners(
-                context, normalized)) {
-            result.add(new PackageResult(owner.name, owner.repository, "x86_64",
-                    owner.version, "", false, owner.path));
-            if (result.size() >= 50) break;
+        if (!exactPackage && ArchPackageRuntime.available(context)
+                && normalized.matches("[a-zA-Z0-9@._+:-]{2,128}")) {
+            try {
+                for (ArchPackageRuntime.FileOwner owner : ArchPackageRuntime.searchFileOwners(
+                        context, normalized)) {
+                    PackageResult prior = candidates.get(
+                            owner.repository + "/" + owner.name + "/x86_64");
+                    PackageResult fileMatch = new PackageResult(owner.name, owner.repository,
+                            "x86_64", owner.version, prior == null ? "" : prior.description,
+                            prior != null && prior.flaggedOutOfDate, owner.path);
+                    candidates.put(identity(fileMatch), fileMatch);
+                }
+            } catch (Exception error) {
+                if (candidates.isEmpty()) throw error;
+                android.util.Log.w("ArchpheneSearch",
+                        "Executable search unavailable; showing package matches", error);
+            }
         }
+        ArrayList<PackageResult> result = new ArrayList<>(candidates.values());
+        Collections.sort(result, Comparator
+                .comparingInt((PackageResult value) -> SearchRanking.score(normalized,
+                        value.name, value.matchedFile, value.description))
+                .thenComparing(value -> value.name, String.CASE_INSENSITIVE_ORDER)
+                .thenComparing(value -> value.repository, String.CASE_INSENSITIVE_ORDER));
+        if (result.size() > 50) return new ArrayList<>(result.subList(0, 50));
         return result;
+    }
+
+    private static String identity(PackageResult value) {
+        return value.repository + "/" + value.name + "/" + value.architecture;
     }
 
     public static List<String> versions(Context context, String packageName, String currentVersion)

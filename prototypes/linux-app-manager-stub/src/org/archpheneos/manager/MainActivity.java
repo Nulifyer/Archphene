@@ -400,12 +400,17 @@ public final class MainActivity extends Activity {
         int shown = 0;
         String listFilter = ManagerStateStore.listFilter(this);
         Set<String> installedSources = new HashSet<>();
-        for (InstalledLinuxAppCatalog.Entry app : apps) {
+        ArrayList<InstalledLinuxAppCatalog.Entry> visibleApps = new ArrayList<>(apps);
+        if (!normalized.isEmpty()) {
+            Collections.sort(visibleApps, Comparator
+                    .comparingInt((InstalledLinuxAppCatalog.Entry app) -> SearchRanking.score(
+                            normalized, app.label, app.sourceId, app.packageName))
+                    .thenComparing(app -> app.label, String.CASE_INSENSITIVE_ORDER));
+        }
+        for (InstalledLinuxAppCatalog.Entry app : visibleApps) {
             ManagerStateStore.Snapshot state = ManagerStateStore.read(this, app.packageName);
-            boolean matches = normalized.isEmpty()
-                    || app.label.toLowerCase(Locale.ROOT).contains(normalized)
-                    || app.sourceId.toLowerCase(Locale.ROOT).contains(normalized)
-                    || app.packageName.toLowerCase(Locale.ROOT).contains(normalized);
+            boolean matches = normalized.isEmpty() || SearchRanking.score(normalized,
+                    app.label, app.sourceId, app.packageName) != SearchRanking.NO_MATCH;
             installedSources.add(InstalledLinuxAppCatalog.sourceKey(
                     app.sourceType, app.sourceId, app.runtimeAbi));
             boolean hiddenByFilter = "updates".equals(listFilter) && !state.updateAvailable
@@ -417,9 +422,9 @@ public final class MainActivity extends Activity {
         for (ArchPackageRepository.PackageResult tracked : TrackedPackageStore.list(this)) {
             if (installedSources.contains(InstalledLinuxAppCatalog.pacmanSourceKey(
                     tracked.repository, tracked.name, tracked.architecture))) continue;
-            boolean matches = normalized.isEmpty()
-                    || tracked.name.toLowerCase(Locale.ROOT).contains(normalized)
-                    || tracked.description.toLowerCase(Locale.ROOT).contains(normalized);
+            boolean matches = normalized.isEmpty() || SearchRanking.score(normalized,
+                    tracked.name, tracked.repository, tracked.description)
+                    != SearchRanking.NO_MATCH;
             String stateKey = "tracked:" + tracked.name + ":" + tracked.architecture;
             boolean hiddenByFilter = "updates".equals(listFilter)
                     || "pinned".equals(listFilter) && !ManagerStateStore.isPinned(this, stateKey);
@@ -1963,6 +1968,7 @@ public final class MainActivity extends Activity {
         new Thread(() -> {
             try {
                 if (getIntent().getBooleanExtra("archphene_test_package_jobs", false)) {
+                    SearchRanking.verifyForTest();
                     PackageInstallJobStore.verifyForTest(this);
                     PackageInstallCoordinator.verifySchedulingForTest();
                     InstalledLinuxAppCatalog.verifyPacmanMetadataForTest();
