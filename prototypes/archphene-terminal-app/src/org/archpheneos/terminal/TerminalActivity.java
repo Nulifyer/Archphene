@@ -34,6 +34,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class TerminalActivity extends Activity
         implements TerminalSessionClient, TerminalViewClient {
     private static final String TAG = "ArchpheneTerminal";
+    private LinearLayout root;
     private TerminalView terminalView;
     private TerminalSession terminalSession;
     private TextView title;
@@ -52,7 +53,7 @@ public final class TerminalActivity extends Activity
         int surface = dark ? Color.rgb(29, 34, 38) : Color.rgb(232, 237, 240);
         configureTerminalColors(dark);
 
-        LinearLayout root = new LinearLayout(this);
+        root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(background);
         root.setOnApplyWindowInsetsListener((view, insets) -> {
@@ -95,6 +96,21 @@ public final class TerminalActivity extends Activity
             Log.e(TAG, "Could not prepare terminal", error);
             title.setText("Terminal unavailable: " + safeMessage(error));
         }
+    }
+
+    @Override
+    public void onConfigurationChanged(Configuration configuration) {
+        super.onConfigurationChanged(configuration);
+        boolean dark = isDark();
+        int background = dark ? Color.rgb(17, 20, 23) : Color.rgb(248, 250, 252);
+        int foreground = dark ? Color.rgb(240, 245, 247) : Color.rgb(31, 37, 41);
+        int surface = dark ? Color.rgb(29, 34, 38) : Color.rgb(232, 237, 240);
+        configureTerminalColors(dark);
+        root.setBackgroundColor(background);
+        title.setTextColor(foreground);
+        title.setBackgroundColor(surface);
+        terminalView.setBackgroundColor(dark ? Color.rgb(13, 15, 17) : Color.WHITE);
+        terminalView.invalidate();
     }
 
     @Override

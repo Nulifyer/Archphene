@@ -45,6 +45,7 @@ The Terminal companion uses an ordinary Android application UID. It does not rec
 - Dotfiles such as `.config` and `.cache`, runtime packs, and manager state remain hidden and app-private. Linux commands can use visible home paths without a prompt; Android apps reach them only through Android's document grant model.
 - External Downloads and arbitrary project folders are not raw paths in the sandbox. Import/export and persisted tree grants require explicit Storage Access Framework bridge actions.
 - Persistent background sessions require a foreground service and notification. The current session is terminated as a process group when its activity is destroyed.
+- Handled phone, tablet, docked-display, density, font-scale, and dark/light configuration changes relayout in place without replacing the PTY. The emulator matrix preserved one app PID and shell PID across 1080x2400, 2400x1080, 1280x1920, 1920x1280, and 1920x1080 viewports.
 
 ## Remaining terminal work
 

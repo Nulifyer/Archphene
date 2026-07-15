@@ -18,7 +18,8 @@
         <activity
             android:name="org.archpheneos.terminal.TerminalActivity"
             android:exported="true"
-            android:windowSoftInputMode="adjustResize">
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="density|fontScale|keyboard|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
