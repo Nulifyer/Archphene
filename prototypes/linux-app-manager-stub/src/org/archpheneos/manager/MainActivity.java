@@ -867,8 +867,7 @@ public final class MainActivity extends Activity {
         String installLabel = job.active() ? "Install in progress"
                 : job.retryable() ? "Retry install" : "Install";
         Button install = actionButton(installLabel, android.R.drawable.stat_sys_download_done);
-        boolean supported = "x86_64".equals(app.architecture)
-                && java.util.Arrays.asList(android.os.Build.SUPPORTED_ABIS).contains("x86_64");
+        boolean supported = ArchRuntimePolicy.supports(app.architecture);
         install.setEnabled(supported && !job.active());
         install.setContentDescription(supported
                 ? "Resolve, verify, build, and install " + app.name
@@ -1940,7 +1939,8 @@ public final class MainActivity extends Activity {
                         ? ArchWrapperAssembler.assembleQt(this, "extra", sourcePackage)
                         : ArchWrapperAssembler.assembleDesktopFromRuntimePack(
                                 this, "extra", sourcePackage, staged.sourceVersion(),
-                                "x86_64", staged.toolkit, staged.classification, staged.root);
+                                ArchRuntimePolicy.current().architecture, staged.toolkit,
+                                staged.classification, staged.root);
                 if (getIntent().getBooleanExtra("archphene_test_install_assembled", false)) {
                     runOnUiThread(() -> {
                         showBanner("Generated " + result.packageName + "\nOpening Android installer", false);
@@ -2067,6 +2067,8 @@ public final class MainActivity extends Activity {
                 }
                 if (getIntent().getBooleanExtra("archphene_test_package_jobs", false)) {
                     SearchRanking.verifyForTest();
+                    ArchRuntimePolicy.verifyForTest();
+                    ArchPackageRuntime.verifySearchParserForTest();
                     PackageInstallJobStore.verifyForTest(this);
                     PackageInstallCoordinator.verifySchedulingForTest();
                     InstalledLinuxAppCatalog.verifyPacmanMetadataForTest();
@@ -2096,11 +2098,47 @@ public final class MainActivity extends Activity {
                             false));
                     return;
                 }
+                String searchPackage = getIntent().getStringExtra("archphene_test_search_package");
+                if (searchPackage != null) {
+                    List<ArchPackageRepository.PackageResult> matches =
+                            ArchPackageRepository.search(this, searchPackage);
+                    String first = matches.isEmpty() ? "none"
+                            : matches.get(0).repository + "/" + matches.get(0).name + " "
+                            + matches.get(0).version + " " + matches.get(0).architecture;
+                    android.util.Log.i("ArchphenePackages", "search " + searchPackage + " matches="
+                            + matches.size() + " first=" + first);
+                    runOnUiThread(() -> showBanner("Search " + searchPackage + " returned "
+                            + matches.size() + " packages\n" + first, matches.isEmpty()));
+                    return;
+                }
                 String stagePackage = getIntent().getStringExtra("archphene_test_stage_package");
                 if (stagePackage != null) {
                     ArchPackageRuntime.StagedTransaction staged =
                             ArchPackageRuntime.stageTransaction(this, stagePackage);
                     RuntimePackStore.Pack pack = RuntimePackStore.load(this, staged.runtimePackId);
+                    if (getIntent().getBooleanExtra(
+                            "archphene_test_publish_terminal", false)) {
+                        String repository = "";
+                        for (ArchPackageRuntime.ResolvedPackage value : staged.packages) {
+                            if (stagePackage.equals(value.name)) {
+                                repository = value.repository;
+                                break;
+                            }
+                        }
+                        if (repository.isEmpty()) {
+                            throw new SecurityException("Staged source repository is missing");
+                        }
+                        ArchPackageRepository.PackageResult source =
+                                new ArchPackageRepository.PackageResult(stagePackage, repository,
+                                        ArchRuntimePolicy.current().architecture,
+                                        staged.sourceVersion(), "", false,
+                                        "usr/bin/" + staged.classification.executable,
+                                        staged.classification.executable);
+                        ManagedPackageStore.Entry entry = ManagedPackageStore.install(
+                                this, source, staged);
+                        android.util.Log.i("ArchphenePackages", "Terminal catalog published "
+                                + entry.identity() + " pack=" + entry.runtimePackId);
+                    }
                     long openedBytes = 0;
                     for (RuntimePackStore.Module module : pack.modules) {
                         try (android.os.ParcelFileDescriptor descriptor =
@@ -2119,6 +2157,10 @@ public final class MainActivity extends Activity {
                         RuntimePackStore.grantActive(this, targetPackage);
                     }
                     long verifiedBytes = openedBytes;
+                    android.util.Log.i("ArchphenePackages", "published " + stagePackage
+                            + " pack=" + pack.id + " modules=" + pack.modules.size()
+                            + " bytes=" + verifiedBytes + " architecture="
+                            + ArchRuntimePolicy.current().architecture);
                     runOnUiThread(() -> showBanner("Published " + stagePackage + " runtime pack\n"
                             + pack.modules.size() + " modules, " + verifiedBytes
                             + " bytes verified through provider\n" + pack.id, false));
@@ -2139,9 +2181,15 @@ public final class MainActivity extends Activity {
                         if (target == null) throw new IllegalStateException("Resolved target is missing");
                         ArchPackageRuntime.Verification verification =
                                 ArchPackageRuntime.downloadAndVerify(this, target);
+                        android.util.Log.i("ArchphenePackages", "verified " + resolvePackage
+                                + " signer=" + verification.signerFingerprint + " architecture="
+                                + ArchRuntimePolicy.current().architecture);
                         runOnUiThread(() -> showBanner("Downloaded and verified " + resolvePackage
                                 + "\nSigner " + verification.signerFingerprint, false));
                     } else {
+                        android.util.Log.i("ArchphenePackages", "resolved " + resolvePackage
+                                + " packages=" + resolved.size() + " architecture="
+                                + ArchRuntimePolicy.current().architecture);
                         runOnUiThread(() -> showBanner("Resolved " + resolvePackage + "\n"
                                 + resolved.size() + " packages through libalpm", false));
                     }
@@ -2153,10 +2201,14 @@ public final class MainActivity extends Activity {
                 } else {
                     ArchPackageRuntime.Result result = ArchPackageRuntime.pacman(this, "--version");
                     String firstLine = result.output.replace('\r', '\n').trim();
+                    android.util.Log.i("ArchphenePackages", "pacman exit=" + result.exitCode
+                            + " output=" + firstLine);
                     runOnUiThread(() -> showBanner("Package runtime exit " + result.exitCode
                             + "\n" + firstLine, result.exitCode != 0));
                 }
             } catch (Exception e) {
+                android.util.Log.e("ArchphenePackages", "Package runtime test failed: "
+                        + e.getClass().getName() + ": " + e.getMessage(), e);
                 runOnUiThread(() -> showBanner("Package runtime failed: " + e.getMessage(), true));
             }
         }, "archphene-package-runtime-test").start();

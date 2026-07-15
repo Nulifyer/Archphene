@@ -71,6 +71,9 @@ public final class ArchPackageRepository {
     public static List<PackageResult> search(Context context, String query) throws Exception {
         String normalized = query == null ? "" : query.trim();
         if (normalized.length() < 2) return new ArrayList<>();
+        if (ArchRuntimePolicy.AARCH64.equals(ArchRuntimePolicy.current().architecture)) {
+            return searchRuntime(context, normalized);
+        }
         String endpoint = "https://archlinux.org/packages/search/json/?q="
                 + URLEncoder.encode(normalized, StandardCharsets.UTF_8.name());
         JSONObject root = new JSONObject(fetchCached(context, endpoint, 15 * 60_000L));
@@ -96,9 +99,11 @@ public final class ArchPackageRepository {
                 for (ArchPackageRuntime.FileOwner owner : ArchPackageRuntime.searchFileOwners(
                         context, normalized)) {
                     PackageResult prior = candidates.get(
-                            owner.repository + "/" + owner.name + "/x86_64");
+                            owner.repository + "/" + owner.name + "/"
+                                    + ArchRuntimePolicy.current().architecture);
                     PackageResult fileMatch = new PackageResult(owner.name, owner.repository,
-                            "x86_64", owner.version, prior == null ? "" : prior.description,
+                            ArchRuntimePolicy.current().architecture, owner.version,
+                            prior == null ? "" : prior.description,
                             prior != null && prior.flaggedOutOfDate, owner.path);
                     candidates.put(identity(fileMatch), fileMatch);
                 }
@@ -118,12 +123,55 @@ public final class ArchPackageRepository {
         return result;
     }
 
+    private static List<PackageResult> searchRuntime(Context context, String query)
+            throws Exception {
+        ArchRuntimePolicy policy = ArchRuntimePolicy.current();
+        LinkedHashMap<String, PackageResult> candidates = new LinkedHashMap<>();
+        boolean exactPackage = false;
+        for (ArchPackageRuntime.PackageSearch value : ArchPackageRuntime.searchPackages(
+                context, query)) {
+            if (!VersionPolicy.allowed(context, value.version)) continue;
+            PackageResult candidate = new PackageResult(value.name, value.repository,
+                    policy.architecture, value.version, value.description, false);
+            candidates.put(identity(candidate), candidate);
+            exactPackage |= candidate.name.equalsIgnoreCase(query);
+        }
+        try {
+            if (!exactPackage) {
+                for (ArchPackageRuntime.FileOwner owner : ArchPackageRuntime.searchFileOwners(
+                        context, query)) {
+                    String key = owner.repository + "/" + owner.name + "/"
+                            + policy.architecture;
+                    PackageResult prior = candidates.get(key);
+                    PackageResult candidate = new PackageResult(owner.name, owner.repository,
+                            policy.architecture, owner.version,
+                            prior == null ? "" : prior.description, false, owner.path);
+                    candidates.put(identity(candidate), candidate);
+                }
+            }
+        } catch (Exception error) {
+            if (candidates.isEmpty()) throw error;
+            android.util.Log.w("ArchpheneSearch",
+                    "Executable search unavailable; showing package matches", error);
+        }
+        ArrayList<PackageResult> result = new ArrayList<>(candidates.values());
+        Collections.sort(result, Comparator
+                .comparingInt((PackageResult value) -> SearchRanking.score(query,
+                        value.name, value.matchedFile, value.description))
+                .thenComparing(value -> value.name, String.CASE_INSENSITIVE_ORDER)
+                .thenComparing(value -> value.repository, String.CASE_INSENSITIVE_ORDER));
+        if (result.size() > 50) return new ArrayList<>(result.subList(0, 50));
+        return result;
+    }
     private static String identity(PackageResult value) {
         return value.repository + "/" + value.name + "/" + value.architecture;
     }
 
     public static List<String> versions(Context context, String packageName, String currentVersion)
             throws Exception {
+        if (ArchRuntimePolicy.AARCH64.equals(ArchRuntimePolicy.current().architecture)) {
+            return filterVersions(context, Collections.singletonList(currentVersion), currentVersion);
+        }
         List<String> curated = curatedVersions(context, packageName);
         if (!curated.isEmpty()) return filterVersions(context, curated, currentVersion);
         String first = packageName.substring(0, 1).toLowerCase(java.util.Locale.ROOT);

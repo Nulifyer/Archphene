@@ -43,7 +43,9 @@ if ($LinuxRoot.Contains("'")) {
 
 if (-not $SkipRuntime) {
     $runtimeCommand = "cd '$LinuxRoot' && CONTAINER_CLI=podman SKIP_CHOWN=1 JOBS=$Jobs bash scripts/build-ci-package-runtime.sh"
-    Invoke-Native "Linux package runtime build" { podman machine ssh $runtimeCommand }
+    Invoke-Native "x86_64 Linux package runtime build" { podman machine ssh $runtimeCommand }
+    $armRuntimeCommand = "cd '$LinuxRoot' && CONTAINER_CLI=podman SKIP_CHOWN=1 JOBS=$Jobs bash scripts/build-ci-package-runtime-arm64.sh"
+    Invoke-Native "AArch64 Linux package runtime build" { podman machine ssh $armRuntimeCommand }
 }
 
 if ($ReleaseBuild) {

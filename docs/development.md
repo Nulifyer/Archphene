@@ -42,7 +42,9 @@ CONTAINER_CLI=podman JOBS=8 bash scripts/build-ci-package-runtime-arm64.sh
 It uses a cacheable cross-toolchain image and a persistent package cache. Cache
 entries are signature-verified on every build before extraction. The ignored
 output is `tooling/build/ci-package-runtime-arm64/` with a complete `SHA256SUMS`
-catalog and pinned keyring, package-signer, and glibc provenance.
+catalog, pinned keyring/package-signer/glibc provenance, and the AArch64 glibc
+path broker. A normal non-`SkipRuntime` manager build refreshes both x86_64 and
+AArch64 artifacts before APK assembly.
 
 Local builds are signed with the development key and remain debuggable so the explicit `archphene_test_*` emulator hooks work. Those hooks are ignored unless Android marks the installed APK debuggable.
 

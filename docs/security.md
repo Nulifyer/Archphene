@@ -33,7 +33,7 @@ Production manager releases are built non-debuggable and signed with a dedicated
 
 ## Important limitations
 
-- The manager performs complete on-device resolution, verification, generic desktop/terminal classification, durable phase tracking, wrapper generation, persistent signing, and Android installation for supported x86_64 packages. AArch64 has a verified build artifact but not yet an on-device package transaction or desktop wrapper.
+- The manager performs on-device resolution, verification, generic classification, and runtime-pack publication for supported x86_64 and AArch64 terminal packages. x86_64 desktop wrapper generation/signing/installation passes; AArch64 desktop wrapper generation remains incomplete.
 - Package-derived dependency closures now execute from manager-owned, immutable content-addressed packs through caller-authenticated, read-only descriptors under the separate wrapper UID. Running-process leases, complete uninstall reconciliation, process-tree cleanup, and 4 KB/16 KB page-size validation remain incomplete.
 - Per-package jobs persist phase, percent, bounded diagnostics, generated package identity, runtime-pack identity, and artifact time before installer handoff. Recovery activates a completed install only when Android reports an update newer than the recorded artifacts; otherwise it fails closed into an explicit retry state.
 - The prototype Java Wayland parsers are not yet a hardened protocol boundary.

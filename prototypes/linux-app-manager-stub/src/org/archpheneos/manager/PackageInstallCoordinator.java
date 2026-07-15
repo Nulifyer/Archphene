@@ -57,6 +57,9 @@ final class PackageInstallCoordinator {
         ArchPackageRuntime.StagedTransaction staged = null;
         boolean handedOff = false;
         try {
+            if (!ArchRuntimePolicy.supports(source.architecture)) {
+                throw new UnsupportedOperationException("Package architecture does not match device runtime");
+            }
             checkInterrupted();
             update(activity, listener, id, PackageInstallJobStore.RUNNING,
                     ApkUpdateInstaller.Phase.DOWNLOAD, 3,

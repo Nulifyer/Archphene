@@ -17,7 +17,7 @@ This is the prioritized completion queue for the Archphene Android application. 
   - [x] Prove on the emulator with concurrent real package transactions that one resolution failure does not block an unrelated CLI package install.
 - [ ] Complete AArch64 package runtime support.
   - [x] Build a reproducible, checksum-cataloged AArch64 pacman/GnuPG/libarchive closure from official Arch Linux ARM repositories; verify every package against the pinned build-system key and cross-build matching patched glibc.
-  - [ ] Embed the verified AArch64 runtime and separate trust assets in the ARM manager, then prove package search, resolution, verification, staging, and Terminal publication on Samsung.
+  - [x] Embed the verified AArch64 runtime and separate trust assets in the ARM manager, then prove package search, resolution, verification, staging, and Terminal publication on Samsung.
   - [ ] Generate arm64-v8a desktop wrapper templates and prove a real Qt or GTK package through Android PackageInstaller and app-drawer launch.
   - [ ] Publish separate x86_64 and arm64-v8a release assets; accept `any` data packages but require matching ABI for native ELF files.
 - [ ] Complete runtime-pack lifecycle safety.

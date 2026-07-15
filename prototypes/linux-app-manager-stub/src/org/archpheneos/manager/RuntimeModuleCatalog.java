@@ -17,7 +17,6 @@ import java.util.regex.Pattern;
 
 /** Parses the APK-signature-protected runtime module catalog. */
 final class RuntimeModuleCatalog {
-    static final String ASSET = "package-runtime/runtime-modules.tsv";
     private static final String SCHEMA = "# org.archphene.runtime-modules.v1";
     private static final int MAX_MODULES = 512;
     private static final int MAX_LINE_LENGTH = 1024;
@@ -115,7 +114,8 @@ final class RuntimeModuleCatalog {
 
     private static RuntimeModuleCatalog parse(Context context) throws IOException {
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(
-                context.getAssets().open(ASSET), StandardCharsets.UTF_8))) {
+                context.getAssets().open(ArchRuntimePolicy.current().catalogAsset()),
+                StandardCharsets.UTF_8))) {
             return parse(reader);
         }
     }

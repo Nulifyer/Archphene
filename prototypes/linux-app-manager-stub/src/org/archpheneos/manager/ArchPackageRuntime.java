@@ -70,6 +70,19 @@ public final class ArchPackageRuntime {
         }
     }
 
+    public static final class PackageSearch {
+        public final String repository;
+        public final String name;
+        public final String version;
+        public final String description;
+
+        PackageSearch(String repository, String name, String version, String description) {
+            this.repository = repository;
+            this.name = name;
+            this.version = version;
+            this.description = description;
+        }
+    }
     public static final class FileOwner {
         public final String repository;
         public final String name;
@@ -130,12 +143,84 @@ public final class ArchPackageRuntime {
 
     public static synchronized void refreshDatabases(Context context) throws Exception {
         File sync = directory(directory(state(context), "db"), "sync");
-        download("https://geo.mirror.pkgbuild.com/core/os/x86_64/core.db",
+        ArchRuntimePolicy policy = ArchRuntimePolicy.current();
+        download(policy.databaseUrl("core", false),
                 new File(sync, "core.db"), 4 * 1024 * 1024L);
-        download("https://geo.mirror.pkgbuild.com/extra/os/x86_64/extra.db",
+        download(policy.databaseUrl("extra", false),
                 new File(sync, "extra.db"), 32 * 1024 * 1024L);
     }
 
+    public static synchronized List<PackageSearch> searchPackages(Context context, String query)
+            throws Exception {
+        String normalized = query == null ? "" : query.trim();
+        if (!normalized.matches("[a-zA-Z0-9@._+:-]{2,128}")) {
+            throw new IllegalArgumentException("Invalid package search");
+        }
+        File state = state(context);
+        File database = directory(state, "db");
+        if (!new File(database, "sync/core.db").isFile()
+                || !new File(database, "sync/extra.db").isFile()) {
+            refreshDatabases(context);
+        }
+        File root = directory(state, "root");
+        File config = new File(state, "pacman.conf");
+        writePacmanConfig(config);
+        Result result = pacman(context, "--config", config.getPath(), "--root", root.getPath(),
+                "--dbpath", database.getPath(), "-Ss", normalized);
+        if (result.exitCode != 0 && !result.output.trim().isEmpty()) {
+            throw new IllegalStateException("Arch package search failed\n" + result.output);
+        }
+        return parsePackageSearch(result.output);
+    }
+
+    static List<PackageSearch> parsePackageSearch(String output) {
+        ArrayList<PackageSearch> packages = new ArrayList<>();
+        String repository = "";
+        String name = "";
+        String version = "";
+        for (String line : output.split("\\r?\\n")) {
+            if (!line.startsWith(" ") && line.contains("/")) {
+                if (!name.isEmpty()) {
+                    packages.add(new PackageSearch(repository, name, version, ""));
+                }
+                repository = "";
+                name = "";
+                version = "";
+                String[] fields = line.trim().split("\\s+", 3);
+                int separator = fields.length == 0 ? -1 : fields[0].indexOf('/');
+                if (fields.length >= 2 && separator > 0) {
+                    String candidateRepository = fields[0].substring(0, separator);
+                    String candidateName = fields[0].substring(separator + 1);
+                    if (candidateRepository.matches("(?:core|extra)")
+                            && candidateName.matches("[a-zA-Z0-9@._+:-]{1,128}")) {
+                        repository = candidateRepository;
+                        name = candidateName;
+                        version = fields[1];
+                    }
+                }
+            } else if (!name.isEmpty() && line.startsWith("    ")) {
+                packages.add(new PackageSearch(repository, name, version, line.trim()));
+                repository = "";
+                name = "";
+                version = "";
+            }
+            if (packages.size() >= 100) break;
+        }
+        if (!name.isEmpty() && packages.size() < 100) {
+            packages.add(new PackageSearch(repository, name, version, ""));
+        }
+        return packages;
+    }
+    static void verifySearchParserForTest() {
+        List<PackageSearch> parsed = parsePackageSearch(
+                "extra/kcalc 26.04.3-1\n    Scientific calculator\n"
+                + "extra/kcharselect 26.04.3-1 [installed]\n    Character selector\n");
+        if (parsed.size() != 2 || !"kcalc".equals(parsed.get(0).name)
+                || !"Scientific calculator".equals(parsed.get(0).description)
+                || !"kcharselect".equals(parsed.get(1).name)) {
+            throw new SecurityException("Pacman package search parser mismatch");
+        }
+    }
     public static synchronized List<FileOwner> searchFileOwners(Context context, String query)
             throws Exception {
         String normalized = query == null ? "" : query.trim();
@@ -162,8 +247,7 @@ public final class ArchPackageRuntime {
             throws Exception {
         if (target.isFile() && target.length() > 0
                 && System.currentTimeMillis() - target.lastModified() < 24L * 60 * 60_000) return;
-        download("https://geo.mirror.pkgbuild.com/" + repository + "/os/x86_64/"
-                + repository + ".files", target, limit);
+        download(ArchRuntimePolicy.current().databaseUrl(repository, true), target, limit);
     }
 
     static List<FileOwner> parseFileOwners(String output) {
@@ -224,7 +308,7 @@ public final class ArchPackageRuntime {
         for (String line : result.output.split("\\r?\\n")) {
             String[] fields = line.trim().split(separator, -1);
             if (fields.length != 5) continue;
-            validatePackageUrl(fields[3], fields[2]);
+            ArchRuntimePolicy.current().validatePackageUrl(fields[3], fields[2]);
             if (!fields[4].matches("[a-zA-Z0-9@._+:-]+\\.pkg\\.tar\\.(?:zst|xz)")) {
                 throw new SecurityException("Invalid Arch package filename");
             }
@@ -242,10 +326,11 @@ public final class ArchPackageRuntime {
     }
 
     private static void writePacmanConfig(File config) throws Exception {
-        writeText(config, "[options]\nArchitecture = x86_64\n"
+        ArchRuntimePolicy policy = ArchRuntimePolicy.current();
+        writeText(config, "[options]\nArchitecture = " + policy.architecture + "\n"
                 + "SigLevel = Required DatabaseOptional\nLocalFileSigLevel = Required\n\n"
-                + "[core]\nServer = https://geo.mirror.pkgbuild.com/core/os/x86_64\n\n"
-                + "[extra]\nServer = https://geo.mirror.pkgbuild.com/extra/os/x86_64\n");
+                + "[core]\nServer = " + policy.baseUrl("core") + "\n\n"
+                + "[extra]\nServer = " + policy.baseUrl("extra") + "\n");
     }
     public static Verification downloadAndVerify(Context context, ResolvedPackage value)
             throws Exception {
@@ -257,7 +342,7 @@ public final class ArchPackageRuntime {
 
     private static Verification downloadAndVerifyLocked(Context context,
             ResolvedPackage value) throws Exception {
-        validatePackageUrl(value.url, value.repository);
+        ArchRuntimePolicy.current().validatePackageUrl(value.url, value.repository);
         File downloads = directory(state(context), "downloads");
         String safeName = value.filename.replace(':', '_');
         File packageFile = new File(downloads, safeName);
@@ -655,7 +740,12 @@ public final class ArchPackageRuntime {
         if (!signer.matches("[0-9A-F]{40,64}")) {
             throw new SecurityException("Arch package signature returned no valid fingerprint");
         }
-        Set<String> revoked = readFingerprintSet(new File(state, "trust/archlinux-revoked"));
+        ArchRuntimePolicy policy = ArchRuntimePolicy.current();
+        if (!policy.requiredSigner.isEmpty() && !policy.requiredSigner.equals(signer)) {
+            throw new SecurityException("Package was not signed by the required repository key");
+        }
+        Set<String> revoked = readFingerprintSet(new File(state,
+                "trust/" + policy.trustName + "-revoked"));
         if (revoked.contains(signer) || revoked.contains(primary)) {
             throw new SecurityException("Arch package signer is explicitly revoked");
         }
@@ -663,24 +753,29 @@ public final class ArchPackageRuntime {
     }
 
     private static File ensureTrustDatabase(Context context, File state) throws Exception {
+        ArchRuntimePolicy policy = ArchRuntimePolicy.current();
         File trust = directory(state, "trust");
-        File anchor = new File(trust, "archlinux.gpg");
-        File revoked = new File(trust, "archlinux-revoked");
+        File anchor = new File(trust, policy.trustName + ".gpg");
+        File revoked = new File(trust, policy.trustName + "-revoked");
         String assetHash;
-        try (InputStream input = context.getAssets().open(ASSET_ROOT + "archlinux.gpg")) {
+        try (InputStream input = context.getAssets().open(
+                ASSET_ROOT + policy.trustName + ".gpg")) {
             assetHash = copyAndHash(input, anchor);
         }
-        try (InputStream input = context.getAssets().open(ASSET_ROOT + "archlinux-revoked")) {
+        try (InputStream input = context.getAssets().open(
+                ASSET_ROOT + policy.trustName + "-revoked")) {
             copyAndHash(input, revoked);
         }
-        File marker = new File(trust, "anchor.sha256");
-        File gnupg = new File(state, "gnupg");
+        File marker = new File(trust, "anchor-" + policy.trustName + ".sha256");
+        File gnupg = new File(state, "gnupg-" + policy.trustName);
         String installedHash = marker.isFile() ? readText(marker, 256).trim() : "";
         if (assetHash.equals(installedHash) && new File(gnupg, "pubring.kbx").isFile()) {
             return gnupg;
         }
         deleteRecursively(gnupg);
-        if (!gnupg.mkdirs()) throw new IllegalStateException("Could not create package trust database");
+        if (!gnupg.mkdirs()) {
+            throw new IllegalStateException("Could not create package trust database");
+        }
         Result imported = runTool(context, "libarchphene_gpg.so", Arrays.asList(
                 "--homedir", gnupg.getPath(), "--batch", "--no-autostart",
                 "--no-auto-check-trustdb", "--import", anchor.getPath()));
@@ -691,7 +786,6 @@ public final class ArchPackageRuntime {
         writeText(marker, assetHash + "\n");
         return gnupg;
     }
-
     private static Result runTool(Context context, String toolName, List<String> arguments)
             throws Exception {
         File nativeDir = new File(context.getApplicationInfo().nativeLibraryDir).getCanonicalFile();
@@ -728,7 +822,23 @@ public final class ArchPackageRuntime {
 
     private static void download(String endpoint, File target, long limit) throws Exception {
         URL url = new URL(endpoint);
-        validatePackageHost(url);
+        ArchRuntimePolicy.current().validateHost(url);
+        java.io.IOException failure = null;
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            try {
+                downloadOnce(url, target, limit);
+                return;
+            } catch (java.io.IOException error) {
+                failure = error;
+                android.util.Log.w("ArchphenePackages", "repository transport retry "
+                        + attempt + "/3 for " + target.getName() + ": " + error);
+                if (attempt < 3) Thread.sleep(250L * attempt);
+            }
+        }
+        throw failure;
+    }
+
+    private static void downloadOnce(URL url, File target, long limit) throws Exception {
         HttpURLConnection connection = (HttpURLConnection) url.openConnection();
         connection.setInstanceFollowRedirects(false);
         connection.setConnectTimeout(15_000);
@@ -762,24 +872,6 @@ public final class ArchPackageRuntime {
         } finally {
             connection.disconnect();
             if (temporary.exists() && !temporary.equals(target)) temporary.delete();
-        }
-    }
-
-    private static void validatePackageUrl(String endpoint, String repository) throws Exception {
-        URL url = new URL(endpoint);
-        validatePackageHost(url);
-        String expected = "/" + repository + "/os/x86_64/";
-        if (!("core".equals(repository) || "extra".equals(repository))
-                || !url.getPath().startsWith(expected)) {
-            throw new SecurityException("Package URL does not match its Arch repository");
-        }
-    }
-
-    private static void validatePackageHost(URL url) {
-        if (!"https".equals(url.getProtocol())
-                || !"geo.mirror.pkgbuild.com".equals(url.getHost())
-                || url.getUserInfo() != null || url.getPort() != -1) {
-            throw new SecurityException("Unsupported Arch package endpoint");
         }
     }
 
