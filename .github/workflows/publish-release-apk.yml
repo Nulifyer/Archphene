@@ -87,7 +87,7 @@ jobs:
           {
             echo "VERSION_NAME=$version_name"
             echo "VERSION_CODE=$((1000000000 + GITHUB_RUN_NUMBER))"
-            echo "APK_NAME=Archphene-$version_name.apk"
+            echo "APK_NAME=Archphene-x86_64-$version_name.apk"
           } >> "$GITHUB_ENV"
 
       - name: Restore release signing key
@@ -122,7 +122,7 @@ jobs:
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Archphene-${{ env.VERSION_NAME }}
+          name: Archphene-x86_64-${{ env.VERSION_NAME }}
           path: |
             ${{ env.APK_PATH }}
             ${{ env.APK_SHA256_PATH }}

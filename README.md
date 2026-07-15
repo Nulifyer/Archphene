@@ -70,8 +70,8 @@ Official Arch Linux packages are used for x86_64. AArch64 testing uses the separ
 
 Download the APK and checksum from [GitHub Releases](https://github.com/Nulifyer/Archphene/releases).
 
-1. Download `Archphene-<version>.apk`.
-2. Optionally verify it against `Archphene-<version>.apk.sha256`.
+1. Download `Archphene-x86_64-<version>.apk`.
+2. Verify it against `Archphene-x86_64-<version>.apk.sha256`.
 3. Allow your browser or file manager to install unknown applications when Android prompts.
 4. Install the APK through Android's normal package installer.
 

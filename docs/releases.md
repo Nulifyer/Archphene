@@ -26,8 +26,10 @@ The local keystore and credentials backup are stored under ignored `tooling/sign
 3. Create and publish a GitHub Release for that tag.
 4. The **Publish Archphene APK** workflow builds and verifies the APK.
 5. The workflow attaches:
-   - `Archphene-<version>.apk`
-   - `Archphene-<version>.apk.sha256`
+   - `Archphene-x86_64-<version>.apk`
+   - `Archphene-x86_64-<version>.apk.sha256`
+
+The asset name includes the supported ABI. The self-updater selects a matching `x86_64` or `arm64-v8a` asset and accepts the legacy ABI-neutral name for older releases. Do not publish an `arm64-v8a` asset until the manager contains a validated Arch Linux ARM runtime.
 
 The Android `versionName` comes from the release tag. The `versionCode` uses a high CI range plus the monotonic GitHub workflow run number, allowing a stable release after a prerelease with the same semantic version.
 

@@ -1,6 +1,7 @@
 package org.archpheneos.manager;
 
 import android.content.Context;
+import android.os.Build;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
@@ -30,17 +31,20 @@ public final class GitHubReleaseClient {
         public final String sha256;
         public final boolean prerelease;
         public final long size;
+        private final String assetName;
         private final String checksumUrl;
         private final String apiDigest;
 
         Artifact(String version, String tag, String apkUrl, String sha256,
-                boolean prerelease, long size, String checksumUrl, String apiDigest) {
+                boolean prerelease, long size, String assetName, String checksumUrl,
+                String apiDigest) {
             this.version = version;
             this.tag = tag;
             this.apkUrl = apkUrl;
             this.sha256 = sha256;
             this.prerelease = prerelease;
             this.size = size;
+            this.assetName = assetName;
             this.checksumUrl = checksumUrl;
             this.apiDigest = apiDigest;
         }
@@ -69,7 +73,7 @@ public final class GitHubReleaseClient {
             return new ArrayList<>(cachedVersions);
         }
         List<Artifact> result = parseReleaseResponse(
-                fetch(new URL(API), JSON_LIMIT, true), allowPrereleases);
+                fetch(new URL(API), JSON_LIMIT, true), allowPrereleases, releaseAbi());
         for (Artifact artifact : result) {
             ManagerStateStore.setVersionPrerelease(context, context.getPackageName(),
                     artifact.version, artifact.prerelease);
@@ -82,6 +86,14 @@ public final class GitHubReleaseClient {
 
     static List<Artifact> parseReleaseResponse(String response, boolean allowPrereleases)
             throws Exception {
+        return parseReleaseResponse(response, allowPrereleases, releaseAbi());
+    }
+
+    static List<Artifact> parseReleaseResponse(String response, boolean allowPrereleases,
+            String releaseAbi) throws Exception {
+        if (!releaseAbi.matches("(?:x86_64|arm64-v8a)")) {
+            throw new IllegalArgumentException("Unsupported release ABI " + releaseAbi);
+        }
         JSONArray releases = new JSONArray(response);
         ArrayList<Artifact> result = new ArrayList<>();
         for (int index = 0; index < releases.length(); index++) {
@@ -93,10 +105,14 @@ public final class GitHubReleaseClient {
             if (!tag.matches("v[0-9]{1,9}\\.[0-9]{1,9}\\.[0-9]{1,9}"
                     + "(?:[-+][0-9A-Za-z.-]+)?")) continue;
             String version = tag.substring(1);
-            String apkName = "Archphene-" + version + ".apk";
+            String apkName = "Archphene-" + releaseAbi + "-" + version + ".apk";
             String checksumName = apkName + ".sha256";
+            String fallbackApkName = "Archphene-" + version + ".apk";
+            String fallbackChecksumName = fallbackApkName + ".sha256";
             JSONObject apk = null;
             JSONObject checksum = null;
+            JSONObject fallbackApk = null;
+            JSONObject fallbackChecksum = null;
             JSONArray assets = release.optJSONArray("assets");
             if (assets == null) continue;
             for (int assetIndex = 0; assetIndex < assets.length(); assetIndex++) {
@@ -104,6 +120,16 @@ public final class GitHubReleaseClient {
                 if (!"uploaded".equals(asset.optString("state", ""))) continue;
                 if (apkName.equals(asset.optString("name", ""))) apk = asset;
                 if (checksumName.equals(asset.optString("name", ""))) checksum = asset;
+                if (fallbackApkName.equals(asset.optString("name", ""))) fallbackApk = asset;
+                if (fallbackChecksumName.equals(asset.optString("name", ""))) {
+                    fallbackChecksum = asset;
+                }
+            }
+            if (apk == null || checksum == null) {
+                apk = fallbackApk;
+                checksum = fallbackChecksum;
+                apkName = fallbackApkName;
+                checksumName = fallbackChecksumName;
             }
             if (apk == null || checksum == null) continue;
             long size = apk.optLong("size", -1);
@@ -114,7 +140,7 @@ public final class GitHubReleaseClient {
             long checksumSize = checksum.optLong("size", -1);
             if (checksumSize <= 0 || checksumSize > CHECKSUM_LIMIT) continue;
             result.add(new Artifact(version, tag, apkUrl.toString(), "", prerelease, size,
-                    checksumUrl.toString(), apk.optString("digest", "")));
+                    apkName, checksumUrl.toString(), apk.optString("digest", "")));
         }
         Collections.sort(result, (left, right) -> compareVersions(right.version, left.version));
         return result;
@@ -136,27 +162,42 @@ public final class GitHubReleaseClient {
                 .replace("1.2.3.apk", "1.3.0-rc1.apk")
                 .replace("\"prerelease\":false", "\"prerelease\":true");
         List<Artifact> stableOnly = parseReleaseResponse(
-                "[" + stable + "," + prerelease + "]", false);
+                "[" + stable + "," + prerelease + "]", false, "x86_64");
         List<Artifact> withPrerelease = parseReleaseResponse(
-                "[" + stable + "," + prerelease + "]", true);
+                "[" + stable + "," + prerelease + "]", true, "x86_64");
+        String x86Specific = stable.replace("Archphene-1.2.3.apk",
+                "Archphene-x86_64-1.2.3.apk");
+        List<Artifact> x86Only = parseReleaseResponse("[" + x86Specific + "]",
+                false, "x86_64");
+        List<Artifact> incompatible = parseReleaseResponse("[" + x86Specific + "]",
+                false, "arm64-v8a");
         if (stableOnly.size() != 1 || !"1.2.3".equals(stableOnly.get(0).version)
                 || withPrerelease.size() != 2
-                || !"1.3.0-rc1".equals(withPrerelease.get(0).version)) {
+                || !"1.3.0-rc1".equals(withPrerelease.get(0).version)
+                || x86Only.size() != 1
+                || !"Archphene-x86_64-1.2.3.apk".equals(x86Only.get(0).assetName)
+                || !incompatible.isEmpty()) {
             throw new SecurityException("GitHub release parser policy mismatch");
         }
     }
     private static Artifact resolveChecksum(Artifact artifact) throws Exception {
-        String apkName = "Archphene-" + artifact.version + ".apk";
         String checksumText = fetch(new URL(artifact.checksumUrl),
                 CHECKSUM_LIMIT, false).trim();
-        String hash = parseChecksum(checksumText, apkName);
+        String hash = parseChecksum(checksumText, artifact.assetName);
         if (!artifact.apiDigest.isEmpty()
                 && !artifact.apiDigest.equalsIgnoreCase("sha256:" + hash)) {
             throw new SecurityException("GitHub asset digest does not match checksum asset");
         }
         return new Artifact(artifact.version, artifact.tag, artifact.apkUrl, hash,
-                artifact.prerelease, artifact.size, artifact.checksumUrl,
+                artifact.prerelease, artifact.size, artifact.assetName, artifact.checksumUrl,
                 artifact.apiDigest);
+    }
+
+    private static String releaseAbi() {
+        for (String abi : Build.SUPPORTED_ABIS) {
+            if ("x86_64".equals(abi) || "arm64-v8a".equals(abi)) return abi;
+        }
+        throw new IllegalStateException("No supported 64-bit Archphene release ABI");
     }
 
     static String parseChecksum(String value, String apkName) {
