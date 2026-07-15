@@ -7,9 +7,10 @@ This is the prioritized completion queue for the Archphene Android application. 
 ## P0 - Public release blockers
 
 - [ ] Complete general on-device package transactions.
-  - Detect desktop entrypoints, icons, toolkit, executable, ABI, and required bridge capabilities without KCalc-specific assumptions.
-  - Generate package-specific Android metadata and resources.
-  - Keep structured phase diagnostics and prove that one failed transaction does not block unrelated jobs.
+  - [ ] Detect desktop entrypoints, icons, toolkit, executable, ABI, and required bridge capabilities without KCalc-specific assumptions.
+  - [ ] Generate package-specific Android metadata and resources.
+  - [x] Persist and display bounded structured phase diagnostics, including legacy-job migration.
+  - [ ] Prove with real packages that one failed transaction does not block unrelated jobs.
 - [ ] Complete AArch64 package runtime support.
   - Integrate Arch Linux ARM repositories, keyrings, dependency resolution, and package verification.
   - Publish separate x86_64 and arm64-v8a release assets; accept any data packages but require matching ABI for native ELF files.

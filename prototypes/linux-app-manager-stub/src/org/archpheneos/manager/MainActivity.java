@@ -844,6 +844,7 @@ public final class MainActivity extends Activity {
                 TextView error = text(job.error, 12, COLOR_ERROR);
                 jobDetails.addView(error, spacedWrap(dp(6)));
             }
+            addPackageDiagnostics(jobDetails, job);
             if (job.active()) {
                 TwoStageProgressView progress = new TwoStageProgressView(this,
                         COLOR_PRIMARY, COLOR_MUTED);
@@ -1352,6 +1353,7 @@ public final class MainActivity extends Activity {
         }
         packageJobDetail.setVisibility(View.VISIBLE);
         packageJobDetail.addView(detailLine("Install phase", job.status));
+        addPackageDiagnostics(packageJobDetail, job);
         if (job.active()) {
             TwoStageProgressView progress = new TwoStageProgressView(this,
                     COLOR_PRIMARY, COLOR_MUTED);
@@ -1379,6 +1381,18 @@ public final class MainActivity extends Activity {
                     startOnDevicePackageInstall(packageSource(packageJobDetailApp)));
             packageJobDetail.addView(retry, spacedWrap(dp(8)));
         }
+    }
+
+    private void addPackageDiagnostics(LinearLayout parent,
+            PackageInstallJobStore.Snapshot job) {
+        String summary = PackageInstallJobStore.diagnosticSummary(job);
+        if (summary.isEmpty()) return;
+        TextView title = text("Recent phases", 12, COLOR_MUTED);
+        title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        parent.addView(title, spacedWrap(dp(8)));
+        TextView history = text(summary, 11, COLOR_MUTED);
+        history.setTextIsSelectable(true);
+        parent.addView(history, spacedWrap(dp(4)));
     }
 
     private void populateVersionSelector(InstalledLinuxAppCatalog.Entry app,
