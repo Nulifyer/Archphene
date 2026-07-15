@@ -59,6 +59,9 @@ build_qt_template() {
   compositor="$root/native/archphene-compositor/target/x86_64-linux-android/release/libarchphene_compositor.so"
   [[ -f "$compositor" ]] || { echo "missing shared compositor: $compositor" >&2; exit 1; }
   cp "$compositor" "$out/stage/lib/x86_64/libarchphene_compositor.so"
+  gpu_helper="$root/tooling/build/android-gpu/x86_64/virgl_test_server_android"
+  [[ -f "$gpu_helper" ]] || { echo "missing Android GPU helper: $gpu_helper" >&2; exit 1; }
+  cp "$gpu_helper" "$out/stage/lib/x86_64/libarchphene_virgl_server.so"
   (
     cd "$out/stage"
     mapfile -d '' entries < <(find . -type f -print0)

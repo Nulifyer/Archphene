@@ -1,0 +1,12 @@
+diff --git a/meson.build b/meson.build
+index 3958182..8fda7cc 100644
+--- a/meson.build
++++ b/meson.build
+@@ -65,6 +65,8 @@ warning_flags = [
+    '-Werror=switch',
+    '-Wno-overlength-strings',
+    '-Wno-missing-field-initializers',
++   '-Wno-gnu-offsetof-extensions',
++   '-Wno-gnu-pointer-arith',
+    '-Werror=format',
+ ]

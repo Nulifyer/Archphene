@@ -1,0 +1,14 @@
+diff --git a/src/vrend/vrend_renderer.c b/src/vrend/vrend_renderer.c
+index 4bf88e0..61e42f5 100644
+--- a/src/vrend/vrend_renderer.c
++++ b/src/vrend/vrend_renderer.c
+@@ -1329,7 +1329,8 @@ static void vrend_shader_destroy(struct vrend_shader *shader)
+ 
+    if (shader->sel->sinfo.separable_program)
+        glDeleteProgram(shader->program_id);
+-   glDeleteShader(shader->id);
++   if (glIsShader(shader->id))
++      glDeleteShader(shader->id);
+    strarray_free(&shader->glsl_strings, true);
+    free(shader);
+ }

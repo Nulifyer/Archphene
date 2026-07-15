@@ -64,6 +64,14 @@ jobs:
             archphene-android-native:release \
             bash -lc 'cargo build --target x86_64-linux-android --release --locked'
 
+      - name: Build Android GPU helper
+        run: |
+          docker run --rm \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            archphene-android-native:release \
+            bash scripts/build-android-gpu-helper.sh x86_64
+
       - name: Resolve release version
         run: |
           if [[ "$RELEASE_TAG" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)([-+][0-9A-Za-z.-]+)?$ ]]; then

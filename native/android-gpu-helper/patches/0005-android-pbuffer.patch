@@ -1,0 +1,73 @@
+diff --git a/src/vrend/vrend_winsys_egl.c b/src/vrend/vrend_winsys_egl.c
+index 4ddcd0d..6955b01 100644
+--- a/src/vrend/vrend_winsys_egl.c
++++ b/src/vrend/vrend_winsys_egl.c
+@@ -103,6 +103,9 @@ struct virgl_egl {
+    EGLDisplay egl_display;
+    EGLConfig egl_conf;
+    EGLContext egl_ctx;
++#ifdef __ANDROID__
++   EGLSurface egl_surface;
++#endif
+    uint32_t extension_bits;
+    EGLSyncKHR signaled_fence;
+    bool different_gpu;
+@@ -188,6 +191,10 @@ static bool virgl_egl_add_extensions(struct virgl_egl *egl, const char *extensio
+ 
+ static bool virgl_egl_check_extensions(struct virgl_egl *egl)
+ {
++#ifdef __ANDROID__
++   return true;
++#endif
++
+    if (!has_bits(egl->extension_bits, EGL_KHR_SURFACELESS_CONTEXT | EGL_KHR_CREATE_CONTEXT)) {
+       virgl_error("Missing EGL_KHR_surfaceless_context or EGL_KHR_create_context\n");
+       return false;
+@@ -325,6 +332,9 @@ struct virgl_egl *virgl_egl_init(EGLNativeDisplayType display_id, bool surfacele
+ 
+    const char *client_extensions = eglQueryString (NULL, EGL_EXTENSIONS);
+    bool has_egl_base = virgl_egl_has_extension_in_string(client_extensions, "EGL_EXT_platform_base");
++#ifdef __ANDROID__
++   has_egl_base = false;
++#endif
+ 
+    egl = calloc(1, sizeof(struct virgl_egl));
+    if (!egl)
+@@ -424,8 +434,24 @@ struct virgl_egl *virgl_egl_init(EGLNativeDisplayType display_id, bool surfacele
+    if (!egl->egl_ctx)
+       goto fail;
+ 
+-   eglMakeCurrent(egl->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+-                  egl->egl_ctx);
++#ifdef __ANDROID__
++   static const EGLint pbuffer_att[] = {
++      EGL_WIDTH, 1,
++      EGL_HEIGHT, 1,
++      EGL_NONE,
++   };
++   egl->egl_surface = eglCreatePbufferSurface(egl->egl_display,
++                                              egl->egl_conf, pbuffer_att);
++   if (egl->egl_surface == EGL_NO_SURFACE)
++      goto fail;
++   success = eglMakeCurrent(egl->egl_display, egl->egl_surface,
++                            egl->egl_surface, egl->egl_ctx);
++#else
++   success = eglMakeCurrent(egl->egl_display, EGL_NO_SURFACE,
++                            EGL_NO_SURFACE, egl->egl_ctx);
++#endif
++   if (!success)
++      goto fail;
+ 
+    if (virgl_egl_supports_fences(egl)) {
+       egl->signaled_fence = eglCreateSyncKHR(egl->egl_display,
+@@ -454,6 +480,10 @@ void virgl_egl_destroy(struct virgl_egl *egl)
+    eglMakeCurrent(egl->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                   EGL_NO_CONTEXT);
+    eglDestroyContext(egl->egl_display, egl->egl_ctx);
++#ifdef __ANDROID__
++   if (egl->egl_surface != EGL_NO_SURFACE)
++      eglDestroySurface(egl->egl_display, egl->egl_surface);
++#endif
+    eglTerminate(egl->egl_display);
+    free(egl);
+ }

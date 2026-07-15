@@ -1,0 +1,52 @@
+diff --git a/meson.build b/meson.build
+index 874a21e..3958182 100644
+--- a/meson.build
++++ b/meson.build
+@@ -171,6 +171,7 @@ if cc.get_id() == 'gcc' and cc.version().version_compare('< 8.0')
+ endif
+ 
+ with_host_windows = host_machine.system() == 'windows'
++with_host_android = host_machine.system() == 'android'
+ with_host_darwin = host_machine.system() == 'darwin'
+ 
+ if thread_dep.found() and not with_host_windows
+@@ -288,7 +289,7 @@ endif
+ 
+ if with_egl
+    if cc.has_header('epoxy/egl.h', dependencies: epoxy_dep) and epoxy_dep.get_variable(pkgconfig: 'epoxy_has_egl') == '1'
+-      if with_host_windows or with_host_darwin
++      if with_host_windows or with_host_darwin or with_host_android
+          have_egl = true
+       else
+          if libdrm_dep.found()
+diff --git a/src/vrend/vrend_winsys.c b/src/vrend/vrend_winsys.c
+index 56b8905..930b5a6 100644
+--- a/src/vrend/vrend_winsys.c
++++ b/src/vrend/vrend_winsys.c
+@@ -76,6 +76,12 @@ int vrend_winsys_init(uint32_t flags, int preferred_fd)
+       }
+ 
+       use_context = CONTEXT_EGL;
++#elif defined(__ANDROID__)
++      egl = virgl_egl_init(NULL, flags & VIRGL_RENDERER_USE_SURFACELESS,
++                           flags & VIRGL_RENDERER_USE_GLES);
++      if (!egl)
++         return -1;
++      use_context = CONTEXT_EGL;
+ #else
+       (void)preferred_fd;
+       virgl_error("EGL is not supported on this platform\n");
+@@ -98,6 +104,13 @@ int vrend_winsys_init(uint32_t flags, int preferred_fd)
+ 
+ void vrend_winsys_cleanup(void)
+ {
++#ifdef __ANDROID__
++   if (use_context == CONTEXT_EGL) {
++      virgl_egl_destroy(egl);
++      egl = NULL;
++      use_context = CONTEXT_NONE;
++   }
++#endif
+ #ifdef ENABLE_GBM
+    if (use_context == CONTEXT_EGL) {
+       virgl_egl_destroy(egl);

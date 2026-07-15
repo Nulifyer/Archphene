@@ -1,0 +1,17 @@
+diff --git a/src/vrend/vrend_renderer.c b/src/vrend/vrend_renderer.c
+index 266d64a..4dc8405 100644
+--- a/src/vrend/vrend_renderer.c
++++ b/src/vrend/vrend_renderer.c
+@@ -417,6 +417,12 @@ static bool gles_emulate_bgra;
+ 
+ static inline bool has_feature(enum features_id feature_id)
+ {
++#ifdef __ANDROID__
++   if (feature_id == feat_dual_src_blend) {
++      return false;
++   }
++#endif
++
+    int slot = feature_id / 64;
+    uint64_t mask = 1ull << (feature_id & 63);
+    bool retval = vrend_state.features[slot] & mask ? true : false;

@@ -61,6 +61,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     private ArchpheneInputView compositorView;
     private ArchpheneCompositorSession session;
     private AndroidDocumentSession documentSession;
+    private final AndroidGpuBridge gpuBridge = new AndroidGpuBridge();
     private Process linuxProcess;
     private String logTag = "ArchpheneLinuxApp";
     private String payload;
@@ -607,7 +608,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                         new File(getFilesDir(), "fontconfig/fonts.conf"));
                 environment.put("FONTCONFIG_FILE", fontconfig.getAbsolutePath());
                 environment.put("FONTCONFIG_PATH", fontconfig.getParentFile().getAbsolutePath());
-                applyToolkitEnvironment(environment, runtimeLib, config);
+                File gpuSocket = startGpuBridge();
+                applyToolkitEnvironment(environment, runtimeLib, config, gpuSocket);
                 File imported = documentSession.importDocument(getIntent());
                 List<String> arguments = imported == null
                         ? java.util.Collections.emptyList()
@@ -621,6 +623,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 logRuntimeOutput(result.output);
             } catch (Throwable error) {
                 Log.e("ArchpheneRuntime", "Could not launch runtime GUI", error);
+            } finally {
+                gpuBridge.stop();
             }
         }, "archphene-runtime-gui").start();
     }
@@ -685,7 +689,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             File fontconfig = copyAsset("fonts.conf", new File(getFilesDir(), "fontconfig/fonts.conf"));
             env.put("FONTCONFIG_FILE", fontconfig.getAbsolutePath());
             env.put("FONTCONFIG_PATH", fontconfig.getParentFile().getAbsolutePath());
-            applyToolkitEnvironment(env, runtimeLib, config);
+            File gpuSocket = startGpuBridge();
+            applyToolkitEnvironment(env, runtimeLib, config, gpuSocket);
             builder.redirectErrorStream(true);
             linuxProcess = builder.start();
             Log.i(logTag, "Started Linux payload executable=" + executable.getName());
@@ -700,7 +705,14 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             Log.i(logTag, "Linux payload exited code=" + exit);
         } catch (Throwable error) {
             Log.e(logTag, "Could not launch Linux payload", error);
+        } finally {
+            gpuBridge.stop();
         }
+    }
+
+    private File startGpuBridge() {
+        if (!"wayland".equals(toolkit)) return null;
+        return gpuBridge.start(new File(getApplicationInfo().nativeLibraryDir), getCacheDir());
     }
 
     private boolean resolvedDarkAppearance() {
@@ -709,8 +721,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         return "dark".equals(appearanceTheme)
                 || (!"light".equals(appearanceTheme) && systemDark);
     }
-    private void applyToolkitEnvironment(
-            Map<String, String> env, File runtimeLib, File configDir) throws IOException {
+    private void applyToolkitEnvironment(Map<String, String> env, File runtimeLib,
+            File configDir, File gpuSocket) throws IOException {
         Configuration configuration = getResources().getConfiguration();
         boolean dark = resolvedDarkAppearance();
         int scalePercent = appearanceScalePercent;
@@ -741,11 +753,15 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 + appearanceMaterialYou);
         if ("wayland".equals(toolkit)) {
             env.put("EGL_PLATFORM", "wayland");
-            env.put("EGL_LOG_LEVEL", "debug");
             env.put("LIBGL_ALWAYS_SOFTWARE", "true");
-            env.put("LIBGL_DEBUG", "verbose");
-            env.put("GALLIUM_DRIVER", "llvmpipe");
-            env.put("MESA_DEBUG", "1");
+            if (gpuSocket != null) {
+                env.put("GALLIUM_DRIVER", "virpipe");
+                env.put("VTEST_SOCKET_NAME", gpuSocket.getAbsolutePath());
+                Log.i(logTag, "Graphics renderer=virpipe Android EGL/GLES bridge");
+            } else {
+                env.put("GALLIUM_DRIVER", "llvmpipe");
+                Log.i(logTag, "Graphics renderer=llvmpipe fallback");
+            }
         } else if ("gtk3".equals(toolkit)) {
             File root = new File(getFilesDir(), "linux-runtime/root");
             env.put("GDK_BACKEND", "wayland");
@@ -1179,6 +1195,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         secondaryWindows.clear();
         if (documentSession != null) documentSession.close();
         if (linuxProcess != null) linuxProcess.destroy();
+        gpuBridge.stop();
         if (session != null) session.close();
         super.onDestroy();
     }

@@ -41,6 +41,12 @@ The Linux process connects to an app-local Wayland socket. The bridge maps Wayla
 
 KCalc and Mousepad use the same Android Activity, input, clipboard, window host, and Rust native compositor. Application Activities contain only package metadata and inherit the shared bridge behavior.
 
+### Graphics bridge
+
+For Wayland applications, the wrapper starts a Bionic virglrenderer helper under the same Android UID and exposes a private Unix socket inside the app cache directory. The glibc Mesa client selects `virpipe` and sends Gallium commands over that socket. Virglrenderer executes those commands through Android EGL/OpenGL ES. If the helper cannot initialize, the launcher selects `llvmpipe` without changing Android permissions or sandbox identity.
+
+The current compositor accepts `wl_shm` output, so rendered frames still return through a CPU-visible shared-memory presentation path. This accelerates GL command execution but is not a zero-copy pipeline. Android HardwareBuffer/dmabuf import, Vulkan, and robust helper-loss recovery remain future work. See [GPU acceleration](gpu-acceleration.md).
+
 ### Runtime compatibility
 
 Arch glibc and application libraries run inside the Android app sandbox. Source-level glibc compatibility patches replace optional or blocked startup syscall forms. They do not change the Android UID, grant permissions, bypass SELinux, or modify the kernel.

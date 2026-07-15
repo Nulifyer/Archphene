@@ -1,0 +1,15 @@
+diff --git a/src/vrend/vrend_winsys_egl.c b/src/vrend/vrend_winsys_egl.c
+index 4ddcd0d..f09168d 100644
+--- a/src/vrend/vrend_winsys_egl.c
++++ b/src/vrend/vrend_winsys_egl.c
+@@ -791,6 +791,10 @@ void *virgl_egl_image_from_gbm_bo(struct virgl_egl *egl, struct gbm_bo *bo)
+ 
+ bool virgl_egl_supports_fences(struct virgl_egl *egl)
+ {
++#ifdef __ANDROID__
++   (void)egl;
++   return false;
++#endif
+    return (egl && has_bit(egl->extension_bits, EGL_KHR_FENCE_SYNC_ANDROID));
+ }
+ 

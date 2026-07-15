@@ -17,4 +17,9 @@ RUN apt-get update \
     && rustup component add rustfmt \
     && rustup target add x86_64-linux-android aarch64-linux-android
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       curl meson ninja-build patch pkg-config python3-yaml \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /workspace

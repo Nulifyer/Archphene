@@ -1,6 +1,6 @@
 # Project status
 
-Updated: 2026-07-14
+Updated: 2026-07-15
 
 This page separates validated behavior from planned platform work. Package search does not imply package compatibility.
 
@@ -16,6 +16,7 @@ This page separates validated behavior from planned platform work. Package searc
 | Secondary-window registry | Parent/child xdg_toplevel ownership, active-window routing, composited phone policy, separate Android Dialog hosting in freeform/tablet mode, child input, close, and parent restoration pass the emulator regression |
 | Native compositor bootstrap | Rust wayland-server core cross-compiles for Android x86_64 and AArch64; registry/compositor/SHM/xdg-shell/pointer/keyboard/touch seat discovery, SCM_RIGHTS SHM and sealed XKB v1 keymap FD transfer, checked padded-stride frames, ordered xdg configure queues, partial/final acknowledgements, mapped/unmapped lifecycle enforcement, and validated xdg_positioner state/destruction, commit-gated popup configure geometry, output-bound flip/slide/resize constraint adjustment, reactive output and committed-parent-geometry reconfiguration, double-buffered xdg window geometry, popup-grab focus preservation across root commits, snapshot-and-commit wl_region input state, effective-region popup fall-through, recursive wl_subsurface composition/input with parent-atomic synchronized content/position/stack latching, input-serial grab validation, nested topmost grab stacks, root-to-popup hit testing and local-coordinate pointer/button routing, clipped stacking-order SHM popup composition with ARGB/XRGB blending, child-first idempotent popup_done/teardown with root focus and pixels restored, wl_data_device_manager same-client input-serial-gated text source/offer/selection/cancellation lifecycle plus focused descriptor-backed Android ClipboardManager transfer in both directions, zwp_text_input_v3 focus and double-buffered enable/surrounding/cursor lifecycle with Android InputConnection content-purpose mapping, arbitrary UTF-8 preedit/commit, delete, editor-action, show/hide sequencing, and invalid-input rejection, demand-driven ClipboardManager reads with self-publish suppression, inverse wl_surface buffer transform/scale with retained-source reinterpretation, accumulated logical/buffer damage translated through synchronized subsurface trees into clipped root presentation batches, double-buffered wp_viewporter crop/destination scaling, wp_fractional_scale_v1 feedback, cursor-role SHM buffers isolated from application composition with Android PointerIcon transfer, zwp_pointer_gestures_v1 swipe/pinch/hold streams, and wl_output surface-enter/mode/scale updates, with post-ack Android bitmap presentation and Choreographer-timestamped frame-callback pacing, focused pointer, wl_pointer v9 value120/relative-direction wheel axes, wl_touch motion, two-pointer gestures, and hardware-key events routed from Android input, exact wire/pixel checks, and resource teardown pass on both |
 | Package job scheduler | Per-package phase/error state survives Activity recreation and manager process death; two preparation jobs can overlap, wrapper mutation/signing and Android confirmation are serialized, package failures are isolated, and list/detail progress, cancel, retry, installer completion, and interrupted-completion reconciliation pass emulator tests |
+| OpenGL ES bridge | A manager-generated GLMark2 wrapper starts a same-UID Android virglrenderer helper, Mesa reports a virgl renderer backed by the emulator NVIDIA OpenGL ES translator, and the complete 1080x2205 suite finishes with score 12. The final fence-compatible build remains stable through repeated scenes without renderer errors. The aarch64 helper builds and creates its private socket under the Archphene UID on a Samsung Galaxy S22 Ultra |
 
 ## In progress
 
@@ -41,7 +42,7 @@ This page separates validated behavior from planned platform work. Package searc
 
 - Complete capability-to-Android-permission brokers.
 - Manager-owned user document provider and complete multi-document conflict handling.
-- GPU/EGL/Vulkan and dmabuf presentation with SHM fallback.
+- Zero-copy Android HardwareBuffer/dmabuf presentation, Vulkan, physical ARM end-to-end GL application validation, and robust helper-loss recovery; the current OpenGL ES virpipe path presents through SHM.
 - Audio, notifications, printing, camera, drag-and-drop, accessibility, secrets/keyrings, URL handling, and remaining portals.
 - Broader Qt, GTK, SDL, Electron, and Rust-native compatibility.
 - GrapheneOS Pixel and sustained desktop-mode validation.

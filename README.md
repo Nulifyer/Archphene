@@ -20,6 +20,7 @@ Each wrapped Linux application receives a normal Android package identity, UID, 
 - Runs real, unmodified Arch Linux and Arch Linux ARM ELF application payloads as child processes of ordinary Android apps.
 - Gives each Linux app a distinct Android package, UID, SELinux app domain, storage sandbox, launcher entry, and system install/uninstall flow.
 - Renders Qt 6/KDE and GTK 3 applications through an app-local Wayland compositor.
+- Accelerates OpenGL ES applications through a same-UID virpipe-to-Android EGL/GLES helper, with llvmpipe fallback.
 - Supports touch and mouse input, hardware keyboard input, Android IME input, clipboard synchronization, popup menus, secondary dialogs, rotation, and live/freeform resizing.
 - Maps Android light/dark mode into GTK and Qt/KDE applications.
 - Brokers user-visible files through Android's Storage Access Framework while keeping background application state private.
@@ -35,6 +36,7 @@ Each wrapped Linux application receives a normal Android package identity, UID, 
 | KCalc | Qt 6 / KDE Frameworks | x86_64 | Android 16 emulator | GUI, menus, keyboard, clipboard, theme, resize |
 | KCalc | Qt 6 / KDE Frameworks | AArch64 | Samsung Galaxy S22 Ultra, Android 15 | GUI, menus, keyboard, clipboard, freeform resize |
 | Mousepad | GTK 3 | x86_64 | Android 16 emulator | Editing, dialogs, IME, document open/save/reopen |
+| GLMark2 | Mesa / Wayland | x86_64 | Android 16 emulator | Full suite, virgl host renderer, 1080x2205, score 12 |
 | Archphene manager | Android | x86_64 | Android 16 emulator | Catalog, package transaction, versions, updates, settings, and production self-update |
 
 These results prove the bridge on the listed targets only. They do not establish compatibility with every Android device, Linux application, GPU driver, or GrapheneOS release.
@@ -117,8 +119,8 @@ The physical suite expects the curated ARM64 package/runtime workspace and a com
 - The complete on-device transaction is proven for x86_64 KCalc/Qt with durable per-package jobs, list/detail progress, cancellation, retry, bounded parallel preparation, serialized signing/installation, isolated failures, and process-death reconciliation. Arbitrary packages still need desktop-entry/toolkit detection, capability policy, additional wrapper templates, ABI filtering, and compatibility reporting.
 - GitHub Releases discovery, checksum validation, bounded download, signer/package verification, Android confirmation, replacement, and restart reconciliation are implemented. The Linux workflow published and checksummed the first `v1.0.0` APK.
 - KCalc and Mousepad now use one shared Android Activity/InputConnection/clipboard host and Rust native compositor. Broad application support still requires more protocols, toolkit templates, and device coverage.
-- Verified package closures now publish as manager-owned immutable content-addressed runtime packs. A caller-authenticated provider grants exact read-only modules to the generated wrapper UID, cold KCalc app-drawer launch is validated, untrusted shell access is rejected, and the generated wrapper is 629 KB instead of 57 MB. Superseded and manually collected unbound packs are reclaimed; running-process leases, external-uninstall reconciliation, extraction reuse, and 4 KB/16 KB validation remain incomplete.
-- GPU acceleration, audio, printing, camera, drag-and-drop, accessibility, keyrings, and many desktop portals are incomplete or absent.
+- Verified package closures now publish as manager-owned immutable content-addressed runtime packs. A caller-authenticated provider grants exact read-only modules to the generated wrapper UID, cold KCalc app-drawer launch is validated, untrusted shell access is rejected, and the base generated wrapper is about 650 KiB instead of 57 MB (about 1.00 MiB when the native GPU helper is included). Superseded and manually collected unbound packs are reclaimed; running-process leases, external-uninstall reconciliation, extraction reuse, and 4 KB/16 KB validation remain incomplete.
+- OpenGL ES command execution is accelerated through virpipe and Android EGL/GLES with software fallback. Final Wayland presentation still uses shared-memory copies; Vulkan, zero-copy dmabuf, and physical-device end-to-end app tests remain incomplete. Audio, printing, camera, drag-and-drop, accessibility, keyrings, and many desktop portals are absent.
 - Android permissions require explicit bridge APIs; a Linux syscall cannot directly trigger an Android runtime permission prompt.
 - Secondary Linux toplevels use a shared parent/child registry with composited phone behavior and separate Android dialogs in tablet/freeform mode. Sustained vendor desktop-mode policy and multi-display behavior still need validation.
 - GrapheneOS-on-Pixel, Android 16 KB page-size devices, and generic laptop hardware remain unvalidated.
@@ -128,7 +130,7 @@ See [Current project status](docs/project-status.md) for validated evidence and 
 
 ## Roadmap
 
-1. Expand the shared native compositor beyond the validated SHM Qt/GTK path with GPU buffers, richer shell/input protocols, and broader application regressions.
+1. Replace the validated virpipe-to-SHM presentation path with zero-copy Android hardware buffers/dmabuf where supported, while retaining software fallback and expanding application regressions.
 2. Add running-process leases, uninstall reconciliation, process-group cleanup, extraction reuse, and 4 KB/16 KB validation to the package-derived content-addressed runtime-pack broker.
 3. Complete the multi-document Android storage broker and manager-owned shared user-document provider.
 4. Expand the proven failure-isolated x86_64 KCalc job flow to Arch Linux ARM, toolkit-aware templates, generic metadata, and capability policy.

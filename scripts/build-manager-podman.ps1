@@ -1,6 +1,7 @@
 param(
     [switch]$SkipRuntime,
     [switch]$ReleaseBuild,
+    [switch]$SkipGpuHelperBuild,
     [int]$VersionCode = 10000,
     [string]$VersionName = "1.0.0",
     [ValidateRange(1, 16)]
@@ -20,6 +21,12 @@ function Invoke-Native([string]$Step, [scriptblock]$Command) {
 Invoke-Native "Podman availability check" { podman info --format "{{.Host.OS}}/{{.Host.Arch}}" }
 & (Join-Path $PSScriptRoot "build-native-compositor-podman.ps1") -Architecture x86_64 -Release
 if ($LASTEXITCODE -ne 0) { throw "Shared native compositor build failed" }
+if (-not $SkipGpuHelperBuild) {
+    & (Join-Path $PSScriptRoot "build-android-gpu-helper-podman.ps1") -Architecture x86_64
+    if ($LASTEXITCODE -ne 0) { throw "Android GPU helper build failed" }
+} elseif (-not (Test-Path -LiteralPath (Join-Path $Root "tooling/build/android-gpu/x86_64/virgl_test_server_android") -PathType Leaf)) {
+    throw "Android GPU helper output is missing"
+}
 
 $drive = $Root.Substring(0, 1).ToLowerInvariant()
 $rest = $Root.Substring(2).Replace("\", "/")
