@@ -89,14 +89,17 @@ public final class ArchPackageRuntime {
         public final File root;
         public final String runtimePackId;
         public final ArchPackageClassifier.Result classification;
+        public final String toolkit;
 
         StagedTransaction(String sourcePackage, List<ResolvedPackage> packages, File root,
-                String runtimePackId, ArchPackageClassifier.Result classification) {
+                String runtimePackId, ArchPackageClassifier.Result classification,
+                String toolkit) {
             this.sourcePackage = sourcePackage;
             this.packages = Collections.unmodifiableList(new ArrayList<>(packages));
             this.root = root;
             this.runtimePackId = runtimePackId;
             this.classification = classification;
+            this.toolkit = toolkit;
         }
 
         String sourceVersion() {
@@ -353,7 +356,8 @@ public final class ArchPackageRuntime {
                 context, packageName, executableName, packages,
                 classification.commands, root);
         progress.onProgress(65, "Runtime pack ready");
-        return new StagedTransaction(packageName, packages, root, pack.id, classification);
+        return new StagedTransaction(packageName, packages, root, pack.id, classification,
+                pack.toolkit());
     }
 
     private static void stageVerifiedArchive(Context context, File archive, File root,

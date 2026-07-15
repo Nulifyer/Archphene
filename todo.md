@@ -10,7 +10,8 @@ This is the prioritized completion queue for the Archphene Android application. 
   - [x] Flow the selected desktop-entry display name/executable and detected runtime toolkit through generic wrapper assembly.
   - [x] Preserve the selected desktop-entry icon through generic wrapper assembly.
   - [x] Generate exact Android document intents from up to 16 MIME types declared by the selected desktop entry; wrappers without MIME types advertise no file intents.
-  - [ ] Complete ABI and required bridge-capability metadata.
+  - [x] Record the validated package architecture and detected runtime toolkit in generated wrapper metadata; reject unsupported ABI/template combinations.
+  - [ ] Define and enforce required bridge-capability metadata.
   - [ ] Generate package-specific Android metadata and resources.
   - [x] Persist and display bounded structured phase diagnostics, including legacy-job migration.
   - [x] Prove on the emulator with concurrent real package transactions that one resolution failure does not block an unrelated CLI package install.

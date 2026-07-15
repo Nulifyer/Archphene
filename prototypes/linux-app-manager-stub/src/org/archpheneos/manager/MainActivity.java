@@ -1940,7 +1940,7 @@ public final class MainActivity extends Activity {
                         ? ArchWrapperAssembler.assembleQt(this, "extra", sourcePackage)
                         : ArchWrapperAssembler.assembleDesktopFromRuntimePack(
                                 this, "extra", sourcePackage, staged.sourceVersion(),
-                                staged.classification, staged.root);
+                                "x86_64", staged.toolkit, staged.classification, staged.root);
                 if (getIntent().getBooleanExtra("archphene_test_install_assembled", false)) {
                     runOnUiThread(() -> {
                         showBanner("Generated " + result.packageName + "\nOpening Android installer", false);

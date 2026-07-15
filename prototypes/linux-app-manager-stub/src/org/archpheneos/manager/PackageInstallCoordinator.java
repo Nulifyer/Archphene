@@ -102,7 +102,7 @@ final class PackageInstallCoordinator {
                 String resolvedVersion = staged.sourceVersion();
                 result = ArchWrapperAssembler.assembleDesktopFromRuntimePack(
                         activity, source.repository, source.name, resolvedVersion,
-                        staged.classification, staged.root);
+                        source.architecture, staged.toolkit, staged.classification, staged.root);
             } finally {
                 WRAPPER_MUTATION.release();
             }

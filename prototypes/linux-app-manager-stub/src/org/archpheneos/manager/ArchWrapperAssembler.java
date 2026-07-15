@@ -63,25 +63,25 @@ public final class ArchWrapperAssembler {
 
     public static Result assembleQt(Context context, String repository, String sourcePackage)
             throws Exception {
-        return assembleQt(context, repository, sourcePackage, "0", sourcePackage,
+        return assembleQt(context, repository, sourcePackage, "0", "x86_64", "qt6", sourcePackage,
                 displayName(sourcePackage), "", Collections.emptyList(), null, false);
     }
 
     public static Result assembleQt(Context context, String repository, String sourcePackage,
             File runtimeRoot) throws Exception {
-        return assembleQt(context, repository, sourcePackage, "0", sourcePackage,
+        return assembleQt(context, repository, sourcePackage, "0", "x86_64", "qt6", sourcePackage,
                 displayName(sourcePackage), "", Collections.emptyList(), runtimeRoot, true);
     }
 
     public static Result assembleQt(Context context, String repository, String sourcePackage,
             String sourceVersion) throws Exception {
-        return assembleQt(context, repository, sourcePackage, sourceVersion, sourcePackage,
+        return assembleQt(context, repository, sourcePackage, sourceVersion, "x86_64", "qt6", sourcePackage,
                 displayName(sourcePackage), "", Collections.emptyList(), null, false);
     }
 
     public static Result assembleQt(Context context, String repository, String sourcePackage,
             String sourceVersion, String executableName) throws Exception {
-        return assembleQt(context, repository, sourcePackage, sourceVersion, executableName,
+        return assembleQt(context, repository, sourcePackage, sourceVersion, "x86_64", "qt6", executableName,
                 displayName(sourcePackage), "", Collections.emptyList(), null, false);
     }
 
@@ -91,29 +91,33 @@ public final class ArchWrapperAssembler {
         if (runtimeRoot == null) {
             throw new IllegalArgumentException("Runtime-pack staging root is required");
         }
-        return assembleQt(context, repository, sourcePackage, sourceVersion, executableName,
+        return assembleQt(context, repository, sourcePackage, sourceVersion, "x86_64", "qt6", executableName,
                 displayName(sourcePackage), "", Collections.emptyList(), runtimeRoot, false);
     }
 
     static Result assembleDesktopFromRuntimePack(Context context, String repository,
-            String sourcePackage, String sourceVersion,
+            String sourcePackage, String sourceVersion, String architecture, String toolkit,
             ArchPackageClassifier.Result classification, File runtimeRoot) throws Exception {
         if (runtimeRoot == null || classification == null
                 || classification.kind != ArchPackageClassifier.Kind.DESKTOP) {
             throw new IllegalArgumentException("Desktop runtime-pack metadata is required");
         }
-        return assembleQt(context, repository, sourcePackage, sourceVersion,
-                classification.executable, classification.displayName, classification.iconName,
+        return assembleQt(context, repository, sourcePackage, sourceVersion, architecture,
+                toolkit, classification.executable, classification.displayName, classification.iconName,
                 classification.mimeTypes, runtimeRoot, false);
     }
 
     private static Result assembleQt(Context context, String repository, String sourcePackage,
-            String sourceVersion, String executableName, String appLabel, String iconName,
+            String sourceVersion, String architecture, String toolkit, String executableName,
+            String appLabel, String iconName,
             List<String> mimeTypes, File runtimeRoot, boolean embedNativeClosure) throws Exception {
         if (!repository.matches("[a-z0-9-]{1,32}")
                 || !sourcePackage.matches("[a-zA-Z0-9@._+:-]{1,128}")
                 || sourceVersion == null
                 || !sourceVersion.matches("[a-zA-Z0-9@._+:-]{1,128}")
+                || !"x86_64".equals(architecture)
+                || !("qt6".equals(toolkit) || "gtk3".equals(toolkit)
+                        || "wayland".equals(toolkit))
                 || executableName == null
                 || !executableName.matches("[a-zA-Z0-9@._+:-]{1,128}")
                 || !validDisplayName(appLabel) || mimeTypes == null) {
@@ -124,8 +128,8 @@ public final class ArchWrapperAssembler {
         File output = new File(context.getCacheDir(), "generated-" + sourcePackage + ".apk");
         File unsigned = new File(context.getCacheDir(), "generated-" + sourcePackage + ".unsigned.apk");
         rebuildTemplate(context, packageName, repository, sourcePackage, sourceVersion,
-                executableName, appLabel, iconName, documentMimeTypes, runtimeRoot,
-                embedNativeClosure, unsigned);
+                architecture, toolkit, executableName, appLabel, iconName, documentMimeTypes,
+                runtimeRoot, embedNativeClosure, unsigned);
         verifyStoredEntryAlignment(unsigned, "resources.arsc", 4);
         ArchWrapperSigner.Result signed = ArchWrapperSigner.sign(context, unsigned, output);
         PackageInfo parsed = context.getPackageManager().getPackageArchiveInfo(output.getPath(),
@@ -158,7 +162,8 @@ public final class ArchWrapperAssembler {
                         .substring(0, 32);
     }
     private static void rebuildTemplate(Context context, String packageName, String repository,
-            String sourcePackage, String sourceVersion, String executableName, String appLabel,
+            String sourcePackage, String sourceVersion, String architecture, String toolkit,
+            String executableName, String appLabel,
             String iconName, List<String> mimeTypes, File runtimeRoot,
             boolean embedNativeClosure, File output)
             throws Exception {
@@ -197,8 +202,11 @@ public final class ArchWrapperAssembler {
                     value = replaceBinaryXmlString(value, "26.04.3-1", sourceVersion);
                     value = replaceBinaryXmlString(value,
                             "https://archlinux.org/packages/extra/x86_64/kcalc/json/",
-                            "https://archlinux.org/packages/" + repository + "/x86_64/"
-                                    + sourcePackage + "/json/");
+                            "https://archlinux.org/packages/" + repository + "/"
+                                    + architecture + "/" + sourcePackage + "/json/");
+                    value = replaceBinaryXmlString(value, "glibc-x86_64",
+                            "glibc-" + architecture);
+                    value = replaceBinaryXmlString(value, "qt6", toolkit);
                     value = replaceBinaryXmlString(value, "archphene-executable-placeholder",
                             executableName);
                     value = replaceBinaryXmlString(value, "ArchpheneKCalc", "ArchpheneLinuxApp");
