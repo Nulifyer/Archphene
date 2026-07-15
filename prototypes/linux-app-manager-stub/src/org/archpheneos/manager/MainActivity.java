@@ -300,6 +300,8 @@ public final class MainActivity extends Activity {
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
         page.setPadding(dp(16), dp(12), dp(16), 0);
+        page.setFocusableInTouchMode(true);
+        page.requestFocus();
 
         TextView title = text("Apps", 28, COLOR_TEXT);
         title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
@@ -685,6 +687,8 @@ public final class MainActivity extends Activity {
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
         page.setPadding(dp(16), dp(12), dp(16), 0);
+        page.setFocusableInTouchMode(true);
+        page.requestFocus();
         Button back = subtleBackButton();
         back.setOnClickListener(view -> showAppsPage());
         page.addView(back, new LinearLayout.LayoutParams(dp(80), dp(38)));
