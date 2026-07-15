@@ -161,6 +161,10 @@ public final class ArchWrapperAssembler {
                     value = replaceBinaryXmlString(value, "extra/kcalc",
                             repository + "/" + sourcePackage);
                     value = replaceBinaryXmlString(value, "26.04.3-1", sourceVersion);
+                    value = replaceBinaryXmlString(value,
+                            "https://archlinux.org/packages/extra/x86_64/kcalc/json/",
+                            "https://archlinux.org/packages/" + repository + "/x86_64/"
+                                    + sourcePackage + "/json/");
                     value = replaceBinaryXmlString(value, "archphene-executable-placeholder",
                             executableName);
                     value = replaceBinaryXmlString(value, "ArchpheneKCalc", "ArchpheneLinuxApp");

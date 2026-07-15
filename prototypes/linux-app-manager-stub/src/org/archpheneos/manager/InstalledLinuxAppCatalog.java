@@ -38,7 +38,7 @@ public final class InstalledLinuxAppCatalog {
                             metadata.getString("org.archphene.source.id", "unknown")
                                     .replaceFirst("^.*/", "")),
                     metadata.getString("org.archphene.runtime.abi", "unknown"),
-                    metadata.getString("org.archphene.source.update_url", ""),
+                    normalizedUpdateUrl(metadata),
                     launchIntent, false);
         }
 
@@ -169,6 +169,35 @@ public final class InstalledLinuxAppCatalog {
                 ".p00000000000000000000000000000000");
         if (candidatePlaceholder != currentPlaceholder) return !candidatePlaceholder;
         return candidate.packageName.compareTo(current.packageName) < 0;
+    }
+
+    static void verifyPacmanMetadataForTest() {
+        Bundle metadata = new Bundle();
+        metadata.putString("org.archphene.source.type", "pacman");
+        metadata.putString("org.archphene.source.id", "extra/mousepad");
+        metadata.putString("org.archphene.runtime.abi", "glibc-x86_64");
+        metadata.putString("org.archphene.source.update_url",
+                "https://archlinux.org/packages/extra/x86_64/kcalc/json/");
+        String expected = "https://archlinux.org/packages/extra/x86_64/mousepad/json/";
+        if (!expected.equals(normalizedUpdateUrl(metadata))) {
+            throw new SecurityException("Pacman update metadata normalization mismatch");
+        }
+    }
+
+    private static String normalizedUpdateUrl(Bundle metadata) {
+        String configured = metadata.getString("org.archphene.source.update_url", "");
+        if (!"pacman".equalsIgnoreCase(metadata.getString("org.archphene.source.type", ""))) {
+            return configured;
+        }
+        String sourceId = metadata.getString("org.archphene.source.id", "");
+        String runtimeAbi = metadata.getString("org.archphene.runtime.abi", "");
+        if (!sourceId.matches("[a-z0-9-]{1,32}/[a-zA-Z0-9@._+:-]{1,128}")
+                || !"glibc-x86_64".equals(runtimeAbi)) {
+            return configured;
+        }
+        int separator = sourceId.indexOf('/');
+        return "https://archlinux.org/packages/" + sourceId.substring(0, separator)
+                + "/x86_64/" + sourceId.substring(separator + 1) + "/json/";
     }
 
     private static String normalize(String value) {

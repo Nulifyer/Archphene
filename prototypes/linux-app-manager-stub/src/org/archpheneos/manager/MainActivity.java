@@ -459,7 +459,7 @@ public final class MainActivity extends Activity {
                     ? versionButtonDescription(app, state)
                     : pinnedVersionDescription(app, state, pinnedVersion));
             version.setEnabled(!app.updateUrl.isEmpty() && !"checking".equals(state.status));
-            version.setOnClickListener(view -> checkOne(app));
+            version.setOnClickListener(view -> activateVersionButton(app, state, pinnedVersion));
             if (pinnedVersion.isEmpty()) styleVersionButton(version, state);
             else stylePinnedVersionButton(version);
             top.addView(version, new LinearLayout.LayoutParams(dp(126), dp(42)));
@@ -976,6 +976,37 @@ public final class MainActivity extends Activity {
         button.setBackground(new RippleDrawable(
                 ColorStateList.valueOf((foreground & 0x00ffffff) | 0x33000000),
                 rounded(fill, 18), null));
+    }
+
+    private void activateVersionButton(InstalledLinuxAppCatalog.Entry app,
+            ManagerStateStore.Snapshot state, String pinnedVersion) {
+        if (shouldInstallFromVersionButton(state, pinnedVersion)) {
+            if ("pacman".equals(app.sourceType)) {
+                startOnDevicePackageInstall(packageSource(app));
+            } else {
+                installSelectedVersion(app, state.availableVersion);
+            }
+            return;
+        }
+        checkOne(app);
+    }
+
+    static boolean shouldInstallFromVersionButton(ManagerStateStore.Snapshot state,
+            String pinnedVersion) {
+        return pinnedVersion.isEmpty() && state.updateAvailable
+                && "update".equals(state.status) && !state.availableVersion.isEmpty();
+    }
+
+    static void verifyVersionButtonPolicyForTest() {
+        ManagerStateStore.Snapshot update = new ManagerStateStore.Snapshot(
+                "2.0-1", "update", "", 1L, true);
+        ManagerStateStore.Snapshot current = new ManagerStateStore.Snapshot(
+                "1.0-1", "current", "", 1L, false);
+        if (!shouldInstallFromVersionButton(update, "")
+                || shouldInstallFromVersionButton(update, "1.0-1")
+                || shouldInstallFromVersionButton(current, "")) {
+            throw new SecurityException("Version button action policy mismatch");
+        }
     }
 
     private void checkOne(InstalledLinuxAppCatalog.Entry app) {
@@ -1767,6 +1798,8 @@ public final class MainActivity extends Activity {
                 if (getIntent().getBooleanExtra("archphene_test_package_jobs", false)) {
                     PackageInstallJobStore.verifyForTest(this);
                     PackageInstallCoordinator.verifySchedulingForTest();
+                    InstalledLinuxAppCatalog.verifyPacmanMetadataForTest();
+                    verifyVersionButtonPolicyForTest();
                     runOnUiThread(() -> showBanner(
                             "Package job persistence and scheduler passed", false));
                     return;
