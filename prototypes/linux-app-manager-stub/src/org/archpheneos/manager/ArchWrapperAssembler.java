@@ -3,12 +3,20 @@ package org.archpheneos.manager;
 import android.content.Context;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.Canvas;
+import android.graphics.Paint;
+import android.graphics.Rect;
+import android.graphics.drawable.Drawable;
+import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.FilterOutputStream;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.RandomAccessFile;
 import java.nio.charset.StandardCharsets;
@@ -49,26 +57,41 @@ public final class ArchWrapperAssembler {
 
     public static Result assembleQt(Context context, String repository, String sourcePackage)
             throws Exception {
-        return assembleQt(context, repository, sourcePackage, "0", sourcePackage, null);
+        return assembleQt(context, repository, sourcePackage, "0", sourcePackage,
+                null, false);
     }
 
     public static Result assembleQt(Context context, String repository, String sourcePackage,
             File runtimeRoot) throws Exception {
-        return assembleQt(context, repository, sourcePackage, "0", sourcePackage, runtimeRoot);
+        return assembleQt(context, repository, sourcePackage, "0", sourcePackage,
+                runtimeRoot, true);
     }
 
     public static Result assembleQt(Context context, String repository, String sourcePackage,
             String sourceVersion) throws Exception {
-        return assembleQt(context, repository, sourcePackage, sourceVersion, sourcePackage, null);
+        return assembleQt(context, repository, sourcePackage, sourceVersion, sourcePackage,
+                null, false);
     }
 
     public static Result assembleQt(Context context, String repository, String sourcePackage,
             String sourceVersion, String executableName) throws Exception {
-        return assembleQt(context, repository, sourcePackage, sourceVersion, executableName, null);
+        return assembleQt(context, repository, sourcePackage, sourceVersion, executableName,
+                null, false);
+    }
+
+    public static Result assembleQtFromRuntimePack(Context context, String repository,
+            String sourcePackage, String sourceVersion, String executableName, File runtimeRoot)
+            throws Exception {
+        if (runtimeRoot == null) {
+            throw new IllegalArgumentException("Runtime-pack staging root is required");
+        }
+        return assembleQt(context, repository, sourcePackage, sourceVersion, executableName,
+                runtimeRoot, false);
     }
 
     private static Result assembleQt(Context context, String repository, String sourcePackage,
-            String sourceVersion, String executableName, File runtimeRoot) throws Exception {
+            String sourceVersion, String executableName, File runtimeRoot,
+            boolean embedNativeClosure) throws Exception {
         if (!repository.matches("[a-z0-9-]{1,32}")
                 || !sourcePackage.matches("[a-zA-Z0-9@._+:-]{1,128}")
                 || sourceVersion == null
@@ -81,7 +104,7 @@ public final class ArchWrapperAssembler {
         File output = new File(context.getCacheDir(), "generated-" + sourcePackage + ".apk");
         File unsigned = new File(context.getCacheDir(), "generated-" + sourcePackage + ".unsigned.apk");
         rebuildTemplate(context, packageName, repository, sourcePackage, sourceVersion,
-                executableName, runtimeRoot, unsigned);
+                executableName, runtimeRoot, embedNativeClosure, unsigned);
         verifyStoredEntryAlignment(unsigned, "resources.arsc", 4);
         ArchWrapperSigner.Result signed = ArchWrapperSigner.sign(context, unsigned, output);
         PackageInfo parsed = context.getPackageManager().getPackageArchiveInfo(output.getPath(),
@@ -106,7 +129,7 @@ public final class ArchWrapperAssembler {
     }
     private static void rebuildTemplate(Context context, String packageName, String repository,
             String sourcePackage, String sourceVersion, String executableName,
-            File runtimeRoot, File output)
+            File runtimeRoot, boolean embedNativeClosure, File output)
             throws Exception {
         byte[] placeholder = PACKAGE_PLACEHOLDER.getBytes(StandardCharsets.UTF_8);
         byte[] replacement = packageName.getBytes(StandardCharsets.UTF_8);
@@ -117,6 +140,9 @@ public final class ArchWrapperAssembler {
             throw new IllegalStateException("Generated package identity has invalid length");
         }
         boolean patched = false;
+        boolean iconPatched = false;
+        byte[] launcherIcon = buildLauncherIcon(context, sourcePackage,
+                executableName, runtimeRoot);
         try (InputStream raw = context.getAssets().open(QT_TEMPLATE);
                 ZipInputStream input = new ZipInputStream(raw);
                 CountingOutputStream counted = new CountingOutputStream(new FileOutputStream(output));
@@ -126,6 +152,10 @@ public final class ArchWrapperAssembler {
                 String name = entry.getName();
                 if (name.startsWith("META-INF/")) continue;
                 byte[] value = readEntry(input);
+                if (name.endsWith("/linux_app_icon_png.png")) {
+                    value = launcherIcon;
+                    iconPatched = true;
+                }
                 if ("AndroidManifest.xml".equals(name)) {
                     value = replaceBinaryXmlString(value, "KCalc", displayName(sourcePackage));
                     value = replaceBinaryXmlString(value, "extra/kcalc",
@@ -154,7 +184,7 @@ public final class ArchWrapperAssembler {
                 zip.write(value);
                 zip.closeEntry();
             }
-            if (runtimeRoot != null) {
+            if (embedNativeClosure && runtimeRoot != null) {
                 for (Map.Entry<String, File> nativeFile : collectNativeFiles(
                         context, runtimeRoot, sourcePackage).entrySet()) {
                     ZipEntry next = new ZipEntry("lib/x86_64/" + nativeFile.getKey());
@@ -169,9 +199,11 @@ public final class ArchWrapperAssembler {
                 }
             }
         }
-        if (!patched) {
+        if (!patched || !iconPatched) {
             output.delete();
-            throw new SecurityException("Wrapper template manifest is missing");
+            throw new SecurityException(!patched
+                    ? "Wrapper template manifest is missing"
+                    : "Wrapper template launcher icon marker is missing");
         }
     }
 
@@ -530,6 +562,133 @@ public final class ArchWrapperAssembler {
             output.write(buffer, 0, read);
         }
         return output.toByteArray();
+    }
+
+    private static byte[] buildLauncherIcon(Context context, String sourcePackage,
+            String executableName, File runtimeRoot) throws Exception {
+        Bitmap source = runtimeRoot == null ? null
+                : loadDesktopPng(runtimeRoot, executableName);
+        if (source == null) {
+            int fallback = "kcalc".equals(sourcePackage)
+                    ? R.drawable.package_kcalc_icon : R.drawable.manager_icon;
+            Drawable drawable = context.getDrawable(fallback);
+            if (drawable == null) throw new SecurityException("Launcher icon fallback is missing");
+            source = Bitmap.createBitmap(160, 160, Bitmap.Config.ARGB_8888);
+            Canvas canvas = new Canvas(source);
+            drawable.setBounds(0, 0, 160, 160);
+            drawable.draw(canvas);
+        }
+        Bitmap output = Bitmap.createBitmap(192, 192, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(output);
+        int sourceWidth = Math.max(1, source.getWidth());
+        int sourceHeight = Math.max(1, source.getHeight());
+        float scale = Math.min(160f / sourceWidth, 160f / sourceHeight);
+        int width = Math.max(1, Math.round(sourceWidth * scale));
+        int height = Math.max(1, Math.round(sourceHeight * scale));
+        Rect target = new Rect((192 - width) / 2, (192 - height) / 2,
+                (192 + width) / 2, (192 + height) / 2);
+        canvas.drawBitmap(source, null, target,
+                new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG));
+        ByteArrayOutputStream encoded = new ByteArrayOutputStream();
+        if (!output.compress(Bitmap.CompressFormat.PNG, 100, encoded)
+                || encoded.size() <= 0 || encoded.size() > 4 * 1024 * 1024) {
+            throw new SecurityException("Could not encode launcher icon");
+        }
+        source.recycle();
+        output.recycle();
+        return encoded.toByteArray();
+    }
+
+    private static Bitmap loadDesktopPng(File runtimeRoot, String executableName)
+            throws Exception {
+        File root = runtimeRoot.getCanonicalFile();
+        String iconName = desktopIconName(root, executableName);
+        if (iconName == null) return null;
+        ArrayDeque<File> pending = new ArrayDeque<>();
+        pending.add(new File(root, "usr/share/icons"));
+        pending.add(new File(root, "usr/share/pixmaps"));
+        HashSet<String> visited = new HashSet<>();
+        File best = null;
+        long bestArea = -1;
+        int examined = 0;
+        while (!pending.isEmpty() && examined++ < 20000) {
+            File candidate = pending.removeFirst();
+            File canonical;
+            try {
+                canonical = candidate.getCanonicalFile();
+            } catch (Exception ignored) {
+                continue;
+            }
+            if (!canonical.getPath().startsWith(root.getPath() + File.separator)
+                    || !visited.add(canonical.getPath())) continue;
+            if (canonical.isDirectory()) {
+                File[] children = canonical.listFiles();
+                if (children != null) {
+                    for (File child : children) pending.addLast(child);
+                }
+                continue;
+            }
+            if (!canonical.getName().equals(iconName + ".png")
+                    || canonical.length() <= 0 || canonical.length() > 8L * 1024 * 1024) {
+                continue;
+            }
+            BitmapFactory.Options bounds = new BitmapFactory.Options();
+            bounds.inJustDecodeBounds = true;
+            BitmapFactory.decodeFile(canonical.getPath(), bounds);
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0
+                    || bounds.outWidth > 4096 || bounds.outHeight > 4096) continue;
+            long area = (long) bounds.outWidth * bounds.outHeight;
+            if (area > bestArea) {
+                best = canonical;
+                bestArea = area;
+            }
+        }
+        if (best == null) return null;
+        BitmapFactory.Options options = new BitmapFactory.Options();
+        options.inSampleSize = 1;
+        while (bestArea / ((long) options.inSampleSize * options.inSampleSize)
+                > 1024L * 1024) {
+            options.inSampleSize *= 2;
+        }
+        return BitmapFactory.decodeFile(best.getPath(), options);
+    }
+
+    private static String desktopIconName(File root, String executableName) throws Exception {
+        File applications = new File(root, "usr/share/applications").getCanonicalFile();
+        if (!applications.isDirectory()
+                || !applications.getPath().startsWith(root.getPath() + File.separator)) {
+            return executableName;
+        }
+        File[] entries = applications.listFiles((directory, name) -> name.endsWith(".desktop"));
+        if (entries == null) return executableName;
+        for (File entry : entries) {
+            if (entry.length() <= 0 || entry.length() > 1024 * 1024) continue;
+            String executable = null;
+            String icon = null;
+            boolean desktopEntry = false;
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(
+                    new FileInputStream(entry), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (line.startsWith("[")) {
+                        desktopEntry = "[Desktop Entry]".equals(line);
+                    } else if (desktopEntry && line.startsWith("Exec=")) {
+                        String command = line.substring(5).trim();
+                        int space = command.indexOf(' ');
+                        if (space >= 0) command = command.substring(0, space);
+                        int slash = command.lastIndexOf('/');
+                        executable = slash >= 0 ? command.substring(slash + 1) : command;
+                    } else if (desktopEntry && line.startsWith("Icon=")) {
+                        icon = line.substring(5).trim();
+                    }
+                }
+            }
+            if (executableName.equals(executable) && icon != null
+                    && icon.matches("[a-zA-Z0-9@._+-]{1,128}")) {
+                return icon;
+            }
+        }
+        return executableName;
     }
 
     private static String displayName(String packageName) {

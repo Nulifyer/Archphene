@@ -39,7 +39,7 @@ build_qt_template() {
     -e "s/package=\"org.archphene.linux.kcalc\"/package=\"$placeholder\"/" \
     -e "s/$fixed_authority/$placeholder_authority/g" \
     -e 's/android:debuggable="true"/android:debuggable="false"/' \
-    -e 's/@drawable\/kcalc_icon/@drawable\/linux_app_icon/g' \
+    -e 's/@drawable\/kcalc_icon/@drawable\/linux_app_icon_png/g' \
     "$app/AndroidManifest.xml" > "$out/AndroidManifest.xml"
   "$bt/aapt2" compile --dir "$app/res" -o "$out/compiled/res.zip"
   "$bt/aapt2" link -o "$out/unsigned.apk" -I "$platform" \

@@ -424,19 +424,8 @@ public final class MainActivity extends Activity {
         details.addView(name, matchWrap());
         details.addView(text(app.sourceType + " | " + app.sourceId,
                 11, COLOR_MUTED), matchWrap());
-        String runtime = app.runtimeAbi;
         String pinnedVersion = ManagerStateStore.pinnedVersion(this, app.packageName);
-        TextView runtimeView = text(runtime, 10,
-                pinnedVersion.isEmpty() ? COLOR_MUTED : COLOR_WARNING);
-        if (!pinnedVersion.isEmpty()) {
-            runtimeView.setText(runtime + " | " + pinnedVersion
-                    + ("bad".equals(ManagerStateStore.versionHealth(this, app.packageName,
-                    pinnedVersion)) ? " | Reported bad" : ""));
-            runtimeView.setCompoundDrawablesWithIntrinsicBounds(R.drawable.version_pinned, 0, 0, 0);
-            runtimeView.setCompoundDrawablePadding(dp(4));
-            runtimeView.setContentDescription("Pinned to " + pinnedVersion + ". " + runtime);
-        }
-        details.addView(runtimeView, matchWrap());
+        details.addView(text(app.runtimeAbi, 10, COLOR_MUTED), matchWrap());
         top.addView(details, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1));
 
@@ -445,8 +434,14 @@ public final class MainActivity extends Activity {
             int percent = packageInstalling ? job.percent : activeInstallPercent;
             String label = phase == ApkUpdateInstaller.Phase.DOWNLOAD
                     ? "Preparing " + percent + "%" : "Installing...";
-            top.addView(installingAction(label),
-                    new LinearLayout.LayoutParams(dp(126), dp(42)));
+            ApkUpdateInstaller.Operation operation = packageInstalling
+                    ? PackageInstallCoordinator.operation(jobId) : activeInstallOperation;
+            View action = operation != null && operation.canCancel()
+                    ? cancelAction(() -> {
+                        if (packageInstalling) PackageInstallCoordinator.cancel(jobId);
+                        else if (activeInstallOperation != null) activeInstallOperation.cancel();
+                    }) : installingAction(label);
+            top.addView(action, new LinearLayout.LayoutParams(dp(126), dp(42)));
         } else if (job != null && job.retryable()) {
             Button retry = actionButton("Retry", android.R.drawable.stat_notify_error);
             retry.setTextColor(COLOR_ERROR);
@@ -455,36 +450,30 @@ public final class MainActivity extends Activity {
             retry.setOnClickListener(view -> startOnDevicePackageInstall(packageSource(app)));
             top.addView(retry, new LinearLayout.LayoutParams(dp(126), dp(42)));
         } else {
-            Button version = actionButton(versionButtonText(app, state), versionButtonIcon(state));
+            Button version = actionButton(pinnedVersion.isEmpty()
+                    ? versionButtonText(app, state) : pinnedVersion,
+                    pinnedVersion.isEmpty() ? versionButtonIcon(state)
+                            : R.drawable.version_pinned);
             version.setAllCaps(false);
-            version.setContentDescription(versionButtonDescription(app, state));
+            version.setContentDescription(pinnedVersion.isEmpty()
+                    ? versionButtonDescription(app, state)
+                    : pinnedVersionDescription(app, state, pinnedVersion));
             version.setEnabled(!app.updateUrl.isEmpty() && !"checking".equals(state.status));
             version.setOnClickListener(view -> checkOne(app));
-            styleVersionButton(version, state);
+            if (pinnedVersion.isEmpty()) styleVersionButton(version, state);
+            else stylePinnedVersionButton(version);
             top.addView(version, new LinearLayout.LayoutParams(dp(126), dp(42)));
         }
         card.addView(top, matchWrap());
         if (installing) {
-            LinearLayout transfer = new LinearLayout(this);
-            transfer.setGravity(Gravity.CENTER_VERTICAL);
             ApkUpdateInstaller.Phase phase = packageInstalling ? job.phase : activeInstallPhase;
             int percent = packageInstalling ? job.percent : activeInstallPercent;
             String status = packageInstalling ? job.status : activeInstallStatus;
             TwoStageProgressView progress = new TwoStageProgressView(this,
                     COLOR_PRIMARY, COLOR_MUTED);
             progress.setState(phase, percent, status);
-            transfer.addView(progress, new LinearLayout.LayoutParams(0, dp(48), 1));
-            ApkUpdateInstaller.Operation operation = packageInstalling
-                    ? PackageInstallCoordinator.operation(jobId) : activeInstallOperation;
-            if (operation != null && operation.canCancel()) {
-                Button cancel = actionButton("Cancel", android.R.drawable.ic_menu_close_clear_cancel);
-                cancel.setOnClickListener(view -> {
-                    if (packageInstalling) PackageInstallCoordinator.cancel(jobId);
-                    else if (activeInstallOperation != null) activeInstallOperation.cancel();
-                });
-                transfer.addView(cancel, new LinearLayout.LayoutParams(dp(96), dp(38)));
-            }
-            card.addView(transfer, spacedWrap(dp(4)));
+            card.addView(progress, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(48)));
         } else if (job != null && job.retryable()) {
             TextView error = text(job.error.isEmpty() ? job.status : job.error, 11, COLOR_ERROR);
             error.setMaxLines(2);
@@ -530,8 +519,7 @@ public final class MainActivity extends Activity {
         details.addView(name, matchWrap());
         details.addView(text(app.repository + " | " + app.architecture, 11, COLOR_MUTED), matchWrap());
         String pinned = ManagerStateStore.pinnedVersion(this, stateKey);
-        details.addView(text(pinned.isEmpty() ? "Not installed" : "Not installed | Pinned " + pinned,
-                10, pinned.isEmpty() ? COLOR_MUTED : COLOR_WARNING), matchWrap());
+        details.addView(text("Not installed", 10, COLOR_MUTED), matchWrap());
         top.addView(details, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         if (job.active() || artifactInstalling) {
             String label = artifactInstalling
@@ -540,46 +528,45 @@ public final class MainActivity extends Activity {
                     : PackageInstallJobStore.QUEUED.equals(job.state) ? "Queued"
                     : job.phase == ApkUpdateInstaller.Phase.DOWNLOAD
                     ? "Preparing " + job.percent + "%" : "Installing...";
-            top.addView(installingAction(label),
-                    new LinearLayout.LayoutParams(dp(126), dp(42)));
+            ApkUpdateInstaller.Operation operation = artifactInstalling
+                    ? activeInstallOperation : PackageInstallCoordinator.operation(jobId);
+            View action = operation != null && operation.canCancel()
+                    ? cancelAction(() -> {
+                        if (artifactInstalling) operation.cancel();
+                        else PackageInstallCoordinator.cancel(jobId);
+                    }) : installingAction(label);
+            top.addView(action, new LinearLayout.LayoutParams(dp(126), dp(42)));
         } else {
             String label = PackageInstallJobStore.ERROR.equals(job.state) ? "Failed"
                     : PackageInstallJobStore.CANCELLED.equals(job.state) ? "Cancelled"
-                    : app.version;
+                    : pinned.isEmpty() ? app.version : pinned;
             int iconId = job.retryable() ? android.R.drawable.stat_notify_error
-                    : android.R.drawable.stat_sys_download_done;
+                    : pinned.isEmpty() ? android.R.drawable.stat_sys_download_done
+                    : R.drawable.version_pinned;
             Button version = actionButton(label, iconId);
-            version.setEnabled(job.retryable());
             if (job.retryable()) {
                 version.setTextColor(COLOR_ERROR);
                 version.setContentDescription("Retry " + app.name + ". " + job.status
                         + (job.error.isEmpty() ? "" : ". " + job.error));
                 version.setOnClickListener(view -> startOnDevicePackageInstall(app));
+            } else {
+                version.setContentDescription(pinned.isEmpty()
+                        ? "Install " + app.name + " " + app.version
+                        : "Install " + app.name + " pinned to " + pinned);
+                version.setOnClickListener(view -> startOnDevicePackageInstall(app));
+                if (!pinned.isEmpty()) stylePinnedVersionButton(version);
             }
             top.addView(version, new LinearLayout.LayoutParams(dp(126), dp(42)));
         }
         card.addView(top, matchWrap());
         if (job.active() || artifactInstalling) {
-            LinearLayout transfer = new LinearLayout(this);
-            transfer.setGravity(Gravity.CENTER_VERTICAL);
             TwoStageProgressView progress = new TwoStageProgressView(this,
                     COLOR_PRIMARY, COLOR_MUTED);
             progress.setState(artifactInstalling ? activeInstallPhase : job.phase,
                     artifactInstalling ? activeInstallPercent : job.percent,
                     artifactInstalling ? activeInstallStatus : job.status);
-            transfer.addView(progress, new LinearLayout.LayoutParams(0, dp(48), 1));
-            ApkUpdateInstaller.Operation operation = artifactInstalling
-                    ? activeInstallOperation : PackageInstallCoordinator.operation(jobId);
-            if (operation != null && operation.canCancel()) {
-                Button cancel = actionButton("Cancel",
-                        android.R.drawable.ic_menu_close_clear_cancel);
-                cancel.setOnClickListener(view -> {
-                    if (artifactInstalling) operation.cancel();
-                    else PackageInstallCoordinator.cancel(jobId);
-                });
-                transfer.addView(cancel, new LinearLayout.LayoutParams(dp(96), dp(38)));
-            }
-            card.addView(transfer, spacedWrap(dp(4)));
+            card.addView(progress, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(48)));
         } else if (job.retryable()) {
             String failure = job.error.isEmpty() ? job.status : job.error;
             TextView error = text(failure, 11, COLOR_ERROR);
@@ -897,6 +884,37 @@ public final class MainActivity extends Activity {
         action.addView(status, textParams);
         action.setContentDescription(label);
         return action;
+    }
+
+    private Button cancelAction(Runnable cancel) {
+        Button action = actionButton("Cancel", android.R.drawable.ic_menu_close_clear_cancel);
+        action.setContentDescription("Cancel current package operation");
+        action.setOnClickListener(view -> cancel.run());
+        return action;
+    }
+
+    private String pinnedVersionDescription(InstalledLinuxAppCatalog.Entry app,
+            ManagerStateStore.Snapshot state, String pinnedVersion) {
+        String description = "Pinned to " + pinnedVersion + ". " + app.runtimeAbi;
+        if ("bad".equals(ManagerStateStore.versionHealth(this, app.packageName,
+                pinnedVersion))) {
+            description += ". Reported bad";
+        }
+        if ("update".equals(state.status) && !state.availableVersion.isEmpty()
+                && !pinnedVersion.equals(state.availableVersion)) {
+            description += ". Newer version " + state.availableVersion + " available";
+        }
+        return description + ". Check for updates";
+    }
+
+    private void stylePinnedVersionButton(Button button) {
+        int foreground = COLOR_WARNING;
+        int fill = darkTheme ? Color.rgb(66, 45, 22) : Color.rgb(255, 241, 216);
+        button.setTextColor(foreground);
+        button.setCompoundDrawableTintList(ColorStateList.valueOf(foreground));
+        button.setBackground(new RippleDrawable(
+                ColorStateList.valueOf((foreground & 0x00ffffff) | 0x33000000),
+                rounded(fill, 18), null));
     }
 
     private String versionButtonText(InstalledLinuxAppCatalog.Entry app,
