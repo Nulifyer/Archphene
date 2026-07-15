@@ -24,6 +24,7 @@
         <meta-data android:name="org.archphene.source.update_url" android:value="https://archlinux.org/packages/extra/x86_64/kcalc/json/" />
         <meta-data android:name="org.archphene.runtime.abi" android:value="glibc-x86_64" />
         <meta-data android:name="org.archphene.bridge.payload" android:value="libarchphene_kcalc.so" />
+        <meta-data android:name="org.archphene.bridge.capabilities" android:value="wayland,input,ime,clipboard,runtime-pack,home-documents,documents" />
         <meta-data android:name="org.archphene.bridge.toolkit" android:value="qt6" />
         <meta-data android:name="org.archphene.bridge.log_tag" android:value="ArchpheneKCalc" />
         <provider

@@ -6,13 +6,13 @@ This is the prioritized completion queue for the Archphene Android application. 
 
 ## P0 - Public release blockers
 
-- [ ] Complete general on-device package transactions.
+- [x] Complete general on-device package transactions for supported x86_64 desktop and CLI packages.
   - [x] Flow the selected desktop-entry display name/executable and detected runtime toolkit through generic wrapper assembly.
   - [x] Preserve the selected desktop-entry icon through generic wrapper assembly.
   - [x] Generate exact Android document intents from up to 16 MIME types declared by the selected desktop entry; wrappers without MIME types advertise no file intents.
   - [x] Record the validated package architecture and detected runtime toolkit in generated wrapper metadata; reject unsupported ABI/template combinations.
-  - [ ] Define and enforce required bridge-capability metadata.
-  - [ ] Generate package-specific Android metadata and resources.
+  - [x] Generate and validate a required bridge-capability contract; gate incoming-document brokers on package-declared MIME support.
+  - [x] Generate package-specific Android labels, icons, source/runtime metadata, capabilities, and exact document intent resources.
   - [x] Persist and display bounded structured phase diagnostics, including legacy-job migration.
   - [x] Prove on the emulator with concurrent real package transactions that one resolution failure does not block an unrelated CLI package install.
 - [ ] Complete AArch64 package runtime support.

@@ -11,6 +11,10 @@ public final class DocumentOpenActivity extends Activity {
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
+        if (!BridgeCapabilities.read(this).contains(BridgeCapabilities.DOCUMENTS)) {
+            finish();
+            return;
+        }
         if (state == null) {
             Intent picker = new Intent(Intent.ACTION_OPEN_DOCUMENT);
             picker.addCategory(Intent.CATEGORY_OPENABLE);

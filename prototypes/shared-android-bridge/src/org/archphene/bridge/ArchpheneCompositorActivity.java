@@ -61,6 +61,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     private ArchpheneInputView compositorView;
     private ArchpheneCompositorSession session;
     private AndroidDocumentSession documentSession;
+    private Set<String> capabilities;
     private final AndroidGpuBridge gpuBridge = new AndroidGpuBridge();
     private Process linuxProcess;
     private String logTag = "ArchpheneLinuxApp";
@@ -101,7 +102,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         loadManagerAppearance();
         if (runtimeProbeUri == null) loadManagerRuntimePack();
         independentWindows = shouldUseIndependentWindows();
-        documentSession = new AndroidDocumentSession(this, logTag);
+        documentSession = capabilities.contains(BridgeCapabilities.DOCUMENTS)
+                ? new AndroidDocumentSession(this, logTag) : null;
         int systemChrome = resolvedDarkAppearance() ? Color.rgb(35, 38, 41)
                 : Color.rgb(239, 240, 241);
         getWindow().setStatusBarColor(systemChrome);
@@ -212,6 +214,13 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         });
     }
 
+    private File importDocumentIfAllowed() {
+        if (documentSession != null) return documentSession.importDocument(getIntent());
+        if (AndroidDocumentSession.isDocumentIntent(getIntent())) {
+            Log.w(logTag, "Ignoring document intent without declared bridge capability");
+        }
+        return null;
+    }
     private void loadManagerRuntimePack() {
         try {
             Bundle runtime = getContentResolver().call(
@@ -610,7 +619,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 environment.put("FONTCONFIG_PATH", fontconfig.getParentFile().getAbsolutePath());
                 File gpuSocket = startGpuBridge();
                 applyToolkitEnvironment(environment, runtimeLib, config, gpuSocket);
-                File imported = documentSession.importDocument(getIntent());
+                File imported = importDocumentIfAllowed();
                 List<String> arguments = imported == null
                         ? java.util.Collections.emptyList()
                         : java.util.Collections.singletonList(imported.getAbsolutePath());
@@ -665,7 +674,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             cache.mkdirs();
             config.mkdirs();
             tmp.mkdirs();
-            File imported = documentSession.importDocument(getIntent());
+            File imported = importDocumentIfAllowed();
 
             ProcessBuilder builder = new ProcessBuilder(
                     loader.getAbsolutePath(),
@@ -1045,6 +1054,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             toolkit = metadata.getString(META_TOOLKIT, "qt6");
             logTag = metadata.getString(META_TAG, logTag);
             dataAssets = metadata.getString(META_DATA_ASSETS, "");
+            capabilities = BridgeCapabilities.read(this);
             if (payload == null || payload.isBlank()) {
                 throw new IllegalStateException("Linux payload metadata is missing");
             }
