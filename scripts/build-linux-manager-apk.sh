@@ -11,6 +11,8 @@ app_debuggable="${DEBUGGABLE:-false}"
   echo "DEBUGGABLE must be true or false" >&2; exit 1;
 }
 
+command -v python3 >/dev/null || { echo "python3 is required" >&2; exit 1; }
+
 if [[ -z "$sdk" || ! -d "$sdk" ]]; then
   echo "ANDROID_SDK_ROOT or ANDROID_HOME must point to an Android SDK" >&2
   exit 1
@@ -30,7 +32,7 @@ done
   exit 1
 }
 
-build_qt_template() {
+build_qt_templates() {
   local app="$root/prototypes/kcalc-android-app"
   local out="$root/tooling/build/wrapper-templates/qt"
   local placeholder="org.archphene.linux.p00000000000000000000000000000000"
@@ -44,11 +46,18 @@ build_qt_template() {
     -e "s/$fixed_authority/$placeholder_authority/g" \
     -e "s/android:debuggable=\"true\"/android:debuggable=\"$app_debuggable\"/" \
     -e 's/@drawable\/kcalc_icon/@drawable\/linux_app_icon_png/g' \
-    "$app/AndroidManifest.xml" > "$out/AndroidManifest.xml"
+    "$app/AndroidManifest.xml" > "$out/base-manifest.xml"
+  python3 "$root/scripts/render-wrapper-manifest.py" --profile generic \
+    "$out/base-manifest.xml" "$out/generic-manifest.xml"
+  python3 "$root/scripts/render-wrapper-manifest.py" --profile document \
+    "$out/base-manifest.xml" "$out/document-manifest.xml"
+
   "$bt/aapt2" compile --dir "$app/res" -o "$out/compiled/res.zip"
-  "$bt/aapt2" link -o "$out/unsigned.apk" -I "$platform" \
-    --manifest "$out/AndroidManifest.xml" --java "$out/gen" \
+  "$bt/aapt2" link -o "$out/unsigned-generic.apk" -I "$platform" \
+    --manifest "$out/generic-manifest.xml" --java "$out/gen" \
     "$out/compiled/res.zip"
+  "$bt/aapt2" link -o "$out/unsigned-document.apk" -I "$platform" \
+    --manifest "$out/document-manifest.xml" "$out/compiled/res.zip"
 
   mapfile -d '' java_files < <(find "$app/src" "$root/prototypes/shared-android-bridge/src" -type f -name '*.java' -print0)
   javac --release 17 -classpath "$platform" -d "$out/classes" "${java_files[@]}"
@@ -66,21 +75,36 @@ build_qt_template() {
   gpu_helper="$root/tooling/build/android-gpu/x86_64/virgl_test_server_android"
   [[ -f "$gpu_helper" ]] || { echo "missing Android GPU helper: $gpu_helper" >&2; exit 1; }
   cp "$gpu_helper" "$out/stage/lib/x86_64/libarchphene_virgl_server.so"
-  (
-    cd "$out/stage"
-    mapfile -d '' entries < <(find . -type f -print0)
-    jar uf ../unsigned.apk "${entries[@]}"
-  )
-  "$bt/zipalign" -f 4 "$out/unsigned.apk" "$out/qt-wrapper-template.apk"
-  local compiled_manifest
-  compiled_manifest="$("$bt/aapt2" dump xmltree "$out/qt-wrapper-template.apk" --file AndroidManifest.xml)"
-  if [[ "$compiled_manifest" != *"$placeholder_authority"* || "$compiled_manifest" == *"$fixed_authority"* ]]; then
-    echo "compiled wrapper template has an invalid document-provider authority" >&2
+  for profile in generic document; do
+    (
+      cd "$out/stage"
+      mapfile -d '' entries < <(find . -type f -print0)
+      jar uf "../unsigned-$profile.apk" "${entries[@]}"
+    )
+  done
+  "$bt/zipalign" -f 4 "$out/unsigned-generic.apk" "$out/qt-wrapper-template.apk"
+  "$bt/zipalign" -f 4 "$out/unsigned-document.apk" "$out/qt-document-wrapper-template.apk"
+
+  local generic_manifest document_manifest
+  generic_manifest="$("$bt/aapt2" dump xmltree "$out/qt-wrapper-template.apk" --file AndroidManifest.xml)"
+  document_manifest="$("$bt/aapt2" dump xmltree "$out/qt-document-wrapper-template.apk" --file AndroidManifest.xml)"
+  if [[ "$generic_manifest" != *"$placeholder_authority"* \
+      || "$generic_manifest" == *"$fixed_authority"* \
+      || "$generic_manifest" == *"android.intent.action.VIEW"* \
+      || "$generic_manifest" == *"android.intent.action.EDIT"* ]]; then
+    echo "compiled generic wrapper template has invalid document metadata" >&2
+    exit 1
+  fi
+  if [[ "$document_manifest" != *"application/x-archphene-mime-00"* \
+      || "$document_manifest" != *"application/x-archphene-mime-15"* \
+      || "$document_manifest" != *"android.intent.action.VIEW"* \
+      || "$document_manifest" != *"android.intent.action.EDIT"* ]]; then
+    echo "compiled document wrapper template has invalid MIME slots" >&2
     exit 1
   fi
 }
 
-build_qt_template
+build_qt_templates
 
 build_terminal_app() {
   local app="$root/prototypes/archphene-terminal-app"
@@ -152,7 +176,8 @@ resolved="$runtime/elf-needed-resolved.tsv"
 keyrings="$runtime_prefix/tooling/downloads/arch-runtime-archlinux-keyring-x86_64/runtime-root/usr/share/pacman/keyrings"
 glibc="$runtime_prefix/tooling/build/glibc-archphene-runtime-x86_64"
 template="$root/tooling/build/wrapper-templates/qt/qt-wrapper-template.apk"
-for required in "$runtime_root" "$resolved" "$keyrings" "$glibc" "$template"; do
+document_template="$root/tooling/build/wrapper-templates/qt/qt-document-wrapper-template.apk"
+for required in "$runtime_root" "$resolved" "$keyrings" "$glibc" "$template" "$document_template"; do
   [[ -e "$required" ]] || {
     echo "package runtime input missing: $required" >&2
     exit 1
@@ -183,6 +208,7 @@ for name in archlinux.gpg archlinux-revoked archlinux-trusted; do
   cp "$keyrings/$name" "$package_assets/$name"
 done
 cp "$template" "$package_assets/qt-wrapper-template.apk"
+cp "$document_template" "$package_assets/qt-document-wrapper-template.apk"
 cp "$runtime_root/usr/bin/pacman" "$package_libs/libarchphene_pacman.so"
 cp "$runtime_root/usr/bin/gpg" "$package_libs/libarchphene_gpg.so"
 cp "$runtime_root/usr/bin/gpgv" "$package_libs/libarchphene_gpgv.so"

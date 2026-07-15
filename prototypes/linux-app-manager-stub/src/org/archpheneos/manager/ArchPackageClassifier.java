@@ -143,7 +143,7 @@ final class ArchPackageClassifier {
             if (mime.matches("[a-z0-9!#$&^_.+-]{1,64}/[a-z0-9!#$&^_.+*-]{1,64}")
                     && !result.contains(mime)) {
                 result.add(mime);
-                if (result.size() >= 32) break;
+                if (result.size() >= 16) break;
             }
         }
         return result;

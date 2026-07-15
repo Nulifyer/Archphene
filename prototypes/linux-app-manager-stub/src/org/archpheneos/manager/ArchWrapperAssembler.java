@@ -22,7 +22,10 @@ import java.io.RandomAccessFile;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
@@ -34,6 +37,9 @@ import java.util.zip.ZipOutputStream;
 
 public final class ArchWrapperAssembler {
     private static final String QT_TEMPLATE = "package-runtime/qt-wrapper-template.apk";
+    private static final String QT_DOCUMENT_TEMPLATE =
+            "package-runtime/qt-document-wrapper-template.apk";
+    private static final int MIME_SLOT_COUNT = 16;
     private static final String PACKAGE_PLACEHOLDER =
             "org.archphene.linux.p00000000000000000000000000000000";
     private static final int ENTRY_LIMIT = 256 * 1024 * 1024;
@@ -58,25 +64,25 @@ public final class ArchWrapperAssembler {
     public static Result assembleQt(Context context, String repository, String sourcePackage)
             throws Exception {
         return assembleQt(context, repository, sourcePackage, "0", sourcePackage,
-                displayName(sourcePackage), "", null, false);
+                displayName(sourcePackage), "", Collections.emptyList(), null, false);
     }
 
     public static Result assembleQt(Context context, String repository, String sourcePackage,
             File runtimeRoot) throws Exception {
         return assembleQt(context, repository, sourcePackage, "0", sourcePackage,
-                displayName(sourcePackage), "", runtimeRoot, true);
+                displayName(sourcePackage), "", Collections.emptyList(), runtimeRoot, true);
     }
 
     public static Result assembleQt(Context context, String repository, String sourcePackage,
             String sourceVersion) throws Exception {
         return assembleQt(context, repository, sourcePackage, sourceVersion, sourcePackage,
-                displayName(sourcePackage), "", null, false);
+                displayName(sourcePackage), "", Collections.emptyList(), null, false);
     }
 
     public static Result assembleQt(Context context, String repository, String sourcePackage,
             String sourceVersion, String executableName) throws Exception {
         return assembleQt(context, repository, sourcePackage, sourceVersion, executableName,
-                displayName(sourcePackage), "", null, false);
+                displayName(sourcePackage), "", Collections.emptyList(), null, false);
     }
 
     public static Result assembleQtFromRuntimePack(Context context, String repository,
@@ -86,7 +92,7 @@ public final class ArchWrapperAssembler {
             throw new IllegalArgumentException("Runtime-pack staging root is required");
         }
         return assembleQt(context, repository, sourcePackage, sourceVersion, executableName,
-                displayName(sourcePackage), "", runtimeRoot, false);
+                displayName(sourcePackage), "", Collections.emptyList(), runtimeRoot, false);
     }
 
     static Result assembleDesktopFromRuntimePack(Context context, String repository,
@@ -98,26 +104,28 @@ public final class ArchWrapperAssembler {
         }
         return assembleQt(context, repository, sourcePackage, sourceVersion,
                 classification.executable, classification.displayName, classification.iconName,
-                runtimeRoot, false);
+                classification.mimeTypes, runtimeRoot, false);
     }
 
     private static Result assembleQt(Context context, String repository, String sourcePackage,
             String sourceVersion, String executableName, String appLabel, String iconName,
-            File runtimeRoot, boolean embedNativeClosure) throws Exception {
+            List<String> mimeTypes, File runtimeRoot, boolean embedNativeClosure) throws Exception {
         if (!repository.matches("[a-z0-9-]{1,32}")
                 || !sourcePackage.matches("[a-zA-Z0-9@._+:-]{1,128}")
                 || sourceVersion == null
                 || !sourceVersion.matches("[a-zA-Z0-9@._+:-]{1,128}")
                 || executableName == null
                 || !executableName.matches("[a-zA-Z0-9@._+:-]{1,128}")
-                || !validDisplayName(appLabel)) {
+                || !validDisplayName(appLabel) || mimeTypes == null) {
             throw new IllegalArgumentException("Invalid wrapper source identity");
         }
+        List<String> documentMimeTypes = normalizedMimeTypes(mimeTypes);
         String packageName = packageNameFor(repository, sourcePackage);
         File output = new File(context.getCacheDir(), "generated-" + sourcePackage + ".apk");
         File unsigned = new File(context.getCacheDir(), "generated-" + sourcePackage + ".unsigned.apk");
         rebuildTemplate(context, packageName, repository, sourcePackage, sourceVersion,
-                executableName, appLabel, iconName, runtimeRoot, embedNativeClosure, unsigned);
+                executableName, appLabel, iconName, documentMimeTypes, runtimeRoot,
+                embedNativeClosure, unsigned);
         verifyStoredEntryAlignment(unsigned, "resources.arsc", 4);
         ArchWrapperSigner.Result signed = ArchWrapperSigner.sign(context, unsigned, output);
         PackageInfo parsed = context.getPackageManager().getPackageArchiveInfo(output.getPath(),
@@ -151,7 +159,8 @@ public final class ArchWrapperAssembler {
     }
     private static void rebuildTemplate(Context context, String packageName, String repository,
             String sourcePackage, String sourceVersion, String executableName, String appLabel,
-            String iconName, File runtimeRoot, boolean embedNativeClosure, File output)
+            String iconName, List<String> mimeTypes, File runtimeRoot,
+            boolean embedNativeClosure, File output)
             throws Exception {
         byte[] placeholder = PACKAGE_PLACEHOLDER.getBytes(StandardCharsets.UTF_8);
         byte[] replacement = packageName.getBytes(StandardCharsets.UTF_8);
@@ -165,7 +174,10 @@ public final class ArchWrapperAssembler {
         boolean iconPatched = false;
         byte[] launcherIcon = buildLauncherIcon(context, sourcePackage,
                 executableName, iconName, runtimeRoot);
-        try (InputStream raw = context.getAssets().open(QT_TEMPLATE);
+        String templateAsset = mimeTypes.isEmpty() ? QT_TEMPLATE : QT_DOCUMENT_TEMPLATE;
+        android.util.Log.i("ArchphenePackages", "Wrapper template " + templateAsset
+                + " for " + sourcePackage + " with " + mimeTypes.size() + " MIME types");
+        try (InputStream raw = context.getAssets().open(templateAsset);
                 ZipInputStream input = new ZipInputStream(raw);
                 CountingOutputStream counted = new CountingOutputStream(new FileOutputStream(output));
                 ZipOutputStream zip = new ZipOutputStream(counted)) {
@@ -190,6 +202,15 @@ public final class ArchWrapperAssembler {
                     value = replaceBinaryXmlString(value, "archphene-executable-placeholder",
                             executableName);
                     value = replaceBinaryXmlString(value, "ArchpheneKCalc", "ArchpheneLinuxApp");
+                    if (!mimeTypes.isEmpty()) {
+                        String fallbackMime = mimeTypes.get(0);
+                        for (int index = 0; index < MIME_SLOT_COUNT; index++) {
+                            String mime = index < mimeTypes.size()
+                                    ? mimeTypes.get(index) : fallbackMime;
+                            value = replaceBinaryXmlString(value, String.format(Locale.ROOT,
+                                    "application/x-archphene-mime-%02d", index), mime);
+                        }
+                    }
                     int replacements = replaceAll(value, placeholder, replacement)
                             + replaceAll(value, placeholderUtf16, replacementUtf16);
                     if (replacements < 1) throw new SecurityException("Wrapper template package marker is missing");
@@ -720,6 +741,20 @@ public final class ArchWrapperAssembler {
         return executableName;
     }
 
+    private static List<String> normalizedMimeTypes(List<String> values) {
+        ArrayList<String> result = new ArrayList<>();
+        for (String value : values) {
+            String mime = value == null ? "" : value.trim().toLowerCase(Locale.ROOT);
+            if (!mime.matches("[a-z0-9!#$&^_.+-]{1,64}/[a-z0-9!#$&^_.+*-]{1,64}")
+                    || mime.startsWith("application/x-archphene-mime-")
+                    || result.contains(mime)) {
+                continue;
+            }
+            result.add(mime);
+            if (result.size() >= MIME_SLOT_COUNT) break;
+        }
+        return Collections.unmodifiableList(result);
+    }
     private static boolean validDisplayName(String value) {
         if (value == null || value.isBlank() || value.length() > 128) return false;
         for (int index = 0; index < value.length(); index++) {
