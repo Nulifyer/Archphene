@@ -58,25 +58,25 @@ public final class ArchWrapperAssembler {
     public static Result assembleQt(Context context, String repository, String sourcePackage)
             throws Exception {
         return assembleQt(context, repository, sourcePackage, "0", sourcePackage,
-                displayName(sourcePackage), null, false);
+                displayName(sourcePackage), "", null, false);
     }
 
     public static Result assembleQt(Context context, String repository, String sourcePackage,
             File runtimeRoot) throws Exception {
         return assembleQt(context, repository, sourcePackage, "0", sourcePackage,
-                displayName(sourcePackage), runtimeRoot, true);
+                displayName(sourcePackage), "", runtimeRoot, true);
     }
 
     public static Result assembleQt(Context context, String repository, String sourcePackage,
             String sourceVersion) throws Exception {
         return assembleQt(context, repository, sourcePackage, sourceVersion, sourcePackage,
-                displayName(sourcePackage), null, false);
+                displayName(sourcePackage), "", null, false);
     }
 
     public static Result assembleQt(Context context, String repository, String sourcePackage,
             String sourceVersion, String executableName) throws Exception {
         return assembleQt(context, repository, sourcePackage, sourceVersion, executableName,
-                displayName(sourcePackage), null, false);
+                displayName(sourcePackage), "", null, false);
     }
 
     public static Result assembleQtFromRuntimePack(Context context, String repository,
@@ -86,7 +86,7 @@ public final class ArchWrapperAssembler {
             throw new IllegalArgumentException("Runtime-pack staging root is required");
         }
         return assembleQt(context, repository, sourcePackage, sourceVersion, executableName,
-                displayName(sourcePackage), runtimeRoot, false);
+                displayName(sourcePackage), "", runtimeRoot, false);
     }
 
     static Result assembleDesktopFromRuntimePack(Context context, String repository,
@@ -97,12 +97,13 @@ public final class ArchWrapperAssembler {
             throw new IllegalArgumentException("Desktop runtime-pack metadata is required");
         }
         return assembleQt(context, repository, sourcePackage, sourceVersion,
-                classification.executable, classification.displayName, runtimeRoot, false);
+                classification.executable, classification.displayName, classification.iconName,
+                runtimeRoot, false);
     }
 
     private static Result assembleQt(Context context, String repository, String sourcePackage,
-            String sourceVersion, String executableName, String appLabel, File runtimeRoot,
-            boolean embedNativeClosure) throws Exception {
+            String sourceVersion, String executableName, String appLabel, String iconName,
+            File runtimeRoot, boolean embedNativeClosure) throws Exception {
         if (!repository.matches("[a-z0-9-]{1,32}")
                 || !sourcePackage.matches("[a-zA-Z0-9@._+:-]{1,128}")
                 || sourceVersion == null
@@ -116,7 +117,7 @@ public final class ArchWrapperAssembler {
         File output = new File(context.getCacheDir(), "generated-" + sourcePackage + ".apk");
         File unsigned = new File(context.getCacheDir(), "generated-" + sourcePackage + ".unsigned.apk");
         rebuildTemplate(context, packageName, repository, sourcePackage, sourceVersion,
-                executableName, appLabel, runtimeRoot, embedNativeClosure, unsigned);
+                executableName, appLabel, iconName, runtimeRoot, embedNativeClosure, unsigned);
         verifyStoredEntryAlignment(unsigned, "resources.arsc", 4);
         ArchWrapperSigner.Result signed = ArchWrapperSigner.sign(context, unsigned, output);
         PackageInfo parsed = context.getPackageManager().getPackageArchiveInfo(output.getPath(),
@@ -150,7 +151,7 @@ public final class ArchWrapperAssembler {
     }
     private static void rebuildTemplate(Context context, String packageName, String repository,
             String sourcePackage, String sourceVersion, String executableName, String appLabel,
-            File runtimeRoot, boolean embedNativeClosure, File output)
+            String iconName, File runtimeRoot, boolean embedNativeClosure, File output)
             throws Exception {
         byte[] placeholder = PACKAGE_PLACEHOLDER.getBytes(StandardCharsets.UTF_8);
         byte[] replacement = packageName.getBytes(StandardCharsets.UTF_8);
@@ -163,7 +164,7 @@ public final class ArchWrapperAssembler {
         boolean patched = false;
         boolean iconPatched = false;
         byte[] launcherIcon = buildLauncherIcon(context, sourcePackage,
-                executableName, runtimeRoot);
+                executableName, iconName, runtimeRoot);
         try (InputStream raw = context.getAssets().open(QT_TEMPLATE);
                 ZipInputStream input = new ZipInputStream(raw);
                 CountingOutputStream counted = new CountingOutputStream(new FileOutputStream(output));
@@ -590,9 +591,9 @@ public final class ArchWrapperAssembler {
     }
 
     private static byte[] buildLauncherIcon(Context context, String sourcePackage,
-            String executableName, File runtimeRoot) throws Exception {
+            String executableName, String iconName, File runtimeRoot) throws Exception {
         Bitmap source = runtimeRoot == null ? null
-                : loadDesktopPng(runtimeRoot, executableName);
+                : loadDesktopPng(runtimeRoot, executableName, iconName);
         if (source == null) {
             int fallback = "kcalc".equals(sourcePackage)
                     ? R.drawable.package_kcalc_icon : R.drawable.manager_icon;
@@ -624,11 +625,14 @@ public final class ArchWrapperAssembler {
         return encoded.toByteArray();
     }
 
-    private static Bitmap loadDesktopPng(File runtimeRoot, String executableName)
+    private static Bitmap loadDesktopPng(File runtimeRoot, String executableName, String iconName)
             throws Exception {
         File root = runtimeRoot.getCanonicalFile();
-        String iconName = desktopIconName(root, executableName);
-        if (iconName == null) return null;
+        String selectedIcon = iconName == null ? "" : iconName.trim();
+        if (!selectedIcon.matches("[a-zA-Z0-9@._+-]{1,128}")) {
+            selectedIcon = desktopIconName(root, executableName);
+        }
+        if (selectedIcon == null) return null;
         ArrayDeque<File> pending = new ArrayDeque<>();
         pending.add(new File(root, "usr/share/icons"));
         pending.add(new File(root, "usr/share/pixmaps"));
@@ -653,7 +657,7 @@ public final class ArchWrapperAssembler {
                 }
                 continue;
             }
-            if (!canonical.getName().equals(iconName + ".png")
+            if (!canonical.getName().equals(selectedIcon + ".png")
                     || canonical.length() <= 0 || canonical.length() > 8L * 1024 * 1024) {
                 continue;
             }

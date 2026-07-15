@@ -26,15 +26,20 @@ final class ArchPackageClassifier {
         final String executable;
         final String displayName;
         final String desktopFile;
+        final String iconName;
+        final List<String> mimeTypes;
         final boolean terminalDesktopEntry;
         final List<String> commands;
 
         Result(Kind kind, String executable, String displayName, String desktopFile,
-                boolean terminalDesktopEntry, List<String> commands) {
+                String iconName, List<String> mimeTypes, boolean terminalDesktopEntry,
+                List<String> commands) {
             this.kind = kind;
             this.executable = executable;
             this.displayName = displayName;
             this.desktopFile = desktopFile;
+            this.iconName = iconName;
+            this.mimeTypes = Collections.unmodifiableList(new ArrayList<>(mimeTypes));
             this.terminalDesktopEntry = terminalDesktopEntry;
             this.commands = Collections.unmodifiableList(new ArrayList<>(commands));
         }
@@ -70,7 +75,8 @@ final class ArchPackageClassifier {
                 if (entry == null || entry.hidden || entry.noDisplay) continue;
                 if (!entry.terminal) {
                     return new Result(Kind.DESKTOP, entry.executable, entry.name,
-                            entry.relativePath, false, commands);
+                            entry.relativePath, entry.iconName, entry.mimeTypes,
+                            false, commands);
                 }
                 terminalEntries.add(entry);
             }
@@ -78,13 +84,16 @@ final class ArchPackageClassifier {
         if (!terminalEntries.isEmpty()) {
             DesktopEntry entry = preferredEntry(terminalEntries, packageName, executableHint);
             return new Result(Kind.TERMINAL, entry.executable, entry.name,
-                    entry.relativePath, true, commands);
+                    entry.relativePath, entry.iconName, entry.mimeTypes,
+                    true, commands);
         }
         String executable = preferredCommand(commands, packageName, executableHint);
         if (!executable.isEmpty()) {
-            return new Result(Kind.TERMINAL, executable, packageName, "", false, commands);
+            return new Result(Kind.TERMINAL, executable, packageName, "", "",
+                    Collections.emptyList(), false, commands);
         }
-        return new Result(Kind.DEPENDENCY, "", packageName, "", false, commands);
+        return new Result(Kind.DEPENDENCY, "", packageName, "", "",
+                Collections.emptyList(), false, commands);
     }
 
     private static DesktopEntry parse(File root, File file, List<String> commands)
@@ -116,11 +125,28 @@ final class ArchPackageClassifier {
         if (!validDisplayName(name) || executable.isEmpty() || !commands.contains(executable)) return null;
         String tryExec = execProgram(values.getOrDefault("TryExec", ""));
         if (!tryExec.isEmpty() && !commands.contains(tryExec)) return null;
+        String icon = values.getOrDefault("Icon", "").trim();
+        if (!icon.matches("[a-zA-Z0-9@._+-]{1,128}")) icon = "";
+        List<String> mimeTypes = mimeTypes(values.get("MimeType"));
         return new DesktopEntry(executable, name,
                 root.toPath().relativize(canonical.toPath()).toString().replace('\\', '/'),
-                booleanValue(values.get("Terminal")),
+                icon, mimeTypes, booleanValue(values.get("Terminal")),
                 booleanValue(values.get("Hidden")),
                 booleanValue(values.get("NoDisplay")));
+    }
+
+    private static List<String> mimeTypes(String value) {
+        ArrayList<String> result = new ArrayList<>();
+        if (value == null) return result;
+        for (String candidate : value.split(";")) {
+            String mime = candidate.trim().toLowerCase(Locale.ROOT);
+            if (mime.matches("[a-z0-9!#$&^_.+-]{1,64}/[a-z0-9!#$&^_.+*-]{1,64}")
+                    && !result.contains(mime)) {
+                result.add(mime);
+                if (result.size() >= 32) break;
+            }
+        }
+        return result;
     }
 
     private static boolean validDisplayName(String value) {
@@ -220,7 +246,7 @@ final class ArchPackageClassifier {
         write(new File(bin, "dependency-helper"), "#!/bin/sh\n");
         java.util.Set<String> sourceCommands = Collections.singleton("editor");
         write(new File(apps, "editor.desktop"), "[Desktop Entry]\nType=Application\n"
-                + "Name=Editor\nExec=editor %F\nTerminal=false\n");
+                + "Name=Editor\nExec=editor %F\nIcon=editor-icon\nMimeType=text/plain;application/json;invalid\nTerminal=false\n");
         Result desktop = classify(root, "editor", "editor", sourceCommands);
         write(new File(apps, "editor.desktop"), "[Desktop Entry]\nType=Application\n"
                 + "Name=Editor\nExec=editor\nNoDisplay=true\n");
@@ -229,6 +255,9 @@ final class ArchPackageClassifier {
         delete(root);
         if (desktop.kind != Kind.DESKTOP || !"Editor".equals(desktop.displayName)
                 || !"editor".equals(desktop.executable)
+                || !"editor-icon".equals(desktop.iconName) || desktop.mimeTypes.size() != 2
+                || !desktop.mimeTypes.contains("text/plain")
+                || !desktop.mimeTypes.contains("application/json")
                 || desktop.commands.size() != 1 || !desktop.commands.contains("editor")
                 || terminal.kind != Kind.TERMINAL || dependency.kind != Kind.DEPENDENCY
                 || !"quoted".equals(execProgram("\"/usr/bin/quoted\" %F"))) {
@@ -253,15 +282,19 @@ final class ArchPackageClassifier {
         final String executable;
         final String name;
         final String relativePath;
+        final String iconName;
+        final List<String> mimeTypes;
         final boolean terminal;
         final boolean hidden;
         final boolean noDisplay;
 
-        DesktopEntry(String executable, String name, String relativePath, boolean terminal,
-                boolean hidden, boolean noDisplay) {
+        DesktopEntry(String executable, String name, String relativePath, String iconName,
+                List<String> mimeTypes, boolean terminal, boolean hidden, boolean noDisplay) {
             this.executable = executable;
             this.name = name;
             this.relativePath = relativePath;
+            this.iconName = iconName;
+            this.mimeTypes = mimeTypes;
             this.terminal = terminal;
             this.hidden = hidden;
             this.noDisplay = noDisplay;

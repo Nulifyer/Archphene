@@ -8,7 +8,8 @@ This is the prioritized completion queue for the Archphene Android application. 
 
 - [ ] Complete general on-device package transactions.
   - [x] Flow the selected desktop-entry display name/executable and detected runtime toolkit through generic wrapper assembly.
-  - [ ] Complete selected icon, MIME/document, ABI, and required bridge-capability metadata.
+  - [x] Preserve the selected desktop-entry icon through generic wrapper assembly.
+  - [ ] Complete MIME/document, ABI, and required bridge-capability metadata.
   - [ ] Generate package-specific Android metadata and resources.
   - [x] Persist and display bounded structured phase diagnostics, including legacy-job migration.
   - [ ] Prove with real packages that one failed transaction does not block unrelated jobs.
