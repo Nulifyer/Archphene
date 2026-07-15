@@ -212,6 +212,15 @@ public final class ApkUpdateInstaller {
                 || "objects.githubusercontent.com".equals(host));
         if (!githubRelease) throw new SecurityException("Untrusted APK download redirect");
     }
+    static String installedSignerSha256(Context context, String packageName) throws Exception {
+        PackageInfo installed = context.getPackageManager().getPackageInfo(packageName,
+                PackageManager.GET_SIGNING_CERTIFICATES);
+        byte[][] digests = certificateDigests(installed);
+        if (digests.length != 1) {
+            throw new SecurityException("Installed APK has an unsupported signer set");
+        }
+        return hex(digests[0]);
+    }
     private static void verifyIdentity(Context context, File apk, String expectedPackage,
             String expectedSignerSha256) throws Exception {
         PackageManager packages = context.getPackageManager();

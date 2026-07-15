@@ -135,19 +135,26 @@ public final class MainActivity extends Activity {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode != REQUEST_UNINSTALL_LINUX_APP) return;
         String uninstalledPackage = ManagerStateStore.takePendingUninstallPackage(this);
+        ArchPackageRepository.PackageResult reinstall =
+                ManagerStateStore.takePendingReinstall(this);
         loadCatalog();
-        if (resultCode == RESULT_OK) {
-            showBanner("App uninstalled", false);
-            if (!uninstalledPackage.isEmpty()) {
-                new Thread(() -> {
-                    try {
-                        RuntimePackStore.removeBinding(this, uninstalledPackage);
-                    } catch (Exception error) {
-                        android.util.Log.e("ArchpheneRuntime",
-                                "Could not release uninstalled app runtime", error);
-                    }
-                }, "archphene-uninstall-runtime-release").start();
-            }
+        if (resultCode != RESULT_OK) {
+            if (reinstall != null) showBanner("Wrapper migration cancelled", false);
+            return;
+        }
+        showBanner(reinstall == null ? "App uninstalled" : "Preparing replacement app", false);
+        if (!uninstalledPackage.isEmpty()) {
+            new Thread(() -> {
+                try {
+                    RuntimePackStore.removeBinding(this, uninstalledPackage);
+                } catch (Exception error) {
+                    android.util.Log.e("ArchpheneRuntime",
+                            "Could not release uninstalled app runtime", error);
+                }
+            }, "archphene-uninstall-runtime-release").start();
+        }
+        if (reinstall != null) {
+            content.postDelayed(() -> startOnDevicePackageInstall(reinstall), 300);
         }
     }
     private void applySystemPalette() {
@@ -828,6 +835,25 @@ public final class MainActivity extends Activity {
                 });
         renderAppList();
     }
+    private void requestWrapperSignerMigration(ArchPackageRepository.PackageResult source,
+            String packageName) {
+        new AlertDialog.Builder(this)
+                .setTitle("Replace older wrapper?")
+                .setMessage("Android cannot update this app because it was signed by an older "
+                        + "Archphene prototype. Replacing it removes app-private settings and "
+                        + "cache. Files saved through Android documents remain available.")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Replace", (dialog, which) -> {
+                    ManagerStateStore.setPendingUninstallPackage(this, packageName);
+                    ManagerStateStore.setPendingReinstall(this, source);
+                    Intent request = new Intent(Intent.ACTION_UNINSTALL_PACKAGE,
+                            Uri.parse("package:" + packageName));
+                    request.putExtra(Intent.EXTRA_RETURN_RESULT, true);
+                    showAppsPage();
+                    startActivityForResult(request, REQUEST_UNINSTALL_LINUX_APP);
+                })
+                .show();
+    }
     private void startOnDevicePackageInstall(ArchPackageRepository.PackageResult source) {
         try {
             InstalledLinuxAppCatalog.Entry installed = InstalledLinuxAppCatalog.findBySource(this,
@@ -837,6 +863,11 @@ public final class MainActivity extends Activity {
             if (installed != null && !generatedPackage.equals(installed.packageName)) {
                 showBanner(source.name + " is already installed as " + installed.packageName
                         + ". Uninstall that legacy wrapper before installing it again.", true);
+                return;
+            }
+            if (installed != null && !ArchWrapperSigner.signerSha256().equalsIgnoreCase(
+                    ApkUpdateInstaller.installedSignerSha256(this, installed.packageName))) {
+                requestWrapperSignerMigration(source, installed.packageName);
                 return;
             }
         } catch (Exception error) {
@@ -1801,6 +1832,7 @@ public final class MainActivity extends Activity {
                     InstalledLinuxAppCatalog.verifyPacmanMetadataForTest();
                     verifyVersionButtonPolicyForTest();
                     ArchPackageClassifier.verifyForTest(this);
+                    ManagerStateStore.verifyPendingReinstallForTest(this);
                     runOnUiThread(() -> showBanner(
                             "Package job persistence and scheduler passed", false));
                     return;

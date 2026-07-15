@@ -236,6 +236,69 @@ public final class ManagerStateStore {
         }
         preferences(context).edit().putInt("linux-font-percent", value).apply();
     }
+    static void verifyPendingReinstallForTest(Context context) {
+        SharedPreferences state = preferences(context);
+        String previous = state.getString("pending-reinstall", null);
+        try {
+            ArchPackageRepository.PackageResult source =
+                    new ArchPackageRepository.PackageResult("test-cli", "extra", "x86_64",
+                            "1.2.3-1", "test", false, "usr/bin/test-command",
+                            "test-command");
+            setPendingReinstall(context, source);
+            ArchPackageRepository.PackageResult restored = takePendingReinstall(context);
+            if (restored == null || !source.name.equals(restored.name)
+                    || !source.repository.equals(restored.repository)
+                    || !source.architecture.equals(restored.architecture)
+                    || !source.version.equals(restored.version)
+                    || !source.executable.equals(restored.executable)
+                    || takePendingReinstall(context) != null) {
+                throw new IllegalStateException("Pending wrapper migration did not round-trip");
+            }
+        } finally {
+            SharedPreferences.Editor editor = state.edit();
+            if (previous == null) editor.remove("pending-reinstall");
+            else editor.putString("pending-reinstall", previous);
+            editor.commit();
+        }
+    }
+    public static void setPendingReinstall(Context context,
+            ArchPackageRepository.PackageResult source) {
+        if (source == null) {
+            preferences(context).edit().remove("pending-reinstall").commit();
+            return;
+        }
+        try {
+            JSONObject value = new JSONObject();
+            value.put("name", source.name);
+            value.put("repository", source.repository);
+            value.put("architecture", source.architecture);
+            value.put("version", source.version);
+            value.put("description", source.description);
+            value.put("flaggedOutOfDate", source.flaggedOutOfDate);
+            value.put("matchedFile", source.matchedFile);
+            value.put("executable", source.executable);
+            preferences(context).edit().putString("pending-reinstall", value.toString()).commit();
+        } catch (Exception error) {
+            throw new IllegalStateException("Could not persist pending wrapper migration", error);
+        }
+    }
+
+    public static ArchPackageRepository.PackageResult takePendingReinstall(Context context) {
+        SharedPreferences state = preferences(context);
+        String raw = state.getString("pending-reinstall", "");
+        state.edit().remove("pending-reinstall").commit();
+        if (raw == null || raw.isEmpty()) return null;
+        try {
+            JSONObject value = new JSONObject(raw);
+            return new ArchPackageRepository.PackageResult(value.getString("name"),
+                    value.getString("repository"), value.getString("architecture"),
+                    value.getString("version"), value.optString("description", ""),
+                    value.optBoolean("flaggedOutOfDate", false),
+                    value.optString("matchedFile", ""), value.getString("executable"));
+        } catch (Exception error) {
+            throw new IllegalStateException("Pending wrapper migration is invalid", error);
+        }
+    }
     public static void setPendingUninstallPackage(Context context, String packageName) {
         String value = packageName != null
                 && packageName.matches("[a-zA-Z0-9._]{3,255}") ? packageName : "";
