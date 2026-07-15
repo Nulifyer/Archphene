@@ -65,6 +65,11 @@ final class PackageInstallCoordinator {
                             PackageInstallJobStore.RUNNING,
                             ApkUpdateInstaller.Phase.DOWNLOAD, percent, status, "", false));
             checkInterrupted();
+            if (staged.classification.kind != ArchPackageClassifier.Kind.DESKTOP) {
+                ArchPackageRuntime.releaseStaging(activity, staged);
+                throw new UnsupportedOperationException(source.name
+                        + " is a terminal package. Install it into the Archphene Terminal environment.");
+            }
 
             update(activity, listener, id, PackageInstallJobStore.RUNNING,
                     ApkUpdateInstaller.Phase.INSTALL, 5,
@@ -79,7 +84,7 @@ final class PackageInstallCoordinator {
                 String resolvedVersion = staged.sourceVersion();
                 result = ArchWrapperAssembler.assembleQtFromRuntimePack(
                         activity, source.repository, source.name, resolvedVersion,
-                        source.executable, staged.root);
+                        staged.classification.executable, staged.root);
             } finally {
                 WRAPPER_MUTATION.release();
             }

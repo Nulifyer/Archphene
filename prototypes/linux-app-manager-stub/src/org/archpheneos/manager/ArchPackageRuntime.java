@@ -88,13 +88,15 @@ public final class ArchPackageRuntime {
         public final List<ResolvedPackage> packages;
         public final File root;
         public final String runtimePackId;
+        public final ArchPackageClassifier.Result classification;
 
         StagedTransaction(String sourcePackage, List<ResolvedPackage> packages, File root,
-                String runtimePackId) {
+                String runtimePackId, ArchPackageClassifier.Result classification) {
             this.sourcePackage = sourcePackage;
             this.packages = Collections.unmodifiableList(new ArrayList<>(packages));
             this.root = root;
             this.runtimePackId = runtimePackId;
+            this.classification = classification;
         }
 
         String sourceVersion() {
@@ -312,6 +314,7 @@ public final class ArchPackageRuntime {
         File root = new File(staging, "root");
         if (!root.mkdirs()) throw new IllegalStateException("Could not create transaction root");
         File downloads = directory(state(context), "downloads");
+        LinkedHashSet<String> sourceCommands = new LinkedHashSet<>();
         for (int index = 0; index < packages.size(); index++) {
             if (Thread.currentThread().isInterrupted()) throw new InterruptedException();
             ResolvedPackage value = packages.get(index);
@@ -323,10 +326,22 @@ public final class ArchPackageRuntime {
             downloadAndVerify(context, value);
             progress.onProgress(Math.min(59, base + 1), "Staging verified " + value.name);
             File archive = new File(downloads, value.filename.replace(':', '_'));
-            stageVerifiedArchive(context, archive, root, executableName);
+            stageVerifiedArchive(context, archive, root,
+                    value.name.equals(packageName), sourceCommands);
         }
         progress.onProgress(60, "Preparing shared toolkit data");
         prepareSharedData(context, root);
+        ArchPackageClassifier.Result classification = ArchPackageClassifier.classify(
+                root, packageName, executableName, sourceCommands);
+        android.util.Log.i("ArchphenePackages", "classified " + packageName + " as "
+                + classification.kind + " executable=" + classification.executable
+                + " commands=" + classification.commands.size());
+        if (classification.kind == ArchPackageClassifier.Kind.DEPENDENCY) {
+            deleteRecursively(staging);
+            throw new IllegalArgumentException(packageName
+                    + " does not provide a desktop entry or terminal command");
+        }
+        executableName = classification.executable;
         File executable = new File(root, "usr/bin/" + executableName).getCanonicalFile();
         if (!executable.isFile() || !executable.getPath().startsWith(root.getCanonicalPath()
                 + File.separator)) {
@@ -337,23 +352,27 @@ public final class ArchPackageRuntime {
         RuntimePackStore.Pack pack = RuntimePackStore.build(
                 context, packageName, executableName, packages, root);
         progress.onProgress(65, "Runtime pack ready");
-        return new StagedTransaction(packageName, packages, root, pack.id);
+        return new StagedTransaction(packageName, packages, root, pack.id, classification);
     }
 
     private static void stageVerifiedArchive(Context context, File archive, File root,
-            String executableName) throws Exception {
+            boolean sourceArchive, Set<String> sourceCommands)
+            throws Exception {
         Result namesResult = runTool(context, "libarchphene_bsdtar.so",
                 Arrays.asList("-tf", archive.getPath()));
         if (namesResult.exitCode != 0) {
             throw new SecurityException("Could not inspect verified Arch package archive");
         }
         String[] names = namesResult.output.split("\\r?\\n");
-        boolean containsExecutable = false;
+        boolean hasSourceCommand = false;
         for (String entry : names) {
             validateArchivePath(entry);
-            if (entry.equals("usr/bin/" + executableName)) containsExecutable = true;
+            if (sourceArchive && isDirectUsrBinEntry(entry)) {
+                sourceCommands.add(entry.substring("usr/bin/".length()));
+                hasSourceCommand = true;
+            }
         }
-        boolean hasSelectedEntry = containsExecutable;
+        boolean hasSelectedEntry = hasSourceCommand;
         if (!hasSelectedEntry) {
             for (String entry : names) {
                 if (isRuntimeLibraryEntry(entry) || isRuntimeToolEntry(entry)
@@ -379,8 +398,8 @@ public final class ArchPackageRuntime {
             validateArchivePath(entry);
             boolean selected = isRuntimeLibraryEntry(entry)
                     || isRuntimeToolEntry(entry)
-                    || entry.equals("usr/bin/" + executableName)
-                    || containsExecutable && isSourceRuntimeDataEntry(entry)
+                    || sourceArchive && isDirectUsrBinEntry(entry)
+                    || sourceArchive && hasSourceCommand && isSourceRuntimeDataEntry(entry)
                     || isSharedRuntimeDataEntry(entry);
             if (!selected) continue;
             char type = verbose[index].isEmpty() ? '?' : verbose[index].charAt(0);
@@ -416,6 +435,11 @@ public final class ArchPackageRuntime {
         }
     }
 
+    private static boolean isDirectUsrBinEntry(String entry) {
+        if (!entry.startsWith("usr/bin/")) return false;
+        String name = entry.substring("usr/bin/".length());
+        return name.matches("[a-zA-Z0-9@._+:-]{1,128}");
+    }
     private static boolean isRuntimeLibraryEntry(String entry) {
         if (!entry.startsWith("usr/lib/") || entry.startsWith("usr/lib/getconf/")
                 || entry.startsWith("usr/lib/gconv/") || entry.startsWith("usr/lib/audit/")) {

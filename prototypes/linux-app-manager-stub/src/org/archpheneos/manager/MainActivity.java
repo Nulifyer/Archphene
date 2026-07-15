@@ -1800,6 +1800,7 @@ public final class MainActivity extends Activity {
                     PackageInstallCoordinator.verifySchedulingForTest();
                     InstalledLinuxAppCatalog.verifyPacmanMetadataForTest();
                     verifyVersionButtonPolicyForTest();
+                    ArchPackageClassifier.verifyForTest(this);
                     runOnUiThread(() -> showBanner(
                             "Package job persistence and scheduler passed", false));
                     return;
