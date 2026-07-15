@@ -26,6 +26,8 @@ This page separates validated behavior from planned platform work. Package searc
    - retain structured per-phase diagnostics beyond the current bounded user-facing error;
    - validate failure isolation with multiple real simultaneous package transactions.
 
+The debug manager and Terminal APKs are multi-ABI and run as arm64-v8a on the Samsung test device. This validates the Android control plane and PTY only; release assets must remain x86_64 until the Arch Linux ARM runtime, repositories, and trust roots are integrated.
+
 2. **Architecture support**
    - publish x86_64 and arm64-v8a manager/runtime artifacts;
    - use official Arch Linux packages only for x86_64 and Arch Linux ARM packages/trust roots for AArch64;

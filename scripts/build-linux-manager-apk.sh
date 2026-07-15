@@ -85,10 +85,13 @@ build_qt_template
 build_terminal_app() {
   local app="$root/prototypes/archphene-terminal-app"
   local out="$app/out-linux"
-  local native="$root/native/archphene-terminal/out/x86_64/libtermux.so"
-  [[ -f "$native" ]] || { echo "terminal PTY library is missing" >&2; exit 1; }
+  local native_x86="$root/native/archphene-terminal/out/x86_64/libtermux.so"
+  local native_arm64="$root/native/archphene-terminal/out/aarch64/libtermux.so"
+  [[ -f "$native_x86" && -f "$native_arm64" ]] || {
+    echo "x86_64 and aarch64 terminal PTY libraries are required" >&2; exit 1;
+  }
   rm -rf "$out"
-  mkdir -p "$out"/{compiled,gen,classes,dex,stage/lib/x86_64}
+  mkdir -p "$out"/{compiled,gen,classes,dex,stage/lib/x86_64,stage/lib/arm64-v8a}
 
   sed \
     -e "s/android:versionCode=\"[^\"]*\"/android:versionCode=\"$version_code\"/" \
@@ -108,7 +111,8 @@ build_terminal_app() {
   mapfile -d '' class_files < <(find "$out/classes" -type f -name '*.class' -print0)
   "$bt/d8" --lib "$platform" --min-api 23 --output "$out/dex" "${class_files[@]}"
   cp "$out/dex/classes.dex" "$out/stage/classes.dex"
-  cp "$native" "$out/stage/lib/x86_64/libtermux.so"
+  cp "$native_x86" "$out/stage/lib/x86_64/libtermux.so"
+  cp "$native_arm64" "$out/stage/lib/arm64-v8a/libtermux.so"
   (
     cd "$out/stage"
     mapfile -d '' entries < <(find . -type f -print0)
@@ -126,7 +130,7 @@ build_terminal_app
 app="$root/prototypes/linux-app-manager-stub"
 out="$app/out-linux"
 rm -rf "$out"
-mkdir -p "$out"/{compiled,gen,classes,dex,package-runtime/lib/x86_64,package-runtime/assets/package-runtime}
+mkdir -p "$out"/{compiled,gen,classes,dex,package-runtime/lib/x86_64,package-runtime/lib/arm64-v8a,package-runtime/assets/package-runtime}
 
 sed \
   -e "s/android:versionCode=\"[^\"]*\"/android:versionCode=\"$version_code\"/" \
@@ -157,6 +161,10 @@ done
 
 package_assets="$out/package-runtime/assets/package-runtime"
 package_libs="$out/package-runtime/lib/x86_64"
+arm64_manager_libs="$out/package-runtime/lib/arm64-v8a"
+arm64_compositor="$root/native/archphene-compositor/target/aarch64-linux-android/release/libarchphene_compositor.so"
+[[ -f "$arm64_compositor" ]] || { echo "missing aarch64 compositor: $arm64_compositor" >&2; exit 1; }
+cp "$arm64_compositor" "$arm64_manager_libs/libarchphene_compositor.so"
 cp "$root/prototypes/archphene-terminal-app/out-linux/archphene-terminal.apk" "$package_assets/archphene-terminal.apk"
 gcc -shared -fPIC -O2 -Wall -Wextra -Werror \
   -o "$package_libs/libarchphene_path_bridge.so" \

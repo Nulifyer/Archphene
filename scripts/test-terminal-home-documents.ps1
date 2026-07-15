@@ -35,7 +35,37 @@ Invoke-Adb shell "run-as $Package sh -c 'mkdir -p files/terminal/home/Documents'
 Invoke-Adb shell "run-as $Package sh -c 'printf archphene-terminal-home > files/terminal/home/Documents/provider-test.txt'" | Out-Null
 Invoke-Adb shell "run-as $Package sh -c 'printf private > files/terminal/home/.private-test'" | Out-Null
 
-$roots = (Invoke-Adb shell content query --uri "content://$Authority/root") -join [Environment]::NewLine
+$rootsOutput = & adb -s $Serial shell content query --uri "content://$Authority/root" 2>&1
+$roots = $rootsOutput -join [Environment]::NewLine
+if ($roots -match "SecurityException|Permission Denial") {
+    Invoke-Adb shell am force-stop com.google.android.documentsui | Out-Null
+    Invoke-Adb shell am start -W -a android.intent.action.OPEN_DOCUMENT -c android.intent.category.OPENABLE -t "text/plain" --eu android.provider.extra.INITIAL_URI "content://$Authority/root/archphene-terminal-home" | Out-Null
+    Start-Sleep -Seconds 2
+    Invoke-Adb shell uiautomator dump /sdcard/archphene-terminal-home-ui.xml | Out-Null
+    $homeUi = (Invoke-Adb shell cat /sdcard/archphene-terminal-home-ui.xml) -join ""
+    if ($homeUi -notmatch "Archphene Home" -or $homeUi -notmatch "Documents" -or
+            $homeUi -match "private-test") {
+        throw "SAF-only Terminal home root is incorrect"
+    }
+
+    $documentsNode = [regex]::Match($homeUi,
+        'text="Documents"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"')
+    if (-not $documentsNode.Success) {
+        throw "Could not locate the Terminal Documents directory"
+    }
+    $x = ([int]$documentsNode.Groups[1].Value + [int]$documentsNode.Groups[3].Value) / 2
+    $y = ([int]$documentsNode.Groups[2].Value + [int]$documentsNode.Groups[4].Value) / 2
+    Invoke-Adb shell input tap ([int]$x) ([int]$y) | Out-Null
+    Start-Sleep -Seconds 2
+    Invoke-Adb shell uiautomator dump /sdcard/archphene-terminal-documents-ui.xml | Out-Null
+    $documentsUi = (Invoke-Adb shell cat /sdcard/archphene-terminal-documents-ui.xml) -join ""
+    if ($documentsUi -notmatch "provider-test.txt") {
+        throw "SAF-only Terminal document is not visible in DocumentsUI"
+    }
+    Invoke-Adb shell input keyevent 4 | Out-Null
+    Write-Host "Terminal Storage Access Framework home passed on $Serial through DocumentsUI."
+    return
+}
 if ($roots -notmatch "archphene-terminal-home" -or $roots -notmatch "Archphene Home") {
     throw "Terminal document root is unavailable"
 }
@@ -59,5 +89,4 @@ $privateQuery = & adb -s $Serial shell content query --uri "content://$Authority
 if (($privateQuery -join [Environment]::NewLine) -notmatch "No result found|FileNotFoundException|Private document") {
     throw "Hidden Terminal state was unexpectedly exposed"
 }
-
 Write-Host "Terminal Storage Access Framework home passed on $Serial."

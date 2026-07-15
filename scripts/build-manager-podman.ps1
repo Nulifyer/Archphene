@@ -23,6 +23,10 @@ Invoke-Native "Podman availability check" { podman info --format "{{.Host.OS}}/{
 if ($LASTEXITCODE -ne 0) { throw "Shared native compositor build failed" }
 & (Join-Path $PSScriptRoot "build-terminal-pty-podman.ps1") -Architecture x86_64
 if ($LASTEXITCODE -ne 0) { throw "Terminal PTY build failed" }
+& (Join-Path $PSScriptRoot "build-native-compositor-podman.ps1") -Architecture aarch64 -Release
+if ($LASTEXITCODE -ne 0) { throw "AArch64 shared native compositor build failed" }
+& (Join-Path $PSScriptRoot "build-terminal-pty-podman.ps1") -Architecture aarch64
+if ($LASTEXITCODE -ne 0) { throw "AArch64 Terminal PTY build failed" }
 if (-not $SkipGpuHelperBuild) {
     & (Join-Path $PSScriptRoot "build-android-gpu-helper-podman.ps1") -Architecture x86_64
     if ($LASTEXITCODE -ne 0) { throw "Android GPU helper build failed" }
