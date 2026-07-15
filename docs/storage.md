@@ -51,6 +51,7 @@ If the Linux app wants to open a user document, save a user document, work insid
 - bridge-managed grant records
 
 After the user grants a project folder, background reads/writes inside that granted folder can proceed without prompting again until the grant is revoked.
+The Terminal companion now provides the first concrete Android-facing side of this split. Its visible home entries are available as **Archphene Home** through a terminal-owned `DocumentsProvider`; dotfiles and runtime state are excluded. This permits Android Files and share/document flows to use scoped content-URI grants while commands continue to use ordinary paths inside the terminal sandbox. Direct external Downloads/project access and persisted tree-to-path translation remain path-broker work.
 
 ## Virtual Linux Layout
 
