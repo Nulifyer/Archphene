@@ -20,4 +20,10 @@ int archphene_android_capture_camera_jpeg(
         int output_fd, int width, int height, int front_facing,
         char *response, size_t response_size);
 
+int archphene_android_publish_accessibility_tree(
+        int tree_fd, char *response, size_t response_size);
+int archphene_android_accessibility_event(
+        int node_id, const char *type, char *response, size_t response_size);
+int archphene_android_take_accessibility_action(
+        int timeout_millis, char *response, size_t response_size);
 #endif

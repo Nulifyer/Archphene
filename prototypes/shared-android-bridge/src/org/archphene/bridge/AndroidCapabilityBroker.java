@@ -61,6 +61,7 @@ final class AndroidCapabilityBroker implements Closeable {
 
     private final Activity activity;
     private final AndroidCameraIntegration cameraIntegration;
+    private final ArchpheneAccessibilityBridge accessibilityBridge;
     private final Set<String> capabilities;
     private final AtomicBoolean running = new AtomicBoolean();
     private LocalServerSocket server;
@@ -86,8 +87,14 @@ final class AndroidCapabilityBroker implements Closeable {
     }
 
     AndroidCapabilityBroker(Activity activity, Set<String> capabilities) {
+        this(activity, capabilities, null);
+    }
+
+    AndroidCapabilityBroker(Activity activity, Set<String> capabilities,
+            ArchpheneAccessibilityBridge accessibilityBridge) {
         this.activity = activity;
         this.capabilities = capabilities;
+        this.accessibilityBridge = accessibilityBridge;
         cameraIntegration = new AndroidCameraIntegration(activity);
     }
 
@@ -156,6 +163,7 @@ final class AndroidCapabilityBroker implements Closeable {
             throw new IllegalArgumentException("Unsupported capability protocol");
         }
         if (!"PRINT_PDF".equals(fields[1]) && !"CAPTURE_CAMERA_JPEG".equals(fields[1])
+                && !"PUBLISH_ACCESSIBILITY_TREE".equals(fields[1])
                 && descriptors != null && descriptors.length != 0) {
             throw new IllegalArgumentException("Unexpected capability descriptors");
         }
@@ -202,9 +210,59 @@ final class AndroidCapabilityBroker implements Closeable {
                 requireFields(fields, 5);
                 requireCapability(BridgeCapabilities.CAMERA);
                 return captureCameraJpeg(fields[2], fields[3], fields[4], descriptors);
+            case "PUBLISH_ACCESSIBILITY_TREE":
+                requireFields(fields, 2);
+                requireCapability(BridgeCapabilities.ACCESSIBILITY);
+                requireAccessibilityBridge().publish(requireRegularDescriptor(
+                        descriptors, "Accessibility tree"));
+                return "OK";
+            case "ACCESSIBILITY_EVENT":
+                requireFields(fields, 4);
+                requireCapability(BridgeCapabilities.ACCESSIBILITY);
+                requireAccessibilityBridge().sendNamedEvent(
+                        parseBoundedInt(fields[2], 0, 1_000_000, "accessibility node"),
+                        fields[3]);
+                return "OK";
+            case "TAKE_ACCESSIBILITY_ACTION":
+                requireFields(fields, 3);
+                requireCapability(BridgeCapabilities.ACCESSIBILITY);
+                return requireAccessibilityBridge().takeAction(
+                        parseBoundedInt(fields[2], 0, 250, "accessibility timeout"));
             default:
                 throw new IllegalArgumentException("Unknown capability request");
         }
+    }
+
+    private ArchpheneAccessibilityBridge requireAccessibilityBridge() {
+        if (accessibilityBridge == null) {
+            throw new IllegalStateException("Android accessibility bridge is unavailable");
+        }
+        return accessibilityBridge;
+    }
+
+    private static FileDescriptor requireRegularDescriptor(
+            FileDescriptor[] descriptors, String label) throws Exception {
+        if (descriptors == null || descriptors.length != 1 || !descriptors[0].valid()) {
+            throw new IllegalArgumentException(label + " requires one descriptor");
+        }
+        android.system.StructStat stat = Os.fstat(descriptors[0]);
+        if ((stat.st_mode & OsConstants.S_IFMT) != OsConstants.S_IFREG) {
+            throw new IllegalArgumentException(label + " requires a regular file");
+        }
+        return descriptors[0];
+    }
+
+    private static int parseBoundedInt(String value, int minimum, int maximum, String label) {
+        int parsed;
+        try {
+            parsed = Integer.parseInt(value);
+        } catch (NumberFormatException error) {
+            throw new IllegalArgumentException(label + " is invalid", error);
+        }
+        if (parsed < minimum || parsed > maximum) {
+            throw new IllegalArgumentException(label + " is out of range");
+        }
+        return parsed;
     }
 
     private void printPdf(String title, FileDescriptor[] descriptors) throws Exception {

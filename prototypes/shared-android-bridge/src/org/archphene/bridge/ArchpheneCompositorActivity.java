@@ -73,6 +73,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     private ArchpheneCompositorSession session;
     private AndroidDocumentSession documentSession;
     private AndroidCapabilityBroker capabilityBroker;
+    private ArchpheneAccessibilityBridge accessibilityBridge;
     private Dialog documentRestartDialog;
     private Set<String> capabilities;
     private final AndroidGpuBridge gpuBridge = new AndroidGpuBridge();
@@ -137,7 +138,10 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         independentWindows = shouldUseIndependentWindows();
         documentSession = capabilities.contains(BridgeCapabilities.DOCUMENTS)
                 ? new AndroidDocumentSession(this, logTag) : null;
-        capabilityBroker = new AndroidCapabilityBroker(this, capabilities);
+        accessibilityBridge = capabilities.contains(BridgeCapabilities.ACCESSIBILITY)
+                ? new ArchpheneAccessibilityBridge() : null;
+        capabilityBroker = new AndroidCapabilityBroker(
+                this, capabilities, accessibilityBridge);
         try {
             capabilityBroker.start();
         } catch (IOException error) {
@@ -182,6 +186,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         compositorView.setBackgroundColor(systemChrome);
         compositorView.setScaleType(ImageView.ScaleType.FIT_XY);
         compositorView.setClickable(true);
+        compositorView.setAccessibilityBridge(accessibilityBridge);
 
         session = new ArchpheneCompositorSession(
                 this,
@@ -1708,6 +1713,9 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         audioIntegration.stop();
         desktopIntegration.stop();
         if (capabilityBroker != null) capabilityBroker.close();
+        if (accessibilityBridge != null && compositorView != null) {
+            accessibilityBridge.detach(compositorView);
+        }
         cancelManagedRuntimeExecution();
         if (linuxProcess != null) linuxProcess.destroy();
         RuntimeFdLauncher.terminateUidProcesses();

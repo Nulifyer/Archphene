@@ -9,6 +9,7 @@ import android.view.KeyEvent;
 import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
+import android.view.accessibility.AccessibilityNodeProvider;
 import android.widget.ImageView;
 import java.nio.charset.StandardCharsets;
 
@@ -44,6 +45,7 @@ public final class ArchpheneInputView extends ImageView {
     }
 
     private final InputSink sink;
+    private ArchpheneAccessibilityBridge accessibilityBridge;
     private EditorState editorState = new EditorState("", 0, 0, 0, 0);
 
     public ArchpheneInputView(Context context, InputSink sink) {
@@ -55,6 +57,17 @@ public final class ArchpheneInputView extends ImageView {
 
     public void setEditorState(EditorState state) {
         editorState = state;
+    }
+
+    void setAccessibilityBridge(ArchpheneAccessibilityBridge bridge) {
+        accessibilityBridge = bridge;
+        if (bridge != null) bridge.attach(this);
+    }
+
+    @Override
+    public AccessibilityNodeProvider getAccessibilityNodeProvider() {
+        return accessibilityBridge == null
+                ? super.getAccessibilityNodeProvider() : accessibilityBridge;
     }
 
     @Override

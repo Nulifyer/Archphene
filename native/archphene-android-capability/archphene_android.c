@@ -236,6 +236,50 @@ int archphene_android_capture_camera_jpeg(
     }
     return broker_request_with_fd(request, output_fd, response, response_size);
 }
+int archphene_android_publish_accessibility_tree(
+        int tree_fd, char *response, size_t response_size) {
+    if (tree_fd < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    return broker_request_with_fd(
+            "ARCHPHENE/1\tPUBLISH_ACCESSIBILITY_TREE",
+            tree_fd, response, response_size);
+}
+
+int archphene_android_accessibility_event(
+        int node_id, const char *type, char *response, size_t response_size) {
+    if (node_id < 0 || node_id > 1000000 || type == NULL
+            || strlen(type) < 1 || strlen(type) > 32) {
+        errno = EINVAL;
+        return -1;
+    }
+    char request[MAX_REQUEST];
+    int length = snprintf(request, sizeof(request),
+            "ARCHPHENE/1\tACCESSIBILITY_EVENT\t%d\t%s", node_id, type);
+    if (length <= 0 || (size_t)length >= sizeof(request)) {
+        errno = ENOSPC;
+        return -1;
+    }
+    return broker_request(request, response, response_size);
+}
+
+int archphene_android_take_accessibility_action(
+        int timeout_millis, char *response, size_t response_size) {
+    if (timeout_millis < 0 || timeout_millis > 250) {
+        errno = EINVAL;
+        return -1;
+    }
+    char request[MAX_REQUEST];
+    int length = snprintf(request, sizeof(request),
+            "ARCHPHENE/1\tTAKE_ACCESSIBILITY_ACTION\t%d", timeout_millis);
+    if (length <= 0 || (size_t)length >= sizeof(request)) {
+        errno = ENOSPC;
+        return -1;
+    }
+    return broker_request(request, response, response_size);
+}
+
 #ifdef ARCHPHENE_CAPABILITY_PROBE_MAIN
 int main(int argc, char **argv) {
     char response[256];
@@ -305,11 +349,43 @@ int main(int argc, char **argv) {
                 strcmp(argv[argument + 4], "front") == 0,
                 response, sizeof(response));
         close(output_fd);
+    } else if (remaining == 2
+            && strcmp(argv[argument], "publish-accessibility-tree") == 0) {
+        int tree_fd = open(argv[argument + 1], O_RDONLY | O_CLOEXEC);
+        if (tree_fd < 0) {
+            perror("open accessibility tree");
+            return 66;
+        }
+        result = archphene_android_publish_accessibility_tree(
+                tree_fd, response, sizeof(response));
+        close(tree_fd);
+    } else if (remaining == 3
+            && strcmp(argv[argument], "accessibility-event") == 0) {
+        char *end = NULL;
+        long node_id = strtol(argv[argument + 1], &end, 10);
+        if (end == NULL || *end != '\0' || node_id < 0 || node_id > 1000000) {
+            fprintf(stderr, "invalid accessibility node\n");
+            return 64;
+        }
+        result = archphene_android_accessibility_event(
+                (int)node_id, argv[argument + 2], response, sizeof(response));
+    } else if (remaining == 2
+            && strcmp(argv[argument], "take-accessibility-action") == 0) {
+        char *end = NULL;
+        long timeout = strtol(argv[argument + 1], &end, 10);
+        if (end == NULL || *end != '\0' || timeout < 0 || timeout > 250) {
+            fprintf(stderr, "invalid accessibility timeout\n");
+            return 64;
+        }
+        result = archphene_android_take_accessibility_action(
+                (int)timeout, response, sizeof(response));
     } else {
         fprintf(stderr, "usage: %s [--socket @NAME] open-uri URI | "
                 "notify ID TITLE BODY | withdraw ID | print PDF TITLE | "
                 "request-audio-input | check-audio-input | request-camera | "
-                "check-camera | capture-camera-jpeg FILE WIDTH HEIGHT front|back\n", argv[0]);
+                "check-camera | capture-camera-jpeg FILE WIDTH HEIGHT front|back | "
+                "publish-accessibility-tree FILE | accessibility-event NODE TYPE | "
+                "take-accessibility-action TIMEOUT_MS\n", argv[0]);
         return 64;
     }
     if (result < 0) {

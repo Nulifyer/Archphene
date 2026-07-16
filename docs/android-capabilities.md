@@ -13,14 +13,15 @@ Protocol version 1 currently supports:
 - `archphene_android_withdraw_notification`: removes a notification created by that wrapper;
 - `archphene_android_print_pdf`: transfers one rendered PDF file descriptor to Android's system print UI;
 - `archphene_android_request_camera` and `archphene_android_check_camera`: request and report Android `CAMERA` permission without bypassing denial;
-- `archphene_android_capture_camera_jpeg`: captures one bounded Camera2 JPEG to a caller-supplied regular file descriptor after consent.
+- `archphene_android_capture_camera_jpeg`: captures one bounded Camera2 JPEG to a caller-supplied regular file descriptor after consent;
+- `archphene_android_publish_accessibility_tree`, `archphene_android_accessibility_event`, and `archphene_android_take_accessibility_action`: publish bounded app semantics and return Android click, focus, edit, and scroll actions to Linux.
 
 The Android intent behavior follows the platform's [common intent guidance](https://developer.android.com/guide/components/intents-common). Runtime notification permission follows the [Android notification permission model](https://developer.android.com/develop/ui/views/notifications/notification-permission).
 
 ## Security properties
 
 - Android peer credentials must report the wrapper's exact UID. Cross-UID callers are rejected before dispatch.
-- Wrapper metadata must declare `open-uri`, `notifications`, `printing`, `audio-input`, or `camera`; undeclared operations fail closed.
+- Wrapper metadata must declare `open-uri`, `notifications`, `printing`, `audio-input`, `camera`, or `accessibility`; undeclared operations fail closed.
 - Requests and every field have fixed size limits and strict UTF-8 validation.
 - URL opening rejects non-HTTP schemes, missing hosts, user information, and control characters.
 - Android remains the permission authority. The broker requests a permission in wrapper UI and reports requested or denied state to Linux; it does not bypass denial.
@@ -73,7 +74,15 @@ A wrapper declaring `camera` can request and inspect Android `CAMERA` permission
 
 The x86_64 emulator and physical AArch64 Samsung regressions validate the real permission dialog, capture before-consent rejection, 1280x720 JPEG capture and signature/byte checks, invalid-dimension rejection, denial, and no automatic reprompt. This explicit one-shot API does not yet make unmodified Linux camera applications work: the standard XDG Camera portal must return a PipeWire remote, so a private PipeWire producer backed by Camera2 remains required.
 
-Accessibility, secrets/keyrings, the streaming XDG Camera/PipeWire adapter, richer notification actions, non-HTTP URI policies, and other desktop portals remain unimplemented. Each must define an Android permission and lifecycle policy before receiving a broker command.
+## Accessibility
+
+A wrapper declaring `accessibility` can publish up to 1024 virtual nodes from a regular descriptor containing at most 1 MiB of validated JSON. The tree requires bounded IDs, acyclic parent links, a 16384-pixel maximum logical viewport, validated roles/text/states, and positive bounds. The compositor view exposes those nodes through `AccessibilityNodeProvider`, scales Linux logical bounds into the current Android viewport, preserves accessibility and input focus, and emits framework content, text, focus, selection, click, and window events.
+
+Android actions are returned to Linux through a bounded 64-entry queue. Click, focus, set-text, and forward/backward scroll are supported; set-text payloads are UTF-8 bounded to 1024 characters, and Linux polling is capped at 250 milliseconds so it cannot monopolize the shared capability dispatcher. Publishing an invalid tree leaves the last valid model intact. Accessibility does not require or justify Android's powerful accessibility-service permission: production wrappers expose only their own UI semantics. The independently built test fixture uses a test-only service solely to verify what Android receives.
+
+The x86_64 emulator and physical AArch64 Samsung regressions validate framework enumeration, scaled bounds, events, cyclic-tree rejection with rollback, click and edit action routing, empty queues, and stopped-broker rejection. Unmodified Qt/GTK applications are not complete yet: Archphene still needs a private AT-SPI2 adapter that translates their standard D-Bus object trees and actions into this transport, including secondary-window ownership.
+
+Secrets/keyrings, the AT-SPI2 adapter, streaming XDG Camera/PipeWire, richer notification actions, non-HTTP URI policies, and other desktop portals remain unimplemented.
 
 ## Native client
 
