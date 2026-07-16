@@ -1,6 +1,6 @@
 # Archphene TODO
 
-Updated: 2026-07-15
+Updated: 2026-07-16
 
 This is the prioritized completion queue for the Archphene Android application. Check items only after implementation and device validation. Historical experiment notes belong in research/; current behavior belongs in docs/.
 
@@ -26,16 +26,17 @@ This is the prioritized completion queue for the Archphene Android application. 
   - [x] Reuse unchanged closures before copying runtime-pack modules.
   - [x] Validate 4 KB and 16 KB ELF page compatibility. Runtime executables and published modules now fail closed before execution when an ELF load segment is incompatible; the AArch64 runtime is 64 KB-aligned, while current upstream Arch x86_64 packages remain 4 KB-only and are explicitly unsupported on 16 KB x86_64 Android until rebuilt.
   - [x] Clean up the complete Linux process tree when a wrapper exits. Managed launches use a dedicated process group, parent-death signal, cancellable execution registry, and final dedicated-UID descendant sweep.
-- [ ] Finish the Terminal product.
+- [x] Finish the Terminal product.
   - [x] Add multiple sessions/tabs and a foreground-service lifecycle. PTYs survive Activity closure under a visible Android notification, close independently by process group, and die with the Terminal app process.
   - [x] Return manager progress and terminal results to the invoking command. Per-request files correlate exact search/install/remove/upgrade requests with durable manager jobs; the signed manager reports bounded phases and terminal outcomes through a signature-protected Terminal provider.
   - [x] Add persisted project-tree mappings. User-selected SAF trees retain scoped read/write grants and synchronize through stable `$HOME/Projects/<alias>` POSIX mirrors with bounded traversal, conflict copies, deferred deletions, symlink rejection, grant release, and restart persistence.
-  - [ ] Select and package the user shell. Current bootstrap is Bionic sh; evaluate verified Arch bash first, then fish as an optional user choice.
+  - [x] Select and package the user shell. Terminal boots with Bionic sh until a verified Arch Bash closure is installed, then selects managed Bash on restart; x86_64 emulator and physical ARM64 device tests cover PTY startup, locale data, package queries, and home writes.
   - [x] Keep the native Termux terminal renderer unless image protocols or other modern terminal features justify a compatible extension.
 - [ ] Complete Android capability and document brokers.
   - Add manager-owned GUI-app documents, multi-document conflict handling, and explicit permission/capability APIs. Terminal persisted folder grants and guarded mirror synchronization are complete.
   - Decide whether an optional broad file-access flow is justified. Prefer user-selected Storage Access Framework trees; do not request all-files access by default.
 - [ ] Complete platform compatibility.
+  - Rebuild or relocate the bundled x86_64 manager tools and glibc loader so the 16 KB control-plane APK does not trigger Android's page-size warning. Package execution already rejects incompatible 4 KB upstream Arch binaries before publication.
   - Audio, notifications, URL handling, printing, camera, drag-and-drop, accessibility, secrets/keyrings, and remaining portals.
   - Broader Qt, GTK, SDL, Electron, Rust-native, XWayland, Vulkan, and zero-copy GPU validation.
   - General secondary-window policy for phone, tablet, freeform, and external displays.

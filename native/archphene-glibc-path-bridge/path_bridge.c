@@ -42,12 +42,19 @@ static bool has_parent_component(const char *path) {
 
 static const char *translate_path(const char *path, char output[PATH_MAX],
         bool *translated) {
-    static const char prefix[] = "/usr/share";
+    static const char *const prefixes[] = {"/usr/share", "/usr/lib/locale"};
     *translated = false;
-    if (path == NULL || strncmp(path, prefix, sizeof(prefix) - 1) != 0
-            || (path[sizeof(prefix) - 1] != '\0' && path[sizeof(prefix) - 1] != '/')) {
-        return path;
+    if (path == NULL) return path;
+    bool allowed = false;
+    for (size_t index = 0; index < sizeof(prefixes) / sizeof(prefixes[0]); index++) {
+        size_t length = strlen(prefixes[index]);
+        if (strncmp(path, prefixes[index], length) == 0
+                && (path[length] == '\0' || path[length] == '/')) {
+            allowed = true;
+            break;
+        }
     }
+    if (!allowed) return path;
     if (has_parent_component(path)) {
         errno = EACCES;
         return NULL;

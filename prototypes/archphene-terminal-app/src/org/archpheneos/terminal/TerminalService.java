@@ -180,12 +180,14 @@ public final class TerminalService extends Service implements TerminalSessionCli
             }
             if (!used) {
                 TerminalSession session = new TerminalSession("/system/bin/sh",
-                        environment.home.getAbsolutePath(), new String[] {"sh", "-i"},
+                        environment.home.getAbsolutePath(),
+                        new String[] {"sh", environment.launcher.getAbsolutePath()},
                         environment.environment, 10000, this);
                 session.mSessionName = candidate;
                 sessions.add(new Record(session, candidate));
                 activeHandle = session.mHandle;
                 Log.i(TAG, "Created terminal session " + candidate
+                        + " shell=" + environment.shellName
                         + " handle=" + session.mHandle);
                 if (first) promoteToForeground();
                 else updateNotification();

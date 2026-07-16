@@ -47,14 +47,18 @@ final class TerminalEnvironment {
         final File requestDirectory;
         final File responseDirectory;
         final File rc;
+        final File launcher;
+        final String shellName;
         final String[] environment;
 
         Session(File home, File requestDirectory, File responseDirectory, File rc,
-                String[] environment) {
+                File launcher, String shellName, String[] environment) {
             this.home = home;
             this.requestDirectory = requestDirectory;
             this.responseDirectory = responseDirectory;
             this.rc = rc;
+            this.launcher = launcher;
+            this.shellName = shellName;
             this.environment = environment;
         }
     }
@@ -103,15 +107,17 @@ final class TerminalEnvironment {
         final File libraries;
         final File runtimeRoot;
         final File loader;
+        final String interpreter;
 
         Command(String packId, String name, File program, File libraries,
-                File runtimeRoot, File loader) {
+                File runtimeRoot, File loader, String interpreter) {
             this.packId = packId;
             this.name = name;
             this.program = program;
             this.libraries = libraries;
             this.runtimeRoot = runtimeRoot;
             this.loader = loader;
+            this.interpreter = interpreter;
         }
     }
 
@@ -236,9 +242,10 @@ final class TerminalEnvironment {
                 File loader = packagedLoader;
                 dataDirectories.add(new File(dataRoot, "usr/share").getAbsolutePath());
                 for (String commandName : entry.commands) {
+                    File program = new File(new File(packRoot, "bin"), commandName);
                     Command command = new Command(entry.packId, commandName,
-                            new File(new File(packRoot, "bin"), commandName), libraries,
-                            dataRoot, loader);
+                            program, libraries, dataRoot, loader,
+                            scriptInterpreter(program));
                     if (!command.program.isFile()) {
                         throw new SecurityException(
                                 "Runtime pack is missing command " + commandName);
@@ -257,7 +264,13 @@ final class TerminalEnvironment {
         writeInstalledList(installed, packages);
         File rc = new File(runtime, "shell.rc");
         writeAtomically(rc, shellRc(home, config, cache, tmp, requests, responses,
-                installed, commands, dataDirectories));
+                installed, rc, commands, dataDirectories));
+        Command bash = commands.get("bash");
+        if (bash != null && !bash.interpreter.isEmpty()) {
+            throw new SecurityException("Managed Bash command is not an ELF executable");
+        }
+        File launcher = new File(runtime, "launch.sh");
+        writeAtomically(launcher, launchScript(rc, bash));
 
         ArrayList<String> env = new ArrayList<>();
         env.add("HOME=" + home.getAbsolutePath());
@@ -272,7 +285,8 @@ final class TerminalEnvironment {
         env.add("ENV=" + rc.getAbsolutePath());
         env.add("ARCHPHENE_MANAGER_REQUESTS=" + requests.getAbsolutePath());
         env.add("ARCHPHENE_MANAGER_RESPONSES=" + responses.getAbsolutePath());
-        return new Session(home, requests, responses, rc, env.toArray(new String[0]));
+        return new Session(home, requests, responses, rc, launcher,
+                bash == null ? "Bionic sh" : "Arch Bash", env.toArray(new String[0]));
     }
 
     static File responseDirectory(Context context) throws IOException {
@@ -379,9 +393,84 @@ final class TerminalEnvironment {
         if (!target.setReadOnly()) throw new IOException("Could not protect Terminal module");
     }
 
+    private static String scriptInterpreter(File program) throws Exception {
+        try (InputStream input = new BufferedInputStream(new FileInputStream(program))) {
+            int first = input.read();
+            int second = input.read();
+            int third = input.read();
+            int fourth = input.read();
+            if (first == 0x7f && second == 'E' && third == 'L' && fourth == 'F') return "";
+            if (first != '#' || second != '!') {
+                throw new SecurityException("Runtime command is neither ELF nor a shebang script: "
+                        + program.getName());
+            }
+            StringBuilder line = new StringBuilder();
+            if (third >= 0 && third != '\n') line.append((char) third);
+            if (fourth >= 0 && fourth != '\n') line.append((char) fourth);
+            int value;
+            while ((value = input.read()) >= 0 && value != '\n') {
+                if (value == 0 || value == '\r' || line.length() >= 255) {
+                    throw new SecurityException("Runtime script has an unsafe shebang");
+                }
+                line.append((char) value);
+            }
+            if (value != '\n') throw new SecurityException("Runtime script has an invalid shebang");
+            String[] tokens = line.toString().trim().split("\\s+");
+            if (tokens.length == 0) throw new SecurityException("Runtime script has no interpreter");
+            int index = 0;
+            String interpreter = basename(tokens[index++]);
+            if ("env".equals(interpreter)) {
+                while (index < tokens.length && tokens[index].startsWith("-")) index++;
+                if (index >= tokens.length) {
+                    throw new SecurityException("Runtime env shebang has no interpreter");
+                }
+                interpreter = basename(tokens[index]);
+            }
+            if (!interpreter.matches(SAFE_ID)) {
+                throw new SecurityException("Runtime script interpreter is unsafe");
+            }
+            return interpreter;
+        }
+    }
+
+    private static String basename(String value) {
+        int slash = value.lastIndexOf('/');
+        return slash < 0 ? value : value.substring(slash + 1);
+    }
+
+    private static String managedInvocation(Command executable, File runtimeRoot,
+            File script, File rc, boolean replaceProcess) {
+        StringBuilder value = new StringBuilder();
+        value.append("ARCHPHENE_RUNTIME_ROOT=").append(quote(runtimeRoot.getAbsolutePath()))
+                .append(" LOCPATH=").append(quote(new File(runtimeRoot,
+                        "usr/lib/locale").getAbsolutePath()))
+                .append(" GLIBC_TUNABLES='glibc.pthread.rseq=0' LD_PRELOAD=")
+                .append(quote(new File(executable.libraries,
+                        "libarchphene_path_bridge.so").getAbsolutePath()));
+        if (script != null && "bash".equals(executable.name)) {
+            value.append(" BASH_ENV=").append(quote(rc.getAbsolutePath()));
+        }
+        value.append(replaceProcess ? " exec " : " ")
+                .append(quote(executable.loader.getAbsolutePath()))
+                .append(" --library-path ").append(quote(executable.libraries.getAbsolutePath()))
+                .append(' ').append(quote(executable.program.getAbsolutePath()));
+        if (script != null) value.append(' ').append(quote(script.getAbsolutePath()));
+        return value.toString();
+    }
+
+    private static String launchScript(File rc, Command bash) {
+        StringBuilder value = new StringBuilder("#!/system/bin/sh\n");
+        if (bash == null) {
+            return value.append("exec /system/bin/sh -i\n").toString();
+        }
+        value.append(managedInvocation(bash, bash.runtimeRoot, null, rc, true))
+                .append(" --noprofile --rcfile ").append(quote(rc.getAbsolutePath()))
+                .append(" -i\n");
+        return value.toString();
+    }
     private static String shellRc(File home, File config, File cache, File tmp,
-            File requests, File responses, File installed, Map<String, Command> commands,
-            List<String> dataDirectories) {
+            File requests, File responses, File installed, File rcFile,
+            Map<String, Command> commands, List<String> dataDirectories) {
         StringBuilder rc = new StringBuilder();
         rc.append("export HOME=").append(quote(home.getAbsolutePath())).append('\n');
         rc.append("export TMPDIR=").append(quote(tmp.getAbsolutePath())).append('\n');
@@ -390,17 +479,32 @@ final class TerminalEnvironment {
         rc.append("export XDG_CONFIG_HOME=").append(quote(config.getAbsolutePath())).append('\n');
         rc.append("export XDG_CACHE_HOME=").append(quote(cache.getAbsolutePath())).append('\n');
         rc.append("export TERM=xterm-256color COLORTERM=truecolor LANG=C.UTF-8 LC_ALL=C.UTF-8\n");
-        rc.append("export PS1='archphene \\w $ '\n");
+        rc.append("unset LD_PRELOAD\n");
+        rc.append("case \"$-\" in *i*) _ap_interactive=1;; *) _ap_interactive=0;; esac\n");
+        rc.append("[ -z \"$BASH_VERSION\" ] || shopt -s expand_aliases\n");
+        rc.append("[ \"$_ap_interactive\" = 0 ] || export PS1='archphene \\w $ '\n");
         rc.append("_archphene_run() {\n  _ap_key=\"$1/$2\"; shift 2\n  case \"$_ap_key\" in\n");
+        Command managedBash = commands.get("bash");
         for (Command command : commands.values()) {
-            String libraryPath = command.libraries.getAbsolutePath();
-            rc.append("    ").append(quote(command.packId + "/" + command.name))
-                    .append(") ARCHPHENE_RUNTIME_ROOT=").append(quote(command.runtimeRoot.getAbsolutePath()))
-                    .append(" GLIBC_TUNABLES='glibc.pthread.rseq=0' LD_PRELOAD=")
-                    .append(quote(new File(command.libraries, "libarchphene_path_bridge.so").getAbsolutePath()))
-                    .append(' ').append(quote(command.loader.getAbsolutePath()))
-                    .append(" --library-path ").append(quote(libraryPath)).append(' ')
-                    .append(quote(command.program.getAbsolutePath())).append(" \"$@\" ;;\n");
+            rc.append("    ").append(quote(command.packId + "/" + command.name)).append(") ");
+            if (command.interpreter.isEmpty()) {
+                rc.append(managedInvocation(command, command.runtimeRoot, null, rcFile, false));
+            } else {
+                Command interpreter = ("sh".equals(command.interpreter)
+                        || "bash".equals(command.interpreter))
+                        ? managedBash : commands.get(command.interpreter);
+                if (interpreter != null && interpreter.interpreter.isEmpty()) {
+                    rc.append(managedInvocation(interpreter, command.runtimeRoot,
+                            command.program, rcFile, false));
+                } else if ("sh".equals(command.interpreter)) {
+                    rc.append("/system/bin/sh ").append(quote(command.program.getAbsolutePath()));
+                } else {
+                    rc.append("echo ").append(quote("archphene: interpreter "
+                            + command.interpreter + " is not installed for " + command.name))
+                            .append(" >&2; return 126; :");
+                }
+            }
+            rc.append(" \"$@\" ;;\n");
         }
         rc.append("    *) echo \"archphene: unavailable command $_ap_key\" >&2; return 127 ;;\n  esac\n}\n");
         for (Command command : commands.values()) {
@@ -466,8 +570,11 @@ final class TerminalEnvironment {
             for (String dataDirectory : dataDirectories) terminfo.add(dataDirectory + "/terminfo");
             rc.append("export TERMINFO_DIRS=").append(quote(String.join(":", terminfo))).append('\n');
         }
-        rc.append("echo 'Archphene Terminal - ").append(commands.size())
-                .append(" managed command(s). Type pacman -Q to list packages.'\n");
+        rc.append("if [ \"$_ap_interactive\" = 1 ]; then\n")
+                .append("  if [ -n \"$BASH_VERSION\" ] && [ -f \"$HOME/.bashrc\" ]; then . \"$HOME/.bashrc\"; fi\n")
+                .append("  echo 'Archphene Terminal - ").append(commands.size())
+                .append(" managed command(s). Type pacman -Q to list packages.'\n")
+                .append("fi\n");
         return rc.toString();
     }
 

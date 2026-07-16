@@ -4,7 +4,8 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 
-glibc_commit="fdf10644d6ee345c7b5277c3fa009c1bedb92d60"
+glibc_version="2.43"
+glibc_sha256="d9c86c6b5dbddb43a3e08270c5844fc5177d19442cf5b8df4be7c07cd5fa3831"
 jobs="${JOBS:-2}"
 glibc_out="tooling/build/glibc-archphene-runtime-x86_64"
 stage="tooling/build/ci-package-runtime"
@@ -29,7 +30,8 @@ MSYS2_ARG_CONV_EXCL="$msys_arg_excl" $container_cli run --rm \
   -e HOST_UID="$(id -u)" \
   -e HOST_GID="$(id -g)" \
   -e SKIP_CHOWN="${SKIP_CHOWN:-0}" \
-  -e GLIBC_COMMIT="$glibc_commit" \
+  -e GLIBC_VERSION="$glibc_version" \
+  -e GLIBC_SHA256="$glibc_sha256" \
   -e JOBS="$jobs" \
   -v "$container_volume:/out" \
   -v "$patch_volume:/archphene-patches:ro" \
@@ -82,24 +84,14 @@ fi
 source=/tmp/glibc-source
 obj=/tmp/glibc-obj
 install=/tmp/glibc-install
+archive=/tmp/glibc.tar.xz
 mkdir "$source"
-git -C "$source" init --quiet
-git -C "$source" remote add origin https://sourceware.org/git/glibc.git
-fetched=false
-for attempt in 1 2 3; do
-  if git -C "$source" fetch --depth 1 origin "$GLIBC_COMMIT"; then
-    fetched=true
-    break
-  fi
-  echo "glibc fetch attempt $attempt failed" >&2
-  sleep "$((attempt * 10))"
-done
-[[ "$fetched" == "true" ]] || {
-  echo "Could not fetch pinned glibc commit after 3 attempts" >&2
-  exit 1
-}
-git -C "$source" checkout --detach FETCH_HEAD
-git -C "$source" apply /archphene-patches/0001-android-app-seccomp-compat.patch
+curl --proto =https --tlsv1.2 --fail --location --retry 3 \
+  --silent --show-error --output "$archive" \
+  "https://ftp.gnu.org/gnu/glibc/glibc-$GLIBC_VERSION.tar.xz"
+printf "%s  %s\n" "$GLIBC_SHA256" "$archive" | sha256sum -c -
+tar -xJf "$archive" --strip-components=1 -C "$source"
+patch -d "$source" -p1 < /archphene-patches/0001-android-app-seccomp-compat.patch
 mkdir "$obj"
 (
   cd "$obj"
@@ -124,7 +116,8 @@ for name in "${runtime_files[@]}"; do
   }
   cp -L "$source_file" "/out/glibc/$name"
 done
-printf "%s\n" "$GLIBC_COMMIT" > /out/glibc/source-commit.txt
+printf "glibc-%s+sha256.%s\n" "$GLIBC_VERSION" "$GLIBC_SHA256" \
+  > /out/glibc/source-commit.txt
 
 if [[ "$SKIP_CHOWN" != "1" ]]; then
   chown -R "$HOST_UID:$HOST_GID" /out

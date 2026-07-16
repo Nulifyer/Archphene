@@ -191,9 +191,11 @@ final class RuntimePackStore {
             throw new SecurityException("Runtime path bridge is unavailable");
         }
         Map<String, File> closure = new HashMap<>();
-        for (String commandName : commandNames) {
+        for (int commandIndex = 0; commandIndex < commandNames.size(); commandIndex++) {
+            File commandFile = commandFiles.get(commandIndex);
+            if (!ArchWrapperAssembler.isElf(commandFile)) validateScriptCommand(commandFile);
             Map<String, File> commandClosure = ArchWrapperAssembler.collectNativeFiles(
-                    context, canonicalRoot, sourcePackage, commandName);
+                    context, canonicalRoot, sourcePackage, commandNames.get(commandIndex));
             for (Map.Entry<String, File> entry : commandClosure.entrySet()) {
                 File dependency = entry.getValue().getCanonicalFile();
                 if (commandPaths.contains(dependency.getPath())) continue;
@@ -264,9 +266,10 @@ final class RuntimePackStore {
         File dataArchive = null;
         try {
             File dataRoot = new File(canonicalRoot, "usr/share");
-            if (dataRoot.isDirectory()) {
+            File localeRoot = new File(canonicalRoot, "usr/lib/locale/C.utf8");
+            if (dataRoot.isDirectory() || localeRoot.isDirectory()) {
                 dataArchive = File.createTempFile("runtime-data-", ".zip", stagingRoot);
-                createDataArchive(canonicalRoot, dataRoot, dataArchive);
+                createDataArchive(canonicalRoot, dataRoot, localeRoot, dataArchive);
                 if (dataArchive.length() > 0) {
                     pending.add(new PendingModule("data", "root.zip", dataArchive));
                 }
@@ -279,8 +282,12 @@ final class RuntimePackStore {
             ArrayList<Module> modules = new ArrayList<>();
             long total = 0;
             for (PendingModule value : pending) {
+                boolean command = "program".equals(value.kind) || "command".equals(value.kind);
+                boolean elf = ArchWrapperAssembler.isElf(value.source);
+                if (command && !elf) validateScriptCommand(value.source);
                 ModuleIdentity identity = inspectModule(value.source,
-                        !"data".equals(value.kind));
+                        "loader".equals(value.kind) || "library".equals(value.kind)
+                                || (command && elf));
                 total = Math.addExact(total, identity.size);
                 if (total > MAX_PACK_SIZE) throw new SecurityException("Runtime pack is too large");
                 modules.add(new Module(value.kind, identity.hash, identity.size,
@@ -676,13 +683,20 @@ final class RuntimePackStore {
         long bytes;
     }
 
-    private static void createDataArchive(File stagedRoot, File dataRoot, File output)
-            throws Exception {
+    private static void createDataArchive(File stagedRoot, File dataRoot, File localeRoot,
+            File output) throws Exception {
         File canonicalRoot = stagedRoot.getCanonicalFile();
         DataBudget budget = new DataBudget();
         try (FileOutputStream file = new FileOutputStream(output);
                 ZipOutputStream zip = new ZipOutputStream(file)) {
-            addDataTree(canonicalRoot, dataRoot, "usr/share", zip, budget, new HashSet<>());
+            if (dataRoot.isDirectory()) {
+                addDataTree(canonicalRoot, dataRoot, "usr/share", zip, budget,
+                        new HashSet<>());
+            }
+            if (localeRoot.isDirectory()) {
+                addDataTree(canonicalRoot, localeRoot, "usr/lib/locale/C.utf8", zip,
+                        budget, new HashSet<>());
+            }
             zip.finish();
             zip.flush();
             file.getFD().sync();
@@ -886,6 +900,28 @@ final class RuntimePackStore {
         ModuleIdentity(String hash, long size) {
             this.hash = hash;
             this.size = size;
+        }
+    }
+
+    private static void validateScriptCommand(File source) throws Exception {
+        if (!source.isFile() || source.length() < 3 || source.length() > MAX_MODULE_SIZE) {
+            throw new SecurityException("Runtime script has an invalid size");
+        }
+        try (InputStream input = new FileInputStream(source)) {
+            if (input.read() != '#' || input.read() != '!') {
+                throw new SecurityException("Runtime command is neither ELF nor a shebang script: "
+                        + source.getName());
+            }
+            int length = 0;
+            int value;
+            while ((value = input.read()) >= 0 && value != '\n') {
+                if (value == 0 || value == '\r' || ++length > 255) {
+                    throw new SecurityException("Runtime script has an unsafe shebang");
+                }
+            }
+            if (value != '\n' || length == 0) {
+                throw new SecurityException("Runtime script has an invalid shebang");
+            }
         }
     }
 

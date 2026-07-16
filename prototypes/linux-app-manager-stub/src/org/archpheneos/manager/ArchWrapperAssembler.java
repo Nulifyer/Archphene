@@ -303,6 +303,7 @@ public final class ArchWrapperAssembler {
                 || !executable.isFile()) {
             throw new SecurityException("Invalid staged runtime root");
         }
+        if (!isElf(executable)) return Collections.emptyMap();
         TreeMap<String, File> candidates = new TreeMap<>();
         collectElfFiles(canonicalRoot, libraryRoot, candidates, new HashSet<>());
         TreeMap<String, File> result = new TreeMap<>();
@@ -553,7 +554,7 @@ public final class ArchWrapperAssembler {
         return false;
     }
 
-    private static boolean isElf(File file) throws Exception {
+    static boolean isElf(File file) throws Exception {
         try (InputStream input = new FileInputStream(file)) {
             return input.read() == 0x7f && input.read() == 'E'
                     && input.read() == 'L' && input.read() == 'F';

@@ -562,7 +562,8 @@ public final class ArchPackageRuntime {
     }
 
     private static boolean isSharedRuntimeDataEntry(String entry) {
-        return entry.startsWith("usr/share/glvnd/egl_vendor.d/")
+        return entry.startsWith("usr/lib/locale/C.utf8/")
+                || entry.startsWith("usr/share/glvnd/egl_vendor.d/")
                 || entry.startsWith("usr/share/vulkan/icd.d/")
                 || entry.startsWith("usr/share/drirc.d/")
                 || entry.startsWith("usr/share/glib-2.0/schemas/")

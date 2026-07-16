@@ -10,12 +10,14 @@ Archphene provides a first-party **Archphene Terminal** companion for command-li
 - Terminal copies each command, library, and data archive into its own sandbox, verifies the manager-declared size and SHA-256, rejects malformed catalogs and command collisions, and marks materialized runtime files read-only. The glibc loader is verified against the same catalog but executes from Terminal's APK-owned native library directory because modern Android forbids executing downloaded code from writable app data.
 - The Apache-2.0 Termux `terminal-emulator` and `terminal-view` modules provide VT/ANSI rendering, hardware-key input, Android IME input, selection, and resize handling.
 - Universal development builds carry both PTY libraries and APK-owned glibc loaders; release manager APKs embed a single-ABI Terminal companion matching x86_64 or arm64-v8a. Android selected arm64-v8a on the Samsung Galaxy S22 Ultra, launched a real PTY shell, accepted input, exposed its home through DocumentsUI, preserved the shell through rotation, and executed managed `btop 1.4.7`. The 16 KB x86_64 emulator returns a correlated compatibility error because upstream Arch x86_64 glibc is currently 4 KB-only.
-- A Bionic JNI PTY host starts `/system/bin/sh`. Each shell owns a process group and requests a parent-death signal from Android's app process.
+- A Bionic JNI PTY host starts the generated shell launcher. It uses `/system/bin/sh` until a verified Arch Bash runtime is installed, then selects managed Bash on the next session. Each shell owns a process group and requests a parent-death signal from Android's app process.
 - Each Arch command runs through the patched glibc loader with only its resolved library closure and package data root.
 - Home, `.config`, and `.cache` persist under the Terminal UID. GUI wrappers remain separate Android UIDs.
 - CLI packages do not create launcher APKs. A package with a usable `.desktop` entry is handled as a GUI wrapper; CLI/TUI packages are exposed in Terminal; dependency-only packages create neither launcher nor command.
 
 Installing btop does not implicitly install curl. Commands become available only when their source package is explicitly installed. Multiple commands from one source package are exposed together.
+
+Installing `bash` through Archphene publishes its verified runtime closure to Terminal and makes it the default user shell for subsequent sessions. The launcher scopes the patched glibc loader, library path, path bridge, and `C.UTF-8` locale root to managed commands; it clears those variables before invoking Android's Bionic utilities. Fish remains a possible future opt-in shell rather than a release dependency.
 
 ## Pacman compatibility
 
@@ -56,9 +58,9 @@ The Terminal companion uses an ordinary Android application UID. It does not rec
 
 ## Remaining terminal work
 
-1. Allow an installed Arch shell such as bash to replace the Bionic bootstrap shell.
-2. Add capability metadata for packages requiring restricted `/proc`, devices, sockets, or Android bridge APIs.
-3. Evaluate an opt-in automatic project-sync policy with explicit conflict and battery/network controls.
+1. Add capability metadata for packages requiring restricted `/proc`, devices, sockets, or Android bridge APIs.
+2. Evaluate an opt-in automatic project-sync policy with explicit conflict and battery/network controls.
+3. Evaluate optional user-selectable shells after the Bash lifecycle and package compatibility matrix are stable.
 
 Kitty is not the default frontend because it is itself a GPU-accelerated Wayland application and would add compositor and GPU dependencies before displaying a shell or TUI.
 

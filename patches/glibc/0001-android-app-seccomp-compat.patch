@@ -176,6 +176,22 @@ index fcc6e2b6..eb57a223 100644
    return INLINE_SYSCALL_CALL (inotify_init);
  #else
    return INLINE_SYSCALL_CALL (inotify_init1, 0);
+diff --git a/sysdeps/unix/sysv/linux/isatty.c b/sysdeps/unix/sysv/linux/isatty.c
+index bb3fdc73..de28f506 100644
+--- a/sysdeps/unix/sysv/linux/isatty.c
++++ b/sysdeps/unix/sysv/linux/isatty.c
+@@ -25,7 +25,11 @@ int
+ int
+ __isatty (int fd)
+ {
+   struct termios2 k_termios;
++#ifdef ARCHPHENE_ANDROID_APP_COMPAT
++  return INLINE_SYSCALL_CALL (ioctl, fd, TCGETS, &k_termios) == 0;
++#else
+   return INLINE_SYSCALL_CALL (ioctl, fd, TCGETS2, &k_termios) == 0;
++#endif
+ }
+ weak_alias (__isatty, isatty)
 diff --git a/sysdeps/unix/sysv/linux/lchown.c b/sysdeps/unix/sysv/linux/lchown.c
 index 903fbddc..ed2d34f2 100644
 --- a/sysdeps/unix/sysv/linux/lchown.c
@@ -236,15 +252,15 @@ diff --git a/sysdeps/unix/sysv/linux/openat2.c b/sysdeps/unix/sysv/linux/openat2
 index ac7b7058..2c9b1718 100644
 --- a/sysdeps/unix/sysv/linux/openat2.c
 +++ b/sysdeps/unix/sysv/linux/openat2.c
-@@ -17,12 +17,18 @@
+@@ -18,6 +18,7 @@
     <https://www.gnu.org/licenses/>.  */
  
  #include <fcntl.h>
 +#include <errno.h>
+ #include <bits/openat2.h>
  #include <sysdep-cancel.h>
  
- int
- __openat2 (int dfd, const char *filename,
+@@ -25,5 +26,10 @@ __openat2 (int dfd, const char *filename,
  	   const struct open_how *how, size_t usize)
  {
 +#ifdef ARCHPHENE_ANDROID_APP_COMPAT
@@ -333,6 +349,17 @@ index 7febc667..f5df7bf0 100644
    if (do_rseq)
      {
        unsigned int size =  __rseq_size;
+diff --git a/sysdeps/unix/sysv/linux/syscalls.list b/sysdeps/unix/sysv/linux/syscalls.list
+--- a/sysdeps/unix/sysv/linux/syscalls.list
++++ b/sysdeps/unix/sysv/linux/syscalls.list
+@@ -20,7 +20,6 @@
+ getegid		-	getegid		Ei:	__getegid	getegid
+ geteuid		-	geteuid		Ei:	__geteuid	geteuid
+ getpgid		-	getpgid		i:i	__getpgid	getpgid
+-getpgrp		-	getpgrp		Ei:	getpgrp
+ getppid		-	getppid		Ei:	__getppid	getppid
+ getresuid	-	getresuid	i:ppp	getresuid
+ getresgid	-	getresgid	i:ppp	getresgid
 diff --git a/sysdeps/unix/sysv/linux/symlink.c b/sysdeps/unix/sysv/linux/symlink.c
 index d82ee898..c745a370 100644
 --- a/sysdeps/unix/sysv/linux/symlink.c
@@ -351,6 +378,48 @@ index d82ee898..c745a370 100644
  #endif
  }
  weak_alias (__symlink, symlink)
+diff --git a/sysdeps/unix/sysv/linux/tcgetattr.c b/sysdeps/unix/sysv/linux/tcgetattr.c
+index 0a4c285f..92b97ca3 100644
+--- a/sysdeps/unix/sysv/linux/tcgetattr.c
++++ b/sysdeps/unix/sysv/linux/tcgetattr.c
+@@ -21,7 +21,12 @@ int
+ __tcgetattr (int fd, struct termios *termios_p)
+ {
+   struct termios2 k_termios;
++  memset (&k_termios, 0, sizeof (k_termios));
++#ifdef ARCHPHENE_ANDROID_APP_COMPAT
++  long int retval = INLINE_SYSCALL_CALL (ioctl, fd, TCGETS, &k_termios);
++#else
+   long int retval = INLINE_SYSCALL_CALL (ioctl, fd, TCGETS2, &k_termios);
++#endif
+ 
+   if (__glibc_likely (retval != -1))
+     {
+diff --git a/sysdeps/unix/sysv/linux/tcsetattr.c b/sysdeps/unix/sysv/linux/tcsetattr.c
+index cc08b69a..06e8b06d 100644
+--- a/sysdeps/unix/sysv/linux/tcsetattr.c
++++ b/sysdeps/unix/sysv/linux/tcsetattr.c
+@@ -65,5 +65,12 @@ __tcsetattr (int fd, int optional_actions, const struct termios *termios_p)
+      __BOTHER causes unpredictable results on old Alpha kernels and
+      could even crash them. */
++#ifdef ARCHPHENE_ANDROID_APP_COMPAT
++  if (k_termios.c_ospeed != k_termios.c_ispeed
++      || cbaud (k_termios.c_cflag) == __BOTHER)
++    return INLINE_SYSCALL_ERROR_RETURN_VALUE (EINVAL);
++  cmd += TCSETS;
++  k_termios.c_cflag &= ~CIBAUD;
++#else
+   if (__ASSUME_TERMIOS2 ||
+       k_termios.c_ospeed != k_termios.c_ispeed ||
+       cbaud (k_termios.c_cflag) == __BOTHER)
+@@ -75,6 +84,7 @@ __tcsetattr (int fd, int optional_actions, const struct termios *termios_p)
+     }
+   else
+     cmd += TCSETS;
++#endif
+ 
+   return INLINE_SYSCALL_CALL (ioctl, fd, cmd, &k_termios);
+ }
 diff --git a/sysdeps/unix/sysv/linux/unlink.c b/sysdeps/unix/sysv/linux/unlink.c
 index 6bf7ee1e..6dd6fdd0 100644
 --- a/sysdeps/unix/sysv/linux/unlink.c
