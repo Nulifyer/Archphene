@@ -25,6 +25,7 @@ mkdir -p "$out"/{gen,classes,dex,package/lib/$abi}
 javac --release 17 -classpath "$platform" -d "$out/classes" \
   "$app/src/org/archphene/bridge/CameraProbeActivity.java" \
   "$root/prototypes/shared-android-bridge/src/org/archphene/bridge/AndroidCameraIntegration.java" \
+  "$root/prototypes/shared-android-bridge/src/org/archphene/bridge/AndroidDesktopIntegration.java" \
   "$root/prototypes/shared-android-bridge/src/org/archphene/bridge/ArchpheneAccessibilityBridge.java" \
   "$root/prototypes/shared-android-bridge/src/org/archphene/bridge/AndroidSecretStore.java" \
   "$root/prototypes/shared-android-bridge/src/org/archphene/bridge/AndroidCapabilityBroker.java" \
@@ -36,8 +37,27 @@ mapfile -d '' class_files < <(find "$out/classes" -type f -name '*.class' -print
   -fPIE -pie -O2 -Wall -Wextra -Werror \
   "$root/native/archphene-android-capability/archphene_android.c" \
   -o "$out/package/lib/$abi/libarchphene_camera_probe.so"
+"$toolchain/bin/$target"29-clang \
+  -fPIE -pie -O2 -Wall -Wextra -Werror \
+  "$root/native/archphene-portal/archphene_pipewire_socket_probe.c" \
+  -o "$out/package/lib/$abi/libarchphene_pipewire_socket_probe.so"
+if [[ "$abi" == "arm64-v8a" ]]; then dbus_arch=aarch64; else dbus_arch=x86_64; fi
+dbus_out="$root/tooling/build/android-dbus/$dbus_arch"
+for mapping in \
+  "dbus-daemon:libarchphene_dbus_daemon.so" \
+  "portal-service:libarchphene_portal_service.so" \
+  "portal-probe:libarchphene_portal_probe.so" \
+  "xdg-open:libarchphene_xdg_open.so"; do
+  source_name="$(printf '%s' "$mapping" | cut -d: -f1)"
+  target_name="$(printf '%s' "$mapping" | cut -d: -f2)"
+  [[ -f "$dbus_out/$source_name" ]] || {
+    echo "missing Android D-Bus helper: $dbus_out/$source_name" >&2
+    exit 1
+  }
+  cp "$dbus_out/$source_name" "$out/package/lib/$abi/$target_name"
+done
 (cd "$out/dex" && jar uf "$out/unsigned.apk" classes.dex)
-(cd "$out/package" && jar uf "$out/unsigned.apk" "lib/$abi/libarchphene_camera_probe.so")
+(cd "$out/package" && jar uf "$out/unsigned.apk" lib/"$abi"/*.so)
 "$bt/zipalign" -f 4 "$out/unsigned.apk" "$out/aligned.apk"
 "$bt/apksigner" sign --ks "$KEYSTORE_PATH" --ks-key-alias "$KEY_ALIAS" \
   --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEY_PASSWORD \

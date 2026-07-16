@@ -34,13 +34,27 @@ function Start-Probe {
     throw "Camera broker did not start: $($logs -join "`n")"
 }
 
-function Native-Path {
+function Native-Path([string]$Leaf = "libarchphene_camera_probe.so") {
     $dump = (Invoke-Adb @("shell", "dumpsys", "package", $Package) `
             "read camera probe package") -join "`n"
     $native = [regex]::Match($dump, "legacyNativeLibraryDir=(\S+)").Groups[1].Value
     if (-not $native) { throw "Camera probe native library directory is unavailable" }
     $nativeSubdirectory = if ($AndroidAbi -eq "arm64-v8a") { "arm64" } else { "x86_64" }
-    return "$native/$nativeSubdirectory/libarchphene_camera_probe.so"
+    return "$native/$nativeSubdirectory/$Leaf"
+}
+
+function Invoke-PortalProbe([string[]]$Arguments) {
+    $bus = & $Adb -s $Serial shell run-as $Package cat files/camera-bus-address 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $bus) {
+        throw "Camera portal session bus address is unavailable"
+    }
+    $native = Native-Path "libarchphene_portal_probe.so"
+    $busAddress = ($bus -join "").Trim()
+    $output = & $Adb -s $Serial shell run-as $Package env -e $native "DBUS_SESSION_BUS_ADDRESS=$busAddress" archphene-portal-probe @Arguments 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "Camera portal request failed: $($output -join [Environment]::NewLine)"
+    }
+    return ($output -join [Environment]::NewLine).Trim()
 }
 
 function Invoke-Probe([string]$Socket, [string[]]$Arguments, [switch]$AllowFailure) {
@@ -54,29 +68,33 @@ function Invoke-Probe([string]$Socket, [string[]]$Arguments, [switch]$AllowFailu
 }
 
 function Select-PermissionAction([string[]]$Labels) {
-    Invoke-Adb @("shell", "uiautomator", "dump", "/sdcard/archphene-camera.xml") `
-            "dump camera permission UI" | Out-Null
-    [xml]$ui = (Invoke-Adb @("shell", "cat", "/sdcard/archphene-camera.xml") `
-            "read camera permission UI") -join ""
-    $action = $ui.SelectNodes("//node") | Where-Object {
-        $_.text -in $Labels
-    } | Select-Object -First 1
-    if ($null -eq $action -and $Labels -contains "Deny") {
-        $action = $ui.SelectNodes("//node") | Where-Object {
-            $_.'resource-id' -match "permission_deny_button$"
-        } | Select-Object -First 1
+    $selected = $false
+    for ($attempt = 0; $attempt -lt 3; $attempt++) {
+        Invoke-Adb @("shell", "uiautomator", "dump", "/sdcard/archphene-camera.xml") "dump camera permission UI" | Out-Null
+        [xml]$ui = (Invoke-Adb @("shell", "cat", "/sdcard/archphene-camera.xml") "read camera permission UI") -join ""
+        $action = $ui.SelectNodes("//node") | Where-Object { $_.text -in $Labels } | Select-Object -First 1
+        if ($null -eq $action) {
+            $resourcePattern = if ($Labels -contains "Deny") {
+                "permission_deny_button$"
+            } else {
+                "permission_allow_(foreground_only|one_time)_button$"
+            }
+            $action = $ui.SelectNodes("//node") | Where-Object {
+                $_.'resource-id' -match $resourcePattern
+            } | Select-Object -First 1
+        }
+        if ($null -eq $action) {
+            if ($selected) { return }
+            Start-Sleep -Milliseconds 500
+            continue
+        }
+        $bounds = [regex]::Matches($action.bounds, "\d+") | ForEach-Object { [int]$_.Value }
+        Invoke-Adb @("shell", "input", "tap", [string][int](($bounds[0] + $bounds[2]) / 2), [string][int](($bounds[1] + $bounds[3]) / 2)) "select camera permission action" | Out-Null
+        $selected = $true
+        Start-Sleep -Milliseconds 750
     }
-    if ($null -eq $action) {
-        throw "Camera permission prompt has none of: $($Labels -join ', ')"
-    }
-    $bounds = [regex]::Matches($action.bounds, "\d+") | ForEach-Object { [int]$_.Value }
-    Invoke-Adb @("shell", "input", "tap",
-            [string][int](($bounds[0] + $bounds[2]) / 2),
-            [string][int](($bounds[1] + $bounds[3]) / 2)) `
-            "select camera permission action" | Out-Null
-    Start-Sleep -Milliseconds 750
+    throw "Camera permission prompt did not close after repeated selection"
 }
-
 if (-not (Test-Path -LiteralPath $Apk -PathType Leaf)) {
     throw "Camera probe APK is missing: $Apk"
 }
@@ -103,6 +121,19 @@ Start-Sleep -Milliseconds 500
 Select-PermissionAction @("While using the app", "Only this time", "Allow")
 $granted = Invoke-Probe $socket @("check-camera")
 if ($granted -ne "OK") { throw "Camera permission was not granted: $granted" }
+
+$portalContract = Invoke-PortalProbe @("contract")
+if ($portalContract -notmatch "PASS portal Camera version=1 present=true") {
+    throw "Camera portal contract is incomplete: $portalContract"
+}
+$portalAccess = Invoke-PortalProbe @("camera-access")
+if ($portalAccess -notmatch "PASS portal camera access accepted") {
+    throw "Camera portal access failed: $portalAccess"
+}
+$portalRemote = Invoke-PortalProbe @("camera-open")
+if ($portalRemote -notmatch "PASS portal PipeWire remote descriptor") {
+    throw "Camera portal did not transfer its private remote: $portalRemote"
+}
 
 $capture = Invoke-Probe $socket @("capture-camera-jpeg", "files/camera-test.jpg",
         "1280", "720", "back")

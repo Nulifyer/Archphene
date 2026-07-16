@@ -1,5 +1,6 @@
 #include <dbus/dbus.h>
 
+#include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -115,6 +116,38 @@ static uint32_t portal_version(DBusConnection *connection,
     return version;
 }
 
+static dbus_bool_t bool_property(DBusConnection *connection,
+        const char *interface, const char *property, const char *label) {
+    DBusMessage *request = dbus_message_new_method_call(
+            PORTAL_NAME, PORTAL_PATH, "org.freedesktop.DBus.Properties", "Get");
+    if (request == NULL || !dbus_message_append_args(request,
+            DBUS_TYPE_STRING, &interface, DBUS_TYPE_STRING, &property,
+            DBUS_TYPE_INVALID)) {
+        if (request != NULL) dbus_message_unref(request);
+        fprintf(stderr, "FAIL %s: arguments\n", label);
+        exit(1);
+    }
+    DBusMessage *reply = call(connection, request, label);
+    DBusMessageIter value;
+    DBusMessageIter variant;
+    dbus_bool_t result = FALSE;
+    if (!dbus_message_iter_init(reply, &value)
+            || dbus_message_iter_get_arg_type(&value) != DBUS_TYPE_VARIANT) {
+        dbus_message_unref(reply);
+        fprintf(stderr, "FAIL %s: wrong reply\n", label);
+        exit(1);
+    }
+    dbus_message_iter_recurse(&value, &variant);
+    if (dbus_message_iter_get_arg_type(&variant) != DBUS_TYPE_BOOLEAN) {
+        dbus_message_unref(reply);
+        fprintf(stderr, "FAIL %s: wrong type\n", label);
+        exit(1);
+    }
+    dbus_message_iter_get_basic(&variant, &result);
+    dbus_message_unref(reply);
+    return result;
+}
+
 static dbus_bool_t scheme_supported(DBusConnection *connection, const char *scheme) {
     DBusMessage *request = dbus_message_new_method_call(
             PORTAL_NAME, PORTAL_PATH, "org.freedesktop.portal.OpenURI",
@@ -158,6 +191,17 @@ static void check_contract(DBusConnection *connection) {
         exit(1);
     }
     printf("PASS portal Print version=%u\n", print_version);
+    uint32_t camera_version = portal_version(connection,
+            "org.freedesktop.portal.Camera", "portal Camera version");
+    if (camera_version < 1) {
+        fprintf(stderr, "FAIL portal Camera version: %u\n", camera_version);
+        exit(1);
+    }
+    dbus_bool_t present = bool_property(connection,
+            "org.freedesktop.portal.Camera", "IsCameraPresent",
+            "portal camera presence");
+    printf("PASS portal Camera version=%u present=%s\n",
+            camera_version, present ? "true" : "false");
     if (!scheme_supported(connection, "https")
             || scheme_supported(connection, "file")) {
         fprintf(stderr, "FAIL portal scheme policy\n");
@@ -467,9 +511,102 @@ static void print_pdf(DBusConnection *connection, const char *path, uint32_t exp
             : "PASS portal Print rejected non-regular descriptor\n");
 }
 
+static void camera_access(DBusConnection *connection) {
+    const char *key = "handle_token";
+    const char *token = "archphene_camera_probe";
+    DBusMessage *request = dbus_message_new_method_call(
+            PORTAL_NAME, PORTAL_PATH,
+            "org.freedesktop.portal.Camera", "AccessCamera");
+    DBusMessageIter arguments;
+    DBusMessageIter dict;
+    if (request == NULL) {
+        fprintf(stderr, "FAIL camera access: allocation\n");
+        exit(1);
+    }
+    dbus_message_iter_init_append(request, &arguments);
+    if (!dbus_message_iter_open_container(
+                &arguments, DBUS_TYPE_ARRAY, "{sv}", &dict)
+            || !append_string_property(&dict, key, token)
+            || !dbus_message_iter_close_container(&arguments, &dict)) {
+        dbus_message_unref(request);
+        fprintf(stderr, "FAIL camera access: arguments\n");
+        exit(1);
+    }
+    DBusMessage *reply = call(connection, request, "camera access");
+    DBusMessageIter output;
+    const char *response_path = NULL;
+    if (!dbus_message_iter_init(reply, &output)
+            || dbus_message_iter_get_arg_type(&output) != DBUS_TYPE_OBJECT_PATH) {
+        dbus_message_unref(reply);
+        fprintf(stderr, "FAIL camera access: wrong reply\n");
+        exit(1);
+    }
+    dbus_message_iter_get_basic(&output, &response_path);
+    char path_copy[256];
+    if (response_path == NULL || strlen(response_path) >= sizeof(path_copy)) {
+        dbus_message_unref(reply);
+        fprintf(stderr, "FAIL camera access: invalid response path\n");
+        exit(1);
+    }
+    strcpy(path_copy, response_path);
+    dbus_message_unref(reply);
+    uint32_t response = wait_request_response(connection, path_copy, "camera access");
+    if (response != 0) {
+        fprintf(stderr, "FAIL camera access: response=%u\n", response);
+        exit(1);
+    }
+    printf("PASS portal camera access accepted\n");
+}
+
+static void camera_open(DBusConnection *connection) {
+    DBusMessage *request = dbus_message_new_method_call(
+            PORTAL_NAME, PORTAL_PATH,
+            "org.freedesktop.portal.Camera", "OpenPipeWireRemote");
+    DBusMessageIter arguments;
+    if (request == NULL) {
+        fprintf(stderr, "FAIL camera remote: allocation\n");
+        exit(1);
+    }
+    dbus_message_iter_init_append(request, &arguments);
+    if (!append_empty_dict(&arguments)) {
+        dbus_message_unref(request);
+        fprintf(stderr, "FAIL camera remote: arguments\n");
+        exit(1);
+    }
+    DBusMessage *reply = call(connection, request, "camera remote");
+    DBusError error = DBUS_ERROR_INIT;
+    int remote = -1;
+    if (!dbus_message_get_args(reply, &error,
+            DBUS_TYPE_UNIX_FD, &remote, DBUS_TYPE_INVALID)) {
+        dbus_message_unref(reply);
+        fail_error("camera remote reply", &error);
+    }
+    if (write(remote, "PING", 4) != 4) {
+        dbus_message_unref(reply);
+        close(remote);
+        perror("FAIL camera remote write");
+        exit(1);
+    }
+    char response[4];
+    size_t received = 0;
+    while (received < sizeof(response)) {
+        ssize_t count = read(remote, response + received, sizeof(response) - received);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) break;
+        received += (size_t)count;
+    }
+    close(remote);
+    dbus_message_unref(reply);
+    if (received != sizeof(response) || memcmp(response, "PONG", 4) != 0) {
+        fprintf(stderr, "FAIL camera remote descriptor transport\n");
+        exit(1);
+    }
+    printf("PASS portal PipeWire remote descriptor\n");
+}
+
 int main(int argc, char **argv) {
     if (argc < 2 || argc > 3) {
-        fprintf(stderr, "usage: %s contract|notify|withdraw [classic-id] | open URI | print PDF | print-pipe\n",
+        fprintf(stderr, "usage: %s contract|notify|withdraw [classic-id] | open URI | print PDF | print-pipe | camera-access | camera-open\n",
                 argv[0]);
         return 2;
     }
@@ -499,6 +636,10 @@ int main(int argc, char **argv) {
         print_pdf(connection, argv[2], 0);
     } else if (strcmp(argv[1], "print-pipe") == 0 && argc == 2) {
         print_pipe(connection);
+    } else if (strcmp(argv[1], "camera-access") == 0 && argc == 2) {
+        camera_access(connection);
+    } else if (strcmp(argv[1], "camera-open") == 0 && argc == 2) {
+        camera_open(connection);
     } else {
         fprintf(stderr, "invalid probe arguments\n");
         dbus_connection_close(connection);

@@ -5,10 +5,15 @@
 
 #include <errno.h>
 #include <signal.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <time.h>
+#include <unistd.h>
 
 #define PORTAL_PATH "/org/freedesktop/portal/desktop"
 #define NOTIFICATIONS_PATH "/org/freedesktop/Notifications"
@@ -16,6 +21,7 @@
 #define PORTAL_OPEN_URI "org.freedesktop.portal.OpenURI"
 #define PORTAL_NOTIFICATION "org.freedesktop.portal.Notification"
 #define PORTAL_PRINT "org.freedesktop.portal.Print"
+#define PORTAL_CAMERA "org.freedesktop.portal.Camera"
 #define CLASSIC_NOTIFICATION "org.freedesktop.Notifications"
 #define PROPERTIES "org.freedesktop.DBus.Properties"
 #define INTROSPECTABLE "org.freedesktop.DBus.Introspectable"
@@ -47,6 +53,13 @@ static const char portal_xml[] =
         "<method name='Print'><arg type='s' direction='in'/>"
         "<arg type='s' direction='in'/><arg type='h' direction='in'/>"
         "<arg type='a{sv}' direction='in'/><arg type='o' direction='out'/></method>"
+        "<property name='version' type='u' access='read'/></interface>"
+        "<interface name='org.freedesktop.portal.Camera'>"
+        "<method name='AccessCamera'><arg type='a{sv}' direction='in'/>"
+        "<arg type='o' direction='out'/></method>"
+        "<method name='OpenPipeWireRemote'><arg type='a{sv}' direction='in'/>"
+        "<arg type='h' direction='out'/></method>"
+        "<property name='IsCameraPresent' type='b' access='read'/>"
         "<property name='version' type='u' access='read'/></interface>"
         "<interface name='org.freedesktop.DBus.Properties'>"
         "<method name='Get'><arg type='s' direction='in'/><arg type='s' direction='in'/>"
@@ -189,6 +202,50 @@ static dbus_bool_t broker_accepted(int result, const char *response) {
             && strcmp(response, "ERROR\tPERMISSION_REQUESTED") == 0);
 }
 
+static dbus_bool_t camera_enabled(void) {
+    const char *value = getenv("ARCHPHENE_ENABLE_CAMERA");
+    return value != NULL && strcmp(value, "1") == 0;
+}
+
+static dbus_bool_t camera_present(void) {
+    if (!camera_enabled()) return FALSE;
+    char response[256] = {0};
+    int result = archphene_android_check_camera(response, sizeof(response));
+    return result == 0 || strcmp(response, "ERROR\tPERMISSION_NOT_REQUESTED") == 0
+            || strcmp(response, "ERROR\tPERMISSION_REQUESTED") == 0
+            || strcmp(response, "ERROR\tPERMISSION_DENIED") == 0;
+}
+
+static int connect_pipewire_remote(void) {
+    const char *path = getenv("ARCHPHENE_PIPEWIRE_SOCKET");
+    if (path == NULL || path[0] == '\0') {
+        errno = ENOENT;
+        return -1;
+    }
+    size_t length = strlen(path);
+    dbus_bool_t abstract = path[0] == '@';
+    const char *name = abstract ? path + 1 : path;
+    size_t name_length = abstract ? length - 1 : length;
+    if (name_length == 0 || name_length >= sizeof(((struct sockaddr_un *)0)->sun_path)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return -1;
+    struct sockaddr_un address = {0};
+    address.sun_family = AF_UNIX;
+    memcpy(address.sun_path + (abstract ? 1 : 0), name, name_length);
+    socklen_t address_length = (socklen_t)(offsetof(struct sockaddr_un, sun_path)
+            + name_length + (abstract ? 1 : 0));
+    if (connect(fd, (struct sockaddr *)&address, address_length) != 0) {
+        int saved = errno;
+        close(fd);
+        errno = saved;
+        return -1;
+    }
+    return fd;
+}
+
 static void emit_portal_response(DBusConnection *connection, const char *path,
         uint32_t response) {
     DBusMessage *signal = dbus_message_new_signal(
@@ -213,6 +270,18 @@ static dbus_bool_t append_named_empty_dict(DBusMessageIter *dict, const char *ke
             && dbus_message_iter_open_container(&entry, DBUS_TYPE_VARIANT, "a{sv}", &variant)
             && dbus_message_iter_open_container(&variant, DBUS_TYPE_ARRAY, "{sv}", &values)
             && dbus_message_iter_close_container(&variant, &values)
+            && dbus_message_iter_close_container(&entry, &variant)
+            && dbus_message_iter_close_container(dict, &entry);
+}
+
+static dbus_bool_t append_named_bool(
+        DBusMessageIter *dict, const char *key, dbus_bool_t value) {
+    DBusMessageIter entry;
+    DBusMessageIter variant;
+    return dbus_message_iter_open_container(dict, DBUS_TYPE_DICT_ENTRY, NULL, &entry)
+            && dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &key)
+            && dbus_message_iter_open_container(&entry, DBUS_TYPE_VARIANT, "b", &variant)
+            && dbus_message_iter_append_basic(&variant, DBUS_TYPE_BOOLEAN, &value)
             && dbus_message_iter_close_container(&entry, &variant)
             && dbus_message_iter_close_container(dict, &entry);
 }
@@ -333,6 +402,63 @@ static void handle_print(DBusConnection *connection, DBusMessage *request) {
     if (send_request_reply(connection, request, path)) {
         emit_portal_response(connection, path, result == 0 ? 0u : 2u);
     }
+}
+
+static void handle_camera_access(DBusConnection *connection, DBusMessage *request) {
+    DBusMessageIter options;
+    if (!dbus_message_iter_init(request, &options)
+            || dbus_message_iter_get_arg_type(&options) != DBUS_TYPE_ARRAY) {
+        send_error(connection, request, DBUS_ERROR_INVALID_ARGS, "Expected (a{sv})");
+        return;
+    }
+    char path[256];
+    make_request_path(request, &options, path, sizeof(path));
+    if (!send_request_reply(connection, request, path)) return;
+    char response[256] = {0};
+    int result = camera_enabled()
+            ? archphene_android_request_camera(response, sizeof(response)) : 1;
+    if (result == 1 && strcmp(response, "ERROR\tPERMISSION_REQUESTED") == 0) {
+        struct timespec delay = {.tv_sec = 0, .tv_nsec = 100000000};
+        for (unsigned int attempt = 0; attempt < 600; attempt++) {
+            nanosleep(&delay, NULL);
+            result = archphene_android_check_camera(response, sizeof(response));
+            if (result == 0 || strcmp(response, "ERROR\tPERMISSION_REQUESTED") != 0) break;
+        }
+    }
+    emit_portal_response(connection, path, result == 0 ? 0u : 2u);
+}
+
+static void handle_camera_open_remote(
+        DBusConnection *connection, DBusMessage *request) {
+    DBusMessageIter options;
+    if (!dbus_message_iter_init(request, &options)
+            || dbus_message_iter_get_arg_type(&options) != DBUS_TYPE_ARRAY) {
+        send_error(connection, request, DBUS_ERROR_INVALID_ARGS, "Expected (a{sv})");
+        return;
+    }
+    char response[256] = {0};
+    if (!camera_enabled()
+            || archphene_android_check_camera(response, sizeof(response)) != 0) {
+        send_error(connection, request, DBUS_ERROR_ACCESS_DENIED,
+                "Android camera permission has not been granted");
+        return;
+    }
+    int fd = connect_pipewire_remote();
+    if (fd < 0) {
+        send_error(connection, request, DBUS_ERROR_FAILED,
+                "Private PipeWire camera remote is unavailable");
+        return;
+    }
+    DBusMessage *reply = dbus_message_new_method_return(request);
+    if (reply == NULL || !dbus_message_append_args(
+            reply, DBUS_TYPE_UNIX_FD, &fd, DBUS_TYPE_INVALID)) {
+        if (reply != NULL) dbus_message_unref(reply);
+        close(fd);
+        send_error(connection, request, DBUS_ERROR_NO_MEMORY, "Could not return PipeWire remote");
+        return;
+    }
+    close(fd);
+    send_message(connection, reply);
 }
 
 static void handle_open_uri(DBusConnection *connection, DBusMessage *request) {
@@ -518,7 +644,8 @@ static void handle_properties(DBusConnection *connection, DBusMessage *request) 
     }
     dbus_bool_t notification = strcmp(interface, PORTAL_NOTIFICATION) == 0;
     dbus_bool_t printing = strcmp(interface, PORTAL_PRINT) == 0;
-    uint32_t version = notification ? 2u : (printing ? 4u : 5u);
+    dbus_bool_t camera = strcmp(interface, PORTAL_CAMERA) == 0;
+    uint32_t version = camera ? 1u : (notification ? 2u : (printing ? 4u : 5u));
     if (dbus_message_is_method_call(request, PROPERTIES, "Get")) {
         char property[64] = {0};
         if (!dbus_message_iter_next(&args)
@@ -533,13 +660,20 @@ static void handle_properties(DBusConnection *connection, DBusMessage *request) 
         dbus_message_iter_init_append(reply, &output);
         dbus_bool_t ok = FALSE;
         if (strcmp(property, "version") == 0
-                && (notification || printing || strcmp(interface, PORTAL_OPEN_URI) == 0)) {
+                && (camera || notification || printing
+                    || strcmp(interface, PORTAL_OPEN_URI) == 0)) {
             ok = dbus_message_iter_open_container(&output, DBUS_TYPE_VARIANT, "u", &variant)
                     && dbus_message_iter_append_basic(&variant, DBUS_TYPE_UINT32, &version)
                     && dbus_message_iter_close_container(&output, &variant);
         } else if (notification && strcmp(property, "SupportedOptions") == 0) {
             ok = dbus_message_iter_open_container(&output, DBUS_TYPE_VARIANT, "a{sv}", &variant)
                     && append_empty_dict(&variant)
+                    && dbus_message_iter_close_container(&output, &variant);
+        } else if (camera && strcmp(property, "IsCameraPresent") == 0) {
+            dbus_bool_t present = camera_present();
+            ok = dbus_message_iter_open_container(&output, DBUS_TYPE_VARIANT, "b", &variant)
+                    && dbus_message_iter_append_basic(
+                            &variant, DBUS_TYPE_BOOLEAN, &present)
                     && dbus_message_iter_close_container(&output, &variant);
         }
         if (!ok) {
@@ -550,7 +684,8 @@ static void handle_properties(DBusConnection *connection, DBusMessage *request) 
         send_message(connection, reply);
         return;
     }
-    if (!notification && !printing && strcmp(interface, PORTAL_OPEN_URI) != 0) {
+    if (!camera && !notification && !printing
+            && strcmp(interface, PORTAL_OPEN_URI) != 0) {
         send_error(connection, request, DBUS_ERROR_UNKNOWN_INTERFACE, "Unknown interface");
         return;
     }
@@ -562,6 +697,8 @@ static void handle_properties(DBusConnection *connection, DBusMessage *request) 
     dbus_bool_t ok = dbus_message_iter_open_container(&output, DBUS_TYPE_ARRAY, "{sv}", &dict)
             && append_version_property(&dict, version)
             && (!notification || append_supported_options_property(&dict))
+            && (!camera || append_named_bool(&dict,
+                    "IsCameraPresent", camera_present()))
             && dbus_message_iter_close_container(&output, &dict);
     if (!ok) {
         dbus_message_unref(reply);
@@ -597,6 +734,11 @@ static void handle_message(DBusConnection *connection, DBusMessage *request) {
         handle_open_uri(connection, request);
     } else if (dbus_message_is_method_call(request, PORTAL_OPEN_URI, "SchemeSupported")) {
         handle_scheme_supported(connection, request);
+    } else if (dbus_message_is_method_call(request, PORTAL_CAMERA, "AccessCamera")) {
+        handle_camera_access(connection, request);
+    } else if (dbus_message_is_method_call(
+            request, PORTAL_CAMERA, "OpenPipeWireRemote")) {
+        handle_camera_open_remote(connection, request);
     } else if (dbus_message_is_method_call(request, PORTAL_PRINT, "PreparePrint")) {
         handle_prepare_print(connection, request);
     } else if (dbus_message_is_method_call(request, PORTAL_PRINT, "Print")) {

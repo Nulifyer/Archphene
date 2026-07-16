@@ -28,12 +28,24 @@ final class AndroidDesktopIntegration {
 
     synchronized void start(File nativeLibraryDir, File cacheDirectory,
             String brokerSocket, String appName, boolean secretsEnabled) throws IOException {
-        start(nativeLibraryDir, cacheDirectory, brokerSocket, appName, secretsEnabled, false);
+        start(nativeLibraryDir, cacheDirectory, brokerSocket, appName,
+                secretsEnabled, false, false, null);
     }
 
     synchronized void start(File nativeLibraryDir, File cacheDirectory,
             String brokerSocket, String appName, boolean secretsEnabled,
             boolean traceSecrets) throws IOException {
+        start(nativeLibraryDir, cacheDirectory, brokerSocket, appName,
+                secretsEnabled, traceSecrets, false, null);
+    }
+
+    synchronized void start(File nativeLibraryDir, File cacheDirectory,
+            String brokerSocket, String appName, boolean secretsEnabled,
+            boolean traceSecrets, boolean cameraEnabled, String pipeWireSocket)
+            throws IOException {
+        if (cameraEnabled && (pipeWireSocket == null || pipeWireSocket.isBlank())) {
+            throw new IOException("Camera portal requires a private PipeWire socket");
+        }
         stop();
         File daemonFile = requireHelper(nativeLibraryDir, DAEMON);
         File portalFile = requireHelper(nativeLibraryDir, PORTAL);
@@ -72,6 +84,10 @@ final class AndroidDesktopIntegration {
         portalEnvironment.put("ARCHPHENE_ANDROID_BROKER", brokerSocket);
         portalEnvironment.put("ARCHPHENE_APP_NAME", appName);
         portalEnvironment.put("ARCHPHENE_ENABLE_SECRETS", secretsEnabled ? "1" : "0");
+        portalEnvironment.put("ARCHPHENE_ENABLE_CAMERA", cameraEnabled ? "1" : "0");
+        if (cameraEnabled) {
+            portalEnvironment.put("ARCHPHENE_PIPEWIRE_SOCKET", pipeWireSocket);
+        }
         if (traceSecrets) portalEnvironment.put("ARCHPHENE_SECRET_TRACE", "1");
         portal = portalBuilder.start();
         drain(portal, "portal");
