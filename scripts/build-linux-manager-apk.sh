@@ -212,10 +212,13 @@ arm_resolved="$arm_runtime/elf-needed-resolved.tsv"
 arm_keyrings="$arm_prefix/tooling/downloads/arch-runtime-archlinuxarm-keyring-aarch64/runtime-root/usr/share/pacman/keyrings"
 arm_glibc="$arm_prefix/tooling/build/glibc-archphene-runtime-aarch64"
 arm_path_bridge="$arm_prefix/tooling/build/archphene-path-bridge-aarch64/libarchphene_path_bridge.so"
+x86_android_client="$root/tooling/build/android-capability/x86_64/libarchphene_android.so"
+arm_android_client="$root/tooling/build/android-capability/aarch64/libarchphene_android.so"
 template="$root/tooling/build/wrapper-templates/qt/qt-wrapper-template.apk"
 document_template="$root/tooling/build/wrapper-templates/qt/qt-document-wrapper-template.apk"
 for required in "$x86_root" "$x86_resolved" "$x86_keyrings" "$x86_glibc" \
     "$arm_root" "$arm_resolved" "$arm_keyrings" "$arm_glibc" "$arm_path_bridge" \
+    "$x86_android_client" "$arm_android_client" \
     "$template" "$document_template"; do
   [[ -e "$required" ]] || {
     echo "package runtime input missing: $required" >&2
@@ -241,6 +244,8 @@ gcc -shared -fPIC -O2 -Wall -Wextra -Werror \
   -o "$x86_libs/libarchphene_path_bridge.so" \
   "$root/native/archphene-glibc-path-bridge/path_bridge.c" -ldl
 cp "$arm_path_bridge" "$arm_libs/libarchphene_path_bridge.so"
+cp "$x86_android_client" "$x86_libs/libarchphene_android.so"
+cp "$arm_android_client" "$arm_libs/libarchphene_android.so"
 
 (cd "$root/prebuilt/gtk3-compat" && sha256sum --check SHA256SUMS)
 cp "$root"/prebuilt/gtk3-compat/x86_64/*.so "$x86_libs/"

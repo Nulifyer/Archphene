@@ -92,6 +92,7 @@ $ArchRuntimeRoot = Join-Path $Root "tooling/downloads/arch-curated-kcalc-$LinuxA
 $ArchInclude = Join-Path $ArchRuntimeRoot "usr/include"
 $WaylandInclude = Join-Path $App "wayland-include"
 Run-Native { & $Clang -fPIE -pie -O2 -Wall -Wextra -o (Join-Path $NativeLibDir "libarchphene_wayland_socket_probe.so") (Join-Path $App "wayland_socket_probe.c") } "clang build Wayland socket probe"
+Run-Native { & $Clang -DARCHPHENE_CAPABILITY_PROBE_MAIN -fPIE -pie -O2 -Wall -Wextra -Werror -o (Join-Path $NativeLibDir "libarchphene_capability_probe.so") (Join-Path $Root "native/archphene-android-capability/archphene_android.c") } "clang build Android capability probe"
 Run-Native { & $Clang -fPIE -pie -O2 -Wall -Wextra -o (Join-Path $NativeLibDir "libarchphene_frame_client.so") (Join-Path $App "archphene_frame_client.c") } "clang build Linux frame client"
 Run-Native { & $Clang -fPIE -pie -O2 -Wall -Wextra -o (Join-Path $NativeLibDir "libarchphene_shm_frame_client.so") (Join-Path $App "archphene_shm_frame_client.c") } "clang build Linux shm frame client"
 Run-Native { & $Clang -fPIE -pie -O2 -Wall -Wextra -o (Join-Path $NativeLibDir "libarchphene_wayland_shm_client.so") (Join-Path $App "archphene_wayland_shm_client.c") } "clang build raw Wayland shm client"

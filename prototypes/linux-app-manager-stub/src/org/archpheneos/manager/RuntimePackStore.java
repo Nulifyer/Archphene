@@ -190,6 +190,11 @@ final class RuntimePackStore {
         if (!pathBridge.isFile() || !pathBridge.getParentFile().equals(managerNative)) {
             throw new SecurityException("Runtime path bridge is unavailable");
         }
+        File androidClient = new File(managerNative, "libarchphene_android.so")
+                .getCanonicalFile();
+        if (!androidClient.isFile() || !androidClient.getParentFile().equals(managerNative)) {
+            throw new SecurityException("Android capability client is unavailable");
+        }
         Map<String, File> closure = new HashMap<>();
         for (int commandIndex = 0; commandIndex < commandNames.size(); commandIndex++) {
             File commandFile = commandFiles.get(commandIndex);
@@ -239,6 +244,10 @@ final class RuntimePackStore {
             throw new SecurityException("Runtime path bridge link name collision");
         }
         pending.add(new PendingModule("library", "libarchphene_path_bridge.so", pathBridge));
+        if (!names.add("libarchphene_android.so")) {
+            throw new SecurityException("Android capability client link name collision");
+        }
+        pending.add(new PendingModule("library", "libarchphene_android.so", androidClient));
         if (gtkSvgLoader != null) {
             if (!names.add("libarchphene_pixbufloader_svg.so")) {
                 throw new SecurityException("GTK bridge link name collision");

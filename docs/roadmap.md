@@ -31,6 +31,8 @@ Archphene is moving from application-specific proofs toward a package-driven And
 4. **Permission and document policy**
    - generate manifest permissions from declared capabilities;
    - extend the manager-owned user-document provider from individual document grants to persisted GUI project trees.
+   - expose Android services through same-UID, metadata-gated brokers; URL opening and notifications are validated;
+   - add standard XDG portal adapters before treating the broker APIs as transparent unmodified-app support.
 
 ## P1: desktop usability
 

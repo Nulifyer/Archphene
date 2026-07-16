@@ -66,6 +66,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     private ArchpheneInputView compositorView;
     private ArchpheneCompositorSession session;
     private AndroidDocumentSession documentSession;
+    private AndroidCapabilityBroker capabilityBroker;
     private Dialog documentRestartDialog;
     private Set<String> capabilities;
     private final AndroidGpuBridge gpuBridge = new AndroidGpuBridge();
@@ -122,6 +123,12 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         independentWindows = shouldUseIndependentWindows();
         documentSession = capabilities.contains(BridgeCapabilities.DOCUMENTS)
                 ? new AndroidDocumentSession(this, logTag) : null;
+        capabilityBroker = new AndroidCapabilityBroker(this, capabilities);
+        try {
+            capabilityBroker.start();
+        } catch (IOException error) {
+            throw new IllegalStateException("Could not start Android capability broker", error);
+        }
         int systemChrome = resolvedDarkAppearance() ? Color.rgb(35, 38, 41)
                 : Color.rgb(239, 240, 241);
         getWindow().setStatusBarColor(systemChrome);
@@ -788,6 +795,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 environment.put("XDG_CONFIG_HOME", config.getAbsolutePath());
                 environment.put("XDG_RUNTIME_DIR", runtimeDir.getAbsolutePath());
                 environment.put("WAYLAND_DISPLAY", "wayland-0");
+                applyCapabilityEnvironment(environment);
                 environment.put("TMPDIR", tmp.getAbsolutePath());
                 File runtimeRoot = new File(getFilesDir(), "linux-runtime/root");
                 environment.put("ARCHPHENE_RUNTIME_ROOT", runtimeRoot.getAbsolutePath());
@@ -880,6 +888,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             env.put("XDG_CONFIG_HOME", config.getAbsolutePath());
             env.put("XDG_RUNTIME_DIR", waylandRuntime.getAbsolutePath());
             env.put("WAYLAND_DISPLAY", "wayland-0");
+            applyCapabilityEnvironment(env);
             if (getIntent().getBooleanExtra("archphene.wayland_debug", false)) {
                 env.put("WAYLAND_DEBUG", "client");
                 Log.i(logTag, "Wayland client protocol trace enabled");
@@ -909,6 +918,11 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             packagedRuntimeActive.set(false);
             gpuBridge.stop();
         }
+    }
+
+    private void applyCapabilityEnvironment(Map<String, String> environment) {
+        environment.put("ARCHPHENE_ANDROID_BROKER", "@" + capabilityBroker.socketName());
+        environment.put("ARCHPHENE_ANDROID_PROTOCOL", "1");
     }
 
     private File startGpuBridge() {
@@ -1400,6 +1414,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         }
         secondaryWindows.clear();
         if (documentSession != null) documentSession.close();
+        if (capabilityBroker != null) capabilityBroker.close();
         cancelManagedRuntimeExecution();
         if (linuxProcess != null) linuxProcess.destroy();
         RuntimeFdLauncher.terminateUidProcesses();

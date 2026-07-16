@@ -13,14 +13,16 @@ import java.util.Set;
 final class BridgeCapabilities {
     static final String META = "org.archphene.bridge.capabilities";
     static final String DOCUMENTS = "documents";
+    static final String OPEN_URI = "open-uri";
+    static final String NOTIFICATIONS = "notifications";
     private static final Set<String> REQUIRED = Collections.unmodifiableSet(new HashSet<>(
             Arrays.asList("wayland", "input", "ime", "clipboard", "runtime-pack",
                     "home-documents")));
     private static final Set<String> ALLOWED = Collections.unmodifiableSet(new HashSet<>(
             Arrays.asList("wayland", "input", "ime", "clipboard", "runtime-pack",
-                    "home-documents", DOCUMENTS)));
+                    "home-documents", OPEN_URI, NOTIFICATIONS, DOCUMENTS)));
     private static final String LEGACY =
-            "wayland,input,ime,clipboard,runtime-pack,home-documents,documents";
+            "wayland,input,ime,clipboard,runtime-pack,home-documents,open-uri,notifications,documents";
 
     private BridgeCapabilities() {}
 

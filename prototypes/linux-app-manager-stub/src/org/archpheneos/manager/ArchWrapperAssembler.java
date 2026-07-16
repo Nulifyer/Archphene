@@ -207,7 +207,7 @@ public final class ArchWrapperAssembler {
                             "glibc-" + architecture);
                     value = replaceBinaryXmlString(value, "qt6", toolkit);
                     value = replaceBinaryXmlString(value,
-                            "wayland,input,ime,clipboard,runtime-pack,home-documents,documents",
+                            "wayland,input,ime,clipboard,runtime-pack,home-documents,open-uri,notifications,documents",
                             capabilityMetadata(mimeTypes));
                     value = replaceBinaryXmlString(value, "archphene-executable-placeholder",
                             executableName);
@@ -773,7 +773,7 @@ public final class ArchWrapperAssembler {
     }
 
     private static String capabilityMetadata(List<String> mimeTypes) {
-        String base = "wayland,input,ime,clipboard,runtime-pack,home-documents";
+        String base = "wayland,input,ime,clipboard,runtime-pack,home-documents,open-uri,notifications";
         return mimeTypes.isEmpty() ? base : base + ",documents";
     }
     private static List<String> normalizedMimeTypes(List<String> values) {
