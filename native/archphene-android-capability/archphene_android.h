@@ -36,4 +36,6 @@ int archphene_android_delete_secret(
         const char *id, char *response, size_t response_size);
 int archphene_android_list_secrets(
         int output_fd, char *response, size_t response_size);
+int archphene_android_catalog_secrets(
+        int output_fd, char *response, size_t response_size);
 #endif

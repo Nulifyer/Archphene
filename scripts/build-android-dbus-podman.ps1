@@ -24,7 +24,7 @@ podman run --rm -v "${Root}:/workspace" -w /workspace `
 if ($LASTEXITCODE -ne 0) { throw "Android D-Bus build failed" }
 
 $OutputDir = Join-Path $Root "tooling/build/android-dbus/$Architecture"
-foreach ($name in @("dbus-daemon", "portal-service", "portal-probe", "xdg-open")) {
+foreach ($name in @("dbus-daemon", "portal-service", "portal-probe", "secret-probe", "xdg-open")) {
     $output = Join-Path $OutputDir $name
     if (-not (Test-Path -LiteralPath $output -PathType Leaf)) {
         throw "Android D-Bus output is missing: $output"

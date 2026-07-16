@@ -11,6 +11,7 @@ import java.util.Set;
 /** Device probe host for the same encrypted secret broker used by generated wrappers. */
 public final class SecretsProbeActivity extends Activity {
     private AndroidCapabilityBroker broker;
+    private final AndroidDesktopIntegration desktopIntegration = new AndroidDesktopIntegration();
     private File brokerFile;
 
     @Override
@@ -29,6 +30,9 @@ public final class SecretsProbeActivity extends Activity {
             Set<String> capabilities = BridgeCapabilities.read(this);
             broker = new AndroidCapabilityBroker(this, capabilities);
             broker.start();
+            desktopIntegration.start(new File(getApplicationInfo().nativeLibraryDir),
+                    getCacheDir(), "@" + broker.socketName(), "Archphene Secrets Probe", true);
+            writeFixture("secrets-bus-address", desktopIntegration.busAddress());
             brokerFile = new File(getFilesDir(), "secrets-broker-name");
             try (FileOutputStream output = new FileOutputStream(brokerFile, false)) {
                 output.write(broker.socketName().getBytes(StandardCharsets.UTF_8));
@@ -54,6 +58,7 @@ public final class SecretsProbeActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        desktopIntegration.stop();
         if (broker != null) broker.close();
         if (brokerFile != null) brokerFile.delete();
         super.onDestroy();

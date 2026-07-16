@@ -6,6 +6,7 @@ import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
 import android.system.Os;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.File;
@@ -165,6 +166,48 @@ final class AndroidSecretStore {
         writeOutput(outputDescriptor, encoded);
         return result.length();
     }
+    synchronized int catalog(FileDescriptor outputDescriptor) throws Exception {
+        ensureDirectory();
+        List<File> files = recordFiles();
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try (DataOutputStream output = new DataOutputStream(bytes)) {
+            output.writeInt(0x41504331);
+            output.writeByte(1);
+            output.writeShort(files.size());
+            for (File file : files) {
+                Record record = decrypt(file);
+                try {
+                    writeCatalogString(output, record.id);
+                    writeCatalogString(output, record.label);
+                    JSONObject attributes = new JSONObject(record.attributes);
+                    ArrayList<String> keys = new ArrayList<>();
+                    Iterator<String> iterator = attributes.keys();
+                    while (iterator.hasNext()) keys.add(iterator.next());
+                    Collections.sort(keys);
+                    output.writeByte(keys.size());
+                    for (String key : keys) {
+                        writeCatalogString(output, key);
+                        writeCatalogString(output, attributes.getString(key));
+                    }
+                    output.writeInt(record.secret.length);
+                } finally {
+                    java.util.Arrays.fill(record.secret, (byte)0);
+                }
+            }
+        }
+        byte[] encoded = bytes.toByteArray();
+        if (encoded.length > 1024 * 1024) throw new IOException("Secret catalog is too large");
+        writeOutput(outputDescriptor, encoded);
+        return files.size();
+    }
+
+    private static void writeCatalogString(DataOutputStream output, String value)
+            throws IOException {
+        byte[] encoded = value.getBytes(StandardCharsets.UTF_8);
+        if (encoded.length > 0xffff) throw new IOException("Secret catalog string is too large");
+        output.writeShort(encoded.length);
+        output.write(encoded);
+    }
     private SecretKey secretKey() throws Exception {
         KeyStore store = KeyStore.getInstance("AndroidKeyStore");
         store.load(null);
@@ -238,7 +281,7 @@ final class AndroidSecretStore {
             String label = readString(input, MAX_LABEL * 4);
             String attributes = readString(input, MAX_ATTRIBUTES_BYTES);
             int secretLength = input.readInt();
-            if (secretLength < 1 || secretLength > MAX_SECRET_BYTES
+            if (secretLength < 0 || secretLength > MAX_SECRET_BYTES
                     || secretLength != input.available()) {
                 throw new IOException("Secret payload length is invalid");
             }
@@ -258,7 +301,7 @@ final class AndroidSecretStore {
         android.system.StructStat stat = Os.fstat(descriptor);
         if ((stat.st_mode & android.system.OsConstants.S_IFMT)
                 != android.system.OsConstants.S_IFREG
-                || stat.st_size < 1 || stat.st_size > MAX_SECRET_BYTES) {
+                || stat.st_size < 0 || stat.st_size > MAX_SECRET_BYTES) {
             throw new IllegalArgumentException("Secret input must be a bounded regular file");
         }
         byte[] value = new byte[(int)stat.st_size];

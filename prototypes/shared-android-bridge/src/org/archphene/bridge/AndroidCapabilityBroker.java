@@ -169,6 +169,7 @@ final class AndroidCapabilityBroker implements Closeable {
                 && !"STORE_SECRET".equals(fields[1])
                 && !"READ_SECRET".equals(fields[1])
                 && !"LIST_SECRETS".equals(fields[1])
+                && !"CATALOG_SECRETS".equals(fields[1])
                 && descriptors != null && descriptors.length != 0) {
             throw new IllegalArgumentException("Unexpected capability descriptors");
         }
@@ -264,6 +265,11 @@ final class AndroidCapabilityBroker implements Closeable {
                 requireCapability(BridgeCapabilities.SECRETS);
                 return "OK\t" + secretStore.list(
                         requireRegularDescriptor(descriptors, "Secret index output"));
+            case "CATALOG_SECRETS":
+                requireFields(fields, 2);
+                requireCapability(BridgeCapabilities.SECRETS);
+                return "OK\t" + secretStore.catalog(
+                        requireRegularDescriptor(descriptors, "Secret catalog output"));
             default:
                 throw new IllegalArgumentException("Unknown capability request");
         }

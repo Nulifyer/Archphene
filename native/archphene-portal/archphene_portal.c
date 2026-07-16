@@ -1,6 +1,7 @@
 #include <dbus/dbus.h>
 
 #include "archphene_android.h"
+#include "archphene_secret_service.h"
 
 #include <errno.h>
 #include <signal.h>
@@ -572,8 +573,11 @@ static void handle_properties(DBusConnection *connection, DBusMessage *request) 
 
 static void handle_introspection(DBusConnection *connection, DBusMessage *request) {
     const char *path = dbus_message_get_path(request);
-    const char *xml = path != NULL && strcmp(path, NOTIFICATIONS_PATH) == 0
-            ? notifications_xml : portal_xml;
+    const char *xml = archphene_secret_service_introspection(path);
+    if (xml == NULL) {
+        xml = path != NULL && strcmp(path, NOTIFICATIONS_PATH) == 0
+                ? notifications_xml : portal_xml;
+    }
     DBusMessage *reply = dbus_message_new_method_return(request);
     if (reply == NULL || !dbus_message_append_args(reply,
             DBUS_TYPE_STRING, &xml, DBUS_TYPE_INVALID)) {
@@ -631,7 +635,7 @@ static void handle_message(DBusConnection *connection, DBusMessage *request) {
     } else if (dbus_message_is_method_call(request, CLASSIC_NOTIFICATION,
             "CloseNotification")) {
         handle_classic_close(connection, request);
-    } else {
+    } else if (!archphene_secret_service_handles(connection, request)) {
         send_error(connection, request, DBUS_ERROR_UNKNOWN_METHOD,
                 "Archphene does not implement this portal method");
     }
@@ -654,8 +658,11 @@ int main(void) {
         return 70;
     }
     dbus_connection_set_exit_on_disconnect(connection, FALSE);
+    const char *secrets_enabled = getenv("ARCHPHENE_ENABLE_SECRETS");
     if (own_name(connection, PORTAL_NAME, &error) != 0
-            || own_name(connection, CLASSIC_NOTIFICATION, &error) != 0) {
+            || own_name(connection, CLASSIC_NOTIFICATION, &error) != 0
+            || (secrets_enabled != NULL && strcmp(secrets_enabled, "1") == 0
+                && archphene_secret_service_own_name(connection, &error) != 0)) {
         fprintf(stderr, "Archphene portal could not own bus name: %s\n",
                 error.message == NULL ? "name already owned" : error.message);
         dbus_error_free(&error);
@@ -663,6 +670,18 @@ int main(void) {
         dbus_connection_unref(connection);
         return 70;
     }
+    dbus_bus_add_match(connection,
+            "type='signal',sender='org.freedesktop.DBus',"
+            "interface='org.freedesktop.DBus',member='NameOwnerChanged'", &error);
+    if (dbus_error_is_set(&error)) {
+        fprintf(stderr, "Archphene portal could not subscribe to owner changes: %s\n",
+                error.message == NULL ? "unknown error" : error.message);
+        dbus_error_free(&error);
+        dbus_connection_close(connection);
+        dbus_connection_unref(connection);
+        return 70;
+    }
+    dbus_connection_flush(connection);
     fprintf(stderr, "Archphene portal ready\n");
     while (running && dbus_connection_get_is_connected(connection)) {
         dbus_connection_read_write(connection, 250);
@@ -670,6 +689,8 @@ int main(void) {
         while ((message = dbus_connection_pop_message(connection)) != NULL) {
             if (dbus_message_get_type(message) == DBUS_MESSAGE_TYPE_METHOD_CALL)
                 handle_message(connection, message);
+            else if (dbus_message_get_type(message) == DBUS_MESSAGE_TYPE_SIGNAL)
+                archphene_secret_service_handle_signal(message);
             dbus_message_unref(message);
         }
     }

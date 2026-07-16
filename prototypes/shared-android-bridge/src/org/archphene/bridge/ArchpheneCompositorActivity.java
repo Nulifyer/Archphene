@@ -1190,7 +1190,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     private void startDesktopIntegration() throws IOException {
         desktopIntegration.start(new File(getApplicationInfo().nativeLibraryDir),
                 getCacheDir(), "@" + capabilityBroker.socketName(),
-                getApplicationInfo().loadLabel(getPackageManager()).toString());
+                getApplicationInfo().loadLabel(getPackageManager()).toString(),
+                capabilities.contains(BridgeCapabilities.SECRETS));
     }
 
     private void startAudioIntegration() throws IOException {

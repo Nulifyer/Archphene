@@ -87,11 +87,13 @@ The x86_64 emulator and physical AArch64 Samsung regressions validate framework 
 
 A wrapper declaring `secrets` receives a private encrypted collection. Secret identifiers, labels, and string attributes are validated and bounded; secret bytes enter and leave only through regular file descriptors. Records are named by a SHA-256 digest of the identifier, encrypted in full with AES-256-GCM, authenticated against the record filename, and written atomically. The non-exportable key is generated in Android Keystore with randomized encryption and unlocked-device enforcement where supported. The store is limited to 256 records, 64 KiB per secret, 8 KiB of attributes, and a 1 MiB metadata index. No Android runtime permission or accessibility-service privilege is involved because the collection remains inside the wrapper UID.
 
-The x86_64 emulator and physical AArch64 Samsung regressions validate exact readback, ciphertext plaintext absence, metadata, overwrite, persistence across process death, malformed and oversized rejection, deletion, stale-broker rejection, and absence of secret values from Android logs. This explicit API is not yet transparent to unmodified Linux applications. A private implementation of the [freedesktop.org Secret Service API](https://specifications.freedesktop.org/secret-service/latest/) must translate standard session-bus calls onto this store.
+The private session bus now owns `org.freedesktop.secrets` only for wrappers declaring `secrets`. Its [freedesktop.org Secret Service](https://specifications.freedesktop.org/secret-service/latest/) adapter exposes one always-unlocked login collection, sender-bound plain sessions, aliases, bounded search, create/replace, get/set, delete, bulk retrieval, properties, and zero-length values. Secret bytes cross the Android boundary only through private regular descriptors; closed or disconnected D-Bus clients lose their sessions.
+
+The 4 KB and 16 KB x86_64 emulators and physical AArch64 Samsung regressions validate the direct encrypted API plus a standard D-Bus client flow covering unsupported negotiation, session lifecycle, create, search, exact readback, overwrite, replacement, zero-length values, deletion, persistence across process death, malformed and oversized rejection, ciphertext plaintext absence, stale-broker rejection, and absence of secret values from Android logs. Packaged libsecret and KWallet client validation remains pending before broad toolkit compatibility is claimed.
 
 ## Remaining adapters
 
-The Secret Service D-Bus adapter, AT-SPI2 adapter, streaming XDG Camera/PipeWire, richer notification actions, non-HTTP URI policies, and other desktop portals remain unimplemented.
+Packaged libsecret/KWallet validation, the AT-SPI2 adapter, streaming XDG Camera/PipeWire, richer notification actions, non-HTTP URI policies, and other desktop portals remain incomplete.
 
 ## Native client
 

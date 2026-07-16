@@ -101,6 +101,7 @@ common_flags=(
 )
 "${TOOLCHAIN}/bin/${TARGET}${API_LEVEL}-clang" "${common_flags[@]}" \
   "$ROOT/native/archphene-portal/archphene_portal.c" \
+  "$ROOT/native/archphene-portal/archphene_secret_service.c" \
   "$ROOT/native/archphene-android-capability/archphene_android.c" \
   "$BUILD_ROOT/build/dbus/libdbus-1.a" \
   -pie -pthread -llog -o "$OUTPUT/portal-service"
@@ -108,6 +109,10 @@ common_flags=(
   "$ROOT/native/archphene-portal/archphene_portal_probe.c" \
   "$BUILD_ROOT/build/dbus/libdbus-1.a" \
   -pie -pthread -o "$OUTPUT/portal-probe"
+"${TOOLCHAIN}/bin/${TARGET}${API_LEVEL}-clang" "${common_flags[@]}" \
+  "$ROOT/native/archphene-portal/archphene_secret_probe.c" \
+  "$BUILD_ROOT/build/dbus/libdbus-1.a" \
+  -pie -pthread -o "$OUTPUT/secret-probe"
 "${TOOLCHAIN}/bin/${TARGET}${API_LEVEL}-clang" \
   -fPIE -O2 -Wall -Wextra -Werror \
   -I"$ROOT/native/archphene-android-capability" \
@@ -115,7 +120,7 @@ common_flags=(
   "$ROOT/native/archphene-android-capability/archphene_android.c" \
   -pie -o "$OUTPUT/xdg-open"
 
-for executable in dbus-daemon portal-service portal-probe xdg-open; do
+for executable in dbus-daemon portal-service portal-probe secret-probe xdg-open; do
   "${TOOLCHAIN}/bin/llvm-strip" "$OUTPUT/$executable"
   "${TOOLCHAIN}/bin/llvm-readelf" -h "$OUTPUT/$executable" \
     | grep -F 'Type:                              DYN'
@@ -127,4 +132,4 @@ if "${TOOLCHAIN}/bin/llvm-readelf" -d "$OUTPUT/dbus-daemon" | grep -q 'libexpat'
   exit 1
 fi
 sha256sum "$OUTPUT/dbus-daemon" "$OUTPUT/portal-service" \
-  "$OUTPUT/portal-probe" "$OUTPUT/xdg-open"
+  "$OUTPUT/portal-probe" "$OUTPUT/secret-probe" "$OUTPUT/xdg-open"

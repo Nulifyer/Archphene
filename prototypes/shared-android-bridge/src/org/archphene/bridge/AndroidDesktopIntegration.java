@@ -27,7 +27,7 @@ final class AndroidDesktopIntegration {
     private String busAddress;
 
     synchronized void start(File nativeLibraryDir, File cacheDirectory,
-            String brokerSocket, String appName) throws IOException {
+            String brokerSocket, String appName, boolean secretsEnabled) throws IOException {
         stop();
         File daemonFile = requireHelper(nativeLibraryDir, DAEMON);
         File portalFile = requireHelper(nativeLibraryDir, PORTAL);
@@ -65,6 +65,7 @@ final class AndroidDesktopIntegration {
         portalEnvironment.put("DBUS_SESSION_BUS_ADDRESS", busAddress);
         portalEnvironment.put("ARCHPHENE_ANDROID_BROKER", brokerSocket);
         portalEnvironment.put("ARCHPHENE_APP_NAME", appName);
+        portalEnvironment.put("ARCHPHENE_ENABLE_SECRETS", secretsEnabled ? "1" : "0");
         portal = portalBuilder.start();
         drain(portal, "portal");
         android.os.SystemClock.sleep(100);
@@ -82,6 +83,11 @@ final class AndroidDesktopIntegration {
             throw new IOException("Could not publish xdg-open adapter", error);
         }
         Log.i(TAG, "Private session bus and desktop adapters ready");
+    }
+
+    synchronized String busAddress() {
+        if (busAddress == null) throw new IllegalStateException("Desktop integration is not running");
+        return busAddress;
     }
 
     synchronized void applyEnvironment(Map<String, String> environment) {

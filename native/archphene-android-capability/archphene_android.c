@@ -356,6 +356,16 @@ int archphene_android_list_secrets(
             "ARCHPHENE/1\tLIST_SECRETS", output_fd, response, response_size);
 }
 
+int archphene_android_catalog_secrets(
+        int output_fd, char *response, size_t response_size) {
+    if (output_fd < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    return broker_request_with_fd(
+            "ARCHPHENE/1\tCATALOG_SECRETS", output_fd, response, response_size);
+}
+
 #ifdef ARCHPHENE_CAPABILITY_PROBE_MAIN
 int main(int argc, char **argv) {
     char response[MAX_REQUEST];
@@ -487,6 +497,15 @@ int main(int argc, char **argv) {
         }
         result = archphene_android_list_secrets(output_fd, response, sizeof(response));
         close(output_fd);
+    } else if (remaining == 2 && strcmp(argv[argument], "catalog-secrets") == 0) {
+        int output_fd = open(argv[argument + 1],
+                O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+        if (output_fd < 0) {
+            perror("open secret catalog output");
+            return 66;
+        }
+        result = archphene_android_catalog_secrets(output_fd, response, sizeof(response));
+        close(output_fd);
     } else {
         fprintf(stderr, "usage: %s [--socket @NAME] open-uri URI | "
                 "notify ID TITLE BODY | withdraw ID | print PDF TITLE | "
@@ -495,7 +514,8 @@ int main(int argc, char **argv) {
                 "publish-accessibility-tree FILE | accessibility-event NODE TYPE | "
                 "take-accessibility-action TIMEOUT_MS | "
                 "store-secret FILE ID LABEL ATTRIBUTES_JSON | "
-                "read-secret OUTPUT ID | delete-secret ID | list-secrets OUTPUT\n", argv[0]);
+                "read-secret OUTPUT ID | delete-secret ID | list-secrets OUTPUT | "
+                "catalog-secrets OUTPUT\n", argv[0]);
         return 64;
     }
     if (result < 0) {

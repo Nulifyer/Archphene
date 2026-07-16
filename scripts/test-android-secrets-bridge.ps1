@@ -157,6 +157,15 @@ if ($emptyList -ne "OK`t0" -or (Read-PrivateFile "files/empty-index.json") -ne "
     throw "Deleted secret remained in the metadata index"
 }
 
+$busAddress = (Read-PrivateFile "files/secrets-bus-address").Trim()
+$serviceProbe = (Native-Path).Replace(
+        "libarchphene_secrets_probe.so", "libarchphene_secret_service_probe.so")
+$serviceCommand = "export DBUS_SESSION_BUS_ADDRESS='$busAddress'; exec '$serviceProbe'"
+$serviceOutput = & $Adb -s $Serial shell run-as $Package sh -c "'$serviceCommand'" 2>&1
+if ($LASTEXITCODE -ne 0 -or ($serviceOutput -join "`n") -notmatch
+        '^PASS Secret Service:') {
+    throw "Secret Service D-Bus adapter failed: $($serviceOutput -join "`n")"
+}
 $logs = (Invoke-Adb @("logcat", "-d", "-v", "brief", "-s",
         "ArchpheneCapabilities:I", "AndroidRuntime:E", "*:S") "read secrets logs") -join "`n"
 if ($logs -match "FATAL EXCEPTION") { throw "Secrets probe crashed: $logs" }
@@ -164,4 +173,4 @@ if ($logs.Contains($Secret) -or $logs.Contains($UpdatedSecret)) {
     throw "Secret plaintext was written to Android logs"
 }
 Write-Host ("Android secrets bridge passed on $Serial ($AndroidAbi): encrypted storage, " +
-        "metadata, overwrite, restart persistence, bounds, delete, and lifecycle validated.")
+        "metadata, overwrite, restart persistence, bounds, delete, lifecycle, and standard D-Bus adapter validated.")
