@@ -2,6 +2,7 @@
     <uses-sdk android:minSdkVersion="23" android:targetSdkVersion="36" />
     <queries>
         <provider android:authorities="org.archpheneos.manager.runtime" />
+        <provider android:authorities="org.archphene.linux.p0392be9c9f103a39d951c2f39c3644d2.documents" />
     </queries>
 
     <application
@@ -26,15 +27,11 @@
         <meta-data android:name="org.archphene.bridge.data_assets" android:value="mousepad-data.zip,glibc-gconv.zip" />
 
         <provider
-            android:name="org.archphene.bridge.LinuxHomeDocumentsProvider"
+            android:name="org.archphene.bridge.LinuxHomeBrokerProvider"
             android:authorities="org.archphene.linux.mousepad.documents"
             android:exported="true"
             android:grantUriPermissions="true"
-            android:permission="android.permission.MANAGE_DOCUMENTS">
-            <intent-filter>
-                <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
-            </intent-filter>
-        </provider>
+            android:permission="org.archpheneos.permission.GUI_DOCUMENTS" />
 
         <activity
             android:name="org.archphene.bridge.DocumentOpenActivity"

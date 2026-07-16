@@ -132,7 +132,7 @@ See [Current project status](docs/project-status.md) for validated evidence and 
 ## Roadmap
 
 1. Replace the validated virpipe-to-SHM presentation path with zero-copy Android hardware buffers/dmabuf where supported, while retaining software fallback and expanding application regressions.
-2. Complete the multi-document Android storage broker and manager-owned shared user-document provider.
+2. Complete active-app document activation and the remaining Android capability brokers; manager-owned GUI homes and cold multi-document conflict handling are implemented.
 3. Expand the proven failure-isolated x86_64/AArch64 KCalc flow to toolkit-aware templates, generic metadata, and capability policy.
 4. Generate Android manifests and permission brokers from package capabilities.
 5. Expand compatibility to GPU-accelerated editors, browsers, creative applications, audio, and desktop/freeform multi-window use.

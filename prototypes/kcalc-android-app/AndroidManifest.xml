@@ -28,15 +28,11 @@
         <meta-data android:name="org.archphene.bridge.toolkit" android:value="qt6" />
         <meta-data android:name="org.archphene.bridge.log_tag" android:value="ArchpheneKCalc" />
         <provider
-            android:name="org.archphene.bridge.LinuxHomeDocumentsProvider"
+            android:name="org.archphene.bridge.LinuxHomeBrokerProvider"
             android:authorities="org.archphene.linux.kcalc.documents"
             android:exported="true"
             android:grantUriPermissions="true"
-            android:permission="android.permission.MANAGE_DOCUMENTS">
-            <intent-filter>
-                <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
-            </intent-filter>
-        </provider>
+            android:permission="org.archpheneos.permission.GUI_DOCUMENTS" />
 
         <activity
             android:name="org.archphene.bridge.DocumentOpenActivity"

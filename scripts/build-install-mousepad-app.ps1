@@ -33,10 +33,10 @@ $ManifestXml = [xml]$ManifestText
 $AndroidNamespace = "http://schemas.android.com/apk/res/android"
 $DocumentProviders = @($ManifestXml.manifest.application.provider | Where-Object {
     $_.GetAttribute("name", $AndroidNamespace) -eq
-        "org.archphene.bridge.LinuxHomeDocumentsProvider"
+        "org.archphene.bridge.LinuxHomeBrokerProvider"
 })
 if ($DocumentProviders.Count -ne 1) {
-    throw "Mousepad manifest must declare exactly one LinuxHomeDocumentsProvider; found $($DocumentProviders.Count)"
+    throw "Mousepad manifest must declare exactly one LinuxHomeBrokerProvider; found $($DocumentProviders.Count)"
 }
 foreach ($Expected in @($Descriptor.android.package, $Descriptor.android.label,
         $Descriptor.android.versionName, $Descriptor.source.metadataUrl, $Descriptor.runtime.linuxAbi)) {

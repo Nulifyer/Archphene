@@ -98,6 +98,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         readMetadata();
+        runBrokerPermissionProbe();
         runtimeProbeUri = getIntent().getStringExtra("archphene_test_runtime_module_uri");
         runtimeLoaderUri = getIntent().getStringExtra("archphene_test_runtime_loader_uri");
         runtimeLibraryUris = getIntent().getStringArrayExtra(
@@ -230,12 +231,56 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         });
     }
 
-    private File importDocumentIfAllowed() {
-        if (documentSession != null) return documentSession.importDocument(getIntent());
+    private List<File> importDocumentsIfAllowed() {
+        if (documentSession != null) {
+            List<File> imported = documentSession.importDocuments(getIntent());
+            runDocumentSessionProbe(imported);
+            return imported;
+        }
         if (AndroidDocumentSession.isDocumentIntent(getIntent())) {
             Log.w(logTag, "Ignoring document intent without declared bridge capability");
         }
-        return null;
+        return java.util.Collections.emptyList();
+    }
+
+    private void runBrokerPermissionProbe() {
+        String authority = getIntent().getStringExtra(
+                "archphene_test_private_broker_authority");
+        if ((getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) == 0
+                || authority == null) {
+            return;
+        }
+        Uri uri = new Uri.Builder().scheme("content").authority(authority)
+                .appendPath("document").appendPath("home").build();
+        try (android.database.Cursor result = getContentResolver().query(
+                uri, new String[] {"document_id"}, null, null, null)) {
+            if (result == null) {
+                Log.i(logTag,
+                        "Private GUI home provider unavailable to unauthorized caller");
+                return;
+            }
+            throw new SecurityException(
+                    "Private GUI home provider accepted unauthorized caller");
+        } catch (SecurityException expected) {
+            if (expected.getMessage() != null && expected.getMessage().startsWith(
+                    "Private GUI home provider accepted")) {
+                throw expected;
+            }
+            Log.i(logTag, "Private GUI home provider denied unauthorized caller");
+        }
+    }
+    private void runDocumentSessionProbe(List<File> imported) {
+        if ((getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) == 0
+                || !getIntent().getBooleanExtra(
+                        "archphene_test_document_conflict", false)) {
+            return;
+        }
+        try {
+            documentSession.runConflictProbe(imported);
+        } catch (Exception error) {
+            Log.e(logTag, "Document conflict probe failed", error);
+            throw new IllegalStateException("Document conflict probe failed", error);
+        }
     }
     private void loadManagerRuntimePack() {
         ContentProviderClient client = null;
@@ -684,10 +729,9 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 environment.put("FONTCONFIG_PATH", fontconfig.getParentFile().getAbsolutePath());
                 File gpuSocket = startGpuBridge();
                 applyToolkitEnvironment(environment, runtimeLib, config, gpuSocket);
-                File imported = importDocumentIfAllowed();
-                List<String> arguments = imported == null
-                        ? java.util.Collections.emptyList()
-                        : java.util.Collections.singletonList(imported.getAbsolutePath());
+                List<File> imported = importDocumentsIfAllowed();
+                List<String> arguments = new java.util.ArrayList<>();
+                for (File file : imported) arguments.add(file.getAbsolutePath());
                 RuntimeFdLauncher.Result result = RuntimeFdLauncher.runGlibc(
                         getContentResolver(), android.net.Uri.parse(runtimeProbeUri),
                         android.net.Uri.parse(runtimeLoaderUri), libraries,
@@ -746,14 +790,14 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             cache.mkdirs();
             config.mkdirs();
             tmp.mkdirs();
-            File imported = importDocumentIfAllowed();
+            List<File> imported = importDocumentsIfAllowed();
 
             ProcessBuilder builder = new ProcessBuilder(
                     loader.getAbsolutePath(),
                     "--library-path",
                     runtimeLib.getAbsolutePath() + ":" + apkLib.getAbsolutePath(),
                     executable.getAbsolutePath());
-            if (imported != null) builder.command().add(imported.getAbsolutePath());
+            for (File file : imported) builder.command().add(file.getAbsolutePath());
             Map<String, String> env = builder.environment();
             env.put("LD_LIBRARY_PATH", runtimeLib.getAbsolutePath() + ":" + apkLib.getAbsolutePath());
             env.put("GLIBC_TUNABLES", "glibc.pthread.rseq=0");

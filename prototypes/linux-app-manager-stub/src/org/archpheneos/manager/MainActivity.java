@@ -119,6 +119,8 @@ public final class MainActivity extends Activity {
             handleTestWrapperAssemblyIntent();
             handleTestGitHubReleaseIntent();
             handleTestRuntimeModuleIntent();
+            handleTestGuiDocumentsIntent();
+            handleTestDocumentSessionIntent();
         }
     }
 
@@ -126,7 +128,11 @@ public final class MainActivity extends Activity {
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
-        if (testHooksEnabled()) handleTestRuntimeModuleIntent();
+        if (testHooksEnabled()) {
+            handleTestRuntimeModuleIntent();
+            handleTestGuiDocumentsIntent();
+            handleTestDocumentSessionIntent();
+        }
         handleTerminalRequestIntent();
     }
     private boolean testHooksEnabled() {
@@ -2024,6 +2030,164 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private void handleTestGuiDocumentsIntent() {
+        String packageName = getIntent().getStringExtra("archphene_test_gui_documents");
+        getIntent().removeExtra("archphene_test_gui_documents");
+        if (packageName == null) return;
+        new Thread(() -> {
+            Uri created = null;
+            try {
+                String authority = "org.archpheneos.manager.documents";
+                String wanted = "app/" + packageName + "/home";
+                Uri children = android.provider.DocumentsContract.buildChildDocumentsUri(
+                        authority, "apps");
+                boolean found = false;
+                try (android.database.Cursor cursor = getContentResolver().query(children,
+                        new String[] {
+                                android.provider.DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                                android.provider.DocumentsContract.Document.COLUMN_DISPLAY_NAME },
+                        null, null, null)) {
+                    while (cursor != null && cursor.moveToNext()) {
+                        if (wanted.equals(cursor.getString(0))) {
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                if (!found) throw new SecurityException("GUI app home is not brokered");
+                Uri home = android.provider.DocumentsContract.buildDocumentUri(authority, wanted);
+                String name = "archphene-broker-" + System.currentTimeMillis() + ".txt";
+                created = android.provider.DocumentsContract.createDocument(
+                        getContentResolver(), home, "text/plain", name);
+                if (created == null) throw new IllegalStateException("Create returned no URI");
+                byte[] expected = "manager-broker-round-trip\n".getBytes(
+                        java.nio.charset.StandardCharsets.UTF_8);
+                try (java.io.OutputStream output = getContentResolver()
+                        .openOutputStream(created, "rwt")) {
+                    if (output == null) throw new IllegalStateException("Open returned no output");
+                    output.write(expected);
+                }
+                byte[] actual;
+                try (java.io.InputStream input = getContentResolver().openInputStream(created);
+                        java.io.ByteArrayOutputStream output =
+                                new java.io.ByteArrayOutputStream()) {
+                    if (input == null) throw new IllegalStateException("Open returned no input");
+                    input.transferTo(output);
+                    actual = output.toByteArray();
+                }
+                if (!java.util.Arrays.equals(expected, actual)) {
+                    throw new SecurityException("Brokered document content mismatch");
+                }
+                String renamedName = name.replace(".txt", "-renamed.txt");
+                Uri renamed = android.provider.DocumentsContract.renameDocument(
+                        getContentResolver(), created, renamedName);
+                if (renamed == null) throw new IllegalStateException("Rename returned no URI");
+                created = renamed;
+                try (android.database.Cursor cursor = getContentResolver().query(renamed,
+                        new String[] {
+                                android.provider.DocumentsContract.Document.COLUMN_DISPLAY_NAME },
+                        null, null, null)) {
+                    if (cursor == null || !cursor.moveToFirst()
+                            || !renamedName.equals(cursor.getString(0))) {
+                        throw new SecurityException("Brokered rename was not visible");
+                    }
+                }
+                if (!android.provider.DocumentsContract.deleteDocument(
+                        getContentResolver(), renamed)) {
+                    throw new IllegalStateException("Delete returned false");
+                }
+                created = null;
+                android.util.Log.i("ArchpheneDocuments",
+                        "GUI document broker passed package=" + packageName
+                                + " bytes=" + actual.length);
+                runOnUiThread(() -> showBanner("GUI document broker passed", false));
+            } catch (Exception error) {
+                android.util.Log.e("ArchpheneDocuments", "GUI document broker failed", error);
+                runOnUiThread(() -> showBanner(
+                        "GUI document broker failed: " + safeMessage(error), true));
+            } finally {
+                if (created != null) {
+                    try {
+                        android.provider.DocumentsContract.deleteDocument(
+                                getContentResolver(), created);
+                    } catch (Exception ignored) {}
+                }
+            }
+        }, "archphene-gui-documents-test").start();
+    }
+    private void handleTestDocumentSessionIntent() {
+        String sourcePackage = getIntent().getStringExtra(
+                "archphene_test_document_session_source");
+        String targetPackage = getIntent().getStringExtra(
+                "archphene_test_document_session_target");
+        getIntent().removeExtra("archphene_test_document_session_source");
+        getIntent().removeExtra("archphene_test_document_session_target");
+        if (sourcePackage == null || targetPackage == null) return;
+        new Thread(() -> {
+            try {
+                String authority = "org.archpheneos.manager.documents";
+                Uri home = android.provider.DocumentsContract.buildDocumentUri(authority,
+                        "app/" + sourcePackage + "/home");
+                String suffix = Long.toHexString(System.currentTimeMillis());
+                Uri firstDir = android.provider.DocumentsContract.createDocument(
+                        getContentResolver(), home,
+                        android.provider.DocumentsContract.Document.MIME_TYPE_DIR,
+                        "document-probe-a-" + suffix);
+                Uri secondDir = android.provider.DocumentsContract.createDocument(
+                        getContentResolver(), home,
+                        android.provider.DocumentsContract.Document.MIME_TYPE_DIR,
+                        "document-probe-b-" + suffix);
+                if (firstDir == null || secondDir == null) {
+                    throw new IllegalStateException("Could not create probe directories");
+                }
+                Uri first = android.provider.DocumentsContract.createDocument(
+                        getContentResolver(), firstDir, "text/plain", "same-name.txt");
+                Uri second = android.provider.DocumentsContract.createDocument(
+                        getContentResolver(), secondDir, "text/plain", "same-name.txt");
+                if (first == null || second == null) {
+                    throw new IllegalStateException("Could not create probe documents");
+                }
+                writeTestDocument(first, "first-source\n");
+                writeTestDocument(second, "second-source\n");
+                Intent launch = new Intent(Intent.ACTION_EDIT);
+                Intent launcher = getPackageManager().getLaunchIntentForPackage(targetPackage);
+                if (launcher == null || launcher.getComponent() == null) {
+                    throw new IllegalStateException("Target wrapper has no launcher Activity");
+                }
+                launch.setComponent(launcher.getComponent());
+                launch.setDataAndType(first, "text/plain");
+                android.content.ClipData documents = android.content.ClipData.newUri(
+                        getContentResolver(), "Archphene document session", first);
+                documents.addItem(new android.content.ClipData.Item(second));
+                launch.setClipData(documents);
+                launch.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                launch.putExtra("archphene_test_document_conflict", true);
+                grantUriPermission(targetPackage, first,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                                | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                grantUriPermission(targetPackage, second,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                                | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                startActivity(launch);
+                android.util.Log.i("ArchpheneDocuments",
+                        "Launched document conflict probe source=" + sourcePackage
+                                + " target=" + targetPackage);
+            } catch (Exception error) {
+                android.util.Log.e("ArchpheneDocuments",
+                        "Could not launch document conflict probe", error);
+                runOnUiThread(() -> showBanner(
+                        "Document conflict probe failed: " + safeMessage(error), true));
+            }
+        }, "archphene-document-session-test").start();
+    }
+
+    private void writeTestDocument(Uri uri, String value) throws java.io.IOException {
+        try (java.io.OutputStream output = getContentResolver().openOutputStream(uri, "rwt")) {
+            if (output == null) throw new java.io.IOException("Document is not writable");
+            output.write(value.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+    }
     private void handleTestGitHubReleaseIntent() {
         if (!getIntent().getBooleanExtra("archphene_test_github_releases", false)) return;
         new Thread(() -> {

@@ -53,6 +53,10 @@ If the Linux app wants to open a user document, save a user document, work insid
 After the user grants a project folder, the bridge can continue using its content URIs without prompting again until the grant is revoked.
 The Terminal companion provides the first concrete Android-facing side of this split. Its visible home entries are available as **Archphene Home** through a terminal-owned `DocumentsProvider`; dotfiles and runtime state are excluded. This permits Android Files and share/document flows to use scoped content-URI grants while commands continue to use ordinary paths inside the terminal sandbox. `archphene-import` and `archphene-export` provide explicit one-document transfers. `archphene-project add <alias>` persists a selected tree grant and maps a synchronized local POSIX mirror at `$HOME/Projects/<alias>`.
 
+Generated GUI wrappers now expose the same policy through one manager-owned **Archphene Apps** document root. Each installed generated GUI app appears as a directory backed by its visible `files/linux-home` entries. Dotfiles are never enumerated. The wrapper endpoint is not a public DocumentsProvider: it requires the manager's signature permission and also verifies that the calling package is `org.archpheneos.manager`. Android Files and other apps interact only with the manager DocumentsProvider and receive normal per-URI grants.
+
+Cold `ACTION_VIEW` and `ACTION_EDIT` launches accept up to 32 granted documents. The bridge imports them atomically into `Documents/Android`, allocates distinct Linux names for identical display names, hashes local and provider state, and writes back only changed writable documents. If Android and Linux both changed a document, the Android version is retained as `<name>.android-conflict-<hash>` before the Linux edit is written to the granted URI. The x86_64 emulator regression verifies manager create/read/write/rename/delete, private-provider denial, same-name import, conflict preservation, and writeback. A physical AArch64 device verifies manager CRUD and denial; a complete ARM conflict run still needs a document-capable wrapper with a valid active runtime pack.
+
 SAF is not a POSIX filesystem and unprivileged Android cannot mount arbitrary document trees with FUSE. The current project bridge therefore synchronizes explicitly rather than intercepting every filesystem syscall. It preserves simultaneous edits as conflict copies, defers deletions, rejects symlinks/path escapes, and retains the local mirror when a mapping is removed. A future live path broker would require OS support or a descriptor/RPC interception layer with clearly documented compatibility limits.
 
 ## Virtual Linux Layout
@@ -168,8 +172,8 @@ The emulator regression proves parser rejection and both sides of the access bou
 
 ## Next Milestones
 
-1. Extend the persisted-tree model from Terminal into manager-owned GUI application document brokers.
+1. Define generic activation or safe restart behavior when a new document arrives while a wrapper is already running.
 2. Add a small descriptor/RPC path-broker C API before claiming live SAF path translation.
-3. Add automatic-sync policy only after conflict, lifecycle, and power behavior are defined.
+3. Extend GUI wrappers from individual granted documents to persisted project trees with explicit lifecycle and power policy.
 4. Add a syscall probe for app-private path operations: `mkdir`, `mkdirat`, `open`, `openat`, `rename`, `unlink`, `fsync`, and `stat`.
 

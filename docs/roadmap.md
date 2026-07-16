@@ -30,8 +30,8 @@ Archphene is moving from application-specific proofs toward a package-driven And
 
 4. **Permission and document policy**
    - generate manifest permissions from declared capabilities;
-   - complete multi-document conflict/error handling;
-   - provide a manager-owned user-document provider with explicit per-app grants.
+   - complete active-app document activation and remaining conflict/error handling;
+   - extend the manager-owned user-document provider from cold document grants to persisted GUI project trees.
 
 ## P1: desktop usability
 
