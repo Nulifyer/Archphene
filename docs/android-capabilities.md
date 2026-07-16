@@ -63,7 +63,9 @@ Speaker playback needs no runtime permission. Microphone input is disabled by de
 
 The permission dialog grant and denial paths pass on the x86_64 emulator. An unmodified Pulse `pacat` client on a physical AArch64 Samsung captured 480,000 bytes in five seconds, including 356,437 nonzero bytes, after consent. The same test produced Android-mandated silence while the device-wide microphone privacy switch was enabled. Wrapper force-stop removes the Pulse server, input helper, and Linux client process tree.
 
-Camera, drag-and-drop, accessibility, secrets/keyrings, richer notification actions, non-HTTP URI policies, and other desktop portals remain unimplemented. Each must define an Android permission and lifecycle policy before receiving a broker command.
+Capability-scoped plain-text drag-and-drop now maps Android `DragEvent` motion/drop/cancel lifecycle to standard Wayland data devices in both directions. Text is bounded to 8 MiB, source actions are copy-only, and URI-bearing clips are rejected instead of exposing Android `content://` identifiers to Linux. URI/file drag-and-drop remains pending and must import through the SAF/document broker.
+
+Camera, accessibility, secrets/keyrings, richer notification actions, non-HTTP URI policies, and other desktop portals remain unimplemented. Each must define an Android permission and lifecycle policy before receiving a broker command.
 
 ## Native client
 

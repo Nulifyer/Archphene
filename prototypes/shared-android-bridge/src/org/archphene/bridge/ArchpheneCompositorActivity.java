@@ -2,6 +2,8 @@ package org.archphene.bridge;
 
 import android.app.Activity;
 import android.app.Dialog;
+import android.content.ClipData;
+import android.content.ClipDescription;
 import android.content.ContentProviderClient;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
@@ -16,10 +18,12 @@ import android.os.Build;
 import android.os.Binder;
 import android.os.Bundle;
 import android.util.Log;
+import android.view.DragEvent;
 import android.view.Gravity;
 import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
+import android.view.View;
 import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowManager;
@@ -100,6 +104,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     private final Map<Integer, SecondaryWindow> secondaryWindows = new HashMap<>();
     private boolean independentWindows;
     private ArchpheneCompositorSession.WindowFrame primaryFrame;
+    private final Object linuxDragToken = new Object();
+    private boolean androidTextDragDropped;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -193,6 +199,11 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                     }
 
                     @Override
+                    public void onLinuxDragText(String text) {
+                        startLinuxTextDrag(text);
+                    }
+
+                    @Override
                     public void onError(String detail) {
                         Log.e(logTag, "Shared compositor failed: " + detail);
                     }
@@ -200,6 +211,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         holder[0] = session;
         session.setIndependentWindows(independentWindows);
         installInputRouting();
+        installDragRouting(compositorView, 0);
 
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(systemChrome);
@@ -474,6 +486,100 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         });
     }
 
+    private void installDragRouting(ArchpheneInputView target, int windowId) {
+        if (!capabilities.contains(BridgeCapabilities.DRAG_DROP)) return;
+        target.setOnDragListener((view, event) -> {
+            if (event.getLocalState() == linuxDragToken) {
+                if (event.getAction() == DragEvent.ACTION_DRAG_ENDED && session != null) {
+                    session.finishLinuxDrag(event.getResult());
+                }
+                return true;
+            }
+            switch (event.getAction()) {
+                case DragEvent.ACTION_DRAG_STARTED: {
+                    androidTextDragDropped = false;
+                    ClipDescription description = event.getClipDescription();
+                    return description != null
+                            && description.hasMimeType(ClipDescription.MIMETYPE_TEXT_PLAIN);
+                }
+                case DragEvent.ACTION_DRAG_ENTERED:
+                    return true;
+                case DragEvent.ACTION_DRAG_LOCATION:
+                    routeAndroidDragMotion(target, windowId, event);
+                    return true;
+                case DragEvent.ACTION_DROP: {
+                    routeAndroidDragMotion(target, windowId, event);
+                    ClipData clip = event.getClipData();
+                    if (clip == null || clip.getItemCount() != 1
+                            || clip.getItemAt(0).getUri() != null) {
+                        if (session != null) session.cancelAndroidDrag();
+                        return false;
+                    }
+                    CharSequence value = clip.getItemAt(0).coerceToText(this);
+                    String text = value == null ? "" : value.toString();
+                    if (text.getBytes(StandardCharsets.UTF_8).length > 8 * 1024 * 1024) {
+                        if (session != null) session.cancelAndroidDrag();
+                        return false;
+                    }
+                    androidTextDragDropped = true;
+                    if (session != null) session.androidDropText(text);
+                    return true;
+                }
+                case DragEvent.ACTION_DRAG_EXITED:
+                    if (session != null) session.cancelAndroidDrag();
+                    return true;
+                case DragEvent.ACTION_DRAG_ENDED:
+                    if (!androidTextDragDropped && session != null) {
+                        session.cancelAndroidDrag();
+                    }
+                    androidTextDragDropped = false;
+                    return true;
+                default:
+                    return false;
+            }
+        });
+    }
+
+    private void routeAndroidDragMotion(
+            ArchpheneInputView target, int windowId, DragEvent event) {
+        if (session == null) return;
+        int width = target.getDrawable() == null
+                ? target.getWidth() : target.getDrawable().getIntrinsicWidth();
+        int height = target.getDrawable() == null
+                ? target.getHeight() : target.getDrawable().getIntrinsicHeight();
+        session.androidDragMotion(windowId, target, Math.max(1, width), Math.max(1, height),
+                event.getX(), event.getY(), android.os.SystemClock.uptimeMillis());
+    }
+
+    private void startLinuxTextDrag(String text) {
+        if (session == null || text == null || text.isEmpty()
+                || !capabilities.contains(BridgeCapabilities.DRAG_DROP)) {
+            if (session != null) session.finishLinuxDrag(false);
+            return;
+        }
+        ArchpheneInputView source = compositorView;
+        for (SecondaryWindow window : secondaryWindows.values()) {
+            if (window.view.hasFocus()) {
+                source = window.view;
+                break;
+            }
+        }
+        ClipData data = ClipData.newPlainText("Archphene Linux drag", text);
+        ImageView shadowView = new ImageView(this);
+        shadowView.setImageResource(android.R.drawable.ic_menu_edit);
+        int shadowSize = Math.round(48 * getResources().getDisplayMetrics().density);
+        shadowView.layout(0, 0, shadowSize, shadowSize);
+        View.DragShadowBuilder shadow = new View.DragShadowBuilder(shadowView);
+        boolean started;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            started = source.startDragAndDrop(
+                    data, shadow, linuxDragToken, View.DRAG_FLAG_GLOBAL);
+        } else {
+            started = source.startDrag(data, shadow, linuxDragToken, 0);
+        }
+        if (!started) session.finishLinuxDrag(false);
+    }
+
     private boolean shouldUseIndependentWindows() {
         return isInMultiWindowMode()
                 || getResources().getConfiguration().smallestScreenWidthDp >= 600;
@@ -604,6 +710,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             dialog.setOnKeyListener((ignored, keyCode, event) ->
                     session != null && session.key(event));
             installInputRouting();
+            installDragRouting(view, id);
             dialog.show();
             Window window = dialog.getWindow();
             if (window != null) {

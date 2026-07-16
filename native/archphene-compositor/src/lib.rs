@@ -162,6 +162,9 @@ pub struct CompositorState {
     android_clipboard_offered: bool,
     pending_android_paste_fds: VecDeque<File>,
     pending_linux_copy_fds: VecDeque<File>,
+    pending_linux_drag_fds: VecDeque<File>,
+    linux_drag_source: Option<WlDataSource>,
+    android_drag: Option<AndroidDragState>,
     text_input_manager_binds: u32,
     text_input_count: u32,
     text_inputs: Vec<ZwpTextInputV3>,
@@ -288,7 +291,14 @@ struct DataDeviceData {
 #[derive(Clone)]
 enum ClipboardOfferSource {
     Wayland(WlDataSource),
-    Android,
+    AndroidClipboard,
+    AndroidDrag(Arc<Mutex<Option<Vec<u8>>>>),
+}
+
+struct AndroidDragState {
+    device: WlDataDevice,
+    offer: WlDataOffer,
+    payload: Arc<Mutex<Option<Vec<u8>>>>,
 }
 
 struct DataOfferData {
@@ -2193,34 +2203,53 @@ fn publish_android_selection(state: &mut CompositorState, handle: &DisplayHandle
             state,
             handle,
             device,
-            ClipboardOfferSource::Android,
+            ClipboardOfferSource::AndroidClipboard,
             mime_types.clone(),
         );
     }
+}
+
+fn source_text_mime(source: &WlDataSource) -> Option<String> {
+    let source_data = source.data::<DataSourceData>()?;
+    let mime_types = source_data
+        .mime_types
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    TEXT_MIME_TYPES
+        .iter()
+        .find(|candidate| mime_types.iter().any(|offered| offered == **candidate))
+        .map(|mime_type| (*mime_type).to_owned())
 }
 
 fn queue_linux_copy(state: &mut CompositorState, source: &WlDataSource) {
     if !state.clipboard_active || !source.is_alive() {
         return;
     }
-    let Some(source_data) = source.data::<DataSourceData>() else {
-        return;
-    };
-    let mime_types = source_data
-        .mime_types
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let Some(mime_type) = TEXT_MIME_TYPES
-        .iter()
-        .find(|candidate| mime_types.iter().any(|offered| offered == **candidate))
-    else {
+    let Some(mime_type) = source_text_mime(source) else {
         return;
     };
     let Ok((read_end, write_end)) = create_cloexec_pipe() else {
         return;
     };
-    source.send((*mime_type).to_owned(), write_end.as_fd());
+    source.send(mime_type, write_end.as_fd());
     state.pending_linux_copy_fds.push_back(read_end);
+}
+
+fn queue_linux_drag(state: &mut CompositorState, source: &WlDataSource) -> bool {
+    let Some(mime_type) = source_text_mime(source) else {
+        return false;
+    };
+    let Ok((read_end, write_end)) = create_cloexec_pipe() else {
+        return false;
+    };
+    source.target(Some(mime_type.clone()));
+    if source.version() >= 3 {
+        source.action(wl_data_device_manager::DndAction::Copy.into());
+    }
+    source.send(mime_type, write_end.as_fd());
+    state.pending_linux_drag_fds.push_back(read_end);
+    state.linux_drag_source = Some(source.clone());
+    true
 }
 impl GlobalDispatch<ZwpPointerGesturesV1, ()> for CompositorState {
     fn bind(
@@ -2832,7 +2861,7 @@ impl Dispatch<WlDataDeviceManager, ()> for CompositorState {
                         state,
                         handle,
                         &device,
-                        ClipboardOfferSource::Android,
+                        ClipboardOfferSource::AndroidClipboard,
                         TEXT_MIME_TYPES
                             .iter()
                             .map(|mime_type| (*mime_type).to_owned())
@@ -2881,6 +2910,10 @@ impl Dispatch<WlDataSource, DataSourceData> for CompositorState {
             .selection_source
             .as_ref()
             .is_some_and(|source| source.id() == resource.id());
+        let was_drag = state
+            .linux_drag_source
+            .as_ref()
+            .is_some_and(|source| source.id() == resource.id());
         state
             .data_sources
             .retain(|source| source.id() != resource.id());
@@ -2890,6 +2923,10 @@ impl Dispatch<WlDataSource, DataSourceData> for CompositorState {
             for device in state.data_devices.iter().filter(|device| device.is_alive()) {
                 device.selection(None);
             }
+        }
+        if was_drag {
+            state.linux_drag_source = None;
+            state.pending_linux_drag_fds.clear();
         }
     }
 }
@@ -2941,7 +2978,44 @@ impl Dispatch<WlDataDevice, DataDeviceData> for CompositorState {
                 }
                 publish_wayland_selection(state, handle, source.as_ref());
             }
-            wl_data_device::Request::StartDrag { .. } | wl_data_device::Request::Release => {}
+            wl_data_device::Request::StartDrag {
+                source,
+                origin,
+                icon: _,
+                serial,
+            } => {
+                let valid_serial = state.selection_serials.iter().any(|candidate| {
+                    candidate.serial == serial
+                        && candidate.surface.id() == origin.id()
+                        && candidate.surface.id().same_client_as(&resource.id())
+                });
+                if !data.seat.id().same_client_as(&resource.id()) || !valid_serial {
+                    return;
+                }
+                let Some(source) = source else {
+                    return;
+                };
+                let Some(source_data) = source.data::<DataSourceData>() else {
+                    return;
+                };
+                if source_data.used.swap(true, Ordering::AcqRel) {
+                    resource.post_error(
+                        wl_data_device::Error::UsedSource,
+                        "wl_data_source was already used",
+                    );
+                    return;
+                }
+                if let Some(previous) = state.linux_drag_source.take() {
+                    if previous.is_alive() {
+                        previous.cancelled();
+                    }
+                }
+                state.pending_linux_drag_fds.clear();
+                if !queue_linux_drag(state, &source) {
+                    source.cancelled();
+                }
+            }
+            wl_data_device::Request::Release => {}
             _ => unreachable!("wl_data_device request added without an implementation"),
         }
     }
@@ -2978,15 +3052,33 @@ impl Dispatch<WlDataOffer, DataOfferData> for CompositorState {
                     ClipboardOfferSource::Wayland(source) if source.is_alive() => {
                         source.send(mime_type, fd.as_fd());
                     }
-                    ClipboardOfferSource::Android if state.clipboard_active => {
+                    ClipboardOfferSource::AndroidClipboard if state.clipboard_active => {
                         state.pending_android_paste_fds.push_back(File::from(fd));
                     }
-                    ClipboardOfferSource::Wayland(_) | ClipboardOfferSource::Android => {}
+                    ClipboardOfferSource::AndroidDrag(payload) => {
+                        if let Some(bytes) = payload
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .as_ref()
+                        {
+                            let mut output = File::from(fd);
+                            let _ = output.write_all(bytes);
+                        }
+                    }
+                    ClipboardOfferSource::Wayland(_) | ClipboardOfferSource::AndroidClipboard => {}
+                }
+            }
+            wl_data_offer::Request::Finish => {
+                if state
+                    .android_drag
+                    .as_ref()
+                    .is_some_and(|drag| drag.offer.id() == _resource.id())
+                {
+                    state.android_drag = None;
                 }
             }
             wl_data_offer::Request::Destroy
             | wl_data_offer::Request::Accept { .. }
-            | wl_data_offer::Request::Finish
             | wl_data_offer::Request::SetActions { .. } => {}
             _ => unreachable!("wl_data_offer request added without an implementation"),
         }
@@ -2998,6 +3090,13 @@ impl Dispatch<WlDataOffer, DataOfferData> for CompositorState {
         resource: &WlDataOffer,
         _data: &DataOfferData,
     ) {
+        if state
+            .android_drag
+            .as_ref()
+            .is_some_and(|drag| drag.offer.id() == resource.id())
+        {
+            state.android_drag = None;
+        }
         state
             .data_offers
             .retain(|offer| offer.id() != resource.id());
@@ -6656,6 +6755,17 @@ impl CompositorCore {
         if !active {
             self.state.pending_android_paste_fds.clear();
             self.state.pending_linux_copy_fds.clear();
+            self.state.pending_linux_drag_fds.clear();
+            if let Some(source) = self.state.linux_drag_source.take()
+                && source.is_alive()
+            {
+                source.cancelled();
+            }
+            if let Some(drag) = self.state.android_drag.take()
+                && drag.device.is_alive()
+            {
+                drag.device.leave();
+            }
             if self.state.android_clipboard_offered {
                 self.state.android_clipboard_offered = false;
                 for device in self
@@ -6706,6 +6816,127 @@ impl CompositorCore {
             .pop_front()
             .map_or(-1, IntoRawFd::into_raw_fd)
     }
+
+    pub fn take_linux_drag_fd(&mut self) -> RawFd {
+        self.state
+            .pending_linux_drag_fds
+            .pop_front()
+            .map_or(-1, IntoRawFd::into_raw_fd)
+    }
+
+    pub fn finish_linux_drag(&mut self, accepted: bool) -> u32 {
+        let Some(source) = self.state.linux_drag_source.take() else {
+            return 0;
+        };
+        self.state.pending_linux_drag_fds.clear();
+        if !source.is_alive() {
+            return 0;
+        }
+        if accepted && source.version() >= 3 {
+            source.dnd_drop_performed();
+            source.dnd_finished();
+        } else {
+            source.cancelled();
+        }
+        1
+    }
+
+    pub fn begin_android_text_drag(&mut self, x: f64, y: f64) -> u32 {
+        self.cancel_android_drag();
+        let Some(surface) = self.state.root_surface.clone() else {
+            return 0;
+        };
+        let Some(device) = self
+            .state
+            .data_devices
+            .iter()
+            .find(|device| device.is_alive() && device.id().same_client_as(&surface.id()))
+            .cloned()
+        else {
+            return 0;
+        };
+        let Ok(client) = self.display.handle().get_client(device.id()) else {
+            return 0;
+        };
+        let payload = Arc::new(Mutex::new(None));
+        let mime_types = TEXT_MIME_TYPES
+            .iter()
+            .map(|mime_type| (*mime_type).to_owned())
+            .collect::<Vec<_>>();
+        let Ok(offer) = client.create_resource::<WlDataOffer, _, CompositorState>(
+            &self.display.handle(),
+            device.version().min(3),
+            DataOfferData {
+                source: ClipboardOfferSource::AndroidDrag(payload.clone()),
+                mime_types: mime_types.clone(),
+            },
+        ) else {
+            return 0;
+        };
+        device.data_offer(&offer);
+        for mime_type in mime_types {
+            offer.offer(mime_type);
+        }
+        if offer.version() >= 3 {
+            offer.source_actions(wl_data_device_manager::DndAction::Copy.into());
+            offer.action(wl_data_device_manager::DndAction::Copy.into());
+        }
+        let serial = self.next_input_serial();
+        let (local_x, local_y) = self.pointer_local_coordinates(&surface, x, y);
+        device.enter(serial, &surface, local_x, local_y, Some(&offer));
+        self.state.data_offer_count = self.state.data_offer_count.saturating_add(1);
+        self.state.data_offers.push(offer.clone());
+        self.state.android_drag = Some(AndroidDragState {
+            device,
+            offer,
+            payload,
+        });
+        1
+    }
+
+    pub fn android_drag_motion(&mut self, x: f64, y: f64, time: u32) -> u32 {
+        if self.state.android_drag.is_none() && self.begin_android_text_drag(x, y) == 0 {
+            return 0;
+        }
+        let Some(surface) = self.state.root_surface.as_ref() else {
+            return 0;
+        };
+        let (local_x, local_y) = self.pointer_local_coordinates(surface, x, y);
+        let Some(drag) = self.state.android_drag.as_ref() else {
+            return 0;
+        };
+        drag.device.motion(time, local_x, local_y);
+        1
+    }
+
+    pub fn android_drop_text(&mut self, text: Vec<u8>) -> u32 {
+        const MAX_DRAG_BYTES: usize = 8 * 1024 * 1024;
+        if text.len() > MAX_DRAG_BYTES {
+            self.cancel_android_drag();
+            return 0;
+        }
+        let Some(drag) = self.state.android_drag.as_ref() else {
+            return 0;
+        };
+        *drag
+            .payload
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(text);
+        drag.device.drop();
+        1
+    }
+
+    pub fn cancel_android_drag(&mut self) -> u32 {
+        let Some(drag) = self.state.android_drag.take() else {
+            return 0;
+        };
+        if drag.device.is_alive() {
+            drag.device.leave();
+        }
+        let _ = drag.offer;
+        1
+    }
+
     pub fn text_input_manager_bind_count(&self) -> u32 {
         self.state.text_input_manager_binds
     }
@@ -7951,6 +8182,124 @@ fn receive_probe_data_source_send(
     destination.write_all(payload)?;
     Ok(payload.len())
 }
+fn receive_probe_drag_source_send(
+    socket_fd: RawFd,
+    source_id: u32,
+    callback_id: u32,
+    expected_mime_type: &str,
+    payload: &[u8],
+) -> io::Result<usize> {
+    let mut pending = Vec::new();
+    let mut destination: Option<File> = None;
+    let mut targeted = false;
+    let mut action_copy = false;
+    let mut sent = false;
+    let mut synced = false;
+    for _ in 0..16 {
+        let mut bytes = [0u8; 4096];
+        let mut io_vector = libc::iovec {
+            iov_base: bytes.as_mut_ptr().cast(),
+            iov_len: bytes.len(),
+        };
+        let control_size = unsafe { libc::CMSG_SPACE(size_of::<RawFd>() as u32) } as usize;
+        let control_words = control_size.div_ceil(size_of::<usize>());
+        let mut control = vec![0usize; control_words];
+        let mut message: libc::msghdr = unsafe { zeroed() };
+        message.msg_iov = &mut io_vector;
+        message.msg_iovlen = 1;
+        message.msg_control = control.as_mut_ptr().cast();
+        message.msg_controllen = control_size;
+        let received = loop {
+            let result = unsafe { libc::recvmsg(socket_fd, &mut message, 0) };
+            if result >= 0 {
+                break result as usize;
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        };
+        if received == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "drag source event stream closed",
+            ));
+        }
+        let control_message = unsafe { libc::CMSG_FIRSTHDR(&message) };
+        if !control_message.is_null()
+            && unsafe { (*control_message).cmsg_level } == libc::SOL_SOCKET
+            && unsafe { (*control_message).cmsg_type } == libc::SCM_RIGHTS
+        {
+            let received_fd =
+                unsafe { ptr::read_unaligned(libc::CMSG_DATA(control_message).cast::<RawFd>()) };
+            if received_fd >= 0 {
+                if destination.is_some() {
+                    unsafe { libc::close(received_fd) };
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "multiple drag source FDs",
+                    ));
+                }
+                destination = Some(unsafe { File::from_raw_fd(received_fd) });
+            }
+        }
+        pending.extend_from_slice(&bytes[..received]);
+        loop {
+            if pending.len() < 8 {
+                break;
+            }
+            let object = u32::from_ne_bytes(pending[0..4].try_into().expect("fixed header"));
+            let word = u32::from_ne_bytes(pending[4..8].try_into().expect("fixed header"));
+            let opcode = word & 0xffff;
+            let size = (word >> 16) as usize;
+            if size < 8 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid drag source event size",
+                ));
+            }
+            if pending.len() < size {
+                break;
+            }
+            let body = &pending[8..size];
+            let parse_string = |value: &[u8]| -> io::Result<Option<String>> {
+                if value.len() < 4 {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, "short string"));
+                }
+                let length =
+                    u32::from_ne_bytes(value[0..4].try_into().expect("string length")) as usize;
+                if length == 0 {
+                    return Ok(None);
+                }
+                if length > value.len() - 4 || value[4 + length - 1] != 0 {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid string"));
+                }
+                std::str::from_utf8(&value[4..4 + length - 1])
+                    .map(|text| Some(text.to_owned()))
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+            };
+            if object == source_id && opcode == 0 {
+                targeted = parse_string(body)?.as_deref() == Some(expected_mime_type);
+            } else if object == source_id && opcode == 5 && body.len() == 4 {
+                action_copy = u32::from_ne_bytes(body.try_into().expect("action body")) == 1;
+            } else if object == source_id && opcode == 1 {
+                sent = parse_string(body)?.as_deref() == Some(expected_mime_type);
+            } else if object == callback_id && opcode == 0 {
+                synced = true;
+            }
+            pending.drain(..size);
+        }
+        if targeted && action_copy && sent && synced && destination.is_some() {
+            let mut destination = destination.expect("checked destination");
+            destination.write_all(payload)?;
+            return Ok(payload.len());
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "incomplete coalesced drag source events",
+    ))
+}
 fn send_probe_data_offer_receive(
     socket_fd: RawFd,
     offer_id: u32,
@@ -8102,6 +8451,31 @@ pub extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeRec
     }
 }
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeReceiveDragSourceSend(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    socket_fd: i32,
+    source_id: i32,
+    callback_id: i32,
+) -> i32 {
+    const PAYLOAD: &[u8] = b"ARCHPHENE_WAYLAND_TO_ANDROID";
+    let (Ok(source_id), Ok(callback_id)) = (u32::try_from(source_id), u32::try_from(callback_id))
+    else {
+        return -1;
+    };
+    match receive_probe_drag_source_send(
+        socket_fd,
+        source_id,
+        callback_id,
+        TEXT_MIME_TYPES[0],
+        PAYLOAD,
+    ) {
+        Ok(size) => i32::try_from(size).unwrap_or(i32::MAX),
+        Err(_) => -2,
+    }
+}
+
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeSendDataOfferReceive(
     _environment: *mut std::ffi::c_void,
     _activity: *mut std::ffi::c_void,
@@ -8113,6 +8487,75 @@ pub extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeSen
     }
     send_probe_data_offer_receive(socket_fd, offer_id as u32, TEXT_MIME_TYPES[0]).unwrap_or(-2)
 }
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeTakeLinuxDragFd(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+        return -1;
+    };
+    core.take_linux_drag_fd()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeFinishLinuxDrag(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+    accepted: u8,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+        return -1;
+    };
+    i32::try_from(core.finish_linux_drag(accepted != 0)).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeAndroidDragMotion(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+    x: i32,
+    y: i32,
+    time: i32,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+        return -1;
+    };
+    i32::try_from(core.android_drag_motion(f64::from(x), f64::from(y), time as u32))
+        .unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeAndroidDropText(
+    environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+    value: jbyteArray,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+        return -1;
+    };
+    let Some(text) = java_byte_array(environment, value) else {
+        return -2;
+    };
+    i32::try_from(core.android_drop_text(text)).unwrap_or(i32::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeCancelAndroidDrag(
+    _environment: *mut std::ffi::c_void,
+    _activity: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+        return -1;
+    };
+    i32::try_from(core.cancel_android_drag()).unwrap_or(i32::MAX)
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeReceiveKeyboardKeymap(
     _environment: *mut std::ffi::c_void,
@@ -9700,6 +10143,13 @@ pub unsafe extern "system" fn Java_org_archphene_bridge_NativeCompositor_nativeI
         56 => return i32::try_from(core.pointer_count()).unwrap_or(i32::MAX),
         57 => return i32::try_from(core.touch_count()).unwrap_or(i32::MAX),
         58 => return core.popup_component(a as u32, b as u32),
+        59 => {
+            return i32::try_from(core.android_drag_motion(f64::from(a), f64::from(b), c as u32))
+                .unwrap_or(i32::MAX);
+        }
+        60 => return i32::try_from(core.cancel_android_drag()).unwrap_or(i32::MAX),
+        61 => return core.take_linux_drag_fd(),
+        62 => return i32::try_from(core.finish_linux_drag(a != 0)).unwrap_or(i32::MAX),
         _ => return -3,
     };
     i32::try_from(value).unwrap_or(i32::MAX)
@@ -9743,6 +10193,12 @@ pub unsafe extern "system" fn Java_org_archphene_bridge_NativeCompositor_nativeB
                 return -2;
             };
             copy_to_java_byte_array(environment, value, text.as_bytes())
+        }
+        6 => {
+            let Some(text) = java_byte_array(environment, value) else {
+                return -2;
+            };
+            i32::try_from(core.android_drop_text(text)).unwrap_or(i32::MAX)
         }
         _ => -3,
     }

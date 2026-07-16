@@ -70,6 +70,8 @@ public final class MainActivity extends Activity {
     private static native int nativeReceiveKeyboardKeymap(int socketFd, int keyboardId);
     private static native int nativeSendDataOfferReceive(int socketFd, int offerId);
     private static native int nativeReceiveDataSourceSend(int socketFd, int sourceId);
+    private static native int nativeReceiveDragSourceSend(
+            int socketFd, int sourceId, int callbackId);
     private static native int nativeDispatchOnce(long handle);
     private static native int nativeCompositorBindCount(long handle);
     private static native int nativeSubcompositorBindCount(long handle);
@@ -101,6 +103,11 @@ public final class MainActivity extends Activity {
     private static native int nativeOfferAndroidClipboardText(long handle);
     private static native int nativeTakeAndroidPasteFd(long handle);
     private static native int nativeTakeLinuxCopyFd(long handle);
+    private static native int nativeTakeLinuxDragFd(long handle);
+    private static native int nativeFinishLinuxDrag(long handle, boolean accepted);
+    private static native int nativeAndroidDragMotion(long handle, int x, int y, int time);
+    private static native int nativeAndroidDropText(long handle, byte[] text);
+    private static native int nativeCancelAndroidDrag(long handle);
     private static native int nativeTextInputManagerBindCount(long handle);
     private static native int nativeTextInputCount(long handle);
     private static native int nativeImeActive(long handle);
@@ -350,7 +357,13 @@ public final class MainActivity extends Activity {
         result.setTextSize(20);
         content.addView(result);
         setContentView(content);
-        new Thread(() -> runProbe(result, frameView), "native-compositor-probe").start();
+        boolean dragOnly = getIntent().getBooleanExtra("drag_only", false);
+        new Thread(
+                () -> {
+                    if (dragOnly) runDragProbe(result);
+                    else runProbe(result, frameView);
+                },
+                dragOnly ? "native-drag-probe" : "native-compositor-probe").start();
     }
 
     @Override
@@ -1465,6 +1478,269 @@ public final class MainActivity extends Activity {
         });
     }
 
+    private void runDragProbe(TextView result) {
+        String message;
+        boolean passed = false;
+        long core = 0;
+        try {
+            core = nativeCreateCore();
+            if (core == 0) throw new IllegalStateException("display creation");
+            ParcelFileDescriptor[] pair = ParcelFileDescriptor.createSocketPair();
+            try (ParcelFileDescriptor client = pair[0];
+                    FileInputStream input = new FileInputStream(client.getFileDescriptor());
+                    FileOutputStream output = new FileOutputStream(client.getFileDescriptor())) {
+                int serverFd = pair[1].detachFd();
+                pair[1].close();
+                if (nativeAdoptClient(core, serverFd) != 0) {
+                    throw new IllegalStateException("client adoption");
+                }
+                output.write(getRegistryAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                RegistryGlobals globals = readGlobals(input, 3);
+
+                output.write(bindGlobalAndSyncRequest(
+                        globals.compositor, "wl_compositor", 4, 5));
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 5);
+                readDeleteId(input, 5);
+                output.write(bindGlobalAndSyncRequest(globals.shm, "wl_shm", 6, 7));
+                output.flush();
+                dispatch(core);
+                readShmFormatsUntilCallback(input, 6, 7);
+                readDeleteId(input, 7);
+                for (int objectId = 8; objectId <= 17; objectId++) {
+                    output.write(syncRequest(objectId));
+                    output.flush();
+                    dispatch(core);
+                    readUntilCallback(input, objectId);
+                    readDeleteId(input, objectId);
+                }
+                output.write(bindGlobalAndSyncRequest(
+                        globals.xdgWmBase, "xdg_wm_base", 18, 19));
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 19);
+                readDeleteId(input, 19);
+
+                output.write(createSecondSurfaceAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 21);
+                output.write(createXdgToplevelAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                int configureSerial = readXdgConfigureUntilCallback(input, 22, 23, 24);
+                output.write(ackXdgConfigureAndSyncRequest(configureSerial, 25));
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 25);
+                readDeleteId(input, 25);
+                if (nativeSendShmPoolRequest(client.getFd(), 26, 40, 27) != 0) {
+                    throw new IllegalStateException("drag SHM pool FD transfer");
+                }
+                dispatch(core);
+                readUntilCallback(input, 27);
+                readDeleteId(input, 27);
+                output.write(createSecondShmBufferAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 29);
+                readDeleteId(input, 29);
+                output.write(commitXdgFrameAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                readFrameCommitUntilSync(input, 28, 30, 31);
+                readDeleteId(input, 31);
+
+                output.write(bindGlobalAndSyncRequest(globals.seat, "wl_seat", 32, 33));
+                output.flush();
+                dispatch(core);
+                readSeatUntilCallback(input, 32, 33);
+                readDeleteId(input, 33);
+                for (int objectId = 34; objectId <= 35; objectId++) {
+                    output.write(syncRequest(objectId));
+                    output.flush();
+                    dispatch(core);
+                    readUntilCallback(input, objectId);
+                    readDeleteId(input, objectId);
+                }
+                output.write(getKeyboardAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                if (nativeReceiveKeyboardKeymap(client.getFd(), 36) <= 1) {
+                    throw new IllegalStateException("wl_keyboard keymap FD validation");
+                }
+                readKeyboardMetadataUntilCallback(input, 36, 20, 37);
+                if (nativeKeyboardKey(core, 105, true, 1000) != 1) {
+                    throw new IllegalStateException("drag serial key press failed");
+                }
+                dispatch(core);
+                int dragSerial = readKeyboardKey(input, 36, 105, true, 1000);
+                if (nativeKeyboardKey(core, 105, false, 1001) != 1) {
+                    throw new IllegalStateException("drag serial key release failed");
+                }
+                dispatch(core);
+                readKeyboardKey(input, 36, 105, false, 1001);
+
+                output.write(bindGlobalAndSyncRequest(
+                        globals.dataDeviceManager, "wl_data_device_manager", 38, 39));
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 39);
+                readDeleteId(input, 39);
+                output.write(createDataDeviceAndSyncRequest(32));
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 41);
+                readDeleteId(input, 41);
+
+                exerciseBidirectionalTextDrag(
+                        core, client, input, output, dragSerial, 40, 20);
+                if (nativeDataSourceCount(core) != 0
+                        || nativeDataOfferCount(core) != 0
+                        || nativeDataDeviceCount(core) != 1
+                        || nativeTakeLinuxDragFd(core) != -1) {
+                    throw new IllegalStateException("drag-and-drop resources leaked");
+                }
+                output.write(destroyDataDeviceAndSyncRequest());
+                output.flush();
+                dispatch(core);
+                readUntilCallback(input, 52);
+                if (nativeDataDeviceCount(core) != 0) {
+                    throw new IllegalStateException("wl_data_device release leaked");
+                }
+            }
+            passed = true;
+            message = "Native drag-and-drop probe passed\n"
+                    + "bidirectional text drag-and-drop lifecycle complete";
+        } catch (Exception error) {
+            message = "Native drag-and-drop probe failed\n" + error.getMessage();
+        } finally {
+            if (core != 0) nativeDestroyCore(core);
+        }
+        boolean finalPassed = passed;
+        String finalMessage = message;
+        Log.i(TAG, finalMessage.replace('\n', ' '));
+        runOnUiThread(() -> {
+            result.setText(finalMessage);
+            result.setContentDescription(finalPassed
+                    ? "Native drag-and-drop probe passed"
+                    : "Native drag-and-drop probe failed");
+        });
+    }
+
+    private static void exerciseBidirectionalTextDrag(
+            long core,
+            ParcelFileDescriptor client,
+            FileInputStream input,
+            FileOutputStream output,
+            int serial,
+            int dataDeviceId,
+            int surfaceId) throws Exception {
+        String linuxText = "ARCHPHENE_WAYLAND_TO_ANDROID";
+        output.write(createTextDragAndSyncRequest(serial));
+        output.flush();
+        dispatch(core);
+        int sourceTransfer = nativeReceiveDragSourceSend(client.getFd(), 42, 43);
+        if (sourceTransfer != linuxText.getBytes(StandardCharsets.UTF_8).length) {
+            throw new IllegalStateException(
+                    "Wayland drag source FD transfer failed: " + sourceTransfer);
+        }
+        int linuxDragFd = nativeTakeLinuxDragFd(core);
+        if (linuxDragFd < 0 || nativeTakeLinuxDragFd(core) != -1) {
+            throw new IllegalStateException("Linux drag request queue was invalid");
+        }
+        try (ParcelFileDescriptor source = ParcelFileDescriptor.adoptFd(linuxDragFd);
+                FileInputStream sourceStream =
+                        new FileInputStream(source.getFileDescriptor())) {
+            byte[] linuxDragBytes = readExact(
+                    sourceStream, linuxText.getBytes(StandardCharsets.UTF_8).length);
+            if (!linuxText.equals(new String(linuxDragBytes, StandardCharsets.UTF_8))) {
+                throw new IllegalStateException("Wayland drag payload mismatch");
+            }
+        }
+        if (nativeFinishLinuxDrag(core, true) != 1) {
+            throw new IllegalStateException("Wayland drag did not finish");
+        }
+        output.write(destroyTextDragSourceAndSyncRequest());
+        output.flush();
+        dispatch(core);
+        readLinuxDragFinishedUntilCallback(input, 42, 44);
+
+        if (nativeAndroidDragMotion(core, 120, 80, 1234) != 1) {
+            throw new IllegalStateException("Android drag did not enter Wayland");
+        }
+        output.write(syncRequest(45));
+        output.flush();
+        dispatch(core);
+        int[] androidDragOffer = readAndroidDragOfferUntilCallback(
+                input, dataDeviceId, surfaceId, 45);
+        byte[] androidDragBytes = "ARCHPHENE_ANDROID_DRAG_TO_WAYLAND"
+                .getBytes(StandardCharsets.UTF_8);
+        if (nativeAndroidDropText(core, androidDragBytes) != 1) {
+            throw new IllegalStateException("Android drag payload was rejected");
+        }
+        output.write(syncRequest(46));
+        output.flush();
+        dispatch(core);
+        readAndroidDropUntilCallback(input, dataDeviceId, 46);
+        output.write(acceptAndroidDragRequest(androidDragOffer[0], androidDragOffer[1]));
+        output.flush();
+        dispatch(core);
+        int androidDragReadFd = nativeSendDataOfferReceive(
+                client.getFd(), androidDragOffer[0]);
+        if (androidDragReadFd < 0) {
+            throw new IllegalStateException("Android drag receive FD transfer failed");
+        }
+        dispatch(core);
+        try (ParcelFileDescriptor source = ParcelFileDescriptor.adoptFd(androidDragReadFd);
+                FileInputStream sourceStream =
+                        new FileInputStream(source.getFileDescriptor())) {
+            byte[] receivedDrag = readExact(sourceStream, androidDragBytes.length);
+            if (!java.util.Arrays.equals(receivedDrag, androidDragBytes)) {
+                throw new IllegalStateException("Android drag payload mismatch");
+            }
+        }
+        output.write(finishAndroidDragAndSyncRequest(androidDragOffer[0]));
+        output.flush();
+        dispatch(core);
+        readUntilCallback(input, 47);
+
+        if (nativeAndroidDragMotion(core, 60, 40, 2234) != 1) {
+            throw new IllegalStateException("Android cancellation drag did not enter");
+        }
+        output.write(syncRequest(48));
+        output.flush();
+        dispatch(core);
+        int[] cancelledDragOffer = readAndroidDragOfferUntilCallback(
+                input, dataDeviceId, surfaceId, 48);
+        if (nativeCancelAndroidDrag(core) != 1) {
+            throw new IllegalStateException("Android drag did not cancel");
+        }
+        output.write(destroyCancelledAndroidDragAndSyncRequest(cancelledDragOffer[0]));
+        output.flush();
+        dispatch(core);
+        readAndroidDragCancelledUntilCallback(input, dataDeviceId, 49);
+
+        if (nativeAndroidDragMotion(core, 30, 20, 3234) != 1) {
+            throw new IllegalStateException("Android offer-destroy drag did not enter");
+        }
+        output.write(syncRequest(50));
+        output.flush();
+        dispatch(core);
+        int[] destroyedDragOffer = readAndroidDragOfferUntilCallback(
+                input, dataDeviceId, surfaceId, 50);
+        output.write(destroyAndroidDragOfferAndSyncRequest(destroyedDragOffer[0]));
+        output.flush();
+        dispatch(core);
+        readUntilCallback(input, 51);
+        if (nativeCancelAndroidDrag(core) != 0) {
+            throw new IllegalStateException("Destroyed Android drag offer remained active");
+        }
+    }
+
     private static void injectSyntheticGesture(ImageView view) {
         long downTime = SystemClock.uptimeMillis();
         MotionEvent.PointerProperties[] properties = new MotionEvent.PointerProperties[2];
@@ -2210,6 +2486,98 @@ public final class MainActivity extends Activity {
         return request.array();
     }
 
+    private static byte[] createDataDeviceAndSyncRequest(int seatId) {
+        ByteBuffer request = buffer(28);
+        putHeader(request, 38, 1, 16);
+        request.putInt(40);
+        request.putInt(seatId);
+        putHeader(request, 1, 0, 12);
+        request.putInt(41);
+        return request.array();
+    }
+
+    private static byte[] destroyDataDeviceAndSyncRequest() {
+        ByteBuffer request = buffer(20);
+        putHeader(request, 40, 2, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(52);
+        return request.array();
+    }
+
+    private static byte[] createTextDragAndSyncRequest(int serial) {
+        String plain = "text/plain";
+        String utf8 = "text/plain;charset=utf-8";
+        int plainSize = waylandStringMessageSize(plain);
+        int utf8Size = waylandStringMessageSize(utf8);
+        ByteBuffer request = buffer(12 + plainSize + utf8Size + 12 + 24 + 12);
+        putHeader(request, 38, 0, 12);
+        request.putInt(42);
+        putWaylandStringMessage(request, 42, 0, plain);
+        putWaylandStringMessage(request, 42, 0, utf8);
+        putHeader(request, 42, 2, 12);
+        request.putInt(1);
+        putHeader(request, 40, 0, 24);
+        request.putInt(42);
+        request.putInt(20);
+        request.putInt(0);
+        request.putInt(serial);
+        putHeader(request, 1, 0, 12);
+        request.putInt(43);
+        return request.array();
+    }
+
+    private static byte[] destroyTextDragSourceAndSyncRequest() {
+        ByteBuffer request = buffer(20);
+        putHeader(request, 42, 1, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(44);
+        return request.array();
+    }
+
+    private static byte[] acceptAndroidDragRequest(int offerId, int serial) {
+        String mimeType = "text/plain";
+        byte[] encoded = mimeType.getBytes(StandardCharsets.UTF_8);
+        int stringLength = encoded.length + 1;
+        int paddedLength = (stringLength + 3) & ~3;
+        int acceptSize = 8 + 4 + 4 + paddedLength;
+        ByteBuffer request = buffer(acceptSize + 16);
+        putHeader(request, offerId, 0, acceptSize);
+        request.putInt(serial);
+        request.putInt(stringLength);
+        request.put(encoded);
+        request.put((byte) 0);
+        while (request.position() < acceptSize) request.put((byte) 0);
+        putHeader(request, offerId, 4, 16);
+        request.putInt(1);
+        request.putInt(1);
+        return request.array();
+    }
+
+    private static byte[] finishAndroidDragAndSyncRequest(int offerId) {
+        ByteBuffer request = buffer(28);
+        putHeader(request, offerId, 3, 8);
+        putHeader(request, offerId, 2, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(47);
+        return request.array();
+    }
+
+    private static byte[] destroyCancelledAndroidDragAndSyncRequest(int offerId) {
+        ByteBuffer request = buffer(20);
+        putHeader(request, offerId, 2, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(49);
+        return request.array();
+    }
+
+    private static byte[] destroyAndroidDragOfferAndSyncRequest(int offerId) {
+        ByteBuffer request = buffer(20);
+        putHeader(request, offerId, 2, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(51);
+        return request.array();
+    }
+
     private static byte[] clearDataSelectionAndSyncRequest(int serial) {
         ByteBuffer request = buffer(28);
         putHeader(request, 88, 1, 16);
@@ -2810,6 +3178,110 @@ public final class MainActivity extends Activity {
                 return new RegistryGlobals(compositor, subcompositor, shm, xdgWmBase, seat,
                         dataDeviceManager, textInputManager, pointerGestures, viewporter,
                         fractionalScaleManager, output);
+            }
+        }
+    }
+
+    private static void readLinuxDragFinishedUntilCallback(
+            FileInputStream input, int sourceId, int callbackId) throws Exception {
+        boolean dropped = false;
+        boolean finished = false;
+        while (true) {
+            Message message = readMessage(input);
+            throwIfDisplayError(message);
+            dropped |= message.objectId == sourceId && message.opcode == 3;
+            finished |= message.objectId == sourceId && message.opcode == 4;
+            if (message.objectId == callbackId && message.opcode == 0) {
+                if (!dropped || !finished) {
+                    throw new IllegalStateException(
+                            "Wayland drag completion events were incomplete");
+                }
+                return;
+            }
+        }
+    }
+
+    private static int[] readAndroidDragOfferUntilCallback(
+            FileInputStream input, int dataDeviceId, int surfaceId, int callbackId)
+            throws Exception {
+        int offerId = 0;
+        int enterSerial = 0;
+        boolean foundPlain = false;
+        boolean foundUtf8 = false;
+        boolean sourceCopy = false;
+        boolean actionCopy = false;
+        boolean entered = false;
+        boolean moved = false;
+        while (true) {
+            Message message = readMessage(input);
+            throwIfDisplayError(message);
+            if (message.objectId == dataDeviceId
+                    && message.opcode == 0
+                    && message.body.length == 4) {
+                offerId = ByteBuffer.wrap(message.body)
+                        .order(ByteOrder.nativeOrder()).getInt();
+            } else if (offerId != 0 && message.objectId == offerId && message.opcode == 0) {
+                String mimeType = readWaylandString(message.body);
+                foundPlain |= "text/plain".equals(mimeType);
+                foundUtf8 |= "text/plain;charset=utf-8".equals(mimeType);
+            } else if (offerId != 0 && message.objectId == offerId
+                    && message.opcode == 1 && message.body.length == 4) {
+                sourceCopy = ByteBuffer.wrap(message.body)
+                        .order(ByteOrder.nativeOrder()).getInt() == 1;
+            } else if (offerId != 0 && message.objectId == offerId
+                    && message.opcode == 2 && message.body.length == 4) {
+                actionCopy = ByteBuffer.wrap(message.body)
+                        .order(ByteOrder.nativeOrder()).getInt() == 1;
+            } else if (message.objectId == dataDeviceId
+                    && message.opcode == 1
+                    && message.body.length == 20) {
+                ByteBuffer body = ByteBuffer.wrap(message.body).order(ByteOrder.nativeOrder());
+                enterSerial = body.getInt();
+                int enteredSurface = body.getInt();
+                body.getInt();
+                body.getInt();
+                int enteredOffer = body.getInt();
+                entered = offerId != 0 && enteredSurface == surfaceId && enteredOffer == offerId;
+            } else if (message.objectId == dataDeviceId
+                    && message.opcode == 3
+                    && message.body.length == 12) {
+                moved = true;
+            }
+            if (message.objectId == callbackId && message.opcode == 0) {
+                if (offerId == 0 || enterSerial == 0 || !foundPlain || !foundUtf8
+                        || !sourceCopy || !actionCopy || !entered || !moved) {
+                    throw new IllegalStateException(
+                            "Android drag Wayland offer was incomplete");
+                }
+                return new int[] {offerId, enterSerial};
+            }
+        }
+    }
+
+    private static void readAndroidDropUntilCallback(
+            FileInputStream input, int dataDeviceId, int callbackId) throws Exception {
+        boolean dropped = false;
+        while (true) {
+            Message message = readMessage(input);
+            throwIfDisplayError(message);
+            dropped |= message.objectId == dataDeviceId && message.opcode == 4;
+            if (message.objectId == callbackId && message.opcode == 0) {
+                if (!dropped) throw new IllegalStateException("Android drag drop event was missing");
+                return;
+            }
+        }
+    }
+
+    private static void readAndroidDragCancelledUntilCallback(
+            FileInputStream input, int dataDeviceId, int callbackId) throws Exception {
+        boolean left = false;
+        while (true) {
+            Message message = readMessage(input);
+            throwIfDisplayError(message);
+            left |= message.objectId == dataDeviceId && message.opcode == 2;
+            if (message.objectId == callbackId && message.opcode == 0) {
+                if (!left) throw new IllegalStateException("Android drag leave event was missing");
+                return;
             }
         }
     }

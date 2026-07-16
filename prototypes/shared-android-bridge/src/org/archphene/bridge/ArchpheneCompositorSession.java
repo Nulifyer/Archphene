@@ -34,6 +34,7 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
         void onClientConnected();
         void onFrame(Bitmap frame);
         default void onWindows(List<WindowFrame> windows) {}
+        default void onLinuxDragText(String text) {}
         void onError(String detail);
     }
 
@@ -76,6 +77,10 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
     private static final int WINDOW_MODE = 27;
     private static final int CONFIGURE_WINDOW = 28;
     private static final int CLOSE_WINDOW = 29;
+    private static final int ANDROID_DRAG_MOTION = 30;
+    private static final int ANDROID_DRAG_DROP_TEXT = 31;
+    private static final int ANDROID_DRAG_CANCEL = 32;
+    private static final int LINUX_DRAG_FINISH = 33;
 
     private final Activity activity;
     private final ArchpheneInputView view;
@@ -170,6 +175,36 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
         events.offer(new Event(CLOSE_WINDOW, id, 0, 0, 0, ""));
     }
 
+    public void androidDragMotion(
+            int windowId,
+            ArchpheneInputView source,
+            int targetWidth,
+            int targetHeight,
+            float x,
+            float y,
+            long time) {
+        if (windowId != 0) activateWindow(windowId, source);
+        events.offer(new Event(
+                ANDROID_DRAG_MOTION,
+                Math.round(mapCoordinate(x, source, targetWidth, true)),
+                Math.round(mapCoordinate(y, source, targetHeight, false)),
+                (int) time,
+                0,
+                ""));
+    }
+
+    public void androidDropText(String text) {
+        events.offer(new Event(ANDROID_DRAG_DROP_TEXT, 0, 0, 0, 0,
+                text == null ? "" : text));
+    }
+
+    public void cancelAndroidDrag() {
+        events.offer(Event.simple(ANDROID_DRAG_CANCEL));
+    }
+
+    public void finishLinuxDrag(boolean accepted) {
+        events.offer(new Event(LINUX_DRAG_FINISH, accepted ? 1 : 0, 0, 0, 0, ""));
+    }
 
     public void pointerMotion(float x, float y, long time) {
         pointerMotion(0, view, frameWidth, frameHeight, x, y, time);
@@ -481,6 +516,7 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
                     publishCursor(compositor, cursorWidth, cursorHeight);
                 }
                 drainClipboard(compositor);
+                drainLinuxDrag(compositor);
             }
             compositor.setClipboardActive(false);
         } catch (InterruptedException ignored) {
@@ -584,6 +620,11 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
             }
             case CONFIGURE_WINDOW -> compositor.configureWindow(event.a, event.b, event.c);
             case CLOSE_WINDOW -> compositor.closeWindow(event.a);
+            case ANDROID_DRAG_MOTION -> compositor.androidDragMotion(
+                    event.a, event.b, event.c);
+            case ANDROID_DRAG_DROP_TEXT -> compositor.androidDropText(event.text);
+            case ANDROID_DRAG_CANCEL -> compositor.cancelAndroidDrag();
+            case LINUX_DRAG_FINISH -> compositor.finishLinuxDrag(event.a != 0);
             default -> throw new IllegalStateException("Unknown compositor event " + event.type);
         }
     }
@@ -703,6 +744,18 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
         int androidPasteFd;
         while ((androidPasteFd = compositor.takeAndroidPasteFd()) >= 0) {
             writeFd(androidPasteFd, clipboard.readTextForWaylandPaste());
+        }
+    }
+
+    private void drainLinuxDrag(NativeCompositor compositor) {
+        int linuxDragFd;
+        while ((linuxDragFd = compositor.takeLinuxDragFd()) >= 0) {
+            String text = readFd(linuxDragFd);
+            if (text.isEmpty()) {
+                compositor.finishLinuxDrag(false);
+            } else {
+                activity.runOnUiThread(() -> listener.onLinuxDragText(text));
+            }
         }
     }
 

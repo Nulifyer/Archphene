@@ -64,6 +64,10 @@ public final class NativeCompositor implements AutoCloseable {
     private static final int POINTER_COUNT = 56;
     private static final int TOUCH_COUNT = 57;
     private static final int POPUP_COMPONENT = 58;
+    private static final int ANDROID_DRAG_MOTION = 59;
+    private static final int ANDROID_DRAG_CANCEL = 60;
+    private static final int LINUX_DRAG_FD = 61;
+    private static final int LINUX_DRAG_FINISH = 62;
 
     static { System.loadLibrary("archphene_compositor"); }
 
@@ -143,6 +147,17 @@ public final class NativeCompositor implements AutoCloseable {
     public int offerAndroidClipboard() { return command(CLIPBOARD_OFFER); }
     public int takeAndroidPasteFd() { return command(ANDROID_PASTE_FD); }
     public int takeLinuxCopyFd() { return command(LINUX_COPY_FD); }
+    public int androidDragMotion(int x, int y, int timeMillis) {
+        return command(ANDROID_DRAG_MOTION, x, y, timeMillis);
+    }
+    public int androidDropText(String text) {
+        return nativeBytes(handle, 6, text.getBytes(StandardCharsets.UTF_8), 0, 0);
+    }
+    public int cancelAndroidDrag() { return command(ANDROID_DRAG_CANCEL); }
+    public int takeLinuxDragFd() { return command(LINUX_DRAG_FD); }
+    public int finishLinuxDrag(boolean accepted) {
+        return command(LINUX_DRAG_FINISH, accepted ? 1 : 0);
+    }
     public int cursorWidth() { return command(CURSOR_WIDTH); }
     public int cursorHeight() { return command(CURSOR_HEIGHT); }
     public int cursorHotspot(int component) { return command(CURSOR_HOTSPOT, component); }
