@@ -21,7 +21,11 @@ This is the prioritized completion queue for the Archphene Android application. 
   - [x] Generate arm64-v8a desktop wrapper templates and prove a real Qt package through Android PackageInstaller and app-drawer launch.
   - [ ] Publish separate x86_64 and arm64-v8a release assets; accept `any` data packages but require matching ABI for native ELF files.
 - [ ] Complete runtime-pack lifecycle safety.
-  - Add running-process leases, external-uninstall reconciliation, explicit grant revocation, unchanged-closure reuse, 4 KB/16 KB page validation, and process-tree cleanup.
+  - [ ] Add running-process leases.
+  - [x] Reconcile external Android uninstalls and revoke grants per package without disrupting wrappers that share a pack.
+  - [ ] Reuse unchanged closures before copying runtime-pack modules.
+  - [ ] Validate 4 KB and 16 KB ELF page compatibility.
+  - [ ] Clean up the complete Linux process tree when a wrapper exits.
 - [ ] Finish the Terminal product.
   - Add multiple sessions/tabs, foreground-service lifecycle, manager progress returned to the invoking command, and persisted project-tree mappings.
   - Select and package the user shell. Current bootstrap is Bionic sh; evaluate verified Arch bash first, then fish as an optional user choice.

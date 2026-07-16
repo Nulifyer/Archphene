@@ -328,6 +328,7 @@ final class RuntimePackStore {
                 + "package\t" + androidPackage + "\npack\t" + pack.id + "\n";
         writeAtomically(target, value.getBytes(StandardCharsets.UTF_8));
         if (previous != null && !previous.id.equals(pack.id)) {
+            revokePack(context, androidPackage, previous);
             deleteIfUnbound(context, previous.id);
         }
     }
@@ -390,10 +391,7 @@ final class RuntimePackStore {
         }
         syncDirectory(bindings);
         if (active != null) {
-            for (Module module : active.modules) {
-                context.revokeUriPermission(module.uri(active.id),
-                        android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            }
+            revokePack(context, androidPackage, active);
             deleteIfUnbound(context, active.id);
         }
         garbageCollect(context);
@@ -423,11 +421,11 @@ final class RuntimePackStore {
                     }
                     String androidPackage = lines.get(1).substring(8);
                     String packId = lines.get(2).substring(5);
-                    if (context.getPackageManager().getLaunchIntentForPackage(androidPackage)
-                            == null) {
+                    Pack pack = load(context, packId);
+                    if (!isPackageInstalled(context, androidPackage)) {
+                        revokePack(context, androidPackage, pack);
                         binding.delete();
                     } else {
-                        load(context, packId);
                         live.add(packId);
                     }
                 } catch (Exception invalid) {
@@ -451,6 +449,22 @@ final class RuntimePackStore {
         syncDirectory(bindings);
         syncDirectory(packs);
         return removed;
+    }
+
+    private static boolean isPackageInstalled(Context context, String androidPackage) {
+        try {
+            context.getPackageManager().getApplicationInfo(androidPackage, 0);
+            return true;
+        } catch (android.content.pm.PackageManager.NameNotFoundException missing) {
+            return false;
+        }
+    }
+
+    private static void revokePack(Context context, String androidPackage, Pack pack) {
+        for (Module module : pack.modules) {
+            context.revokeUriPermission(androidPackage, module.uri(pack.id),
+                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        }
     }
 
     static synchronized void releaseManagedPack(Context context, String packId) throws Exception {
