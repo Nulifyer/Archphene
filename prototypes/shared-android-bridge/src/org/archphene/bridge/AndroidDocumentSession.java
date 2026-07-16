@@ -48,6 +48,7 @@ public final class AndroidDocumentSession {
     private final Object syncLock = new Object();
     private final Map<String, Binding> bindings = new LinkedHashMap<>();
     private FileObserver fileObserver;
+    private boolean closed;
 
     public AndroidDocumentSession(Activity activity, String logTag) {
         this.activity = activity;
@@ -78,22 +79,56 @@ public final class AndroidDocumentSession {
                         | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
         ArrayList<File> result = new ArrayList<>();
         synchronized (syncLock) {
+            if (closed) return Collections.emptyList();
             startFileObserver(imports);
             for (Uri uri : uris) {
-                File imported = importOne(uri, imports, grantFlags);
+                File imported = importOne(uri, imports, grantFlags, true, false);
                 if (imported != null) result.add(imported);
             }
         }
         return Collections.unmodifiableList(result);
     }
 
-    private File importOne(Uri uri, File imports, int grantFlags) {
+    public List<File> importDragDocuments(ClipData clip) {
+        List<Uri> uris = clipUris(clip);
+        if (uris.isEmpty()) return Collections.emptyList();
+        File imports = new File(activity.getFilesDir(), "linux-home/Documents/Android");
+        if (!imports.isDirectory() && !imports.mkdirs()) {
+            Log.e(logTag, "Could not create Android drag import directory");
+            return Collections.emptyList();
+        }
+        ArrayList<File> result = new ArrayList<>();
+        synchronized (syncLock) {
+            if (closed) return Collections.emptyList();
+            startFileObserver(imports);
+            LinkedHashSet<String> existing = new LinkedHashSet<>(bindings.keySet());
+            for (Uri uri : uris) {
+                File imported = importOne(uri, imports, 0, false, true);
+                if (imported != null) result.add(imported);
+            }
+            if (result.size() != uris.size()) {
+                ArrayList<String> added = new ArrayList<>(bindings.keySet());
+                added.removeAll(existing);
+                for (String name : added) {
+                    Binding binding = bindings.remove(name);
+                    if (binding != null && !binding.file.delete()) {
+                        Log.w(logTag, "Could not roll back failed drag import " + name);
+                    }
+                }
+                return Collections.emptyList();
+            }
+        }
+        return Collections.unmodifiableList(result);
+    }
+
+    private File importOne(Uri uri, File imports, int grantFlags,
+            boolean persistPermission, boolean detectWritable) {
         if (uri == null || (!"content".equals(uri.getScheme())
                 && !"file".equals(uri.getScheme()))) {
             Log.w(logTag, "Ignoring unsupported Android document URI");
             return null;
         }
-        if ("content".equals(uri.getScheme()) && grantFlags != 0) {
+        if (persistPermission && "content".equals(uri.getScheme()) && grantFlags != 0) {
             try {
                 activity.getContentResolver().takePersistableUriPermission(uri, grantFlags);
             } catch (SecurityException ignored) {
@@ -114,8 +149,10 @@ public final class AndroidDocumentSession {
             if (!temporary.renameTo(target)) {
                 throw new IOException("Could not publish imported document");
             }
-            Binding binding = new Binding(uri, target,
-                    (grantFlags & Intent.FLAG_GRANT_WRITE_URI_PERMISSION) != 0, hash);
+            boolean writable = detectWritable
+                    ? canWrite(uri)
+                    : (grantFlags & Intent.FLAG_GRANT_WRITE_URI_PERMISSION) != 0;
+            Binding binding = new Binding(uri, target, writable, hash);
             bindings.put(target.getName(), binding);
             Log.i(logTag, "Imported Android document uri=" + uri + " path="
                     + target.getAbsolutePath() + " writable=" + binding.writable);
@@ -124,6 +161,19 @@ public final class AndroidDocumentSession {
             temporary.delete();
             Log.e(logTag, "Could not import Android document " + uri, error);
             return null;
+        }
+    }
+
+    private boolean canWrite(Uri uri) {
+        if ("file".equals(uri.getScheme())) {
+            String path = uri.getPath();
+            return path != null && new File(path).canWrite();
+        }
+        try (android.os.ParcelFileDescriptor descriptor =
+                activity.getContentResolver().openFileDescriptor(uri, "rw")) {
+            return descriptor != null;
+        } catch (Exception ignored) {
+            return false;
         }
     }
 
@@ -180,6 +230,9 @@ public final class AndroidDocumentSession {
     }
 
     public void close() {
+        synchronized (syncLock) {
+            closed = true;
+        }
         syncAll();
         synchronized (syncLock) {
             if (fileObserver != null) {
@@ -192,7 +245,7 @@ public final class AndroidDocumentSession {
 
     public void syncAsyncIfDirty() {
         synchronized (syncLock) {
-            if (bindings.isEmpty()) return;
+            if (closed || bindings.isEmpty()) return;
         }
         new Thread(this::syncAll, "archphene-document-sync").start();
     }
@@ -255,17 +308,27 @@ public final class AndroidDocumentSession {
         LinkedHashSet<Uri> unique = new LinkedHashSet<>();
         if (intent.getData() != null) unique.add(intent.getData());
         ClipData clip = intent.getClipData();
-        if (clip != null) {
-            if (clip.getItemCount() > MAX_DOCUMENTS) {
-                Log.w(logTag, "Ignoring document intent with too many items");
-                return Collections.emptyList();
-            }
-            for (int index = 0; index < clip.getItemCount(); index++) {
-                Uri uri = clip.getItemAt(index).getUri();
-                if (uri != null) unique.add(uri);
-            }
+        if (clip != null && clip.getItemCount() > MAX_DOCUMENTS) {
+            Log.w(logTag, "Ignoring document intent with too many items");
+            return Collections.emptyList();
         }
+        unique.addAll(clipUris(clip));
         if (unique.size() > MAX_DOCUMENTS) return Collections.emptyList();
+        return new ArrayList<>(unique);
+    }
+
+    private List<Uri> clipUris(ClipData clip) {
+        if (clip == null || clip.getItemCount() == 0) return Collections.emptyList();
+        if (clip.getItemCount() > MAX_DOCUMENTS) {
+            Log.w(logTag, "Ignoring Android clip with too many documents");
+            return Collections.emptyList();
+        }
+        LinkedHashSet<Uri> unique = new LinkedHashSet<>();
+        for (int index = 0; index < clip.getItemCount(); index++) {
+            Uri uri = clip.getItemAt(index).getUri();
+            if (uri == null) return Collections.emptyList();
+            unique.add(uri);
+        }
         return new ArrayList<>(unique);
     }
 

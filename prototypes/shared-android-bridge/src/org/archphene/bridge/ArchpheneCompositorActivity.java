@@ -18,6 +18,7 @@ import android.os.Build;
 import android.os.Binder;
 import android.os.Bundle;
 import android.util.Log;
+import android.view.DragAndDropPermissions;
 import android.view.DragEvent;
 import android.view.Gravity;
 import android.view.InputDevice;
@@ -38,6 +39,7 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -105,7 +107,9 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     private boolean independentWindows;
     private ArchpheneCompositorSession.WindowFrame primaryFrame;
     private final Object linuxDragToken = new Object();
-    private boolean androidTextDragDropped;
+    private boolean androidDragDropped;
+    private final List<DragAndDropPermissions> retainedDragPermissions =
+            new ArrayList<>();
 
     @Override
     protected void onCreate(Bundle state) {
@@ -201,6 +205,11 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                     @Override
                     public void onLinuxDragText(String text) {
                         startLinuxTextDrag(text);
+                    }
+
+                    @Override
+                    public void onLinuxDragUriList(String uriList) {
+                        startLinuxUriDrag(uriList);
                     }
 
                     @Override
@@ -496,12 +505,9 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 return true;
             }
             switch (event.getAction()) {
-                case DragEvent.ACTION_DRAG_STARTED: {
-                    androidTextDragDropped = false;
-                    ClipDescription description = event.getClipDescription();
-                    return description != null
-                            && description.hasMimeType(ClipDescription.MIMETYPE_TEXT_PLAIN);
-                }
+                case DragEvent.ACTION_DRAG_STARTED:
+                    androidDragDropped = false;
+                    return event.getClipDescription() != null;
                 case DragEvent.ACTION_DRAG_ENTERED:
                     return true;
                 case DragEvent.ACTION_DRAG_LOCATION:
@@ -510,6 +516,9 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 case DragEvent.ACTION_DROP: {
                     routeAndroidDragMotion(target, windowId, event);
                     ClipData clip = event.getClipData();
+                    if (containsOnlyUris(clip)) {
+                        return importAndroidDragDocuments(event, clip);
+                    }
                     if (clip == null || clip.getItemCount() != 1
                             || clip.getItemAt(0).getUri() != null) {
                         if (session != null) session.cancelAndroidDrag();
@@ -521,7 +530,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                         if (session != null) session.cancelAndroidDrag();
                         return false;
                     }
-                    androidTextDragDropped = true;
+                    androidDragDropped = true;
                     if (session != null) session.androidDropText(text);
                     return true;
                 }
@@ -529,15 +538,75 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                     if (session != null) session.cancelAndroidDrag();
                     return true;
                 case DragEvent.ACTION_DRAG_ENDED:
-                    if (!androidTextDragDropped && session != null) {
+                    if (!androidDragDropped && session != null) {
                         session.cancelAndroidDrag();
                     }
-                    androidTextDragDropped = false;
+                    androidDragDropped = false;
                     return true;
                 default:
                     return false;
             }
         });
+    }
+
+    private boolean containsOnlyUris(ClipData clip) {
+        if (clip == null || clip.getItemCount() == 0 || clip.getItemCount() > 32) return false;
+        for (int index = 0; index < clip.getItemCount(); index++) {
+            if (clip.getItemAt(index).getUri() == null) return false;
+        }
+        return true;
+    }
+
+    private boolean importAndroidDragDocuments(DragEvent event, ClipData clip) {
+        if (session == null || documentSession == null) {
+            if (session != null) session.cancelAndroidDrag();
+            return false;
+        }
+        DragAndDropPermissions permission = Build.VERSION.SDK_INT >= Build.VERSION_CODES.N
+                ? requestDragAndDropPermissions(event) : null;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && permission == null) {
+            session.cancelAndroidDrag();
+            return false;
+        }
+        AndroidDocumentSession documents = documentSession;
+        androidDragDropped = true;
+        if (permission != null) {
+            synchronized (retainedDragPermissions) {
+                retainedDragPermissions.add(permission);
+            }
+        }
+        new Thread(() -> {
+            List<File> imported = documents.importDragDocuments(clip);
+            if (imported.isEmpty() || isFinishing() || isDestroyed()) {
+                releaseDragPermission(permission);
+                if (session != null) session.cancelAndroidDrag();
+                return;
+            }
+            StringBuilder uriList = new StringBuilder();
+            for (File file : imported) {
+                uriList.append(file.toURI().toASCIIString()).append("\r\n");
+            }
+            if (session != null) session.androidDropUriList(uriList.toString());
+        }, "archphene-drag-document-import").start();
+        return true;
+    }
+
+    private void releaseDragPermission(DragAndDropPermissions permission) {
+        if (permission == null) return;
+        boolean retained;
+        synchronized (retainedDragPermissions) {
+            retained = retainedDragPermissions.remove(permission);
+        }
+        if (retained) permission.release();
+    }
+
+    private void releaseDragPermissions() {
+        List<DragAndDropPermissions> permissions;
+        synchronized (retainedDragPermissions) {
+            permissions = new ArrayList<>(retainedDragPermissions);
+            retainedDragPermissions.clear();
+        }
+        for (DragAndDropPermissions permission : permissions) permission.release();
     }
 
     private void routeAndroidDragMotion(
@@ -551,19 +620,84 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 event.getX(), event.getY(), android.os.SystemClock.uptimeMillis());
     }
 
+    private void startLinuxUriDrag(String uriList) {
+        if (session == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.N
+                || uriList == null
+                || uriList.getBytes(StandardCharsets.UTF_8).length > 1024 * 1024) {
+            if (session != null) session.finishLinuxDrag(false);
+            return;
+        }
+        try {
+            File home = new File(getFilesDir(), "linux-home").getCanonicalFile();
+            ArrayList<Uri> exported = new ArrayList<>();
+            Set<String> seen = new HashSet<>();
+            for (String rawLine : uriList.split("\\r?\\n")) {
+                String line = rawLine.trim();
+                if (line.isEmpty() || line.startsWith("#")) continue;
+                Uri source = Uri.parse(line);
+                if (!"file".equals(source.getScheme())
+                        || (source.getAuthority() != null
+                                && !source.getAuthority().isEmpty())) {
+                    throw new SecurityException("Linux drag URI is not a local file");
+                }
+                File file = new File(source.getPath()).getCanonicalFile();
+                if (!file.isFile()
+                        || !file.getPath().startsWith(home.getPath() + File.separator)) {
+                    throw new SecurityException("Linux drag file is outside visible home");
+                }
+                String relative = file.getPath().substring(home.getPath().length() + 1)
+                        .replace(File.separatorChar, '/');
+                for (String segment : relative.split("/")) {
+                    if (segment.isEmpty() || segment.startsWith(".")) {
+                        throw new SecurityException("Linux drag file is private");
+                    }
+                }
+                if (!seen.add(relative)) continue;
+                exported.add(new Uri.Builder().scheme("content")
+                        .authority(getPackageName() + ".documents")
+                        .appendPath("document").appendPath("home/" + relative).build());
+                if (exported.size() > 32) {
+                    throw new SecurityException("Linux drag has too many files");
+                }
+            }
+            if (exported.isEmpty()) throw new SecurityException("Linux drag has no files");
+            ClipData data = new ClipData("Archphene Linux files",
+                    new String[] {ClipDescription.MIMETYPE_TEXT_URILIST,
+                            "application/octet-stream"},
+                    new ClipData.Item(exported.get(0)));
+            for (int index = 1; index < exported.size(); index++) {
+                data.addItem(new ClipData.Item(exported.get(index)));
+            }
+            ArchpheneInputView source = focusedDragSource();
+            ImageView shadowView = new ImageView(this);
+            shadowView.setImageResource(android.R.drawable.ic_menu_save);
+            int shadowSize = Math.round(48 * getResources().getDisplayMetrics().density);
+            shadowView.layout(0, 0, shadowSize, shadowSize);
+            boolean started = source.startDragAndDrop(data,
+                    new View.DragShadowBuilder(shadowView), linuxDragToken,
+                    View.DRAG_FLAG_GLOBAL | View.DRAG_FLAG_GLOBAL_URI_READ);
+            if (!started) session.finishLinuxDrag(false);
+        } catch (Exception error) {
+            Log.w(logTag, "Rejected Linux file drag", error);
+            session.finishLinuxDrag(false);
+        }
+    }
+
+    private ArchpheneInputView focusedDragSource() {
+        ArchpheneInputView source = compositorView;
+        for (SecondaryWindow window : secondaryWindows.values()) {
+            if (window.view.hasFocus()) return window.view;
+        }
+        return source;
+    }
+
     private void startLinuxTextDrag(String text) {
         if (session == null || text == null || text.isEmpty()
                 || !capabilities.contains(BridgeCapabilities.DRAG_DROP)) {
             if (session != null) session.finishLinuxDrag(false);
             return;
         }
-        ArchpheneInputView source = compositorView;
-        for (SecondaryWindow window : secondaryWindows.values()) {
-            if (window.view.hasFocus()) {
-                source = window.view;
-                break;
-            }
-        }
+        ArchpheneInputView source = focusedDragSource();
         ClipData data = ClipData.newPlainText("Archphene Linux drag", text);
         ImageView shadowView = new ImageView(this);
         shadowView.setImageResource(android.R.drawable.ic_menu_edit);
@@ -1570,6 +1704,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         }
         secondaryWindows.clear();
         if (documentSession != null) documentSession.close();
+        releaseDragPermissions();
         audioIntegration.stop();
         desktopIntegration.stop();
         if (capabilityBroker != null) capabilityBroker.close();

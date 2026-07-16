@@ -35,6 +35,7 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
         void onFrame(Bitmap frame);
         default void onWindows(List<WindowFrame> windows) {}
         default void onLinuxDragText(String text) {}
+        default void onLinuxDragUriList(String uriList) {}
         void onError(String detail);
     }
 
@@ -81,6 +82,7 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
     private static final int ANDROID_DRAG_DROP_TEXT = 31;
     private static final int ANDROID_DRAG_CANCEL = 32;
     private static final int LINUX_DRAG_FINISH = 33;
+    private static final int ANDROID_DRAG_DROP_URI_LIST = 34;
 
     private final Activity activity;
     private final ArchpheneInputView view;
@@ -196,6 +198,11 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
     public void androidDropText(String text) {
         events.offer(new Event(ANDROID_DRAG_DROP_TEXT, 0, 0, 0, 0,
                 text == null ? "" : text));
+    }
+
+    public void androidDropUriList(String uriList) {
+        events.offer(new Event(ANDROID_DRAG_DROP_URI_LIST, 0, 0, 0, 0,
+                uriList == null ? "" : uriList));
     }
 
     public void cancelAndroidDrag() {
@@ -623,6 +630,7 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
             case ANDROID_DRAG_MOTION -> compositor.androidDragMotion(
                     event.a, event.b, event.c);
             case ANDROID_DRAG_DROP_TEXT -> compositor.androidDropText(event.text);
+            case ANDROID_DRAG_DROP_URI_LIST -> compositor.androidDropUriList(event.text);
             case ANDROID_DRAG_CANCEL -> compositor.cancelAndroidDrag();
             case LINUX_DRAG_FINISH -> compositor.finishLinuxDrag(event.a != 0);
             default -> throw new IllegalStateException("Unknown compositor event " + event.type);
@@ -750,11 +758,14 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
     private void drainLinuxDrag(NativeCompositor compositor) {
         int linuxDragFd;
         while ((linuxDragFd = compositor.takeLinuxDragFd()) >= 0) {
-            String text = readFd(linuxDragFd);
-            if (text.isEmpty()) {
+            String mimeType = compositor.takeLinuxDragMimeType();
+            String payload = readFd(linuxDragFd);
+            if (mimeType.isEmpty() || payload.isEmpty()) {
                 compositor.finishLinuxDrag(false);
+            } else if ("text/uri-list".equals(mimeType)) {
+                activity.runOnUiThread(() -> listener.onLinuxDragUriList(payload));
             } else {
-                activity.runOnUiThread(() -> listener.onLinuxDragText(text));
+                activity.runOnUiThread(() -> listener.onLinuxDragText(payload));
             }
         }
     }

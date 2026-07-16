@@ -33,7 +33,9 @@
             android:authorities="org.archphene.linux.mousepad.documents"
             android:exported="true"
             android:grantUriPermissions="true"
-            android:permission="org.archpheneos.permission.GUI_DOCUMENTS" />
+            android:permission="org.archpheneos.permission.GUI_DOCUMENTS">
+            <grant-uri-permission android:pathPrefix="/document/" />
+        </provider>
 
         <activity
             android:name="org.archphene.bridge.DocumentOpenActivity"

@@ -2,10 +2,12 @@ package org.archphene.bridge;
 
 import android.content.ContentProvider;
 import android.content.ContentValues;
+import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.database.MatrixCursor;
 import android.net.Uri;
-
+import android.os.Binder;
 import android.os.CancellationSignal;
 import android.os.ParcelFileDescriptor;
 import android.provider.DocumentsContract;
@@ -28,7 +30,7 @@ public final class LinuxHomeBrokerProvider extends ContentProvider {
 
     @Override public Cursor query(Uri uri, String[] projection, String selection,
             String[] selectionArgs, String sortOrder) {
-        enforceManagerCaller();
+        enforceGrantedCaller(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
         try {
             List<String> segments = uri.getPathSegments();
             MatrixCursor rows = new MatrixCursor(documentProjection(projection));
@@ -57,7 +59,10 @@ public final class LinuxHomeBrokerProvider extends ContentProvider {
 
     @Override public ParcelFileDescriptor openFile(Uri uri, String mode,
             CancellationSignal signal) throws FileNotFoundException {
-        enforceManagerCaller();
+        int grantMode = mode != null && (mode.contains("w") || mode.contains("a"))
+                ? Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                : Intent.FLAG_GRANT_READ_URI_PERMISSION;
+        enforceGrantedCaller(uri, grantMode);
         return ParcelFileDescriptor.open(fileForDocumentUri(uri),
                 ParcelFileDescriptor.parseMode(mode));
     }
@@ -125,7 +130,7 @@ public final class LinuxHomeBrokerProvider extends ContentProvider {
     }
 
     @Override public String getType(Uri uri) {
-        enforceManagerCaller();
+        enforceGrantedCaller(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
         try {
             File file = fileForDocumentUri(uri);
             return file.isDirectory()
@@ -133,6 +138,21 @@ public final class LinuxHomeBrokerProvider extends ContentProvider {
         } catch (FileNotFoundException error) {
             return null;
         }
+    }
+
+    private void enforceGrantedCaller(Uri uri, int modeFlags) {
+        if (Binder.getCallingUid() == android.os.Process.myUid()) return;
+        String caller = getCallingPackage();
+        if (MANAGER_PACKAGE.equals(caller)
+                && getContext().getPackageManager().checkPermission(
+                        BROKER_PERMISSION, caller) == PackageManager.PERMISSION_GRANTED) {
+            return;
+        }
+        if (getContext().checkUriPermission(uri, Binder.getCallingPid(),
+                Binder.getCallingUid(), modeFlags) == PackageManager.PERMISSION_GRANTED) {
+            return;
+        }
+        throw new SecurityException("Caller has no Android grant for Linux home document");
     }
 
     private void enforceManagerCaller() {

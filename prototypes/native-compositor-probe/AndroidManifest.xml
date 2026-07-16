@@ -1,7 +1,21 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="org.archphene.compositorprobe">
     <uses-sdk android:minSdkVersion="23" android:targetSdkVersion="36" />
+    <permission
+        android:name="org.archphene.compositorprobe.GUI_DOCUMENTS"
+        android:protectionLevel="signature" />
+    <queries>
+        <package android:name="org.archphene.urigrantprobe" />
+    </queries>
     <application android:label="Archphene Compositor Probe" android:theme="@android:style/Theme.Material.NoActionBar">
+        <provider
+            android:name="org.archphene.bridge.LinuxHomeBrokerProvider"
+            android:authorities="org.archphene.compositorprobe.documents"
+            android:exported="true"
+            android:grantUriPermissions="true"
+            android:permission="org.archphene.compositorprobe.GUI_DOCUMENTS">
+            <grant-uri-permission android:pathPrefix="/document/" />
+        </provider>
         <activity android:name=".MainActivity" android:exported="true" android:screenOrientation="unspecified">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

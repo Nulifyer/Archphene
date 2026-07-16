@@ -1,6 +1,7 @@
 package org.archphene.compositorprobe;
 
 import android.app.Activity;
+import org.archphene.bridge.AndroidDocumentSession;
 import org.archphene.bridge.ArchpheneClipboardBroker;
 import org.archphene.bridge.ArchpheneInputView;
 import android.content.ClipData;
@@ -8,6 +9,7 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.Color;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
@@ -26,11 +28,13 @@ import android.view.inputmethod.InputMethodManager;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
+import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -69,8 +73,11 @@ public final class MainActivity extends Activity {
             int socketFd, int poolId, int poolSize, int callbackId);
     private static native int nativeReceiveKeyboardKeymap(int socketFd, int keyboardId);
     private static native int nativeSendDataOfferReceive(int socketFd, int offerId);
+    private static native int nativeSendDataOfferUriReceive(int socketFd, int offerId);
     private static native int nativeReceiveDataSourceSend(int socketFd, int sourceId);
     private static native int nativeReceiveDragSourceSend(
+            int socketFd, int sourceId, int callbackId);
+    private static native int nativeReceiveUriDragSourceSend(
             int socketFd, int sourceId, int callbackId);
     private static native int nativeDispatchOnce(long handle);
     private static native int nativeCompositorBindCount(long handle);
@@ -104,9 +111,11 @@ public final class MainActivity extends Activity {
     private static native int nativeTakeAndroidPasteFd(long handle);
     private static native int nativeTakeLinuxCopyFd(long handle);
     private static native int nativeTakeLinuxDragFd(long handle);
+    private static native int nativeTakeLinuxDragMimeKind(long handle);
     private static native int nativeFinishLinuxDrag(long handle, boolean accepted);
     private static native int nativeAndroidDragMotion(long handle, int x, int y, int time);
     private static native int nativeAndroidDropText(long handle, byte[] text);
+    private static native int nativeAndroidDropUriList(long handle, byte[] uriList);
     private static native int nativeCancelAndroidDrag(long handle);
     private static native int nativeTextInputManagerBindCount(long handle);
     private static native int nativeTextInputCount(long handle);
@@ -358,12 +367,18 @@ public final class MainActivity extends Activity {
         content.addView(result);
         setContentView(content);
         boolean dragOnly = getIntent().getBooleanExtra("drag_only", false);
+        boolean documentDragOnly = getIntent().getBooleanExtra("document_drag_only", false);
+        boolean providerGrantOnly = getIntent().getBooleanExtra("provider_grant_only", false);
         new Thread(
                 () -> {
-                    if (dragOnly) runDragProbe(result);
+                    if (providerGrantOnly) runProviderGrantProbe(result);
+                    else if (documentDragOnly) runDocumentDragProbe(result);
+                    else if (dragOnly) runDragProbe(result);
                     else runProbe(result, frameView);
                 },
-                dragOnly ? "native-drag-probe" : "native-compositor-probe").start();
+                providerGrantOnly ? "provider-grant-probe"
+                        : documentDragOnly ? "document-drag-probe"
+                        : dragOnly ? "native-drag-probe" : "native-compositor-probe").start();
     }
 
     @Override
@@ -1478,6 +1493,118 @@ public final class MainActivity extends Activity {
         });
     }
 
+    private void runProviderGrantProbe(TextView result) {
+        String message;
+        try {
+            File document = new File(
+                    getFilesDir(), "linux-home/Documents/outbound-grant.txt");
+            File parent = document.getParentFile();
+            if (!parent.isDirectory() && !parent.mkdirs()) {
+                throw new IllegalStateException("could not create visible home Documents");
+            }
+            try (FileOutputStream output = new FileOutputStream(document, false)) {
+                output.write("ARCHPHENE_OUTBOUND_URI_GRANT\n"
+                        .getBytes(StandardCharsets.UTF_8));
+                output.getFD().sync();
+            }
+            Uri uri = new Uri.Builder().scheme("content")
+                    .authority("org.archphene.compositorprobe.documents")
+                    .appendPath("document")
+                    .appendPath("home/Documents/outbound-grant.txt").build();
+            boolean grant = getIntent().getBooleanExtra("grant_provider_uri", true);
+            android.content.Intent receiver = new android.content.Intent(
+                    android.content.Intent.ACTION_VIEW, uri)
+                    .setClassName("org.archphene.urigrantprobe",
+                            "org.archphene.urigrantprobe.MainActivity");
+            if (grant) {
+                receiver.addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            }
+            startActivity(receiver);
+            message = (grant ? "Provider URI grant probe ready\n"
+                    : "Provider URI grant probe prepared\n") + uri;
+        } catch (Exception error) {
+            message = "Provider URI grant probe failed\n" + error.getMessage();
+        }
+        String finalMessage = message;
+        Log.i(TAG, finalMessage.replace('\n', ' '));
+        runOnUiThread(() -> {
+            result.setText(finalMessage);
+            result.setContentDescription(finalMessage.startsWith("Provider URI grant probe")
+                    ? "Provider URI grant probe"
+                    : "Provider URI grant probe failed");
+        });
+    }
+
+    private void runDocumentDragProbe(TextView result) {
+        String message;
+        AndroidDocumentSession documents = new AndroidDocumentSession(this, TAG);
+        try {
+            File source = new File(getCacheDir(), "android-drag-source.txt");
+            byte[] original = "android drag document\n".getBytes(StandardCharsets.UTF_8);
+            try (FileOutputStream output = new FileOutputStream(source, false)) {
+                output.write(original);
+                output.getFD().sync();
+            }
+            ClipData clip = ClipData.newRawUri(
+                    "Archphene document drag", Uri.fromFile(source));
+            List<File> imported = documents.importDragDocuments(clip);
+            if (imported.size() != 1) {
+                throw new IllegalStateException("drag document was not imported");
+            }
+            File local = imported.get(0);
+            File expectedParent = new File(
+                    getFilesDir(), "linux-home/Documents/Android").getCanonicalFile();
+            if (!expectedParent.equals(local.getCanonicalFile().getParentFile())) {
+                throw new SecurityException("drag document escaped Linux home");
+            }
+            try (FileInputStream input = new FileInputStream(local)) {
+                if (!java.util.Arrays.equals(original, readExact(input, original.length))) {
+                    throw new IllegalStateException("drag import content mismatch");
+                }
+            }
+            String rollbackName = "drag-rollback-" + Long.toHexString(System.nanoTime()) + ".txt";
+            File rollbackSource = new File(getCacheDir(), rollbackName);
+            try (FileOutputStream output = new FileOutputStream(rollbackSource, false)) {
+                output.write("rollback probe\n".getBytes(StandardCharsets.UTF_8));
+                output.getFD().sync();
+            }
+            ClipData rollbackClip = ClipData.newRawUri(
+                    "Archphene failed document drag", Uri.fromFile(rollbackSource));
+            rollbackClip.addItem(new ClipData.Item(
+                    Uri.parse("content://org.archphene.missing/document/invalid")));
+            if (!documents.importDragDocuments(rollbackClip).isEmpty()
+                    || new File(expectedParent, rollbackName).exists()) {
+                throw new IllegalStateException("failed multi-file drag was not rolled back");
+            }
+
+            byte[] edited = "linux drag document edit\n".getBytes(StandardCharsets.UTF_8);
+            try (FileOutputStream output = new FileOutputStream(local, false)) {
+                output.write(edited);
+                output.getFD().sync();
+            }
+            documents.syncAll();
+            try (FileInputStream input = new FileInputStream(source)) {
+                if (!java.util.Arrays.equals(edited, readExact(input, edited.length))) {
+                    throw new IllegalStateException("drag document writeback mismatch");
+                }
+            }
+            message = "Document drag broker probe passed\n"
+                    + local.toURI().toASCIIString();
+        } catch (Exception error) {
+            message = "Document drag broker probe failed\n" + error.getMessage();
+        } finally {
+            documents.close();
+        }
+        String finalMessage = message;
+        Log.i(TAG, finalMessage.replace('\n', ' '));
+        runOnUiThread(() -> {
+            result.setText(finalMessage);
+            result.setContentDescription(finalMessage.startsWith("Document drag broker probe passed")
+                    ? "Document drag broker probe passed"
+                    : "Document drag broker probe failed");
+        });
+    }
+
     private void runDragProbe(TextView result) {
         String message;
         boolean passed = false;
@@ -1607,14 +1734,14 @@ public final class MainActivity extends Activity {
                 output.write(destroyDataDeviceAndSyncRequest());
                 output.flush();
                 dispatch(core);
-                readUntilCallback(input, 52);
+                readUntilCallback(input, 58);
                 if (nativeDataDeviceCount(core) != 0) {
                     throw new IllegalStateException("wl_data_device release leaked");
                 }
             }
             passed = true;
             message = "Native drag-and-drop probe passed\n"
-                    + "bidirectional text drag-and-drop lifecycle complete";
+                    + "bidirectional text and URI-list drag-and-drop lifecycle complete";
         } catch (Exception error) {
             message = "Native drag-and-drop probe failed\n" + error.getMessage();
         } finally {
@@ -1649,8 +1776,9 @@ public final class MainActivity extends Activity {
                     "Wayland drag source FD transfer failed: " + sourceTransfer);
         }
         int linuxDragFd = nativeTakeLinuxDragFd(core);
-        if (linuxDragFd < 0 || nativeTakeLinuxDragFd(core) != -1) {
-            throw new IllegalStateException("Linux drag request queue was invalid");
+        if (linuxDragFd < 0 || nativeTakeLinuxDragFd(core) != -1
+                || nativeTakeLinuxDragMimeKind(core) != 1) {
+            throw new IllegalStateException("Linux text drag request queue was invalid");
         }
         try (ParcelFileDescriptor source = ParcelFileDescriptor.adoptFd(linuxDragFd);
                 FileInputStream sourceStream =
@@ -1686,7 +1814,7 @@ public final class MainActivity extends Activity {
         output.flush();
         dispatch(core);
         readAndroidDropUntilCallback(input, dataDeviceId, 46);
-        output.write(acceptAndroidDragRequest(androidDragOffer[0], androidDragOffer[1]));
+        output.write(acceptAndroidDragRequest(androidDragOffer[0], androidDragOffer[1], "text/plain"));
         output.flush();
         dispatch(core);
         int androidDragReadFd = nativeSendDataOfferReceive(
@@ -1708,37 +1836,114 @@ public final class MainActivity extends Activity {
         dispatch(core);
         readUntilCallback(input, 47);
 
-        if (nativeAndroidDragMotion(core, 60, 40, 2234) != 1) {
-            throw new IllegalStateException("Android cancellation drag did not enter");
+        if (nativeAndroidDragMotion(core, 90, 60, 1734) != 1) {
+            throw new IllegalStateException("Android URI drag did not enter Wayland");
         }
         output.write(syncRequest(48));
         output.flush();
         dispatch(core);
-        int[] cancelledDragOffer = readAndroidDragOfferUntilCallback(
+        int[] androidUriOffer = readAndroidDragOfferUntilCallback(
                 input, dataDeviceId, surfaceId, 48);
+        byte[] androidUriBytes = "file:///data/user/0/org.archphene.probe/files/"
+                .concat("linux-home/Documents/Android/drag%20probe.txt\r\n")
+                .getBytes(StandardCharsets.UTF_8);
+        if (nativeAndroidDropUriList(core, androidUriBytes) != 1) {
+            throw new IllegalStateException("Android URI-list payload was rejected");
+        }
+        output.write(syncRequest(49));
+        output.flush();
+        dispatch(core);
+        readAndroidDropUntilCallback(input, dataDeviceId, 49);
+        output.write(acceptAndroidDragRequest(
+                androidUriOffer[0], androidUriOffer[1], "text/uri-list"));
+        output.flush();
+        dispatch(core);
+        int androidUriReadFd = nativeSendDataOfferUriReceive(
+                client.getFd(), androidUriOffer[0]);
+        if (androidUriReadFd < 0) {
+            throw new IllegalStateException("Android URI-list receive FD transfer failed");
+        }
+        dispatch(core);
+        try (ParcelFileDescriptor source = ParcelFileDescriptor.adoptFd(androidUriReadFd);
+                FileInputStream sourceStream =
+                        new FileInputStream(source.getFileDescriptor())) {
+            byte[] receivedUris = readExact(sourceStream, androidUriBytes.length);
+            if (!java.util.Arrays.equals(receivedUris, androidUriBytes)) {
+                throw new IllegalStateException("Android URI-list payload mismatch");
+            }
+        }
+        output.write(finishAndroidUriDragAndSyncRequest(androidUriOffer[0]));
+        output.flush();
+        dispatch(core);
+        readUntilCallback(input, 50);
+
+        if (nativeAndroidDragMotion(core, 60, 40, 2234) != 1) {
+            throw new IllegalStateException("Android cancellation drag did not enter");
+        }
+        output.write(syncRequest(51));
+        output.flush();
+        dispatch(core);
+        int[] cancelledDragOffer = readAndroidDragOfferUntilCallback(
+                input, dataDeviceId, surfaceId, 51);
         if (nativeCancelAndroidDrag(core) != 1) {
             throw new IllegalStateException("Android drag did not cancel");
         }
         output.write(destroyCancelledAndroidDragAndSyncRequest(cancelledDragOffer[0]));
         output.flush();
         dispatch(core);
-        readAndroidDragCancelledUntilCallback(input, dataDeviceId, 49);
+        readAndroidDragCancelledUntilCallback(input, dataDeviceId, 52);
 
         if (nativeAndroidDragMotion(core, 30, 20, 3234) != 1) {
             throw new IllegalStateException("Android offer-destroy drag did not enter");
         }
-        output.write(syncRequest(50));
+        output.write(syncRequest(53));
         output.flush();
         dispatch(core);
         int[] destroyedDragOffer = readAndroidDragOfferUntilCallback(
-                input, dataDeviceId, surfaceId, 50);
+                input, dataDeviceId, surfaceId, 53);
         output.write(destroyAndroidDragOfferAndSyncRequest(destroyedDragOffer[0]));
         output.flush();
         dispatch(core);
-        readUntilCallback(input, 51);
+        readUntilCallback(input, 54);
         if (nativeCancelAndroidDrag(core) != 0) {
             throw new IllegalStateException("Destroyed Android drag offer remained active");
         }
+
+        String linuxUriList = "file:///data/user/0/org.archphene.probe/files/"
+                + "linux-home/Documents/outbound%20drag.txt\r\n";
+        output.write(createUriDragAndSyncRequest(serial));
+        output.flush();
+        dispatch(core);
+        int queuedUriMimeKind = nativeTakeLinuxDragMimeKind(core);
+        if (queuedUriMimeKind != 2) {
+            throw new IllegalStateException("Wayland URI drag MIME was not selected: "
+                    + queuedUriMimeKind);
+        }
+        int uriSourceTransfer = nativeReceiveUriDragSourceSend(client.getFd(), 55, 56);
+        if (uriSourceTransfer != linuxUriList.getBytes(StandardCharsets.UTF_8).length) {
+            throw new IllegalStateException(
+                    "Wayland URI drag source FD transfer failed: " + uriSourceTransfer);
+        }
+        int linuxUriDragFd = nativeTakeLinuxDragFd(core);
+        if (linuxUriDragFd < 0 || nativeTakeLinuxDragFd(core) != -1) {
+            throw new IllegalStateException("Linux URI drag request queue was invalid");
+        }
+        try (ParcelFileDescriptor source = ParcelFileDescriptor.adoptFd(linuxUriDragFd);
+                FileInputStream sourceStream =
+                        new FileInputStream(source.getFileDescriptor())) {
+            byte[] uriBytes = readExact(
+                    sourceStream, linuxUriList.getBytes(StandardCharsets.UTF_8).length);
+            if (!linuxUriList.equals(new String(uriBytes, StandardCharsets.UTF_8))) {
+                throw new IllegalStateException("Wayland URI drag payload mismatch");
+            }
+        }
+        if (nativeFinishLinuxDrag(core, true) != 1) {
+            throw new IllegalStateException("Wayland URI drag did not finish");
+        }
+        output.write(destroyUriDragSourceAndSyncRequest());
+        output.flush();
+        dispatch(core);
+        readLinuxDragFinishedUntilCallback(input, 55, 57);
     }
 
     private static void injectSyntheticGesture(ImageView view) {
@@ -2500,7 +2705,7 @@ public final class MainActivity extends Activity {
         ByteBuffer request = buffer(20);
         putHeader(request, 40, 2, 8);
         putHeader(request, 1, 0, 12);
-        request.putInt(52);
+        request.putInt(58);
         return request.array();
     }
 
@@ -2534,8 +2739,35 @@ public final class MainActivity extends Activity {
         return request.array();
     }
 
-    private static byte[] acceptAndroidDragRequest(int offerId, int serial) {
-        String mimeType = "text/plain";
+    private static byte[] createUriDragAndSyncRequest(int serial) {
+        String mimeType = "text/uri-list";
+        int mimeSize = waylandStringMessageSize(mimeType);
+        ByteBuffer request = buffer(12 + mimeSize + 12 + 24 + 12);
+        putHeader(request, 38, 0, 12);
+        request.putInt(55);
+        putWaylandStringMessage(request, 55, 0, mimeType);
+        putHeader(request, 55, 2, 12);
+        request.putInt(1);
+        putHeader(request, 40, 0, 24);
+        request.putInt(55);
+        request.putInt(20);
+        request.putInt(0);
+        request.putInt(serial);
+        putHeader(request, 1, 0, 12);
+        request.putInt(56);
+        return request.array();
+    }
+
+    private static byte[] destroyUriDragSourceAndSyncRequest() {
+        ByteBuffer request = buffer(20);
+        putHeader(request, 55, 1, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(57);
+        return request.array();
+    }
+
+    private static byte[] acceptAndroidDragRequest(
+            int offerId, int serial, String mimeType) {
         byte[] encoded = mimeType.getBytes(StandardCharsets.UTF_8);
         int stringLength = encoded.length + 1;
         int paddedLength = (stringLength + 3) & ~3;
@@ -2562,11 +2794,20 @@ public final class MainActivity extends Activity {
         return request.array();
     }
 
+    private static byte[] finishAndroidUriDragAndSyncRequest(int offerId) {
+        ByteBuffer request = buffer(28);
+        putHeader(request, offerId, 3, 8);
+        putHeader(request, offerId, 2, 8);
+        putHeader(request, 1, 0, 12);
+        request.putInt(50);
+        return request.array();
+    }
+
     private static byte[] destroyCancelledAndroidDragAndSyncRequest(int offerId) {
         ByteBuffer request = buffer(20);
         putHeader(request, offerId, 2, 8);
         putHeader(request, 1, 0, 12);
-        request.putInt(49);
+        request.putInt(52);
         return request.array();
     }
 
@@ -2574,7 +2815,7 @@ public final class MainActivity extends Activity {
         ByteBuffer request = buffer(20);
         putHeader(request, offerId, 2, 8);
         putHeader(request, 1, 0, 12);
-        request.putInt(51);
+        request.putInt(54);
         return request.array();
     }
 
@@ -3208,6 +3449,7 @@ public final class MainActivity extends Activity {
         int enterSerial = 0;
         boolean foundPlain = false;
         boolean foundUtf8 = false;
+        boolean foundUriList = false;
         boolean sourceCopy = false;
         boolean actionCopy = false;
         boolean entered = false;
@@ -3224,6 +3466,7 @@ public final class MainActivity extends Activity {
                 String mimeType = readWaylandString(message.body);
                 foundPlain |= "text/plain".equals(mimeType);
                 foundUtf8 |= "text/plain;charset=utf-8".equals(mimeType);
+                foundUriList |= "text/uri-list".equals(mimeType);
             } else if (offerId != 0 && message.objectId == offerId
                     && message.opcode == 1 && message.body.length == 4) {
                 sourceCopy = ByteBuffer.wrap(message.body)
@@ -3249,7 +3492,7 @@ public final class MainActivity extends Activity {
             }
             if (message.objectId == callbackId && message.opcode == 0) {
                 if (offerId == 0 || enterSerial == 0 || !foundPlain || !foundUtf8
-                        || !sourceCopy || !actionCopy || !entered || !moved) {
+                        || !foundUriList || !sourceCopy || !actionCopy || !entered || !moved) {
                     throw new IllegalStateException(
                             "Android drag Wayland offer was incomplete");
                 }

@@ -68,6 +68,7 @@ public final class NativeCompositor implements AutoCloseable {
     private static final int ANDROID_DRAG_CANCEL = 60;
     private static final int LINUX_DRAG_FD = 61;
     private static final int LINUX_DRAG_FINISH = 62;
+    private static final int LINUX_DRAG_MIME_LENGTH = 63;
 
     static { System.loadLibrary("archphene_compositor"); }
 
@@ -153,8 +154,18 @@ public final class NativeCompositor implements AutoCloseable {
     public int androidDropText(String text) {
         return nativeBytes(handle, 6, text.getBytes(StandardCharsets.UTF_8), 0, 0);
     }
+    public int androidDropUriList(String uriList) {
+        return nativeBytes(handle, 7, uriList.getBytes(StandardCharsets.UTF_8), 0, 0);
+    }
     public int cancelAndroidDrag() { return command(ANDROID_DRAG_CANCEL); }
     public int takeLinuxDragFd() { return command(LINUX_DRAG_FD); }
+    public String takeLinuxDragMimeType() {
+        int length = command(LINUX_DRAG_MIME_LENGTH);
+        if (length <= 0 || length > 256) return "";
+        byte[] mimeType = new byte[length];
+        if (nativeBytes(handle, 8, mimeType, 0, 0) != length) return "";
+        return new String(mimeType, StandardCharsets.UTF_8);
+    }
     public int finishLinuxDrag(boolean accepted) {
         return command(LINUX_DRAG_FINISH, accepted ? 1 : 0);
     }
