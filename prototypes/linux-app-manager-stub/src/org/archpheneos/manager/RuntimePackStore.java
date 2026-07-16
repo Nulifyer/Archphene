@@ -447,6 +447,7 @@ final class RuntimePackStore {
             }
         }
         live.addAll(ManagedPackageStore.packIds(context));
+        live.addAll(RuntimePackLeaseRegistry.packIds());
         int removed = 0;
         File[] packDirectories = packs.listFiles();
         if (packDirectories != null) {
@@ -484,7 +485,8 @@ final class RuntimePackStore {
         deleteIfUnbound(context, packId);
     }
 
-    private static void deleteIfUnbound(Context context, String packId) throws Exception {
+    static synchronized void deleteIfUnbound(Context context, String packId) throws Exception {
+        if (RuntimePackLeaseRegistry.isLeased(packId)) return;
         if (ManagedPackageStore.packIds(context).contains(packId)) return;
         File store = directory(context.getFilesDir(), "runtime-packs");
         File bindings = directory(store, "bindings");

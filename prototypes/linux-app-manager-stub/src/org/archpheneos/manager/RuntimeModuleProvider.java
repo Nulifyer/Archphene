@@ -13,6 +13,7 @@ import android.net.Uri;
 import android.os.Binder;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.IBinder;
 import android.os.ParcelFileDescriptor;
 import android.provider.OpenableColumns;
 import android.util.Log;
@@ -29,6 +30,8 @@ import java.util.List;
 public final class RuntimeModuleProvider extends ContentProvider {
     public static final String AUTHORITY = "org.archpheneos.manager.runtime";
     public static final String ACTIVE_PACK_METHOD = "org.archphene.runtime.ACTIVE_PACK_V1";
+    public static final String RELEASE_LEASE_METHOD =
+            "org.archphene.runtime.RELEASE_LEASE_V1";
     public static final String APPEARANCE_METHOD =
             "org.archphene.runtime.APPEARANCE_V1";
     public static final String TERMINAL_CATALOG_METHOD =
@@ -65,7 +68,8 @@ public final class RuntimeModuleProvider extends ContentProvider {
 
     @Override
     public Bundle call(String method, String arg, Bundle extras) {
-        if (!ACTIVE_PACK_METHOD.equals(method) && !APPEARANCE_METHOD.equals(method)
+        if (!ACTIVE_PACK_METHOD.equals(method) && !RELEASE_LEASE_METHOD.equals(method)
+                && !APPEARANCE_METHOD.equals(method)
                 && !TERMINAL_CATALOG_METHOD.equals(method)
                 && !TERMINAL_PACK_METHOD.equals(method)) {
             throw new UnsupportedOperationException("Unsupported runtime provider method");
@@ -73,33 +77,66 @@ public final class RuntimeModuleProvider extends ContentProvider {
         try {
             if (APPEARANCE_METHOD.equals(method)) return appearanceBundle();
             if (TERMINAL_CATALOG_METHOD.equals(method)) return terminalCatalogBundle();
-            if (TERMINAL_PACK_METHOD.equals(method)) return terminalPackBundle(arg);
-            String caller = requireWrapperCaller();
-            RuntimePackStore.Pack pack = RuntimePackStore.active(providerContext(), caller);
-            RuntimePackStore.grantActive(providerContext(), caller);
-            RuntimePackStore.Module program = pack.requireKind("program");
-            RuntimePackStore.Module data = pack.data();
-            Uri loader = uriForRole(providerContext(), "glibc-loader");
-            providerContext().grantUriPermission(caller, loader,
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            List<RuntimePackStore.Module> libraries = pack.libraries();
-            String[] libraryUris = new String[libraries.size()];
-            String[] libraryNames = new String[libraries.size()];
-            for (int index = 0; index < libraries.size(); index++) {
-                RuntimePackStore.Module library = libraries.get(index);
-                libraryUris[index] = library.uri(pack.id).toString();
-                libraryNames[index] = library.linkName;
+            if (RELEASE_LEASE_METHOD.equals(method)) {
+                String caller = isTerminalCaller() ? requireTerminalCaller()
+                        : requireWrapperCaller();
+                IBinder token = extras == null ? null : extras.getBinder("lease_token");
+                RuntimePackLeaseRegistry.release(caller, arg, token);
+                return new Bundle();
             }
-            Bundle result = new Bundle();
-            result.putString("pack_id", pack.id);
-            result.putString("program_uri", program.uri(pack.id).toString());
-            result.putString("program_name", pack.executableName);
-            result.putString("loader_uri", loader.toString());
-            result.putStringArray("library_uris", libraryUris);
-            result.putStringArray("library_names", libraryNames);
-            result.putString("toolkit", pack.toolkit());
-            if (data != null) result.putString("data_uri", data.uri(pack.id).toString());
-            return result;
+            if (TERMINAL_PACK_METHOD.equals(method)) {
+                String caller = requireTerminalCaller();
+                IBinder token = extras == null ? null : extras.getBinder("lease_token");
+                RuntimePackLeaseRegistry.acquire(providerContext(), caller, arg, token);
+                try {
+                    return terminalPackBundle(arg);
+                } catch (Exception error) {
+                    RuntimePackLeaseRegistry.release(caller, arg, token);
+                    throw error;
+                }
+            }
+            String caller = requireWrapperCaller();
+            boolean external = Binder.getCallingUid() != android.os.Process.myUid();
+            IBinder token = extras == null ? null : extras.getBinder("lease_token");
+            RuntimePackStore.Pack pack;
+            synchronized (RuntimePackStore.class) {
+                pack = RuntimePackStore.active(providerContext(), caller);
+                if (external) {
+                    RuntimePackLeaseRegistry.acquire(
+                            providerContext(), caller, pack.id, token);
+                }
+            }
+            try {
+                RuntimePackStore.grantActive(providerContext(), caller);
+                RuntimePackStore.Module program = pack.requireKind("program");
+                RuntimePackStore.Module data = pack.data();
+                Uri loader = uriForRole(providerContext(), "glibc-loader");
+                providerContext().grantUriPermission(caller, loader,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                List<RuntimePackStore.Module> libraries = pack.libraries();
+                String[] libraryUris = new String[libraries.size()];
+                String[] libraryNames = new String[libraries.size()];
+                for (int index = 0; index < libraries.size(); index++) {
+                    RuntimePackStore.Module library = libraries.get(index);
+                    libraryUris[index] = library.uri(pack.id).toString();
+                    libraryNames[index] = library.linkName;
+                }
+                Bundle result = new Bundle();
+                result.putString("pack_id", pack.id);
+                result.putString("program_uri", program.uri(pack.id).toString());
+                result.putString("program_name", pack.executableName);
+                result.putString("loader_uri", loader.toString());
+                result.putStringArray("library_uris", libraryUris);
+                result.putStringArray("library_names", libraryNames);
+                result.putString("toolkit", pack.toolkit());
+                if (data != null) {
+                    result.putString("data_uri", data.uri(pack.id).toString());
+                }
+                return result;
+            } catch (Exception error) {
+                if (external) RuntimePackLeaseRegistry.release(caller, pack.id, token);
+                throw error;
+            }
         } catch (Exception error) {
             SecurityException failure = new SecurityException(
                     "Caller has no active Archphene runtime pack");

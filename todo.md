@@ -21,7 +21,7 @@ This is the prioritized completion queue for the Archphene Android application. 
   - [x] Generate arm64-v8a desktop wrapper templates and prove a real Qt package through Android PackageInstaller and app-drawer launch.
   - [x] Publish separate x86_64 and arm64-v8a release assets; accept `any` data packages but require matching ABI for native ELF files.
 - [ ] Complete runtime-pack lifecycle safety.
-  - [ ] Add running-process leases.
+  - [x] Add authenticated runtime-pack leases backed by stable provider clients and Binder death tokens. Running wrappers survive unbinding/GC and release on exit/death; Terminal leases each pack until its private copy is hash-verified and committed.
   - [x] Reconcile external Android uninstalls and revoke grants per package without disrupting wrappers that share a pack.
   - [x] Reuse unchanged closures before copying runtime-pack modules.
   - [x] Validate 4 KB and 16 KB ELF page compatibility. Runtime executables and published modules now fail closed before execution when an ELF load segment is incompatible; the AArch64 runtime is 64 KB-aligned, while current upstream Arch x86_64 packages remain 4 KB-only and are explicitly unsupported on 16 KB x86_64 Android until rebuilt.

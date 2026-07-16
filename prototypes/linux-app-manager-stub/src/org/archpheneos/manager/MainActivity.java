@@ -2077,13 +2077,46 @@ public final class MainActivity extends Activity {
                     ManagerStateStore.verifyPendingReinstallForTest(this);
                     ManagedPackageStore.verifyForTest(this);
                     RuntimePackStore.verifyParserForTest();
+                    RuntimePackLeaseRegistry.verifyForTest(this);
                     runOnUiThread(() -> showBanner(
                             "Package job persistence and scheduler passed", false));
                     return;
                 }
                 if (getIntent().getBooleanExtra("archphene_test_runtime_pack_parser", false)) {
                     RuntimePackStore.verifyParserForTest();
+                    RuntimePackLeaseRegistry.verifyForTest(this);
                     runOnUiThread(() -> showBanner("Runtime-pack parser passed", false));
+                    return;
+                }
+                String removeBinding = getIntent().getStringExtra(
+                        "archphene_test_remove_binding");
+                if (removeBinding != null) {
+                    RuntimePackStore.removeBinding(this, removeBinding);
+                    runOnUiThread(() -> showBanner(
+                            "Removed runtime binding for " + removeBinding, false));
+                    return;
+                }
+                String statusPack = getIntent().getStringExtra(
+                        "archphene_test_runtime_pack_status");
+                if (statusPack != null) {
+                    boolean exists;
+                    try {
+                        RuntimePackStore.load(this, statusPack);
+                        exists = true;
+                    } catch (java.io.FileNotFoundException missing) {
+                        exists = false;
+                    }
+                    boolean leased = RuntimePackLeaseRegistry.isLeased(statusPack);
+                    boolean found = exists;
+                    runOnUiThread(() -> showBanner("Runtime pack status exists=" + found
+                            + " leased=" + leased, false));
+                    return;
+                }
+                if (getIntent().getBooleanExtra(
+                        "archphene_test_collect_runtime_packs", false)) {
+                    int removed = RuntimePackStore.garbageCollectNow(this);
+                    runOnUiThread(() -> showBanner(
+                            "Collected " + removed + " runtime packs", false));
                     return;
                 }
                 String bindPack = getIntent().getStringExtra("archphene_test_bind_pack");

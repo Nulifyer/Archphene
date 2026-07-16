@@ -31,9 +31,8 @@ Local debug builds can remain multi-ABI. Release builds emit independently signe
    - do not silently emulate x86_64 on ARM.
 
 2. **Runtime storage**
-   - add running-process leases so garbage collection cannot remove a pack still used by a wrapper;
    - finish complete Linux process-tree cleanup when a wrapper exits;
-   - retain the 24-hour grace period only when no active binding or running lease protects a pack.
+   - retain the 24-hour grace period for stale unbound packs while active bindings and Binder-death leases remain immediate GC roots.
 
 ## Pending
 

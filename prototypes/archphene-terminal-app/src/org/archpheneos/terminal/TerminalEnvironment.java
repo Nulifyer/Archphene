@@ -1,9 +1,12 @@
 package org.archpheneos.terminal;
 
+import android.content.ContentProviderClient;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.net.Uri;
+import android.os.Binder;
 import android.os.Bundle;
+import android.util.Log;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.File;
@@ -28,6 +31,9 @@ final class TerminalEnvironment {
     private static final Uri PROVIDER = Uri.parse("content://org.archpheneos.manager.runtime");
     private static final String CATALOG_METHOD = "org.archphene.runtime.TERMINAL_CATALOG_V1";
     private static final String PACK_METHOD = "org.archphene.runtime.TERMINAL_PACK_V1";
+    private static final String RELEASE_METHOD =
+            "org.archphene.runtime.RELEASE_LEASE_V1";
+    private static final String TAG = "ArchpheneTerminal";
     private static final String SAFE_ID = "[a-zA-Z0-9@._+:-]{1,128}";
     private static final String HASH = "[0-9a-f]{64}";
     private static final String MATERIALIZATION_SCHEMA = "v2:";
@@ -106,6 +112,82 @@ final class TerminalEnvironment {
         }
     }
 
+    private static final class ProviderSession implements AutoCloseable {
+        final ContentResolver resolver;
+        final ContentProviderClient client;
+
+        private ProviderSession(ContentResolver resolver, ContentProviderClient client) {
+            this.resolver = resolver;
+            this.client = client;
+        }
+
+        static ProviderSession open(Context context) {
+            ContentResolver resolver = context.getContentResolver();
+            ContentProviderClient client = resolver.acquireContentProviderClient(PROVIDER);
+            if (client == null) {
+                throw new IllegalStateException("Archphene runtime provider is unavailable");
+            }
+            return new ProviderSession(resolver, client);
+        }
+
+        Bundle catalog() throws Exception {
+            return requireBundle(client.call(CATALOG_METHOD, null, null),
+                    "Terminal catalog unavailable");
+        }
+
+        PackLease pack(String packId) throws Exception {
+            Binder token = new Binder();
+            Bundle request = new Bundle();
+            request.putBinder("lease_token", token);
+            try {
+                Bundle modules = requireBundle(client.call(PACK_METHOD, packId, request),
+                        "Terminal pack unavailable");
+                return new PackLease(client, packId, token, modules);
+            } catch (Exception error) {
+                releaseLease(client, packId, token);
+                throw error;
+            }
+        }
+
+        @Override
+        public void close() {
+            client.release();
+        }
+    }
+
+    private static final class PackLease implements AutoCloseable {
+        final ContentProviderClient client;
+        final String packId;
+        final Binder token;
+        final Bundle modules;
+        private boolean closed;
+
+        PackLease(ContentProviderClient client, String packId, Binder token, Bundle modules) {
+            this.client = client;
+            this.packId = packId;
+            this.token = token;
+            this.modules = modules;
+        }
+
+        @Override
+        public void close() {
+            if (closed) return;
+            closed = true;
+            releaseLease(client, packId, token);
+        }
+    }
+
+    private static void releaseLease(ContentProviderClient client, String packId,
+            Binder token) {
+        try {
+            Bundle request = new Bundle();
+            request.putBinder("lease_token", token);
+            client.call(RELEASE_METHOD, packId, request);
+        } catch (Exception error) {
+            Log.w(TAG, "Could not release runtime pack lease " + packId, error);
+        }
+    }
+
     private TerminalEnvironment() {}
 
     static synchronized Session prepare(Context context) throws Exception {
@@ -119,42 +201,45 @@ final class TerminalEnvironment {
         File request = new File(runtime, "manager-request.tsv");
         if (request.exists() && !request.delete()) throw new IOException("Could not reset request");
 
-        Bundle catalog = requireBundle(context.getContentResolver().call(
-                PROVIDER, CATALOG_METHOD, null, null), "Terminal catalog unavailable");
-        String[] encoded = catalog.getStringArray("packages");
-        if (encoded == null || encoded.length > MAX_PACKAGES) {
-            throw new SecurityException("Terminal package catalog exceeds its limit");
-        }
         ArrayList<PackageEntry> packages = new ArrayList<>();
         Set<String> livePacks = new HashSet<>();
         LinkedHashMap<String, Command> commands = new LinkedHashMap<>();
         ArrayList<String> dataDirectories = new ArrayList<>();
-        for (String value : encoded) {
-            PackageEntry entry = new PackageEntry(value);
-            if (!livePacks.add(entry.packId)) {
-                throw new SecurityException("Duplicate Terminal runtime pack");
+        try (ProviderSession provider = ProviderSession.open(context)) {
+            Bundle catalog = provider.catalog();
+            String[] encoded = catalog.getStringArray("packages");
+            if (encoded == null || encoded.length > MAX_PACKAGES) {
+                throw new SecurityException("Terminal package catalog exceeds its limit");
             }
-            Bundle modules = requireBundle(context.getContentResolver().call(
-                    PROVIDER, PACK_METHOD, entry.packId, null), "Terminal pack unavailable");
-            File packRoot = materializePack(context.getContentResolver(), packsRoot,
-                    entry, modules);
-            File libraries = new File(packRoot, "lib");
-            File dataRoot = new File(packRoot, "root");
-            File loader = new File(packRoot, "loader");
-            dataDirectories.add(new File(dataRoot, "usr/share").getAbsolutePath());
-            for (String commandName : entry.commands) {
-                Command command = new Command(entry.packId, commandName,
-                        new File(new File(packRoot, "bin"), commandName), libraries,
-                        dataRoot, loader);
-                if (!command.program.isFile()) {
-                    throw new SecurityException("Runtime pack is missing command " + commandName);
+            for (String value : encoded) {
+                PackageEntry entry = new PackageEntry(value);
+                if (!livePacks.add(entry.packId)) {
+                    throw new SecurityException("Duplicate Terminal runtime pack");
                 }
-                Command previous = commands.putIfAbsent(commandName, command);
-                if (previous != null && !previous.packId.equals(entry.packId)) {
-                    throw new IllegalStateException("Command collision: " + commandName);
+                File packRoot;
+                try (PackLease lease = provider.pack(entry.packId)) {
+                    packRoot = materializePack(provider.resolver, packsRoot,
+                            entry, lease.modules);
                 }
+                File libraries = new File(packRoot, "lib");
+                File dataRoot = new File(packRoot, "root");
+                File loader = new File(packRoot, "loader");
+                dataDirectories.add(new File(dataRoot, "usr/share").getAbsolutePath());
+                for (String commandName : entry.commands) {
+                    Command command = new Command(entry.packId, commandName,
+                            new File(new File(packRoot, "bin"), commandName), libraries,
+                            dataRoot, loader);
+                    if (!command.program.isFile()) {
+                        throw new SecurityException(
+                                "Runtime pack is missing command " + commandName);
+                    }
+                    Command previous = commands.putIfAbsent(commandName, command);
+                    if (previous != null && !previous.packId.equals(entry.packId)) {
+                        throw new IllegalStateException("Command collision: " + commandName);
+                    }
+                }
+                packages.add(entry);
             }
-            packages.add(entry);
         }
         removeStalePacks(packsRoot, livePacks);
 

@@ -2,6 +2,7 @@ package org.archphene.bridge;
 
 import android.app.Activity;
 import android.app.Dialog;
+import android.content.ContentProviderClient;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
@@ -12,6 +13,7 @@ import android.graphics.Insets;
 import android.graphics.drawable.ColorDrawable;
 import android.net.Uri;
 import android.os.Build;
+import android.os.Binder;
 import android.os.Bundle;
 import android.util.Log;
 import android.view.Gravity;
@@ -54,6 +56,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             "content://org.archpheneos.manager.runtime");
     private static final String ACTIVE_PACK_METHOD =
             "org.archphene.runtime.ACTIVE_PACK_V1";
+    private static final String RELEASE_LEASE_METHOD =
+            "org.archphene.runtime.RELEASE_LEASE_V1";
     private static final String APPEARANCE_METHOD =
             "org.archphene.runtime.APPEARANCE_V1";
 
@@ -75,6 +79,10 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     private String[] runtimeLibraryUris;
     private String[] runtimeLibraryNames;
     private boolean runtimeGui;
+    private final Binder runtimeLeaseToken = new Binder();
+    private ContentProviderClient runtimeProviderClient;
+    private String runtimePackId;
+    private boolean runtimeExecutionStarted;
     private String appearanceTheme = "system";
     private int appearanceScalePercent;
     private int appearanceFontPercent = 100;
@@ -222,15 +230,22 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         return null;
     }
     private void loadManagerRuntimePack() {
+        ContentProviderClient client = null;
+        String leasedPack = null;
         try {
-            Bundle runtime = getContentResolver().call(
-                    RUNTIME_PROVIDER, ACTIVE_PACK_METHOD, null, null);
+            client = getContentResolver().acquireContentProviderClient(RUNTIME_PROVIDER);
+            if (client == null) return;
+            Bundle request = new Bundle();
+            request.putBinder("lease_token", runtimeLeaseToken);
+            Bundle runtime = client.call(ACTIVE_PACK_METHOD, null, request);
             if (runtime == null) return;
+            leasedPack = runtime.getString("pack_id");
             String program = runtime.getString("program_uri");
             String loader = runtime.getString("loader_uri");
             String[] libraries = runtime.getStringArray("library_uris");
             String[] names = runtime.getStringArray("library_names");
-            if (program == null || loader == null || libraries == null || names == null
+            if (leasedPack == null || !leasedPack.matches("[a-f0-9]{64}")
+                    || program == null || loader == null || libraries == null || names == null
                     || libraries.length == 0 || libraries.length != names.length) {
                 throw new SecurityException("Manager returned an invalid runtime pack");
             }
@@ -244,10 +259,19 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             if ("qt6".equals(runtimeToolkit) || "gtk3".equals(runtimeToolkit)
                     || "wayland".equals(runtimeToolkit)) toolkit = runtimeToolkit;
             runtimeGui = true;
-            Log.i(logTag, "Loaded manager-owned runtime pack "
-                    + runtime.getString("pack_id", "unknown"));
+            synchronized (this) {
+                runtimePackId = leasedPack;
+                runtimeProviderClient = client;
+                client = null;
+            }
+            Log.i(logTag, "Loaded manager-owned runtime pack " + runtimePackId);
         } catch (Exception unavailable) {
             Log.d(logTag, "No manager-owned runtime pack; using packaged payload");
+        } finally {
+            if (client != null) {
+                if (leasedPack != null) releaseLease(client, leasedPack);
+                client.release();
+            }
         }
     }
 
@@ -578,6 +602,9 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         session.start(socket, width, height);
         new Thread(() -> {
             try {
+                if (runtimePackId != null && !beginRuntimeExecution()) {
+                    throw new SecurityException("Runtime pack lease is unavailable");
+                }
                 if (runtimeLibraryUris == null || runtimeLibraryNames == null
                         || runtimeLibraryUris.length != runtimeLibraryNames.length) {
                     throw new IllegalArgumentException("Runtime library intent is malformed");
@@ -634,6 +661,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 Log.e("ArchpheneRuntime", "Could not launch runtime GUI", error);
             } finally {
                 gpuBridge.stop();
+                releaseRuntimeLease();
             }
         }, "archphene-runtime-gui").start();
     }
@@ -1207,6 +1235,35 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         if (linuxProcess != null) linuxProcess.destroy();
         gpuBridge.stop();
         if (session != null) session.close();
+        releaseUnstartedRuntimeLease();
         super.onDestroy();
+    }
+
+    private synchronized boolean beginRuntimeExecution() {
+        if (runtimeProviderClient == null || runtimeExecutionStarted) return false;
+        runtimeExecutionStarted = true;
+        return true;
+    }
+
+    private synchronized void releaseUnstartedRuntimeLease() {
+        if (!runtimeExecutionStarted) releaseRuntimeLease();
+    }
+
+    private synchronized void releaseRuntimeLease() {
+        if (runtimeProviderClient == null) return;
+        releaseLease(runtimeProviderClient, runtimePackId);
+        runtimeProviderClient.release();
+        runtimeProviderClient = null;
+        runtimePackId = null;
+    }
+
+    private void releaseLease(ContentProviderClient client, String packId) {
+        try {
+            Bundle request = new Bundle();
+            request.putBinder("lease_token", runtimeLeaseToken);
+            client.call(RELEASE_LEASE_METHOD, packId, request);
+        } catch (Exception error) {
+            Log.w(logTag, "Could not explicitly release runtime pack lease", error);
+        }
     }
 }
