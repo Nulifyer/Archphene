@@ -2392,6 +2392,7 @@ public final class MainActivity extends Activity {
                     SearchRanking.verifyForTest();
                     ArchRuntimePolicy.verifyForTest();
                     ArchPackageRuntime.verifySearchParserForTest();
+                    ArchPackageRuntime.verifyArchivePathPolicyForTest();
                     PackageInstallJobStore.verifyForTest(this);
                     PackageInstallCoordinator.verifySchedulingForTest();
                     InstalledLinuxAppCatalog.verifyPacmanMetadataForTest();

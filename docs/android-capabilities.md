@@ -43,7 +43,13 @@ The first standard notification remains queued while Android displays `POST_NOTI
 
 Dual-ABI builds pass ELF dependency checks. A manager-generated KCalc wrapper passes portal discovery, HTTP(S)-only scheme policy, portal and classic notification permission/post/withdraw, portal OpenURI, and `xdg-open` on the x86_64 emulator. The private-bus contract and first-use notification lifecycle also pass on a physical AArch64 Samsung device.
 
-Audio, printing, camera, drag-and-drop, accessibility, secrets/keyrings, richer notification actions, non-HTTP URI policies, and other desktop portals remain unimplemented. Each must define an Android permission and lifecycle policy before receiving a broker command.
+## Audio output
+
+Wrappers whose verified ELF closure contains a Pulse client declare `audio-output`. The shared bridge then starts a PulseAudio native-protocol server inside that wrapper's Android UID, exports its private Unix socket through `PULSE_SERVER`, and renders a stereo 48 kHz sink through Android AAudio. OpenSL ES is the fallback when AAudio cannot initialize. The socket is under app-private cache storage and is never shared across wrapper UIDs.
+
+The manager embeds one checksum-verified Bionic server payload per supported ABI and copies it only into audio-enabled wrappers. The Linux application continues using its unmodified glibc Pulse client. On the x86_64 emulator, an on-device conversion of the official Arch `pavucontrol` package detects GTK4 and Pulse, generates an `audio-output` wrapper, launches the private AAudio sink, authenticates the Linux client, creates pavucontrol's monitor stream, and renders the live Volume Control GUI. Direct server playback also passes on the x86_64 emulator and physical AArch64 Samsung device.
+
+Speaker playback needs no runtime permission. Microphone capture is deliberately absent: it requires a separate input capability and an explicit `RECORD_AUDIO` request at the point of use. Printing, camera, drag-and-drop, accessibility, secrets/keyrings, richer notification actions, non-HTTP URI policies, and other desktop portals remain unimplemented. Each must define an Android permission and lifecycle policy before receiving a broker command.
 
 ## Native client
 

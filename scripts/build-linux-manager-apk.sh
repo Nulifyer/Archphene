@@ -234,11 +234,14 @@ arm_glibc="$arm_prefix/tooling/build/glibc-archphene-runtime-aarch64"
 arm_path_bridge="$arm_prefix/tooling/build/archphene-path-bridge-aarch64/libarchphene_path_bridge.so"
 x86_android_client="$root/tooling/build/android-capability/x86_64/libarchphene_android.so"
 arm_android_client="$root/tooling/build/android-capability/aarch64/libarchphene_android.so"
+x86_audio="$root/tooling/build/android-pulse/x86_64/out"
+arm_audio="$root/tooling/build/android-pulse/aarch64/out"
 template="$root/tooling/build/wrapper-templates/qt/qt-wrapper-template.apk"
 document_template="$root/tooling/build/wrapper-templates/qt/qt-document-wrapper-template.apk"
 for required in "$x86_root" "$x86_resolved" "$x86_keyrings" "$x86_glibc" \
     "$arm_root" "$arm_resolved" "$arm_keyrings" "$arm_glibc" "$arm_path_bridge" \
     "$x86_android_client" "$arm_android_client" \
+    "$x86_audio/SHA256SUMS" "$arm_audio/SHA256SUMS" \
     "$template" "$document_template"; do
   [[ -e "$required" ]] || {
     echo "package runtime input missing: $required" >&2
@@ -251,6 +254,16 @@ build_terminal_app "$x86_glibc/ld-linux-x86-64.so.2" "$arm_glibc/ld-linux-aarch6
 package_assets="$out/package-runtime/assets/package-runtime"
 x86_libs="$out/package-runtime/lib/x86_64"
 arm_libs="$out/package-runtime/lib/arm64-v8a"
+verify_audio_payload() {
+  local source="$1" destination="$2"
+  (cd "$source" && sha256sum --check --quiet SHA256SUMS) || {
+    echo "Android audio payload verification failed: $source" >&2
+    exit 1
+  }
+  cp "$source"/*.so "$destination/"
+}
+verify_audio_payload "$x86_audio" "$x86_libs"
+verify_audio_payload "$arm_audio" "$arm_libs"
 arm64_compositor="$root/native/archphene-compositor/target/aarch64-linux-android/release/libarchphene_compositor.so"
 [[ -f "$arm64_compositor" ]] || {
   echo "missing aarch64 compositor: $arm64_compositor" >&2

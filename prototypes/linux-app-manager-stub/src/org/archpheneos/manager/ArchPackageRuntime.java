@@ -399,50 +399,64 @@ public final class ArchPackageRuntime {
         }
         File staging = new File(state(context), "staging/" + packageName);
         deleteRecursively(staging);
-        File root = new File(staging, "root");
-        if (!root.mkdirs()) throw new IllegalStateException("Could not create transaction root");
-        File downloads = directory(state(context), "downloads");
-        LinkedHashSet<String> sourceCommands = new LinkedHashSet<>();
-        for (int index = 0; index < packages.size(); index++) {
-            if (Thread.currentThread().isInterrupted()) throw new InterruptedException();
-            ResolvedPackage value = packages.get(index);
-            int base = 10 + index * 50 / packages.size();
-            progress.onProgress(base, "Downloading and verifying " + value.name
-                    + " (" + (index + 1) + "/" + packages.size() + ")");
-            android.util.Log.i("ArchphenePackages", "staging " + value.repository + "/"
-                    + value.name + " " + value.version);
-            downloadAndVerify(context, value);
-            progress.onProgress(Math.min(59, base + 1), "Staging verified " + value.name);
-            File archive = new File(downloads, value.filename.replace(':', '_'));
-            stageVerifiedArchive(context, archive, root,
-                    value.name.equals(packageName), sourceCommands);
+        boolean transactionReady = false;
+        try {
+            File root = new File(staging, "root");
+            if (!root.mkdirs()) throw new IllegalStateException("Could not create transaction root");
+            File downloads = directory(state(context), "downloads");
+            LinkedHashSet<String> sourceCommands = new LinkedHashSet<>();
+            for (int index = 0; index < packages.size(); index++) {
+                if (Thread.currentThread().isInterrupted()) throw new InterruptedException();
+                ResolvedPackage value = packages.get(index);
+                int base = 10 + index * 50 / packages.size();
+                progress.onProgress(base, "Downloading and verifying " + value.name
+                        + " (" + (index + 1) + "/" + packages.size() + ")");
+                android.util.Log.i("ArchphenePackages", "staging " + value.repository + "/"
+                        + value.name + " " + value.version);
+                downloadAndVerify(context, value);
+                progress.onProgress(Math.min(59, base + 1), "Staging verified " + value.name);
+                File archive = new File(downloads, value.filename.replace(':', '_'));
+                stageVerifiedArchive(context, archive, root,
+                        value.name.equals(packageName), sourceCommands);
+            }
+            progress.onProgress(60, "Preparing shared toolkit data");
+            prepareSharedData(context, root);
+            ArchPackageClassifier.Result classification = ArchPackageClassifier.classify(
+                    root, packageName, executableName, sourceCommands);
+            android.util.Log.i("ArchphenePackages", "classified " + packageName + " as "
+                    + classification.kind + " executable=" + classification.executable
+                    + " commands=" + classification.commands.size());
+            if (classification.kind == ArchPackageClassifier.Kind.DEPENDENCY) {
+                deleteRecursively(staging);
+                throw new IllegalArgumentException(packageName
+                        + " does not provide a desktop entry or terminal command");
+            }
+            executableName = classification.executable;
+            File executable = new File(root, "usr/bin/" + executableName).getCanonicalFile();
+            if (!executable.isFile() || !executable.getPath().startsWith(root.getCanonicalPath()
+                    + File.separator)) {
+                deleteRecursively(staging);
+                throw new SecurityException("Resolved package has no safe desktop executable");
+            }
+            progress.onProgress(62, "Publishing verified runtime pack");
+            RuntimePackStore.Pack pack = RuntimePackStore.build(
+                    context, packageName, executableName, packages,
+                    classification.commands, root);
+            progress.onProgress(65, "Runtime pack ready");
+            StagedTransaction transaction = new StagedTransaction(packageName, packages, root,
+                    pack.id, classification, pack.toolkit());
+            transactionReady = true;
+            return transaction;
+        } finally {
+            if (!transactionReady) {
+                try {
+                    deleteRecursively(staging);
+                } catch (RuntimeException cleanupError) {
+                    android.util.Log.w("ArchphenePackages",
+                            "Could not clean failed transaction staging", cleanupError);
+                }
+            }
         }
-        progress.onProgress(60, "Preparing shared toolkit data");
-        prepareSharedData(context, root);
-        ArchPackageClassifier.Result classification = ArchPackageClassifier.classify(
-                root, packageName, executableName, sourceCommands);
-        android.util.Log.i("ArchphenePackages", "classified " + packageName + " as "
-                + classification.kind + " executable=" + classification.executable
-                + " commands=" + classification.commands.size());
-        if (classification.kind == ArchPackageClassifier.Kind.DEPENDENCY) {
-            deleteRecursively(staging);
-            throw new IllegalArgumentException(packageName
-                    + " does not provide a desktop entry or terminal command");
-        }
-        executableName = classification.executable;
-        File executable = new File(root, "usr/bin/" + executableName).getCanonicalFile();
-        if (!executable.isFile() || !executable.getPath().startsWith(root.getCanonicalPath()
-                + File.separator)) {
-            deleteRecursively(staging);
-            throw new SecurityException("Resolved package has no safe desktop executable");
-        }
-        progress.onProgress(62, "Publishing verified runtime pack");
-        RuntimePackStore.Pack pack = RuntimePackStore.build(
-                context, packageName, executableName, packages,
-                classification.commands, root);
-        progress.onProgress(65, "Runtime pack ready");
-        return new StagedTransaction(packageName, packages, root, pack.id, classification,
-                pack.toolkit());
     }
 
     private static void stageVerifiedArchive(Context context, File archive, File root,
@@ -739,10 +753,33 @@ public final class ArchPackageRuntime {
     }
 
     private static void validateArchivePath(String entry) {
-        if (entry.isEmpty() || entry.startsWith("/") || entry.indexOf('\\') >= 0
+        boolean control = false;
+        for (int index = 0; index < entry.length(); index++) {
+            if (Character.isISOControl(entry.charAt(index))) {
+                control = true;
+                break;
+            }
+        }
+        if (entry.isEmpty() || entry.length() > 4096 || control || entry.startsWith("/")
                 || entry.equals("..") || entry.startsWith("../")
                 || entry.contains("/../") || entry.endsWith("/..")) {
-            throw new SecurityException("Arch package contains an unsafe path");
+            String diagnostic = entry.replaceAll("[\\p{Cntrl}]", "?");
+            if (diagnostic.length() > 160) diagnostic = diagnostic.substring(0, 160) + "...";
+            throw new SecurityException("Arch package contains an unsafe path: " + diagnostic);
+        }
+    }
+
+    static void verifyArchivePathPolicyForTest() {
+        validateArchivePath("usr/lib/systemd/system/system-systemd\\x2dcryptsetup.slice");
+        for (String rejected : new String[] {"../escape", "usr/lib/../../escape", "/absolute",
+                "usr/lib/control\nname"}) {
+            boolean denied = false;
+            try {
+                validateArchivePath(rejected);
+            } catch (SecurityException expected) {
+                denied = true;
+            }
+            if (!denied) throw new SecurityException("Unsafe archive test path was accepted");
         }
     }
 

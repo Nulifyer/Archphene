@@ -39,7 +39,9 @@ This is the prioritized completion queue for the Archphene Android application. 
   - [x] Deliver a document sent to an already-running `singleTask` wrapper through a shared safe-restart policy with an explicit unsaved-work warning, Cancel action, and debug-only automated regression.
   - [x] Add a bounded same-UID Android capability broker and ABI-specific glibc client for HTTP(S) URL handling and notification permission/post/withdraw; validate unsafe-URI and cross-UID rejection and dynamic runtime-pack publication on the emulator.
   - [x] Add a private session bus and standard XDG portal adapters so unmodified applications can reach the validated URL and notification primitives.
-  - [ ] Add explicit Android capability APIs for audio, printing, camera, drag-and-drop, accessibility, and secrets/keyrings.
+  - [x] Add capability-scoped Linux audio playback through a wrapper-private Pulse native-protocol server backed by Android AAudio, with OpenSL ES fallback.
+  - [ ] Add microphone capture with an explicit `RECORD_AUDIO` request and separate input capability.
+  - [ ] Add explicit Android capability APIs for printing, camera, drag-and-drop, accessibility, and secrets/keyrings.
   - [x] Reject broad all-files access as the default. Use user-selected Storage Access Framework documents and trees; reconsider an optional advanced flow only with a concrete compatibility requirement.
 - [ ] Complete platform compatibility.
   - Rebuild or relocate the bundled x86_64 manager tools and glibc loader so the 16 KB control-plane APK does not trigger Android's page-size warning. Package execution already rejects incompatible 4 KB upstream Arch binaries before publication.

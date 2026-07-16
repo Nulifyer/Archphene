@@ -19,7 +19,7 @@ RUN apt-get update \
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       curl meson ninja-build patch pkg-config python3-yaml \
+       curl libarchive-tools meson ninja-build patch patchelf pkg-config python3-yaml \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace

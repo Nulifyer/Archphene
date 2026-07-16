@@ -3,6 +3,7 @@ param(
     [switch]$ReleaseBuild,
     [switch]$SkipGpuHelperBuild,
     [switch]$SkipDesktopIntegrationBuild,
+    [switch]$SkipAudioBuild,
     [ValidateSet("universal", "x86_64", "arm64-v8a")]
     [string]$ArtifactAbi = "universal",
     [int]$VersionCode = 10000,
@@ -36,6 +37,19 @@ if (-not $SkipDesktopIntegrationBuild) {
             if (-not (Test-Path -LiteralPath $output -PathType Leaf)) {
                 throw "Desktop integration output is required when skipping its build: $output"
             }
+        }
+    }
+}
+if (-not $SkipAudioBuild) {
+    & (Join-Path $PSScriptRoot "build-android-pulse-podman.ps1") -Architecture x86_64
+    if ($LASTEXITCODE -ne 0) { throw "Android x86_64 audio payload build failed" }
+    & (Join-Path $PSScriptRoot "build-android-pulse-podman.ps1") -Architecture aarch64
+    if ($LASTEXITCODE -ne 0) { throw "Android AArch64 audio payload build failed" }
+} else {
+    foreach ($architecture in @("x86_64", "aarch64")) {
+        $audioOutput = Join-Path $Root "tooling/build/android-pulse/$architecture/out"
+        if (-not (Test-Path -LiteralPath (Join-Path $audioOutput "SHA256SUMS") -PathType Leaf)) {
+            throw "Audio payload is required when skipping its build: $audioOutput"
         }
     }
 }

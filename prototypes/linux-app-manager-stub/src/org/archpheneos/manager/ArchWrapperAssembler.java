@@ -44,6 +44,17 @@ public final class ArchWrapperAssembler {
             "org.archphene.linux.p00000000000000000000000000000000";
     private static final int ENTRY_LIMIT = 256 * 1024 * 1024;
     private static final long ZIP_EPOCH_MILLIS = 1577836800000L;
+    private static final String[] AUDIO_NATIVE_LIBRARIES = {
+            "libarchphene_pulseaudio.so",
+            "libarchphene_pulse_module_aaudio_sink.so",
+            "libarchphene_pulse_module_sles_sink.so",
+            "libarchphene_pulse_module_native_protocol_unix.so",
+            "libprotocol-native.so", "libpulsecore-17.0.so", "libpulsecommon-17.0.so",
+            "libpulse.so", "libltdl.so", "libdbus-1.so", "libsndfile.so",
+            "libsoxr.so", "libspeexdsp.so", "libiconv.so", "libandroid-execinfo.so",
+            "libFLAC.so", "libvorbis.so", "libvorbisenc.so", "libopus.so",
+            "libogg.so", "libmp3lame.so"
+    };
 
     public static final class Result {
         public final String packageName;
@@ -117,6 +128,7 @@ public final class ArchWrapperAssembler {
                 || !sourceVersion.matches("[a-zA-Z0-9@._+:-]{1,128}")
                 || !ArchRuntimePolicy.supports(architecture)
                 || !("qt6".equals(toolkit) || "gtk3".equals(toolkit)
+                        || "gtk4".equals(toolkit)
                         || "wayland".equals(toolkit))
                 || executableName == null
                 || !executableName.matches("[a-zA-Z0-9@._+:-]{1,128}")
@@ -179,6 +191,15 @@ public final class ArchWrapperAssembler {
         boolean iconPatched = false;
         byte[] launcherIcon = buildLauncherIcon(context, sourcePackage,
                 executableName, iconName, runtimeRoot);
+        Map<String, File> nativeClosure = runtimeRoot == null
+                ? Collections.emptyMap()
+                : collectNativeFiles(context, runtimeRoot, sourcePackage, executableName);
+        boolean pulseClient = nativeClosure.containsKey("libpulse.so")
+                || nativeClosure.containsKey("libpulse.so.0");
+        if (pulseClient && embedNativeClosure) {
+            throw new SecurityException(
+                    "Audio-enabled applications require runtime-pack publication");
+        }
         String templateAsset = mimeTypes.isEmpty() ? QT_TEMPLATE : QT_DOCUMENT_TEMPLATE;
         android.util.Log.i("ArchphenePackages", "Wrapper template " + templateAsset
                 + " for " + sourcePackage + " with " + mimeTypes.size() + " MIME types");
@@ -208,7 +229,7 @@ public final class ArchWrapperAssembler {
                     value = replaceBinaryXmlString(value, "qt6", toolkit);
                     value = replaceBinaryXmlString(value,
                             "wayland,input,ime,clipboard,runtime-pack,home-documents,open-uri,notifications,documents",
-                            capabilityMetadata(mimeTypes));
+                            capabilityMetadata(mimeTypes, pulseClient));
                     value = replaceBinaryXmlString(value, "archphene-executable-placeholder",
                             executableName);
                     value = replaceBinaryXmlString(value, "ArchpheneKCalc", "ArchpheneLinuxApp");
@@ -242,20 +263,11 @@ public final class ArchWrapperAssembler {
                 zip.closeEntry();
             }
             if (embedNativeClosure && runtimeRoot != null) {
-                for (Map.Entry<String, File> nativeFile : collectNativeFiles(
-                        context, runtimeRoot, sourcePackage).entrySet()) {
-                    ZipEntry next = new ZipEntry("lib/" + androidAbi(architecture) + "/"
-                            + nativeFile.getKey());
-                    next.setTime(ZIP_EPOCH_MILLIS);
-                    zip.putNextEntry(next);
-                    try (InputStream file = new FileInputStream(nativeFile.getValue())) {
-                        byte[] buffer = new byte[64 * 1024];
-                        int read;
-                        while ((read = file.read(buffer)) != -1) zip.write(buffer, 0, read);
-                    }
-                    zip.closeEntry();
+                for (Map.Entry<String, File> nativeFile : nativeClosure.entrySet()) {
+                    writeNativeEntry(zip, architecture, nativeFile.getKey(), nativeFile.getValue());
                 }
             }
+            if (pulseClient) addAudioNativeFiles(context, zip, architecture);
         }
         if (!patched || !iconPatched) {
             output.delete();
@@ -263,6 +275,33 @@ public final class ArchWrapperAssembler {
                     ? "Wrapper template manifest is missing"
                     : "Wrapper template launcher icon marker is missing");
         }
+    }
+
+    private static void addAudioNativeFiles(Context context, ZipOutputStream zip,
+            String architecture) throws Exception {
+        File nativeDirectory = new File(context.getApplicationInfo().nativeLibraryDir)
+                .getCanonicalFile();
+        for (String name : AUDIO_NATIVE_LIBRARIES) {
+            File file = new File(nativeDirectory, name).getCanonicalFile();
+            if (!nativeDirectory.equals(file.getParentFile()) || !file.isFile() || !isElf(file)) {
+                throw new SecurityException("Verified Android audio payload is missing: " + name);
+            }
+            RuntimePackStore.validateRuntimeElf(file);
+            writeNativeEntry(zip, architecture, name, file);
+        }
+    }
+
+    private static void writeNativeEntry(ZipOutputStream zip, String architecture,
+            String name, File source) throws Exception {
+        ZipEntry next = new ZipEntry("lib/" + androidAbi(architecture) + "/" + name);
+        next.setTime(ZIP_EPOCH_MILLIS);
+        zip.putNextEntry(next);
+        try (InputStream file = new FileInputStream(source)) {
+            byte[] buffer = new byte[64 * 1024];
+            int read;
+            while ((read = file.read(buffer)) != -1) zip.write(buffer, 0, read);
+        }
+        zip.closeEntry();
     }
 
     private static String currentArchitecture() {
@@ -335,6 +374,19 @@ public final class ArchWrapperAssembler {
             pending.add(dynamic);
         }
         resolveDependencies(result, candidates, pending, visited);
+        if (result.containsKey("libgtk-4.so.1")) {
+            for (String dynamicName : new String[] {"libEGL.so.1", "libGLESv2.so.2"}) {
+                if (result.containsKey(dynamicName)) continue;
+                File dynamic = candidates.get(dynamicName);
+                if (dynamic == null) {
+                    throw new SecurityException("Missing GTK4 graphics provider "
+                            + dynamicName);
+                }
+                addNative(result, dynamicName, dynamic);
+                pending.add(dynamic);
+            }
+            resolveDependencies(result, candidates, pending, visited);
+        }
         if (result.containsKey("libQt6Core.so.6")) {
             for (String pluginName : new String[] {"libqwayland.so", "libxdg-shell.so"}) {
                 File plugin = candidates.get(pluginName);
@@ -365,6 +417,7 @@ public final class ArchWrapperAssembler {
             if (pluginRoot.isDirectory()
                     && pluginPrefix.startsWith(libraryRoot.getPath() + File.separator)) {
                 for (Map.Entry<String, File> entry : candidates.entrySet()) {
+                    if (entry.getValue() == null) continue;
                     File candidate = entry.getValue().getCanonicalFile();
                     if (!candidate.getPath().startsWith(pluginPrefix)) continue;
                     TreeMap<String, File> trial = new TreeMap<>(result);
@@ -385,7 +438,8 @@ public final class ArchWrapperAssembler {
                     }
                 }
             }
-        }        if (result.containsKey("libEGL.so.1") || result.containsKey("libEGL.so")) {
+        }
+        if (result.containsKey("libEGL.so.1") || result.containsKey("libEGL.so")) {
             for (String providerName : new String[] {
                     "libEGL_mesa.so.0", "swrast_dri.so", "kms_swrast_dri.so",
                     "virtio_gpu_dri.so"}) {
@@ -409,7 +463,9 @@ public final class ArchWrapperAssembler {
                 if (result.containsKey(needed)) continue;
                 File dependency = candidates.get(needed);
                 if (dependency == null) {
-                    throw new SecurityException("Missing ELF dependency " + needed
+                    String reason = candidates.containsKey(needed)
+                            ? "Ambiguous ELF dependency " : "Missing ELF dependency ";
+                    throw new SecurityException(reason + needed
                             + " required by " + current.getName());
                 }
                 addNative(result, needed, dependency);
@@ -433,7 +489,7 @@ public final class ArchWrapperAssembler {
             if (target.isDirectory()) {
                 collectElfFiles(root, target, result, visited);
             } else if (target.isFile() && isElf(target)) {
-                addNative(result, child.getName(), target);
+                addCandidate(result, child.getName(), target);
             }
         }
     }
@@ -521,6 +577,21 @@ public final class ArchWrapperAssembler {
         return Integer.toUnsignedLong(readIntLe(input))
                 | Integer.toUnsignedLong(readIntLe(input)) << 32;
     }
+    private static void addCandidate(Map<String, File> candidates, String name, File file)
+            throws Exception {
+        if (!name.matches("[a-zA-Z0-9@._+-]{1,255}")) return;
+        File canonical = file.getCanonicalFile();
+        if (!candidates.containsKey(name)) {
+            candidates.put(name, canonical);
+            return;
+        }
+        File previous = candidates.get(name);
+        if (previous == null || previous.getCanonicalFile().equals(canonical)) return;
+        candidates.put(name, null);
+        android.util.Log.i("ArchphenePackages",
+                "Quarantined ambiguous runtime filename " + name);
+    }
+
     private static void addNative(Map<String, File> result, String name, File file)
             throws Exception {
         if (!name.matches("[a-zA-Z0-9@._+-]{1,255}")) {
@@ -772,9 +843,10 @@ public final class ArchWrapperAssembler {
         return executableName;
     }
 
-    private static String capabilityMetadata(List<String> mimeTypes) {
+    private static String capabilityMetadata(List<String> mimeTypes, boolean audioOutput) {
         String base = "wayland,input,ime,clipboard,runtime-pack,home-documents,open-uri,notifications";
-        return mimeTypes.isEmpty() ? base : base + ",documents";
+        if (!mimeTypes.isEmpty()) base += ",documents";
+        return audioOutput ? base + ",audio-output" : base;
     }
     private static List<String> normalizedMimeTypes(List<String> values) {
         ArrayList<String> result = new ArrayList<>();

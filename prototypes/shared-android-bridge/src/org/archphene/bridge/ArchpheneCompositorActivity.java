@@ -72,6 +72,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     private final AndroidGpuBridge gpuBridge = new AndroidGpuBridge();
     private final AndroidDesktopIntegration desktopIntegration =
             new AndroidDesktopIntegration();
+    private final AndroidAudioIntegration audioIntegration =
+            new AndroidAudioIntegration();
     private Process linuxProcess;
     private String logTag = "ArchpheneLinuxApp";
     private String payload;
@@ -391,6 +393,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             runtimeDataUri = runtime.getString("data_uri");
             String runtimeToolkit = runtime.getString("toolkit");
             if ("qt6".equals(runtimeToolkit) || "gtk3".equals(runtimeToolkit)
+                    || "gtk4".equals(runtimeToolkit)
                     || "wayland".equals(runtimeToolkit)) toolkit = runtimeToolkit;
             runtimeGui = true;
             synchronized (this) {
@@ -791,6 +794,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 config.mkdirs();
                 tmp.mkdirs();
                 startDesktopIntegration();
+                startAudioIntegration();
                 if (isActivityDestroyed()) return;
                 Map<String, String> environment = new HashMap<>();
                 environment.put("GLIBC_TUNABLES", "glibc.pthread.rseq=0");
@@ -833,6 +837,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                             + " remaining Linux processes");
                 }
                 gpuBridge.stop();
+                audioIntegration.stop();
                 desktopIntegration.stop();
                 releaseRuntimeLease();
             }
@@ -877,6 +882,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             config.mkdirs();
             tmp.mkdirs();
             startDesktopIntegration();
+            startAudioIntegration();
             if (isActivityDestroyed()) return;
             List<File> imported = importDocumentsIfAllowed();
 
@@ -922,6 +928,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             Log.e(logTag, "Could not launch Linux payload", error);
         } finally {
             packagedRuntimeActive.set(false);
+            audioIntegration.stop();
             desktopIntegration.stop();
             gpuBridge.stop();
         }
@@ -931,6 +938,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         environment.put("ARCHPHENE_ANDROID_BROKER", "@" + capabilityBroker.socketName());
         environment.put("ARCHPHENE_ANDROID_PROTOCOL", "1");
         desktopIntegration.applyEnvironment(environment);
+        audioIntegration.applyEnvironment(environment);
     }
 
     private void startDesktopIntegration() throws IOException {
@@ -939,8 +947,13 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 getApplicationInfo().loadLabel(getPackageManager()).toString());
     }
 
+    private void startAudioIntegration() throws IOException {
+        if (!capabilities.contains(BridgeCapabilities.AUDIO_OUTPUT)) return;
+        audioIntegration.start(new File(getApplicationInfo().nativeLibraryDir), getCacheDir());
+    }
+
     private File startGpuBridge() {
-        if (!"wayland".equals(toolkit)) return null;
+        if (!("wayland".equals(toolkit) || "gtk4".equals(toolkit))) return null;
         return gpuBridge.start(new File(getApplicationInfo().nativeLibraryDir), getCacheDir());
     }
 
@@ -975,12 +988,18 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         File dataHome = new File(configDir.getParentFile(), ".local/share");
         dataHome.mkdirs();
         env.put("XDG_DATA_HOME", dataHome.getAbsolutePath());
+        File root = new File(getFilesDir(), "linux-runtime/root");
+        File xkbRoot = new File(root, "usr/share/X11/xkb");
+        if (!xkbRoot.isDirectory()) {
+            xkbRoot = new File(root, "usr/share/xkeyboard-config-2");
+        }
+        if (xkbRoot.isDirectory()) env.put("XKB_CONFIG_ROOT", xkbRoot.getAbsolutePath());
         Log.i(logTag, "Appearance theme=" + appearanceTheme + " resolved="
                 + (dark ? "dark" : "light") + " scale=" + scalePercent
                 + " font=" + appearanceFontPercent + " pointSize=" + fontPointSize
                 + " materialYou="
                 + appearanceMaterialYou);
-        if ("wayland".equals(toolkit)) {
+        if ("wayland".equals(toolkit) || "gtk4".equals(toolkit)) {
             env.put("EGL_PLATFORM", "wayland");
             env.put("LIBGL_ALWAYS_SOFTWARE", "true");
             if (gpuSocket != null) {
@@ -991,15 +1010,17 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 env.put("GALLIUM_DRIVER", "llvmpipe");
                 Log.i(logTag, "Graphics renderer=llvmpipe fallback");
             }
-        } else if ("gtk3".equals(toolkit)) {
-            File root = new File(getFilesDir(), "linux-runtime/root");
+        }
+        if ("gtk3".equals(toolkit) || "gtk4".equals(toolkit)) {
             env.put("GDK_BACKEND", "wayland");
             env.put("GDK_SCALE", "1");
             env.put("GDK_DPI_SCALE", "1.0");
             writeGtkTheme(configDir, dark, fontPointSize, appScale);
-            env.put("GTK_IM_MODULE", "wayland");
-            env.put("GTK_IM_MODULE_FILE", new File(
-                    runtimeLib, "gtk-3.0/3.0.0/immodules.cache").getAbsolutePath());
+            if ("gtk3".equals(toolkit)) {
+                env.put("GTK_IM_MODULE", "wayland");
+                env.put("GTK_IM_MODULE_FILE", new File(
+                        runtimeLib, "gtk-3.0/3.0.0/immodules.cache").getAbsolutePath());
+            }
 
             env.put("GTK_USE_PORTAL", "0");
             env.put("GTK_THEME", dark ? "Adwaita:dark" : "Adwaita");
@@ -1010,14 +1031,12 @@ public abstract class ArchpheneCompositorActivity extends Activity {
 
             env.put("GSETTINGS_SCHEMA_DIR", new File(
                     root, "usr/share/glib-2.0/schemas").getAbsolutePath());
-            File xkbRoot = new File(root, "usr/share/X11/xkb");
-            if (!xkbRoot.isDirectory()) {
-                xkbRoot = new File(root, "usr/share/xkeyboard-config-2");
+            if ("gtk3".equals(toolkit)) {
+                env.put("MOUSEPAD_PLUGIN_PATH",
+                        new File(runtimeLib, "mousepad/plugins").getAbsolutePath());
             }
-            env.put("XKB_CONFIG_ROOT", xkbRoot.getAbsolutePath());
-            env.put("MOUSEPAD_PLUGIN_PATH", new File(runtimeLib, "mousepad/plugins").getAbsolutePath());
             env.put("GCONV_PATH", new File(root, "usr/lib/gconv").getAbsolutePath());
-        } else {
+        } else if (!"wayland".equals(toolkit)) {
             env.put("QT_QPA_PLATFORM", "wayland");
             env.put("QT_QPA_PLATFORM_PLUGIN_PATH", runtimeLib.getAbsolutePath());
             env.put("QT_PLUGIN_PATH", runtimeLib.getAbsolutePath());
@@ -1030,6 +1049,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             int fontPointSize, float appScale) throws IOException {
         File gtkConfig = new File(configDir, "gtk-3.0");
         gtkConfig.mkdirs();
+        File gtk4Config = new File(configDir, "gtk-4.0");
+        gtk4Config.mkdirs();
         float density = getResources().getDisplayMetrics().density;
         int uiFontSize = Math.max(fontPointSize,
                 Math.round(fontPointSize * 4f / 3f * appScale));
@@ -1040,11 +1061,12 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         int menuBorder = Math.max(2, Math.round(1f * density));
         String outline = dark ? "rgba(255,255,255,0.28)" : "rgba(0,0,0,0.24)";
         String shadow = dark ? "rgba(0,0,0,0.72)" : "rgba(0,0,0,0.38)";
-        String settings = "[Settings]\n"
+        String baseSettings = "[Settings]\n"
                 + "gtk-theme-name=" + (dark ? "Adwaita-dark" : "Adwaita") + "\n"
                 + "gtk-icon-theme-name=Adwaita\n"
                 + "gtk-font-name=Noto Sans " + fontPointSize + "\n"
-                + "gtk-application-prefer-dark-theme=" + dark + "\n"
+                + "gtk-application-prefer-dark-theme=" + dark + "\n";
+        String settings = baseSettings
                 + "gtk-menu-images=false\n"
                 + "gtk-button-images=false\n";
         writeText(new File(gtkConfig, "settings.ini"), settings);
@@ -1089,6 +1111,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 + "  min-height: " + scrollbarSize + "px;\n"
                 + "}\n";
         writeText(new File(gtkConfig, "gtk.css"), css);
+        writeText(new File(gtk4Config, "settings.ini"), baseSettings);
+        writeText(new File(gtk4Config, "gtk.css"), css);
     }
     private void writeKdeTheme(File configDir, boolean dark) throws IOException {
         String foreground = dark ? "239,240,241" : "35,38,41";
@@ -1437,6 +1461,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         }
         secondaryWindows.clear();
         if (documentSession != null) documentSession.close();
+        audioIntegration.stop();
         desktopIntegration.stop();
         if (capabilityBroker != null) capabilityBroker.close();
         cancelManagedRuntimeExecution();

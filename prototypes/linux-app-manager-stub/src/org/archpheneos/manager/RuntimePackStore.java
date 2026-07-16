@@ -122,6 +122,9 @@ final class RuntimePackStore {
                 if (module.linkName.startsWith("libQt6")) return "qt6";
             }
             for (Module module : modules) {
+                if (module.linkName.startsWith("libgtk-4")) return "gtk4";
+            }
+            for (Module module : modules) {
                 if (module.linkName.startsWith("libgtk-3")) return "gtk3";
             }
             return "wayland";
@@ -562,8 +565,17 @@ final class RuntimePackStore {
                 + "module\tcommand\t" + hashD + "\t50\tkcalc-cli\n"
                 + "module\tloader\t" + hashB + "\t200\tloader\n"
                 + "module\tlibrary\t" + hashC + "\t300\tlibc.so.6\n";
-        parse("d" + repeat('0', 63), new File("."),
+        Pack parsed = parse("d" + repeat('0', 63), new File("."),
                 valid.getBytes(StandardCharsets.UTF_8), false);
+        if (!"wayland".equals(parsed.toolkit())) {
+            throw new IllegalStateException("Default runtime toolkit detection failed");
+        }
+        Pack gtk4 = parse("e" + repeat('0', 63), new File("."),
+                valid.replace("libc.so.6", "libgtk-4.so.1")
+                        .getBytes(StandardCharsets.UTF_8), false);
+        if (!"gtk4".equals(gtk4.toolkit())) {
+            throw new IllegalStateException("GTK4 runtime toolkit detection failed");
+        }
         expectRejected(valid.replace("libc.so.6", "../libc.so.6"));
         expectRejected(valid + "module\tlibrary\t" + hashA + "\t100\tlibc.so.6\n");
         expectRejected(valid.replace("module\tloader", "module\tlibrary"));

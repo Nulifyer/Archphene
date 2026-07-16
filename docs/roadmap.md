@@ -31,7 +31,7 @@ Archphene is moving from application-specific proofs toward a package-driven And
 4. **Permission and document policy**
    - generate manifest permissions from declared capabilities;
    - extend the manager-owned user-document provider from individual document grants to persisted GUI project trees.
-   - expose Android services through same-UID, metadata-gated brokers; URL opening and notifications are validated;
+   - expose Android services through same-UID, metadata-gated brokers; URL opening, notifications, and audio output are validated;
    - expose the validated URL and notification brokers through app-private standard XDG portal and freedesktop.org adapters.
 
 ## P1: desktop usability
@@ -39,7 +39,7 @@ Archphene is moving from application-specific proofs toward a package-driven And
 - general secondary-window mapping for phone, tablet, and Android desktop/freeform modes;
 - drag-and-drop, clipboard MIME types, cursor and pointer protocols;
 - zero-copy Android HardwareBuffer/dmabuf and Vulkan presentation building on the validated OpenGL ES virpipe path, with SHM fallback;
-- audio, printing, camera, secrets/keyrings, and remaining portals; URL handling and notifications are implemented through private standard desktop adapters;
+- microphone capture, printing, camera, secrets/keyrings, and remaining portals; URL handling, notifications, and private Pulse-to-AAudio playback are implemented;
 - accessibility and input-method completeness;
 - rollback, health checks, storage quotas, and vulnerability status.
 
