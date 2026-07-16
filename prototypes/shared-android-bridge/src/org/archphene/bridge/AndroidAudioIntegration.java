@@ -13,21 +13,29 @@ import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
-/** Private PulseAudio playback server backed by Android audio APIs. */
+/** Private PulseAudio input/output server backed by Android audio APIs. */
 final class AndroidAudioIntegration {
     private static final String TAG = "ArchpheneAudio";
     private static final String SERVER = "libarchphene_pulseaudio.so";
     private static final String AAUDIO = "libarchphene_pulse_module_aaudio_sink.so";
     private static final String SLES = "libarchphene_pulse_module_sles_sink.so";
     private static final String NATIVE = "libarchphene_pulse_module_native_protocol_unix.so";
+    private static final String PIPE_SOURCE = "libarchphene_pulse_module_pipe_source.so";
+    private static final String INPUT_HELPER = "libarchphene_audio_input.so";
     private static final long START_TIMEOUT_MILLIS = 5000;
 
     private Process server;
+    private Process input;
     private File socket;
+    private File inputFifo;
     private String serverAddress;
 
-    synchronized void start(File nativeLibraryDir, File cacheDirectory) throws IOException {
+    synchronized void start(File nativeLibraryDir, File cacheDirectory,
+            boolean inputEnabled, String brokerAddress) throws IOException {
         stop();
+        if (inputEnabled && (brokerAddress == null || !brokerAddress.startsWith("@"))) {
+            throw new IOException("Android microphone broker is unavailable");
+        }
         File serverFile = requireHelper(nativeLibraryDir, SERVER);
         File runtime = new File(cacheDirectory, "pa");
         File modules = new File(runtime, "m");
@@ -39,8 +47,13 @@ final class AndroidAudioIntegration {
         linkModule(nativeLibraryDir, modules, AAUDIO, "module-aaudio-sink.so");
         linkModule(nativeLibraryDir, modules, SLES, "module-sles-sink.so");
         linkModule(nativeLibraryDir, modules, NATIVE, "module-native-protocol-unix.so");
+        if (inputEnabled) {
+            linkModule(nativeLibraryDir, modules, PIPE_SOURCE, "module-pipe-source.so");
+        }
 
         socket = new File(runtime, "s");
+        inputFifo = inputEnabled ? new File(runtime, "input") : null;
+        if (inputFifo != null) unlinkIfPresent(inputFifo, "microphone input FIFO");
         String socketPath = socket.getCanonicalPath();
         if (socketPath.getBytes(StandardCharsets.UTF_8).length >= 100) {
             throw new IOException("PulseAudio socket path is too long");
@@ -48,18 +61,24 @@ final class AndroidAudioIntegration {
         serverAddress = "unix:" + socketPath;
         IOException firstFailure;
         try {
-            launch(serverFile, modules, state, runtime, socketPath, "module-aaudio-sink");
+            launch(serverFile, modules, state, runtime, socketPath, "module-aaudio-sink",
+                    inputEnabled);
+            if (inputEnabled) launchInput(nativeLibraryDir, runtime, brokerAddress);
             Log.i(TAG, "Private AAudio PulseAudio server ready");
             return;
         } catch (IOException error) {
             firstFailure = error;
             Log.w(TAG, "AAudio server startup failed; trying OpenSL ES", error);
+            stopProcess(input);
+            input = null;
             stopProcess(server);
             server = null;
             if (socket.exists()) socket.delete();
         }
         try {
-            launch(serverFile, modules, state, runtime, socketPath, "module-sles-sink");
+            launch(serverFile, modules, state, runtime, socketPath, "module-sles-sink",
+                    inputEnabled);
+            if (inputEnabled) launchInput(nativeLibraryDir, runtime, brokerAddress);
             Log.i(TAG, "Private OpenSL ES PulseAudio server ready");
         } catch (IOException fallbackFailure) {
             fallbackFailure.addSuppressed(firstFailure);
@@ -75,20 +94,29 @@ final class AndroidAudioIntegration {
     }
 
     synchronized void stop() {
+        stopProcess(input);
+        input = null;
         stopProcess(server);
         server = null;
         if (socket != null) socket.delete();
+        if (inputFifo != null) inputFifo.delete();
         socket = null;
+        inputFifo = null;
         serverAddress = null;
     }
 
     private void launch(File serverFile, File modules, File state, File runtime,
-            String socketPath, String sinkModule) throws IOException {
+            String socketPath, String sinkModule, boolean inputEnabled) throws IOException {
         File config = new File(runtime, "default.pa");
         String configuration = "load-module " + sinkModule
                 + " sink_name=archphene_output\n"
                 + "load-module module-native-protocol-unix socket=" + socketPath
                 + " auth-anonymous=1\n";
+        if (inputEnabled) {
+            configuration += "load-module module-pipe-source source_name=archphene_input"
+                    + " file=" + inputFifo.getAbsolutePath()
+                    + " format=s16le rate=48000 channels=1\n";
+        }
         try (FileOutputStream output = new FileOutputStream(config, false)) {
             output.write(configuration.getBytes(StandardCharsets.UTF_8));
         }
@@ -115,6 +143,26 @@ final class AndroidAudioIntegration {
         waitForSocket();
     }
 
+    private void launchInput(File nativeLibraryDir, File runtime, String brokerAddress)
+            throws IOException {
+        File helper = requireHelper(nativeLibraryDir, INPUT_HELPER);
+        ProcessBuilder builder = new ProcessBuilder(
+                helper.getAbsolutePath(), inputFifo.getAbsolutePath());
+        builder.redirectErrorStream(true);
+        Map<String, String> environment = builder.environment();
+        environment.put("LD_LIBRARY_PATH", nativeLibraryDir.getAbsolutePath());
+        environment.put("PULSE_SERVER", serverAddress);
+        environment.put("PULSE_RUNTIME_PATH", runtime.getAbsolutePath());
+        environment.put("ARCHPHENE_ANDROID_BROKER", brokerAddress);
+        environment.put("ARCHPHENE_ANDROID_PROTOCOL", "1");
+        input = builder.start();
+        drain(input, "microphone");
+        android.os.SystemClock.sleep(100);
+        if (!input.isAlive()) {
+            throw new IOException("Android microphone bridge exited during startup");
+        }
+        Log.i(TAG, "Private PulseAudio microphone bridge ready");
+    }
     private void waitForSocket() throws IOException {
         long deadline = android.os.SystemClock.uptimeMillis() + START_TIMEOUT_MILLIS;
         while (!socket.exists() && server.isAlive()

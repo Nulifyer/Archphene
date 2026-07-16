@@ -16,6 +16,7 @@ final class BridgeCapabilities {
     static final String OPEN_URI = "open-uri";
     static final String NOTIFICATIONS = "notifications";
     static final String AUDIO_OUTPUT = "audio-output";
+    static final String AUDIO_INPUT = "audio-input";
     static final String PRINTING = "printing";
     private static final Set<String> REQUIRED = Collections.unmodifiableSet(new HashSet<>(
             Arrays.asList("wayland", "input", "ime", "clipboard", "runtime-pack",
@@ -23,7 +24,7 @@ final class BridgeCapabilities {
     private static final Set<String> ALLOWED = Collections.unmodifiableSet(new HashSet<>(
             Arrays.asList("wayland", "input", "ime", "clipboard", "runtime-pack",
                     "home-documents", OPEN_URI, NOTIFICATIONS, DOCUMENTS, AUDIO_OUTPUT,
-                    PRINTING)));
+                    AUDIO_INPUT, PRINTING)));
     private static final String LEGACY =
             "wayland,input,ime,clipboard,runtime-pack,home-documents,open-uri,notifications,documents";
 
@@ -43,6 +44,9 @@ final class BridgeCapabilities {
             }
             if (!result.containsAll(REQUIRED)) {
                 throw new SecurityException("Required bridge capabilities are missing");
+            }
+            if (result.contains(AUDIO_INPUT) && !result.contains(AUDIO_OUTPUT)) {
+                throw new SecurityException("Audio input requires the private Pulse server");
             }
             return Collections.unmodifiableSet(result);
         } catch (PackageManager.NameNotFoundException error) {

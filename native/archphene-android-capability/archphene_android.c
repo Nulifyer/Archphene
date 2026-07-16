@@ -201,6 +201,14 @@ int archphene_android_print_pdf(
     return broker_request_with_fd(request, pdf_fd, response, response_size);
 }
 
+int archphene_android_request_audio_input(char *response, size_t response_size) {
+    return broker_request("ARCHPHENE/1\tREQUEST_AUDIO_INPUT", response, response_size);
+}
+
+int archphene_android_check_audio_input(char *response, size_t response_size) {
+    return broker_request("ARCHPHENE/1\tCHECK_AUDIO_INPUT", response, response_size);
+}
+
 #ifdef ARCHPHENE_CAPABILITY_PROBE_MAIN
 int main(int argc, char **argv) {
     char response[256];
@@ -233,9 +241,16 @@ int main(int argc, char **argv) {
         result = archphene_android_print_pdf(
                 pdf_fd, argv[argument + 2], response, sizeof(response));
         close(pdf_fd);
+    } else if (remaining == 1
+            && strcmp(argv[argument], "request-audio-input") == 0) {
+        result = archphene_android_request_audio_input(response, sizeof(response));
+    } else if (remaining == 1
+            && strcmp(argv[argument], "check-audio-input") == 0) {
+        result = archphene_android_check_audio_input(response, sizeof(response));
     } else {
         fprintf(stderr, "usage: %s [--socket @NAME] open-uri URI | "
-                "notify ID TITLE BODY | withdraw ID | print PDF TITLE\n", argv[0]);
+                "notify ID TITLE BODY | withdraw ID | print PDF TITLE | "
+                "request-audio-input | check-audio-input\n", argv[0]);
         return 64;
     }
     if (result < 0) {

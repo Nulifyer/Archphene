@@ -49,6 +49,9 @@ public final class ArchWrapperAssembler {
             "libarchphene_pulse_module_aaudio_sink.so",
             "libarchphene_pulse_module_sles_sink.so",
             "libarchphene_pulse_module_native_protocol_unix.so",
+            "libarchphene_pulse_module_pipe_source.so",
+            "libarchphene_audio_input.so",
+            "libarchphene_pulse_probe.so",
             "libprotocol-native.so", "libpulsecore-17.0.so", "libpulsecommon-17.0.so",
             "libpulse.so", "libltdl.so", "libdbus-1.so", "libsndfile.so",
             "libsoxr.so", "libspeexdsp.so", "libiconv.so", "libandroid-execinfo.so",
@@ -198,6 +201,8 @@ public final class ArchWrapperAssembler {
                 || nativeClosure.containsKey("libpulse.so.0");
         boolean printing = nativeClosure.containsKey("libcups.so")
                 || nativeClosure.containsKey("libcups.so.2");
+        boolean audioInput = pulseClient
+                && ManagerStateStore.microphoneInputEnabled(context, packageName);
         if (pulseClient && embedNativeClosure) {
             throw new SecurityException(
                     "Audio-enabled applications require runtime-pack publication");
@@ -231,7 +236,7 @@ public final class ArchWrapperAssembler {
                     value = replaceBinaryXmlString(value, "qt6", toolkit);
                     value = replaceBinaryXmlString(value,
                             "wayland,input,ime,clipboard,runtime-pack,home-documents,open-uri,notifications,documents",
-                            capabilityMetadata(mimeTypes, pulseClient, printing));
+                            capabilityMetadata(mimeTypes, pulseClient, audioInput, printing));
                     value = replaceBinaryXmlString(value, "archphene-executable-placeholder",
                             executableName);
                     value = replaceBinaryXmlString(value, "ArchpheneKCalc", "ArchpheneLinuxApp");
@@ -846,10 +851,11 @@ public final class ArchWrapperAssembler {
     }
 
     private static String capabilityMetadata(List<String> mimeTypes, boolean audioOutput,
-            boolean printing) {
+            boolean audioInput, boolean printing) {
         String base = "wayland,input,ime,clipboard,runtime-pack,home-documents,open-uri,notifications";
         if (!mimeTypes.isEmpty()) base += ",documents";
         if (audioOutput) base += ",audio-output";
+        if (audioInput) base += ",audio-input";
         return printing ? base + ",printing" : base;
     }
     private static List<String> normalizedMimeTypes(List<String> values) {

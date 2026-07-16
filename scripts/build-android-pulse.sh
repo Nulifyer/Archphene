@@ -50,6 +50,23 @@ copy_file "$prefix/lib/pulseaudio/modules/module-sles-sink.so" \
   libarchphene_pulse_module_sles_sink.so
 copy_file "$prefix/lib/pulseaudio/modules/module-native-protocol-unix.so" \
   libarchphene_pulse_module_native_protocol_unix.so
+copy_file "$prefix/lib/pulseaudio/modules/module-pipe-source.so" \
+  libarchphene_pulse_module_pipe_source.so
+
+ndk_version="${NDK_VERSION:-29.0.14206865}"
+api_level="${API_LEVEL:-29}"
+toolchain="${ANDROID_SDK_ROOT}/ndk/$ndk_version/toolchains/llvm/prebuilt/linux-x86_64"
+case "$architecture" in
+  x86_64) target=x86_64-linux-android ;;
+  aarch64) target=aarch64-linux-android ;;
+esac
+"$toolchain/bin/${target}${api_level}-clang" -fPIE -pie -O2 -Wall -Wextra -Werror \
+  -I"$prefix/include" \
+  -I"$root/native/archphene-android-capability" \
+  "$root/native/archphene-audio/archphene_audio_input.c" \
+  "$root/native/archphene-android-capability/archphene_android.c" \
+  -L"$prefix/lib" -Wl,--allow-shlib-undefined -lpulse -laaudio -llog \
+  -o "$output/libarchphene_audio_input.so"
 
 libraries=(
   libprotocol-native.so libpulsecore-17.0.so libpulsecommon-17.0.so

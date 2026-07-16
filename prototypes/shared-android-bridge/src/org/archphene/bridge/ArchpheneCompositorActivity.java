@@ -949,7 +949,9 @@ public abstract class ArchpheneCompositorActivity extends Activity {
 
     private void startAudioIntegration() throws IOException {
         if (!capabilities.contains(BridgeCapabilities.AUDIO_OUTPUT)) return;
-        audioIntegration.start(new File(getApplicationInfo().nativeLibraryDir), getCacheDir());
+        audioIntegration.start(new File(getApplicationInfo().nativeLibraryDir), getCacheDir(),
+                capabilities.contains(BridgeCapabilities.AUDIO_INPUT),
+                "@" + capabilityBroker.socketName());
     }
 
     private File startGpuBridge() {

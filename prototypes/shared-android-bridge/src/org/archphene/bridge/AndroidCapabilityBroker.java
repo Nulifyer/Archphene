@@ -53,6 +53,7 @@ final class AndroidCapabilityBroker implements Closeable {
     private static final int SOCKET_TIMEOUT_MILLIS = 5000;
     private static final int UI_TIMEOUT_SECONDS = 15;
     private static final int NOTIFICATION_PERMISSION_REQUEST = 0x4150;
+    private static final int MICROPHONE_PERMISSION_REQUEST = 0x4151;
     private static final int MAX_PENDING_NOTIFICATIONS = 32;
     private static final int MAX_PENDING_PRINTS = 4;
     private static final long MAX_PRINT_BYTES = 256L * 1024 * 1024;
@@ -66,6 +67,7 @@ final class AndroidCapabilityBroker implements Closeable {
     private final Map<String, PendingNotification> pendingNotifications =
             new LinkedHashMap<>();
     private boolean notificationPermissionRequestInFlight;
+    private boolean microphonePermissionRequestInFlight;
     private static final Set<File> ACTIVE_PRINT_FILES = new java.util.HashSet<>();
 
     private static final class PendingNotification {
@@ -176,6 +178,14 @@ final class AndroidCapabilityBroker implements Closeable {
                 requireCapability(BridgeCapabilities.PRINTING);
                 printPdf(decode(fields[2], MAX_TITLE_BYTES), descriptors);
                 return "OK";
+            case "REQUEST_AUDIO_INPUT":
+                requireFields(fields, 2);
+                requireCapability(BridgeCapabilities.AUDIO_INPUT);
+                return requestAudioInput();
+            case "CHECK_AUDIO_INPUT":
+                requireFields(fields, 2);
+                requireCapability(BridgeCapabilities.AUDIO_INPUT);
+                return audioInputPermissionState();
             default:
                 throw new IllegalArgumentException("Unknown capability request");
         }
@@ -317,6 +327,53 @@ final class AndroidCapabilityBroker implements Closeable {
         Log.i(TAG, "Opened Android URI scheme=" + scheme.toLowerCase(java.util.Locale.ROOT));
     }
 
+    private String requestAudioInput() throws Exception {
+        if (activity.checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+                == PackageManager.PERMISSION_GRANTED) {
+            return "OK";
+        }
+        synchronized (this) {
+            if (microphonePermissionRequestInFlight) {
+                return "ERROR\tPERMISSION_REQUESTED";
+            }
+            if (activity.getPreferences(Activity.MODE_PRIVATE)
+                    .getBoolean("microphone_permission_requested", false)) {
+                return "ERROR\tPERMISSION_DENIED";
+            }
+            microphonePermissionRequestInFlight = true;
+        }
+        activity.getPreferences(Activity.MODE_PRIVATE).edit()
+                .putBoolean("microphone_permission_requested", true).apply();
+        try {
+            runOnUiThread(() -> activity.requestPermissions(
+                    new String[] {Manifest.permission.RECORD_AUDIO},
+                    MICROPHONE_PERMISSION_REQUEST));
+        } catch (Exception error) {
+            synchronized (this) {
+                microphonePermissionRequestInFlight = false;
+            }
+            activity.getPreferences(Activity.MODE_PRIVATE).edit()
+                    .putBoolean("microphone_permission_requested", false).apply();
+            throw error;
+        }
+        Log.i(TAG, "Requested Android microphone permission for Linux audio input");
+        return "ERROR\tPERMISSION_REQUESTED";
+    }
+
+    private String audioInputPermissionState() {
+        if (activity.checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+                == PackageManager.PERMISSION_GRANTED) {
+            return "OK";
+        }
+        synchronized (this) {
+            if (microphonePermissionRequestInFlight) {
+                return "ERROR\tPERMISSION_REQUESTED";
+            }
+        }
+        return activity.getPreferences(Activity.MODE_PRIVATE)
+                .getBoolean("microphone_permission_requested", false)
+                ? "ERROR\tPERMISSION_DENIED" : "ERROR\tPERMISSION_NOT_REQUESTED";
+    }
     private String notifyLinuxApp(String id, String title, String body) throws Exception {
         validateText(id, "notification ID", false);
         validateText(title, "notification title", false);
@@ -403,6 +460,16 @@ final class AndroidCapabilityBroker implements Closeable {
     }
 
     boolean onRequestPermissionsResult(int requestCode, int[] grantResults) {
+        if (requestCode == MICROPHONE_PERMISSION_REQUEST) {
+            synchronized (this) {
+                microphonePermissionRequestInFlight = false;
+            }
+            boolean granted = grantResults.length > 0
+                    && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+            Log.i(TAG, "Android microphone permission "
+                    + (granted ? "granted" : "denied"));
+            return true;
+        }
         if (requestCode != NOTIFICATION_PERMISSION_REQUEST) return false;
         List<PendingNotification> pending;
         synchronized (this) {

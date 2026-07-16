@@ -41,12 +41,12 @@ This is the prioritized completion queue for the Archphene Android application. 
   - [x] Add a private session bus and standard XDG portal adapters so unmodified applications can reach the validated URL and notification primitives.
   - [x] Add capability-scoped Linux audio playback through a wrapper-private Pulse native-protocol server backed by Android AAudio, with OpenSL ES fallback.
   - [x] Add XDG printing through the Android system print UI with bounded same-UID PDF transfer, private staging, cancellation cleanup, and invalid-document rejection.
-  - [ ] Add microphone capture with an explicit `RECORD_AUDIO` request and separate input capability.
+  - [x] Add microphone capture with an explicit `RECORD_AUDIO` request and separate input capability; validate grant, denial/no-reprompt, privacy-switch silence, process cleanup, and real nonzero capture on x86_64 emulator and physical AArch64.
   - [ ] Add explicit Android capability APIs for camera, drag-and-drop, accessibility, and secrets/keyrings.
   - [x] Reject broad all-files access as the default. Use user-selected Storage Access Framework documents and trees; reconsider an optional advanced flow only with a concrete compatibility requirement.
 - [ ] Complete platform compatibility.
   - Rebuild or relocate the bundled x86_64 manager tools and glibc loader so the 16 KB control-plane APK does not trigger Android's page-size warning. Package execution already rejects incompatible 4 KB upstream Arch binaries before publication.
-  - Microphone capture, camera, drag-and-drop, accessibility, secrets/keyrings, and remaining portals.
+  - Camera, drag-and-drop, accessibility, secrets/keyrings, and remaining portals.
   - Broader Qt, GTK, SDL, Electron, Rust-native, XWayland, Vulkan, and zero-copy GPU validation.
   - General secondary-window policy for phone, tablet, freeform, and external displays.
 - [ ] Complete end-user release and update lifecycle.

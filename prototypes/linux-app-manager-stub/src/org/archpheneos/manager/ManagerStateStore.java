@@ -158,6 +158,15 @@ public final class ManagerStateStore {
         preferences(context).edit().putBoolean("sort-ascending", ascending).apply();
     }
 
+    public static boolean microphoneInputEnabled(Context context, String packageName) {
+        return preferences(context).getBoolean("microphone-input:" + packageName, false);
+    }
+
+    public static void setMicrophoneInputEnabled(Context context, String packageName,
+            boolean enabled) {
+        preferences(context).edit().putBoolean("microphone-input:" + packageName, enabled)
+                .apply();
+    }
     public static String pinnedVersion(Context context, String packageName) {
         return preferences(context).getString("pinned-version:" + packageName, "");
     }

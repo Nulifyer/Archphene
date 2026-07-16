@@ -121,6 +121,7 @@ public final class MainActivity extends Activity {
             handleTestRuntimeModuleIntent();
             handleTestGuiDocumentsIntent();
             handleTestDocumentSessionIntent();
+            handleTestMicrophonePreferenceIntent();
         }
     }
 
@@ -132,6 +133,7 @@ public final class MainActivity extends Activity {
             handleTestRuntimeModuleIntent();
             handleTestGuiDocumentsIntent();
             handleTestDocumentSessionIntent();
+            handleTestMicrophonePreferenceIntent();
         }
         handleTerminalRequestIntent();
     }
@@ -1368,6 +1370,35 @@ public final class MainActivity extends Activity {
         }
         page.addView(source, spacedWrap(dp(6)));
 
+        boolean currentAudioOutput = installedBridgeCapability(app.packageName, "audio-output");
+        if (!managed && (currentAudioOutput
+                || ManagerStateStore.microphoneInputEnabled(this, app.packageName))) {
+            LinearLayout permissions = verticalSection();
+            permissions.addView(text("Android permissions", 13, COLOR_MUTED));
+            Switch microphone = new Switch(this);
+            microphone.setText("Microphone input");
+            microphone.setTextColor(COLOR_TEXT);
+            boolean desiredMicrophone = ManagerStateStore.microphoneInputEnabled(
+                    this, app.packageName);
+            boolean currentMicrophone = installedBridgeCapability(
+                    app.packageName, "audio-input");
+            microphone.setChecked(desiredMicrophone);
+            permissions.addView(microphone, spacedWrap(dp(8)));
+            TextView microphoneStatus = text(currentMicrophone
+                    ? "Enabled. Android asks when the Linux app first records."
+                    : "Disabled. Enabling rebuilds the wrapper before Android can ask.",
+                    12, COLOR_MUTED);
+            permissions.addView(microphoneStatus, spacedWrap(dp(4)));
+            microphone.setOnCheckedChangeListener((button, enabled) -> {
+                ManagerStateStore.setMicrophoneInputEnabled(
+                        this, app.packageName, enabled);
+                showBanner((enabled ? "Enabling" : "Disabling")
+                        + " microphone access for " + app.label, false);
+                installSelectedVersion(app, app.sourceVersion);
+            });
+            page.addView(permissions, spacedWrap(dp(6)));
+        }
+
         LinearLayout actions = verticalSection();
         Button launch = actionButton(managed ? "Open Terminal" : "Launch",
                 android.R.drawable.ic_media_play);
@@ -1436,6 +1467,20 @@ public final class MainActivity extends Activity {
         content.addView(scroll, frameMatch());
     }
 
+    private boolean installedBridgeCapability(String packageName, String capability) {
+        try {
+            android.content.pm.ApplicationInfo info = getPackageManager().getApplicationInfo(
+                    packageName, PackageManager.GET_META_DATA);
+            String values = info.metaData == null ? "" : info.metaData.getString(
+                    "org.archphene.bridge.capabilities", "");
+            for (String value : values.split(",")) {
+                if (capability.equals(value.trim())) return true;
+            }
+        } catch (Exception ignored) {
+            // Managed Terminal entries and removed packages do not expose wrapper metadata.
+        }
+        return false;
+    }
     private String commandSummary(List<String> commands) {
         int shown = Math.min(8, commands.size());
         String value = android.text.TextUtils.join(", ", commands.subList(0, shown));
@@ -2245,6 +2290,20 @@ public final class MainActivity extends Activity {
                         + error.getMessage(), true));
             }
         }, "archphene-github-release-test").start();
+    }
+    private void handleTestMicrophonePreferenceIntent() {
+        String packageName = getIntent().getStringExtra(
+                "archphene_test_microphone_package");
+        if (packageName == null) return;
+        getIntent().removeExtra("archphene_test_microphone_package");
+        if (!packageName.matches("org\\.archphene\\.linux\\.p[0-9a-f]{32}")) {
+            throw new SecurityException("Invalid microphone test package");
+        }
+        boolean enabled = getIntent().getBooleanExtra(
+                "archphene_test_microphone_enabled", false);
+        ManagerStateStore.setMicrophoneInputEnabled(this, packageName, enabled);
+        android.util.Log.i("ArchpheneManager", "Microphone wrapper preference "
+                + packageName + " enabled=" + enabled);
     }
     private void handleTestWrapperAssemblyIntent() {
         String sourcePackage = getIntent().getStringExtra("archphene_test_assemble_qt");

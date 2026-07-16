@@ -18,7 +18,7 @@ The Android intent behavior follows the platform's [common intent guidance](http
 ## Security properties
 
 - Android peer credentials must report the wrapper's exact UID. Cross-UID callers are rejected before dispatch.
-- Wrapper metadata must declare `open-uri`, `notifications`, or `printing`; undeclared operations fail closed.
+- Wrapper metadata must declare `open-uri`, `notifications`, `printing`, or `audio-input`; undeclared operations fail closed.
 - Requests and every field have fixed size limits and strict UTF-8 validation.
 - URL opening rejects non-HTTP schemes, missing hosts, user information, and control characters.
 - Android remains the permission authority. The broker requests a permission in wrapper UI and reports requested or denied state to Linux; it does not bypass denial.
@@ -53,13 +53,17 @@ Android cannot present `PrintManager` before it has a rendered document adapter.
 
 The x86_64 emulator and physical AArch64 Samsung regressions validate `PreparePrint`, descriptor transfer, a rendered one-page Android preview, Save as PDF discovery, cancellation cleanup, and rejection of non-PDF and non-regular descriptors without opening the print UI. They also validate wrapper upgrades with stale helper symlinks. Printing requires no Android runtime permission. Availability is still determined by the device's Android printing feature and installed print services.
 
-## Audio output
+## Audio input and output
 
 Wrappers whose verified ELF closure contains a Pulse client declare `audio-output`. The shared bridge then starts a PulseAudio native-protocol server inside that wrapper's Android UID, exports its private Unix socket through `PULSE_SERVER`, and renders a stereo 48 kHz sink through Android AAudio. OpenSL ES is the fallback when AAudio cannot initialize. The socket is under app-private cache storage and is never shared across wrapper UIDs.
 
 The manager embeds one checksum-verified Bionic server payload per supported ABI and copies it only into audio-enabled wrappers. The Linux application continues using its unmodified glibc Pulse client. On the x86_64 emulator, an on-device conversion of the official Arch `pavucontrol` package detects GTK4 and Pulse, generates an `audio-output` wrapper, launches the private AAudio sink, authenticates the Linux client, creates pavucontrol's monitor stream, and renders the live Volume Control GUI. Direct server playback also passes on the x86_64 emulator and physical AArch64 Samsung device.
 
-Speaker playback needs no runtime permission. Microphone capture is deliberately absent: it requires a separate input capability and an explicit `RECORD_AUDIO` request at the point of use. Camera, drag-and-drop, accessibility, secrets/keyrings, richer notification actions, non-HTTP URI policies, and other desktop portals remain unimplemented. Each must define an Android permission and lifecycle policy before receiving a broker command.
+Speaker playback needs no runtime permission. Microphone input is disabled by default and is enabled per wrapper in the manager. Rebuilding an eligible Pulse wrapper adds the separate `audio-input` capability. A Bionic helper then exposes a private mono 48 kHz PCM16 Pulse source and monitors only streams attached to that source. The first attached Linux recording stream sends `REQUEST_AUDIO_INPUT`; the Android Activity requests `RECORD_AUDIO`, and the helper starts AAudio capture only after Android reports a grant. Denial is not repeatedly prompted, and users can change the permission later in Android app settings. Disabling the manager setting removes the bridge capability on the next wrapper rebuild, although an Android permission already granted to that package remains granted until the user revokes it.
+
+The permission dialog grant and denial paths pass on the x86_64 emulator. An unmodified Pulse `pacat` client on a physical AArch64 Samsung captured 480,000 bytes in five seconds, including 356,437 nonzero bytes, after consent. The same test produced Android-mandated silence while the device-wide microphone privacy switch was enabled. Wrapper force-stop removes the Pulse server, input helper, and Linux client process tree.
+
+Camera, drag-and-drop, accessibility, secrets/keyrings, richer notification actions, non-HTTP URI policies, and other desktop portals remain unimplemented. Each must define an Android permission and lifecycle policy before receiving a broker command.
 
 ## Native client
 

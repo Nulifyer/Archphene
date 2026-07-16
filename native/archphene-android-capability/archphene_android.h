@@ -12,5 +12,7 @@ int archphene_android_withdraw_notification(
         const char *id, char *response, size_t response_size);
 int archphene_android_print_pdf(
         int pdf_fd, const char *title, char *response, size_t response_size);
+int archphene_android_request_audio_input(char *response, size_t response_size);
+int archphene_android_check_audio_input(char *response, size_t response_size);
 
 #endif
