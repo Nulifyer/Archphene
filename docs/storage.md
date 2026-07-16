@@ -55,7 +55,7 @@ The Terminal companion provides the first concrete Android-facing side of this s
 
 Generated GUI wrappers now expose the same policy through one manager-owned **Archphene Apps** document root. Each installed generated GUI app appears as a directory backed by its visible `files/linux-home` entries. Dotfiles are never enumerated. The wrapper endpoint is not a public DocumentsProvider: it requires the manager's signature permission and also verifies that the calling package is `org.archpheneos.manager`. Android Files and other apps interact only with the manager DocumentsProvider and receive normal per-URI grants.
 
-Cold `ACTION_VIEW` and `ACTION_EDIT` launches accept up to 32 granted documents. The bridge imports them atomically into `Documents/Android`, allocates distinct Linux names for identical display names, hashes local and provider state, and writes back only changed writable documents. If Android and Linux both changed a document, the Android version is retained as `<name>.android-conflict-<hash>` before the Linux edit is written to the granted URI. The x86_64 emulator regression verifies manager create/read/write/rename/delete, private-provider denial, same-name import, conflict preservation, and writeback. A physical AArch64 device verifies manager CRUD and denial; a complete ARM conflict run still needs a document-capable wrapper with a valid active runtime pack.
+`ACTION_VIEW` and `ACTION_EDIT` launches accept up to 32 granted documents. The bridge imports them atomically into `Documents/Android`, allocates distinct Linux names for identical display names, hashes local and provider state, and writes back only changed writable documents. If Android and Linux both changed a document, the Android version is retained as `<name>.android-conflict-<hash>` before the Linux edit is written to the granted URI. A new document sent to an active `singleTask` wrapper displays a native warning that unsaved changes may be lost; Cancel leaves the app running, while **Restart and open** closes the previous document session, terminates the Linux process tree, and recreates the same generic wrapper with the new grants. The x86_64 emulator regression verifies manager create/read/write/rename/delete, private-provider denial, active-app restart, same-name import, conflict preservation, and writeback. A physical AArch64 device verifies manager CRUD and denial; a complete ARM conflict run still needs a document-capable wrapper with a valid active runtime pack.
 
 SAF is not a POSIX filesystem and unprivileged Android cannot mount arbitrary document trees with FUSE. The current project bridge therefore synchronizes explicitly rather than intercepting every filesystem syscall. It preserves simultaneous edits as conflict copies, defers deletions, rejects symlinks/path escapes, and retains the local mirror when a mapping is removed. A future live path broker would require OS support or a descriptor/RPC interception layer with clearly documented compatibility limits.
 
@@ -172,8 +172,7 @@ The emulator regression proves parser rejection and both sides of the access bou
 
 ## Next Milestones
 
-1. Define generic activation or safe restart behavior when a new document arrives while a wrapper is already running.
-2. Add a small descriptor/RPC path-broker C API before claiming live SAF path translation.
-3. Extend GUI wrappers from individual granted documents to persisted project trees with explicit lifecycle and power policy.
-4. Add a syscall probe for app-private path operations: `mkdir`, `mkdirat`, `open`, `openat`, `rename`, `unlink`, `fsync`, and `stat`.
+1. Add a small descriptor/RPC path-broker C API before claiming live SAF path translation.
+2. Extend GUI wrappers from individual granted documents to persisted project trees with explicit lifecycle and power policy.
+3. Add a syscall probe for app-private path operations: `mkdir`, `mkdirat`, `open`, `openat`, `rename`, `unlink`, `fsync`, and `stat`.
 

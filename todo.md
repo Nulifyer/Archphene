@@ -36,7 +36,7 @@ This is the prioritized completion queue for the Archphene Android application. 
   - [x] Expose visible per-app Linux homes through one manager-owned DocumentsProvider while hiding dotfiles and private runtime state behind a signature-protected wrapper endpoint.
   - [x] Import up to 32 granted Android documents with collision-safe Linux names and preserve concurrent Android edits as bounded conflict copies before writeback.
   - [x] Validate manager CRUD, direct-provider denial, same-name import, conflict preservation, and writeback on the x86_64 emulator; validate manager CRUD and direct-provider denial on physical AArch64.
-  - [ ] Deliver a document sent to an already-running `singleTask` wrapper through a generic activation or safe restart policy; cold document launch is validated.
+  - [x] Deliver a document sent to an already-running `singleTask` wrapper through a shared safe-restart policy with an explicit unsaved-work warning, Cancel action, and debug-only automated regression.
   - [ ] Add explicit Android capability APIs for audio, notifications, URL handling, printing, camera, drag-and-drop, accessibility, and secrets/keyrings.
   - [x] Reject broad all-files access as the default. Use user-selected Storage Access Framework documents and trees; reconsider an optional advanced flow only with a concrete compatibility requirement.
 - [ ] Complete platform compatibility.

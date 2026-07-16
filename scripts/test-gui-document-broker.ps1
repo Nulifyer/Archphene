@@ -80,7 +80,7 @@ Invoke-Adb @("shell", "am", "start", "-n", "$Manager/.MainActivity", "--es",
         "archphene_test_document_session_source", $SourcePackage, "--es",
         "archphene_test_document_session_target", $TargetPackage) `
         "start multi-document conflict probe" | Out-Null
-Wait-Log "Document conflict probe passed documents=2" `
-        "Multi-document conflict probe failed" | Out-Null
+Wait-Log "Running document restart probe passed documents=2" `
+        "Running multi-document restart probe failed" | Out-Null
 
-Write-Host "GUI document broker passed on ${Serial}: manager CRUD, private-provider denial, same-name import, conflict preservation, and writeback."
+Write-Host "GUI document broker passed on ${Serial}: manager CRUD, private-provider denial, running-app restart, same-name import, conflict preservation, and writeback."

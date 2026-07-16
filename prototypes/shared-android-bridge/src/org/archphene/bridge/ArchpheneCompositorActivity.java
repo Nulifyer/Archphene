@@ -62,9 +62,11 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             "org.archphene.runtime.APPEARANCE_V1";
 
     private final AtomicBoolean launched = new AtomicBoolean();
+    private final AtomicBoolean packagedRuntimeActive = new AtomicBoolean();
     private ArchpheneInputView compositorView;
     private ArchpheneCompositorSession session;
     private AndroidDocumentSession documentSession;
+    private Dialog documentRestartDialog;
     private Set<String> capabilities;
     private final AndroidGpuBridge gpuBridge = new AndroidGpuBridge();
     private Process linuxProcess;
@@ -231,6 +233,71 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         });
     }
 
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        if (!AndroidDocumentSession.isDocumentIntent(intent)) {
+            setIntent(intent);
+            return;
+        }
+        if (documentSession == null) {
+            Log.w(logTag, "Ignoring new document intent without declared bridge capability");
+            return;
+        }
+        Intent pending = new Intent(intent);
+        boolean debuggable = (getApplicationInfo().flags
+                & ApplicationInfo.FLAG_DEBUGGABLE) != 0;
+        boolean autoConfirm = debuggable && pending.getBooleanExtra(
+                "archphene_test_confirm_document_restart", false);
+        boolean requireActive = debuggable && pending.getBooleanExtra(
+                "archphene_test_require_active_document_restart", false);
+        boolean active = hasActiveLinuxRuntime();
+        if (requireActive && !active) {
+            throw new IllegalStateException(
+                    "Running document restart probe found no active Linux runtime");
+        }
+        if (!active || autoConfirm) {
+            restartForDocumentIntent(pending);
+            return;
+        }
+        showDocumentRestartDialog(pending);
+    }
+
+    private synchronized boolean hasActiveLinuxRuntime() {
+        return managedRuntimeExecution != null
+                || packagedRuntimeActive.get()
+                || (linuxProcess != null && linuxProcess.isAlive());
+    }
+
+    private void showDocumentRestartDialog(Intent pending) {
+        if (documentRestartDialog != null) documentRestartDialog.dismiss();
+        documentRestartDialog = new android.app.AlertDialog.Builder(this)
+                .setTitle("Open document?")
+                .setMessage("This Linux app must restart to open the document. "
+                        + "Unsaved changes may be lost.")
+                .setNegativeButton(android.R.string.cancel, null)
+                .setPositiveButton("Restart and open", (dialog, which) ->
+                        restartForDocumentIntent(pending))
+                .create();
+        documentRestartDialog.setOnDismissListener(dialog -> documentRestartDialog = null);
+        documentRestartDialog.show();
+    }
+
+    private void restartForDocumentIntent(Intent pending) {
+        if (documentRestartDialog != null) {
+            documentRestartDialog.setOnDismissListener(null);
+            documentRestartDialog.dismiss();
+            documentRestartDialog = null;
+        }
+        if (documentSession != null) {
+            documentSession.close();
+            documentSession = null;
+        }
+        Log.i(logTag, "Restarting running Linux app for document intent");
+        setIntent(pending);
+        recreate();
+    }
+
     private List<File> importDocumentsIfAllowed() {
         if (documentSession != null) {
             List<File> imported = documentSession.importDocuments(getIntent());
@@ -277,6 +344,11 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         }
         try {
             documentSession.runConflictProbe(imported);
+            if (getIntent().getBooleanExtra(
+                    "archphene_test_confirm_document_restart", false)) {
+                Log.i(logTag, "Running document restart probe passed documents="
+                        + imported.size());
+            }
         } catch (Exception error) {
             Log.e(logTag, "Document conflict probe failed", error);
             throw new IllegalStateException("Document conflict probe failed", error);
@@ -769,6 +841,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         runtimeDir.mkdirs();
         File socket = new File(runtimeDir, "wayland-0");
         session.start(socket, width, height);
+        packagedRuntimeActive.set(true);
         new Thread(() -> launchLinuxProcess(runtimeDir), "archphene-linux-launch").start();
     }
 
@@ -790,6 +863,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             cache.mkdirs();
             config.mkdirs();
             tmp.mkdirs();
+            if (isActivityDestroyed()) return;
             List<File> imported = importDocumentsIfAllowed();
 
             ProcessBuilder builder = new ProcessBuilder(
@@ -816,6 +890,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             env.put("FONTCONFIG_PATH", fontconfig.getParentFile().getAbsolutePath());
             File gpuSocket = startGpuBridge();
             applyToolkitEnvironment(env, runtimeLib, config, gpuSocket);
+            if (isActivityDestroyed()) return;
             builder.redirectErrorStream(true);
             linuxProcess = builder.start();
             Log.i(logTag, "Started Linux payload executable=" + executable.getName());
@@ -831,6 +906,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         } catch (Throwable error) {
             Log.e(logTag, "Could not launch Linux payload", error);
         } finally {
+            packagedRuntimeActive.set(false);
             gpuBridge.stop();
         }
     }
@@ -1315,6 +1391,10 @@ public abstract class ArchpheneCompositorActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        if (documentRestartDialog != null) {
+            documentRestartDialog.dismiss();
+            documentRestartDialog = null;
+        }
         for (SecondaryWindow window : secondaryWindows.values()) {
             window.dismissFromRegistry();
         }
@@ -1334,6 +1414,10 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         if (activityDestroyed || managedRuntimeExecution != null) return false;
         managedRuntimeExecution = execution;
         return true;
+    }
+
+    private synchronized boolean isActivityDestroyed() {
+        return activityDestroyed;
     }
 
     private synchronized void clearManagedRuntimeExecution(

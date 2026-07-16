@@ -2149,29 +2149,33 @@ public final class MainActivity extends Activity {
                 }
                 writeTestDocument(first, "first-source\n");
                 writeTestDocument(second, "second-source\n");
-                Intent launch = new Intent(Intent.ACTION_EDIT);
-                Intent launcher = getPackageManager().getLaunchIntentForPackage(targetPackage);
-                if (launcher == null || launcher.getComponent() == null) {
-                    throw new IllegalStateException("Target wrapper has no launcher Activity");
+                launchTestDocumentSession(targetPackage, first, second, false);
+                Thread.sleep(3000);
+                Uri thirdDir = android.provider.DocumentsContract.createDocument(
+                        getContentResolver(), home,
+                        android.provider.DocumentsContract.Document.MIME_TYPE_DIR,
+                        "document-probe-c-" + suffix);
+                Uri fourthDir = android.provider.DocumentsContract.createDocument(
+                        getContentResolver(), home,
+                        android.provider.DocumentsContract.Document.MIME_TYPE_DIR,
+                        "document-probe-d-" + suffix);
+                if (thirdDir == null || fourthDir == null) {
+                    throw new IllegalStateException(
+                            "Could not create running-restart probe directories");
                 }
-                launch.setComponent(launcher.getComponent());
-                launch.setDataAndType(first, "text/plain");
-                android.content.ClipData documents = android.content.ClipData.newUri(
-                        getContentResolver(), "Archphene document session", first);
-                documents.addItem(new android.content.ClipData.Item(second));
-                launch.setClipData(documents);
-                launch.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
-                        | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
-                launch.putExtra("archphene_test_document_conflict", true);
-                grantUriPermission(targetPackage, first,
-                        Intent.FLAG_GRANT_READ_URI_PERMISSION
-                                | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
-                grantUriPermission(targetPackage, second,
-                        Intent.FLAG_GRANT_READ_URI_PERMISSION
-                                | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
-                startActivity(launch);
+                Uri third = android.provider.DocumentsContract.createDocument(
+                        getContentResolver(), thirdDir, "text/plain", "same-name.txt");
+                Uri fourth = android.provider.DocumentsContract.createDocument(
+                        getContentResolver(), fourthDir, "text/plain", "same-name.txt");
+                if (third == null || fourth == null) {
+                    throw new IllegalStateException(
+                            "Could not create running-restart probe documents");
+                }
+                writeTestDocument(third, "third-source\n");
+                writeTestDocument(fourth, "fourth-source\n");
+                launchTestDocumentSession(targetPackage, third, fourth, true);
                 android.util.Log.i("ArchpheneDocuments",
-                        "Launched document conflict probe source=" + sourcePackage
+                        "Launched running document restart probe source=" + sourcePackage
                                 + " target=" + targetPackage);
             } catch (Exception error) {
                 android.util.Log.e("ArchpheneDocuments",
@@ -2180,6 +2184,35 @@ public final class MainActivity extends Activity {
                         "Document conflict probe failed: " + safeMessage(error), true));
             }
         }, "archphene-document-session-test").start();
+    }
+
+    private void launchTestDocumentSession(
+            String targetPackage, Uri first, Uri second, boolean runningRestart) {
+        Intent launch = new Intent(Intent.ACTION_EDIT);
+        Intent launcher = getPackageManager().getLaunchIntentForPackage(targetPackage);
+        if (launcher == null || launcher.getComponent() == null) {
+            throw new IllegalStateException("Target wrapper has no launcher Activity");
+        }
+        launch.setComponent(launcher.getComponent());
+        launch.setDataAndType(first, "text/plain");
+        android.content.ClipData documents = android.content.ClipData.newUri(
+                getContentResolver(), "Archphene document session", first);
+        documents.addItem(new android.content.ClipData.Item(second));
+        launch.setClipData(documents);
+        launch.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        if (runningRestart) {
+            launch.putExtra("archphene_test_document_conflict", true);
+            launch.putExtra("archphene_test_confirm_document_restart", true);
+            launch.putExtra("archphene_test_require_active_document_restart", true);
+        }
+        grantUriPermission(targetPackage, first,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        grantUriPermission(targetPackage, second,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        startActivity(launch);
     }
 
     private void writeTestDocument(Uri uri, String value) throws java.io.IOException {
