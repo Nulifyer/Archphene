@@ -7,6 +7,8 @@ API_LEVEL="${API_LEVEL:-29}"
 DBUS_BUILD_TYPE="${DBUS_BUILD_TYPE:-release}"
 DBUS_VERSION="1.16.2"
 DBUS_SHA256="0ba2a1a4b16afe7bceb2c07e9ce99a8c2c3508e5dec290dbb643384bd6beb7e2"
+MBEDTLS_VERSION="3.6.6"
+MBEDTLS_SHA256="8fb65fae8dcae5840f793c0a334860a411f884cc537ea290ce1c52bb64ca007a"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DOWNLOADS="${DBUS_DOWNLOADS:-$ROOT/tooling/downloads}"
 OUTPUT="$ROOT/tooling/build/android-dbus/$ARCHITECTURE"
@@ -42,10 +44,27 @@ echo "$DBUS_SHA256  $archive" | sha256sum --check --status || {
   exit 1
 }
 
+mbedtls_archive="$DOWNLOADS/mbedtls-$MBEDTLS_VERSION.tar.bz2"
+if [[ ! -f "$mbedtls_archive" ]]; then
+  curl --fail --location --retry 3 --output "$mbedtls_archive.part" \
+    "https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-$MBEDTLS_VERSION/mbedtls-$MBEDTLS_VERSION.tar.bz2"
+  mv "$mbedtls_archive.part" "$mbedtls_archive"
+fi
+echo "$MBEDTLS_SHA256  $mbedtls_archive" | sha256sum --check --status || {
+  echo "Mbed TLS source checksum mismatch: $mbedtls_archive" >&2
+  exit 1
+}
+
 rm -rf "$BUILD_ROOT"
 mkdir -p "$BUILD_ROOT" "$OUTPUT"
 tar -xJf "$archive" -C "$BUILD_ROOT"
+tar -xjf "$mbedtls_archive" -C "$BUILD_ROOT"
 source_dir="$BUILD_ROOT/dbus-$DBUS_VERSION"
+mbedtls_source="$BUILD_ROOT/mbedtls-$MBEDTLS_VERSION"
+make -C "$mbedtls_source" -j"$(nproc)" lib \
+  CC="${TOOLCHAIN}/bin/${TARGET}${API_LEVEL}-clang" \
+  AR="${TOOLCHAIN}/bin/llvm-ar" \
+  CFLAGS="-fPIC -O2 -fvisibility=hidden"
 for patch_file in "$ROOT"/native/archphene-dbus/patches/*.patch; do
   patch -d "$source_dir" -p1 < "$patch_file"
 done
@@ -98,11 +117,14 @@ common_flags=(
   -I"$source_dir" -I"$source_dir/dbus"
   -I"$BUILD_ROOT/build" -I"$BUILD_ROOT/build/dbus"
   -I"$ROOT/native/archphene-android-capability"
+  -I"$mbedtls_source/include"
 )
 "${TOOLCHAIN}/bin/${TARGET}${API_LEVEL}-clang" "${common_flags[@]}" \
   "$ROOT/native/archphene-portal/archphene_portal.c" \
   "$ROOT/native/archphene-portal/archphene_secret_service.c" \
+  "$ROOT/native/archphene-portal/archphene_secret_crypto.c" \
   "$ROOT/native/archphene-android-capability/archphene_android.c" \
+  "$mbedtls_source/library/libmbedcrypto.a" \
   "$BUILD_ROOT/build/dbus/libdbus-1.a" \
   -pie -pthread -llog -o "$OUTPUT/portal-service"
 "${TOOLCHAIN}/bin/${TARGET}${API_LEVEL}-clang" "${common_flags[@]}" \

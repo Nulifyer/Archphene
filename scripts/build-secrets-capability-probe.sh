@@ -20,6 +20,16 @@ esac
 
 rm -rf "$out"
 mkdir -p "$out"/{gen,classes,dex,package/lib/$abi}
+if [[ "$abi" == "x86_64" ]]; then
+  fixture="$root/tooling/build/libsecret-probe/x86_64"
+  [[ -f "$fixture/secret-tool" ]] || {
+    echo "missing Arch libsecret probe runtime: $fixture" >&2; exit 1;
+  }
+  mkdir -p "$out/package/assets/libsecret"
+  cp -a "$fixture"/. "$out/package/assets/libsecret/"
+  cp "$fixture/lib/ld-linux-x86-64.so.2" \
+    "$out/package/lib/$abi/libarchphene_libsecret_loader.so"
+fi
 "$bt/aapt2" link -o "$out/unsigned.apk" -I "$platform" \
   --manifest "$app/AndroidManifest.xml" --java "$out/gen"
 javac --release 17 -classpath "$platform" -d "$out/classes" \
@@ -46,7 +56,11 @@ cp "$root/tooling/build/android-dbus/$dbus_arch/xdg-open" \
 cp "$root/tooling/build/android-dbus/$dbus_arch/secret-probe" \
   "$out/package/lib/$abi/libarchphene_secret_service_probe.so"
 (cd "$out/dex" && jar uf "$out/unsigned.apk" classes.dex)
-(cd "$out/package" && jar uf "$out/unsigned.apk" "lib/$abi")
+if [[ -d "$out/package/assets" ]]; then
+  (cd "$out/package" && jar uf "$out/unsigned.apk" "lib/$abi" assets)
+else
+  (cd "$out/package" && jar uf "$out/unsigned.apk" "lib/$abi")
+fi
 "$bt/zipalign" -f 4 "$out/unsigned.apk" "$out/aligned.apk"
 "$bt/apksigner" sign --ks "$KEYSTORE_PATH" --ks-key-alias "$KEY_ALIAS" \
   --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEY_PASSWORD \

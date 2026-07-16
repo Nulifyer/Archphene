@@ -3,6 +3,7 @@
 #include "archphene_secret_service.h"
 
 #include "archphene_android.h"
+#include "archphene_secret_crypto.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -20,6 +21,7 @@
 #define SECRET_NAME "org.freedesktop.secrets"
 #define SERVICE_PATH "/org/freedesktop/secrets"
 #define COLLECTION_PATH "/org/freedesktop/secrets/collection/login"
+#define DEFAULT_ALIAS_PATH "/org/freedesktop/secrets/aliases/default"
 #define ITEM_PREFIX COLLECTION_PATH "/i"
 #define SESSION_PREFIX "/org/freedesktop/secrets/session/s"
 #define SERVICE_IFACE "org.freedesktop.Secret.Service"
@@ -28,12 +30,13 @@
 #define SESSION_IFACE "org.freedesktop.Secret.Session"
 #define PROPERTIES_IFACE "org.freedesktop.DBus.Properties"
 #define INTROSPECTABLE_IFACE "org.freedesktop.DBus.Introspectable"
-#define ERROR_NOT_SUPPORTED "org.freedesktop.Secret.Error.NotSupported"
+#define ERROR_NOT_SUPPORTED DBUS_ERROR_NOT_SUPPORTED
 #define ERROR_NO_SESSION "org.freedesktop.Secret.Error.NoSession"
 #define MAX_ITEMS 256
 #define MAX_ATTRIBUTES 32
 #define MAX_SECRET_BYTES (64 * 1024)
 #define MAX_CATALOG_BYTES (1024 * 1024)
+#define MAX_TRANSFER_BYTES (MAX_SECRET_BYTES + ARCHPHENE_SECRET_AES_IV_BYTES)
 
 typedef struct {
     char *key;
@@ -43,6 +46,7 @@ typedef struct {
 typedef struct {
     char *id;
     char *label;
+    char *content_type;
     SecretAttribute attributes[MAX_ATTRIBUTES];
     size_t attribute_count;
     uint32_t secret_bytes;
@@ -53,14 +57,28 @@ typedef struct {
     size_t count;
 } SecretCatalog;
 
+typedef enum {
+    SECRET_SESSION_PLAIN = 0,
+    SECRET_SESSION_DH_AES = 1
+} SecretSessionMode;
+
 typedef struct {
     dbus_bool_t active;
     char path[96];
     char sender[256];
+    SecretSessionMode mode;
+    uint8_t key[ARCHPHENE_SECRET_AES_KEY_BYTES];
 } SecretSession;
 
 static SecretSession sessions[64];
 static uint32_t next_session = 1;
+static uint8_t secret_input_scratch[MAX_SECRET_BYTES];
+static uint8_t secret_output_scratch[MAX_TRANSFER_BYTES];
+
+static dbus_bool_t is_collection_path(const char *path) {
+    return path != NULL && (strcmp(path, COLLECTION_PATH) == 0
+            || strcmp(path, DEFAULT_ALIAS_PATH) == 0);
+}
 
 static const char service_xml[] =
         "<node><interface name='org.freedesktop.Secret.Service'>"
@@ -88,6 +106,9 @@ static const char collection_xml[] =
         "<method name='SearchItems'><arg type='a{ss}' direction='in'/><arg type='ao' direction='out'/></method>"
         "<method name='CreateItem'><arg type='a{sv}' direction='in'/><arg type='(oayays)' direction='in'/>"
         "<arg type='b' direction='in'/><arg type='o' direction='out'/><arg type='o' direction='out'/></method>"
+        "<signal name='ItemCreated'><arg type='o'/></signal>"
+        "<signal name='ItemDeleted'><arg type='o'/></signal>"
+        "<signal name='ItemChanged'><arg type='o'/></signal>"
         "<property name='Items' type='ao' access='read'/><property name='Label' type='s' access='readwrite'/>"
         "<property name='Locked' type='b' access='read'/><property name='Created' type='t' access='read'/>"
         "<property name='Modified' type='t' access='read'/></interface>"
@@ -118,6 +139,23 @@ static dbus_bool_t send_message(DBusConnection *connection, DBusMessage *message
     return sent;
 }
 
+static void emit_object_path_signal(DBusConnection *connection,
+        const char *path, const char *interface, const char *member,
+        const char *object_path) {
+    DBusMessage *signal = dbus_message_new_signal(path, interface, member);
+    if (signal != NULL && dbus_message_append_args(signal,
+            DBUS_TYPE_OBJECT_PATH, &object_path, DBUS_TYPE_INVALID)) {
+        send_message(connection, signal);
+    } else if (signal != NULL) {
+        dbus_message_unref(signal);
+    }
+}
+
+static void emit_item_signal(DBusConnection *connection, const char *member,
+        const char *item_path) {
+    emit_object_path_signal(connection, COLLECTION_PATH, COLLECTION_IFACE,
+            member, item_path);
+}
 static void send_error(DBusConnection *connection, DBusMessage *request,
         const char *name, const char *detail) {
     send_message(connection, dbus_message_new_error(request, name, detail));
@@ -129,6 +167,7 @@ static void free_catalog(SecretCatalog *catalog) {
         SecretMetadata *item = &catalog->items[index];
         free(item->id);
         free(item->label);
+        free(item->content_type);
         for (size_t attribute = 0; attribute < item->attribute_count; attribute++) {
             free(item->attributes[attribute].key);
             free(item->attributes[attribute].value);
@@ -196,13 +235,14 @@ static int load_catalog(SecretCatalog *catalog) {
     const uint8_t *cursor = encoded;
     const uint8_t *end = encoded + stat.st_size;
     dbus_bool_t ok = TRUE;
-    if (take_u32(&cursor, end, &ok) != 0x41504331 || cursor >= end || *cursor++ != 1) ok = FALSE;
+    if (take_u32(&cursor, end, &ok) != 0x41504331 || cursor >= end || *cursor++ != 2) ok = FALSE;
     uint16_t item_count = take_u16(&cursor, end, &ok);
     if (item_count > MAX_ITEMS) ok = FALSE;
     for (size_t index = 0; ok && index < item_count; index++) {
         SecretMetadata *item = &catalog->items[index];
         item->id = take_string(&cursor, end, 128 * 4, &ok);
         item->label = take_string(&cursor, end, 256 * 4, &ok);
+        item->content_type = take_string(&cursor, end, 128 * 4, &ok);
         if (!ok || cursor >= end) { ok = FALSE; break; }
         item->attribute_count = *cursor++;
         if (item->attribute_count > MAX_ATTRIBUTES) { ok = FALSE; break; }
@@ -391,6 +431,12 @@ static char *attributes_json(const SecretAttribute *attributes, size_t count) {
     return json;
 }
 
+static void clear_session(SecretSession *session) {
+    if (session == NULL) return;
+    archphene_secret_crypto_wipe(session->key, sizeof(session->key));
+    memset(session, 0, sizeof(*session));
+}
+
 static SecretSession *find_session(const char *path, const char *sender) {
     for (size_t index = 0; index < sizeof(sessions) / sizeof(sessions[0]); index++) {
         if (sessions[index].active && strcmp(sessions[index].path, path) == 0
@@ -403,7 +449,7 @@ static SecretSession *create_session(const char *sender) {
     for (size_t index = 0; index < sizeof(sessions) / sizeof(sessions[0]); index++) {
         if (!sessions[index].active) {
             SecretSession *session = &sessions[index];
-            memset(session, 0, sizeof(*session));
+            clear_session(session);
             snprintf(session->path, sizeof(session->path), SESSION_PREFIX "%u", next_session++);
             if (next_session == 0) next_session = 1;
             snprintf(session->sender, sizeof(session->sender), "%s", sender);
@@ -456,35 +502,64 @@ static dbus_bool_t parse_secret_iter(DBusMessageIter *source, const char *sender
     if (dbus_message_iter_get_arg_type(&structure) != DBUS_TYPE_OBJECT_PATH) return FALSE;
     const char *session_path = NULL;
     dbus_message_iter_get_basic(&structure, &session_path);
-    if (find_session(session_path, sender) == NULL || !dbus_message_iter_next(&structure)
+    SecretSession *session = find_session(session_path, sender);
+    if (session == NULL || !dbus_message_iter_next(&structure)
             || dbus_message_iter_get_arg_type(&structure) != DBUS_TYPE_ARRAY
             || dbus_message_iter_get_element_type(&structure) != DBUS_TYPE_BYTE) return FALSE;
+
     DBusMessageIter parameters;
     dbus_message_iter_recurse(&structure, &parameters);
     int parameters_length = 0;
     const uint8_t *parameters_value = NULL;
     dbus_message_iter_get_fixed_array(&parameters, &parameters_value, &parameters_length);
-    if (parameters_length != 0 || !dbus_message_iter_next(&structure)
+    if (parameters_length < 0 || !dbus_message_iter_next(&structure)
             || dbus_message_iter_get_arg_type(&structure) != DBUS_TYPE_ARRAY
             || dbus_message_iter_get_element_type(&structure) != DBUS_TYPE_BYTE) return FALSE;
+
     DBusMessageIter bytes;
     dbus_message_iter_recurse(&structure, &bytes);
-    dbus_message_iter_get_fixed_array(&bytes, value, length);
-    if (*length < 0 || *length > MAX_SECRET_BYTES || !dbus_message_iter_next(&structure)
+    int encoded_length = 0;
+    const uint8_t *encoded_value = NULL;
+    dbus_message_iter_get_fixed_array(&bytes, &encoded_value, &encoded_length);
+    if (encoded_length < 0 || encoded_length > MAX_TRANSFER_BYTES
+            || !dbus_message_iter_next(&structure)
             || dbus_message_iter_get_arg_type(&structure) != DBUS_TYPE_STRING) return FALSE;
     dbus_message_iter_get_basic(&structure, content_type);
-    return *content_type != NULL && strlen(*content_type) <= 128
-            && !dbus_message_iter_next(&structure);
-}
+    if (*content_type == NULL || strlen(*content_type) == 0
+            || strlen(*content_type) > 128 || !dbus_validate_utf8(*content_type, NULL)
+            || dbus_message_iter_next(&structure)) return FALSE;
 
+    if (session->mode == SECRET_SESSION_PLAIN) {
+        if (parameters_length != 0 || encoded_length > MAX_SECRET_BYTES) return FALSE;
+        *value = encoded_value;
+        *length = encoded_length;
+        return TRUE;
+    }
+    if (parameters_length != ARCHPHENE_SECRET_AES_IV_BYTES
+            || encoded_length == 0
+            || encoded_length % ARCHPHENE_SECRET_AES_IV_BYTES != 0) return FALSE;
+
+    archphene_secret_crypto_wipe(secret_input_scratch, sizeof(secret_input_scratch));
+    size_t decoded_length = 0;
+    if (archphene_secret_crypto_decrypt(session->key, parameters_value,
+            encoded_value, (size_t)encoded_length,
+            secret_input_scratch, sizeof(secret_input_scratch),
+            &decoded_length) != 0 || decoded_length > MAX_SECRET_BYTES) {
+        archphene_secret_crypto_wipe(secret_input_scratch, sizeof(secret_input_scratch));
+        return FALSE;
+    }
+    *value = secret_input_scratch;
+    *length = (int)decoded_length;
+    return TRUE;
+}
 static int store_secret_value(const char *id, const char *label,
         const SecretAttribute *attributes, size_t count,
-        const uint8_t *value, int length) {
+        const uint8_t *value, int length, const char *content_type) {
     char *json = attributes_json(attributes, count);
     int fd = json == NULL ? -1 : create_secret_fd(value, length);
     if (json == NULL || fd < 0) { free(json); return -1; }
     char response[256] = {0};
-    int result = archphene_android_store_secret(fd, id, label, json,
+    int result = archphene_android_store_secret_typed(fd, id, label, json, content_type,
             response, sizeof(response));
     close(fd);
     free(json);
@@ -517,22 +592,65 @@ static uint8_t *read_secret_value(const SecretMetadata *item, int *length) {
 }
 
 static dbus_bool_t append_secret(DBusMessageIter *parent, const char *session_path,
-        const uint8_t *value, int length) {
+        const uint8_t *value, int length, const char *content_type) {
+    SecretSession *session = NULL;
+    for (size_t index = 0; index < sizeof(sessions) / sizeof(sessions[0]); index++) {
+        if (sessions[index].active && strcmp(sessions[index].path, session_path) == 0) {
+            session = &sessions[index];
+            break;
+        }
+    }
+    if (session == NULL || value == NULL || length < 0 || length > MAX_SECRET_BYTES)
+        return FALSE;
+
+    uint8_t iv[ARCHPHENE_SECRET_AES_IV_BYTES] = {0};
+    const uint8_t *parameters_value = NULL;
+    int parameters_length = 0;
+    const uint8_t *encoded_value = value;
+    int encoded_length = length;
+    if (session->mode == SECRET_SESSION_DH_AES) {
+        size_t offset = 0;
+        while (offset < sizeof(iv)) {
+            ssize_t count = getrandom(iv + offset, sizeof(iv) - offset, 0);
+            if (count < 0 && errno == EINTR) continue;
+            if (count <= 0) return FALSE;
+            offset += (size_t)count;
+        }
+        size_t encrypted_length = 0;
+        archphene_secret_crypto_wipe(secret_output_scratch,
+                sizeof(secret_output_scratch));
+        if (archphene_secret_crypto_encrypt(session->key, iv, value, (size_t)length,
+                secret_output_scratch, sizeof(secret_output_scratch),
+                &encrypted_length) != 0 || encrypted_length > INT32_MAX) {
+            archphene_secret_crypto_wipe(secret_output_scratch,
+                    sizeof(secret_output_scratch));
+            return FALSE;
+        }
+        parameters_value = iv;
+        parameters_length = sizeof(iv);
+        encoded_value = secret_output_scratch;
+        encoded_length = (int)encrypted_length;
+    }
+
     DBusMessageIter structure, parameters, bytes;
-    const uint8_t *empty = NULL;
-    const char *content_type = "text/plain; charset=utf-8";
-    return dbus_message_iter_open_container(parent, DBUS_TYPE_STRUCT, NULL, &structure)
+    dbus_bool_t ok =
+            dbus_message_iter_open_container(parent, DBUS_TYPE_STRUCT, NULL, &structure)
             && dbus_message_iter_append_basic(&structure, DBUS_TYPE_OBJECT_PATH, &session_path)
             && dbus_message_iter_open_container(&structure, DBUS_TYPE_ARRAY, "y", &parameters)
-            && dbus_message_iter_append_fixed_array(&parameters, DBUS_TYPE_BYTE, &empty, 0)
+            && dbus_message_iter_append_fixed_array(&parameters, DBUS_TYPE_BYTE,
+                &parameters_value, parameters_length)
             && dbus_message_iter_close_container(&structure, &parameters)
             && dbus_message_iter_open_container(&structure, DBUS_TYPE_ARRAY, "y", &bytes)
-            && dbus_message_iter_append_fixed_array(&bytes, DBUS_TYPE_BYTE, &value, length)
+            && dbus_message_iter_append_fixed_array(&bytes, DBUS_TYPE_BYTE,
+                &encoded_value, encoded_length)
             && dbus_message_iter_close_container(&structure, &bytes)
             && dbus_message_iter_append_basic(&structure, DBUS_TYPE_STRING, &content_type)
             && dbus_message_iter_close_container(parent, &structure);
+    archphene_secret_crypto_wipe(iv, sizeof(iv));
+    archphene_secret_crypto_wipe(secret_output_scratch,
+            sizeof(secret_output_scratch));
+    return ok;
 }
-
 
 static dbus_bool_t parse_item_properties(DBusMessageIter *source, char **label,
         SecretAttribute *attributes, size_t *attribute_count) {
@@ -574,43 +692,121 @@ static void handle_open_session(DBusConnection *connection, DBusMessage *request
     DBusMessageIter input;
     if (!dbus_message_iter_init(request, &input)
             || dbus_message_iter_get_arg_type(&input) != DBUS_TYPE_STRING) {
-        send_error(connection, request, DBUS_ERROR_INVALID_ARGS, "OpenSession requires an algorithm");
+        send_error(connection, request, DBUS_ERROR_INVALID_ARGS,
+                "OpenSession requires an algorithm");
         return;
     }
     const char *algorithm = NULL;
     dbus_message_iter_get_basic(&input, &algorithm);
-    if (algorithm == NULL || strcmp(algorithm, "plain") != 0) {
+    if (algorithm == NULL || (strcmp(algorithm, "plain") != 0
+            && strcmp(algorithm, "dh-ietf1024-sha256-aes128-cbc-pkcs7") != 0)) {
         send_error(connection, request, ERROR_NOT_SUPPORTED,
-                "Only the Secret Service plain same-UID session is supported");
+                "Secret Service session algorithm is unsupported");
         return;
     }
     if (!dbus_message_iter_next(&input)
-            || dbus_message_iter_get_arg_type(&input) != DBUS_TYPE_VARIANT
-            || dbus_message_iter_next(&input)) {
-        send_error(connection, request, DBUS_ERROR_INVALID_ARGS, "OpenSession arguments are invalid");
+            || dbus_message_iter_get_arg_type(&input) != DBUS_TYPE_VARIANT) {
+        send_error(connection, request, DBUS_ERROR_INVALID_ARGS,
+                "OpenSession arguments are invalid");
         return;
     }
+    DBusMessageIter trailing = input;
+    if (dbus_message_iter_next(&trailing)) {
+        send_error(connection, request, DBUS_ERROR_INVALID_ARGS,
+                "OpenSession arguments are invalid");
+        return;
+    }
+
+    DBusMessageIter argument;
+    dbus_message_iter_recurse(&input, &argument);
+    dbus_bool_t encrypted = strcmp(algorithm,
+            "dh-ietf1024-sha256-aes128-cbc-pkcs7") == 0;
+    uint8_t public_value[ARCHPHENE_SECRET_DH_PUBLIC_MAX_BYTES] = {0};
+    size_t public_length = 0;
+    uint8_t session_key[ARCHPHENE_SECRET_AES_KEY_BYTES] = {0};
+    if (!encrypted) {
+        const char *plain_input = NULL;
+        if (dbus_message_iter_get_arg_type(&argument) != DBUS_TYPE_STRING) {
+            send_error(connection, request, DBUS_ERROR_INVALID_ARGS,
+                    "Plain session input must be a string");
+            return;
+        }
+        dbus_message_iter_get_basic(&argument, &plain_input);
+        if (plain_input == NULL || plain_input[0] != '\0'
+                || dbus_message_iter_next(&argument)) {
+            send_error(connection, request, DBUS_ERROR_INVALID_ARGS,
+                    "Plain session input must be empty");
+            return;
+        }
+    } else {
+        if (dbus_message_iter_get_arg_type(&argument) != DBUS_TYPE_ARRAY
+                || dbus_message_iter_get_element_type(&argument) != DBUS_TYPE_BYTE) {
+            send_error(connection, request, DBUS_ERROR_INVALID_ARGS,
+                    "Encrypted session input must be a DH public key");
+            return;
+        }
+        DBusMessageIter peer_array;
+        dbus_message_iter_recurse(&argument, &peer_array);
+        const uint8_t *peer_public = NULL;
+        int peer_length = 0;
+        dbus_message_iter_get_fixed_array(&peer_array, &peer_public, &peer_length);
+        if (peer_length <= 0
+                || archphene_secret_crypto_negotiate(peer_public, (size_t)peer_length,
+                    public_value, sizeof(public_value), &public_length,
+                    session_key) != 0) {
+            send_error(connection, request, DBUS_ERROR_INVALID_ARGS,
+                    "Encrypted session DH public key is invalid");
+            return;
+        }
+    }
+
     SecretSession *session = create_session(dbus_message_get_sender(request));
     if (session == NULL) {
-        send_error(connection, request, DBUS_ERROR_LIMITS_EXCEEDED, "Secret session limit reached");
+        archphene_secret_crypto_wipe(public_value, sizeof(public_value));
+        archphene_secret_crypto_wipe(session_key, sizeof(session_key));
+        send_error(connection, request, DBUS_ERROR_LIMITS_EXCEEDED,
+                "Secret session limit reached");
         return;
     }
+    session->mode = encrypted ? SECRET_SESSION_DH_AES : SECRET_SESSION_PLAIN;
+    if (encrypted) memcpy(session->key, session_key, sizeof(session->key));
+
     DBusMessage *reply = dbus_message_new_method_return(request);
-    DBusMessageIter output, variant;
+    DBusMessageIter output, variant, public_array;
     const char *empty = "";
     const char *path = session->path;
-    if (reply == NULL) return;
-    dbus_message_iter_init_append(reply, &output);
-    if (!dbus_message_iter_open_container(&output, DBUS_TYPE_VARIANT, "s", &variant)
-            || !dbus_message_iter_append_basic(&variant, DBUS_TYPE_STRING, &empty)
-            || !dbus_message_iter_close_container(&output, &variant)
-            || !dbus_message_iter_append_basic(&output, DBUS_TYPE_OBJECT_PATH, &path)) {
-        dbus_message_unref(reply);
+    dbus_bool_t ok = reply != NULL;
+    if (ok) {
+        dbus_message_iter_init_append(reply, &output);
+        if (encrypted) {
+            const uint8_t *public_pointer = public_value;
+            ok = dbus_message_iter_open_container(&output, DBUS_TYPE_VARIANT,
+                    "ay", &variant)
+                    && dbus_message_iter_open_container(&variant, DBUS_TYPE_ARRAY,
+                        "y", &public_array)
+                    && dbus_message_iter_append_fixed_array(&public_array,
+                        DBUS_TYPE_BYTE, &public_pointer, (int)public_length)
+                    && dbus_message_iter_close_container(&variant, &public_array)
+                    && dbus_message_iter_close_container(&output, &variant);
+        } else {
+            ok = dbus_message_iter_open_container(&output, DBUS_TYPE_VARIANT,
+                    "s", &variant)
+                    && dbus_message_iter_append_basic(&variant,
+                        DBUS_TYPE_STRING, &empty)
+                    && dbus_message_iter_close_container(&output, &variant);
+        }
+        ok = ok && dbus_message_iter_append_basic(&output,
+                DBUS_TYPE_OBJECT_PATH, &path);
+    }
+    archphene_secret_crypto_wipe(public_value, sizeof(public_value));
+    archphene_secret_crypto_wipe(session_key, sizeof(session_key));
+    if (!ok) {
+        if (reply != NULL) dbus_message_unref(reply);
+        clear_session(session);
         return;
     }
     send_message(connection, reply);
 }
-
 static void send_search_reply(DBusConnection *connection, DBusMessage *request,
         const SecretAttribute *query, size_t query_count, dbus_bool_t service_reply) {
     SecretCatalog catalog;
@@ -764,10 +960,12 @@ static void handle_create_item(DBusConnection *connection, DBusMessage *request)
         return;
     }
     const char *id = NULL;
+    dbus_bool_t replaced = FALSE;
     if (replace) {
         for (size_t index = 0; index < catalog.count; index++) {
             if (attributes_equal(&catalog.items[index], attributes, attribute_count)) {
                 id = catalog.items[index].id;
+                replaced = TRUE;
                 break;
             }
         }
@@ -783,7 +981,8 @@ static void handle_create_item(DBusConnection *connection, DBusMessage *request)
     }
     char path[1200];
     int result = item_path(id, path, sizeof(path))
-            ? store_secret_value(id, label, attributes, attribute_count, value, length) : -1;
+            ? store_secret_value(id, label, attributes, attribute_count, value, length,
+                    content_type) : -1;
     if (result != 0) {
         free_catalog(&catalog); free(label); free_attributes(attributes, attribute_count);
         send_error(connection, request, DBUS_ERROR_FAILED, "Could not persist encrypted secret");
@@ -796,6 +995,7 @@ static void handle_create_item(DBusConnection *connection, DBusMessage *request)
             DBUS_TYPE_OBJECT_PATH, &item, DBUS_TYPE_OBJECT_PATH, &prompt, DBUS_TYPE_INVALID))
         send_message(connection, reply);
     else if (reply != NULL) dbus_message_unref(reply);
+    emit_item_signal(connection, replaced ? "ItemChanged" : "ItemCreated", path);
     free_catalog(&catalog); free(label); free_attributes(attributes, attribute_count);
 }
 
@@ -821,7 +1021,8 @@ static void handle_get_secret(DBusConnection *connection, DBusMessage *request,
     DBusMessageIter output;
     if (reply != NULL) {
         dbus_message_iter_init_append(reply, &output);
-        if (append_secret(&output, session_path, value, length)) send_message(connection, reply);
+        if (append_secret(&output, session_path, value, length, item->content_type))
+            send_message(connection, reply);
         else dbus_message_unref(reply);
     }
     memset(value, 0, (size_t)length);
@@ -839,11 +1040,12 @@ static void handle_set_secret(DBusConnection *connection, DBusMessage *request,
                 &value, &length, &content_type)
             || dbus_message_iter_next(&input)
             || store_secret_value(item->id, item->label, item->attributes,
-                item->attribute_count, value, length) != 0) {
+                item->attribute_count, value, length, content_type) != 0) {
         send_error(connection, request, ERROR_NO_SESSION, "SetSecret failed or session is invalid");
         return;
     }
     send_empty_reply(connection, request);
+    emit_item_signal(connection, "ItemChanged", dbus_message_get_path(request));
 }
 
 static void handle_delete_item(DBusConnection *connection, DBusMessage *request,
@@ -858,6 +1060,7 @@ static void handle_delete_item(DBusConnection *connection, DBusMessage *request,
     if (reply != NULL && dbus_message_append_args(reply,
             DBUS_TYPE_OBJECT_PATH, &prompt, DBUS_TYPE_INVALID)) send_message(connection, reply);
     else if (reply != NULL) dbus_message_unref(reply);
+    emit_item_signal(connection, "ItemDeleted", dbus_message_get_path(request));
 }
 
 
@@ -916,7 +1119,7 @@ static dbus_bool_t append_requested_property(DBusMessageIter *output,
         const char *paths[] = { COLLECTION_PATH };
         return append_variant_paths(output, paths, 1);
     }
-    if (strcmp(path, COLLECTION_PATH) == 0 && strcmp(interface, COLLECTION_IFACE) == 0) {
+    if (is_collection_path(path) && strcmp(interface, COLLECTION_IFACE) == 0) {
         if (strcmp(property, "Items") == 0) {
             char encoded[MAX_ITEMS][1200];
             const char *paths[MAX_ITEMS];
@@ -998,7 +1201,7 @@ static void handle_properties_get_all(DBusConnection *connection, DBusMessage *r
     static const char *item_names[] = {"Locked", "Attributes", "Label", "Created", "Modified"};
     if (strcmp(path, SERVICE_PATH) == 0 && strcmp(interface, SERVICE_IFACE) == 0) {
         names = service_names; count = sizeof(service_names) / sizeof(service_names[0]);
-    } else if (strcmp(path, COLLECTION_PATH) == 0 && strcmp(interface, COLLECTION_IFACE) == 0) {
+    } else if (is_collection_path(path) && strcmp(interface, COLLECTION_IFACE) == 0) {
         names = collection_names; count = sizeof(collection_names) / sizeof(collection_names[0]);
     } else if (item != NULL && strcmp(interface, ITEM_IFACE) == 0) {
         names = item_names; count = sizeof(item_names) / sizeof(item_names[0]);
@@ -1078,7 +1281,7 @@ static void handle_properties_set(DBusConnection *connection, DBusMessage *reque
     int length = 0;
     uint8_t *value = read_secret_value(item, &length);
     int result = value == NULL ? -1 : store_secret_value(item->id, label,
-            attributes, attribute_count, value, length);
+            attributes, attribute_count, value, length, item->content_type);
     if (value != NULL) { memset(value, 0, (size_t)length); free(value); }
     free_attributes(replacement, replacement_count);
     if (result != 0) {
@@ -1086,6 +1289,7 @@ static void handle_properties_set(DBusConnection *connection, DBusMessage *reque
         return;
     }
     send_empty_reply(connection, request);
+    emit_item_signal(connection, "ItemChanged", dbus_message_get_path(request));
 }
 
 static void handle_get_secrets(DBusConnection *connection, DBusMessage *request,
@@ -1129,7 +1333,7 @@ static void handle_get_secrets(DBusConnection *connection, DBusMessage *request,
             ok = value != NULL
                     && dbus_message_iter_open_container(&array, DBUS_TYPE_DICT_ENTRY, NULL, &entry)
                     && dbus_message_iter_append_basic(&entry, DBUS_TYPE_OBJECT_PATH, &path)
-                    && append_secret(&entry, session_path, value, length)
+                    && append_secret(&entry, session_path, value, length, item->content_type)
                     && dbus_message_iter_close_container(&array, &entry);
             if (value != NULL) { memset(value, 0, (size_t)length); free(value); }
         }
@@ -1161,13 +1365,13 @@ void archphene_secret_service_handle_signal(DBusMessage *message) {
         if (sessions[index].active
                 && (strcmp(sessions[index].sender, name) == 0
                     || (old_owner != NULL && strcmp(sessions[index].sender, old_owner) == 0)))
-            memset(&sessions[index], 0, sizeof(sessions[index]));
+            clear_session(&sessions[index]);
     }
 }
 const char *archphene_secret_service_introspection(const char *path) {
     if (path == NULL) return NULL;
     if (strcmp(path, SERVICE_PATH) == 0) return service_xml;
-    if (strcmp(path, COLLECTION_PATH) == 0) return collection_xml;
+    if (is_collection_path(path)) return collection_xml;
     if (strncmp(path, ITEM_PREFIX, strlen(ITEM_PREFIX)) == 0) return item_xml;
     if (strncmp(path, SESSION_PREFIX, strlen(SESSION_PREFIX)) == 0) return session_xml;
     return NULL;
@@ -1184,7 +1388,7 @@ dbus_bool_t archphene_secret_service_handles(
         DBusConnection *connection, DBusMessage *message) {
     const char *path = dbus_message_get_path(message);
     if (path == NULL || (strcmp(path, SERVICE_PATH) != 0
-            && strcmp(path, COLLECTION_PATH) != 0
+            && !is_collection_path(path)
             && strncmp(path, ITEM_PREFIX, strlen(ITEM_PREFIX)) != 0
             && strncmp(path, SESSION_PREFIX, strlen(SESSION_PREFIX)) != 0)) return FALSE;
 
@@ -1195,10 +1399,16 @@ dbus_bool_t archphene_secret_service_handles(
         return TRUE;
     }
 
+    if (getenv("ARCHPHENE_SECRET_TRACE") != NULL) {
+        fprintf(stderr, "secret request interface=%s member=%s path=%s\n",
+                interface, member, path);
+        fflush(stderr);
+    }
+
     SecretCatalog catalog;
     dbus_bool_t catalog_loaded = FALSE;
     SecretMetadata *item = NULL;
-    if (strcmp(path, COLLECTION_PATH) == 0
+    if (is_collection_path(path)
             || strncmp(path, ITEM_PREFIX, strlen(ITEM_PREFIX)) == 0
             || strcmp(interface, PROPERTIES_IFACE) == 0
             || (strcmp(path, SERVICE_PATH) == 0 && strcmp(member, "GetSecrets") == 0)) {
@@ -1253,7 +1463,7 @@ dbus_bool_t archphene_secret_service_handles(
             send_error(connection, message, DBUS_ERROR_UNKNOWN_METHOD,
                     "Unknown Secret Service method");
         }
-    } else if (strcmp(path, COLLECTION_PATH) == 0
+    } else if (is_collection_path(path)
             && strcmp(interface, COLLECTION_IFACE) == 0) {
         if (strcmp(member, "SearchItems") == 0) {
             handle_search(connection, message, FALSE);
@@ -1283,7 +1493,7 @@ dbus_bool_t archphene_secret_service_handles(
         if (session == NULL) {
             send_error(connection, message, ERROR_NO_SESSION, "Secret session is invalid");
         } else {
-            memset(session, 0, sizeof(*session));
+            clear_session(session);
             send_empty_reply(connection, message);
         }
     } else {
@@ -1292,5 +1502,9 @@ dbus_bool_t archphene_secret_service_handles(
     }
 
     if (catalog_loaded) free_catalog(&catalog);
+    archphene_secret_crypto_wipe(secret_input_scratch,
+            sizeof(secret_input_scratch));
+    archphene_secret_crypto_wipe(secret_output_scratch,
+            sizeof(secret_output_scratch));
     return TRUE;
 }

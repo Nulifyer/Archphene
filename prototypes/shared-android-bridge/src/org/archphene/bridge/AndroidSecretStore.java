@@ -39,24 +39,27 @@ import org.json.JSONObject;
 final class AndroidSecretStore {
     private static final String KEY_ALIAS = "archphene-secret-store-v1";
     private static final int MAGIC = 0x41505331;
-    private static final int VERSION = 1;
+    private static final int VERSION = 2;
     private static final int IV_BYTES = 12;
     private static final int MAX_SECRET_BYTES = 64 * 1024;
     private static final int MAX_ATTRIBUTES_BYTES = 8 * 1024;
     private static final int MAX_ITEMS = 256;
     private static final int MAX_ID = 128;
     private static final int MAX_LABEL = 256;
+    private static final int MAX_CONTENT_TYPE = 128;
     private static final int MAX_ATTRIBUTE_KEY = 128;
     private static final int MAX_ATTRIBUTE_VALUE = 512;
 
     static final class ReadResult {
         final String label;
         final String attributes;
+        final String contentType;
         final int secretBytes;
 
-        ReadResult(String label, String attributes, int secretBytes) {
+        ReadResult(String label, String attributes, String contentType, int secretBytes) {
             this.label = label;
             this.attributes = attributes;
+            this.contentType = contentType;
             this.secretBytes = secretBytes;
         }
     }
@@ -65,12 +68,14 @@ final class AndroidSecretStore {
         final String id;
         final String label;
         final String attributes;
+        final String contentType;
         final byte[] secret;
 
-        Record(String id, String label, String attributes, byte[] secret) {
+        Record(String id, String label, String attributes, String contentType, byte[] secret) {
             this.id = id;
             this.label = label;
             this.attributes = attributes;
+            this.contentType = contentType;
             this.secret = secret;
         }
     }
@@ -83,10 +88,12 @@ final class AndroidSecretStore {
     }
 
     synchronized void store(String id, String label, String attributes,
+            String contentType,
             FileDescriptor secretDescriptor) throws Exception {
         validateText(id, "secret ID", MAX_ID, false);
         validateText(label, "secret label", MAX_LABEL, true);
         String canonicalAttributes = canonicalAttributes(attributes);
+        validateText(contentType, "secret content type", MAX_CONTENT_TYPE, false);
         byte[] secret = readSecret(secretDescriptor);
         byte[] plaintext = null;
         File temporary = null;
@@ -96,7 +103,7 @@ final class AndroidSecretStore {
             if (!target.isFile() && recordFiles().size() >= MAX_ITEMS) {
                 throw new IllegalStateException("Secret store item limit reached");
             }
-            plaintext = encodeRecord(new Record(id, label, canonicalAttributes, secret));
+            plaintext = encodeRecord(new Record(id, label, canonicalAttributes, contentType, secret));
             Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
             cipher.init(Cipher.ENCRYPT_MODE, secretKey());
             byte[] iv = cipher.getIV();
@@ -135,7 +142,7 @@ final class AndroidSecretStore {
                 throw new SecurityException("Secret record identity mismatch");
             }
             writeOutput(outputDescriptor, record.secret);
-            return new ReadResult(record.label, record.attributes, record.secret.length);
+            return new ReadResult(record.label, record.attributes, record.contentType, record.secret.length);
         } finally {
             java.util.Arrays.fill(record.secret, (byte)0);
         }
@@ -156,6 +163,7 @@ final class AndroidSecretStore {
                 item.put("id", record.id);
                 item.put("label", record.label);
                 item.put("attributes", new JSONObject(record.attributes));
+                item.put("contentType", record.contentType);
                 result.put(item);
             } finally {
                 java.util.Arrays.fill(record.secret, (byte)0);
@@ -172,13 +180,14 @@ final class AndroidSecretStore {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         try (DataOutputStream output = new DataOutputStream(bytes)) {
             output.writeInt(0x41504331);
-            output.writeByte(1);
+            output.writeByte(2);
             output.writeShort(files.size());
             for (File file : files) {
                 Record record = decrypt(file);
                 try {
                     writeCatalogString(output, record.id);
                     writeCatalogString(output, record.label);
+                    writeCatalogString(output, record.contentType);
                     JSONObject attributes = new JSONObject(record.attributes);
                     ArrayList<String> keys = new ArrayList<>();
                     Iterator<String> iterator = attributes.keys();
@@ -230,8 +239,12 @@ final class AndroidSecretStore {
             throw new SecurityException("Secret record escaped private storage");
         }
         try (DataInputStream input = new DataInputStream(new FileInputStream(file))) {
-            if (input.readInt() != MAGIC || input.readUnsignedByte() != VERSION) {
+            if (input.readInt() != MAGIC) {
                 throw new IOException("Secret record header is invalid");
+            }
+            int version = input.readUnsignedByte();
+            if (version != 1 && version != VERSION) {
+                throw new IOException("Secret record version is unsupported");
             }
             int ivLength = input.readUnsignedByte();
             int encryptedLength = input.readInt();
@@ -249,7 +262,7 @@ final class AndroidSecretStore {
             cipher.updateAAD(file.getName().getBytes(StandardCharsets.US_ASCII));
             byte[] plaintext = cipher.doFinal(encrypted);
             try {
-                return decodeRecord(plaintext);
+                return decodeRecord(plaintext, version);
             } finally {
                 java.util.Arrays.fill(plaintext, (byte)0);
             }
@@ -260,10 +273,12 @@ final class AndroidSecretStore {
         byte[] id = record.id.getBytes(StandardCharsets.UTF_8);
         byte[] label = record.label.getBytes(StandardCharsets.UTF_8);
         byte[] attributes = record.attributes.getBytes(StandardCharsets.UTF_8);
+        byte[] contentType = record.contentType.getBytes(StandardCharsets.UTF_8);
         int length;
         try {
-            length = Math.addExact(16, Math.addExact(record.secret.length,
-                    Math.addExact(id.length, Math.addExact(label.length, attributes.length))));
+            length = Math.addExact(20, Math.addExact(record.secret.length,
+                    Math.addExact(contentType.length,
+                    Math.addExact(id.length, Math.addExact(label.length, attributes.length)))));
         } catch (ArithmeticException error) {
             throw new IOException("Secret record size overflow", error);
         }
@@ -271,15 +286,18 @@ final class AndroidSecretStore {
         output.putInt(id.length).put(id);
         output.putInt(label.length).put(label);
         output.putInt(attributes.length).put(attributes);
+        output.putInt(contentType.length).put(contentType);
         output.putInt(record.secret.length).put(record.secret);
         return output.array();
     }
-    private static Record decodeRecord(byte[] encoded) throws Exception {
+    private static Record decodeRecord(byte[] encoded, int version) throws Exception {
         byte[] secret = null;
         try (DataInputStream input = new DataInputStream(new ByteArrayInputStream(encoded))) {
             String id = readString(input, MAX_ID * 4);
             String label = readString(input, MAX_LABEL * 4);
             String attributes = readString(input, MAX_ATTRIBUTES_BYTES);
+            String contentType = version >= 2
+                    ? readString(input, MAX_CONTENT_TYPE * 4) : "text/plain";
             int secretLength = input.readInt();
             if (secretLength < 0 || secretLength > MAX_SECRET_BYTES
                     || secretLength != input.available()) {
@@ -290,7 +308,8 @@ final class AndroidSecretStore {
             validateText(id, "secret ID", MAX_ID, false);
             validateText(label, "secret label", MAX_LABEL, true);
             attributes = canonicalAttributes(attributes);
-            return new Record(id, label, attributes, secret);
+            validateText(contentType, "secret content type", MAX_CONTENT_TYPE, false);
+            return new Record(id, label, attributes, contentType, secret);
         } catch (Exception error) {
             if (secret != null) java.util.Arrays.fill(secret, (byte)0);
             throw error;

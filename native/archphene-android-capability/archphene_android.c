@@ -293,21 +293,31 @@ int archphene_android_take_accessibility_action(
 int archphene_android_store_secret(
         int secret_fd, const char *id, const char *label, const char *attributes_json,
         char *response, size_t response_size) {
+    return archphene_android_store_secret_typed(secret_fd, id, label, attributes_json,
+            "text/plain", response, response_size);
+}
+
+int archphene_android_store_secret_typed(
+        int secret_fd, const char *id, const char *label, const char *attributes_json,
+        const char *content_type, char *response, size_t response_size) {
     char encoded_id[MAX_FIELD * 2];
     char encoded_label[MAX_FIELD * 2];
     char encoded_attributes[MAX_FIELD * 2];
+    char encoded_content_type[MAX_FIELD * 2];
     char request[MAX_REQUEST];
     if (secret_fd < 0 || label == NULL
             || base64url(id, encoded_id, sizeof(encoded_id)) != 0
             || base64url_value(label, encoded_label, sizeof(encoded_label), true) != 0
             || base64url(attributes_json, encoded_attributes,
-                    sizeof(encoded_attributes)) != 0) {
+                    sizeof(encoded_attributes)) != 0
+            || base64url(content_type, encoded_content_type,
+                    sizeof(encoded_content_type)) != 0) {
         errno = EINVAL;
         return -1;
     }
     int length = snprintf(request, sizeof(request),
-            "ARCHPHENE/1\tSTORE_SECRET\t%s\t%s\t%s",
-            encoded_id, encoded_label, encoded_attributes);
+            "ARCHPHENE/1\tSTORE_SECRET\t%s\t%s\t%s\t%s",
+            encoded_id, encoded_label, encoded_attributes, encoded_content_type);
     if (length <= 0 || (size_t)length >= sizeof(request)) {
         errno = ENOSPC;
         return -1;

@@ -1,0 +1,65 @@
+KWallet compatibility daemon metadata-only diagnostics
+
+--- a/src/runtime/kwalletd/kwalletd.cpp
++++ b/src/runtime/kwalletd/kwalletd.cpp
+@@ -7,6 +7,7 @@
+ 
+ #include <QDBusConnection>
+ #include <QDebug>
++#include <cstdio>
+ 
+ #include <KConfig>
+ #include <KConfigGroup>
+@@ -18,6 +19,16 @@
+ #include "../kwalletbackend/kwalletbackend.h"
+ #include "../kwalletbackend/kwalletentry.h"
+ 
++static void archpheneTrace(const char *event)
++{
++    if (!qEnvironmentVariableIsSet("ARCHPHENE_KWALLET_TRACE")) {
++        return;
++    }
++
++    std::fprintf(stderr, "archphene-kwallet event=%s\n", event);
++    std::fflush(stderr);
++}
++
+ unsigned int KWalletD::s_lastTransaction = 0;
+ 
+ static void startManagerForKwalletd()
+@@ -334,6 +345,7 @@ void KWalletD::timerEvent(QTimerEvent *ev)
+ 
+ int KWalletD::openInternal(const QString &wallet, qlonglong wId, const QString &appId)
+ {
++    archpheneTrace("open");
+     if (wId < 0) {
+         return -1;
+     }
+@@ -582,14 +594,18 @@ bool KWalletD::hasFolder(int handle, const QString &folder, const QString &appId)
+     }
+     for (auto it = m_structure.constBegin(); it != m_structure.constEnd(); it++) {
+         if (it.value().contains(folder)) {
++            archpheneTrace("has-folder-hit");
+             return true;
+         }
+     }
+-    return m_structure.contains(folder);
++    const bool found = m_structure.contains(folder);
++    archpheneTrace(found ? "has-folder-hit" : "has-folder-miss");
++    return found;
+ }
+ 
+ bool KWalletD::createFolder(int handle, const QString &folder, const QString &appId)
+ {
++    archpheneTrace("create-folder");
+     const QString wallet = walletForHandle(handle, appId);
+     if (wallet.isEmpty()) {
+         return false;
+@@ -867,6 +883,7 @@ int KWalletD::renameEntry(int handle, const QString &folder, const QString &oldNa
+ 
+ int KWalletD::writeEntry(int handle, const QString &folder, const QString &key, const QByteArray &value, int entryType, const QString &appId)
+ {
++    archpheneTrace("write-entry");
+     const QString wallet = walletForHandle(handle, appId);
+ 
+     if (wallet.isEmpty()) {

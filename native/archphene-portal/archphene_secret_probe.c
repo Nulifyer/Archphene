@@ -244,8 +244,8 @@ static void unsupported_session(DBusConnection *connection) {
     dbus_message_iter_open_container(&output, DBUS_TYPE_VARIANT, "s", &variant);
     dbus_message_iter_append_basic(&variant, DBUS_TYPE_STRING, &empty);
     dbus_message_iter_close_container(&output, &variant);
-    expect_error(connection, request, "org.freedesktop.Secret.Error.NotSupported",
-            "unsupported encrypted session");
+    expect_error(connection, request, DBUS_ERROR_INVALID_ARGS,
+            "malformed encrypted session");
 }
 
 int main(void) {

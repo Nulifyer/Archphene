@@ -52,6 +52,8 @@ This is the prioritized completion queue for the Archphene Android application. 
     - [x] Add a per-wrapper Android Keystore-backed encrypted secret store with bounded descriptor APIs for store/read/list/delete; validate ciphertext, metadata, overwrite, process-restart persistence, limits, deletion, lifecycle, and no log exposure on x86_64 emulator and physical AArch64.
     - [x] Add a capability-gated private Secret Service D-Bus adapter with sender-bound sessions, login collection/search/properties, create/get/set/replace/delete, zero-length values, and disconnect cleanup; validate its wire contract on 4 KB and 16 KB x86_64 emulators and physical AArch64.
     - [ ] Validate packaged Arch libsecret and KWallet clients against the private Secret Service adapter before claiming broad unmodified-toolkit compatibility.
+      - [x] Validate official Arch x86_64 libsecret and KWallet clients on a 4 KB emulator, including encrypted sessions, write/read/clear, restart persistence, and no plaintext logs.
+      - [ ] Build and validate the equivalent official Arch Linux ARM client closure on physical AArch64; upstream Arch x86_64 clients remain unusable on 16 KB Android because their ELF files are 4 KB-aligned.
   - [x] Reject broad all-files access as the default. Use user-selected Storage Access Framework documents and trees; reconsider an optional advanced flow only with a concrete compatibility requirement.
 - [ ] Complete platform compatibility.
   - Rebuild or relocate the bundled x86_64 manager tools and glibc loader so the 16 KB control-plane APK does not trigger Android's page-size warning. Package execution already rejects incompatible 4 KB upstream Arch binaries before publication.

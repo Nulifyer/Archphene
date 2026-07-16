@@ -2,9 +2,11 @@ package org.archphene.bridge;
 
 import android.app.Activity;
 import android.os.Bundle;
+import android.system.Os;
 import android.widget.TextView;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Set;
 
@@ -27,11 +29,22 @@ public final class SecretsProbeActivity extends Activity {
                 output.write(0);
                 output.getFD().sync();
             }
+            String[] libsecretAssets = getAssets().list("libsecret");
+            if (libsecretAssets != null && libsecretAssets.length != 0) {
+                File libsecretRoot = new File(getFilesDir(), "libsecret-runtime");
+                extractAssetTree("libsecret", libsecretRoot);
+                for (String executable : new String[] {
+                        "secret-tool", "gdbus", "kwalletd6", "kwallet-query"
+                }) {
+                    Os.chmod(new File(libsecretRoot, executable).getAbsolutePath(), 0700);
+                }
+                writeFixture("libsecret-runtime-root", libsecretRoot.getCanonicalPath());
+            }
             Set<String> capabilities = BridgeCapabilities.read(this);
             broker = new AndroidCapabilityBroker(this, capabilities);
             broker.start();
             desktopIntegration.start(new File(getApplicationInfo().nativeLibraryDir),
-                    getCacheDir(), "@" + broker.socketName(), "Archphene Secrets Probe", true);
+                    getCacheDir(), "@" + broker.socketName(), "Archphene Secrets Probe", true, true);
             writeFixture("secrets-bus-address", desktopIntegration.busAddress());
             brokerFile = new File(getFilesDir(), "secrets-broker-name");
             try (FileOutputStream output = new FileOutputStream(brokerFile, false)) {
@@ -48,6 +61,31 @@ public final class SecretsProbeActivity extends Activity {
         }
     }
 
+    private void extractAssetTree(String assetPath, File target) throws Exception {
+        String[] children = getAssets().list(assetPath);
+        if (children != null && children.length != 0) {
+            if (!target.isDirectory() && !target.mkdirs()) {
+                throw new IllegalStateException("Could not create libsecret fixture directory");
+            }
+            for (String child : children) {
+                extractAssetTree(assetPath + "/" + child, new File(target, child));
+            }
+            return;
+        }
+        File parent = target.getParentFile();
+        if (parent == null || (!parent.isDirectory() && !parent.mkdirs())) {
+            throw new IllegalStateException("Could not create libsecret fixture parent");
+        }
+        byte[] buffer = new byte[64 * 1024];
+        try (InputStream input = getAssets().open(assetPath);
+                FileOutputStream output = new FileOutputStream(target, false)) {
+            int count;
+            while ((count = input.read(buffer)) >= 0) {
+                if (count != 0) output.write(buffer, 0, count);
+            }
+            output.getFD().sync();
+        }
+    }
     private void writeFixture(String name, String value) throws Exception {
         try (FileOutputStream output = new FileOutputStream(
                 new File(getFilesDir(), name), false)) {

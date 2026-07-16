@@ -30,6 +30,9 @@ int archphene_android_take_accessibility_action(
 int archphene_android_store_secret(
         int secret_fd, const char *id, const char *label, const char *attributes_json,
         char *response, size_t response_size);
+int archphene_android_store_secret_typed(
+        int secret_fd, const char *id, const char *label, const char *attributes_json,
+        const char *content_type, char *response, size_t response_size);
 int archphene_android_read_secret(
         int output_fd, const char *id, char *response, size_t response_size);
 int archphene_android_delete_secret(

@@ -28,6 +28,12 @@ final class AndroidDesktopIntegration {
 
     synchronized void start(File nativeLibraryDir, File cacheDirectory,
             String brokerSocket, String appName, boolean secretsEnabled) throws IOException {
+        start(nativeLibraryDir, cacheDirectory, brokerSocket, appName, secretsEnabled, false);
+    }
+
+    synchronized void start(File nativeLibraryDir, File cacheDirectory,
+            String brokerSocket, String appName, boolean secretsEnabled,
+            boolean traceSecrets) throws IOException {
         stop();
         File daemonFile = requireHelper(nativeLibraryDir, DAEMON);
         File portalFile = requireHelper(nativeLibraryDir, PORTAL);
@@ -66,6 +72,7 @@ final class AndroidDesktopIntegration {
         portalEnvironment.put("ARCHPHENE_ANDROID_BROKER", brokerSocket);
         portalEnvironment.put("ARCHPHENE_APP_NAME", appName);
         portalEnvironment.put("ARCHPHENE_ENABLE_SECRETS", secretsEnabled ? "1" : "0");
+        if (traceSecrets) portalEnvironment.put("ARCHPHENE_SECRET_TRACE", "1");
         portal = portalBuilder.start();
         drain(portal, "portal");
         android.os.SystemClock.sleep(100);

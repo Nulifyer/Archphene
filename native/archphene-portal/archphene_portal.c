@@ -591,6 +591,8 @@ static void handle_introspection(DBusConnection *connection, DBusMessage *reques
 static void handle_message(DBusConnection *connection, DBusMessage *request) {
     if (dbus_message_is_method_call(request, INTROSPECTABLE, "Introspect")) {
         handle_introspection(connection, request);
+    } else if (archphene_secret_service_handles(connection, request)) {
+        return;
     } else if (dbus_message_is_method_call(request, PORTAL_OPEN_URI, "OpenURI")) {
         handle_open_uri(connection, request);
     } else if (dbus_message_is_method_call(request, PORTAL_OPEN_URI, "SchemeSupported")) {
@@ -635,7 +637,7 @@ static void handle_message(DBusConnection *connection, DBusMessage *request) {
     } else if (dbus_message_is_method_call(request, CLASSIC_NOTIFICATION,
             "CloseNotification")) {
         handle_classic_close(connection, request);
-    } else if (!archphene_secret_service_handles(connection, request)) {
+    } else {
         send_error(connection, request, DBUS_ERROR_UNKNOWN_METHOD,
                 "Archphene does not implement this portal method");
     }

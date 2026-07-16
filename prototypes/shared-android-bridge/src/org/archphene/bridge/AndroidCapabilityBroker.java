@@ -235,12 +235,15 @@ final class AndroidCapabilityBroker implements Closeable {
                 return requireAccessibilityBridge().takeAction(
                         parseBoundedInt(fields[2], 0, 250, "accessibility timeout"));
             case "STORE_SECRET":
-                requireFields(fields, 5);
+                if (fields.length != 5 && fields.length != 6) {
+                    throw new IllegalArgumentException("STORE_SECRET field count is invalid");
+                }
                 requireCapability(BridgeCapabilities.SECRETS);
                 secretStore.store(
                         decode(fields[2], MAX_ID_BYTES),
                         decodeAllowEmpty(fields[3], MAX_TITLE_BYTES),
                         decode(fields[4], 8 * 1024),
+                        fields.length == 6 ? decode(fields[5], 512) : "text/plain",
                         requireRegularDescriptor(descriptors, "Secret input"));
                 return "OK";
             case "READ_SECRET": {
