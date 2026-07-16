@@ -19,6 +19,9 @@ int archphene_android_check_camera(char *response, size_t response_size);
 int archphene_android_capture_camera_jpeg(
         int output_fd, int width, int height, int front_facing,
         char *response, size_t response_size);
+int archphene_android_stream_camera_i420(
+        int output_fd, int width, int height, int front_facing,
+        char *response, size_t response_size);
 
 int archphene_android_publish_accessibility_tree(
         int tree_fd, char *response, size_t response_size);

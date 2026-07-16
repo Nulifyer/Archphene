@@ -246,6 +246,25 @@ int archphene_android_capture_camera_jpeg(
     }
     return broker_request_with_fd(request, output_fd, response, response_size);
 }
+int archphene_android_stream_camera_i420(
+        int output_fd, int width, int height, int front_facing,
+        char *response, size_t response_size) {
+    if (output_fd < 0 || width < 1 || height < 1
+            || (width & 1) != 0 || (height & 1) != 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    char request[MAX_REQUEST];
+    int length = snprintf(request, sizeof(request),
+            "ARCHPHENE/1\tSTREAM_CAMERA_I420\t%d\t%d\t%s",
+            width, height, front_facing ? "front" : "back");
+    if (length <= 0 || (size_t)length >= sizeof(request)) {
+        errno = ENOSPC;
+        return -1;
+    }
+    return broker_request_with_fd(request, output_fd, response, response_size);
+}
+
 int archphene_android_publish_accessibility_tree(
         int tree_fd, char *response, size_t response_size) {
     if (tree_fd < 0) {

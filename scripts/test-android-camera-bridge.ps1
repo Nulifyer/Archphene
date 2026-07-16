@@ -91,7 +91,11 @@ function Select-PermissionAction([string[]]$Labels) {
         $bounds = [regex]::Matches($action.bounds, "\d+") | ForEach-Object { [int]$_.Value }
         Invoke-Adb @("shell", "input", "tap", [string][int](($bounds[0] + $bounds[2]) / 2), [string][int](($bounds[1] + $bounds[3]) / 2)) "select camera permission action" | Out-Null
         $selected = $true
-        Start-Sleep -Milliseconds 750
+        for ($callbackAttempt = 0; $callbackAttempt -lt 10; $callbackAttempt++) {
+            Start-Sleep -Milliseconds 200
+            $state = Invoke-Probe $socket @("check-camera") -AllowFailure
+            if ($state -ne "ERROR`tPERMISSION_REQUESTED") { return }
+        }
     }
     throw "Camera permission prompt did not close after repeated selection"
 }
@@ -151,6 +155,12 @@ if ($reportedBytes -ne $actualBytes -or $actualBytes -lt 1024) {
 $header = ((Invoke-Adb @("shell", "run-as", $Package, "od", "-An", "-tx1", "-N2",
         "files/camera-test.jpg") "read camera JPEG header") -join " ").Trim()
 if ($header -notmatch '^ff\s+d8$') { throw "Camera output is not a JPEG: $header" }
+$streamProbe = Native-Path "libarchphene_camera_stream_probe.so"
+$stream = & $Adb -s $Serial shell run-as $Package $streamProbe --socket "@$socket" 2>&1
+if ($LASTEXITCODE -ne 0 -or ($stream -join "`n") -notmatch
+        "PASS camera I420 stream frames=3 bytes=460800") {
+    throw "Camera I420 stream failed: $($stream -join "`n")"
+}
 $invalid = Invoke-Probe $socket @("capture-camera-jpeg", "files/invalid.jpg",
         "0", "720", "back") -AllowFailure
 if ($invalid -ne "invalid camera capture arguments") {
@@ -181,4 +191,4 @@ if ($logs -notmatch "Captured Android camera JPEG") {
     throw "Camera broker did not log a completed capture: $logs"
 }
 Write-Host ("Android camera bridge passed on $Serial ($AndroidAbi): " +
-        "${captureWidth}x${captureHeight}, $actualBytes bytes; grant and denial validated.")
+        "${captureWidth}x${captureHeight}, $actualBytes bytes; live I420, grant, and denial validated.")

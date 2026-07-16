@@ -36,6 +36,9 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -68,6 +71,8 @@ final class AndroidCapabilityBroker implements Closeable {
     private LocalServerSocket server;
     private Thread thread;
     private String socketName;
+    private final ThreadPoolExecutor clients = new ThreadPoolExecutor(
+            0, 4, 30, TimeUnit.SECONDS, new SynchronousQueue<>());
     private final Map<String, PendingNotification> pendingNotifications =
             new LinkedHashMap<>();
     private boolean notificationPermissionRequestInFlight;
@@ -130,41 +135,68 @@ final class AndroidCapabilityBroker implements Closeable {
         while (running.get()) {
             LocalServerSocket current = server;
             if (current == null) break;
-            try (LocalSocket client = current.accept()) {
+            LocalSocket client = null;
+            try {
+                client = current.accept();
                 client.setSoTimeout(SOCKET_TIMEOUT_MILLIS);
                 Credentials peer = client.getPeerCredentials();
                 if (peer == null || peer.getUid() != Process.myUid()) {
                     Log.w(TAG, "Rejected capability broker peer uid="
                             + (peer == null ? -1 : peer.getUid()));
                     writeResponse(client, "ERROR\tUNAUTHORIZED");
+                    client.close();
                     continue;
                 }
-                String response;
-                FileDescriptor[] descriptors = null;
-                try {
-                    String request = readRequest(client.getInputStream());
-                    descriptors = client.getAncillaryFileDescriptors();
-                    response = handle(request, descriptors);
-                } catch (Exception error) {
-                    Log.w(TAG, "Rejected Android capability request: "
-                            + safeMessage(error));
-                    response = "ERROR\tINVALID_REQUEST";
-                } finally {
-                    closeDescriptors(descriptors);
+                LocalSocket accepted = client;
+                clients.execute(() -> handleClient(accepted));
+                client = null;
+            } catch (RejectedExecutionException error) {
+                if (client != null) {
+                    try {
+                        writeResponse(client, "ERROR\tBUSY");
+                        client.close();
+                    } catch (IOException ignored) {
+                        // The rejected client may already have disconnected.
+                    }
                 }
-                writeResponse(client, response);
             } catch (IOException error) {
+                if (client != null) {
+                    try {
+                        client.close();
+                    } catch (IOException ignored) {}
+                }
                 if (running.get()) Log.e(TAG, "Capability broker socket failed", error);
             }
         }
     }
 
+    private void handleClient(LocalSocket accepted) {
+        try (LocalSocket client = accepted) {
+            String response;
+            FileDescriptor[] descriptors = null;
+            try {
+                String request = readRequest(client.getInputStream());
+                descriptors = client.getAncillaryFileDescriptors();
+                response = handle(request, descriptors);
+            } catch (Exception error) {
+                Log.w(TAG, "Rejected Android capability request: "
+                        + safeMessage(error));
+                response = "ERROR\tINVALID_REQUEST";
+            } finally {
+                closeDescriptors(descriptors);
+            }
+            writeResponse(client, response);
+        } catch (IOException error) {
+            if (running.get()) Log.d(TAG, "Capability client disconnected");
+        }
+    }
     private String handle(String request, FileDescriptor[] descriptors) throws Exception {
         String[] fields = request.split("\\t", -1);
         if (fields.length < 2 || !PROTOCOL.equals(fields[0])) {
             throw new IllegalArgumentException("Unsupported capability protocol");
         }
         if (!"PRINT_PDF".equals(fields[1]) && !"CAPTURE_CAMERA_JPEG".equals(fields[1])
+                && !"STREAM_CAMERA_I420".equals(fields[1])
                 && !"PUBLISH_ACCESSIBILITY_TREE".equals(fields[1])
                 && !"STORE_SECRET".equals(fields[1])
                 && !"READ_SECRET".equals(fields[1])
@@ -216,6 +248,10 @@ final class AndroidCapabilityBroker implements Closeable {
                 requireFields(fields, 5);
                 requireCapability(BridgeCapabilities.CAMERA);
                 return captureCameraJpeg(fields[2], fields[3], fields[4], descriptors);
+            case "STREAM_CAMERA_I420":
+                requireFields(fields, 5);
+                requireCapability(BridgeCapabilities.CAMERA);
+                return streamCameraI420(fields[2], fields[3], fields[4], descriptors);
             case "PUBLISH_ACCESSIBILITY_TREE":
                 requireFields(fields, 2);
                 requireCapability(BridgeCapabilities.ACCESSIBILITY);
@@ -574,6 +610,39 @@ final class AndroidCapabilityBroker implements Closeable {
         return "OK\t" + result.width + "\t" + result.height + "\t" + result.bytes;
     }
 
+    private String streamCameraI420(String widthField, String heightField, String facing,
+            FileDescriptor[] descriptors) throws Exception {
+        if (activity.checkSelfPermission(Manifest.permission.CAMERA)
+                != PackageManager.PERMISSION_GRANTED) {
+            return cameraPermissionState();
+        }
+        if (descriptors == null || descriptors.length != 1 || !descriptors[0].valid()) {
+            throw new IllegalArgumentException("Camera stream requires one output descriptor");
+        }
+        android.system.StructStat stat = Os.fstat(descriptors[0]);
+        int type = stat.st_mode & OsConstants.S_IFMT;
+        if (type != OsConstants.S_IFSOCK && type != OsConstants.S_IFIFO) {
+            throw new IllegalArgumentException("Camera stream requires a socket or pipe");
+        }
+        int width;
+        int height;
+        try {
+            width = Integer.parseInt(widthField);
+            height = Integer.parseInt(heightField);
+        } catch (NumberFormatException error) {
+            throw new IllegalArgumentException("Camera stream dimensions are invalid", error);
+        }
+        boolean front;
+        if ("front".equals(facing)) front = true;
+        else if ("back".equals(facing)) front = false;
+        else throw new IllegalArgumentException("Camera facing must be front or back");
+        Log.i(TAG, "Starting Android camera I420 stream "
+                + width + "x" + height + " facing=" + facing);
+        cameraIntegration.streamI420(descriptors[0], width, height, front);
+        Log.i(TAG, "Android camera I420 stream stopped");
+        return "OK";
+    }
+
     private String notifyLinuxApp(String id, String title, String body) throws Exception {
         validateText(id, "notification ID", false);
         validateText(title, "notification title", false);
@@ -803,6 +872,7 @@ final class AndroidCapabilityBroker implements Closeable {
             cameraPermissionRequestInFlight = false;
         }
         cameraIntegration.close();
+        clients.shutdownNow();
         LocalServerSocket current = server;
         server = null;
         if (current != null) {

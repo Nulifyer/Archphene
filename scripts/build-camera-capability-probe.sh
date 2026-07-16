@@ -37,6 +37,12 @@ mapfile -d '' class_files < <(find "$out/classes" -type f -name '*.class' -print
   -fPIE -pie -O2 -Wall -Wextra -Werror \
   "$root/native/archphene-android-capability/archphene_android.c" \
   -o "$out/package/lib/$abi/libarchphene_camera_probe.so"
+"$toolchain/bin/${target}29-clang" \
+  -fPIE -pie -O2 -Wall -Wextra -Werror -pthread \
+  -I"$root/native/archphene-android-capability" \
+  "$root/native/archphene-android-capability/archphene_camera_stream_probe.c" \
+  "$root/native/archphene-android-capability/archphene_android.c" \
+  -o "$out/package/lib/$abi/libarchphene_camera_stream_probe.so"
 "$toolchain/bin/$target"29-clang \
   -fPIE -pie -O2 -Wall -Wextra -Werror \
   "$root/native/archphene-portal/archphene_pipewire_socket_probe.c" \
