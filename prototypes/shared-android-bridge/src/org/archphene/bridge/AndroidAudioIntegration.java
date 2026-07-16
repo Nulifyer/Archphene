@@ -1,6 +1,8 @@
 package org.archphene.bridge;
 
+import android.system.ErrnoException;
 import android.system.Os;
+import android.system.OsConstants;
 import android.util.Log;
 import java.io.BufferedReader;
 import java.io.File;
@@ -128,14 +130,23 @@ final class AndroidAudioIntegration {
             String helperName, String moduleName) throws IOException {
         File helper = requireHelper(nativeDirectory, helperName);
         File module = new File(moduleDirectory, moduleName);
-        if (module.exists() && !module.delete()) {
-            throw new IOException("Could not replace stale audio module: " + moduleName);
-        }
+        unlinkIfPresent(module, moduleName);
         try {
             Os.symlink(helper.getAbsolutePath(), module.getAbsolutePath());
         } catch (Exception error) {
             throw new IOException("Could not publish audio module: " + moduleName, error);
         }
+    }
+
+    private static void unlinkIfPresent(File path, String moduleName) throws IOException {
+        if (path.delete()) return;
+        try {
+            Os.lstat(path.getAbsolutePath());
+        } catch (ErrnoException error) {
+            if (error.errno == OsConstants.ENOENT) return;
+            throw new IOException("Could not inspect stale audio module: " + moduleName, error);
+        }
+        throw new IOException("Could not replace stale audio module: " + moduleName);
     }
 
     private static File requireHelper(File directory, String name) throws IOException {

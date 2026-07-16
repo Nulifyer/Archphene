@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -45,8 +46,8 @@ static int base64url(const char *input, char *output, size_t output_size) {
     return 0;
 }
 
-static int broker_request(
-        const char *request, char *response, size_t response_size) {
+static int broker_request_with_fd(
+        const char *request, int send_fd, char *response, size_t response_size) {
     const char *name = getenv("ARCHPHENE_ANDROID_BROKER");
     if (name == NULL || name[0] != '@' || name[1] == '\0'
             || strlen(name + 1) >= sizeof(((struct sockaddr_un *)0)->sun_path)) {
@@ -73,9 +74,37 @@ static int broker_request(
         return -1;
     }
     size_t request_length = strlen(request);
-    size_t written = 0;
+    char wire[MAX_REQUEST + 1];
+    memcpy(wire, request, request_length);
+    wire[request_length++] = '\n';
+    struct iovec iov = {.iov_base = wire, .iov_len = request_length};
+    char control[CMSG_SPACE(sizeof(int))] = {0};
+    struct msghdr message = {0};
+    message.msg_iov = &iov;
+    message.msg_iovlen = 1;
+    if (send_fd >= 0) {
+        message.msg_control = control;
+        message.msg_controllen = sizeof(control);
+        struct cmsghdr *header = CMSG_FIRSTHDR(&message);
+        header->cmsg_level = SOL_SOCKET;
+        header->cmsg_type = SCM_RIGHTS;
+        header->cmsg_len = CMSG_LEN(sizeof(int));
+        memcpy(CMSG_DATA(header), &send_fd, sizeof(send_fd));
+    }
+    ssize_t first;
+    do {
+        first = sendmsg(socket_fd, &message, MSG_NOSIGNAL);
+    } while (first < 0 && errno == EINTR);
+    if (first <= 0) {
+        int saved = first == 0 ? EPIPE : errno;
+        close(socket_fd);
+        errno = saved;
+        return -1;
+    }
+    size_t written = (size_t)first;
     while (written < request_length) {
-        ssize_t count = write(socket_fd, request + written, request_length - written);
+        ssize_t count = send(socket_fd, wire + written,
+                request_length - written, MSG_NOSIGNAL);
         if (count < 0 && errno == EINTR) continue;
         if (count <= 0) {
             int saved = count == 0 ? EPIPE : errno;
@@ -84,12 +113,6 @@ static int broker_request(
             return -1;
         }
         written += (size_t)count;
-    }
-    if (write(socket_fd, "\n", 1) != 1) {
-        int saved = errno;
-        close(socket_fd);
-        errno = saved;
-        return -1;
     }
     size_t received = 0;
     while (received + 1 < response_size) {
@@ -106,6 +129,11 @@ static int broker_request(
         return -1;
     }
     return strcmp(response, "OK") == 0 ? 0 : 1;
+}
+
+static int broker_request(
+        const char *request, char *response, size_t response_size) {
+    return broker_request_with_fd(request, -1, response, response_size);
 }
 
 int archphene_android_open_uri(
@@ -156,6 +184,23 @@ int archphene_android_withdraw_notification(
     return broker_request(request, response, response_size);
 }
 
+int archphene_android_print_pdf(
+        int pdf_fd, const char *title, char *response, size_t response_size) {
+    char encoded[MAX_FIELD * 2];
+    char request[MAX_REQUEST];
+    if (pdf_fd < 0 || base64url(title, encoded, sizeof(encoded)) != 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    int length = snprintf(request, sizeof(request),
+            "ARCHPHENE/1\tPRINT_PDF\t%s", encoded);
+    if (length <= 0 || (size_t)length >= sizeof(request)) {
+        errno = ENOSPC;
+        return -1;
+    }
+    return broker_request_with_fd(request, pdf_fd, response, response_size);
+}
+
 #ifdef ARCHPHENE_CAPABILITY_PROBE_MAIN
 int main(int argc, char **argv) {
     char response[256];
@@ -179,9 +224,18 @@ int main(int argc, char **argv) {
     } else if (remaining == 2 && strcmp(argv[argument], "withdraw") == 0) {
         result = archphene_android_withdraw_notification(
                 argv[argument + 1], response, sizeof(response));
+    } else if (remaining == 3 && strcmp(argv[argument], "print") == 0) {
+        int pdf_fd = open(argv[argument + 1], O_RDONLY | O_CLOEXEC);
+        if (pdf_fd < 0) {
+            perror("open print PDF");
+            return 66;
+        }
+        result = archphene_android_print_pdf(
+                pdf_fd, argv[argument + 2], response, sizeof(response));
+        close(pdf_fd);
     } else {
         fprintf(stderr, "usage: %s [--socket @NAME] open-uri URI | "
-                "notify ID TITLE BODY | withdraw ID\n", argv[0]);
+                "notify ID TITLE BODY | withdraw ID | print PDF TITLE\n", argv[0]);
         return 64;
     }
     if (result < 0) {

@@ -14,6 +14,7 @@
 #define PORTAL_NAME "org.freedesktop.portal.Desktop"
 #define PORTAL_OPEN_URI "org.freedesktop.portal.OpenURI"
 #define PORTAL_NOTIFICATION "org.freedesktop.portal.Notification"
+#define PORTAL_PRINT "org.freedesktop.portal.Print"
 #define CLASSIC_NOTIFICATION "org.freedesktop.Notifications"
 #define PROPERTIES "org.freedesktop.DBus.Properties"
 #define INTROSPECTABLE "org.freedesktop.DBus.Introspectable"
@@ -36,6 +37,15 @@ static const char portal_xml[] =
         "<arg type='a{sv}' direction='in'/></method>"
         "<method name='RemoveNotification'><arg type='s' direction='in'/></method>"
         "<property name='SupportedOptions' type='a{sv}' access='read'/>"
+        "<property name='version' type='u' access='read'/></interface>"
+        "<interface name='org.freedesktop.portal.Print'>"
+        "<method name='PreparePrint'><arg type='s' direction='in'/>"
+        "<arg type='s' direction='in'/><arg type='a{sv}' direction='in'/>"
+        "<arg type='a{sv}' direction='in'/><arg type='a{sv}' direction='in'/>"
+        "<arg type='o' direction='out'/></method>"
+        "<method name='Print'><arg type='s' direction='in'/>"
+        "<arg type='s' direction='in'/><arg type='h' direction='in'/>"
+        "<arg type='a{sv}' direction='in'/><arg type='o' direction='out'/></method>"
         "<property name='version' type='u' access='read'/></interface>"
         "<interface name='org.freedesktop.DBus.Properties'>"
         "<method name='Get'><arg type='s' direction='in'/><arg type='s' direction='in'/>"
@@ -191,6 +201,137 @@ static void emit_portal_response(DBusConnection *connection, const char *path,
         return;
     }
     send_message(connection, signal);
+}
+
+static dbus_bool_t append_named_empty_dict(DBusMessageIter *dict, const char *key) {
+    DBusMessageIter entry;
+    DBusMessageIter variant;
+    DBusMessageIter values;
+    return dbus_message_iter_open_container(dict, DBUS_TYPE_DICT_ENTRY, NULL, &entry)
+            && dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &key)
+            && dbus_message_iter_open_container(&entry, DBUS_TYPE_VARIANT, "a{sv}", &variant)
+            && dbus_message_iter_open_container(&variant, DBUS_TYPE_ARRAY, "{sv}", &values)
+            && dbus_message_iter_close_container(&variant, &values)
+            && dbus_message_iter_close_container(&entry, &variant)
+            && dbus_message_iter_close_container(dict, &entry);
+}
+
+static dbus_bool_t append_named_uint(
+        DBusMessageIter *dict, const char *key, uint32_t value) {
+    DBusMessageIter entry;
+    DBusMessageIter variant;
+    return dbus_message_iter_open_container(dict, DBUS_TYPE_DICT_ENTRY, NULL, &entry)
+            && dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &key)
+            && dbus_message_iter_open_container(&entry, DBUS_TYPE_VARIANT, "u", &variant)
+            && dbus_message_iter_append_basic(&variant, DBUS_TYPE_UINT32, &value)
+            && dbus_message_iter_close_container(&entry, &variant)
+            && dbus_message_iter_close_container(dict, &entry);
+}
+
+static void emit_print_prepare_response(
+        DBusConnection *connection, const char *path, uint32_t token) {
+    DBusMessage *signal = dbus_message_new_signal(
+            path, "org.freedesktop.portal.Request", "Response");
+    if (signal == NULL) return;
+    DBusMessageIter args;
+    DBusMessageIter dict;
+    uint32_t response = 0;
+    dbus_message_iter_init_append(signal, &args);
+    dbus_bool_t ok = dbus_message_iter_append_basic(
+            &args, DBUS_TYPE_UINT32, &response)
+            && dbus_message_iter_open_container(&args, DBUS_TYPE_ARRAY, "{sv}", &dict)
+            && append_named_empty_dict(&dict, "settings")
+            && append_named_empty_dict(&dict, "page-setup")
+            && append_named_uint(&dict, "token", token)
+            && dbus_message_iter_close_container(&args, &dict);
+    if (!ok) {
+        dbus_message_unref(signal);
+        return;
+    }
+    send_message(connection, signal);
+}
+
+static void make_request_path(DBusMessage *request, DBusMessageIter *options,
+        char *path, size_t path_size) {
+    char token[65] = {0};
+    read_vardict_strings(options, NULL, 0, NULL, 0, token, sizeof(token));
+    if (!valid_path_element(token)) snprintf(token, sizeof(token), "archphene%u", next_id++);
+    char sender[65];
+    sender_element(dbus_message_get_sender(request), sender, sizeof(sender));
+    if (!valid_path_element(sender)) snprintf(sender, sizeof(sender), "client");
+    snprintf(path, path_size, "/org/freedesktop/portal/desktop/request/%s/%s",
+            sender, token);
+}
+
+static dbus_bool_t send_request_reply(DBusConnection *connection,
+        DBusMessage *request, const char *path) {
+    DBusMessage *reply = dbus_message_new_method_return(request);
+    const char *path_value = path;
+    if (reply == NULL || !dbus_message_append_args(reply,
+            DBUS_TYPE_OBJECT_PATH, &path_value, DBUS_TYPE_INVALID)) {
+        if (reply != NULL) dbus_message_unref(reply);
+        send_error(connection, request, DBUS_ERROR_NO_MEMORY, "Could not create response");
+        return FALSE;
+    }
+    send_message(connection, reply);
+    return TRUE;
+}
+
+static void handle_prepare_print(DBusConnection *connection, DBusMessage *request) {
+    DBusMessageIter args;
+    char title[257] = {0};
+    if (!dbus_message_iter_init(request, &args)
+            || dbus_message_iter_get_arg_type(&args) != DBUS_TYPE_STRING
+            || !dbus_message_iter_next(&args)
+            || copy_basic_string(&args, title, sizeof(title)) != 0
+            || !dbus_message_iter_next(&args)
+            || dbus_message_iter_get_arg_type(&args) != DBUS_TYPE_ARRAY
+            || !dbus_message_iter_next(&args)
+            || dbus_message_iter_get_arg_type(&args) != DBUS_TYPE_ARRAY
+            || !dbus_message_iter_next(&args)
+            || dbus_message_iter_get_arg_type(&args) != DBUS_TYPE_ARRAY) {
+        send_error(connection, request, DBUS_ERROR_INVALID_ARGS,
+                "Expected (ssa{sv}a{sv}a{sv})");
+        return;
+    }
+    char path[256];
+    make_request_path(request, &args, path, sizeof(path));
+    uint32_t token = next_id++;
+    if (token == 0) token = next_id++;
+    if (send_request_reply(connection, request, path)) {
+        emit_print_prepare_response(connection, path, token);
+    }
+}
+
+static void handle_print(DBusConnection *connection, DBusMessage *request) {
+    DBusMessageIter args;
+    char title[257] = {0};
+    int pdf_fd = -1;
+    if (!dbus_message_iter_init(request, &args)
+            || dbus_message_iter_get_arg_type(&args) != DBUS_TYPE_STRING
+            || !dbus_message_iter_next(&args)
+            || copy_basic_string(&args, title, sizeof(title)) != 0
+            || !dbus_message_iter_next(&args)
+            || dbus_message_iter_get_arg_type(&args) != DBUS_TYPE_UNIX_FD) {
+        send_error(connection, request, DBUS_ERROR_INVALID_ARGS, "Expected (ssha{sv})");
+        return;
+    }
+    dbus_message_iter_get_basic(&args, &pdf_fd);
+    if (!dbus_message_iter_next(&args)
+            || dbus_message_iter_get_arg_type(&args) != DBUS_TYPE_ARRAY) {
+        send_error(connection, request, DBUS_ERROR_INVALID_ARGS, "Expected print options");
+        return;
+    }
+    char path[256];
+    make_request_path(request, &args, path, sizeof(path));
+    if (title[0] == '\0') snprintf(title, sizeof(title), "%s",
+            getenv("ARCHPHENE_APP_NAME") == NULL
+                    ? "Linux document" : getenv("ARCHPHENE_APP_NAME"));
+    char response[256] = {0};
+    int result = archphene_android_print_pdf(pdf_fd, title, response, sizeof(response));
+    if (send_request_reply(connection, request, path)) {
+        emit_portal_response(connection, path, result == 0 ? 0u : 2u);
+    }
 }
 
 static void handle_open_uri(DBusConnection *connection, DBusMessage *request) {
@@ -375,7 +516,8 @@ static void handle_properties(DBusConnection *connection, DBusMessage *request) 
         return;
     }
     dbus_bool_t notification = strcmp(interface, PORTAL_NOTIFICATION) == 0;
-    uint32_t version = notification ? 2u : 5u;
+    dbus_bool_t printing = strcmp(interface, PORTAL_PRINT) == 0;
+    uint32_t version = notification ? 2u : (printing ? 4u : 5u);
     if (dbus_message_is_method_call(request, PROPERTIES, "Get")) {
         char property[64] = {0};
         if (!dbus_message_iter_next(&args)
@@ -390,7 +532,7 @@ static void handle_properties(DBusConnection *connection, DBusMessage *request) 
         dbus_message_iter_init_append(reply, &output);
         dbus_bool_t ok = FALSE;
         if (strcmp(property, "version") == 0
-                && (notification || strcmp(interface, PORTAL_OPEN_URI) == 0)) {
+                && (notification || printing || strcmp(interface, PORTAL_OPEN_URI) == 0)) {
             ok = dbus_message_iter_open_container(&output, DBUS_TYPE_VARIANT, "u", &variant)
                     && dbus_message_iter_append_basic(&variant, DBUS_TYPE_UINT32, &version)
                     && dbus_message_iter_close_container(&output, &variant);
@@ -407,7 +549,7 @@ static void handle_properties(DBusConnection *connection, DBusMessage *request) 
         send_message(connection, reply);
         return;
     }
-    if (!notification && strcmp(interface, PORTAL_OPEN_URI) != 0) {
+    if (!notification && !printing && strcmp(interface, PORTAL_OPEN_URI) != 0) {
         send_error(connection, request, DBUS_ERROR_UNKNOWN_INTERFACE, "Unknown interface");
         return;
     }
@@ -449,6 +591,10 @@ static void handle_message(DBusConnection *connection, DBusMessage *request) {
         handle_open_uri(connection, request);
     } else if (dbus_message_is_method_call(request, PORTAL_OPEN_URI, "SchemeSupported")) {
         handle_scheme_supported(connection, request);
+    } else if (dbus_message_is_method_call(request, PORTAL_PRINT, "PreparePrint")) {
+        handle_prepare_print(connection, request);
+    } else if (dbus_message_is_method_call(request, PORTAL_PRINT, "Print")) {
+        handle_print(connection, request);
     } else if (dbus_message_is_method_call(request, PORTAL_NOTIFICATION, "AddNotification")) {
         handle_portal_add_notification(connection, request);
     } else if (dbus_message_is_method_call(request, PORTAL_NOTIFICATION, "RemoveNotification")) {

@@ -1,6 +1,8 @@
 package org.archphene.bridge;
 
+import android.system.ErrnoException;
 import android.system.Os;
+import android.system.OsConstants;
 import android.util.Log;
 import java.io.BufferedReader;
 import java.io.File;
@@ -73,9 +75,7 @@ final class AndroidDesktopIntegration {
             throw new IOException("Could not create desktop command directory");
         }
         File xdgOpen = new File(binDirectory, "xdg-open");
-        if (xdgOpen.exists() && !xdgOpen.delete()) {
-            throw new IOException("Could not replace stale xdg-open adapter");
-        }
+        unlinkIfPresent(xdgOpen);
         try {
             Os.symlink(xdgOpenFile.getAbsolutePath(), xdgOpen.getAbsolutePath());
         } catch (Exception error) {
@@ -105,6 +105,17 @@ final class AndroidDesktopIntegration {
         socket = null;
         binDirectory = null;
         busAddress = null;
+    }
+
+    private static void unlinkIfPresent(File path) throws IOException {
+        if (path.delete()) return;
+        try {
+            Os.lstat(path.getAbsolutePath());
+        } catch (ErrnoException error) {
+            if (error.errno == OsConstants.ENOENT) return;
+            throw new IOException("Could not inspect stale xdg-open adapter", error);
+        }
+        throw new IOException("Could not replace stale xdg-open adapter");
     }
 
     private void waitForSocket() throws IOException {

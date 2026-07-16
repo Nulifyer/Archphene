@@ -16,12 +16,14 @@ final class BridgeCapabilities {
     static final String OPEN_URI = "open-uri";
     static final String NOTIFICATIONS = "notifications";
     static final String AUDIO_OUTPUT = "audio-output";
+    static final String PRINTING = "printing";
     private static final Set<String> REQUIRED = Collections.unmodifiableSet(new HashSet<>(
             Arrays.asList("wayland", "input", "ime", "clipboard", "runtime-pack",
                     "home-documents")));
     private static final Set<String> ALLOWED = Collections.unmodifiableSet(new HashSet<>(
             Arrays.asList("wayland", "input", "ime", "clipboard", "runtime-pack",
-                    "home-documents", OPEN_URI, NOTIFICATIONS, DOCUMENTS, AUDIO_OUTPUT)));
+                    "home-documents", OPEN_URI, NOTIFICATIONS, DOCUMENTS, AUDIO_OUTPUT,
+                    PRINTING)));
     private static final String LEGACY =
             "wayland,input,ime,clipboard,runtime-pack,home-documents,open-uri,notifications,documents";
 

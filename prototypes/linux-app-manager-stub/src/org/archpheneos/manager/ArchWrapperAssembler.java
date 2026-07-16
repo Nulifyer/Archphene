@@ -196,6 +196,8 @@ public final class ArchWrapperAssembler {
                 : collectNativeFiles(context, runtimeRoot, sourcePackage, executableName);
         boolean pulseClient = nativeClosure.containsKey("libpulse.so")
                 || nativeClosure.containsKey("libpulse.so.0");
+        boolean printing = nativeClosure.containsKey("libcups.so")
+                || nativeClosure.containsKey("libcups.so.2");
         if (pulseClient && embedNativeClosure) {
             throw new SecurityException(
                     "Audio-enabled applications require runtime-pack publication");
@@ -229,7 +231,7 @@ public final class ArchWrapperAssembler {
                     value = replaceBinaryXmlString(value, "qt6", toolkit);
                     value = replaceBinaryXmlString(value,
                             "wayland,input,ime,clipboard,runtime-pack,home-documents,open-uri,notifications,documents",
-                            capabilityMetadata(mimeTypes, pulseClient));
+                            capabilityMetadata(mimeTypes, pulseClient, printing));
                     value = replaceBinaryXmlString(value, "archphene-executable-placeholder",
                             executableName);
                     value = replaceBinaryXmlString(value, "ArchpheneKCalc", "ArchpheneLinuxApp");
@@ -843,10 +845,12 @@ public final class ArchWrapperAssembler {
         return executableName;
     }
 
-    private static String capabilityMetadata(List<String> mimeTypes, boolean audioOutput) {
+    private static String capabilityMetadata(List<String> mimeTypes, boolean audioOutput,
+            boolean printing) {
         String base = "wayland,input,ime,clipboard,runtime-pack,home-documents,open-uri,notifications";
         if (!mimeTypes.isEmpty()) base += ",documents";
-        return audioOutput ? base + ",audio-output" : base;
+        if (audioOutput) base += ",audio-output";
+        return printing ? base + ",printing" : base;
     }
     private static List<String> normalizedMimeTypes(List<String> values) {
         ArrayList<String> result = new ArrayList<>();

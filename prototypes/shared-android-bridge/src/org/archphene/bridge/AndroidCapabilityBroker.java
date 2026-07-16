@@ -13,10 +13,17 @@ import android.net.LocalSocket;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Process;
+import android.print.PrintManager;
+import android.system.Os;
+import android.system.OsConstants;
 import android.util.Base64;
 import android.util.Log;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
+import java.io.File;
+import java.io.FileDescriptor;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -27,6 +34,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -46,6 +54,8 @@ final class AndroidCapabilityBroker implements Closeable {
     private static final int UI_TIMEOUT_SECONDS = 15;
     private static final int NOTIFICATION_PERMISSION_REQUEST = 0x4150;
     private static final int MAX_PENDING_NOTIFICATIONS = 32;
+    private static final int MAX_PENDING_PRINTS = 4;
+    private static final long MAX_PRINT_BYTES = 256L * 1024 * 1024;
 
     private final Activity activity;
     private final Set<String> capabilities;
@@ -56,6 +66,7 @@ final class AndroidCapabilityBroker implements Closeable {
     private final Map<String, PendingNotification> pendingNotifications =
             new LinkedHashMap<>();
     private boolean notificationPermissionRequestInFlight;
+    private static final Set<File> ACTIVE_PRINT_FILES = new java.util.HashSet<>();
 
     private static final class PendingNotification {
         final String id;
@@ -78,6 +89,7 @@ final class AndroidCapabilityBroker implements Closeable {
         if (!running.compareAndSet(false, true)) {
             throw new IllegalStateException("Android capability broker already started");
         }
+        cleanupStalePrintFiles();
         byte[] random = new byte[16];
         new SecureRandom().nextBytes(random);
         socketName = "archphene-" + Process.myUid() + "-"
@@ -113,12 +125,17 @@ final class AndroidCapabilityBroker implements Closeable {
                     continue;
                 }
                 String response;
+                FileDescriptor[] descriptors = null;
                 try {
-                    response = handle(readRequest(client.getInputStream()));
+                    String request = readRequest(client.getInputStream());
+                    descriptors = client.getAncillaryFileDescriptors();
+                    response = handle(request, descriptors);
                 } catch (Exception error) {
                     Log.w(TAG, "Rejected Android capability request: "
                             + safeMessage(error));
                     response = "ERROR\tINVALID_REQUEST";
+                } finally {
+                    closeDescriptors(descriptors);
                 }
                 writeResponse(client, response);
             } catch (IOException error) {
@@ -127,10 +144,14 @@ final class AndroidCapabilityBroker implements Closeable {
         }
     }
 
-    private String handle(String request) throws Exception {
+    private String handle(String request, FileDescriptor[] descriptors) throws Exception {
         String[] fields = request.split("\\t", -1);
         if (fields.length < 2 || !PROTOCOL.equals(fields[0])) {
             throw new IllegalArgumentException("Unsupported capability protocol");
+        }
+        if (!"PRINT_PDF".equals(fields[1])
+                && descriptors != null && descriptors.length != 0) {
+            throw new IllegalArgumentException("Unexpected capability descriptors");
         }
         switch (fields[1]) {
             case "OPEN_URI":
@@ -150,8 +171,126 @@ final class AndroidCapabilityBroker implements Closeable {
                 requireCapability(BridgeCapabilities.NOTIFICATIONS);
                 withdrawNotification(decode(fields[2], MAX_ID_BYTES));
                 return "OK";
+            case "PRINT_PDF":
+                requireFields(fields, 3);
+                requireCapability(BridgeCapabilities.PRINTING);
+                printPdf(decode(fields[2], MAX_TITLE_BYTES), descriptors);
+                return "OK";
             default:
                 throw new IllegalArgumentException("Unknown capability request");
+        }
+    }
+
+    private void printPdf(String title, FileDescriptor[] descriptors) throws Exception {
+        validateText(title, "print title", false);
+        if (descriptors == null || descriptors.length != 1 || !descriptors[0].valid()) {
+            throw new IllegalArgumentException("Printing requires exactly one PDF descriptor");
+        }
+        if (!activity.getPackageManager().hasSystemFeature(PackageManager.FEATURE_PRINTING)) {
+            throw new UnsupportedOperationException("Android printing is unavailable");
+        }
+        android.system.StructStat stat = Os.fstat(descriptors[0]);
+        if ((stat.st_mode & OsConstants.S_IFMT) != OsConstants.S_IFREG) {
+            throw new IllegalArgumentException("Printing requires a regular PDF file");
+        }
+        if (stat.st_size < 5 || stat.st_size > MAX_PRINT_BYTES) {
+            throw new IllegalArgumentException("Print PDF size is invalid");
+        }
+        File directory = new File(activity.getCacheDir(), "print");
+        if (!directory.isDirectory() && !directory.mkdirs()) {
+            throw new IOException("Could not create private print directory");
+        }
+        File document = new File(directory, UUID.randomUUID() + ".pdf").getCanonicalFile();
+        if (!directory.getCanonicalFile().equals(document.getParentFile())) {
+            throw new SecurityException("Invalid private print path");
+        }
+        boolean accepted = false;
+        try {
+            synchronized (ACTIVE_PRINT_FILES) {
+                if (ACTIVE_PRINT_FILES.size() >= MAX_PENDING_PRINTS) {
+                    throw new IllegalStateException("Too many pending print jobs");
+                }
+                ACTIVE_PRINT_FILES.add(document);
+            }
+            copyPdf(descriptors[0], document);
+            runOnUiThread(() -> {
+                PrintManager manager = activity.getSystemService(PrintManager.class);
+                if (manager == null || manager.print(title,
+                        new AndroidPdfPrintAdapter(document, title,
+                                () -> finishPrint(document)), null) == null) {
+                    throw new IllegalStateException("Android print service unavailable");
+                }
+            });
+            accepted = true;
+            Log.i(TAG, "Opened Android print UI bytes=" + document.length());
+        } finally {
+            if (!accepted) finishPrint(document);
+        }
+    }
+
+    private static void copyPdf(FileDescriptor descriptor, File target) throws IOException {
+        byte[] header = new byte[5];
+        long total = 0;
+        try (FileInputStream input = new FileInputStream(descriptor);
+                FileOutputStream output = new FileOutputStream(target, false)) {
+            int headerRead = input.read(header);
+            if (headerRead != header.length
+                    || header[0] != '%' || header[1] != 'P' || header[2] != 'D'
+                    || header[3] != 'F' || header[4] != '-') {
+                throw new IOException("Print document is not a PDF");
+            }
+            output.write(header);
+            total = header.length;
+            byte[] buffer = new byte[64 * 1024];
+            int read;
+            while ((read = input.read(buffer)) != -1) {
+                try {
+                    total = Math.addExact(total, read);
+                } catch (ArithmeticException overflow) {
+                    throw new IOException("Print PDF size overflow", overflow);
+                }
+                if (total > MAX_PRINT_BYTES) throw new IOException("Print PDF exceeds size limit");
+                output.write(buffer, 0, read);
+            }
+            output.getFD().sync();
+        }
+    }
+
+    private static void finishPrint(File document) {
+        synchronized (ACTIVE_PRINT_FILES) {
+            ACTIVE_PRINT_FILES.remove(document);
+        }
+        if (document.exists() && !document.delete()) {
+            Log.w(TAG, "Could not delete private print document");
+        }
+    }
+
+    private static void closeDescriptors(FileDescriptor[] descriptors) {
+        if (descriptors == null) return;
+        for (FileDescriptor descriptor : descriptors) {
+            if (descriptor == null || !descriptor.valid()) continue;
+            try {
+                Os.close(descriptor);
+            } catch (Exception ignored) {}
+        }
+    }
+
+    private void cleanupStalePrintFiles() throws IOException {
+        File directory = new File(activity.getCacheDir(), "print").getCanonicalFile();
+        File[] files = directory.listFiles();
+        if (files == null) return;
+        synchronized (ACTIVE_PRINT_FILES) {
+            for (File file : files) {
+                File canonical = file.getCanonicalFile();
+                if (!directory.equals(canonical.getParentFile())
+                        || !canonical.isFile() || !canonical.getName().endsWith(".pdf")
+                        || ACTIVE_PRINT_FILES.contains(canonical)) {
+                    continue;
+                }
+                if (!canonical.delete()) {
+                    Log.w(TAG, "Could not delete stale private print document");
+                }
+            }
         }
     }
 
