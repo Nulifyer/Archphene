@@ -7,9 +7,9 @@ Archphene provides a first-party **Archphene Terminal** companion for command-li
 - The manager and Terminal have separate Android package names and UIDs. Linux child processes cannot read or modify manager-private package state.
 - A signature-protected manager activity accepts `pacman` requests from the companion. The exported manager launcher ignores terminal request extras.
 - A read-only content provider exposes only runtime packs recorded as Terminal-managed and only to a companion signed with the manager release certificate.
-- Terminal copies each command, loader, library, and data archive into its own sandbox, verifies the manager-declared size and SHA-256, rejects malformed catalogs and command collisions, and marks materialized runtime files read-only.
+- Terminal copies each command, library, and data archive into its own sandbox, verifies the manager-declared size and SHA-256, rejects malformed catalogs and command collisions, and marks materialized runtime files read-only. The glibc loader is verified against the same catalog but executes from Terminal's APK-owned native library directory because modern Android forbids executing downloaded code from writable app data.
 - The Apache-2.0 Termux `terminal-emulator` and `terminal-view` modules provide VT/ANSI rendering, hardware-key input, Android IME input, selection, and resize handling.
-- Universal development builds carry both PTY libraries; release manager APKs embed a single-ABI Terminal companion matching x86_64 or arm64-v8a. Android selected arm64-v8a on the Samsung Galaxy S22 Ultra, launched a real PTY shell, accepted input, exposed its home through DocumentsUI, and preserved the shell through rotation.
+- Universal development builds carry both PTY libraries and APK-owned glibc loaders; release manager APKs embed a single-ABI Terminal companion matching x86_64 or arm64-v8a. Android selected arm64-v8a on the Samsung Galaxy S22 Ultra, launched a real PTY shell, accepted input, exposed its home through DocumentsUI, preserved the shell through rotation, and executed managed `btop 1.4.7`. The 16 KB x86_64 emulator returns a correlated compatibility error because upstream Arch x86_64 glibc is currently 4 KB-only.
 - A Bionic JNI PTY host starts `/system/bin/sh`. Each shell owns a process group and requests a parent-death signal from Android's app process.
 - Each Arch command runs through the patched glibc loader with only its resolved library closure and package data root.
 - Home, `.config`, and `.cache` persist under the Terminal UID. GUI wrappers remain separate Android UIDs.
@@ -24,16 +24,16 @@ Installing btop does not implicitly install curl. Commands become available only
 | Command | Behavior |
 | --- | --- |
 | `pacman -Q`, `-Qi`, `-Qs` | Query the locally managed Terminal package set. |
-| `pacman -Ss <name>` | Open a prefilled official-repository search in Archphene. |
-| `pacman -S <name>` | Open the package for user review and installation. |
-| `pacman -R <name>` | Open the installed package removal screen. |
-| `pacman -Syu` | Check installed packages; pinned versions remain unchanged. |
+| `pacman -Ss <name>` | Search official repositories in Archphene and return the compatible result count. |
+| `pacman -S <name>` | Resolve one exact compatible package, run the normal verified manager transaction, and stream its phase/result. |
+| `pacman -R <name>` | Request confirmation, remove one Terminal package, and return success or cancellation. |
+| `pacman -Syu` | Start an installed-package update check; pinned versions remain unchanged. |
 | `archphene-import [home-directory]` | Choose an Android document and copy it into visible Terminal home storage. The default destination is the home Downloads directory. |
 | `archphene-export <home-file>` | Choose an Android save location and copy a visible Terminal home file through a scoped URI grant. |
 
 Imports use collision-safe names and publish only after a bounded copy completes. Exports require one visible regular file. Both operations reject dot-directories and paths outside Terminal home; neither requests broad storage access.
 
-Resolve, signature verification, runtime-pack construction, and errors continue through the manager job model and visible per-package progress. One package failure does not stop independent jobs.
+Each shell request has a bounded unique identifier and atomically published request/response files, so tabbed sessions cannot overwrite each other. The manager correlates install jobs with that identifier and streams resolve, download, install, complete, cancellation, and error states through a provider protected by the release-signature permission and an explicit manager UID/package check. Correlation survives manager job recovery. One package failure does not stop independent jobs.
 
 ## Android capability boundary
 
@@ -52,8 +52,7 @@ The Terminal companion uses an ordinary Android application UID. It does not rec
 
 1. Add persisted project-tree grants and stable Linux path mappings for repeated background access.
 2. Allow an installed Arch shell such as bash to replace the Bionic bootstrap shell.
-3. Stream manager job progress back to the invoking terminal command.
-4. Add capability metadata for packages requiring restricted `/proc`, devices, sockets, or Android bridge APIs.
+3. Add capability metadata for packages requiring restricted `/proc`, devices, sockets, or Android bridge APIs.
 
 Kitty is not the default frontend because it is itself a GPU-accelerated Wayland application and would add compositor and GPU dependencies before displaying a shell or TUI.
 

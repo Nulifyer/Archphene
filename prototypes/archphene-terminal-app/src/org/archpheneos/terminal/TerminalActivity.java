@@ -36,7 +36,6 @@ import java.io.FileInputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Properties;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /** PTY-backed launcher surface for managed command-line packages. */
 public final class TerminalActivity extends Activity
@@ -56,13 +55,13 @@ public final class TerminalActivity extends Activity
     private FileObserver requestObserver;
     private TerminalDocumentBridge documentBridge;
     private Bundle restoredState;
-    private final AtomicBoolean handlingRequest = new AtomicBoolean();
     private int fontPixels;
     private int background;
     private int foreground;
     private int surface;
     private int activeSurface;
     private boolean debugSessionTestStarted;
+    private boolean debugCommandTestStarted;
 
     private final ServiceConnection serviceConnection = new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name, IBinder binder) {
@@ -243,9 +242,10 @@ public final class TerminalActivity extends Activity
                 reportBridgeMessage("Document bridge unavailable: " + safeMessage(error));
             }
         }
-        File request = terminalService.requestFile();
-        if (requestObserver == null && request != null) observeManagerRequests(request);
+        File requests = terminalService.requestDirectory();
+        if (requestObserver == null && requests != null) observeManagerRequests(requests);
         runDebugSessionTestIfRequested();
+        runDebugCommandTestIfRequested();
     }
 
     private void renderServiceState() {
@@ -326,19 +326,51 @@ public final class TerminalActivity extends Activity
         }, 1500);
     }
 
-    private void observeManagerRequests(File request) {
+    private void runDebugCommandTestIfRequested() {
+        if (debugCommandTestStarted || terminalService == null
+                || (getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) == 0) return;
+        String command = getIntent().getStringExtra("archphene_test_terminal_command");
+        if (command == null || command.isEmpty()) return;
+        if (command.length() > 512 || command.indexOf((char) 10) >= 0
+                || command.indexOf((char) 13) >= 0) {
+            throw new SecurityException("Invalid Terminal test command");
+        }
+        TerminalSession session = terminalService.activeSession();
+        if (session == null || session.getEmulator() == null) return;
+        debugCommandTestStarted = true;
+        int delay = Math.max(1000, Math.min(300000,
+                getIntent().getIntExtra("archphene_test_terminal_capture_delay_ms", 30000)));
+        session.write(command + (char) 13);
+        root.postDelayed(() -> {
+            TerminalSession active = terminalService == null
+                    ? null : terminalService.activeSession();
+            if (active == null || active.getEmulator() == null) {
+                Log.e(TAG, "Terminal command probe lost its session");
+                return;
+            }
+            String transcript = active.getEmulator().getScreen().getTranscriptText();
+            Log.i(TAG, "Terminal command probe transcript=" + transcript);
+        }, delay);
+    }
+    private void observeManagerRequests(File requestDirectory) {
         stopRequestObserver();
-        requestObserver = new FileObserver(request.getParentFile().getAbsolutePath(),
+        requestObserver = new FileObserver(requestDirectory.getAbsolutePath(),
                 FileObserver.CLOSE_WRITE | FileObserver.MOVED_TO) {
             @Override public void onEvent(int event, String path) {
-                if (path == null || !request.getName().equals(path)
-                        || !handlingRequest.compareAndSet(false, true)) return;
+                if (path == null || !path.matches("[a-zA-Z0-9._-]{1,64}\\.request")) return;
+                File request = new File(requestDirectory, path);
                 try {
+                    File canonicalRequest = request.getCanonicalFile();
+                    if (!requestDirectory.getCanonicalFile().equals(
+                            canonicalRequest.getParentFile())) {
+                        throw new SecurityException("Request escaped its directory");
+                    }
+                    request = canonicalRequest;
+                    if (!request.isFile() || request.length() > 4096) {
+                        throw new SecurityException("Request is too large");
+                    }
                     byte[] bytes;
                     try (FileInputStream input = new FileInputStream(request)) {
-                        if (request.length() > 4096) {
-                            throw new SecurityException("Request is too large");
-                        }
                         bytes = new byte[(int) request.length()];
                         int offset = 0;
                         while (offset < bytes.length) {
@@ -347,18 +379,21 @@ public final class TerminalActivity extends Activity
                             offset += count;
                         }
                     }
-                    request.delete();
+                    if (!request.delete()) throw new IllegalStateException("Could not consume request");
                     String value = new String(bytes, StandardCharsets.UTF_8).trim();
-                    String[] fields = value.split("\\t", 2);
-                    if (fields.length != 2
-                            || !fields[0].matches("search|install|remove|upgrade|import|export")
-                            || fields[1].length() > 512
-                            || fields[1].contains("\n") || fields[1].contains("\r")) {
+                    String[] fields = value.split("\\t", 4);
+                    String fileId = path.substring(0, path.length() - ".request".length());
+                    if (fields.length != 4 || !"v1".equals(fields[0])
+                            || !fileId.equals(fields[1])
+                            || !fields[1].matches("[a-zA-Z0-9._-]{1,64}")
+                            || !fields[2].matches("search|install|remove|upgrade|import|export")
+                            || fields[3].length() > 512
+                            || fields[3].contains("\n") || fields[3].contains("\r")) {
                         throw new SecurityException("Invalid terminal request");
                     }
-                    runOnUiThread(() -> dispatchManagerRequest(fields[0], fields[1]));
+                    runOnUiThread(() -> dispatchManagerRequest(
+                            fields[1], fields[2], fields[3]));
                 } catch (Exception error) {
-                    handlingRequest.set(false);
                     Log.e(TAG, "Rejected terminal manager request", error);
                 }
             }
@@ -366,17 +401,20 @@ public final class TerminalActivity extends Activity
         requestObserver.startWatching();
     }
 
-    private void dispatchManagerRequest(String action, String query) {
+    private void dispatchManagerRequest(String requestId, String action, String query) {
         try {
             if ("import".equals(action) || "export".equals(action)) {
                 if (documentBridge == null) {
                     throw new IllegalStateException("Document bridge is unavailable");
                 }
                 documentBridge.request(action, query);
+                TerminalCommandProvider.publish(this, requestId, action, 100,
+                        true, "success", "Android document picker opened");
             } else {
                 Intent manager = new Intent("org.archpheneos.action.TERMINAL_REQUEST")
                         .setClassName("org.archpheneos.manager",
                                 "org.archpheneos.manager.TerminalRequestActivity")
+                        .putExtra("archphene_terminal_request_id", requestId)
                         .putExtra("archphene_terminal_action", action)
                         .putExtra("archphene_terminal_query", query)
                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
@@ -385,12 +423,14 @@ public final class TerminalActivity extends Activity
             }
         } catch (Exception error) {
             Log.e(TAG, "Rejected terminal manager request", error);
-            reportBridgeMessage(safeMessage(error));
-        } finally {
-            handlingRequest.set(false);
+            try {
+                TerminalCommandProvider.publish(this, requestId, action, 0,
+                        true, "error", safeMessage(error));
+            } catch (Exception publishError) {
+                Log.e(TAG, "Could not publish Terminal request failure", publishError);
+            }
         }
     }
-
     private void stopRequestObserver() {
         if (requestObserver != null) requestObserver.stopWatching();
         requestObserver = null;

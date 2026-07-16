@@ -127,12 +127,13 @@ build_qt_templates() {
 build_qt_templates
 
 build_terminal_app() {
+  local loader_x86="$1" loader_arm64="$2"
   local app="$root/prototypes/archphene-terminal-app"
   local out="$app/out-linux"
   local native_x86="$root/native/archphene-terminal/out/x86_64/libtermux.so"
   local native_arm64="$root/native/archphene-terminal/out/aarch64/libtermux.so"
-  [[ -f "$native_x86" && -f "$native_arm64" ]] || {
-    echo "x86_64 and aarch64 terminal PTY libraries are required" >&2; exit 1;
+  [[ -f "$native_x86" && -f "$native_arm64" && -f "$loader_x86" && -f "$loader_arm64" ]] || {
+    echo "Terminal PTY and glibc loader libraries are required" >&2; exit 1;
   }
   rm -rf "$out"
   mkdir -p "$out"/{compiled,gen,classes,dex,stage/lib/x86_64,stage/lib/arm64-v8a}
@@ -157,6 +158,8 @@ build_terminal_app() {
   cp "$out/dex/classes.dex" "$out/stage/classes.dex"
   cp "$native_x86" "$out/stage/lib/x86_64/libtermux.so"
   cp "$native_arm64" "$out/stage/lib/arm64-v8a/libtermux.so"
+  cp "$loader_x86" "$out/stage/lib/x86_64/libarchphene_ld.so"
+  cp "$loader_arm64" "$out/stage/lib/arm64-v8a/libarchphene_ld.so"
   prune_native_abis "$out/stage/lib"
   (
     cd "$out/stage"
@@ -169,8 +172,6 @@ build_terminal_app() {
     --out "$out/archphene-terminal.apk" "$out/aligned.apk"
   "$bt/apksigner" verify --verbose --print-certs "$out/archphene-terminal.apk"
 }
-
-build_terminal_app
 
 app="$root/prototypes/linux-app-manager-stub"
 out="$app/out-linux"
@@ -221,6 +222,8 @@ for required in "$x86_root" "$x86_resolved" "$x86_keyrings" "$x86_glibc" \
     exit 1
   }
 done
+
+build_terminal_app "$x86_glibc/ld-linux-x86-64.so.2" "$arm_glibc/ld-linux-aarch64.so.1"
 
 package_assets="$out/package-runtime/assets/package-runtime"
 x86_libs="$out/package-runtime/lib/x86_64"

@@ -36,7 +36,7 @@ final class TerminalEnvironment {
     private static final String TAG = "ArchpheneTerminal";
     private static final String SAFE_ID = "[a-zA-Z0-9@._+:-]{1,128}";
     private static final String HASH = "[0-9a-f]{64}";
-    private static final String MATERIALIZATION_SCHEMA = "v2:";
+    private static final String MATERIALIZATION_SCHEMA = "v3:";
     private static final int MAX_PACKAGES = 512;
     private static final int MAX_MODULES = 4096;
     private static final int MAX_DATA_FILES = 100000;
@@ -44,13 +44,16 @@ final class TerminalEnvironment {
 
     static final class Session {
         final File home;
-        final File request;
+        final File requestDirectory;
+        final File responseDirectory;
         final File rc;
         final String[] environment;
 
-        Session(File home, File request, File rc, String[] environment) {
+        Session(File home, File requestDirectory, File responseDirectory, File rc,
+                String[] environment) {
             this.home = home;
-            this.request = request;
+            this.requestDirectory = requestDirectory;
+            this.responseDirectory = responseDirectory;
             this.rc = rc;
             this.environment = environment;
         }
@@ -198,9 +201,16 @@ final class TerminalEnvironment {
         File runtime = directory(terminal, "runtime");
         File packsRoot = directory(runtime, "packs");
         File tmp = directory(context.getCacheDir(), "terminal-tmp");
-        File request = new File(runtime, "manager-request.tsv");
-        if (request.exists() && !request.delete()) throw new IOException("Could not reset request");
+        File requests = directory(runtime, "requests");
+        File responses = directory(runtime, "responses");
+        clearFiles(requests);
+        clearFiles(responses);
 
+        File packagedLoader = new File(context.getApplicationInfo().nativeLibraryDir,
+                "libarchphene_ld.so");
+        if (!packagedLoader.isFile() || !packagedLoader.canExecute()) {
+            throw new SecurityException("APK-owned glibc loader is unavailable");
+        }
         ArrayList<PackageEntry> packages = new ArrayList<>();
         Set<String> livePacks = new HashSet<>();
         LinkedHashMap<String, Command> commands = new LinkedHashMap<>();
@@ -219,11 +229,11 @@ final class TerminalEnvironment {
                 File packRoot;
                 try (PackLease lease = provider.pack(entry.packId)) {
                     packRoot = materializePack(provider.resolver, packsRoot,
-                            entry, lease.modules);
+                            entry, lease.modules, packagedLoader);
                 }
                 File libraries = new File(packRoot, "lib");
                 File dataRoot = new File(packRoot, "root");
-                File loader = new File(packRoot, "loader");
+                File loader = packagedLoader;
                 dataDirectories.add(new File(dataRoot, "usr/share").getAbsolutePath());
                 for (String commandName : entry.commands) {
                     Command command = new Command(entry.packId, commandName,
@@ -246,7 +256,7 @@ final class TerminalEnvironment {
         File installed = new File(runtime, "installed.tsv");
         writeInstalledList(installed, packages);
         File rc = new File(runtime, "shell.rc");
-        writeAtomically(rc, shellRc(home, config, cache, tmp, request,
+        writeAtomically(rc, shellRc(home, config, cache, tmp, requests, responses,
                 installed, commands, dataDirectories));
 
         ArrayList<String> env = new ArrayList<>();
@@ -260,12 +270,18 @@ final class TerminalEnvironment {
         env.add("LC_ALL=C.UTF-8");
         env.add("PATH=/system/bin:/system/xbin");
         env.add("ENV=" + rc.getAbsolutePath());
-        env.add("ARCHPHENE_MANAGER_REQUEST=" + request.getAbsolutePath());
-        return new Session(home, request, rc, env.toArray(new String[0]));
+        env.add("ARCHPHENE_MANAGER_REQUESTS=" + requests.getAbsolutePath());
+        env.add("ARCHPHENE_MANAGER_RESPONSES=" + responses.getAbsolutePath());
+        return new Session(home, requests, responses, rc, env.toArray(new String[0]));
+    }
+
+    static File responseDirectory(Context context) throws IOException {
+        return directory(directory(directory(context.getFilesDir(), "terminal"),
+                "runtime"), "responses");
     }
 
     private static File materializePack(ContentResolver resolver, File packsRoot,
-            PackageEntry entry, Bundle modules) throws Exception {
+            PackageEntry entry, Bundle modules, File packagedLoader) throws Exception {
         String[] kinds = modules.getStringArray("kinds");
         String[] names = modules.getStringArray("names");
         String[] uris = modules.getStringArray("uris");
@@ -299,6 +315,8 @@ final class TerminalEnvironment {
                     || !names[index].matches(SAFE_ID) || !moduleNames.add(kinds[index] + "/" + names[index])) {
                 throw new SecurityException("Unsafe Terminal runtime module");
             }
+            Uri moduleUri = Uri.parse(uris[index]);
+            requireTrustedModuleUri(moduleUri);
             File target;
             if ("program".equals(kinds[index])) {
                 target = new File(bin, entry.executable);
@@ -308,14 +326,15 @@ final class TerminalEnvironment {
                 target = new File(lib, names[index]);
             } else if ("loader".equals(kinds[index]) && !loader) {
                 loader = true;
-                target = new File(staging, "loader");
+                verifyLocal(packagedLoader, hashes[index], sizes[index]);
+                continue;
             } else if ("data".equals(kinds[index]) && !data) {
                 data = true;
                 target = new File(staging, "data.zip");
             } else {
                 throw new SecurityException("Unsupported or duplicate Terminal module kind");
             }
-            copyVerified(resolver, Uri.parse(uris[index]), target, hashes[index], sizes[index]);
+            copyVerified(resolver, moduleUri, target, hashes[index], sizes[index]);
             if (("program".equals(kinds[index]) || "command".equals(kinds[index])
                     || "loader".equals(kinds[index]))
                     && !target.setExecutable(true, true)) {
@@ -337,10 +356,7 @@ final class TerminalEnvironment {
 
     private static void copyVerified(ContentResolver resolver, Uri uri, File target,
             String expectedHash, long expectedSize) throws Exception {
-        if (!"content".equals(uri.getScheme())
-                || !PROVIDER.getAuthority().equals(uri.getAuthority())) {
-            throw new SecurityException("Terminal module URI is untrusted");
-        }
+        requireTrustedModuleUri(uri);
         MessageDigest digest = MessageDigest.getInstance("SHA-256");
         long total = 0;
         byte[] buffer = new byte[64 * 1024];
@@ -364,7 +380,7 @@ final class TerminalEnvironment {
     }
 
     private static String shellRc(File home, File config, File cache, File tmp,
-            File request, File installed, Map<String, Command> commands,
+            File requests, File responses, File installed, Map<String, Command> commands,
             List<String> dataDirectories) {
         StringBuilder rc = new StringBuilder();
         rc.append("export HOME=").append(quote(home.getAbsolutePath())).append('\n');
@@ -389,23 +405,51 @@ final class TerminalEnvironment {
             rc.append("alias ").append(command.name).append("='_archphene_run ")
                     .append(command.packId).append(' ').append(command.name).append("'\n");
         }
+        rc.append("export ARCHPHENE_MANAGER_REQUESTS=")
+                .append(quote(requests.getAbsolutePath())).append('\n');
+        rc.append("export ARCHPHENE_MANAGER_RESPONSES=")
+                .append(quote(responses.getAbsolutePath())).append('\n');
+        rc.append("_ap_request_sequence=0\n")
+                .append("_archphene_manager_request() {\n")
+                .append("  _ap_action=\"$1\"; shift; _ap_query=\"$*\"\n")
+                .append("  _ap_request_sequence=$((_ap_request_sequence + 1))\n")
+                .append("  _ap_id=\"$$-$(date +%s)-$_ap_request_sequence\"\n")
+                .append("  _ap_tmp=\"$ARCHPHENE_MANAGER_REQUESTS/.$_ap_id.tmp\"\n")
+                .append("  _ap_request=\"$ARCHPHENE_MANAGER_REQUESTS/$_ap_id.request\"\n")
+                .append("  _ap_response=\"$ARCHPHENE_MANAGER_RESPONSES/$_ap_id.response\"\n")
+                .append("  rm -f \"$_ap_response\"\n")
+                .append("  printf 'v1\\t%s\\t%s\\t%s\\n' \"$_ap_id\" \"$_ap_action\" \"$_ap_query\" > \"$_ap_tmp\" || return 1\n")
+                .append("  mv \"$_ap_tmp\" \"$_ap_request\" || return 1\n")
+                .append("  _ap_last=0; _ap_elapsed=0\n")
+                .append("  while [ \"$_ap_elapsed\" -lt 1800 ]; do\n")
+                .append("    if [ -f \"$_ap_response\" ]; then\n")
+                .append("      IFS=\"$(printf '\\t')\" read _ap_schema _ap_seq _ap_phase _ap_percent _ap_terminal _ap_outcome _ap_status < \"$_ap_response\"\n")
+                .append("      if [ \"$_ap_schema\" = v1 ] && [ \"$_ap_seq\" != \"$_ap_last\" ]; then\n")
+                .append("        _ap_last=\"$_ap_seq\"; printf '[%s%%] %s: %s\\n' \"$_ap_percent\" \"$_ap_phase\" \"$_ap_status\"\n")
+                .append("        if [ \"$_ap_terminal\" = 1 ]; then\n")
+                .append("          rm -f \"$_ap_response\"; case \"$_ap_outcome\" in success) return 0;; cancelled) return 130;; *) return 1;; esac\n")
+                .append("        fi\n")
+                .append("      fi\n")
+                .append("    fi\n")
+                .append("    sleep 1; _ap_elapsed=$((_ap_elapsed + 1))\n")
+                .append("  done\n")
+                .append("  rm -f \"$_ap_request\" \"$_ap_response\"; echo 'archphene: manager request timed out' >&2; return 124\n")
+                .append("}\n");
         rc.append("archphene-import() {\n")
                 .append("  _ap_target=\"$1\"\n")
                 .append("  [ -n \"$_ap_target\" ] || _ap_target=Downloads\n")
-                .append("  printf 'import\\t%s\\n' \"$_ap_target\" > ")
-                .append(quote(request.getAbsolutePath())).append("\n}\n");
+                .append("  _archphene_manager_request import \"$_ap_target\"\n}\n");
         rc.append("archphene-export() {\n")
                 .append("  [ \"$#\" -eq 1 ] || { echo 'usage: archphene-export <home-file>' >&2; return 2; }\n")
-                .append("  printf 'export\\t%s\\n' \"$1\" > ")
-                .append(quote(request.getAbsolutePath())).append("\n}\n");
+                .append("  _archphene_manager_request export \"$1\"\n}\n");
         rc.append("pacman() {\n  case \"$1\" in\n")
                 .append("    -Q) cat ").append(quote(installed.getAbsolutePath())).append(" ;;\n")
                 .append("    -Qs) shift; grep -i -- \"$*\" ").append(quote(installed.getAbsolutePath())).append(" || true ;;\n")
                 .append("    -Qi) shift; grep -i -- \"^$1[[:space:]]\" ").append(quote(installed.getAbsolutePath())).append(" || return 1 ;;\n")
-                .append("    -Ss) shift; printf 'search\\t%s\\n' \"$*\" > ").append(quote(request.getAbsolutePath())).append(" ;;\n")
-                .append("    -S) shift; printf 'install\\t%s\\n' \"$*\" > ").append(quote(request.getAbsolutePath())).append("; echo 'Review the install request in Archphene.' ;;\n")
-                .append("    -R|-Rs|-Rns) shift; printf 'remove\\t%s\\n' \"$*\" > ").append(quote(request.getAbsolutePath())).append("; echo 'Review the removal request in Archphene.' ;;\n")
-                .append("    -Syu|-Syyu) printf 'upgrade\\tall\\n' > ").append(quote(request.getAbsolutePath())).append("; echo 'Review available updates in Archphene.' ;;\n")
+                .append("    -Ss) shift; _archphene_manager_request search \"$*\" ;;\n")
+                .append("    -S) shift; [ \"$#\" -eq 1 ] || { echo 'pacman -S accepts one package per command' >&2; return 2; }; _archphene_manager_request install \"$1\" ;;\n")
+                .append("    -R|-Rs|-Rns) shift; [ \"$#\" -eq 1 ] || { echo 'pacman -R accepts one package per command' >&2; return 2; }; _archphene_manager_request remove \"$1\" ;;\n")
+                .append("    -Syu|-Syyu) _archphene_manager_request upgrade all ;;\n")
                 .append("    *) echo 'Archphene pacman supports -Q, -Qi, -Qs, -Ss, -S, -R, and -Syu.' >&2; return 2 ;;\n  esac\n}\n");
         if (!dataDirectories.isEmpty()) {
             rc.append("export XDG_DATA_DIRS=").append(quote(String.join(":", dataDirectories))).append('\n');
@@ -473,10 +517,39 @@ final class TerminalEnvironment {
         if (children == null) return;
         for (File child : children) if (child.isDirectory() && !live.contains(child.getName())) deleteRecursively(child);
     }
+    private static void requireTrustedModuleUri(Uri uri) {
+        if (!"content".equals(uri.getScheme())
+                || !PROVIDER.getAuthority().equals(uri.getAuthority())) {
+            throw new SecurityException("Terminal module URI is untrusted");
+        }
+    }
+
+    private static void verifyLocal(File file, String expectedHash, long expectedSize)
+            throws Exception {
+        if (!file.isFile() || file.length() != expectedSize) {
+            throw new SecurityException("APK-owned Terminal loader does not match runtime");
+        }
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        byte[] buffer = new byte[64 * 1024];
+        try (InputStream input = new BufferedInputStream(new FileInputStream(file))) {
+            int read;
+            while ((read = input.read(buffer)) >= 0) {
+                if (read > 0) digest.update(buffer, 0, read);
+            }
+        }
+        if (!expectedHash.equals(hex(digest.digest()))) {
+            throw new SecurityException("APK-owned Terminal loader hash mismatch");
+        }
+    }
     private static File directory(File parent, String child) throws IOException {
         File result = new File(parent, child);
         if (!result.isDirectory() && !result.mkdirs()) throw new IOException("Could not create " + result);
         return result;
+    }
+    private static void clearFiles(File directory) throws IOException {
+        File[] children = directory.listFiles();
+        if (children == null) throw new IOException("Could not list " + directory);
+        for (File child : children) deleteRecursively(child);
     }
     private static void writeAtomically(File file, String value) throws IOException {
         File temporary = new File(file.getParentFile(), file.getName() + ".tmp");

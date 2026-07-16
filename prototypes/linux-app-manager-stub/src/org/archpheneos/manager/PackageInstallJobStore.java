@@ -140,9 +140,10 @@ final class PackageInstallJobStore {
             Snapshot previous = read(context, id);
             if (previous.active()) {
                 if (reconcileCompletedInstall(context, previous)) continue;
-                update(context, id, ERROR, ApkUpdateInstaller.Phase.ERROR,
+                Snapshot interrupted = update(context, id, ERROR, ApkUpdateInstaller.Phase.ERROR,
                         previous.percent, "Install interrupted",
                         "The manager process stopped before this phase completed. Retry the package.");
+                TerminalCommandReporter.reportJob(context, interrupted, true);
             }
         }
     }
@@ -160,8 +161,10 @@ final class PackageInstallJobStore {
             if (identity.length == 4 && "pacman".equals(identity[0])) {
                 TrackedPackageStore.remove(context, identity[1], identity[2], identity[3]);
             }
-            update(context, job.id, COMPLETE, ApkUpdateInstaller.Phase.COMPLETE,
-                    100, "Recovered completed Android install", "");
+            Snapshot recovered = update(context, job.id, COMPLETE,
+                    ApkUpdateInstaller.Phase.COMPLETE, 100,
+                    "Recovered completed Android install", "");
+            TerminalCommandReporter.reportJob(context, recovered, true);
             return true;
         } catch (Exception error) {
             android.util.Log.w("ArchpheneManager",

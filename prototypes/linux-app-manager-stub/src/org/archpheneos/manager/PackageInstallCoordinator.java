@@ -29,12 +29,25 @@ final class PackageInstallCoordinator {
 
     static boolean start(Activity activity, ArchPackageRepository.PackageResult source,
             Listener listener) {
+        return start(activity, source, null, listener);
+    }
+
+    static boolean start(Activity activity, ArchPackageRepository.PackageResult source,
+            String terminalRequestId, Listener listener) {
         String id = PackageInstallJobStore.key(source);
         ApkUpdateInstaller.Operation preparation = new ApkUpdateInstaller.Operation();
         if (OPERATIONS.putIfAbsent(id, preparation) != null) return false;
-        notify(activity, listener, PackageInstallJobStore.begin(activity, id), false);
-        PREPARATION.execute(() -> prepare(activity, source, id, preparation, listener));
-        return true;
+        try {
+            if (terminalRequestId != null) {
+                TerminalCommandReporter.bind(activity, id, terminalRequestId);
+            }
+            notify(activity, listener, PackageInstallJobStore.begin(activity, id), false);
+            PREPARATION.execute(() -> prepare(activity, source, id, preparation, listener));
+            return true;
+        } catch (RuntimeException error) {
+            OPERATIONS.remove(id, preparation);
+            throw error;
+        }
     }
 
     static ApkUpdateInstaller.Operation operation(String id) {
@@ -242,6 +255,7 @@ final class PackageInstallCoordinator {
 
     private static void notify(Activity activity, Listener listener,
             PackageInstallJobStore.Snapshot snapshot, boolean terminal) {
+        TerminalCommandReporter.reportJob(activity, snapshot, terminal);
         MAIN.post(() -> {
             if (!activity.isFinishing() && !activity.isDestroyed()) {
                 listener.onChanged(snapshot, terminal);

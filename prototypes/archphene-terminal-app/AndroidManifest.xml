@@ -26,6 +26,11 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Keeps user-created interactive terminal sessions running while the UI is not visible" />
         </service>
+        <provider
+            android:name="org.archpheneos.terminal.TerminalCommandProvider"
+            android:authorities="org.archpheneos.terminal.commands"
+            android:exported="true"
+            android:permission="org.archpheneos.permission.TERMINAL" />
         <activity
             android:name="org.archpheneos.terminal.TerminalActivity"
             android:exported="true"

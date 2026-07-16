@@ -167,40 +167,143 @@ public final class MainActivity extends Activity {
         }
     }
     private void handleTerminalRequestIntent() {
-        TerminalRequestStore.Request terminalRequest = TerminalRequestStore.take(this);
+        Intent intent = getIntent();
+        String requestId = intent.getStringExtra("archphene_terminal_request_id");
+        intent.removeExtra("archphene_terminal_request_id");
+        TerminalRequestStore.Request terminalRequest =
+                TerminalRequestStore.take(this, requestId);
         if (terminalRequest == null) return;
         String action = terminalRequest.action;
-        String request = terminalRequest.query;
-        String query = request.trim().split("\\s+", 2)[0];
+        String query = terminalRequest.query.trim();
+        TerminalCommandReporter.report(this, terminalRequest.id, "request", 1,
+                false, "running", "Accepted " + action + " request");
         if (("install".equals(action) || "search".equals(action))
                 && query.matches("[a-zA-Z0-9@._+:-]{2,128}")) {
-            showPackageSearchPage(query);
-            showBanner("Review the " + query + " package before installing", false);
-            return;
-        }
-        if ("remove".equals(action) && query.matches("[a-zA-Z0-9@._+:-]{1,128}")) {
-            try {
-                for (InstalledLinuxAppCatalog.Entry entry : InstalledLinuxAppCatalog.query(this)) {
-                    if (!entry.managedKind.isEmpty()
-                            && entry.sourceId.endsWith("/" + query)) {
-                        showAppDetail(entry);
-                        showBanner("Review the package removal", false);
-                        return;
-                    }
-                }
-                showBanner(query + " is not installed in Terminal", true);
-            } catch (Exception error) {
-                showBanner("Could not read Terminal packages: " + error.getMessage(), true);
+            if ("search".equals(action)) {
+                showPackageSearchPage(query);
+                reportTerminalPackageSearch(terminalRequest.id, query);
+            } else {
+                resolveTerminalPackageInstall(terminalRequest.id, query);
             }
             return;
         }
-        if ("upgrade".equals(action)) {
-            showAppsPage();
-            checkAll();
-            showBanner("Checked installed packages; pinned versions remain unchanged", false);
+        if ("remove".equals(action) && query.matches("[a-zA-Z0-9@._+:-]{1,128}")) {
+            confirmTerminalPackageRemoval(terminalRequest.id, query);
             return;
         }
-        showBanner("Unsupported Terminal package request", true);
+        if ("upgrade".equals(action) && "all".equals(query)) {
+            showAppsPage();
+            checkAll();
+            TerminalCommandReporter.report(this, terminalRequest.id, "upgrade", 100,
+                    true, "success",
+                    "Update check started; pinned versions remain unchanged");
+            return;
+        }
+        TerminalCommandReporter.report(this, terminalRequest.id, "request", 0,
+                true, "error", "Unsupported Terminal package request");
+    }
+
+    private void reportTerminalPackageSearch(String requestId, String query) {
+        new Thread(() -> {
+            try {
+                List<ArchPackageRepository.PackageResult> found =
+                        ArchPackageRepository.search(this, query);
+                int compatible = 0;
+                for (ArchPackageRepository.PackageResult result : found) {
+                    if (ArchRuntimePolicy.supports(result.architecture)) compatible++;
+                }
+                TerminalCommandReporter.report(this, requestId, "search", 100,
+                        true, "success", "Found " + compatible
+                                + " compatible package result(s) in Archphene");
+            } catch (Exception error) {
+                TerminalCommandReporter.report(this, requestId, "search", 0,
+                        true, "error", "Repository search failed: " + safeMessage(error));
+            }
+        }, "archphene-terminal-search").start();
+    }
+
+    private void resolveTerminalPackageInstall(String requestId, String packageName) {
+        showAppsPage();
+        showBanner("Resolving " + packageName + " for Terminal", false);
+        new Thread(() -> {
+            try {
+                ArchPackageRepository.PackageResult exact = null;
+                for (ArchPackageRepository.PackageResult result
+                        : ArchPackageRepository.search(this, packageName)) {
+                    if (packageName.equals(result.name)
+                            && ArchRuntimePolicy.supports(result.architecture)) {
+                        exact = result;
+                        break;
+                    }
+                }
+                if (exact == null) {
+                    throw new IllegalStateException(
+                            "No compatible exact package named " + packageName);
+                }
+                ArchPackageRepository.PackageResult selected = exact;
+                runOnUiThread(() -> startOnDevicePackageInstall(selected, requestId));
+            } catch (Exception error) {
+                TerminalCommandReporter.report(this, requestId, "resolve", 0,
+                        true, "error", safeMessage(error));
+                runOnUiThread(() -> showBanner(
+                        "Could not resolve " + packageName + ": " + safeMessage(error), true));
+            }
+        }, "archphene-terminal-resolve").start();
+    }
+
+    private void confirmTerminalPackageRemoval(String requestId, String packageName) {
+        ManagedPackageStore.Entry target = null;
+        try {
+            for (ManagedPackageStore.Entry entry : ManagedPackageStore.list(this)) {
+                if (packageName.equals(entry.name)) {
+                    target = entry;
+                    break;
+                }
+            }
+        } catch (Exception error) {
+            TerminalCommandReporter.report(this, requestId, "remove", 0,
+                    true, "error", "Could not read Terminal packages: " + safeMessage(error));
+            return;
+        }
+        if (target == null) {
+            TerminalCommandReporter.report(this, requestId, "remove", 0,
+                    true, "error", packageName + " is not installed in Terminal");
+            return;
+        }
+        ManagedPackageStore.Entry selected = target;
+        new AlertDialog.Builder(this)
+                .setTitle("Remove " + packageName + "?")
+                .setMessage("This removes the package from the shared Terminal environment. "
+                        + "Terminal home files are kept.")
+                .setNegativeButton("Cancel", (dialog, which) ->
+                        TerminalCommandReporter.report(this, requestId, "remove", 0,
+                                true, "cancelled", "Package removal cancelled"))
+                .setPositiveButton("Remove", (dialog, which) -> new Thread(() -> {
+                    try {
+                        ManagedPackageStore.remove(this, selected);
+                        PackageInstallJobStore.clear(this,
+                                PackageInstallJobStore.key(selected.source()));
+                        TerminalCommandReporter.report(this, requestId, "remove", 100,
+                                true, "success", packageName + " removed from Terminal");
+                        runOnUiThread(() -> {
+                            showBanner(packageName + " removed from Terminal", false);
+                            showAppsPage();
+                        });
+                    } catch (Exception error) {
+                        TerminalCommandReporter.report(this, requestId, "remove", 0,
+                                true, "error", "Removal failed: " + safeMessage(error));
+                    }
+                }, "archphene-terminal-remove").start())
+                .setOnCancelListener(dialog ->
+                        TerminalCommandReporter.report(this, requestId, "remove", 0,
+                                true, "cancelled", "Package removal cancelled"))
+                .show();
+    }
+    private static String safeMessage(Throwable error) {
+        String value = error == null ? null : error.getMessage();
+        return value == null || value.isEmpty()
+                ? (error == null ? "Unknown error" : error.getClass().getSimpleName())
+                : value;
     }
     private void applySystemPalette() {
         String requestedTheme = ManagerStateStore.themeMode(this);
@@ -919,29 +1022,48 @@ public final class MainActivity extends Activity {
                 .show();
     }
     private void startOnDevicePackageInstall(ArchPackageRepository.PackageResult source) {
-        try {
+        startOnDevicePackageInstall(source, null);
+    }
+
+    private void startOnDevicePackageInstall(ArchPackageRepository.PackageResult source,
+            String terminalRequestId) {        try {
             InstalledLinuxAppCatalog.Entry installed = InstalledLinuxAppCatalog.findBySource(this,
                     source.repository, source.name, source.architecture);
             String generatedPackage = ArchWrapperAssembler.packageNameFor(
                     source.repository, source.name);
             if (installed != null && installed.managedKind.isEmpty()
                     && !generatedPackage.equals(installed.packageName)) {
-                showBanner(source.name + " is already installed as " + installed.packageName
-                        + ". Uninstall that legacy wrapper before installing it again.", true);
+                String message = source.name + " is already installed as " + installed.packageName
+                        + ". Uninstall that legacy wrapper before installing it again.";
+                showBanner(message, true);
+                if (terminalRequestId != null) {
+                    TerminalCommandReporter.report(this, terminalRequestId, "preflight", 0,
+                            true, "error", message);
+                }
                 return;
             }
             if (installed != null && installed.managedKind.isEmpty()
                     && !ArchWrapperSigner.signerSha256().equalsIgnoreCase(
                     ApkUpdateInstaller.installedSignerSha256(this, installed.packageName))) {
                 requestWrapperSignerMigration(source, installed.packageName);
+                if (terminalRequestId != null) {
+                    TerminalCommandReporter.report(this, terminalRequestId, "preflight", 0,
+                            true, "error",
+                            "Legacy wrapper migration requires confirmation in Archphene");
+                }
                 return;
             }
         } catch (Exception error) {
-            showBanner("Could not verify existing installs: " + error.getMessage(), true);
+            String message = "Could not verify existing installs: " + safeMessage(error);
+            showBanner(message, true);
+            if (terminalRequestId != null) {
+                TerminalCommandReporter.report(this, terminalRequestId, "preflight", 0,
+                        true, "error", message);
+            }
             return;
         }
         TrackedPackageStore.add(this, source);
-        boolean started = PackageInstallCoordinator.start(this, source, (state, terminal) -> {
+        boolean started = PackageInstallCoordinator.start(this, source, terminalRequestId, (state, terminal) -> {
             if (terminal) {
                 boolean failed = PackageInstallJobStore.ERROR.equals(state.state);
                 String detail = state.error.isEmpty() ? state.status
@@ -961,6 +1083,10 @@ public final class MainActivity extends Activity {
         });
         if (!started) {
             showBanner(source.name + " already has an active install job", false);
+            if (terminalRequestId != null) {
+                TerminalCommandReporter.report(this, terminalRequestId, "queue", 0,
+                        true, "error", source.name + " already has an active install job");
+            }
         }
         showAppsPage();
     }

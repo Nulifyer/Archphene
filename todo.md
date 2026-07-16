@@ -28,7 +28,7 @@ This is the prioritized completion queue for the Archphene Android application. 
   - [x] Clean up the complete Linux process tree when a wrapper exits. Managed launches use a dedicated process group, parent-death signal, cancellable execution registry, and final dedicated-UID descendant sweep.
 - [ ] Finish the Terminal product.
   - [x] Add multiple sessions/tabs and a foreground-service lifecycle. PTYs survive Activity closure under a visible Android notification, close independently by process group, and die with the Terminal app process.
-  - [ ] Return manager progress and terminal results to the invoking command.
+  - [x] Return manager progress and terminal results to the invoking command. Per-request files correlate exact search/install/remove/upgrade requests with durable manager jobs; the signed manager reports bounded phases and terminal outcomes through a signature-protected Terminal provider.
   - [ ] Add persisted project-tree mappings.
   - [ ] Select and package the user shell. Current bootstrap is Bionic sh; evaluate verified Arch bash first, then fish as an optional user choice.
   - [x] Keep the native Termux terminal renderer unless image protocols or other modern terminal features justify a compatible extension.

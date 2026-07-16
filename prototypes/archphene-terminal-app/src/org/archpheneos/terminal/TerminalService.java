@@ -145,8 +145,8 @@ public final class TerminalService extends Service implements TerminalSessionCli
         return environment == null ? null : environment.home;
     }
 
-    File requestFile() {
-        return environment == null ? null : environment.request;
+    File requestDirectory() {
+        return environment == null ? null : environment.requestDirectory;
     }
 
     Throwable preparationError() {
