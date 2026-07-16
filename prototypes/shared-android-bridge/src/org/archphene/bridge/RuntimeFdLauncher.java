@@ -14,11 +14,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 /** Executes immutable runtime modules supplied by Android content descriptors. */
 public final class RuntimeFdLauncher {
     private static final int MAX_LIBRARIES = 510;
     private static final AtomicBoolean STALE_VIEWS_PURGED = new AtomicBoolean();
+    private static final AtomicLong NEXT_EXECUTION_ID = new AtomicLong(1);
 
     public static final class Result {
         public final int exitCode;
@@ -28,6 +30,56 @@ public final class RuntimeFdLauncher {
             this.exitCode = exitCode;
             this.output = output;
         }
+    }
+
+    public static final class Execution {
+        private final long id;
+        private final AtomicBoolean started = new AtomicBoolean();
+        private final AtomicBoolean cancelled = new AtomicBoolean();
+        private final AtomicBoolean completed = new AtomicBoolean();
+
+        private Execution(long id) {
+            this.id = id;
+        }
+
+        private long begin() {
+            if (!started.compareAndSet(false, true)) {
+                throw new IllegalStateException("Runtime execution was already started");
+            }
+            if (cancelled.get()) {
+                completed.set(true);
+                throw new java.util.concurrent.CancellationException(
+                        "Runtime execution was cancelled");
+            }
+            return id;
+        }
+
+        public void cancel() {
+            cancelled.set(true);
+            if (started.get() && !completed.get()) nativeCancelGlibc(id);
+        }
+
+        private void throwIfCancelled() {
+            if (cancelled.get()) {
+                throw new java.util.concurrent.CancellationException(
+                        "Runtime execution was cancelled");
+            }
+        }
+
+        private void finish() {
+            completed.set(true);
+            nativeForgetGlibc(id);
+        }
+    }
+
+    public static Execution newExecution() {
+        long id = NEXT_EXECUTION_ID.getAndIncrement();
+        if (id <= 0) throw new IllegalStateException("Runtime execution IDs exhausted");
+        return new Execution(id);
+    }
+
+    public static int terminateUidProcesses() {
+        return nativeTerminateUidProcesses();
     }
 
     static { System.loadLibrary("archphene_compositor"); }
@@ -72,6 +124,14 @@ public final class RuntimeFdLauncher {
             Uri loaderUri, Uri[] libraryUris, String[] libraryNames, File cacheRoot,
             Map<String, String> environment, String programName, List<String> arguments)
             throws Exception {
+        return runGlibc(resolver, programUri, loaderUri, libraryUris, libraryNames,
+                cacheRoot, environment, programName, arguments, null);
+    }
+
+    public static Result runGlibc(ContentResolver resolver, Uri programUri,
+            Uri loaderUri, Uri[] libraryUris, String[] libraryNames, File cacheRoot,
+            Map<String, String> environment, String programName, List<String> arguments,
+            Execution execution) throws Exception {
         if (programName == null || !programName.matches("[a-zA-Z0-9@._+:-]{1,128}")) {
             throw new IllegalArgumentException("Invalid runtime program name");
         }
@@ -85,9 +145,11 @@ public final class RuntimeFdLauncher {
                 + "-" + System.nanoTime());
         if (!links.mkdir()) throw new IllegalStateException("Could not create runtime FD view");
         List<ParcelFileDescriptor> descriptors = new ArrayList<>(libraryUris.length + 2);
+        long executionId = 0;
         try {
+            if (execution != null) executionId = execution.begin();
             ParcelFileDescriptor program = materializeElf(resolver, programUri,
-                    new File(links, ".program"));
+                    new File(links, ".program"), execution);
             descriptors.add(program);
             ParcelFileDescriptor loader = openElf(resolver, loaderUri);
             descriptors.add(loader);
@@ -99,7 +161,7 @@ public final class RuntimeFdLauncher {
                     throw new SecurityException("Unsafe or duplicate runtime library name");
                 }
                 ParcelFileDescriptor library = materializeElf(resolver, libraryUris[index],
-                        new File(links, ".library-" + index));
+                        new File(links, ".library-" + index), execution);
                 descriptors.add(library);
                 manifest.append(library.getFd()).append('\t')
                         .append(libraryNames[index]).append('\n');
@@ -124,9 +186,10 @@ public final class RuntimeFdLauncher {
                     links.getAbsolutePath().getBytes(StandardCharsets.UTF_8),
                     encodeEnvironment(launchEnvironment),
                     programName.getBytes(StandardCharsets.UTF_8),
-                    encodeArguments(arguments), output);
+                    encodeArguments(arguments), executionId, output);
             return result(exitCode, output);
         } finally {
+            if (execution != null) execution.finish();
             for (int index = descriptors.size() - 1; index >= 0; index--) {
                 try {
                     descriptors.get(index).close();
@@ -215,7 +278,7 @@ public final class RuntimeFdLauncher {
     }
 
     private static ParcelFileDescriptor materializeElf(ContentResolver resolver, Uri uri,
-            File temporary) throws Exception {
+            File temporary, Execution execution) throws Exception {
         try (ParcelFileDescriptor source = openElf(resolver, uri);
                 ParcelFileDescriptor duplicate = ParcelFileDescriptor.dup(
                         source.getFileDescriptor());
@@ -225,6 +288,7 @@ public final class RuntimeFdLauncher {
             byte[] buffer = new byte[64 * 1024];
             int count;
             while ((count = input.read(buffer)) != -1) {
+                if (execution != null) execution.throwIfCancelled();
                 total += count;
                 if (total > 2L * 1024 * 1024 * 1024) {
                     throw new SecurityException("Runtime module exceeds bounds");
@@ -275,5 +339,8 @@ public final class RuntimeFdLauncher {
     private static native int nativeRunFd(int fd, byte[] output);
     private static native int nativeRunGlibc(int programFd, int loaderFd,
             byte[] libraryManifest, byte[] linkDirectory, byte[] environment,
-            byte[] programName, byte[] arguments, byte[] output);
+            byte[] programName, byte[] arguments, long executionId, byte[] output);
+    private static native void nativeCancelGlibc(long executionId);
+    private static native void nativeForgetGlibc(long executionId);
+    private static native int nativeTerminateUidProcesses();
 }

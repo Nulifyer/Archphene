@@ -34,7 +34,7 @@ Production manager releases are built non-debuggable and signed with a dedicated
 ## Important limitations
 
 - The manager performs on-device resolution, verification, generic classification, runtime-pack publication, wrapper generation, signing, and Android-confirmed installation for supported x86_64 and AArch64 packages. KCalc launches from a generated wrapper on both architectures.
-- Package-derived dependency closures execute from manager-owned, immutable content-addressed packs through caller-authenticated, read-only descriptors under the separate wrapper UID. Stable provider clients and Binder death tokens protect live packs; external uninstalls are reconciled per package; ELF page layouts fail closed. Complete Linux process-tree cleanup remains incomplete.
+- Package-derived dependency closures execute from manager-owned, immutable content-addressed packs through caller-authenticated, read-only descriptors under the separate wrapper UID. Stable provider clients and Binder death tokens protect live packs; external uninstalls are reconciled per package; ELF page layouts fail closed. Dedicated process groups, parent-death signals, cancellable executions, and wrapper-UID cleanup terminate Linux descendants when their Activity exits.
 - Per-package jobs persist phase, percent, bounded diagnostics, generated package identity, runtime-pack identity, and artifact time before installer handoff. Recovery activates a completed install only when Android reports an update newer than the recorded artifacts; otherwise it fails closed into an explicit retry state.
 - The prototype Java Wayland parsers are not yet a hardened protocol boundary.
 - GrapheneOS-specific hardening has not been validated on a supported Pixel.

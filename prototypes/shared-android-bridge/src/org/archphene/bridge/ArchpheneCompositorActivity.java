@@ -79,10 +79,13 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     private String[] runtimeLibraryUris;
     private String[] runtimeLibraryNames;
     private boolean runtimeGui;
+    private boolean processTreeProbe;
     private final Binder runtimeLeaseToken = new Binder();
     private ContentProviderClient runtimeProviderClient;
     private String runtimePackId;
     private boolean runtimeExecutionStarted;
+    private RuntimeFdLauncher.Execution managedRuntimeExecution;
+    private boolean activityDestroyed;
     private String appearanceTheme = "system";
     private int appearanceScalePercent;
     private int appearanceFontPercent = 100;
@@ -102,13 +105,17 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         runtimeLibraryNames = getIntent().getStringArrayExtra(
                 "archphene_test_runtime_library_names");
         runtimeGui = getIntent().getBooleanExtra("archphene_runtime_gui", false);
+        processTreeProbe = (getApplicationInfo().flags
+                & ApplicationInfo.FLAG_DEBUGGABLE) != 0
+                && getIntent().getBooleanExtra(
+                        "archphene_test_process_tree_cleanup", false);
         String legacyLibc = getIntent().getStringExtra("archphene_test_runtime_libc_uri");
         if (runtimeLibraryUris == null && legacyLibc != null) {
             runtimeLibraryUris = new String[] {legacyLibc};
             runtimeLibraryNames = new String[] {"libc.so.6"};
         }
         loadManagerAppearance();
-        if (runtimeProbeUri == null) loadManagerRuntimePack();
+        if (runtimeProbeUri == null && !processTreeProbe) loadManagerRuntimePack();
         independentWindows = shouldUseIndependentWindows();
         documentSession = capabilities.contains(BridgeCapabilities.DOCUMENTS)
                 ? new AndroidDocumentSession(this, logTag) : null;
@@ -213,7 +220,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 }
             }
             if (width > 1 && height > 1 && launched.compareAndSet(false, true)) {
-                if (runtimeProbeUri == null) launch(width, height);
+                if (processTreeProbe) runProcessTreeCleanupProbe();
+                else if (runtimeProbeUri == null) launch(width, height);
                 else if (runtimeLoaderUri == null) runRuntimeFdProbe(runtimeProbeUri);
                 else if (runtimeGui) launchRuntimeGlibc(width, height);
                 else runRuntimeGlibcProbe(runtimeProbeUri, runtimeLoaderUri,
@@ -560,6 +568,30 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             });
         }
     }
+    private void runProcessTreeCleanupProbe() {
+        new Thread(() -> {
+            Process shell = null;
+            try {
+                shell = new ProcessBuilder(
+                        "/system/bin/sh", "-c", "sleep 300 & wait").start();
+                Thread.sleep(500);
+                int terminated = RuntimeFdLauncher.terminateUidProcesses();
+                if (terminated < 2 || !shell.waitFor(
+                        3, java.util.concurrent.TimeUnit.SECONDS)) {
+                    throw new IllegalStateException(
+                            "UID cleanup did not terminate the process tree");
+                }
+                Log.i("ArchpheneRuntime", "Process-tree cleanup probe passed; terminated="
+                        + terminated + " exit=" + shell.exitValue());
+            } catch (Throwable error) {
+                Log.e("ArchpheneRuntime", "Process-tree cleanup probe failed", error);
+            } finally {
+                if (shell != null) shell.destroyForcibly();
+                runOnUiThread(this::finish);
+            }
+        }, "archphene-process-tree-probe").start();
+    }
+
     private void runRuntimeFdProbe(String uriText) {
         new Thread(() -> {
             try {
@@ -601,7 +633,13 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         File socket = new File(runtimeDir, "wayland-0");
         session.start(socket, width, height);
         new Thread(() -> {
+            RuntimeFdLauncher.Execution execution = RuntimeFdLauncher.newExecution();
             try {
+                if (!registerManagedRuntimeExecution(execution)) {
+                    execution.cancel();
+                    throw new java.util.concurrent.CancellationException(
+                            "Activity was destroyed before runtime launch");
+                }
                 if (runtimePackId != null && !beginRuntimeExecution()) {
                     throw new SecurityException("Runtime pack lease is unavailable");
                 }
@@ -654,12 +692,18 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                         getContentResolver(), android.net.Uri.parse(runtimeProbeUri),
                         android.net.Uri.parse(runtimeLoaderUri), libraries,
                         runtimeLibraryNames, getCacheDir(), environment,
-                        runtimeProgramName, arguments);
+                        runtimeProgramName, arguments, execution);
                 Log.i("ArchpheneRuntime", "Runtime GUI exit=" + result.exitCode);
                 logRuntimeOutput(result.output);
             } catch (Throwable error) {
                 Log.e("ArchpheneRuntime", "Could not launch runtime GUI", error);
             } finally {
+                clearManagedRuntimeExecution(execution);
+                int terminated = RuntimeFdLauncher.terminateUidProcesses();
+                if (terminated > 0) {
+                    Log.i("ArchpheneRuntime", "Cleaned up " + terminated
+                            + " remaining Linux processes");
+                }
                 gpuBridge.stop();
                 releaseRuntimeLease();
             }
@@ -1232,11 +1276,34 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         }
         secondaryWindows.clear();
         if (documentSession != null) documentSession.close();
+        cancelManagedRuntimeExecution();
         if (linuxProcess != null) linuxProcess.destroy();
+        RuntimeFdLauncher.terminateUidProcesses();
         gpuBridge.stop();
         if (session != null) session.close();
         releaseUnstartedRuntimeLease();
         super.onDestroy();
+    }
+
+    private synchronized boolean registerManagedRuntimeExecution(
+            RuntimeFdLauncher.Execution execution) {
+        if (activityDestroyed || managedRuntimeExecution != null) return false;
+        managedRuntimeExecution = execution;
+        return true;
+    }
+
+    private synchronized void clearManagedRuntimeExecution(
+            RuntimeFdLauncher.Execution execution) {
+        if (managedRuntimeExecution == execution) managedRuntimeExecution = null;
+    }
+
+    private void cancelManagedRuntimeExecution() {
+        RuntimeFdLauncher.Execution execution;
+        synchronized (this) {
+            activityDestroyed = true;
+            execution = managedRuntimeExecution;
+        }
+        if (execution != null) execution.cancel();
     }
 
     private synchronized boolean beginRuntimeExecution() {

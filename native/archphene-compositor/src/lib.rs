@@ -9014,6 +9014,188 @@ fn cleanup_runtime_fd_view(inherited: &mut Vec<i32>, links: &[PathBuf]) {
 }
 
 #[cfg(target_os = "android")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuntimeExecutionState {
+    Starting,
+    Running(libc::pid_t),
+    Cancelling(libc::pid_t),
+    Cancelled,
+}
+
+#[cfg(target_os = "android")]
+fn runtime_executions() -> &'static Mutex<std::collections::HashMap<i64, RuntimeExecutionState>> {
+    static EXECUTIONS: std::sync::OnceLock<
+        Mutex<std::collections::HashMap<i64, RuntimeExecutionState>>,
+    > = std::sync::OnceLock::new();
+    EXECUTIONS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(target_os = "android")]
+struct RuntimeExecutionGuard {
+    id: i64,
+}
+
+#[cfg(target_os = "android")]
+impl RuntimeExecutionGuard {
+    fn begin(id: i64) -> Result<Self, i32> {
+        if id <= 0 {
+            return Ok(Self { id: 0 });
+        }
+        let mut executions = runtime_executions().lock().map_err(|_| libc::EIO)?;
+        match executions.entry(id) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(RuntimeExecutionState::Starting);
+                Ok(Self { id })
+            }
+            std::collections::hash_map::Entry::Occupied(entry)
+                if *entry.get() == RuntimeExecutionState::Cancelled =>
+            {
+                entry.remove();
+                Err(libc::ECANCELED)
+            }
+            std::collections::hash_map::Entry::Occupied(_) => Err(libc::EBUSY),
+        }
+    }
+
+    fn register_process_group(&self, pgid: libc::pid_t) -> bool {
+        if self.id <= 0 {
+            return true;
+        }
+        let Ok(mut executions) = runtime_executions().lock() else {
+            return false;
+        };
+        match executions.get_mut(&self.id) {
+            Some(state @ RuntimeExecutionState::Starting) => {
+                *state = RuntimeExecutionState::Running(pgid);
+                true
+            }
+            Some(state @ RuntimeExecutionState::Cancelled) => {
+                *state = RuntimeExecutionState::Cancelling(pgid);
+                false
+            }
+            _ => false,
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+impl Drop for RuntimeExecutionGuard {
+    fn drop(&mut self) {
+        if self.id <= 0 {
+            return;
+        }
+        if let Ok(mut executions) = runtime_executions().lock() {
+            executions.remove(&self.id);
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+fn cancel_runtime_execution(id: i64) {
+    if id <= 0 {
+        return;
+    }
+    let pgid = {
+        let Ok(mut executions) = runtime_executions().lock() else {
+            return;
+        };
+        let Some(state) = executions.get_mut(&id) else {
+            executions.insert(id, RuntimeExecutionState::Cancelled);
+            return;
+        };
+        match *state {
+            RuntimeExecutionState::Starting => {
+                *state = RuntimeExecutionState::Cancelled;
+                0
+            }
+            RuntimeExecutionState::Running(pgid) => {
+                *state = RuntimeExecutionState::Cancelling(pgid);
+                pgid
+            }
+            RuntimeExecutionState::Cancelling(_) | RuntimeExecutionState::Cancelled => 0,
+        }
+    };
+    if pgid <= 0 {
+        return;
+    }
+    unsafe {
+        libc::kill(-pgid, libc::SIGTERM);
+    }
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(750));
+        let should_kill = runtime_executions()
+            .lock()
+            .map(|executions| executions.get(&id) == Some(&RuntimeExecutionState::Cancelling(pgid)))
+            .unwrap_or(false);
+        if should_kill {
+            unsafe {
+                libc::kill(-pgid, libc::SIGKILL);
+            }
+        }
+    });
+}
+
+#[cfg(target_os = "android")]
+fn forget_runtime_execution(id: i64) {
+    if id <= 0 {
+        return;
+    }
+    if let Ok(mut executions) = runtime_executions().lock() {
+        executions.remove(&id);
+    }
+}
+
+#[cfg(target_os = "android")]
+unsafe fn configure_runtime_child(parent: libc::pid_t) -> bool {
+    unsafe {
+        libc::setpgid(0, 0) == 0
+            && libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == 0
+            && libc::getppid() == parent
+    }
+}
+
+#[cfg(target_os = "android")]
+fn establish_runtime_process_group(child: libc::pid_t) -> bool {
+    if unsafe { libc::setpgid(child, child) } == 0 {
+        return true;
+    }
+    unsafe { libc::getpgid(child) == child }
+}
+
+#[cfg(target_os = "android")]
+fn terminate_uid_processes(signal: i32) -> i32 {
+    use std::os::unix::fs::MetadataExt;
+
+    let own_pid = unsafe { libc::getpid() };
+    let own_uid = unsafe { libc::geteuid() };
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return -libc::EIO;
+    };
+    let mut terminated = 0;
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Ok(pid) = name.parse::<libc::pid_t>() else {
+            continue;
+        };
+        if pid <= 1 || pid == own_pid {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if metadata.uid() != own_uid {
+            continue;
+        }
+        if unsafe { libc::kill(pid, signal) } == 0 {
+            terminated += 1;
+        }
+    }
+    terminated
+}
+
+#[cfg(target_os = "android")]
 fn run_glibc_fds(
     program_fd: i32,
     loader_fd: i32,
@@ -9022,7 +9204,12 @@ fn run_glibc_fds(
     environment_manifest: &[u8],
     program_name: &[u8],
     argument_manifest: &[u8],
+    execution_id: i64,
 ) -> (i32, Vec<u8>) {
+    let execution = match RuntimeExecutionGuard::begin(execution_id) {
+        Ok(execution) => execution,
+        Err(error) => return (-error, Vec::new()),
+    };
     let libraries = match parse_runtime_library_manifest(library_manifest) {
         Ok(libraries) => libraries,
         Err(error) => return (-error, Vec::new()),
@@ -9160,9 +9347,13 @@ fn run_glibc_fds(
         return (-error, Vec::new());
     }
 
+    let parent = unsafe { libc::getpid() };
     let child = unsafe { libc::fork() };
     if child == 0 {
         unsafe {
+            if !configure_runtime_child(parent) {
+                libc::_exit(125);
+            }
             libc::close(pipe[0]);
             libc::dup2(pipe[1], libc::STDOUT_FILENO);
             libc::dup2(pipe[1], libc::STDERR_FILENO);
@@ -9204,6 +9395,20 @@ fn run_glibc_fds(
         cleanup_runtime_fd_view(&mut inherited, &links);
         return (-fork_error, Vec::new());
     }
+    if !establish_runtime_process_group(child) {
+        unsafe {
+            libc::kill(child, libc::SIGKILL);
+            libc::waitpid(child, ptr::null_mut(), 0);
+            libc::close(pipe[0]);
+        }
+        cleanup_runtime_fd_view(&mut inherited, &links);
+        return (-libc::EIO, Vec::new());
+    }
+    if !execution.register_process_group(child) {
+        unsafe {
+            libc::kill(-child, libc::SIGKILL);
+        }
+    }
 
     let mut output = Vec::new();
     let mut buffer = [0u8; 1024];
@@ -9241,9 +9446,15 @@ fn run_glibc_fds(
     let mut status = 0;
     while unsafe { libc::waitpid(child, &mut status, 0) } < 0 {
         if io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            unsafe {
+                libc::kill(-child, libc::SIGKILL);
+            }
             cleanup_runtime_fd_view(&mut inherited, &links);
             return (-libc::ECHILD, output);
         }
+    }
+    unsafe {
+        libc::kill(-child, libc::SIGKILL);
     }
     cleanup_runtime_fd_view(&mut inherited, &links);
     let exit_code = if libc::WIFEXITED(status) {
@@ -9268,6 +9479,7 @@ pub unsafe extern "system" fn Java_org_archphene_bridge_RuntimeFdLauncher_native
     runtime_environment: jbyteArray,
     program_name: jbyteArray,
     runtime_arguments: jbyteArray,
+    execution_id: i64,
     output: jbyteArray,
 ) -> i32 {
     let (
@@ -9294,12 +9506,42 @@ pub unsafe extern "system" fn Java_org_archphene_bridge_RuntimeFdLauncher_native
         &runtime_environment,
         &program_name,
         &runtime_arguments,
+        execution_id,
     );
     if copy_to_java_byte_array(environment, output, &captured) < 0 {
         return -libc::EFAULT;
     }
     exit_code
 }
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_bridge_RuntimeFdLauncher_nativeCancelGlibc(
+    _environment: *mut std::ffi::c_void,
+    _class: *mut std::ffi::c_void,
+    execution_id: i64,
+) {
+    cancel_runtime_execution(execution_id);
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_bridge_RuntimeFdLauncher_nativeForgetGlibc(
+    _environment: *mut std::ffi::c_void,
+    _class: *mut std::ffi::c_void,
+    execution_id: i64,
+) {
+    forget_runtime_execution(execution_id);
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_bridge_RuntimeFdLauncher_nativeTerminateUidProcesses(
+    _environment: *mut std::ffi::c_void,
+    _class: *mut std::ffi::c_void,
+) -> i32 {
+    terminate_uid_processes(libc::SIGKILL)
+}
+
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_org_archphene_bridge_RuntimeFdLauncher_nativeRunFd(

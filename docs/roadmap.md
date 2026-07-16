@@ -25,7 +25,7 @@ Archphene is moving from application-specific proofs toward a package-driven And
 3. **Production runtime model**
    - atomically materialize immutable runtime contents;
    - validate 4 KB and 16 KB page-size compatibility;
-   - track process groups and descendants;
+   - isolate each wrapper Linux tree in a dedicated process group and Android UID cleanup boundary;
    - reduce per-app runtime duplication without weakening UID isolation.
 
 4. **Permission and document policy**
