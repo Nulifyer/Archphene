@@ -3,56 +3,94 @@ package org.archpheneos.terminal;
 import android.app.Activity;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.ServiceConnection;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.graphics.Color;
+import android.graphics.drawable.ColorDrawable;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.FileObserver;
+import android.os.IBinder;
 import android.util.Log;
+import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.view.inputmethod.InputMethodManager;
+import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
-import com.termux.terminal.TerminalColorScheme;
 import com.termux.terminal.TerminalColors;
 import com.termux.terminal.TerminalSession;
-import com.termux.terminal.TerminalSessionClient;
 import com.termux.view.TerminalView;
 import com.termux.view.TerminalViewClient;
 import java.io.File;
 import java.io.FileInputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Properties;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /** PTY-backed launcher surface for managed command-line packages. */
 public final class TerminalActivity extends Activity
-        implements TerminalSessionClient, TerminalViewClient {
+        implements TerminalViewClient, TerminalService.Client {
     private static final String TAG = "ArchpheneTerminal";
+    private static final int NOTIFICATION_PERMISSION_REQUEST = 70;
     private LinearLayout root;
+    private LinearLayout toolbar;
+    private LinearLayout tabs;
+    private HorizontalScrollView tabScroller;
     private TerminalView terminalView;
-    private TerminalSession terminalSession;
     private TextView title;
+    private TextView addButton;
+    private TextView closeButton;
+    private TerminalService terminalService;
+    private boolean serviceBound;
     private FileObserver requestObserver;
     private TerminalDocumentBridge documentBridge;
+    private Bundle restoredState;
     private final AtomicBoolean handlingRequest = new AtomicBoolean();
     private int fontPixels;
+    private int background;
+    private int foreground;
+    private int surface;
+    private int activeSurface;
+    private boolean debugSessionTestStarted;
+
+    private final ServiceConnection serviceConnection = new ServiceConnection() {
+        @Override public void onServiceConnected(ComponentName name, IBinder binder) {
+            terminalService = ((TerminalService.LocalBinder) binder).service();
+            serviceBound = true;
+            terminalService.attachClient(TerminalActivity.this);
+        }
+        @Override public void onServiceDisconnected(ComponentName name) {
+            serviceBound = false;
+            terminalService = null;
+            stopRequestObserver();
+            renderServiceState();
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        restoredState = savedInstanceState;
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
-        boolean dark = isDark();
-        int background = dark ? Color.rgb(17, 20, 23) : Color.rgb(248, 250, 252);
-        int foreground = dark ? Color.rgb(240, 245, 247) : Color.rgb(31, 37, 41);
-        int surface = dark ? Color.rgb(29, 34, 38) : Color.rgb(232, 237, 240);
-        configureTerminalColors(dark);
+        applyPalette();
+        configureTerminalColors(isDark());
+        buildUi();
+        requestNotificationPermission();
+        startAndBindService();
+    }
 
+    private void buildUi() {
         root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(background);
@@ -61,55 +99,109 @@ public final class TerminalActivity extends Activity
                     insets.getSystemWindowInsetBottom());
             return insets;
         });
+
+        toolbar = new LinearLayout(this);
+        toolbar.setGravity(Gravity.CENTER_VERTICAL);
+        toolbar.setBackgroundColor(surface);
         title = new TextView(this);
-        title.setText("Archphene Terminal");
-        title.setTextSize(14);
+        title.setText("Preparing Archphene Terminal");
+        title.setTextSize(15);
         title.setTextColor(foreground);
-        title.setGravity(android.view.Gravity.CENTER_VERTICAL);
-        title.setPadding(dp(14), 0, dp(14), 0);
-        title.setBackgroundColor(surface);
-        root.addView(title, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(40)));
+        title.setSingleLine(true);
+        title.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        title.setPadding(dp(14), 0, dp(8), 0);
+        toolbar.addView(title, new LinearLayout.LayoutParams(0, dp(44), 1));
+        addButton = toolbarAction("+", "New terminal session", 24);
+        addButton.setOnClickListener(view -> {
+            if (terminalService == null) return;
+            try {
+                terminalService.createSession();
+            } catch (Exception error) {
+                reportBridgeMessage(safeMessage(error));
+            }
+        });
+        toolbar.addView(addButton, new LinearLayout.LayoutParams(dp(48), dp(44)));
+        closeButton = toolbarAction("x", "Close current terminal session", 19);
+        closeButton.setOnClickListener(view -> {
+            if (terminalService == null || terminalService.activeHandle() == null) return;
+            terminalService.close(terminalService.activeHandle());
+        });
+        toolbar.addView(closeButton, new LinearLayout.LayoutParams(dp(48), dp(44)));
+        root.addView(toolbar, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(44)));
+
+        tabScroller = new HorizontalScrollView(this);
+        tabScroller.setHorizontalScrollBarEnabled(false);
+        tabScroller.setFillViewport(true);
+        tabScroller.setBackgroundColor(surface);
+        tabs = new LinearLayout(this);
+        tabs.setOrientation(LinearLayout.HORIZONTAL);
+        tabs.setGravity(Gravity.CENTER_VERTICAL);
+        tabs.setPadding(dp(8), dp(4), dp(8), dp(4));
+        tabScroller.addView(tabs, new HorizontalScrollView.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        root.addView(tabScroller, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(44)));
 
         terminalView = new TerminalView(this, null);
         terminalView.setTerminalViewClient(this);
         terminalView.setFocusable(true);
         terminalView.setFocusableInTouchMode(true);
-        terminalView.setBackgroundColor(dark ? Color.rgb(13, 15, 17) : Color.WHITE);
+        terminalView.setBackgroundColor(isDark() ? Color.rgb(13, 15, 17) : Color.WHITE);
         fontPixels = Math.round(16f * getResources().getDisplayMetrics().scaledDensity);
         terminalView.setTextSize(fontPixels);
         root.addView(terminalView, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
         setContentView(root);
+    }
 
+    private TextView toolbarAction(String text, String description, float textSize) {
+        TextView action = new TextView(this);
+        action.setText(text);
+        action.setTextSize(textSize);
+        action.setTextColor(foreground);
+        action.setGravity(Gravity.CENTER);
+        action.setContentDescription(description);
+        action.setFocusable(true);
+        action.setClickable(true);
+        action.setBackgroundColor(Color.TRANSPARENT);
+        return action;
+    }
+
+    private void startAndBindService() {
+        Intent service = new Intent(this, TerminalService.class);
         try {
-            TerminalEnvironment.Session environment = TerminalEnvironment.prepare(this);
-            documentBridge = new TerminalDocumentBridge(
-                    this, environment.home, this::reportBridgeMessage, savedInstanceState);
-            terminalSession = new TerminalSession("/system/bin/sh",
-                    environment.home.getAbsolutePath(), new String[] {"sh", "-i"},
-                    environment.environment, 10000, this);
-            terminalView.attachSession(terminalSession);
-            observeManagerRequests(environment.request);
-            terminalView.requestFocus();
+            if (Build.VERSION.SDK_INT >= 26) startForegroundService(service);
+            else startService(service);
+            bindService(service, serviceConnection, Context.BIND_AUTO_CREATE);
         } catch (Exception error) {
-            Log.e(TAG, "Could not prepare terminal", error);
+            Log.e(TAG, "Could not start terminal service", error);
             title.setText("Terminal unavailable: " + safeMessage(error));
+        }
+    }
+
+    private void requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission("android.permission.POST_NOTIFICATIONS")
+                != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[] {"android.permission.POST_NOTIFICATIONS"},
+                    NOTIFICATION_PERMISSION_REQUEST);
         }
     }
 
     @Override
     public void onConfigurationChanged(Configuration configuration) {
         super.onConfigurationChanged(configuration);
-        boolean dark = isDark();
-        int background = dark ? Color.rgb(17, 20, 23) : Color.rgb(248, 250, 252);
-        int foreground = dark ? Color.rgb(240, 245, 247) : Color.rgb(31, 37, 41);
-        int surface = dark ? Color.rgb(29, 34, 38) : Color.rgb(232, 237, 240);
-        configureTerminalColors(dark);
+        applyPalette();
+        configureTerminalColors(isDark());
         root.setBackgroundColor(background);
+        toolbar.setBackgroundColor(surface);
+        tabScroller.setBackgroundColor(surface);
         title.setTextColor(foreground);
-        title.setBackgroundColor(surface);
-        terminalView.setBackgroundColor(dark ? Color.rgb(13, 15, 17) : Color.WHITE);
+        addButton.setTextColor(foreground);
+        closeButton.setTextColor(foreground);
+        terminalView.setBackgroundColor(isDark() ? Color.rgb(13, 15, 17) : Color.WHITE);
+        renderServiceState();
         terminalView.invalidate();
     }
 
@@ -129,12 +221,113 @@ public final class TerminalActivity extends Activity
 
     @Override
     protected void onDestroy() {
-        if (requestObserver != null) requestObserver.stopWatching();
-        if (terminalSession != null) terminalSession.finishIfRunning();
+        stopRequestObserver();
+        if (terminalService != null) terminalService.detachClient(this);
+        if (serviceBound) unbindService(serviceConnection);
+        serviceBound = false;
+        terminalService = null;
         super.onDestroy();
     }
 
+    @Override
+    public void onServiceStateChanged() {
+        renderServiceState();
+        if (terminalService == null || terminalService.home() == null) return;
+        if (documentBridge == null) {
+            try {
+                documentBridge = new TerminalDocumentBridge(this, terminalService.home(),
+                        this::reportBridgeMessage, restoredState);
+                restoredState = null;
+            } catch (java.io.IOException error) {
+                Log.e(TAG, "Could not prepare document bridge", error);
+                reportBridgeMessage("Document bridge unavailable: " + safeMessage(error));
+            }
+        }
+        File request = terminalService.requestFile();
+        if (requestObserver == null && request != null) observeManagerRequests(request);
+        runDebugSessionTestIfRequested();
+    }
+
+    private void renderServiceState() {
+        if (title == null) return;
+        tabs.removeAllViews();
+        if (terminalService == null) {
+            title.setText("Connecting to Archphene Terminal");
+            closeButton.setEnabled(false);
+            return;
+        }
+        Throwable error = terminalService.preparationError();
+        if (error != null) {
+            title.setText("Terminal unavailable: " + safeMessage(error));
+            closeButton.setEnabled(false);
+            return;
+        }
+        List<TerminalService.SessionInfo> infos = terminalService.sessionInfos();
+        String active = terminalService.activeHandle();
+        TerminalService.SessionInfo activeInfo = null;
+        for (TerminalService.SessionInfo info : infos) {
+            boolean selected = info.handle.equals(active);
+            if (selected) activeInfo = info;
+            TextView tab = new TextView(this);
+            tab.setText(info.title);
+            tab.setTextSize(14);
+            tab.setTextColor(foreground);
+            tab.setGravity(Gravity.CENTER);
+            tab.setSingleLine(true);
+            tab.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            tab.setMinWidth(dp(72));
+            tab.setMaxWidth(dp(160));
+            tab.setPadding(dp(14), 0, dp(14), 0);
+            tab.setContentDescription((selected ? "Current session " : "Switch to ")
+                    + info.title);
+            tab.setBackground(new ColorDrawable(selected ? activeSurface : Color.TRANSPARENT));
+            tab.setOnClickListener(view -> terminalService.activate(info.handle));
+            LinearLayout.LayoutParams parameters = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, dp(36));
+            parameters.setMarginEnd(dp(4));
+            tabs.addView(tab, parameters);
+        }
+        TerminalSession session = terminalService.activeSession();
+        terminalView.attachSession(session);
+        if (activeInfo != null) {
+            title.setText(activeInfo.title);
+        } else if (terminalService.isPreparing()) {
+            title.setText("Preparing Archphene Terminal");
+        } else {
+            title.setText("No terminal sessions");
+        }
+        closeButton.setEnabled(session != null);
+        terminalView.requestFocus();
+    }
+
+    private void runDebugSessionTestIfRequested() {
+        if (debugSessionTestStarted || terminalService == null
+                || (getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) == 0) return;
+        int requested = getIntent().getIntExtra("archphene_test_terminal_sessions", 0);
+        if (requested < 1) return;
+        requested = Math.min(requested, 8);
+        debugSessionTestStarted = true;
+        while (terminalService.sessionInfos().size() < requested) {
+            terminalService.createSession();
+        }
+        int expected = requested;
+        root.postDelayed(() -> {
+            List<TerminalService.SessionInfo> infos = terminalService == null
+                    ? java.util.Collections.emptyList() : terminalService.sessionInfos();
+            StringBuilder pids = new StringBuilder();
+            for (TerminalService.SessionInfo info : infos) {
+                if (pids.length() > 0) pids.append(',');
+                pids.append(info.pid);
+            }
+            Log.i(TAG, "Terminal session probe count=" + infos.size()
+                    + " expected=" + expected + " pids=" + pids);
+            if (getIntent().getBooleanExtra(
+                    "archphene_test_finish_activity", false)) finish();
+        }, 1500);
+    }
+
     private void observeManagerRequests(File request) {
+        stopRequestObserver();
         requestObserver = new FileObserver(request.getParentFile().getAbsolutePath(),
                 FileObserver.CLOSE_WRITE | FileObserver.MOVED_TO) {
             @Override public void onEvent(int event, String path) {
@@ -143,7 +336,9 @@ public final class TerminalActivity extends Activity
                 try {
                     byte[] bytes;
                     try (FileInputStream input = new FileInputStream(request)) {
-                        if (request.length() > 4096) throw new SecurityException("Request is too large");
+                        if (request.length() > 4096) {
+                            throw new SecurityException("Request is too large");
+                        }
                         bytes = new byte[(int) request.length()];
                         int offset = 0;
                         while (offset < bytes.length) {
@@ -161,40 +356,65 @@ public final class TerminalActivity extends Activity
                             || fields[1].contains("\n") || fields[1].contains("\r")) {
                         throw new SecurityException("Invalid terminal request");
                     }
-                    if ("import".equals(fields[0]) || "export".equals(fields[0])) {
-                        if (documentBridge == null) {
-                            throw new IllegalStateException("Document bridge is unavailable");
-                        }
-                        documentBridge.request(fields[0], fields[1]);
-                    } else {
-                        Intent manager = new Intent("org.archpheneos.action.TERMINAL_REQUEST")
-                                .setClassName("org.archpheneos.manager",
-                                        "org.archpheneos.manager.TerminalRequestActivity")
-                                .putExtra("archphene_terminal_action", fields[0])
-                                .putExtra("archphene_terminal_query", fields[1])
-                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
-                                        | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-                        startActivity(manager);
-                    }
+                    runOnUiThread(() -> dispatchManagerRequest(fields[0], fields[1]));
                 } catch (Exception error) {
-                    Log.e(TAG, "Rejected terminal manager request", error);
-                } finally {
                     handlingRequest.set(false);
+                    Log.e(TAG, "Rejected terminal manager request", error);
                 }
             }
         };
         requestObserver.startWatching();
     }
 
+    private void dispatchManagerRequest(String action, String query) {
+        try {
+            if ("import".equals(action) || "export".equals(action)) {
+                if (documentBridge == null) {
+                    throw new IllegalStateException("Document bridge is unavailable");
+                }
+                documentBridge.request(action, query);
+            } else {
+                Intent manager = new Intent("org.archpheneos.action.TERMINAL_REQUEST")
+                        .setClassName("org.archpheneos.manager",
+                                "org.archpheneos.manager.TerminalRequestActivity")
+                        .putExtra("archphene_terminal_action", action)
+                        .putExtra("archphene_terminal_query", query)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                                | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                startActivity(manager);
+            }
+        } catch (Exception error) {
+            Log.e(TAG, "Rejected terminal manager request", error);
+            reportBridgeMessage(safeMessage(error));
+        } finally {
+            handlingRequest.set(false);
+        }
+    }
+
+    private void stopRequestObserver() {
+        if (requestObserver != null) requestObserver.stopWatching();
+        requestObserver = null;
+    }
+
     private void reportBridgeMessage(String message) {
         Log.i(TAG, message);
         runOnUiThread(() -> {
-            if (terminalSession == null || terminalSession.getEmulator() == null) return;
+            TerminalSession session = terminalService == null
+                    ? null : terminalService.activeSession();
+            if (session == null || session.getEmulator() == null) return;
             byte[] output = ("\r\narchphene: " + message + "\r\n")
                     .getBytes(StandardCharsets.UTF_8);
-            terminalSession.getEmulator().append(output, output.length);
+            session.getEmulator().append(output, output.length);
             terminalView.onScreenUpdated();
         });
+    }
+
+    private void applyPalette() {
+        boolean dark = isDark();
+        background = dark ? Color.rgb(17, 20, 23) : Color.rgb(248, 250, 252);
+        foreground = dark ? Color.rgb(240, 245, 247) : Color.rgb(31, 37, 41);
+        surface = dark ? Color.rgb(29, 34, 38) : Color.rgb(232, 237, 240);
+        activeSurface = dark ? Color.rgb(22, 58, 77) : Color.rgb(216, 238, 248);
     }
 
     private void configureTerminalColors(boolean dark) {
@@ -217,19 +437,16 @@ public final class TerminalActivity extends Activity
         if (keyboard != null) keyboard.showSoftInput(terminalView, InputMethodManager.SHOW_IMPLICIT);
     }
 
-    @Override public void onTextChanged(TerminalSession session) {
-        terminalView.onScreenUpdated();
+    @Override public void onTerminalTextChanged(TerminalSession session) {
+        if (terminalService != null && session == terminalService.activeSession()) {
+            terminalView.onScreenUpdated();
+        }
     }
-    @Override public void onTitleChanged(TerminalSession session) {
-        String value = session.getTitle();
-        title.setText(value == null || value.isEmpty() ? "Archphene Terminal" : value);
-    }
-    @Override public void onSessionFinished(TerminalSession session) {}
-    @Override public void onCopyTextToClipboard(TerminalSession session, String text) {
+    @Override public void onTerminalCopyRequested(TerminalSession session, String text) {
         ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
         if (clipboard != null) clipboard.setPrimaryClip(ClipData.newPlainText("Terminal", text));
     }
-    @Override public void onPasteTextFromClipboard(TerminalSession session) {
+    @Override public void onTerminalPasteRequested(TerminalSession session) {
         ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
         if (clipboard == null || !clipboard.hasPrimaryClip()) return;
         ClipData clip = clipboard.getPrimaryClip();
@@ -238,13 +455,11 @@ public final class TerminalActivity extends Activity
             if (text != null) session.write(text.toString());
         }
     }
-    @Override public void onBell(TerminalSession session) {}
-    @Override public void onColorsChanged(TerminalSession session) { terminalView.invalidate(); }
-    @Override public void onTerminalCursorStateChange(boolean state) { terminalView.invalidate(); }
-    @Override public void setTerminalShellPid(TerminalSession session, int pid) {
-        Log.i(TAG, "PTY shell pid=" + pid);
+    @Override public void onTerminalColorsChanged(TerminalSession session) {
+        if (terminalService != null && session == terminalService.activeSession()) {
+            terminalView.invalidate();
+        }
     }
-    @Override public Integer getTerminalCursorStyle() { return null; }
 
     @Override public float onScale(float scale) {
         if (scale < 0.9f || scale > 1.1f) {
@@ -277,7 +492,6 @@ public final class TerminalActivity extends Activity
         return false;
     }
     @Override public void onEmulatorSet() {}
-
     @Override public void logError(String tag, String message) { Log.e(tag, message); }
     @Override public void logWarn(String tag, String message) { Log.w(tag, message); }
     @Override public void logInfo(String tag, String message) { Log.i(tag, message); }

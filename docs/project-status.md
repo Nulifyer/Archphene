@@ -39,7 +39,7 @@ Local debug builds can remain multi-ABI. Release builds emit independently signe
 - Audio, notifications, printing, camera, drag-and-drop, accessibility, secrets/keyrings, URL handling, and remaining portals.
 - Broader Qt, GTK, SDL, Electron, and Rust-native compatibility.
 - GrapheneOS Pixel and sustained desktop-mode validation.
-- Terminal tabs/sessions, foreground-service lifecycle, persisted project-tree mappings, an Arch user shell, and manager progress returned to invoking commands, as described in [Terminal applications](terminal-apps.md).
+- Persisted project-tree mappings, an Arch user shell, and manager progress returned to invoking commands, as described in [Terminal applications](terminal-apps.md). The foreground-service-owned tab/session lifecycle is validated on 4 KB and 16 KB x86_64 emulators and physical AArch64.
 - Post-compositor Qt/GTK theme, density, font, focus, menu, and dialog consistency work.
 
 ## Package-manager efficiency rules

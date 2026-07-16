@@ -15,7 +15,7 @@ This is the prioritized completion queue for the Archphene Android application. 
   - [x] Generate package-specific Android labels, icons, source/runtime metadata, capabilities, and exact document intent resources.
   - [x] Persist and display bounded structured phase diagnostics, including legacy-job migration.
   - [x] Prove on the emulator with concurrent real package transactions that one resolution failure does not block an unrelated CLI package install.
-- [ ] Complete AArch64 package runtime support.
+- [x] Complete AArch64 package runtime support.
   - [x] Build a reproducible, checksum-cataloged AArch64 pacman/GnuPG/libarchive closure from official Arch Linux ARM repositories; verify every package against the pinned build-system key and cross-build matching patched glibc.
   - [x] Embed the verified AArch64 runtime and separate trust assets in the ARM manager, then prove package search, resolution, verification, staging, and Terminal publication on Samsung.
   - [x] Generate arm64-v8a desktop wrapper templates and prove a real Qt package through Android PackageInstaller and app-drawer launch.
@@ -27,9 +27,11 @@ This is the prioritized completion queue for the Archphene Android application. 
   - [x] Validate 4 KB and 16 KB ELF page compatibility. Runtime executables and published modules now fail closed before execution when an ELF load segment is incompatible; the AArch64 runtime is 64 KB-aligned, while current upstream Arch x86_64 packages remain 4 KB-only and are explicitly unsupported on 16 KB x86_64 Android until rebuilt.
   - [x] Clean up the complete Linux process tree when a wrapper exits. Managed launches use a dedicated process group, parent-death signal, cancellable execution registry, and final dedicated-UID descendant sweep.
 - [ ] Finish the Terminal product.
-  - Add multiple sessions/tabs, foreground-service lifecycle, manager progress returned to the invoking command, and persisted project-tree mappings.
-  - Select and package the user shell. Current bootstrap is Bionic sh; evaluate verified Arch bash first, then fish as an optional user choice.
-  - Keep the native Termux terminal renderer unless image protocols or other modern terminal features justify a compatible extension.
+  - [x] Add multiple sessions/tabs and a foreground-service lifecycle. PTYs survive Activity closure under a visible Android notification, close independently by process group, and die with the Terminal app process.
+  - [ ] Return manager progress and terminal results to the invoking command.
+  - [ ] Add persisted project-tree mappings.
+  - [ ] Select and package the user shell. Current bootstrap is Bionic sh; evaluate verified Arch bash first, then fish as an optional user choice.
+  - [x] Keep the native Termux terminal renderer unless image protocols or other modern terminal features justify a compatible extension.
 - [ ] Complete Android capability and document brokers.
   - Add manager-owned user documents, multi-document conflict handling, persisted folder grants, and explicit permission/capability APIs.
   - Decide whether an optional broad file-access flow is justified. Prefer user-selected Storage Access Framework trees; do not request all-files access by default.

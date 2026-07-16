@@ -2,6 +2,7 @@
 #include <fcntl.h>
 #include <jni.h>
 #include <signal.h>
+#include <sys/prctl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -62,6 +63,7 @@ static int create_subprocess(JNIEnv* env,
     struct winsize sz = { .ws_row = (unsigned short) rows, .ws_col = (unsigned short) columns, .ws_xpixel = (unsigned short) (columns * cell_width), .ws_ypixel = (unsigned short) (rows * cell_height)};
     ioctl(ptm, TIOCSWINSZ, &sz);
 
+    pid_t parent_pid = getpid();
     pid_t pid = fork();
     if (pid < 0) {
         return throw_runtime_exception(env, "Fork failed");
@@ -75,7 +77,8 @@ static int create_subprocess(JNIEnv* env,
         sigprocmask(SIG_UNBLOCK, &signals_to_unblock, 0);
 
         close(ptm);
-        setsid();
+        if (prctl(PR_SET_PDEATHSIG, SIGKILL) != 0 || getppid() != parent_pid) _exit(125);
+        if (setsid() < 0) _exit(125);
 
         int pts = open(devname, O_RDWR);
         if (pts < 0) exit(-1);
