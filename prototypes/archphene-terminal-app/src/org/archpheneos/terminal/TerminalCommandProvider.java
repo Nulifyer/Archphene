@@ -31,7 +31,7 @@ public final class TerminalCommandProvider extends ContentProvider {
                 || extras == null) throw new SecurityException("Invalid Terminal result request");
         requireManagerCaller();
         String phase = bounded(extras.getString("phase", "unknown"), 64);
-        String status = bounded(extras.getString("status", ""), 1024);
+        String status = bounded(extras.getString("status", ""), 8192);
         String outcome = bounded(extras.getString("outcome", "running"), 16);
         int percent = Math.max(0, Math.min(100, extras.getInt("percent", 0)));
         if (!phase.matches("[a-zA-Z0-9._ -]{1,64}")
@@ -62,14 +62,15 @@ public final class TerminalCommandProvider extends ContentProvider {
                     value -> value == Integer.MAX_VALUE ? 1 : value + 1);
             String safePhase = bounded(phase, 64).replace((char) 9, ' ')
                     .replace((char) 10, ' ').replace((char) 13, ' ');
-            String safeStatus = bounded(status, 1024).replace((char) 9, ' ')
+            String safeStatus = bounded(status, 8192).replace((char) 9, ' ')
                     .replace((char) 10, ' ').replace((char) 13, ' ');
             String line = new StringBuilder("v1").append((char) 9)
                     .append(sequence).append((char) 9).append(safePhase)
                     .append((char) 9).append(Math.max(0, Math.min(100, percent)))
                     .append((char) 9).append(terminal ? "1" : "0")
                     .append((char) 9).append(outcome).append((char) 9)
-                    .append(safeStatus).append((char) 10).toString();            File temporary = new File(responses, requestId + ".response.tmp");
+                    .append(safeStatus).append((char) 10).toString();
+            File temporary = new File(responses, requestId + ".response.tmp");
             if (temporary.exists() && !temporary.delete()) {
                 throw new IllegalStateException("Could not reset Terminal result");
             }

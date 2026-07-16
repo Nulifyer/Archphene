@@ -29,11 +29,11 @@ This is the prioritized completion queue for the Archphene Android application. 
 - [ ] Finish the Terminal product.
   - [x] Add multiple sessions/tabs and a foreground-service lifecycle. PTYs survive Activity closure under a visible Android notification, close independently by process group, and die with the Terminal app process.
   - [x] Return manager progress and terminal results to the invoking command. Per-request files correlate exact search/install/remove/upgrade requests with durable manager jobs; the signed manager reports bounded phases and terminal outcomes through a signature-protected Terminal provider.
-  - [ ] Add persisted project-tree mappings.
+  - [x] Add persisted project-tree mappings. User-selected SAF trees retain scoped read/write grants and synchronize through stable `$HOME/Projects/<alias>` POSIX mirrors with bounded traversal, conflict copies, deferred deletions, symlink rejection, grant release, and restart persistence.
   - [ ] Select and package the user shell. Current bootstrap is Bionic sh; evaluate verified Arch bash first, then fish as an optional user choice.
   - [x] Keep the native Termux terminal renderer unless image protocols or other modern terminal features justify a compatible extension.
 - [ ] Complete Android capability and document brokers.
-  - Add manager-owned user documents, multi-document conflict handling, persisted folder grants, and explicit permission/capability APIs.
+  - Add manager-owned GUI-app documents, multi-document conflict handling, and explicit permission/capability APIs. Terminal persisted folder grants and guarded mirror synchronization are complete.
   - Decide whether an optional broad file-access flow is justified. Prefer user-selected Storage Access Framework trees; do not request all-files access by default.
 - [ ] Complete platform compatibility.
   - Audio, notifications, URL handling, printing, camera, drag-and-drop, accessibility, secrets/keyrings, and remaining portals.

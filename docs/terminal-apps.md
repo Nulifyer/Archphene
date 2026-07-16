@@ -30,8 +30,14 @@ Installing btop does not implicitly install curl. Commands become available only
 | `pacman -Syu` | Start an installed-package update check; pinned versions remain unchanged. |
 | `archphene-import [home-directory]` | Choose an Android document and copy it into visible Terminal home storage. The default destination is the home Downloads directory. |
 | `archphene-export <home-file>` | Choose an Android save location and copy a visible Terminal home file through a scoped URI grant. |
+| `archphene-project add <alias>` | Choose an Android folder once, persist its read/write grant, and create `$HOME/Projects/<alias>`. |
+| `archphene-project sync <alias>` | Synchronize the local POSIX mirror and its granted Android folder without another prompt. |
+| `archphene-project list`, `path <alias>` | List mappings and revoked-grant state, or print an active project's stable Terminal path. |
+| `archphene-project remove <alias>` | Release the persisted grant and remove the mapping while retaining local files. |
 
 Imports use collision-safe names and publish only after a bounded copy completes. Exports require one visible regular file. Both operations reject dot-directories and paths outside Terminal home; neither requests broad storage access.
+
+Android's Storage Access Framework exposes document URIs, not a mountable POSIX directory. Project mappings therefore use a bridge-managed local mirror. Explicit sync supports ordinary background Linux file access, nested directories, dotfiles, and process-restart persistence. It bounds each side to 10,000 entries and 2 GiB, rejects symlinks and path escapes, preserves simultaneous Android edits as content-hash-suffixed `.android-conflict-*` files, and defers deletions instead of risking silent data loss. External changes become visible after sync; this is not a live FUSE mount.
 
 Each shell request has a bounded unique identifier and atomically published request/response files, so tabbed sessions cannot overwrite each other. The manager correlates install jobs with that identifier and streams resolve, download, install, complete, cancellation, and error states through a provider protected by the release-signature permission and an explicit manager UID/package check. Correlation survives manager job recovery. One package failure does not stop independent jobs.
 
@@ -50,9 +56,9 @@ The Terminal companion uses an ordinary Android application UID. It does not rec
 
 ## Remaining terminal work
 
-1. Add persisted project-tree grants and stable Linux path mappings for repeated background access.
-2. Allow an installed Arch shell such as bash to replace the Bionic bootstrap shell.
-3. Add capability metadata for packages requiring restricted `/proc`, devices, sockets, or Android bridge APIs.
+1. Allow an installed Arch shell such as bash to replace the Bionic bootstrap shell.
+2. Add capability metadata for packages requiring restricted `/proc`, devices, sockets, or Android bridge APIs.
+3. Evaluate an opt-in automatic project-sync policy with explicit conflict and battery/network controls.
 
 Kitty is not the default frontend because it is itself a GPU-accelerated Wayland application and would add compositor and GPU dependencies before displaying a shell or TUI.
 
@@ -61,5 +67,6 @@ Kitty is not the default frontend because it is itself a GPU-accelerated Wayland
 - [Termux application and terminal modules](https://github.com/termux/termux-app)
 - [Android native ABIs](https://developer.android.com/ndk/guides/abis)
 - [Android background execution limits](https://developer.android.com/topic/performance/power/power-details)
+- [Android shared documents and persisted directory access](https://developer.android.com/training/data-storage/shared/documents-files)
 - [Arch Linux package database](https://archlinux.org/packages/)
 - [btop source](https://github.com/aristocratos/btop)

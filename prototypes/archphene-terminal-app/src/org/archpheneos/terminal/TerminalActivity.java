@@ -386,7 +386,7 @@ public final class TerminalActivity extends Activity
                     if (fields.length != 4 || !"v1".equals(fields[0])
                             || !fileId.equals(fields[1])
                             || !fields[1].matches("[a-zA-Z0-9._-]{1,64}")
-                            || !fields[2].matches("search|install|remove|upgrade|import|export")
+                            || !fields[2].matches("search|install|remove|upgrade|import|export|project-add|project-sync|project-list|project-path|project-remove")
                             || fields[3].length() > 512
                             || fields[3].contains("\n") || fields[3].contains("\r")) {
                         throw new SecurityException("Invalid terminal request");
@@ -403,13 +403,12 @@ public final class TerminalActivity extends Activity
 
     private void dispatchManagerRequest(String requestId, String action, String query) {
         try {
-            if ("import".equals(action) || "export".equals(action)) {
+            if ("import".equals(action) || "export".equals(action)
+                    || action.startsWith("project-")) {
                 if (documentBridge == null) {
                     throw new IllegalStateException("Document bridge is unavailable");
                 }
-                documentBridge.request(action, query);
-                TerminalCommandProvider.publish(this, requestId, action, 100,
-                        true, "success", "Android document picker opened");
+                documentBridge.request(requestId, action, query);
             } else {
                 Intent manager = new Intent("org.archpheneos.action.TERMINAL_REQUEST")
                         .setClassName("org.archpheneos.manager",

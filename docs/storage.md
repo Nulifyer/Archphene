@@ -50,8 +50,10 @@ If the Linux app wants to open a user document, save a user document, work insid
 - Android permission dialogs for dangerous permissions
 - bridge-managed grant records
 
-After the user grants a project folder, background reads/writes inside that granted folder can proceed without prompting again until the grant is revoked.
-The Terminal companion now provides the first concrete Android-facing side of this split. Its visible home entries are available as **Archphene Home** through a terminal-owned `DocumentsProvider`; dotfiles and runtime state are excluded. This permits Android Files and share/document flows to use scoped content-URI grants while commands continue to use ordinary paths inside the terminal sandbox. The `archphene-import` and `archphene-export` terminal commands now provide explicit one-document transfers. Direct project-tree access and persisted tree-to-path translation remain path-broker work.
+After the user grants a project folder, the bridge can continue using its content URIs without prompting again until the grant is revoked.
+The Terminal companion provides the first concrete Android-facing side of this split. Its visible home entries are available as **Archphene Home** through a terminal-owned `DocumentsProvider`; dotfiles and runtime state are excluded. This permits Android Files and share/document flows to use scoped content-URI grants while commands continue to use ordinary paths inside the terminal sandbox. `archphene-import` and `archphene-export` provide explicit one-document transfers. `archphene-project add <alias>` persists a selected tree grant and maps a synchronized local POSIX mirror at `$HOME/Projects/<alias>`.
+
+SAF is not a POSIX filesystem and unprivileged Android cannot mount arbitrary document trees with FUSE. The current project bridge therefore synchronizes explicitly rather than intercepting every filesystem syscall. It preserves simultaneous edits as conflict copies, defers deletions, rejects symlinks/path escapes, and retains the local mirror when a mapping is removed. A future live path broker would require OS support or a descriptor/RPC interception layer with clearly documented compatibility limits.
 
 ## Virtual Linux Layout
 
@@ -80,11 +82,11 @@ Recommended layout:
 
 /home/user/Documents
 /home/user/Downloads
-/home/user/Projects
-  bridge-brokered user-visible storage
+/home/user/Projects/<name>
+  synchronized local mirror of a persisted Android tree grant
 
 /mnt/projects/<name>
-  persisted tree grant backed by Android SAF
+  reserved future live path-broker view; not currently exposed
 ```
 
 The Linux app can use normal paths. The bridge decides whether the backing storage is private app data, a read-only runtime module, or an Android content URI.
@@ -100,8 +102,8 @@ The Linux app can use normal paths. The bridge decides whether the backing stora
 | `/home/user/.config` | app-private default, opt-in shared profile later | no prompt unless importing/exporting | app sandbox or bridge broker |
 | `Open File` | content URI from `ACTION_OPEN_DOCUMENT` | prompt per document unless persisted | Android DocumentsUI |
 | `Save As` or export | content URI from `ACTION_CREATE_DOCUMENT` | prompt per target | Android DocumentsUI |
-| Project folder | persisted tree URI from `ACTION_OPEN_DOCUMENT_TREE` | prompt once per folder | Android DocumentsUI |
-| Background project file read/write | previously granted tree URI | no repeat prompt | persisted URI permission |
+| Project folder | local mirror plus persisted tree URI from `ACTION_OPEN_DOCUMENT_TREE` | prompt once per folder | Android DocumentsUI and explicit sync |
+| Background project file read/write | `$HOME/Projects/<name>` local mirror | no repeat prompt | Terminal sandbox; bridge sync uses persisted URI permission |
 | Camera, mic, notifications, contacts | Android runtime permissions | prompt through Android permission APIs | Android PermissionController |
 
 ## Home Folder Rule
@@ -166,9 +168,8 @@ The emulator regression proves parser rejection and both sides of the access bou
 
 ## Next Milestones
 
-1. Implement a path broker that maps Linux paths to private files, runtime modules, and SAF grants.
-2. Store persisted tree grants in bridge-managed state.
-3. Add grant listing, revocation, and missing-grant errors.
-4. Add a small path-broker C API before attempting GUI apps.
-5. Add a syscall probe for app-private path operations: `mkdir`, `mkdirat`, `open`, `openat`, `rename`, `unlink`, `fsync`, and `stat`.
+1. Extend the persisted-tree model from Terminal into manager-owned GUI application document brokers.
+2. Add a small descriptor/RPC path-broker C API before claiming live SAF path translation.
+3. Add automatic-sync policy only after conflict, lifecycle, and power behavior are defined.
+4. Add a syscall probe for app-private path operations: `mkdir`, `mkdirat`, `open`, `openat`, `rename`, `unlink`, `fsync`, and `stat`.
 

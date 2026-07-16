@@ -385,6 +385,8 @@ final class TerminalEnvironment {
         StringBuilder rc = new StringBuilder();
         rc.append("export HOME=").append(quote(home.getAbsolutePath())).append('\n');
         rc.append("export TMPDIR=").append(quote(tmp.getAbsolutePath())).append('\n');
+        rc.append("export ARCHPHENE_PROJECTS=").append(
+                quote(new File(home, "Projects").getAbsolutePath())).append('\n');
         rc.append("export XDG_CONFIG_HOME=").append(quote(config.getAbsolutePath())).append('\n');
         rc.append("export XDG_CACHE_HOME=").append(quote(cache.getAbsolutePath())).append('\n');
         rc.append("export TERM=xterm-256color COLORTERM=truecolor LANG=C.UTF-8 LC_ALL=C.UTF-8\n");
@@ -442,6 +444,13 @@ final class TerminalEnvironment {
         rc.append("archphene-export() {\n")
                 .append("  [ \"$#\" -eq 1 ] || { echo 'usage: archphene-export <home-file>' >&2; return 2; }\n")
                 .append("  _archphene_manager_request export \"$1\"\n}\n");
+        rc.append("archphene-project() {\n")
+                .append("  _ap_project_action=\"$1\"; shift 2>/dev/null || true\n")
+                .append("  case \"$_ap_project_action\" in\n")
+                .append("    add|sync|remove|path) [ \"$#\" -eq 1 ] || { echo 'usage: archphene-project {add|sync|remove|path} <alias>' >&2; return 2; }; _archphene_manager_request \"project-$_ap_project_action\" \"$1\" ;;\n")
+                .append("    list) [ \"$#\" -eq 0 ] || { echo 'usage: archphene-project list' >&2; return 2; }; _archphene_manager_request project-list all ;;\n")
+                .append("    *) echo 'usage: archphene-project {add|sync|list|path|remove} [alias]' >&2; return 2 ;;\n")
+                .append("  esac\n}\n");
         rc.append("pacman() {\n  case \"$1\" in\n")
                 .append("    -Q) cat ").append(quote(installed.getAbsolutePath())).append(" ;;\n")
                 .append("    -Qs) shift; grep -i -- \"$*\" ").append(quote(installed.getAbsolutePath())).append(" || true ;;\n")
