@@ -26,4 +26,14 @@ int archphene_android_accessibility_event(
         int node_id, const char *type, char *response, size_t response_size);
 int archphene_android_take_accessibility_action(
         int timeout_millis, char *response, size_t response_size);
+
+int archphene_android_store_secret(
+        int secret_fd, const char *id, const char *label, const char *attributes_json,
+        char *response, size_t response_size);
+int archphene_android_read_secret(
+        int output_fd, const char *id, char *response, size_t response_size);
+int archphene_android_delete_secret(
+        const char *id, char *response, size_t response_size);
+int archphene_android_list_secrets(
+        int output_fd, char *response, size_t response_size);
 #endif

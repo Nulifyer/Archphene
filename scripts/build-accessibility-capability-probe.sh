@@ -25,6 +25,7 @@ javac --release 17 -classpath "$platform" -d "$out/classes" \
   "$app/src/org/archphene/bridge/ProbeAccessibilityService.java" \
   "$root/prototypes/shared-android-bridge/src/org/archphene/bridge/AndroidCameraIntegration.java" \
   "$root/prototypes/shared-android-bridge/src/org/archphene/bridge/ArchpheneAccessibilityBridge.java" \
+  "$root/prototypes/shared-android-bridge/src/org/archphene/bridge/AndroidSecretStore.java" \
   "$root/prototypes/shared-android-bridge/src/org/archphene/bridge/AndroidCapabilityBroker.java" \
   "$root/prototypes/shared-android-bridge/src/org/archphene/bridge/AndroidPdfPrintAdapter.java" \
   "$root/prototypes/shared-android-bridge/src/org/archphene/bridge/BridgeCapabilities.java"

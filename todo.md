@@ -44,15 +44,17 @@ This is the prioritized completion queue for the Archphene Android application. 
   - [x] Add microphone capture with an explicit `RECORD_AUDIO` request and separate input capability; validate grant, denial/no-reprompt, privacy-switch silence, process cleanup, and real nonzero capture on x86_64 emulator and physical AArch64.
   - [x] Add capability-scoped bidirectional plain-text drag-and-drop between Android and standard Wayland data devices; validate copy negotiation, bounded payload transfer, completion, cancellation, and resource cleanup on x86_64 emulator and physical AArch64.
   - [x] Complete URI/file drag-and-drop through the SAF/document broker without exposing raw `content://` URIs to Linux applications; validate protocol negotiation, import/writeback, visible-home export, exact URI grants, denial without grants, and cleanup on x86_64 emulator and physical AArch64.
-  - [ ] Add explicit Android capability APIs for camera, accessibility, and secrets/keyrings.
+  - [ ] Complete camera, accessibility, and secrets/keyrings integration.
     - [x] Add a capability-scoped Camera2 permission/state and bounded one-shot JPEG descriptor API; validate the real Android grant and denial/no-reprompt paths plus 1280x720 capture on x86_64 emulator and physical AArch64.
     - [ ] Add the private PipeWire producer and XDG Camera portal adapter required by unmodified Linux camera consumers.
     - [x] Add a bounded virtual-node accessibility tree, Android framework events/focus, and reverse click/edit/scroll action queue; validate through a test-only AccessibilityService on x86_64 emulator and physical AArch64.
     - [ ] Add the private AT-SPI2 D-Bus adapter and secondary-window semantic ownership required by unmodified Qt/GTK applications.
+    - [x] Add a per-wrapper Android Keystore-backed encrypted secret store with bounded descriptor APIs for store/read/list/delete; validate ciphertext, metadata, overwrite, process-restart persistence, limits, deletion, lifecycle, and no log exposure on x86_64 emulator and physical AArch64.
+    - [ ] Add a private Secret Service D-Bus adapter so unmodified Qt/GTK keyring clients use the encrypted Android store.
   - [x] Reject broad all-files access as the default. Use user-selected Storage Access Framework documents and trees; reconsider an optional advanced flow only with a concrete compatibility requirement.
 - [ ] Complete platform compatibility.
   - Rebuild or relocate the bundled x86_64 manager tools and glibc loader so the 16 KB control-plane APK does not trigger Android's page-size warning. Package execution already rejects incompatible 4 KB upstream Arch binaries before publication.
-  - Streaming XDG Camera/PipeWire, AT-SPI2 accessibility adapter, secrets/keyrings, and remaining portals.
+  - Streaming XDG Camera/PipeWire, AT-SPI2 accessibility adapter, Secret Service D-Bus adapter, and remaining portals.
   - Broader Qt, GTK, SDL, Electron, Rust-native, XWayland, Vulkan, and zero-copy GPU validation.
   - General secondary-window policy for phone, tablet, freeform, and external displays.
 - [ ] Complete end-user release and update lifecycle.

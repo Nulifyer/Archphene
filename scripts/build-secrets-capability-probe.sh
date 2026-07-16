@@ -7,7 +7,7 @@ abi="${ANDROID_ABI:?ANDROID_ABI is required}"
 build_tools_version="${ANDROID_BUILD_TOOLS_VERSION:-36.0.0}"
 bt="$sdk/build-tools/$build_tools_version"
 platform="$sdk/platforms/android-36/android.jar"
-app="$root/prototypes/camera-capability-probe"
+app="$root/prototypes/secrets-capability-probe"
 out="$app/out-$abi"
 ndk_version="${NDK_VERSION:-29.0.14206865}"
 toolchain="$sdk/ndk/$ndk_version/toolchains/llvm/prebuilt/linux-x86_64"
@@ -23,7 +23,7 @@ mkdir -p "$out"/{gen,classes,dex,package/lib/$abi}
 "$bt/aapt2" link -o "$out/unsigned.apk" -I "$platform" \
   --manifest "$app/AndroidManifest.xml" --java "$out/gen"
 javac --release 17 -classpath "$platform" -d "$out/classes" \
-  "$app/src/org/archphene/bridge/CameraProbeActivity.java" \
+  "$app/src/org/archphene/bridge/SecretsProbeActivity.java" \
   "$root/prototypes/shared-android-bridge/src/org/archphene/bridge/AndroidCameraIntegration.java" \
   "$root/prototypes/shared-android-bridge/src/org/archphene/bridge/ArchpheneAccessibilityBridge.java" \
   "$root/prototypes/shared-android-bridge/src/org/archphene/bridge/AndroidSecretStore.java" \
@@ -35,12 +35,12 @@ mapfile -d '' class_files < <(find "$out/classes" -type f -name '*.class' -print
 "$toolchain/bin/${target}29-clang" -DARCHPHENE_CAPABILITY_PROBE_MAIN \
   -fPIE -pie -O2 -Wall -Wextra -Werror \
   "$root/native/archphene-android-capability/archphene_android.c" \
-  -o "$out/package/lib/$abi/libarchphene_camera_probe.so"
+  -o "$out/package/lib/$abi/libarchphene_secrets_probe.so"
 (cd "$out/dex" && jar uf "$out/unsigned.apk" classes.dex)
-(cd "$out/package" && jar uf "$out/unsigned.apk" "lib/$abi/libarchphene_camera_probe.so")
+(cd "$out/package" && jar uf "$out/unsigned.apk" "lib/$abi/libarchphene_secrets_probe.so")
 "$bt/zipalign" -f 4 "$out/unsigned.apk" "$out/aligned.apk"
 "$bt/apksigner" sign --ks "$KEYSTORE_PATH" --ks-key-alias "$KEY_ALIAS" \
   --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEY_PASSWORD \
-  --out "$out/archphene-camera-probe.apk" "$out/aligned.apk"
-"$bt/apksigner" verify --verbose "$out/archphene-camera-probe.apk"
-echo "Camera capability probe APK: $out/archphene-camera-probe.apk"
+  --out "$out/archphene-secrets-probe.apk" "$out/aligned.apk"
+"$bt/apksigner" verify --verbose "$out/archphene-secrets-probe.apk"
+echo "Secrets capability probe APK: $out/archphene-secrets-probe.apk"

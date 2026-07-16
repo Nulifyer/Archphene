@@ -17,11 +17,12 @@
 #define MAX_REQUEST 16384
 #define MAX_FIELD 8192
 
-static int base64url(const char *input, char *output, size_t output_size) {
+static int base64url_value(
+        const char *input, char *output, size_t output_size, bool allow_empty) {
     static const char alphabet[] =
             "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     size_t length = input == NULL ? 0 : strlen(input);
-    if (length == 0 || length > MAX_FIELD) {
+    if ((!allow_empty && length == 0) || length > MAX_FIELD) {
         errno = EINVAL;
         return -1;
     }
@@ -45,6 +46,10 @@ static int base64url(const char *input, char *output, size_t output_size) {
     }
     output[target] = '\0';
     return 0;
+}
+
+static int base64url(const char *input, char *output, size_t output_size) {
+    return base64url_value(input, output, output_size, false);
 }
 
 static int broker_request_with_fd(
@@ -116,17 +121,22 @@ static int broker_request_with_fd(
         written += (size_t)count;
     }
     size_t received = 0;
+    bool complete = false;
     while (received + 1 < response_size) {
         char value;
         ssize_t count = read(socket_fd, &value, 1);
         if (count < 0 && errno == EINTR) continue;
-        if (count <= 0 || value == '\n') break;
+        if (count <= 0) break;
+        if (value == '\n') {
+            complete = true;
+            break;
+        }
         if (value != '\r') response[received++] = value;
     }
     response[received] = '\0';
     close(socket_fd);
-    if (received == 0) {
-        errno = EPROTO;
+    if (!complete || received == 0) {
+        errno = received + 1 >= response_size ? ENOSPC : EPROTO;
         return -1;
     }
     return strncmp(response, "OK", 2) == 0
@@ -280,9 +290,75 @@ int archphene_android_take_accessibility_action(
     return broker_request(request, response, response_size);
 }
 
+int archphene_android_store_secret(
+        int secret_fd, const char *id, const char *label, const char *attributes_json,
+        char *response, size_t response_size) {
+    char encoded_id[MAX_FIELD * 2];
+    char encoded_label[MAX_FIELD * 2];
+    char encoded_attributes[MAX_FIELD * 2];
+    char request[MAX_REQUEST];
+    if (secret_fd < 0 || label == NULL
+            || base64url(id, encoded_id, sizeof(encoded_id)) != 0
+            || base64url_value(label, encoded_label, sizeof(encoded_label), true) != 0
+            || base64url(attributes_json, encoded_attributes,
+                    sizeof(encoded_attributes)) != 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    int length = snprintf(request, sizeof(request),
+            "ARCHPHENE/1\tSTORE_SECRET\t%s\t%s\t%s",
+            encoded_id, encoded_label, encoded_attributes);
+    if (length <= 0 || (size_t)length >= sizeof(request)) {
+        errno = ENOSPC;
+        return -1;
+    }
+    return broker_request_with_fd(request, secret_fd, response, response_size);
+}
+
+int archphene_android_read_secret(
+        int output_fd, const char *id, char *response, size_t response_size) {
+    char encoded_id[MAX_FIELD * 2];
+    char request[MAX_REQUEST];
+    if (output_fd < 0 || base64url(id, encoded_id, sizeof(encoded_id)) != 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    int length = snprintf(request, sizeof(request),
+            "ARCHPHENE/1\tREAD_SECRET\t%s", encoded_id);
+    if (length <= 0 || (size_t)length >= sizeof(request)) {
+        errno = ENOSPC;
+        return -1;
+    }
+    return broker_request_with_fd(request, output_fd, response, response_size);
+}
+
+int archphene_android_delete_secret(
+        const char *id, char *response, size_t response_size) {
+    char encoded_id[MAX_FIELD * 2];
+    char request[MAX_REQUEST];
+    if (base64url(id, encoded_id, sizeof(encoded_id)) != 0) return -1;
+    int length = snprintf(request, sizeof(request),
+            "ARCHPHENE/1\tDELETE_SECRET\t%s", encoded_id);
+    if (length <= 0 || (size_t)length >= sizeof(request)) {
+        errno = ENOSPC;
+        return -1;
+    }
+    return broker_request(request, response, response_size);
+}
+
+int archphene_android_list_secrets(
+        int output_fd, char *response, size_t response_size) {
+    if (output_fd < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    return broker_request_with_fd(
+            "ARCHPHENE/1\tLIST_SECRETS", output_fd, response, response_size);
+}
+
 #ifdef ARCHPHENE_CAPABILITY_PROBE_MAIN
 int main(int argc, char **argv) {
-    char response[256];
+    char response[MAX_REQUEST];
     int result;
     int argument = 1;
     if (argc > 3 && strcmp(argv[1], "--socket") == 0) {
@@ -379,13 +455,47 @@ int main(int argc, char **argv) {
         }
         result = archphene_android_take_accessibility_action(
                 (int)timeout, response, sizeof(response));
+    } else if (remaining == 5 && strcmp(argv[argument], "store-secret") == 0) {
+        int secret_fd = open(argv[argument + 1], O_RDONLY | O_CLOEXEC);
+        if (secret_fd < 0) {
+            perror("open secret input");
+            return 66;
+        }
+        result = archphene_android_store_secret(
+                secret_fd, argv[argument + 2], argv[argument + 3], argv[argument + 4],
+                response, sizeof(response));
+        close(secret_fd);
+    } else if (remaining == 3 && strcmp(argv[argument], "read-secret") == 0) {
+        int output_fd = open(argv[argument + 1],
+                O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+        if (output_fd < 0) {
+            perror("open secret output");
+            return 66;
+        }
+        result = archphene_android_read_secret(
+                output_fd, argv[argument + 2], response, sizeof(response));
+        close(output_fd);
+    } else if (remaining == 2 && strcmp(argv[argument], "delete-secret") == 0) {
+        result = archphene_android_delete_secret(
+                argv[argument + 1], response, sizeof(response));
+    } else if (remaining == 2 && strcmp(argv[argument], "list-secrets") == 0) {
+        int output_fd = open(argv[argument + 1],
+                O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+        if (output_fd < 0) {
+            perror("open secret index output");
+            return 66;
+        }
+        result = archphene_android_list_secrets(output_fd, response, sizeof(response));
+        close(output_fd);
     } else {
         fprintf(stderr, "usage: %s [--socket @NAME] open-uri URI | "
                 "notify ID TITLE BODY | withdraw ID | print PDF TITLE | "
                 "request-audio-input | check-audio-input | request-camera | "
                 "check-camera | capture-camera-jpeg FILE WIDTH HEIGHT front|back | "
                 "publish-accessibility-tree FILE | accessibility-event NODE TYPE | "
-                "take-accessibility-action TIMEOUT_MS\n", argv[0]);
+                "take-accessibility-action TIMEOUT_MS | "
+                "store-secret FILE ID LABEL ATTRIBUTES_JSON | "
+                "read-secret OUTPUT ID | delete-secret ID | list-secrets OUTPUT\n", argv[0]);
         return 64;
     }
     if (result < 0) {

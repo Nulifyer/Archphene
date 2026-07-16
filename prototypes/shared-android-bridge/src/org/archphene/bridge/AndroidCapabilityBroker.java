@@ -62,6 +62,7 @@ final class AndroidCapabilityBroker implements Closeable {
     private final Activity activity;
     private final AndroidCameraIntegration cameraIntegration;
     private final ArchpheneAccessibilityBridge accessibilityBridge;
+    private final AndroidSecretStore secretStore;
     private final Set<String> capabilities;
     private final AtomicBoolean running = new AtomicBoolean();
     private LocalServerSocket server;
@@ -96,6 +97,7 @@ final class AndroidCapabilityBroker implements Closeable {
         this.capabilities = capabilities;
         this.accessibilityBridge = accessibilityBridge;
         cameraIntegration = new AndroidCameraIntegration(activity);
+        secretStore = new AndroidSecretStore(activity.getFilesDir());
     }
 
     void start() throws IOException {
@@ -164,6 +166,9 @@ final class AndroidCapabilityBroker implements Closeable {
         }
         if (!"PRINT_PDF".equals(fields[1]) && !"CAPTURE_CAMERA_JPEG".equals(fields[1])
                 && !"PUBLISH_ACCESSIBILITY_TREE".equals(fields[1])
+                && !"STORE_SECRET".equals(fields[1])
+                && !"READ_SECRET".equals(fields[1])
+                && !"LIST_SECRETS".equals(fields[1])
                 && descriptors != null && descriptors.length != 0) {
             throw new IllegalArgumentException("Unexpected capability descriptors");
         }
@@ -228,6 +233,37 @@ final class AndroidCapabilityBroker implements Closeable {
                 requireCapability(BridgeCapabilities.ACCESSIBILITY);
                 return requireAccessibilityBridge().takeAction(
                         parseBoundedInt(fields[2], 0, 250, "accessibility timeout"));
+            case "STORE_SECRET":
+                requireFields(fields, 5);
+                requireCapability(BridgeCapabilities.SECRETS);
+                secretStore.store(
+                        decode(fields[2], MAX_ID_BYTES),
+                        decodeAllowEmpty(fields[3], MAX_TITLE_BYTES),
+                        decode(fields[4], 8 * 1024),
+                        requireRegularDescriptor(descriptors, "Secret input"));
+                return "OK";
+            case "READ_SECRET": {
+                requireFields(fields, 3);
+                requireCapability(BridgeCapabilities.SECRETS);
+                AndroidSecretStore.ReadResult result = secretStore.read(
+                        decode(fields[2], MAX_ID_BYTES),
+                        requireRegularDescriptor(descriptors, "Secret output"));
+                if (result == null) return "ERROR\tNOT_FOUND";
+                return "OK\t" + encode(result.label) + "\t"
+                        + encode(result.attributes) + "\t" + result.secretBytes;
+            }
+            case "DELETE_SECRET":
+                requireFields(fields, 3);
+                requireCapability(BridgeCapabilities.SECRETS);
+                if (!secretStore.delete(decode(fields[2], MAX_ID_BYTES))) {
+                    throw new IOException("Could not delete secret record");
+                }
+                return "OK";
+            case "LIST_SECRETS":
+                requireFields(fields, 2);
+                requireCapability(BridgeCapabilities.SECRETS);
+                return "OK\t" + secretStore.list(
+                        requireRegularDescriptor(descriptors, "Secret index output"));
             default:
                 throw new IllegalArgumentException("Unknown capability request");
         }
@@ -698,13 +734,21 @@ final class AndroidCapabilityBroker implements Closeable {
     }
 
     private static String decode(String value, int maxBytes) {
+        return decode(value, maxBytes, false);
+    }
+
+    private static String decodeAllowEmpty(String value, int maxBytes) {
+        return decode(value, maxBytes, true);
+    }
+
+    private static String decode(String value, int maxBytes, boolean allowEmpty) {
         byte[] decoded;
         try {
             decoded = Base64.decode(value, Base64.URL_SAFE | Base64.NO_WRAP);
         } catch (IllegalArgumentException error) {
             throw new IllegalArgumentException("Capability field is not base64url", error);
         }
-        if (decoded.length == 0 || decoded.length > maxBytes) {
+        if ((!allowEmpty && decoded.length == 0) || decoded.length > maxBytes) {
             throw new IllegalArgumentException("Capability field has invalid length");
         }
         String result = new String(decoded, StandardCharsets.UTF_8);
@@ -712,6 +756,11 @@ final class AndroidCapabilityBroker implements Closeable {
             throw new IllegalArgumentException("Capability field is not UTF-8");
         }
         return result;
+    }
+
+    private static String encode(String value) {
+        return Base64.encodeToString(value.getBytes(StandardCharsets.UTF_8),
+                Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
     }
 
     private static void validateText(String value, String label, boolean multiline) {

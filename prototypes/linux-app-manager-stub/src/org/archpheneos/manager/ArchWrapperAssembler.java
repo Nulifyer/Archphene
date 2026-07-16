@@ -201,6 +201,8 @@ public final class ArchWrapperAssembler {
                 || nativeClosure.containsKey("libpulse.so.0");
         boolean printing = nativeClosure.containsKey("libcups.so")
                 || nativeClosure.containsKey("libcups.so.2");
+        boolean secrets = hasVersionedLibrary(nativeClosure,
+                "libsecret-1.so", "libKF6Wallet.so", "libKF5Wallet.so");
         boolean audioInput = pulseClient
                 && ManagerStateStore.microphoneInputEnabled(context, packageName);
         if (pulseClient && embedNativeClosure) {
@@ -236,7 +238,7 @@ public final class ArchWrapperAssembler {
                     value = replaceBinaryXmlString(value, "qt6", toolkit);
                     value = replaceBinaryXmlString(value,
                             "wayland,input,ime,clipboard,runtime-pack,home-documents,open-uri,notifications,documents,drag-drop",
-                            capabilityMetadata(mimeTypes, pulseClient, audioInput, printing));
+                            capabilityMetadata(mimeTypes, pulseClient, audioInput, printing, secrets));
                     value = replaceBinaryXmlString(value, "archphene-executable-placeholder",
                             executableName);
                     value = replaceBinaryXmlString(value, "ArchpheneKCalc", "ArchpheneLinuxApp");
@@ -851,12 +853,22 @@ public final class ArchWrapperAssembler {
     }
 
     private static String capabilityMetadata(List<String> mimeTypes, boolean audioOutput,
-            boolean audioInput, boolean printing) {
+            boolean audioInput, boolean printing, boolean secrets) {
         String base = "wayland,input,ime,clipboard,runtime-pack,home-documents,open-uri,notifications,drag-drop";
         if (!mimeTypes.isEmpty()) base += ",documents";
         if (audioOutput) base += ",audio-output";
         if (audioInput) base += ",audio-input";
-        return printing ? base + ",printing" : base;
+        if (printing) base += ",printing";
+        return secrets ? base + ",secrets" : base;
+    }
+
+    private static boolean hasVersionedLibrary(Map<String, File> closure, String... names) {
+        for (String candidate : closure.keySet()) {
+            for (String name : names) {
+                if (candidate.equals(name) || candidate.startsWith(name + ".")) return true;
+            }
+        }
+        return false;
     }
     private static List<String> normalizedMimeTypes(List<String> values) {
         ArrayList<String> result = new ArrayList<>();

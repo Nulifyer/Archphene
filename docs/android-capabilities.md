@@ -14,14 +14,15 @@ Protocol version 1 currently supports:
 - `archphene_android_print_pdf`: transfers one rendered PDF file descriptor to Android's system print UI;
 - `archphene_android_request_camera` and `archphene_android_check_camera`: request and report Android `CAMERA` permission without bypassing denial;
 - `archphene_android_capture_camera_jpeg`: captures one bounded Camera2 JPEG to a caller-supplied regular file descriptor after consent;
-- `archphene_android_publish_accessibility_tree`, `archphene_android_accessibility_event`, and `archphene_android_take_accessibility_action`: publish bounded app semantics and return Android click, focus, edit, and scroll actions to Linux.
+- `archphene_android_publish_accessibility_tree`, `archphene_android_accessibility_event`, and `archphene_android_take_accessibility_action`: publish bounded app semantics and return Android click, focus, edit, and scroll actions to Linux;
+- `archphene_android_store_secret`, `archphene_android_read_secret`, `archphene_android_delete_secret`, and `archphene_android_list_secrets`: manage a wrapper-private encrypted secret collection through regular file descriptors.
 
 The Android intent behavior follows the platform's [common intent guidance](https://developer.android.com/guide/components/intents-common). Runtime notification permission follows the [Android notification permission model](https://developer.android.com/develop/ui/views/notifications/notification-permission).
 
 ## Security properties
 
 - Android peer credentials must report the wrapper's exact UID. Cross-UID callers are rejected before dispatch.
-- Wrapper metadata must declare `open-uri`, `notifications`, `printing`, `audio-input`, `camera`, or `accessibility`; undeclared operations fail closed.
+- Wrapper metadata must declare `open-uri`, `notifications`, `printing`, `audio-input`, `camera`, `accessibility`, or `secrets`; undeclared operations fail closed.
 - Requests and every field have fixed size limits and strict UTF-8 validation.
 - URL opening rejects non-HTTP schemes, missing hosts, user information, and control characters.
 - Android remains the permission authority. The broker requests a permission in wrapper UI and reports requested or denied state to Linux; it does not bypass denial.
@@ -82,7 +83,15 @@ Android actions are returned to Linux through a bounded 64-entry queue. Click, f
 
 The x86_64 emulator and physical AArch64 Samsung regressions validate framework enumeration, scaled bounds, events, cyclic-tree rejection with rollback, click and edit action routing, empty queues, and stopped-broker rejection. Unmodified Qt/GTK applications are not complete yet: Archphene still needs a private AT-SPI2 adapter that translates their standard D-Bus object trees and actions into this transport, including secondary-window ownership.
 
-Secrets/keyrings, the AT-SPI2 adapter, streaming XDG Camera/PipeWire, richer notification actions, non-HTTP URI policies, and other desktop portals remain unimplemented.
+## Secrets and keyrings
+
+A wrapper declaring `secrets` receives a private encrypted collection. Secret identifiers, labels, and string attributes are validated and bounded; secret bytes enter and leave only through regular file descriptors. Records are named by a SHA-256 digest of the identifier, encrypted in full with AES-256-GCM, authenticated against the record filename, and written atomically. The non-exportable key is generated in Android Keystore with randomized encryption and unlocked-device enforcement where supported. The store is limited to 256 records, 64 KiB per secret, 8 KiB of attributes, and a 1 MiB metadata index. No Android runtime permission or accessibility-service privilege is involved because the collection remains inside the wrapper UID.
+
+The x86_64 emulator and physical AArch64 Samsung regressions validate exact readback, ciphertext plaintext absence, metadata, overwrite, persistence across process death, malformed and oversized rejection, deletion, stale-broker rejection, and absence of secret values from Android logs. This explicit API is not yet transparent to unmodified Linux applications. A private implementation of the [freedesktop.org Secret Service API](https://specifications.freedesktop.org/secret-service/latest/) must translate standard session-bus calls onto this store.
+
+## Remaining adapters
+
+The Secret Service D-Bus adapter, AT-SPI2 adapter, streaming XDG Camera/PipeWire, richer notification actions, non-HTTP URI policies, and other desktop portals remain unimplemented.
 
 ## Native client
 
