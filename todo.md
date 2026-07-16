@@ -24,7 +24,7 @@ This is the prioritized completion queue for the Archphene Android application. 
   - [ ] Add running-process leases.
   - [x] Reconcile external Android uninstalls and revoke grants per package without disrupting wrappers that share a pack.
   - [x] Reuse unchanged closures before copying runtime-pack modules.
-  - [ ] Validate 4 KB and 16 KB ELF page compatibility.
+  - [x] Validate 4 KB and 16 KB ELF page compatibility. Runtime executables and published modules now fail closed before execution when an ELF load segment is incompatible; the AArch64 runtime is 64 KB-aligned, while current upstream Arch x86_64 packages remain 4 KB-only and are explicitly unsupported on 16 KB x86_64 Android until rebuilt.
   - [ ] Clean up the complete Linux process tree when a wrapper exits.
 - [ ] Finish the Terminal product.
   - Add multiple sessions/tabs, foreground-service lifecycle, manager progress returned to the invoking command, and persisted project-tree mappings.

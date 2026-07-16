@@ -14,6 +14,9 @@ import java.io.FileDescriptor;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.RandomAccessFile;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
@@ -276,7 +279,8 @@ final class RuntimePackStore {
             ArrayList<Module> modules = new ArrayList<>();
             long total = 0;
             for (PendingModule value : pending) {
-                ModuleIdentity identity = inspectModule(value.source);
+                ModuleIdentity identity = inspectModule(value.source,
+                        !"data".equals(value.kind));
                 total = Math.addExact(total, identity.size);
                 if (total > MAX_PACK_SIZE) throw new SecurityException("Runtime pack is too large");
                 modules.add(new Module(value.kind, identity.hash, identity.size,
@@ -550,6 +554,7 @@ final class RuntimePackStore {
         expectRejected(valid.replace("\tkcalc-cli\n", "\t../kcalc-cli\n"));
         expectRejected(valid.replace("\t300\t", "\t0\t"));
         expectRejected(valid.replace(SCHEMA, "# org.archphene.runtime-pack.v2"));
+        verifyElfPageParserForTest();
     }
 
     private static Pack parse(String packId, File root, byte[] manifest) throws Exception {
@@ -737,6 +742,141 @@ final class RuntimePackStore {
         }
     }
 
+    static void validateRuntimeElf(File source) throws Exception {
+        long pageSize = Os.sysconf(OsConstants._SC_PAGESIZE);
+        if (pageSize != 4096 && pageSize != 16384) {
+            throw new UnsupportedOperationException("Unsupported Android page size: " + pageSize);
+        }
+        int expectedMachine;
+        String architecture = ArchRuntimePolicy.current().architecture;
+        if (ArchRuntimePolicy.X86_64.equals(architecture)) expectedMachine = 62;
+        else if (ArchRuntimePolicy.AARCH64.equals(architecture)) expectedMachine = 183;
+        else throw new UnsupportedOperationException("Unsupported runtime ELF architecture");
+        byte[] header = new byte[64];
+        long fileSize = source.length();
+        try (RandomAccessFile input = new RandomAccessFile(source, "r")) {
+            if (fileSize < header.length) throw new SecurityException("Runtime ELF is truncated");
+            input.readFully(header);
+            ByteBuffer initial = ByteBuffer.wrap(header).order(ByteOrder.LITTLE_ENDIAN);
+            long programOffset = initial.getLong(32);
+            int entrySize = initial.getShort(54) & 0xffff;
+            int entryCount = initial.getShort(56) & 0xffff;
+            long tableEnd;
+            try {
+                tableEnd = Math.addExact(programOffset,
+                        Math.multiplyExact((long) entrySize, entryCount));
+            } catch (ArithmeticException overflow) {
+                throw new SecurityException("Runtime ELF program table overflows", overflow);
+            }
+            if (programOffset < 64 || entrySize < 56 || entryCount < 1
+                    || entryCount > 1024 || tableEnd > fileSize || tableEnd > 1024 * 1024) {
+                throw new SecurityException("Runtime ELF program table is invalid");
+            }
+            byte[] table = new byte[(int) tableEnd];
+            input.seek(0);
+            input.readFully(table);
+            try {
+                validateElfPageCompatibility(table, fileSize, expectedMachine, pageSize);
+            } catch (SecurityException incompatible) {
+                throw new UnsupportedOperationException(source.getName()
+                        + " is not compatible with " + pageSize
+                        + "-byte Android pages for " + architecture, incompatible);
+            }
+        }
+    }
+
+    private static void validateElfPageCompatibility(byte[] elf, long fileSize,
+            int expectedMachine, long pageSize) {
+        if (elf == null || elf.length < 64 || fileSize < elf.length
+                || elf[0] != 0x7f || elf[1] != 'E' || elf[2] != 'L' || elf[3] != 'F'
+                || elf[4] != 2 || elf[5] != 1 || elf[6] != 1
+                || (pageSize != 4096 && pageSize != 16384)) {
+            throw new SecurityException("Runtime module is not a supported 64-bit ELF");
+        }
+        ByteBuffer value = ByteBuffer.wrap(elf).order(ByteOrder.LITTLE_ENDIAN);
+        int type = value.getShort(16) & 0xffff;
+        int machine = value.getShort(18) & 0xffff;
+        long programOffset = value.getLong(32);
+        int entrySize = value.getShort(54) & 0xffff;
+        int entryCount = value.getShort(56) & 0xffff;
+        long tableEnd;
+        try {
+            tableEnd = Math.addExact(programOffset,
+                    Math.multiplyExact((long) entrySize, entryCount));
+        } catch (ArithmeticException overflow) {
+            throw new SecurityException("Runtime ELF program table overflows", overflow);
+        }
+        if ((type != 2 && type != 3) || machine != expectedMachine
+                || programOffset < 64 || entrySize < 56 || entryCount < 1
+                || entryCount > 1024 || tableEnd > elf.length || tableEnd > fileSize) {
+            throw new SecurityException("Runtime ELF identity is incompatible with this device");
+        }
+        boolean loadable = false;
+        for (int index = 0; index < entryCount; index++) {
+            int offset = Math.toIntExact(programOffset + (long) index * entrySize);
+            if (value.getInt(offset) != 1) continue;
+            loadable = true;
+            long fileOffset = value.getLong(offset + 8);
+            long virtualAddress = value.getLong(offset + 16);
+            long fileBytes = value.getLong(offset + 32);
+            long memoryBytes = value.getLong(offset + 40);
+            long alignment = value.getLong(offset + 48);
+            if (fileOffset < 0 || virtualAddress < 0 || fileBytes < 0 || memoryBytes < fileBytes
+                    || fileOffset > fileSize || fileBytes > fileSize - fileOffset
+                    || alignment < pageSize || (alignment & (alignment - 1)) != 0
+                    || (fileOffset & (alignment - 1)) != (virtualAddress & (alignment - 1))
+                    || (fileOffset & (pageSize - 1)) != (virtualAddress & (pageSize - 1))) {
+                throw new SecurityException("Runtime ELF load segment is page-incompatible");
+            }
+        }
+        if (!loadable) throw new SecurityException("Runtime ELF has no loadable segment");
+    }
+    private static void verifyElfPageParserForTest() {
+        byte[] page4k = elfFixture(62, 4096);
+        validateElfPageCompatibility(page4k, page4k.length, 62, 4096);
+        expectElfRejected(page4k, 62, 16384);
+        byte[] page16k = elfFixture(183, 16384);
+        validateElfPageCompatibility(page16k, page16k.length, 183, 4096);
+        validateElfPageCompatibility(page16k, page16k.length, 183, 16384);
+        expectElfRejected(page16k, 62, 16384);
+        byte[] malformed = page16k.clone();
+        ByteBuffer.wrap(malformed).order(ByteOrder.LITTLE_ENDIAN).putLong(64 + 32,
+                malformed.length + 1L);
+        expectElfRejected(malformed, 183, 16384);
+    }
+
+    private static byte[] elfFixture(int machine, long alignment) {
+        byte[] result = new byte[120];
+        ByteBuffer value = ByteBuffer.wrap(result).order(ByteOrder.LITTLE_ENDIAN);
+        result[0] = 0x7f;
+        result[1] = 'E';
+        result[2] = 'L';
+        result[3] = 'F';
+        result[4] = 2;
+        result[5] = 1;
+        result[6] = 1;
+        value.putShort(16, (short) 3);
+        value.putShort(18, (short) machine);
+        value.putInt(20, 1);
+        value.putLong(32, 64);
+        value.putShort(52, (short) 64);
+        value.putShort(54, (short) 56);
+        value.putShort(56, (short) 1);
+        value.putInt(64, 1);
+        value.putLong(64 + 32, result.length);
+        value.putLong(64 + 40, result.length);
+        value.putLong(64 + 48, alignment);
+        return result;
+    }
+
+    private static void expectElfRejected(byte[] elf, int machine, long pageSize) {
+        try {
+            validateElfPageCompatibility(elf, elf.length, machine, pageSize);
+            throw new IllegalStateException("Invalid ELF page layout was accepted");
+        } catch (SecurityException expected) {
+            // Expected parser rejection.
+        }
+    }
     private static final class ModuleIdentity {
         final String hash;
         final long size;
@@ -747,10 +887,11 @@ final class RuntimePackStore {
         }
     }
 
-    private static ModuleIdentity inspectModule(File source) throws Exception {
+    private static ModuleIdentity inspectModule(File source, boolean requireElf) throws Exception {
         if (!source.isFile() || source.length() <= 0 || source.length() > MAX_MODULE_SIZE) {
             throw new SecurityException("Runtime-pack module has an invalid size");
         }
+        if (requireElf) validateRuntimeElf(source);
         MessageDigest digest = MessageDigest.getInstance("SHA-256");
         long size = 0;
         try (InputStream input = new FileInputStream(source)) {

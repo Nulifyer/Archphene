@@ -947,6 +947,7 @@ public final class ArchPackageRuntime {
         if (!file.getParentFile().equals(nativeDir) || !file.isFile()) {
             throw new SecurityException("Package runtime executable is unavailable: " + name);
         }
+        RuntimePackStore.validateRuntimeElf(file);
         return file;
     }
 
