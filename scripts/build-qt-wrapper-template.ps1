@@ -24,10 +24,14 @@ $App = Join-Path $Root "prototypes/kcalc-android-app"
 $Out = Join-Path $Root "tooling/build/wrapper-templates/qt"
 & (Join-Path $PSScriptRoot "build-native-compositor-podman.ps1") -Architecture x86_64 -Release
 if ($LASTEXITCODE -ne 0) { throw "Shared native compositor build failed" }
+& (Join-Path $PSScriptRoot "build-native-compositor-podman.ps1") -Architecture aarch64 -Release
+if ($LASTEXITCODE -ne 0) { throw "AArch64 shared native compositor build failed" }
 $Compositor = Join-Path $Root "native/archphene-compositor/target/x86_64-linux-android/release/libarchphene_compositor.so"
-if (-not (Test-Path -LiteralPath $Compositor -PathType Leaf)) { throw "Shared native compositor is missing" }
+$Arm64Compositor = Join-Path $Root "native/archphene-compositor/target/aarch64-linux-android/release/libarchphene_compositor.so"
+if (-not (Test-Path -LiteralPath $Compositor -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $Arm64Compositor -PathType Leaf)) { throw "Shared native compositors are missing" }
 if (Test-Path -LiteralPath $Out) { Remove-Item -LiteralPath $Out -Recurse -Force }
-New-Item -ItemType Directory -Force -Path $Out,(Join-Path $Out "compiled"),(Join-Path $Out "gen"),(Join-Path $Out "classes"),(Join-Path $Out "dex"),(Join-Path $Out "stage/lib/x86_64"),(Join-Path $Out "stage/assets") | Out-Null
+New-Item -ItemType Directory -Force -Path $Out,(Join-Path $Out "compiled"),(Join-Path $Out "gen"),(Join-Path $Out "classes"),(Join-Path $Out "dex"),(Join-Path $Out "stage/lib/x86_64"),(Join-Path $Out "stage/lib/arm64-v8a"),(Join-Path $Out "stage/assets") | Out-Null
 
 $placeholder = "org.archphene.linux.p00000000000000000000000000000000"
 $manifest = [IO.File]::ReadAllText((Join-Path $App "AndroidManifest.xml"))
@@ -85,6 +89,7 @@ if (Test-Path -LiteralPath $PrebuiltBridge -PathType Container) {
     } | Copy-Item -Destination (Join-Path $Out "stage/lib/x86_64")
 }
 Copy-Item -LiteralPath $Compositor -Destination (Join-Path $Out "stage/lib/x86_64/libarchphene_compositor.so") -Force
+Copy-Item -LiteralPath $Arm64Compositor -Destination (Join-Path $Out "stage/lib/arm64-v8a/libarchphene_compositor.so") -Force
 Push-Location (Join-Path $Out "stage")
 $entries = Get-ChildItem -Recurse -File | ForEach-Object { $_.FullName.Substring((Get-Location).Path.Length + 1) }
 Run-Native { & jar uf "..\unsigned.apk" $entries } "add template bridge files"

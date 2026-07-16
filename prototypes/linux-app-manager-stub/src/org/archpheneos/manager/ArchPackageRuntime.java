@@ -482,6 +482,8 @@ public final class ArchPackageRuntime {
         if (names.length != verbose.length) {
             throw new SecurityException("Arch package archive listing mismatch");
         }
+        ArrayList<String> batchEntries = new ArrayList<>();
+        ArrayList<String> batchFiles = new ArrayList<>();
         ArrayList<String[]> symlinks = new ArrayList<>();
         for (int index = 0; index < names.length; index++) {
             String entry = names[index];
@@ -498,7 +500,10 @@ public final class ArchPackageRuntime {
                 if (!destination.isDirectory() && !destination.mkdirs()) {
                     throw new IllegalStateException("Could not create staged directory");
                 }
-            } else if (type == '-' || type == 'h') {
+            } else if (type == '-') {
+                batchEntries.add(entry);
+                batchFiles.add(entry);
+            } else if (type == 'h') {
                 File parent = destination.getParentFile();
                 if (!parent.isDirectory() && !parent.mkdirs()) {
                     throw new IllegalStateException("Could not create staged parent");
@@ -512,6 +517,14 @@ public final class ArchPackageRuntime {
                 symlinks.add(new String[] {entry, target});
             } else {
                 throw new SecurityException("Unsupported selected archive entry type: " + type);
+            }
+        }
+        extractArchiveSelection(context, archive, root, batchEntries);
+
+        for (String entry : batchFiles) {
+            File destination = safeStagingFile(root, entry);
+            if (!destination.isFile() || destination.length() > 256L * 1024 * 1024) {
+                throw new SecurityException("Selected archive file was not safely extracted");
             }
         }
         for (String[] symlink : symlinks) {
@@ -639,12 +652,60 @@ public final class ArchPackageRuntime {
                     + exitCode + ") " + output);
         }
         return output;
-    }    private static boolean containsPackage(List<ResolvedPackage> packages, String name) {
+    }
+
+    private static boolean containsPackage(List<ResolvedPackage> packages, String name) {
         for (ResolvedPackage value : packages) {
             if (name.equals(value.name)) return true;
         }
         return false;
     }
+
+    private static void extractArchiveSelection(Context context, File archive, File root,
+            List<String> entries) throws Exception {
+        if (entries.isEmpty()) return;
+        File nativeDir = new File(context.getApplicationInfo().nativeLibraryDir).getCanonicalFile();
+        File loader = executable(nativeDir, "libarchphene_ld.so");
+        File tool = executable(nativeDir, "libarchphene_bsdtar.so");
+        File state = state(context);
+        String suffix = Long.toString(Thread.currentThread().getId());
+        File selection = new File(state, "bsdtar-selection-" + suffix + ".nul");
+        File error = new File(state, "bsdtar-selection-" + suffix + ".err");
+        try {
+            try (FileOutputStream output = new FileOutputStream(selection)) {
+                for (String entry : entries) {
+                    output.write(entry.getBytes(StandardCharsets.UTF_8));
+                    output.write(0);
+                }
+                output.getFD().sync();
+            }
+            List<String> command = new ArrayList<>(Arrays.asList(loader.getPath(),
+                    "--library-path", nativeDir.getPath(), tool.getPath(),
+                    "-xf", archive.getPath(), "-C", root.getPath(),
+                    "--no-same-owner", "--no-same-permissions", "--null", "-T",
+                    selection.getPath()));
+            ProcessBuilder builder = new ProcessBuilder(command);
+            builder.directory(state);
+            builder.redirectErrorStream(true);
+            builder.redirectOutput(error);
+            Map<String, String> environment = builder.environment();
+            environment.put("HOME", directory(state, "home").getPath());
+            environment.put("TMPDIR", directory(state, "tmp").getPath());
+            environment.put("LANG", "C");
+            environment.put("LC_ALL", "C");
+            environment.put("GLIBC_TUNABLES", "glibc.pthread.rseq=0");
+            int exitCode = builder.start().waitFor();
+            if (exitCode != 0) {
+                String diagnostics = error.isFile() ? readText(error, OUTPUT_LIMIT) : "";
+                throw new SecurityException("Could not extract selected archive entries (exit "
+                        + exitCode + ") " + diagnostics);
+            }
+        } finally {
+            selection.delete();
+            error.delete();
+        }
+    }
+
     private static void extractArchiveFile(Context context, File archive, String entry,
             File destination) throws Exception {
         File nativeDir = new File(context.getApplicationInfo().nativeLibraryDir).getCanonicalFile();
@@ -664,6 +725,7 @@ public final class ArchPackageRuntime {
         environment.put("TMPDIR", directory(state(context), "tmp").getPath());
         environment.put("LANG", "C");
         environment.put("LC_ALL", "C");
+        environment.put("GLIBC_TUNABLES", "glibc.pthread.rseq=0");
         int exitCode = builder.start().waitFor();
         String diagnostics = error.isFile() ? readText(error, OUTPUT_LIMIT) : "";
         error.delete();
@@ -807,6 +869,7 @@ public final class ArchPackageRuntime {
         environment.put("TMPDIR", temp.getPath());
         environment.put("LANG", "C");
         environment.put("LC_ALL", "C");
+        environment.put("GLIBC_TUNABLES", "glibc.pthread.rseq=0");
         Process process = builder.start();
         String output;
         try (InputStream input = process.getInputStream()) {

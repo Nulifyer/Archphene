@@ -63,25 +63,25 @@ public final class ArchWrapperAssembler {
 
     public static Result assembleQt(Context context, String repository, String sourcePackage)
             throws Exception {
-        return assembleQt(context, repository, sourcePackage, "0", "x86_64", "qt6", sourcePackage,
+        return assembleQt(context, repository, sourcePackage, "0", currentArchitecture(), "qt6", sourcePackage,
                 displayName(sourcePackage), "", Collections.emptyList(), null, false);
     }
 
     public static Result assembleQt(Context context, String repository, String sourcePackage,
             File runtimeRoot) throws Exception {
-        return assembleQt(context, repository, sourcePackage, "0", "x86_64", "qt6", sourcePackage,
+        return assembleQt(context, repository, sourcePackage, "0", currentArchitecture(), "qt6", sourcePackage,
                 displayName(sourcePackage), "", Collections.emptyList(), runtimeRoot, true);
     }
 
     public static Result assembleQt(Context context, String repository, String sourcePackage,
             String sourceVersion) throws Exception {
-        return assembleQt(context, repository, sourcePackage, sourceVersion, "x86_64", "qt6", sourcePackage,
+        return assembleQt(context, repository, sourcePackage, sourceVersion, currentArchitecture(), "qt6", sourcePackage,
                 displayName(sourcePackage), "", Collections.emptyList(), null, false);
     }
 
     public static Result assembleQt(Context context, String repository, String sourcePackage,
             String sourceVersion, String executableName) throws Exception {
-        return assembleQt(context, repository, sourcePackage, sourceVersion, "x86_64", "qt6", executableName,
+        return assembleQt(context, repository, sourcePackage, sourceVersion, currentArchitecture(), "qt6", executableName,
                 displayName(sourcePackage), "", Collections.emptyList(), null, false);
     }
 
@@ -91,7 +91,7 @@ public final class ArchWrapperAssembler {
         if (runtimeRoot == null) {
             throw new IllegalArgumentException("Runtime-pack staging root is required");
         }
-        return assembleQt(context, repository, sourcePackage, sourceVersion, "x86_64", "qt6", executableName,
+        return assembleQt(context, repository, sourcePackage, sourceVersion, currentArchitecture(), "qt6", executableName,
                 displayName(sourcePackage), "", Collections.emptyList(), runtimeRoot, false);
     }
 
@@ -115,7 +115,7 @@ public final class ArchWrapperAssembler {
                 || !sourcePackage.matches("[a-zA-Z0-9@._+:-]{1,128}")
                 || sourceVersion == null
                 || !sourceVersion.matches("[a-zA-Z0-9@._+:-]{1,128}")
-                || !"x86_64".equals(architecture)
+                || !ArchRuntimePolicy.supports(architecture)
                 || !("qt6".equals(toolkit) || "gtk3".equals(toolkit)
                         || "wayland".equals(toolkit))
                 || executableName == null
@@ -202,8 +202,7 @@ public final class ArchWrapperAssembler {
                     value = replaceBinaryXmlString(value, "26.04.3-1", sourceVersion);
                     value = replaceBinaryXmlString(value,
                             "https://archlinux.org/packages/extra/x86_64/kcalc/json/",
-                            "https://archlinux.org/packages/" + repository + "/"
-                                    + architecture + "/" + sourcePackage + "/json/");
+                            packageMetadataUrl(repository, architecture, sourcePackage));
                     value = replaceBinaryXmlString(value, "glibc-x86_64",
                             "glibc-" + architecture);
                     value = replaceBinaryXmlString(value, "qt6", toolkit);
@@ -245,7 +244,8 @@ public final class ArchWrapperAssembler {
             if (embedNativeClosure && runtimeRoot != null) {
                 for (Map.Entry<String, File> nativeFile : collectNativeFiles(
                         context, runtimeRoot, sourcePackage).entrySet()) {
-                    ZipEntry next = new ZipEntry("lib/x86_64/" + nativeFile.getKey());
+                    ZipEntry next = new ZipEntry("lib/" + androidAbi(architecture) + "/"
+                            + nativeFile.getKey());
                     next.setTime(ZIP_EPOCH_MILLIS);
                     zip.putNextEntry(next);
                     try (InputStream file = new FileInputStream(nativeFile.getValue())) {
@@ -263,6 +263,25 @@ public final class ArchWrapperAssembler {
                     ? "Wrapper template manifest is missing"
                     : "Wrapper template launcher icon marker is missing");
         }
+    }
+
+    private static String currentArchitecture() {
+        return ArchRuntimePolicy.current().architecture;
+    }
+
+    private static String androidAbi(String architecture) {
+        if (ArchRuntimePolicy.X86_64.equals(architecture)) return "x86_64";
+        if (ArchRuntimePolicy.AARCH64.equals(architecture)) return "arm64-v8a";
+        throw new IllegalArgumentException("Unsupported wrapper architecture");
+    }
+
+    private static String packageMetadataUrl(String repository, String architecture,
+            String sourcePackage) {
+        if (ArchRuntimePolicy.AARCH64.equals(architecture)) {
+            return "https://archlinuxarm.org/packages/aarch64/" + sourcePackage;
+        }
+        return "https://archlinux.org/packages/" + repository + "/x86_64/"
+                + sourcePackage + "/json/";
     }
 
     static Map<String, File> collectNativeFiles(Context context, File runtimeRoot,

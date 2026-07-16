@@ -39,7 +39,7 @@ build_qt_templates() {
   local fixed_authority="org.archphene.linux.kcalc.documents"
   local placeholder_authority="$placeholder.documents"
   rm -rf "$out"
-  mkdir -p "$out"/{compiled,gen,classes,dex,stage/lib/x86_64,stage/assets}
+  mkdir -p "$out"/{compiled,gen,classes,dex,stage/lib/x86_64,stage/lib/arm64-v8a,stage/assets}
 
   sed \
     -e "s/package=\"org.archphene.linux.kcalc\"/package=\"$placeholder\"/" \
@@ -75,6 +75,12 @@ build_qt_templates() {
   gpu_helper="$root/tooling/build/android-gpu/x86_64/virgl_test_server_android"
   [[ -f "$gpu_helper" ]] || { echo "missing Android GPU helper: $gpu_helper" >&2; exit 1; }
   cp "$gpu_helper" "$out/stage/lib/x86_64/libarchphene_virgl_server.so"
+  arm64_compositor="$root/native/archphene-compositor/target/aarch64-linux-android/release/libarchphene_compositor.so"
+  [[ -f "$arm64_compositor" ]] || { echo "missing arm64 shared compositor: $arm64_compositor" >&2; exit 1; }
+  cp "$arm64_compositor" "$out/stage/lib/arm64-v8a/libarchphene_compositor.so"
+  arm64_gpu_helper="$root/tooling/build/android-gpu/aarch64/virgl_test_server_android"
+  [[ -f "$arm64_gpu_helper" ]] || { echo "missing arm64 Android GPU helper: $arm64_gpu_helper" >&2; exit 1; }
+  cp "$arm64_gpu_helper" "$out/stage/lib/arm64-v8a/libarchphene_virgl_server.so"
   for profile in generic document; do
     (
       cd "$out/stage"

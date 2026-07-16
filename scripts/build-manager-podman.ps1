@@ -30,8 +30,11 @@ if ($LASTEXITCODE -ne 0) { throw "AArch64 Terminal PTY build failed" }
 if (-not $SkipGpuHelperBuild) {
     & (Join-Path $PSScriptRoot "build-android-gpu-helper-podman.ps1") -Architecture x86_64
     if ($LASTEXITCODE -ne 0) { throw "Android GPU helper build failed" }
-} elseif (-not (Test-Path -LiteralPath (Join-Path $Root "tooling/build/android-gpu/x86_64/virgl_test_server_android") -PathType Leaf)) {
-    throw "Android GPU helper output is missing"
+    & (Join-Path $PSScriptRoot "build-android-gpu-helper-podman.ps1") -Architecture aarch64
+    if ($LASTEXITCODE -ne 0) { throw "AArch64 Android GPU helper build failed" }
+} elseif (-not (Test-Path -LiteralPath (Join-Path $Root "tooling/build/android-gpu/x86_64/virgl_test_server_android") -PathType Leaf) -or
+        -not (Test-Path -LiteralPath (Join-Path $Root "tooling/build/android-gpu/aarch64/virgl_test_server_android") -PathType Leaf)) {
+    throw "x86_64 and AArch64 Android GPU helper outputs are required"
 }
 
 $drive = $Root.Substring(0, 1).ToLowerInvariant()
