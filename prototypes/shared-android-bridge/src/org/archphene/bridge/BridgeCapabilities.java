@@ -19,13 +19,14 @@ final class BridgeCapabilities {
     static final String AUDIO_INPUT = "audio-input";
     static final String DRAG_DROP = "drag-drop";
     static final String PRINTING = "printing";
+    static final String CAMERA = "camera";
     private static final Set<String> REQUIRED = Collections.unmodifiableSet(new HashSet<>(
             Arrays.asList("wayland", "input", "ime", "clipboard", "runtime-pack",
                     "home-documents")));
     private static final Set<String> ALLOWED = Collections.unmodifiableSet(new HashSet<>(
             Arrays.asList("wayland", "input", "ime", "clipboard", "runtime-pack",
                     "home-documents", OPEN_URI, NOTIFICATIONS, DOCUMENTS, AUDIO_OUTPUT,
-                    AUDIO_INPUT, DRAG_DROP, PRINTING)));
+                    AUDIO_INPUT, DRAG_DROP, PRINTING, CAMERA)));
     private static final String LEGACY =
             "wayland,input,ime,clipboard,runtime-pack,home-documents,open-uri,notifications,documents";
 

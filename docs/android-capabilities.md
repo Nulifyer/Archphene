@@ -11,14 +11,16 @@ Protocol version 1 currently supports:
 - `archphene_android_open_uri`: opens an ordinary host-bearing HTTP or HTTPS URI through Android `ACTION_VIEW`;
 - `archphene_android_notify`: requests Android 13+ notification permission on first use and posts a bounded wrapper-owned notification;
 - `archphene_android_withdraw_notification`: removes a notification created by that wrapper;
-- `archphene_android_print_pdf`: transfers one rendered PDF file descriptor to Android's system print UI.
+- `archphene_android_print_pdf`: transfers one rendered PDF file descriptor to Android's system print UI;
+- `archphene_android_request_camera` and `archphene_android_check_camera`: request and report Android `CAMERA` permission without bypassing denial;
+- `archphene_android_capture_camera_jpeg`: captures one bounded Camera2 JPEG to a caller-supplied regular file descriptor after consent.
 
 The Android intent behavior follows the platform's [common intent guidance](https://developer.android.com/guide/components/intents-common). Runtime notification permission follows the [Android notification permission model](https://developer.android.com/develop/ui/views/notifications/notification-permission).
 
 ## Security properties
 
 - Android peer credentials must report the wrapper's exact UID. Cross-UID callers are rejected before dispatch.
-- Wrapper metadata must declare `open-uri`, `notifications`, `printing`, or `audio-input`; undeclared operations fail closed.
+- Wrapper metadata must declare `open-uri`, `notifications`, `printing`, `audio-input`, or `camera`; undeclared operations fail closed.
 - Requests and every field have fixed size limits and strict UTF-8 validation.
 - URL opening rejects non-HTTP schemes, missing hosts, user information, and control characters.
 - Android remains the permission authority. The broker requests a permission in wrapper UI and reports requested or denied state to Linux; it does not bypass denial.
@@ -65,7 +67,13 @@ The permission dialog grant and denial paths pass on the x86_64 emulator. An unm
 
 Capability-scoped drag-and-drop maps Android `DragEvent` motion/drop/cancel lifecycle to standard Wayland data devices in both directions. Plain text is bounded to 8 MiB. Android URI clips accept at most 32 files, retain the temporary drag grant for the document session, import through the existing conflict-safe broker, and expose only local `file://` paths under `Documents/Android` to Linux. Linux `text/uri-list` sources are bounded to 1 MiB of metadata and may export at most 32 canonical, non-dot files under the visible Linux home; Android receives wrapper-provider content URIs with exact temporary read grants. Actions remain copy-only. Protocol transfer, import/writeback, external denial without a grant, granted reads, cancellation, and cleanup pass on the x86_64 emulator and physical AArch64.
 
-Camera, accessibility, secrets/keyrings, richer notification actions, non-HTTP URI policies, and other desktop portals remain unimplemented. Each must define an Android permission and lifecycle policy before receiving a broker command.
+## Camera
+
+A wrapper declaring `camera` can request and inspect Android `CAMERA` permission through the same broker. After consent, a glibc caller supplies one regular output descriptor, requested maximum dimensions up to 8192 pixels, and front/back preference. Camera2 selects the preferred lens when present, bounds JPEG payloads to 32 MiB, closes the camera/session/ImageReader after each request, and returns the actual dimensions and byte count. Android remains the permission authority; denial is persisted and is not repeatedly prompted.
+
+The x86_64 emulator and physical AArch64 Samsung regressions validate the real permission dialog, capture before-consent rejection, 1280x720 JPEG capture and signature/byte checks, invalid-dimension rejection, denial, and no automatic reprompt. This explicit one-shot API does not yet make unmodified Linux camera applications work: the standard XDG Camera portal must return a PipeWire remote, so a private PipeWire producer backed by Camera2 remains required.
+
+Accessibility, secrets/keyrings, the streaming XDG Camera/PipeWire adapter, richer notification actions, non-HTTP URI policies, and other desktop portals remain unimplemented. Each must define an Android permission and lifecycle policy before receiving a broker command.
 
 ## Native client
 

@@ -39,7 +39,7 @@ Archphene is moving from application-specific proofs toward a package-driven And
 - general secondary-window mapping for phone, tablet, and Android desktop/freeform modes;
 - broader clipboard MIME types plus cursor and pointer protocol completeness;
 - zero-copy Android HardwareBuffer/dmabuf and Vulkan presentation building on the validated OpenGL ES virpipe path, with SHM fallback;
-- camera, secrets/keyrings, and remaining portals; URL handling, notifications, printing, drag-and-drop, and private Pulse-to-AAudio input/output are implemented;
+- streaming XDG Camera/PipeWire, accessibility, secrets/keyrings, and remaining portals; URL handling, notifications, printing, drag-and-drop, and private Pulse-to-AAudio input/output are implemented;
 - accessibility and input-method completeness;
 - rollback, health checks, storage quotas, and vulnerability status.
 

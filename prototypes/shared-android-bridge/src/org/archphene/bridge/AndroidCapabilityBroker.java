@@ -54,11 +54,13 @@ final class AndroidCapabilityBroker implements Closeable {
     private static final int UI_TIMEOUT_SECONDS = 15;
     private static final int NOTIFICATION_PERMISSION_REQUEST = 0x4150;
     private static final int MICROPHONE_PERMISSION_REQUEST = 0x4151;
+    private static final int CAMERA_PERMISSION_REQUEST = 0x4152;
     private static final int MAX_PENDING_NOTIFICATIONS = 32;
     private static final int MAX_PENDING_PRINTS = 4;
     private static final long MAX_PRINT_BYTES = 256L * 1024 * 1024;
 
     private final Activity activity;
+    private final AndroidCameraIntegration cameraIntegration;
     private final Set<String> capabilities;
     private final AtomicBoolean running = new AtomicBoolean();
     private LocalServerSocket server;
@@ -68,6 +70,7 @@ final class AndroidCapabilityBroker implements Closeable {
             new LinkedHashMap<>();
     private boolean notificationPermissionRequestInFlight;
     private boolean microphonePermissionRequestInFlight;
+    private boolean cameraPermissionRequestInFlight;
     private static final Set<File> ACTIVE_PRINT_FILES = new java.util.HashSet<>();
 
     private static final class PendingNotification {
@@ -85,6 +88,7 @@ final class AndroidCapabilityBroker implements Closeable {
     AndroidCapabilityBroker(Activity activity, Set<String> capabilities) {
         this.activity = activity;
         this.capabilities = capabilities;
+        cameraIntegration = new AndroidCameraIntegration(activity);
     }
 
     void start() throws IOException {
@@ -151,7 +155,7 @@ final class AndroidCapabilityBroker implements Closeable {
         if (fields.length < 2 || !PROTOCOL.equals(fields[0])) {
             throw new IllegalArgumentException("Unsupported capability protocol");
         }
-        if (!"PRINT_PDF".equals(fields[1])
+        if (!"PRINT_PDF".equals(fields[1]) && !"CAPTURE_CAMERA_JPEG".equals(fields[1])
                 && descriptors != null && descriptors.length != 0) {
             throw new IllegalArgumentException("Unexpected capability descriptors");
         }
@@ -186,6 +190,18 @@ final class AndroidCapabilityBroker implements Closeable {
                 requireFields(fields, 2);
                 requireCapability(BridgeCapabilities.AUDIO_INPUT);
                 return audioInputPermissionState();
+            case "REQUEST_CAMERA":
+                requireFields(fields, 2);
+                requireCapability(BridgeCapabilities.CAMERA);
+                return requestCamera();
+            case "CHECK_CAMERA":
+                requireFields(fields, 2);
+                requireCapability(BridgeCapabilities.CAMERA);
+                return cameraPermissionState();
+            case "CAPTURE_CAMERA_JPEG":
+                requireFields(fields, 5);
+                requireCapability(BridgeCapabilities.CAMERA);
+                return captureCameraJpeg(fields[2], fields[3], fields[4], descriptors);
             default:
                 throw new IllegalArgumentException("Unknown capability request");
         }
@@ -374,6 +390,87 @@ final class AndroidCapabilityBroker implements Closeable {
                 .getBoolean("microphone_permission_requested", false)
                 ? "ERROR\tPERMISSION_DENIED" : "ERROR\tPERMISSION_NOT_REQUESTED";
     }
+    private String requestCamera() throws Exception {
+        if (!activity.getPackageManager().hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY)) {
+            return "ERROR\tUNAVAILABLE";
+        }
+        if (activity.checkSelfPermission(Manifest.permission.CAMERA)
+                == PackageManager.PERMISSION_GRANTED) {
+            return "OK";
+        }
+        synchronized (this) {
+            if (cameraPermissionRequestInFlight) return "ERROR\tPERMISSION_REQUESTED";
+            if (activity.getPreferences(Activity.MODE_PRIVATE)
+                    .getBoolean("camera_permission_requested", false)) {
+                return "ERROR\tPERMISSION_DENIED";
+            }
+            cameraPermissionRequestInFlight = true;
+        }
+        activity.getPreferences(Activity.MODE_PRIVATE).edit()
+                .putBoolean("camera_permission_requested", true).apply();
+        try {
+            runOnUiThread(() -> activity.requestPermissions(
+                    new String[] {Manifest.permission.CAMERA}, CAMERA_PERMISSION_REQUEST));
+        } catch (Exception error) {
+            synchronized (this) {
+                cameraPermissionRequestInFlight = false;
+            }
+            activity.getPreferences(Activity.MODE_PRIVATE).edit()
+                    .putBoolean("camera_permission_requested", false).apply();
+            throw error;
+        }
+        Log.i(TAG, "Requested Android camera permission for Linux camera access");
+        return "ERROR\tPERMISSION_REQUESTED";
+    }
+
+    private String cameraPermissionState() {
+        if (!activity.getPackageManager().hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY)) {
+            return "ERROR\tUNAVAILABLE";
+        }
+        if (activity.checkSelfPermission(Manifest.permission.CAMERA)
+                == PackageManager.PERMISSION_GRANTED) {
+            return "OK";
+        }
+        synchronized (this) {
+            if (cameraPermissionRequestInFlight) return "ERROR\tPERMISSION_REQUESTED";
+        }
+        return activity.getPreferences(Activity.MODE_PRIVATE)
+                .getBoolean("camera_permission_requested", false)
+                ? "ERROR\tPERMISSION_DENIED" : "ERROR\tPERMISSION_NOT_REQUESTED";
+    }
+
+    private String captureCameraJpeg(String widthField, String heightField, String facing,
+            FileDescriptor[] descriptors) throws Exception {
+        if (activity.checkSelfPermission(Manifest.permission.CAMERA)
+                != PackageManager.PERMISSION_GRANTED) {
+            return cameraPermissionState();
+        }
+        if (descriptors == null || descriptors.length != 1 || !descriptors[0].valid()) {
+            throw new IllegalArgumentException("Camera capture requires one output descriptor");
+        }
+        android.system.StructStat stat = Os.fstat(descriptors[0]);
+        if ((stat.st_mode & OsConstants.S_IFMT) != OsConstants.S_IFREG) {
+            throw new IllegalArgumentException("Camera capture requires a regular output file");
+        }
+        int width;
+        int height;
+        try {
+            width = Integer.parseInt(widthField);
+            height = Integer.parseInt(heightField);
+        } catch (NumberFormatException error) {
+            throw new IllegalArgumentException("Camera dimensions are invalid", error);
+        }
+        boolean front;
+        if ("front".equals(facing)) front = true;
+        else if ("back".equals(facing)) front = false;
+        else throw new IllegalArgumentException("Camera facing must be front or back");
+        AndroidCameraIntegration.CaptureResult result = cameraIntegration.captureJpeg(
+                descriptors[0], width, height, front);
+        Log.i(TAG, "Captured Android camera JPEG " + result.width + "x" + result.height
+                + " bytes=" + result.bytes + " facing=" + facing);
+        return "OK\t" + result.width + "\t" + result.height + "\t" + result.bytes;
+    }
+
     private String notifyLinuxApp(String id, String title, String body) throws Exception {
         validateText(id, "notification ID", false);
         validateText(title, "notification title", false);
@@ -468,6 +565,15 @@ final class AndroidCapabilityBroker implements Closeable {
                     && grantResults[0] == PackageManager.PERMISSION_GRANTED;
             Log.i(TAG, "Android microphone permission "
                     + (granted ? "granted" : "denied"));
+            return true;
+        }
+        if (requestCode == CAMERA_PERMISSION_REQUEST) {
+            synchronized (this) {
+                cameraPermissionRequestInFlight = false;
+            }
+            boolean granted = grantResults.length > 0
+                    && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+            Log.i(TAG, "Android camera permission " + (granted ? "granted" : "denied"));
             return true;
         }
         if (requestCode != NOTIFICATION_PERMISSION_REQUEST) return false;
@@ -577,7 +683,10 @@ final class AndroidCapabilityBroker implements Closeable {
         synchronized (this) {
             pendingNotifications.clear();
             notificationPermissionRequestInFlight = false;
+            microphonePermissionRequestInFlight = false;
+            cameraPermissionRequestInFlight = false;
         }
+        cameraIntegration.close();
         LocalServerSocket current = server;
         server = null;
         if (current != null) {

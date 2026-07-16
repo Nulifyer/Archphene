@@ -14,5 +14,10 @@ int archphene_android_print_pdf(
         int pdf_fd, const char *title, char *response, size_t response_size);
 int archphene_android_request_audio_input(char *response, size_t response_size);
 int archphene_android_check_audio_input(char *response, size_t response_size);
+int archphene_android_request_camera(char *response, size_t response_size);
+int archphene_android_check_camera(char *response, size_t response_size);
+int archphene_android_capture_camera_jpeg(
+        int output_fd, int width, int height, int front_facing,
+        char *response, size_t response_size);
 
 #endif

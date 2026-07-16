@@ -3,6 +3,7 @@
 #include "archphene_android.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -128,7 +129,8 @@ static int broker_request_with_fd(
         errno = EPROTO;
         return -1;
     }
-    return strcmp(response, "OK") == 0 ? 0 : 1;
+    return strncmp(response, "OK", 2) == 0
+            && (response[2] == '\0' || response[2] == '\t') ? 0 : 1;
 }
 
 static int broker_request(
@@ -209,6 +211,31 @@ int archphene_android_check_audio_input(char *response, size_t response_size) {
     return broker_request("ARCHPHENE/1\tCHECK_AUDIO_INPUT", response, response_size);
 }
 
+int archphene_android_request_camera(char *response, size_t response_size) {
+    return broker_request("ARCHPHENE/1\tREQUEST_CAMERA", response, response_size);
+}
+
+int archphene_android_check_camera(char *response, size_t response_size) {
+    return broker_request("ARCHPHENE/1\tCHECK_CAMERA", response, response_size);
+}
+
+int archphene_android_capture_camera_jpeg(
+        int output_fd, int width, int height, int front_facing,
+        char *response, size_t response_size) {
+    if (output_fd < 0 || width < 1 || height < 1) {
+        errno = EINVAL;
+        return -1;
+    }
+    char request[MAX_REQUEST];
+    int length = snprintf(request, sizeof(request),
+            "ARCHPHENE/1\tCAPTURE_CAMERA_JPEG\t%d\t%d\t%s",
+            width, height, front_facing ? "front" : "back");
+    if (length <= 0 || (size_t)length >= sizeof(request)) {
+        errno = ENOSPC;
+        return -1;
+    }
+    return broker_request_with_fd(request, output_fd, response, response_size);
+}
 #ifdef ARCHPHENE_CAPABILITY_PROBE_MAIN
 int main(int argc, char **argv) {
     char response[256];
@@ -247,10 +274,42 @@ int main(int argc, char **argv) {
     } else if (remaining == 1
             && strcmp(argv[argument], "check-audio-input") == 0) {
         result = archphene_android_check_audio_input(response, sizeof(response));
+    } else if (remaining == 1
+            && strcmp(argv[argument], "request-camera") == 0) {
+        result = archphene_android_request_camera(response, sizeof(response));
+    } else if (remaining == 1
+            && strcmp(argv[argument], "check-camera") == 0) {
+        result = archphene_android_check_camera(response, sizeof(response));
+    } else if (remaining == 5
+            && strcmp(argv[argument], "capture-camera-jpeg") == 0) {
+        char *end_width = NULL;
+        char *end_height = NULL;
+        long width = strtol(argv[argument + 2], &end_width, 10);
+        long height = strtol(argv[argument + 3], &end_height, 10);
+        if (end_width == NULL || *end_width != '\0' || end_height == NULL
+                || *end_height != '\0' || width < 1 || width > INT32_MAX
+                || height < 1 || height > INT32_MAX
+                || (strcmp(argv[argument + 4], "front") != 0
+                    && strcmp(argv[argument + 4], "back") != 0)) {
+            fprintf(stderr, "invalid camera capture arguments\n");
+            return 64;
+        }
+        int output_fd = open(argv[argument + 1],
+                O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+        if (output_fd < 0) {
+            perror("open camera output");
+            return 66;
+        }
+        result = archphene_android_capture_camera_jpeg(output_fd,
+                (int)width, (int)height,
+                strcmp(argv[argument + 4], "front") == 0,
+                response, sizeof(response));
+        close(output_fd);
     } else {
         fprintf(stderr, "usage: %s [--socket @NAME] open-uri URI | "
                 "notify ID TITLE BODY | withdraw ID | print PDF TITLE | "
-                "request-audio-input | check-audio-input\n", argv[0]);
+                "request-audio-input | check-audio-input | request-camera | "
+                "check-camera | capture-camera-jpeg FILE WIDTH HEIGHT front|back\n", argv[0]);
         return 64;
     }
     if (result < 0) {
