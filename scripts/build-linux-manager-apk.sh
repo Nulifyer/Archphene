@@ -88,12 +88,32 @@ build_qt_templates() {
   gpu_helper="$root/tooling/build/android-gpu/x86_64/virgl_test_server_android"
   [[ -f "$gpu_helper" ]] || { echo "missing Android GPU helper: $gpu_helper" >&2; exit 1; }
   cp "$gpu_helper" "$out/stage/lib/x86_64/libarchphene_virgl_server.so"
+  cp "$root/tooling/build/android-dbus/x86_64/dbus-daemon" \
+    "$out/stage/lib/x86_64/libarchphene_dbus_daemon.so"
+  cp "$root/tooling/build/android-dbus/x86_64/portal-service" \
+    "$out/stage/lib/x86_64/libarchphene_portal_service.so"
+  cp "$root/tooling/build/android-dbus/x86_64/xdg-open" \
+    "$out/stage/lib/x86_64/libarchphene_xdg_open.so"
+  if [[ "$app_debuggable" == "true" ]]; then
+    cp "$root/tooling/build/android-dbus/x86_64/portal-probe" \
+      "$out/stage/lib/x86_64/libarchphene_portal_probe.so"
+  fi
   arm64_compositor="$root/native/archphene-compositor/target/aarch64-linux-android/release/libarchphene_compositor.so"
   [[ -f "$arm64_compositor" ]] || { echo "missing arm64 shared compositor: $arm64_compositor" >&2; exit 1; }
   cp "$arm64_compositor" "$out/stage/lib/arm64-v8a/libarchphene_compositor.so"
   arm64_gpu_helper="$root/tooling/build/android-gpu/aarch64/virgl_test_server_android"
   [[ -f "$arm64_gpu_helper" ]] || { echo "missing arm64 Android GPU helper: $arm64_gpu_helper" >&2; exit 1; }
   cp "$arm64_gpu_helper" "$out/stage/lib/arm64-v8a/libarchphene_virgl_server.so"
+  cp "$root/tooling/build/android-dbus/aarch64/dbus-daemon" \
+    "$out/stage/lib/arm64-v8a/libarchphene_dbus_daemon.so"
+  cp "$root/tooling/build/android-dbus/aarch64/portal-service" \
+    "$out/stage/lib/arm64-v8a/libarchphene_portal_service.so"
+  cp "$root/tooling/build/android-dbus/aarch64/xdg-open" \
+    "$out/stage/lib/arm64-v8a/libarchphene_xdg_open.so"
+  if [[ "$app_debuggable" == "true" ]]; then
+    cp "$root/tooling/build/android-dbus/aarch64/portal-probe" \
+      "$out/stage/lib/arm64-v8a/libarchphene_portal_probe.so"
+  fi
   prune_native_abis "$out/stage/lib"
   for profile in generic document; do
     (

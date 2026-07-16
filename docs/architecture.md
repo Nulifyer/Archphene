@@ -63,7 +63,7 @@ The emulator validates a cold app-drawer KCalc launch from the manager-owned pac
 
 ### Android capability broker
 
-The shared Activity creates a random abstract Unix socket for each launch and accepts requests only from Linux peers with the wrapper's Android UID. Generated capability metadata gates dispatch. ABI-specific glibc clients are content-addressed runtime-pack modules rather than wrapper payloads. URL handling and notifications are validated; Android permission denial remains authoritative. Standard XDG Desktop Portal/D-Bus adapters and the other Android service backends remain pending. See [Android capability broker](android-capabilities.md).
+The shared Activity creates a random abstract Unix socket for each launch and accepts requests only from Linux peers with the wrapper's Android UID. Generated capability metadata gates dispatch. ABI-specific glibc clients are content-addressed runtime-pack modules rather than wrapper payloads. Each wrapper starts an app-private D-Bus session with XDG OpenURI/Notification, classic notification, and `xdg-open` adapters; Android permission denial remains authoritative. Other Android service backends remain pending. See [Android capability broker](android-capabilities.md).
 
 ### Storage
 

@@ -26,11 +26,24 @@ The Android intent behavior follows the platform's [common intent guidance](http
 
 The emulator regression covers same-UID calls, first-use permission UI, notification post and withdrawal, HTTPS dispatch, unsafe-URI rejection, and cross-UID denial. A manager-built KCalc runtime pack was also inspected to prove that its manifest contains the exact `libarchphene_android.so` build hash.
 
-## Compatibility boundary
+## Standard desktop adapters
 
-The C ABI is a bridge primitive, not transparent compatibility for unmodified applications. Applications already using XDG Desktop Portal expect D-Bus interfaces such as [OpenURI](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.OpenURI.html) and [Notification](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Notification.html). Archphene still needs a private session bus and portal frontend/backend adapter that translates those standard calls to this broker. Toolkit-specific fallbacks may also be needed for applications that bypass portals.
+Each generated wrapper starts an app-private D-Bus session daemon under its existing Android UID. The socket is stored in the wrapper cache, accepts EXTERNAL authentication, and is inaccessible outside the Android sandbox. It is not a system bus and does not connect different wrappers.
 
-Audio, printing, camera, drag-and-drop, accessibility, secrets/keyrings, richer notification actions, and non-HTTP URI policies remain unimplemented. Each must define an Android permission and lifecycle policy before receiving a broker command.
+The wrapper also starts one frontend that owns `org.freedesktop.portal.Desktop` and `org.freedesktop.Notifications`. It currently implements:
+
+- XDG OpenURI `OpenURI`, `SchemeSupported`, `version`, and request responses;
+- XDG Notification `AddNotification`, `RemoveNotification`, `SupportedOptions`, and `version`;
+- freedesktop.org notification `GetCapabilities`, `GetServerInformation`, `Notify`, and `CloseNotification`;
+- `xdg-open` as a fallback for applications that do not call the portal directly.
+
+`DBUS_SESSION_BUS_ADDRESS`, `GIO_USE_PORTALS=1`, `NOTIFY_FORCE_PORTAL=1`, and the private `xdg-open` directory are exported to the unmodified Linux process. Android target-SDK executable restrictions are preserved: daemon and adapter executables run directly from the APK native-library directory, while only an app-private symlink is created for `xdg-open`.
+
+The first standard notification remains queued while Android displays `POST_NOTIFICATIONS`; consent posts it without requiring the Linux application to retry. Denial discards the bounded queue and remains authoritative. The queue holds at most 32 notification IDs.
+
+Dual-ABI builds pass ELF dependency checks. A manager-generated KCalc wrapper passes portal discovery, HTTP(S)-only scheme policy, portal and classic notification permission/post/withdraw, portal OpenURI, and `xdg-open` on the x86_64 emulator. The private-bus contract and first-use notification lifecycle also pass on a physical AArch64 Samsung device.
+
+Audio, printing, camera, drag-and-drop, accessibility, secrets/keyrings, richer notification actions, non-HTTP URI policies, and other desktop portals remain unimplemented. Each must define an Android permission and lifecycle policy before receiving a broker command.
 
 ## Native client
 

@@ -1,0 +1,17 @@
+--- a/meson.build
++++ b/meson.build
+@@ -810,13 +810,7 @@ config.set('HAVE_FSTATFS',
+     )
+ )
+ 
+-config.set10('HAVE_DECL_SYS_PIDFD_OPEN',
+-    cc.has_header_symbol(
+-        'sys/syscall.h',
+-        'SYS_pidfd_open',
+-        args: compile_args_c,
+-    )
+-)
++config.set10('HAVE_DECL_SYS_PIDFD_OPEN', false)
+ 
+ ###############################################################################
+ # Project options

@@ -70,6 +70,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     private Dialog documentRestartDialog;
     private Set<String> capabilities;
     private final AndroidGpuBridge gpuBridge = new AndroidGpuBridge();
+    private final AndroidDesktopIntegration desktopIntegration =
+            new AndroidDesktopIntegration();
     private Process linuxProcess;
     private String logTag = "ArchpheneLinuxApp";
     private String payload;
@@ -788,6 +790,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 cache.mkdirs();
                 config.mkdirs();
                 tmp.mkdirs();
+                startDesktopIntegration();
+                if (isActivityDestroyed()) return;
                 Map<String, String> environment = new HashMap<>();
                 environment.put("GLIBC_TUNABLES", "glibc.pthread.rseq=0");
                 environment.put("HOME", home.getAbsolutePath());
@@ -829,6 +833,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                             + " remaining Linux processes");
                 }
                 gpuBridge.stop();
+                desktopIntegration.stop();
                 releaseRuntimeLease();
             }
         }, "archphene-runtime-gui").start();
@@ -871,6 +876,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             cache.mkdirs();
             config.mkdirs();
             tmp.mkdirs();
+            startDesktopIntegration();
             if (isActivityDestroyed()) return;
             List<File> imported = importDocumentsIfAllowed();
 
@@ -916,6 +922,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             Log.e(logTag, "Could not launch Linux payload", error);
         } finally {
             packagedRuntimeActive.set(false);
+            desktopIntegration.stop();
             gpuBridge.stop();
         }
     }
@@ -923,6 +930,13 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     private void applyCapabilityEnvironment(Map<String, String> environment) {
         environment.put("ARCHPHENE_ANDROID_BROKER", "@" + capabilityBroker.socketName());
         environment.put("ARCHPHENE_ANDROID_PROTOCOL", "1");
+        desktopIntegration.applyEnvironment(environment);
+    }
+
+    private void startDesktopIntegration() throws IOException {
+        desktopIntegration.start(new File(getApplicationInfo().nativeLibraryDir),
+                getCacheDir(), "@" + capabilityBroker.socketName(),
+                getApplicationInfo().loadLabel(getPackageManager()).toString());
     }
 
     private File startGpuBridge() {
@@ -1404,6 +1418,15 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     }
 
     @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions,
+            int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (capabilityBroker != null) {
+            capabilityBroker.onRequestPermissionsResult(requestCode, grantResults);
+        }
+    }
+
+    @Override
     protected void onDestroy() {
         if (documentRestartDialog != null) {
             documentRestartDialog.dismiss();
@@ -1414,6 +1437,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         }
         secondaryWindows.clear();
         if (documentSession != null) documentSession.close();
+        desktopIntegration.stop();
         if (capabilityBroker != null) capabilityBroker.close();
         cancelManagedRuntimeExecution();
         if (linuxProcess != null) linuxProcess.destroy();

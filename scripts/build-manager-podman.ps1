@@ -2,6 +2,7 @@ param(
     [switch]$SkipRuntime,
     [switch]$ReleaseBuild,
     [switch]$SkipGpuHelperBuild,
+    [switch]$SkipDesktopIntegrationBuild,
     [ValidateSet("universal", "x86_64", "arm64-v8a")]
     [string]$ArtifactAbi = "universal",
     [int]$VersionCode = 10000,
@@ -23,6 +24,21 @@ function Invoke-Native([string]$Step, [scriptblock]$Command) {
 Invoke-Native "Podman availability check" { podman info --format "{{.Host.OS}}/{{.Host.Arch}}" }
 & (Join-Path $PSScriptRoot "build-android-capability-client-podman.ps1")
 if ($LASTEXITCODE -ne 0) { throw "Android capability client build failed" }
+if (-not $SkipDesktopIntegrationBuild) {
+    & (Join-Path $PSScriptRoot "build-android-dbus-podman.ps1") -Architecture x86_64
+    if ($LASTEXITCODE -ne 0) { throw "Android x86_64 desktop integration build failed" }
+    & (Join-Path $PSScriptRoot "build-android-dbus-podman.ps1") -Architecture aarch64
+    if ($LASTEXITCODE -ne 0) { throw "Android AArch64 desktop integration build failed" }
+} else {
+    foreach ($architecture in @("x86_64", "aarch64")) {
+        foreach ($helper in @("dbus-daemon", "portal-service", "portal-probe", "xdg-open")) {
+            $output = Join-Path $Root "tooling/build/android-dbus/$architecture/$helper"
+            if (-not (Test-Path -LiteralPath $output -PathType Leaf)) {
+                throw "Desktop integration output is required when skipping its build: $output"
+            }
+        }
+    }
+}
 & (Join-Path $PSScriptRoot "build-native-compositor-podman.ps1") -Architecture x86_64 -Release
 if ($LASTEXITCODE -ne 0) { throw "Shared native compositor build failed" }
 & (Join-Path $PSScriptRoot "build-terminal-pty-podman.ps1") -Architecture x86_64

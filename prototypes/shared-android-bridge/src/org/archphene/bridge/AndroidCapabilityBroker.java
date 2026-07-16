@@ -22,6 +22,10 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -41,6 +45,7 @@ final class AndroidCapabilityBroker implements Closeable {
     private static final int SOCKET_TIMEOUT_MILLIS = 5000;
     private static final int UI_TIMEOUT_SECONDS = 15;
     private static final int NOTIFICATION_PERMISSION_REQUEST = 0x4150;
+    private static final int MAX_PENDING_NOTIFICATIONS = 32;
 
     private final Activity activity;
     private final Set<String> capabilities;
@@ -48,6 +53,21 @@ final class AndroidCapabilityBroker implements Closeable {
     private LocalServerSocket server;
     private Thread thread;
     private String socketName;
+    private final Map<String, PendingNotification> pendingNotifications =
+            new LinkedHashMap<>();
+    private boolean notificationPermissionRequestInFlight;
+
+    private static final class PendingNotification {
+        final String id;
+        final String title;
+        final String body;
+
+        PendingNotification(String id, String title, String body) {
+            this.id = id;
+            this.title = title;
+            this.body = body;
+        }
+    }
 
     AndroidCapabilityBroker(Activity activity, Set<String> capabilities) {
         this.activity = activity;
@@ -165,17 +185,39 @@ final class AndroidCapabilityBroker implements Closeable {
         if (Build.VERSION.SDK_INT >= 33
                 && activity.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
                         != PackageManager.PERMISSION_GRANTED) {
-            boolean requested = activity.getPreferences(Activity.MODE_PRIVATE)
-                    .getBoolean("notification_permission_requested", false);
-            if (!requested) {
+            boolean requestPermission = false;
+            synchronized (this) {
+                boolean requested = activity.getPreferences(Activity.MODE_PRIVATE)
+                        .getBoolean("notification_permission_requested", false);
+                if (requested && !notificationPermissionRequestInFlight) {
+                    return "ERROR\tPERMISSION_DENIED";
+                }
+                if (!pendingNotifications.containsKey(id)
+                        && pendingNotifications.size() >= MAX_PENDING_NOTIFICATIONS) {
+                    return "ERROR\tNOTIFICATION_QUEUE_FULL";
+                }
+                pendingNotifications.put(id, new PendingNotification(id, title, body));
+                if (!notificationPermissionRequestInFlight) {
+                    notificationPermissionRequestInFlight = true;
+                    requestPermission = true;
+                }
+            }
+            if (requestPermission) {
                 activity.getPreferences(Activity.MODE_PRIVATE).edit()
                         .putBoolean("notification_permission_requested", true).apply();
-                runOnUiThread(() -> activity.requestPermissions(
-                        new String[] {Manifest.permission.POST_NOTIFICATIONS},
-                        NOTIFICATION_PERMISSION_REQUEST));
-                return "ERROR\tPERMISSION_REQUESTED";
+                try {
+                    runOnUiThread(() -> activity.requestPermissions(
+                            new String[] {Manifest.permission.POST_NOTIFICATIONS},
+                            NOTIFICATION_PERMISSION_REQUEST));
+                } catch (Exception error) {
+                    synchronized (this) {
+                        pendingNotifications.remove(id);
+                        notificationPermissionRequestInFlight = false;
+                    }
+                    throw error;
+                }
             }
-            return "ERROR\tPERMISSION_DENIED";
+            return "ERROR\tPERMISSION_REQUESTED";
         }
         runOnUiThread(() -> postNotification(id, title, body));
         Log.i(TAG, "Posted Android notification id=" + id);
@@ -211,11 +253,40 @@ final class AndroidCapabilityBroker implements Closeable {
 
     private void withdrawNotification(String id) throws Exception {
         validateText(id, "notification ID", false);
+        synchronized (this) {
+            pendingNotifications.remove(id);
+        }
         runOnUiThread(() -> {
             NotificationManager manager = activity.getSystemService(NotificationManager.class);
             if (manager != null) manager.cancel(id, 1);
         });
         Log.i(TAG, "Withdrew Android notification id=" + id);
+    }
+
+    boolean onRequestPermissionsResult(int requestCode, int[] grantResults) {
+        if (requestCode != NOTIFICATION_PERMISSION_REQUEST) return false;
+        List<PendingNotification> pending;
+        synchronized (this) {
+            pending = new ArrayList<>(pendingNotifications.values());
+            pendingNotifications.clear();
+            notificationPermissionRequestInFlight = false;
+        }
+        boolean granted = grantResults.length > 0
+                && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+        if (granted) {
+            for (PendingNotification notification : pending) {
+                try {
+                    postNotification(notification.id, notification.title, notification.body);
+                    Log.i(TAG, "Posted queued Android notification id=" + notification.id);
+                } catch (RuntimeException error) {
+                    Log.e(TAG, "Could not post queued Android notification", error);
+                }
+            }
+        } else {
+            Log.i(TAG, "Android notification permission denied; discarded "
+                    + pending.size() + " queued notification(s)");
+        }
+        return true;
     }
 
     private void runOnUiThread(Runnable action) throws Exception {
@@ -297,6 +368,10 @@ final class AndroidCapabilityBroker implements Closeable {
     @Override
     public void close() {
         running.set(false);
+        synchronized (this) {
+            pendingNotifications.clear();
+            notificationPermissionRequestInFlight = false;
+        }
         LocalServerSocket current = server;
         server = null;
         if (current != null) {
