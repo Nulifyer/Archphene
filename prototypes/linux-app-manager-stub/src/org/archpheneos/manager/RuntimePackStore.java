@@ -276,21 +276,30 @@ final class RuntimePackStore {
             ArrayList<Module> modules = new ArrayList<>();
             long total = 0;
             for (PendingModule value : pending) {
-                CopiedModule copied = copyModule(value.source, moduleRoot);
-                total = Math.addExact(total, copied.size);
+                ModuleIdentity identity = inspectModule(value.source);
+                total = Math.addExact(total, identity.size);
                 if (total > MAX_PACK_SIZE) throw new SecurityException("Runtime pack is too large");
-                modules.add(new Module(value.kind, copied.hash, copied.size,
-                        value.linkName, copied.file));
+                modules.add(new Module(value.kind, identity.hash, identity.size,
+                        value.linkName, new File(moduleRoot, identity.hash)));
             }
             byte[] manifest = manifest(sourcePackage, executableName, packages, modules);
             String packId = sha256(manifest);
-            File manifestFile = new File(temporary, "manifest.tsv");
-            writeSynced(manifestFile, manifest);
             File destination = new File(packsRoot, packId);
             if (destination.isDirectory()) {
+                android.util.Log.i("ArchpheneRuntime", "reusing unchanged runtime pack " + packId);
                 deleteRecursively(temporary);
                 return load(context, packId);
             }
+            for (int index = 0; index < pending.size(); index++) {
+                PendingModule value = pending.get(index);
+                Module expected = modules.get(index);
+                CopiedModule copied = copyModule(value.source, moduleRoot,
+                        expected.hash, expected.size);
+                modules.set(index, new Module(value.kind, copied.hash, copied.size,
+                        value.linkName, copied.file));
+            }
+            File manifestFile = new File(temporary, "manifest.tsv");
+            writeSynced(manifestFile, manifest);
             if (destination.exists() || !temporary.renameTo(destination)) {
                 throw new IOException("Could not atomically publish runtime pack");
             }
@@ -728,10 +737,36 @@ final class RuntimePackStore {
         }
     }
 
-    private static CopiedModule copyModule(File source, File moduleRoot) throws Exception {
+    private static final class ModuleIdentity {
+        final String hash;
+        final long size;
+
+        ModuleIdentity(String hash, long size) {
+            this.hash = hash;
+            this.size = size;
+        }
+    }
+
+    private static ModuleIdentity inspectModule(File source) throws Exception {
         if (!source.isFile() || source.length() <= 0 || source.length() > MAX_MODULE_SIZE) {
             throw new SecurityException("Runtime-pack module has an invalid size");
         }
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        long size = 0;
+        try (InputStream input = new FileInputStream(source)) {
+            byte[] buffer = new byte[64 * 1024];
+            int read;
+            while ((read = input.read(buffer)) != -1) {
+                size += read;
+                if (size > MAX_MODULE_SIZE) throw new SecurityException("Runtime module is too large");
+                digest.update(buffer, 0, read);
+            }
+        }
+        return new ModuleIdentity(hex(digest.digest()), size);
+    }
+
+    private static CopiedModule copyModule(File source, File moduleRoot,
+            String expectedHash, long expectedSize) throws Exception {
         File temporary = File.createTempFile("module-", ".new", moduleRoot);
         MessageDigest digest = MessageDigest.getInstance("SHA-256");
         long size = 0;
@@ -741,13 +776,17 @@ final class RuntimePackStore {
             int read;
             while ((read = input.read(buffer)) != -1) {
                 size += read;
-                if (size > MAX_MODULE_SIZE) throw new SecurityException("Runtime module is too large");
+                if (size > expectedSize) throw new SecurityException("Runtime module changed while copying");
                 digest.update(buffer, 0, read);
                 output.write(buffer, 0, read);
             }
             output.getFD().sync();
         }
         String hash = hex(digest.digest());
+        if (size != expectedSize || !hash.equals(expectedHash)) {
+            temporary.delete();
+            throw new SecurityException("Runtime module changed while copying");
+        }
         File target = new File(moduleRoot, hash);
         if (target.isFile()) {
             temporary.delete();

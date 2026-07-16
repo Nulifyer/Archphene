@@ -23,7 +23,7 @@ This is the prioritized completion queue for the Archphene Android application. 
 - [ ] Complete runtime-pack lifecycle safety.
   - [ ] Add running-process leases.
   - [x] Reconcile external Android uninstalls and revoke grants per package without disrupting wrappers that share a pack.
-  - [ ] Reuse unchanged closures before copying runtime-pack modules.
+  - [x] Reuse unchanged closures before copying runtime-pack modules.
   - [ ] Validate 4 KB and 16 KB ELF page compatibility.
   - [ ] Clean up the complete Linux process tree when a wrapper exits.
 - [ ] Finish the Terminal product.
