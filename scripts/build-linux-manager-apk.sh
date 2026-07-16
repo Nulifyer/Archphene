@@ -10,6 +10,19 @@ app_debuggable="${DEBUGGABLE:-false}"
 [[ "$app_debuggable" == "true" || "$app_debuggable" == "false" ]] || {
   echo "DEBUGGABLE must be true or false" >&2; exit 1;
 }
+artifact_abi="${ARCHPHENE_ABI:-universal}"
+case "$artifact_abi" in
+  universal|x86_64|arm64-v8a) ;;
+  *) echo "ARCHPHENE_ABI must be universal, x86_64, or arm64-v8a" >&2; exit 1 ;;
+esac
+
+prune_native_abis() {
+  local directory="$1"
+  case "$artifact_abi" in
+    x86_64) rm -rf "$directory/arm64-v8a" ;;
+    arm64-v8a) rm -rf "$directory/x86_64" ;;
+  esac
+}
 
 command -v python3 >/dev/null || { echo "python3 is required" >&2; exit 1; }
 
@@ -81,6 +94,7 @@ build_qt_templates() {
   arm64_gpu_helper="$root/tooling/build/android-gpu/aarch64/virgl_test_server_android"
   [[ -f "$arm64_gpu_helper" ]] || { echo "missing arm64 Android GPU helper: $arm64_gpu_helper" >&2; exit 1; }
   cp "$arm64_gpu_helper" "$out/stage/lib/arm64-v8a/libarchphene_virgl_server.so"
+  prune_native_abis "$out/stage/lib"
   for profile in generic document; do
     (
       cd "$out/stage"
@@ -88,8 +102,8 @@ build_qt_templates() {
       jar uf "../unsigned-$profile.apk" "${entries[@]}"
     )
   done
-  "$bt/zipalign" -f 4 "$out/unsigned-generic.apk" "$out/qt-wrapper-template.apk"
-  "$bt/zipalign" -f 4 "$out/unsigned-document.apk" "$out/qt-document-wrapper-template.apk"
+  "$bt/zipalign" -P 16 -f 4 "$out/unsigned-generic.apk" "$out/qt-wrapper-template.apk"
+  "$bt/zipalign" -P 16 -f 4 "$out/unsigned-document.apk" "$out/qt-document-wrapper-template.apk"
 
   local generic_manifest document_manifest
   generic_manifest="$("$bt/aapt2" dump xmltree "$out/qt-wrapper-template.apk" --file AndroidManifest.xml)"
@@ -143,12 +157,13 @@ build_terminal_app() {
   cp "$out/dex/classes.dex" "$out/stage/classes.dex"
   cp "$native_x86" "$out/stage/lib/x86_64/libtermux.so"
   cp "$native_arm64" "$out/stage/lib/arm64-v8a/libtermux.so"
+  prune_native_abis "$out/stage/lib"
   (
     cd "$out/stage"
     mapfile -d '' entries < <(find . -type f -print0)
     jar uf ../unsigned.apk "${entries[@]}"
   )
-  "$bt/zipalign" -f 4 "$out/unsigned.apk" "$out/aligned.apk"
+  "$bt/zipalign" -P 16 -f 4 "$out/unsigned.apk" "$out/aligned.apk"
   "$bt/apksigner" sign --ks "$KEYSTORE_PATH" --ks-key-alias "$KEY_ALIAS" \
     --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEY_PASSWORD \
     --out "$out/archphene-terminal.apk" "$out/aligned.apk"
@@ -300,6 +315,17 @@ add_runtime_module "$arm_catalog" glibc-loader "$arm_libs/libarchphene_ld.so" \
   libarchphene_ld.so ld-linux-aarch64.so.1
 add_runtime_module "$arm_catalog" glibc-libc \
   "$arm_libs/libarchphene_runtime_libc.so" libarchphene_runtime_libc.so libc.so.6
+prune_native_abis "$out/package-runtime/lib"
+case "$artifact_abi" in
+  x86_64)
+    rm -f "$package_assets"/archlinuxarm-aarch64-* \
+      "$package_assets/runtime-modules-aarch64.tsv"
+    ;;
+  arm64-v8a)
+    rm -f "$package_assets"/archlinux-x86_64-* \
+      "$package_assets/runtime-modules-x86_64.tsv"
+    ;;
+esac
 "$bt/aapt2" compile --dir "$app/res" -o "$out/compiled/res.zip"
 "$bt/aapt2" link -o "$out/unsigned.apk" -I "$platform" \
   --version-code "$version_code" --version-name "$version_name" \
@@ -322,7 +348,7 @@ mapfile -d '' class_files < <(find "$out/classes" -type f -name '*.class' -print
   jar uf ../unsigned.apk "${entries[@]}"
 )
 
-"$bt/zipalign" -f 4 "$out/unsigned.apk" "$out/aligned.apk"
+"$bt/zipalign" -P 16 -f 4 "$out/unsigned.apk" "$out/aligned.apk"
 if [[ -z "${KEYSTORE_PATH:-}" || -z "${KEYSTORE_PASSWORD:-}" \
     || -z "${KEY_ALIAS:-}" || -z "${KEY_PASSWORD:-}" ]]; then
   echo "KEYSTORE_PATH, KEYSTORE_PASSWORD, KEY_ALIAS, and KEY_PASSWORD are required" >&2
@@ -332,5 +358,5 @@ fi
   --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEY_PASSWORD \
   --out "$out/archphene.apk" "$out/aligned.apk"
 "$bt/apksigner" verify --verbose --print-certs "$out/archphene.apk"
-echo "Linux-built Archphene APK: $out/archphene.apk"
+echo "Linux-built Archphene APK ($artifact_abi): $out/archphene.apk"
 echo "Linux-built Terminal APK: $root/prototypes/archphene-terminal-app/out-linux/archphene-terminal.apk"

@@ -9,7 +9,7 @@ Archphene provides a first-party **Archphene Terminal** companion for command-li
 - A read-only content provider exposes only runtime packs recorded as Terminal-managed and only to a companion signed with the manager release certificate.
 - Terminal copies each command, loader, library, and data archive into its own sandbox, verifies the manager-declared size and SHA-256, rejects malformed catalogs and command collisions, and marks materialized runtime files read-only.
 - The Apache-2.0 Termux `terminal-emulator` and `terminal-view` modules provide VT/ANSI rendering, hardware-key input, Android IME input, selection, and resize handling.
-- The companion APK carries x86_64 and arm64-v8a PTY libraries. Android selected arm64-v8a on the Samsung Galaxy S22 Ultra, launched a real PTY shell, accepted input, exposed its home through DocumentsUI, and preserved the shell through rotation.
+- Universal development builds carry both PTY libraries; release manager APKs embed a single-ABI Terminal companion matching x86_64 or arm64-v8a. Android selected arm64-v8a on the Samsung Galaxy S22 Ultra, launched a real PTY shell, accepted input, exposed its home through DocumentsUI, and preserved the shell through rotation.
 - A Bionic JNI PTY host starts `/system/bin/sh` and owns a process group for the activity-scoped session.
 - Each Arch command runs through the patched glibc loader with only its resolved library closure and package data root.
 - Home, `.config`, and `.cache` persist under the Terminal UID. GUI wrappers remain separate Android UIDs.

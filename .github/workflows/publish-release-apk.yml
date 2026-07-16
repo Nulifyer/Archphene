@@ -51,27 +51,48 @@ jobs:
       - name: Verify Linux container engine
         run: docker version
 
-      - name: Build verified Arch runtime and patched glibc
-        run: bash scripts/build-ci-package-runtime.sh
+      - name: Build verified Arch runtimes and patched glibc
+        run: |
+          bash scripts/build-ci-package-runtime.sh
+          bash scripts/build-ci-package-runtime-arm64.sh
 
-      - name: Build shared Android compositor
+      - name: Build shared Android compositor and Terminal PTY
         run: |
           docker build -f containers/android-native.Containerfile \
             -t archphene-android-native:release .
-          docker run --rm \
-            -v "$PWD:/workspace" \
-            -v archphene-cargo-registry:/opt/cargo/registry \
-            -w /workspace/native/archphene-compositor \
-            archphene-android-native:release \
-            bash -lc 'cargo build --target x86_64-linux-android --release --locked'
-
-      - name: Build Android GPU helper
-        run: |
+          for target in x86_64-linux-android aarch64-linux-android; do
+            docker run --rm \
+              -v "$PWD:/workspace" \
+              -v archphene-cargo-registry:/opt/cargo/registry \
+              -w /workspace/native/archphene-compositor \
+              archphene-android-native:release \
+              bash -lc "cargo build --target $target --release --locked"
+          done
           docker run --rm \
             -v "$PWD:/workspace" \
             -w /workspace \
             archphene-android-native:release \
-            bash scripts/build-android-gpu-helper.sh x86_64
+            bash -lc '
+              set -euo pipefail
+              ndk="$ANDROID_SDK_ROOT/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/bin"
+              mkdir -p native/archphene-terminal/out/{x86_64,aarch64}
+              "$ndk/x86_64-linux-android29-clang" -shared -fPIC -O2 -Wall -Wextra -Werror \
+                -Wl,-z,relro,-z,now -o native/archphene-terminal/out/x86_64/libtermux.so \
+                native/archphene-terminal/terminal_pty.c
+              "$ndk/aarch64-linux-android29-clang" -shared -fPIC -O2 -Wall -Wextra -Werror \
+                -Wl,-z,relro,-z,now -o native/archphene-terminal/out/aarch64/libtermux.so \
+                native/archphene-terminal/terminal_pty.c
+            '
+
+      - name: Build Android GPU helpers
+        run: |
+          for architecture in x86_64 aarch64; do
+            docker run --rm \
+              -v "$PWD:/workspace" \
+              -w /workspace \
+              archphene-android-native:release \
+              bash scripts/build-android-gpu-helper.sh "$architecture"
+          done
 
       - name: Resolve release version
         run: |
@@ -88,7 +109,8 @@ jobs:
           {
             echo "VERSION_NAME=$version_name"
             echo "VERSION_CODE=$((1000000000 + GITHUB_RUN_NUMBER))"
-            echo "APK_NAME=Archphene-x86_64-$version_name.apk"
+            echo "APK_X86_NAME=Archphene-x86_64-$version_name.apk"
+            echo "APK_ARM64_NAME=Archphene-arm64-v8a-$version_name.apk"
           } >> "$GITHUB_ENV"
 
       - name: Restore release signing key
@@ -103,31 +125,47 @@ jobs:
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$key_path"
           echo "KEYSTORE_PATH=$key_path" >> "$GITHUB_ENV"
 
-      - name: Build signed Archphene APK on Linux
-        run: bash scripts/build-linux-manager-apk.sh
-
-      - name: Verify and name release artifact
+      - name: Build signed ABI-specific APKs on Linux
         run: |
-          source="prototypes/linux-app-manager-stub/out-linux/archphene.apk"
-          asset="$RUNNER_TEMP/$APK_NAME"
-          cp "$source" "$asset"
-          "$ANDROID_HOME/build-tools/36.0.0/apksigner" \
-            verify --verbose --print-certs "$asset"
-          sha256sum "$asset" | sed "s|  .*|  $APK_NAME|" \
-            > "$asset.sha256"
-          {
-            echo "APK_PATH=$asset"
-            echo "APK_SHA256_PATH=$asset.sha256"
-          } >> "$GITHUB_ENV"
+          for abi in x86_64 arm64-v8a; do
+            ARCHPHENE_ABI="$abi" bash scripts/build-linux-manager-apk.sh
+            if [[ "$abi" == "x86_64" ]]; then
+              name="$APK_X86_NAME"
+            else
+              name="$APK_ARM64_NAME"
+            fi
+            cp prototypes/linux-app-manager-stub/out-linux/archphene.apk \
+              "$RUNNER_TEMP/$name"
+          done
 
-      - name: Upload workflow artifact
+      - name: Verify release artifacts
+        run: |
+          for name in "$APK_X86_NAME" "$APK_ARM64_NAME"; do
+            asset="$RUNNER_TEMP/$name"
+            "$ANDROID_HOME/build-tools/36.0.0/apksigner" \
+              verify --verbose --print-certs "$asset"
+            "$ANDROID_HOME/build-tools/36.0.0/zipalign" \
+              -c -P 16 -v 4 "$asset"
+            sha256sum "$asset" | sed "s|  .*|  $name|" \
+              > "$asset.sha256"
+          done
+
+      - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Archphene-x86_64-${{ env.VERSION_NAME }}
+          name: Archphene-${{ env.VERSION_NAME }}
           path: |
-            ${{ env.APK_PATH }}
-            ${{ env.APK_SHA256_PATH }}
+            ${{ runner.temp }}/${{ env.APK_X86_NAME }}
+            ${{ runner.temp }}/${{ env.APK_X86_NAME }}.sha256
+            ${{ runner.temp }}/${{ env.APK_ARM64_NAME }}
+            ${{ runner.temp }}/${{ env.APK_ARM64_NAME }}.sha256
           if-no-files-found: error
 
-      - name: Attach APK to GitHub Release
-        run: gh release upload "$RELEASE_TAG" "$APK_PATH" "$APK_SHA256_PATH" --clobber
+      - name: Attach APKs to GitHub Release
+        run: |
+          gh release upload "$RELEASE_TAG" \
+            "$RUNNER_TEMP/$APK_X86_NAME" \
+            "$RUNNER_TEMP/$APK_X86_NAME.sha256" \
+            "$RUNNER_TEMP/$APK_ARM64_NAME" \
+            "$RUNNER_TEMP/$APK_ARM64_NAME.sha256" \
+            --clobber

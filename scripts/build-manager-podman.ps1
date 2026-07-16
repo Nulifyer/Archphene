@@ -2,6 +2,8 @@ param(
     [switch]$SkipRuntime,
     [switch]$ReleaseBuild,
     [switch]$SkipGpuHelperBuild,
+    [ValidateSet("universal", "x86_64", "arm64-v8a")]
+    [string]$ArtifactAbi = "universal",
     [int]$VersionCode = 10000,
     [string]$VersionName = "1.0.0",
     [ValidateRange(1, 16)]
@@ -100,6 +102,7 @@ try {
         "-e", "VERSION_CODE=$VersionCode",
         "-e", "VERSION_NAME=$VersionName",
         "-e", "DEBUGGABLE=$debuggable",
+        "-e", "ARCHPHENE_ABI=$ArtifactAbi",
         "-e", "KEYSTORE_PATH",
         "-e", "KEYSTORE_PASSWORD",
         "-e", "KEY_ALIAS",

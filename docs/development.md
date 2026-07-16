@@ -33,6 +33,15 @@ For repeated manager-only changes, reuse the verified runtime artifact:
 ./scripts/build-manager-podman.ps1 -SkipRuntime
 ```
 
+Build the same ABI-specific artifacts published by GitHub Releases with:
+
+```powershell
+./scripts/build-manager-podman.ps1 -SkipRuntime -ArtifactAbi x86_64
+./scripts/build-manager-podman.ps1 -SkipRuntime -ArtifactAbi arm64-v8a
+```
+
+Use the universal flavor only for local cross-device development. Release APKs are single-ABI so Android installs only the matching package runtime and wrapper templates.
+
 The AArch64 bootstrap can be rebuilt independently on Linux with:
 
 ```bash

@@ -19,7 +19,7 @@ This is the prioritized completion queue for the Archphene Android application. 
   - [x] Build a reproducible, checksum-cataloged AArch64 pacman/GnuPG/libarchive closure from official Arch Linux ARM repositories; verify every package against the pinned build-system key and cross-build matching patched glibc.
   - [x] Embed the verified AArch64 runtime and separate trust assets in the ARM manager, then prove package search, resolution, verification, staging, and Terminal publication on Samsung.
   - [x] Generate arm64-v8a desktop wrapper templates and prove a real Qt package through Android PackageInstaller and app-drawer launch.
-  - [ ] Publish separate x86_64 and arm64-v8a release assets; accept `any` data packages but require matching ABI for native ELF files.
+  - [x] Publish separate x86_64 and arm64-v8a release assets; accept `any` data packages but require matching ABI for native ELF files.
 - [ ] Complete runtime-pack lifecycle safety.
   - [ ] Add running-process leases.
   - [x] Reconcile external Android uninstalls and revoke grants per package without disrupting wrappers that share a pack.

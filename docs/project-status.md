@@ -22,19 +22,18 @@ This page separates validated behavior from planned platform work. Package searc
 
 ## In progress
 
-The debug manager and Terminal APKs are multi-ABI and run as arm64-v8a on the Samsung test device. The Arch Linux ARM package and Terminal transaction now passes; release assets must remain x86_64 until an ARM generated desktop wrapper passes and CI emits independently validated ABI-specific APKs.
+Local debug builds can remain multi-ABI. Release builds emit independently signed x86_64 and arm64-v8a manager APKs whose embedded Terminal, package runtime, trust data, and wrapper templates contain only the selected ABI. Both variants launch pacman on matching devices, and the ARM manager has generated, installed, and launched a real KCalc wrapper on the Samsung test device.
 
 1. **Architecture support**
-   - publish x86_64 and arm64-v8a manager/runtime artifacts;
+   - exercise the ABI-specific release workflow on a tagged GitHub prerelease;
    - use official Arch Linux packages only for x86_64 and Arch Linux ARM packages/trust roots for AArch64;
    - accept repository packages marked any, but require exact CPU ABI for native ELF files;
    - do not silently emulate x86_64 on ARM.
 
 2. **Runtime storage**
    - add running-process leases so garbage collection cannot remove a pack still used by a wrapper;
-   - reconcile bindings after uninstall and retain explicit grant revocation across all lifecycle paths;
-   - avoid repeatedly extracting an unchanged verified dependency closure;
-   - validate 4 KB and 16 KB page-size devices and process-tree cleanup.
+   - finish complete Linux process-tree cleanup when a wrapper exits;
+   - retain the 24-hour grace period only when no active binding or running lease protects a pack.
 
 ## Pending
 

@@ -28,8 +28,10 @@ The local keystore and credentials backup are stored under ignored `tooling/sign
 5. The workflow attaches:
    - `Archphene-x86_64-<version>.apk`
    - `Archphene-x86_64-<version>.apk.sha256`
+   - `Archphene-arm64-v8a-<version>.apk`
+   - `Archphene-arm64-v8a-<version>.apk.sha256`
 
-The asset name includes the supported ABI. The self-updater selects a matching `x86_64` or `arm64-v8a` asset and accepts the legacy ABI-neutral name for older releases. Do not publish an `arm64-v8a` asset until the manager contains a validated Arch Linux ARM runtime.
+Each APK contains only its matching package runtime, Terminal PTY library, compositor, GPU helper, trust data, and wrapper-template native libraries. The self-updater selects the first/native Android ABI and accepts the legacy ABI-neutral name only for older releases. AArch64 runtime artifacts are aligned for both 4 KB and 16 KB Android pages. Current upstream Arch x86_64 packages are 4 KB-only, so the x86_64 artifact fails closed on a 16 KB x86_64 system until those packages are rebuilt.
 
 The Android `versionName` comes from the release tag. The `versionCode` uses a high CI range plus the monotonic GitHub workflow run number, allowing a stable release after a prerelease with the same semantic version.
 

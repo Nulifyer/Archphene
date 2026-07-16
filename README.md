@@ -38,6 +38,7 @@ Each wrapped Linux application receives a normal Android package identity, UID, 
 | Mousepad | GTK 3 | x86_64 | Android 16 emulator | Editing, dialogs, IME, document open/save/reopen |
 | GLMark2 | Mesa / Wayland | x86_64 | Android 16 emulator | Full suite, virgl host renderer, 1080x2205, score 12 |
 | Archphene manager | Android | x86_64 | Android 16 emulator | Catalog, package transaction, versions, updates, settings, and production self-update |
+| Archphene manager | Android | AArch64 | Samsung Galaxy S22 Ultra, Android 15 | Catalog, package transaction, Terminal publication, wrapper install, and KCalc launch |
 
 These results prove the bridge on the listed targets only. They do not establish compatibility with every Android device, Linux application, GPU driver, or GrapheneOS release.
 
@@ -70,14 +71,14 @@ Official Arch Linux packages are used for x86_64. AArch64 testing uses the separ
 
 Download the APK and checksum from [GitHub Releases](https://github.com/Nulifyer/Archphene/releases).
 
-1. Download `Archphene-x86_64-<version>.apk`.
-2. Verify it against `Archphene-x86_64-<version>.apk.sha256`.
+1. Download `Archphene-arm64-v8a-<version>.apk` for a normal ARM64 phone/tablet, or `Archphene-x86_64-<version>.apk` for an x86_64 Android system.
+2. Verify it against the matching `.apk.sha256` file.
 3. Allow your browser or file manager to install unknown applications when Android prompts.
 4. Install the APK through Android's normal package installer.
 
 Release APKs are signed with a dedicated persistent Archphene release key and are built with `android:debuggable="false"`.
 
-The manager can generate and install the tested x86_64 Qt/KCalc wrapper on-device. Other packages remain subject to toolkit, ABI, bridge-capability, and wrapper-template compatibility checks; package search does not imply that every Arch package is currently runnable.
+The manager can generate and install the tested Qt/KCalc wrapper on x86_64 and AArch64 devices. Other packages remain subject to toolkit, ABI, page-size, bridge-capability, and wrapper-template compatibility checks; package search does not imply that every Arch package is currently runnable.
 
 ## Build from source
 
@@ -116,10 +117,10 @@ The physical suite expects the curated ARM64 package/runtime workspace and a com
 
 ## Current limitations
 
-- The complete on-device transaction is proven for x86_64 KCalc/Qt with durable per-package jobs, list/detail progress, cancellation, retry, bounded parallel preparation, serialized signing/installation, isolated failures, and process-death reconciliation. Arbitrary packages still need desktop-entry/toolkit detection, capability policy, additional wrapper templates, ABI filtering, and compatibility reporting.
-- GitHub Releases discovery, checksum validation, bounded download, signer/package verification, Android confirmation, replacement, and restart reconciliation are implemented. The Linux workflow published and checksummed the first `v1.0.0` APK.
+- The complete on-device KCalc/Qt transaction is proven on x86_64 and AArch64 with durable per-package jobs, list/detail progress, cancellation, retry, bounded parallel preparation, serialized signing/installation, isolated failures, and process-death reconciliation. Arbitrary packages still need broader toolkit detection, capability policy, wrapper templates, and compatibility reporting.
+- GitHub Releases discovery, checksum validation, bounded download, signer/package verification, Android confirmation, replacement, and restart reconciliation are implemented. The Linux workflow is configured to publish independently signed and checksummed x86_64 and arm64-v8a APKs; the dual-ABI workflow still needs a tagged prerelease run.
 - KCalc and Mousepad now use one shared Android Activity/InputConnection/clipboard host and Rust native compositor. Broad application support still requires more protocols, toolkit templates, and device coverage.
-- Verified package closures now publish as manager-owned immutable content-addressed runtime packs. A caller-authenticated provider grants exact read-only modules to the generated wrapper UID, cold KCalc app-drawer launch is validated, untrusted shell access is rejected, and the base generated wrapper is about 650 KiB instead of 57 MB (about 1.00 MiB when the native GPU helper is included). Superseded and manually collected unbound packs are reclaimed; running-process leases, external-uninstall reconciliation, extraction reuse, and 4 KB/16 KB validation remain incomplete.
+- Verified package closures publish as manager-owned immutable content-addressed runtime packs. A caller-authenticated provider grants exact read-only modules to the generated wrapper UID, cold KCalc app-drawer launch is validated, untrusted shell access is rejected, unchanged closures are reused, and external uninstalls are reconciled per package. ARM artifacts support 4 KB/16 KB pages; upstream Arch x86_64 is 4 KB-only. Running-process leases and complete process-tree cleanup remain incomplete.
 - OpenGL ES command execution is accelerated through virpipe and Android EGL/GLES with software fallback. Final Wayland presentation still uses shared-memory copies; Vulkan, zero-copy dmabuf, and physical-device end-to-end app tests remain incomplete. Audio, printing, camera, drag-and-drop, accessibility, keyrings, and many desktop portals are absent.
 - Android permissions require explicit bridge APIs; a Linux syscall cannot directly trigger an Android runtime permission prompt.
 - Secondary Linux toplevels use a shared parent/child registry with composited phone behavior and separate Android dialogs in tablet/freeform mode. Sustained vendor desktop-mode policy and multi-display behavior still need validation.
@@ -131,9 +132,9 @@ See [Current project status](docs/project-status.md) for validated evidence and 
 ## Roadmap
 
 1. Replace the validated virpipe-to-SHM presentation path with zero-copy Android hardware buffers/dmabuf where supported, while retaining software fallback and expanding application regressions.
-2. Add running-process leases, uninstall reconciliation, process-group cleanup, extraction reuse, and 4 KB/16 KB validation to the package-derived content-addressed runtime-pack broker.
+2. Add running-process leases and complete process-group cleanup to the package-derived content-addressed runtime-pack broker.
 3. Complete the multi-document Android storage broker and manager-owned shared user-document provider.
-4. Expand the proven failure-isolated x86_64 KCalc job flow to Arch Linux ARM, toolkit-aware templates, generic metadata, and capability policy.
+4. Expand the proven failure-isolated x86_64/AArch64 KCalc flow to toolkit-aware templates, generic metadata, and capability policy.
 5. Generate Android manifests and permission brokers from package capabilities.
 6. Expand compatibility to GPU-accelerated editors, browsers, creative applications, audio, and desktop/freeform multi-window use.
 7. Validate supported GrapheneOS Pixels without claiming GrapheneOS-equivalent security on other devices.
