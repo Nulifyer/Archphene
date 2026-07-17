@@ -175,7 +175,7 @@ static void on_state_changed(void *userdata, enum pw_stream_state old,
         enum pw_stream_state state, const char *error) {
     (void)old;
     struct app *app = userdata;
-    if (state == PW_STREAM_STATE_ERROR || state == PW_STREAM_STATE_UNCONNECTED) {
+    if (state == PW_STREAM_STATE_ERROR) {
         if (error != NULL) fprintf(stderr, "camera stream: %s\n", error);
         pw_main_loop_quit(app->loop);
     } else if (state == PW_STREAM_STATE_PAUSED) {
@@ -227,7 +227,10 @@ int main(int argc, char **argv) {
     struct app app = {0};
     pthread_mutex_init(&app.camera.lock, NULL);
     atomic_init(&app.camera.stop, 0);
-    fill_test_frame(app.camera.frame);
+    const char *test_pattern = getenv("ARCHPHENE_PIPEWIRE_TEST_PATTERN");
+    if (test_pattern != NULL && strcmp(test_pattern, "1") == 0) {
+        fill_test_frame(app.camera.frame);
+    }
     pw_init(&argc, &argv);
     app.loop = pw_main_loop_new(NULL);
     if (app.loop == NULL) return 70;
