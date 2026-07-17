@@ -136,6 +136,8 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
     private int hostWindowId;
     private int primaryWindowId;
     private boolean independentWindows;
+    private int viewportLeft;
+    private int viewportTop;
     private int viewportWidth = 1;
     private int viewportHeight = 1;
     private Map<Integer, Node> allNodes = Collections.emptyMap();
@@ -279,7 +281,6 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
             owner.viewportHeight = newHeight;
             owner.allNodes = Collections.unmodifiableMap(parsed);
         }
-        actions.clear();
         owner.redistribute();
     }
 
@@ -340,16 +341,22 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
                 subset.put(entry.getKey(), entry.getValue());
             }
         }
+        int subsetLeft = 0;
+        int subsetTop = 0;
         int subsetWidth = root.viewportWidth;
         int subsetHeight = root.viewportHeight;
         for (Node node : subset.values()) {
             if (node.parent == 0) {
+                subsetLeft = node.bounds.left;
+                subsetTop = node.bounds.top;
                 subsetWidth = Math.max(1, node.bounds.width());
                 subsetHeight = Math.max(1, node.bounds.height());
                 break;
             }
         }
         synchronized (lock) {
+            viewportLeft = subsetLeft;
+            viewportTop = subsetTop;
             viewportWidth = subsetWidth;
             viewportHeight = subsetHeight;
             nodes = Collections.unmodifiableMap(subset);
@@ -454,6 +461,8 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
     public AccessibilityNodeInfo createAccessibilityNodeInfo(int virtualViewId) {
         View currentHost;
         Map<Integer, Node> currentNodes;
+        int currentLeft;
+        int currentTop;
         int currentWidth;
         int currentHeight;
         int currentAccessibilityFocus;
@@ -461,6 +470,8 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
         synchronized (lock) {
             currentHost = host;
             currentNodes = nodes;
+            currentLeft = viewportLeft;
+            currentTop = viewportTop;
             currentWidth = viewportWidth;
             currentHeight = viewportHeight;
             currentAccessibilityFocus = accessibilityFocus;
@@ -509,14 +520,14 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
         info.addAction(node.id == currentAccessibilityFocus
                 ? AccessibilityNodeInfo.ACTION_CLEAR_ACCESSIBILITY_FOCUS
                 : AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS);
-        Rect windowBounds = scaleBounds(
-                node.bounds, currentHost, currentWidth, currentHeight);
+        Rect windowBounds = scaleBounds(node.bounds, currentHost,
+                currentLeft, currentTop, currentWidth, currentHeight);
         Rect parentBounds = new Rect(windowBounds);
         if (node.parent != 0) {
             Node parent = currentNodes.get(node.parent);
             if (parent != null) {
-                Rect scaledParent = scaleBounds(
-                        parent.bounds, currentHost, currentWidth, currentHeight);
+                Rect scaledParent = scaleBounds(parent.bounds, currentHost,
+                        currentLeft, currentTop, currentWidth, currentHeight);
                 parentBounds.offset(-scaledParent.left, -scaledParent.top);
             }
         }
@@ -669,8 +680,8 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
         }
     }
 
-    private static Rect scaleBounds(Rect source, View host, int viewportWidth,
-            int viewportHeight) {
+    private static Rect scaleBounds(Rect source, View host, int viewportLeft,
+            int viewportTop, int viewportWidth, int viewportHeight) {
         float scaleX = host.getWidth() / (float)Math.max(1, viewportWidth);
         float scaleY = host.getHeight() / (float)Math.max(1, viewportHeight);
         float offsetX = 0;
@@ -683,10 +694,10 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
             offsetX = (host.getWidth() - viewportWidth * uniform) / 2f;
             offsetY = (host.getHeight() - viewportHeight * uniform) / 2f;
         }
-        return new Rect(Math.round(offsetX + source.left * scaleX),
-                Math.round(offsetY + source.top * scaleY),
-                Math.round(offsetX + source.right * scaleX),
-                Math.round(offsetY + source.bottom * scaleY));
+        return new Rect(Math.round(offsetX + (source.left - viewportLeft) * scaleX),
+                Math.round(offsetY + (source.top - viewportTop) * scaleY),
+                Math.round(offsetX + (source.right - viewportLeft) * scaleX),
+                Math.round(offsetY + (source.bottom - viewportTop) * scaleY));
     }
 
     private static void validateRole(String role) {

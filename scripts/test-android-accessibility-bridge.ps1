@@ -133,6 +133,16 @@ if ($empty -ne "ERROR`tEMPTY") { throw "Accessibility action queue was not empty
 $published = Invoke-Probe $socket @("publish-accessibility-tree",
         "files/accessibility-tree.json")
 if ($published -ne "OK") { throw "Accessibility tree publication failed: $published" }
+$refreshAction = @("shell", "am", "start", "-n", "$Package/$Activity",
+        "--ei", "archphene_node", "2", "--es", "archphene_action", "click")
+Invoke-Adb $refreshAction "queue accessibility action before semantic refresh" | Out-Null
+$republished = Invoke-Probe $socket @("publish-accessibility-tree", "files/accessibility-tree.json")
+if ($republished -ne "OK") { throw "Accessibility tree refresh failed: $republished" }
+$preservedClick = Invoke-Probe $socket @("take-accessibility-action", "250")
+$expectedPreservedClick = "OK" + [char]9 + "2" + [char]9 + "click" + [char]9
+if ($preservedClick -ne $expectedPreservedClick) {
+    throw "Semantic refresh dropped a pending accessibility action: $preservedClick"
+}
 Start-Sleep -Milliseconds 1500
 $frameworkEvent = Invoke-Probe $socket @("accessibility-event", "0", "content")
 if ($frameworkEvent -ne "OK") { throw "Accessibility readiness event failed" }
@@ -143,6 +153,29 @@ if (-not $secondaryTree.Contains("Secondary accessible button")) {
 $secondaryWindowCount = ([regex]::Matches($secondaryTree, '(?m)^WINDOW\|')).Count
 if ($secondaryWindowCount -lt 2) {
     throw "Android did not expose the active secondary accessibility window: $secondaryTree"
+}
+$secondaryButton = [regex]::Match($secondaryTree,
+        '(?m)^\d+\|android\.widget\.Button\|Secondary accessible button\|[^|]*\|' +
+        '(-?\d+) (-?\d+) (-?\d+) (-?\d+)$')
+$displayText = (Invoke-Adb @("shell", "wm", "size") "read display size") -join [Environment]::NewLine
+$displayMatches = [regex]::Matches($displayText,
+        '(?:Physical|Override) size: (\d+)x(\d+)')
+if (-not $secondaryButton.Success -or $displayMatches.Count -eq 0) {
+    throw "Could not validate normalized secondary accessibility bounds"
+}
+$display = $displayMatches[$displayMatches.Count - 1]
+$left = [int]$secondaryButton.Groups[1].Value
+$top = [int]$secondaryButton.Groups[2].Value
+$right = [int]$secondaryButton.Groups[3].Value
+$bottom = [int]$secondaryButton.Groups[4].Value
+$displayWidth = [int]$display.Groups[1].Value
+$displayHeight = [int]$display.Groups[2].Value
+$boundsInvalid = (
+        $left -lt 0 -or $top -lt 0 -or
+        $right -le $left -or $bottom -le $top -or
+        $right -gt $displayWidth -or $bottom -gt $displayHeight)
+if ($boundsInvalid) {
+    throw "Secondary accessibility bounds were not normalized: $($secondaryButton.Value)"
 }
 Invoke-Adb @("shell", "am", "start", "-n", "$Package/$Activity", `
         "--ez", "archphene_reorder_windows", "true") `

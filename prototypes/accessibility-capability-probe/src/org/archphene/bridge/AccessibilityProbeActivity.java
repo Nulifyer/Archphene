@@ -41,9 +41,9 @@ public final class AccessibilityProbeActivity extends Activity {
             + "\"focusable\":true,\"enabled\":false},"
             + "{\"id\":11,\"parent\":0,\"role\":\"window\","
             + "\"text\":\"Secondary probe\",\"windowTitle\":\"Secondary probe\","
-            + "\"x\":0,\"y\":0,\"width\":300,\"height\":240},"
+            + "\"x\":1000,\"y\":800,\"width\":300,\"height\":240},"
             + "{\"id\":12,\"parent\":11,\"role\":\"button\","
-            + "\"text\":\"Secondary accessible button\",\"x\":30,\"y\":60,"
+            + "\"text\":\"Secondary accessible button\",\"x\":1030,\"y\":860,"
             + "\"width\":240,\"height\":72,\"clickable\":true,"
             + "\"focusable\":true}]}";
     private static final String BAD_TREE = "{"
