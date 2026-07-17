@@ -169,8 +169,9 @@ $JavaFiles = @(
 $CompileClasspath = (Join-Path $Sdk "platforms/android-36/android.jar") + [IO.Path]::PathSeparator + $ApkSignerJar
 Run-Native { & javac --release 17 -classpath $CompileClasspath -d (Join-Path $Out "classes") $JavaFiles } "javac"
 
-$ClassFiles = Get-ChildItem -LiteralPath (Join-Path $Out "classes") -Recurse -Filter *.class | ForEach-Object { $_.FullName }
-Run-Native { & (Join-Path $BuildTools "d8.bat") --lib (Join-Path $Sdk "platforms/android-36/android.jar") --min-api 23 --output (Join-Path $Out "dex") $ClassFiles $ApkSignerJar } "d8"
+$ClassesJar = Join-Path $Out "classes.jar"
+Run-Native { & jar --create --file $ClassesJar -C (Join-Path $Out "classes") . } "archive classes"
+Run-Native { & (Join-Path $BuildTools "d8.bat") --lib (Join-Path $Sdk "platforms/android-36/android.jar") --min-api 23 --output (Join-Path $Out "dex") $ClassesJar $ApkSignerJar } "d8"
 
 Push-Location (Join-Path $Out "dex")
 Run-Native { & jar uf "..\unsigned.apk" classes.dex } "jar update apk"

@@ -1336,7 +1336,10 @@ public final class MainActivity extends Activity {
             @Override public void onItemSelected(AdapterView<?> parent, View view,
                     int position, long id) {
                 selectedVersion[0] = versionValues.get(position);
-                installVersion.setText(selectedVersion[0].equals(app.sourceVersion)
+                boolean rollback = managerRollbackUnavailable(app, selectedVersion[0]);
+                installVersion.setEnabled(!rollback);
+                installVersion.setText(rollback ? "Android rollback unavailable"
+                        : selectedVersion[0].equals(app.sourceVersion)
                         ? "Repair installed version" : "Install selected version");
                 versionHealth.setText(versionHealthLabel(app.packageName,
                         selectedVersion[0], app.sourceVersion, state.availableVersion));
@@ -1618,12 +1621,21 @@ public final class MainActivity extends Activity {
         boolean prerelease = ManagerStateStore.versionPrerelease(this, packageName, version);
         String prefix = prerelease ? "Pre-release | " : "";
         if ("bad".equals(health)) return prefix + "Reported problematic version";
+        if (getPackageName().equals(packageName)
+                && GitHubReleaseClient.compareVersions(version, installedVersion) < 0) {
+            return prefix + "Older manager version; Android rollback is unavailable";
+        }
         if (version.equals(availableVersion)) return prefix + "Current repository version";
         if (version.equals(installedVersion)) return prefix + "Installed version";
         return prefix + "Archived version; compatibility not verified";
     }
 
     private void installSelectedVersion(InstalledLinuxAppCatalog.Entry app, String version) {
+        if (managerRollbackUnavailable(app, version)) {
+            showBanner("Android does not allow Archphene to replace itself with an older build",
+                    true);
+            return;
+        }
         String pinned = ManagerStateStore.pinnedVersion(this, app.packageName);
         if (app.sourceVersion.equals(version)) {
             if (!pinned.isEmpty() && !pinned.equals(version)) {
@@ -1659,6 +1671,11 @@ public final class MainActivity extends Activity {
         }, "wrapper-artifact-lookup").start();
     }
 
+    private boolean managerRollbackUnavailable(InstalledLinuxAppCatalog.Entry app,
+            String version) {
+        return "archphene".equals(app.sourceType)
+                && GitHubReleaseClient.compareVersions(version, app.sourceVersion) < 0;
+    }
     private void startManagerReleaseInstall(InstalledLinuxAppCatalog.Entry app,
             GitHubReleaseClient.Artifact release) {
         showAppsPage();

@@ -20,6 +20,7 @@ public final class GitHubReleaseClient {
     private static final int JSON_LIMIT = 4 * 1024 * 1024;
     private static final int CHECKSUM_LIMIT = 4096;
     private static final long CACHE_MILLIS = 5 * 60 * 1000L;
+    private static final String LEGACY_UNIVERSAL_VERSION = "1.0.0";
     private static List<Artifact> cachedVersions;
     private static long cachedAt;
     private static boolean cachedPrereleases;
@@ -99,12 +100,13 @@ public final class GitHubReleaseClient {
         for (int index = 0; index < releases.length(); index++) {
             JSONObject release = releases.getJSONObject(index);
             if (release.optBoolean("draft", true)) continue;
-            boolean prerelease = release.optBoolean("prerelease", false);
-            if (prerelease && !allowPrereleases) continue;
             String tag = release.optString("tag_name", "");
             if (!tag.matches("v[0-9]{1,9}\\.[0-9]{1,9}\\.[0-9]{1,9}"
                     + "(?:[-+][0-9A-Za-z.-]+)?")) continue;
             String version = tag.substring(1);
+            boolean prerelease = release.optBoolean("prerelease", false)
+                    || VersionPolicy.isPrerelease(version);
+            if (prerelease && !allowPrereleases) continue;
             String apkName = "Archphene-" + releaseAbi + "-" + version + ".apk";
             String checksumName = apkName + ".sha256";
             String fallbackApkName = "Archphene-" + version + ".apk";
@@ -113,19 +115,26 @@ public final class GitHubReleaseClient {
             JSONObject checksum = null;
             JSONObject fallbackApk = null;
             JSONObject fallbackChecksum = null;
+            boolean hasAbiSpecificApk = false;
             JSONArray assets = release.optJSONArray("assets");
             if (assets == null) continue;
             for (int assetIndex = 0; assetIndex < assets.length(); assetIndex++) {
                 JSONObject asset = assets.getJSONObject(assetIndex);
                 if (!"uploaded".equals(asset.optString("state", ""))) continue;
-                if (apkName.equals(asset.optString("name", ""))) apk = asset;
-                if (checksumName.equals(asset.optString("name", ""))) checksum = asset;
-                if (fallbackApkName.equals(asset.optString("name", ""))) fallbackApk = asset;
-                if (fallbackChecksumName.equals(asset.optString("name", ""))) {
+                String name = asset.optString("name", "");
+                if (name.matches("Archphene-(?:x86_64|arm64-v8a)-"
+                        + java.util.regex.Pattern.quote(version) + "\\.apk")) {
+                    hasAbiSpecificApk = true;
+                }
+                if (apkName.equals(name)) apk = asset;
+                if (checksumName.equals(name)) checksum = asset;
+                if (fallbackApkName.equals(name)) fallbackApk = asset;
+                if (fallbackChecksumName.equals(name)) {
                     fallbackChecksum = asset;
                 }
             }
             if (apk == null || checksum == null) {
+                if (!LEGACY_UNIVERSAL_VERSION.equals(version) || hasAbiSpecificApk) continue;
                 apk = fallbackApk;
                 checksum = fallbackChecksum;
                 apkName = fallbackApkName;
@@ -149,35 +158,46 @@ public final class GitHubReleaseClient {
     static void verifyParserForTest() throws Exception {
         String stable = "{\"draft\":false,\"prerelease\":false,\"tag_name\":\"v1.2.3\","
                 + "\"assets\":["
-                + "{\"state\":\"uploaded\",\"name\":\"Archphene-1.2.3.apk\","
+                + "{\"state\":\"uploaded\",\"name\":\"Archphene-x86_64-1.2.3.apk\","
                 + "\"size\":123,\"browser_download_url\":"
                 + "\"https://github.com/Nulifyer/Archphene/releases/download/v1.2.3/"
-                + "Archphene-1.2.3.apk\",\"digest\":\"sha256:"
+                + "Archphene-x86_64-1.2.3.apk\",\"digest\":\"sha256:"
                 + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},"
-                + "{\"state\":\"uploaded\",\"name\":\"Archphene-1.2.3.apk.sha256\","
+                + "{\"state\":\"uploaded\",\"name\":\"Archphene-x86_64-1.2.3.apk.sha256\","
                 + "\"size\":90,\"browser_download_url\":"
                 + "\"https://github.com/Nulifyer/Archphene/releases/download/v1.2.3/"
-                + "Archphene-1.2.3.apk.sha256\"}]}";
+                + "Archphene-x86_64-1.2.3.apk.sha256\"}]}";
         String prerelease = stable.replace("v1.2.3", "v1.3.0-rc1")
-                .replace("1.2.3.apk", "1.3.0-rc1.apk")
-                .replace("\"prerelease\":false", "\"prerelease\":true");
+                .replace("1.2.3.apk", "1.3.0-rc1.apk");
         List<Artifact> stableOnly = parseReleaseResponse(
                 "[" + stable + "," + prerelease + "]", false, "x86_64");
         List<Artifact> withPrerelease = parseReleaseResponse(
                 "[" + stable + "," + prerelease + "]", true, "x86_64");
-        String x86Specific = stable.replace("Archphene-1.2.3.apk",
-                "Archphene-x86_64-1.2.3.apk");
-        List<Artifact> x86Only = parseReleaseResponse("[" + x86Specific + "]",
+        List<Artifact> x86Only = parseReleaseResponse("[" + stable + "]",
                 false, "x86_64");
-        List<Artifact> incompatible = parseReleaseResponse("[" + x86Specific + "]",
+        List<Artifact> incompatible = parseReleaseResponse("[" + stable + "]",
+                false, "arm64-v8a");
+        String legacy = stable.replace("v1.2.3", "v1.0.0")
+                .replace("Archphene-x86_64-1.2.3", "Archphene-1.0.0");
+        String unsupportedUniversal = legacy.replace("v1.0.0", "v1.2.4")
+                .replace("Archphene-1.0.0", "Archphene-1.2.4");
+        List<Artifact> legacyArm = parseReleaseResponse("[" + legacy + "]",
+                false, "arm64-v8a");
+        List<Artifact> futureUniversal = parseReleaseResponse("[" + unsupportedUniversal + "]",
                 false, "arm64-v8a");
         if (stableOnly.size() != 1 || !"1.2.3".equals(stableOnly.get(0).version)
                 || withPrerelease.size() != 2
                 || !"1.3.0-rc1".equals(withPrerelease.get(0).version)
                 || x86Only.size() != 1
                 || !"Archphene-x86_64-1.2.3.apk".equals(x86Only.get(0).assetName)
-                || !incompatible.isEmpty()) {
+                || !incompatible.isEmpty() || legacyArm.size() != 1
+                || !futureUniversal.isEmpty()) {
             throw new SecurityException("GitHub release parser policy mismatch");
+        }
+        if (compareVersions("1.0.0-rc.10", "1.0.0-rc.2") <= 0
+                || compareVersions("1.0.0+build.2", "1.0.0+build.1") != 0
+                || compareVersions("1.0.0-1", "1.0.0-alpha") >= 0) {
+            throw new SecurityException("Semantic release ordering mismatch");
         }
     }
     private static Artifact resolveChecksum(Artifact artifact) throws Exception {
@@ -210,19 +230,40 @@ public final class GitHubReleaseClient {
     }
 
     static int compareVersions(String left, String right) {
-        String[] leftParts = left.split("[-+]", 2)[0].split("\\.");
-        String[] rightParts = right.split("[-+]", 2)[0].split("\\.");
+        String leftPrecedence = left.split("\\+", 2)[0];
+        String rightPrecedence = right.split("\\+", 2)[0];
+        String[] leftParts = leftPrecedence.split("-", 2)[0].split("\\.");
+        String[] rightParts = rightPrecedence.split("-", 2)[0].split("\\.");
         for (int index = 0; index < 3; index++) {
             int compared = Long.compare(Long.parseLong(leftParts[index]),
                     Long.parseLong(rightParts[index]));
             if (compared != 0) return compared;
         }
-        boolean leftPrerelease = left.contains("-");
-        boolean rightPrerelease = right.contains("-");
+        boolean leftPrerelease = leftPrecedence.contains("-");
+        boolean rightPrerelease = rightPrecedence.contains("-");
         if (leftPrerelease != rightPrerelease) return leftPrerelease ? -1 : 1;
-        return left.compareTo(right);
+        if (!leftPrerelease) return 0;
+        String[] leftIdentifiers = leftPrecedence.split("-", 2)[1].split("\\.");
+        String[] rightIdentifiers = rightPrecedence.split("-", 2)[1].split("\\.");
+        int shared = Math.min(leftIdentifiers.length, rightIdentifiers.length);
+        for (int index = 0; index < shared; index++) {
+            int compared = comparePrereleaseIdentifier(
+                    leftIdentifiers[index], rightIdentifiers[index]);
+            if (compared != 0) return compared;
+        }
+        return Integer.compare(leftIdentifiers.length, rightIdentifiers.length);
     }
 
+    private static int comparePrereleaseIdentifier(String left, String right) {
+        boolean leftNumeric = left.matches("[0-9]+");
+        boolean rightNumeric = right.matches("[0-9]+");
+        if (leftNumeric != rightNumeric) return leftNumeric ? -1 : 1;
+        if (!leftNumeric) return left.compareTo(right);
+        String normalizedLeft = left.replaceFirst("^0+(?!$)", "");
+        String normalizedRight = right.replaceFirst("^0+(?!$)", "");
+        int length = Integer.compare(normalizedLeft.length(), normalizedRight.length());
+        return length != 0 ? length : normalizedLeft.compareTo(normalizedRight);
+    }
     private static URL validatedBrowserUrl(String value, String tag, String assetName)
             throws Exception {
         URL url = new URL(value);
