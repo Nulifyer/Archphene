@@ -87,9 +87,9 @@ public final class AccessibilityProbeActivity extends Activity {
             }
             accessibility.updateWindows(List.of(
                     new ArchpheneAccessibilityBridge.WindowDescriptor(
-                            101, 0, true, "Archphene accessible window"),
+                            101, 0, true, 360, 640, "Archphene accessible window"),
                     new ArchpheneAccessibilityBridge.WindowDescriptor(
-                            202, 101, false, "Secondary probe")), true);
+                            202, 101, false, 300, 240, "Secondary probe")), true);
             broker = new AndroidCapabilityBroker(this, capabilities, accessibility);
             broker.start();
             brokerFile = new File(getFilesDir(), "accessibility-broker-name");
@@ -111,6 +111,15 @@ public final class AccessibilityProbeActivity extends Activity {
 
     private void handleActionIntent(Intent intent) {
         if (intent == null) return;
+        if (intent.getBooleanExtra("archphene_reorder_windows", false)) {
+            accessibility.updateWindows(List.of(
+                    new ArchpheneAccessibilityBridge.WindowDescriptor(
+                            202, 101, false, 1, 1, ""),
+                    new ArchpheneAccessibilityBridge.WindowDescriptor(
+                            101, 0, true, 1, 1, "")), true);
+            accessibility.sendNamedEvent(0, "content");
+            return;
+        }
         if (intent.getBooleanExtra("archphene_hide_secondary", false)) {
             if (secondaryView != null) accessibility.detach(secondaryView);
             if (secondaryDialog != null) secondaryDialog.dismiss();
@@ -118,7 +127,7 @@ public final class AccessibilityProbeActivity extends Activity {
             secondaryDialog = null;
             accessibility.updateWindows(List.of(
                     new ArchpheneAccessibilityBridge.WindowDescriptor(
-                            101, 0, true, "Archphene accessible window")), true);
+                            101, 0, true, 360, 640, "Archphene accessible window")), true);
             if (view != null) {
                 view.postDelayed(() -> accessibility.sendNamedEvent(0, "content"), 250);
             }
@@ -142,7 +151,16 @@ public final class AccessibilityProbeActivity extends Activity {
         } else {
             throw new IllegalArgumentException("Unknown probe accessibility action");
         }
-        boolean accepted = accessibility.performAction(node, androidAction, arguments);
+        String providerName = intent.getStringExtra("archphene_provider");
+        AccessibilityNodeProvider provider = null;
+        if ("primary".equals(providerName) && view != null) {
+            provider = view.getAccessibilityNodeProvider();
+        } else if ("secondary".equals(providerName) && secondaryView != null) {
+            provider = secondaryView.getAccessibilityNodeProvider();
+        }
+        boolean accepted = providerName == null
+                ? accessibility.performAction(node, androidAction, arguments)
+                : provider != null && provider.performAction(node, androidAction, arguments);
         boolean expectRejected = intent.getBooleanExtra(
                 "archphene_expect_rejected", false);
         if (expectRejected) {

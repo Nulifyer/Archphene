@@ -7,6 +7,7 @@ import android.os.ParcelFileDescriptor;
 import android.util.Base64;
 import android.view.View;
 import android.view.accessibility.AccessibilityEvent;
+import android.widget.ImageView;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityNodeProvider;
 import java.io.ByteArrayOutputStream;
@@ -62,12 +63,17 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
         final int id;
         final int parentId;
         final boolean primary;
+        final int width;
+        final int height;
         final String title;
 
-        WindowDescriptor(int id, int parentId, boolean primary, String title) {
+        WindowDescriptor(int id, int parentId, boolean primary,
+                int width, int height, String title) {
             this.id = id;
             this.parentId = parentId;
             this.primary = primary;
+            this.width = Math.max(1, width);
+            this.height = Math.max(1, height);
             this.title = title == null ? "" : title;
         }
     }
@@ -123,7 +129,9 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
     private final ArrayBlockingQueue<LinuxAction> actions;
     private final Map<Integer, ArchpheneAccessibilityBridge> windowBridges =
             new LinkedHashMap<>();
-    private final Map<Integer, String> windowTitles = new LinkedHashMap<>();
+    private final Map<Integer, WindowDescriptor> windowDescriptors =
+            new LinkedHashMap<>();
+    private final Map<Integer, Integer> semanticWindowAssignments = new HashMap<>();
     private View host;
     private int hostWindowId;
     private int primaryWindowId;
@@ -197,7 +205,7 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
             return;
         }
         synchronized (lock) {
-            windowTitles.clear();
+            windowDescriptors.clear();
             primaryWindowId = 0;
             independentWindows = independent;
             for (WindowDescriptor frame : frames) {
@@ -213,9 +221,11 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
             }
             for (WindowDescriptor frame : frames) {
                 if (independent || frame.id == primaryWindowId) {
-                    windowTitles.put(frame.id, frame.title);
+                    windowDescriptors.put(frame.id, frame);
                 }
             }
+            semanticWindowAssignments.values().removeIf(
+                    windowId -> !windowDescriptors.containsKey(windowId));
         }
         redistribute();
     }
@@ -305,19 +315,17 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
             return;
         }
         Map<Integer, Node> source;
-        Map<Integer, String> titles;
-        int primary;
         int rootWindow;
         List<ArchpheneAccessibilityBridge> providers;
+        Map<Integer, Integer> assignments;
         synchronized (lock) {
             source = allNodes;
-            titles = new LinkedHashMap<>(windowTitles);
-            primary = primaryWindowId != 0 ? primaryWindowId : hostWindowId;
+            int primary = primaryWindowId != 0 ? primaryWindowId : hostWindowId;
             rootWindow = hostWindowId;
             providers = new ArrayList<>(windowBridges.values());
+            assignments = assignWindows(source, windowDescriptors, primary,
+                    independentWindows, semanticWindowAssignments);
         }
-        Map<Integer, Integer> assignments = assignWindows(
-                source, titles, primary, independentWindows);
         installSubset(source, assignments, rootWindow);
         for (ArchpheneAccessibilityBridge provider : providers) {
             provider.installSubset(source, assignments, provider.hostWindowId);
@@ -352,15 +360,33 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
     }
 
     private static Map<Integer, Integer> assignWindows(Map<Integer, Node> source,
-            Map<Integer, String> titles, int primary, boolean independent) {
+            Map<Integer, WindowDescriptor> windows, int primary, boolean independent,
+            Map<Integer, Integer> stickyAssignments) {
         HashMap<Integer, Integer> result = new HashMap<>();
+        HashSet<Integer> roots = new HashSet<>();
+        for (Node node : source.values()) {
+            if (node.parent == 0) roots.add(node.id);
+        }
+        stickyAssignments.keySet().removeIf(id -> !roots.contains(id));
+
         HashSet<Integer> assignedWindows = new HashSet<>();
         for (Node node : source.values()) {
             if (node.parent != 0) continue;
-            String title = node.windowTitle.isBlank() ? node.text : node.windowTitle;
-            int windowId = matchingWindow(
-                    titles, title, primary, independent, assignedWindows);
-            if (windowId != 0) assignedWindows.add(windowId);
+            Integer sticky = stickyAssignments.get(node.id);
+            int windowId = sticky != null && windows.containsKey(sticky)
+                    && (!independent || !assignedWindows.contains(sticky))
+                    ? sticky : 0;
+            if (windowId == 0) {
+                String title = node.windowTitle.isBlank() ? node.text : node.windowTitle;
+                windowId = matchingWindow(windows, title, node.bounds.width(),
+                        node.bounds.height(), primary, independent, assignedWindows);
+            }
+            if (windowId != 0) {
+                stickyAssignments.put(node.id, windowId);
+                if (independent) assignedWindows.add(windowId);
+            } else {
+                stickyAssignments.remove(node.id);
+            }
             ArrayList<Integer> pending = new ArrayList<>();
             pending.add(node.id);
             for (int index = 0; index < pending.size(); index++) {
@@ -373,19 +399,33 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
         return result;
     }
 
-    private static int matchingWindow(Map<Integer, String> titles, String title,
-            int primary, boolean independent, Set<Integer> assignedWindows) {
+    private static int matchingWindow(Map<Integer, WindowDescriptor> windows,
+            String title, int width, int height, int primary, boolean independent,
+            Set<Integer> assignedWindows) {
         if (!title.isBlank()) {
-            for (Map.Entry<Integer, String> entry : titles.entrySet()) {
-                if (title.equals(entry.getValue())
-                        && !assignedWindows.contains(entry.getKey())) {
-                    return entry.getKey();
+            for (WindowDescriptor window : windows.values()) {
+                if (title.equals(window.title)
+                        && (!independent || !assignedWindows.contains(window.id))) {
+                    return window.id;
                 }
             }
         }
         if (!independent) return primary;
+
+        int closest = 0;
+        long closestDifference = Long.MAX_VALUE;
+        for (WindowDescriptor window : windows.values()) {
+            if (assignedWindows.contains(window.id)) continue;
+            long difference = Math.abs((long)width - window.width)
+                    + Math.abs((long)height - window.height);
+            if (difference < closestDifference) {
+                closest = window.id;
+                closestDifference = difference;
+            }
+        }
+        if (closest != 0) return closest;
         if (primary != 0 && !assignedWindows.contains(primary)) return primary;
-        for (int windowId : titles.keySet()) {
+        for (int windowId : windows.keySet()) {
             if (!assignedWindows.contains(windowId)) return windowId;
         }
         return 0;
@@ -526,10 +566,6 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
 
     @Override
     public boolean performAction(int virtualViewId, int action, Bundle arguments) {
-        if (this == root) {
-            ArchpheneAccessibilityBridge target = bridgeForNode(virtualViewId);
-            if (target != this) return target.performAction(virtualViewId, action, arguments);
-        }
         Node node;
         synchronized (lock) {
             node = nodes.get(virtualViewId);
@@ -636,8 +672,20 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
             int viewportHeight) {
         float scaleX = host.getWidth() / (float)Math.max(1, viewportWidth);
         float scaleY = host.getHeight() / (float)Math.max(1, viewportHeight);
-        return new Rect(Math.round(source.left * scaleX), Math.round(source.top * scaleY),
-                Math.round(source.right * scaleX), Math.round(source.bottom * scaleY));
+        float offsetX = 0;
+        float offsetY = 0;
+        if (host instanceof ImageView image
+                && image.getScaleType() == ImageView.ScaleType.FIT_CENTER) {
+            float uniform = Math.min(scaleX, scaleY);
+            scaleX = uniform;
+            scaleY = uniform;
+            offsetX = (host.getWidth() - viewportWidth * uniform) / 2f;
+            offsetY = (host.getHeight() - viewportHeight * uniform) / 2f;
+        }
+        return new Rect(Math.round(offsetX + source.left * scaleX),
+                Math.round(offsetY + source.top * scaleY),
+                Math.round(offsetX + source.right * scaleX),
+                Math.round(offsetY + source.bottom * scaleY));
     }
 
     private static void validateRole(String role) {

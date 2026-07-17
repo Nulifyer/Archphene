@@ -145,11 +145,25 @@ if ($secondaryWindowCount -lt 2) {
     throw "Android did not expose the active secondary accessibility window: $secondaryTree"
 }
 Invoke-Adb @("shell", "am", "start", "-n", "$Package/$Activity", `
-        "--ei", "archphene_node", "12", "--es", "archphene_action", "click") `
+        "--ez", "archphene_reorder_windows", "true") `
+        "reorder ambiguous accessibility windows" | Out-Null
+Start-Sleep -Milliseconds 250
+Invoke-Adb @("shell", "am", "start", "-n", "$Package/$Activity", `
+        "--ei", "archphene_node", "12", "--es", "archphene_action", "click", `
+        "--es", "archphene_provider", "secondary") `
         "invoke secondary Android accessibility click" | Out-Null
 $secondaryClick = Invoke-Probe $socket @("take-accessibility-action", "250")
 if ($secondaryClick -ne "OK`t12`tclick`t") {
     throw "Secondary Android click was not routed to Linux: $secondaryClick"
+}
+Invoke-Adb @("shell", "am", "start", "-n", "$Package/$Activity", `
+        "--ei", "archphene_node", "12", "--es", "archphene_action", "click", `
+        "--es", "archphene_provider", "primary", `
+        "--ez", "archphene_expect_rejected", "true") `
+        "reject secondary node through primary accessibility provider" | Out-Null
+$afterWrongWindow = Invoke-Probe $socket @("take-accessibility-action", "0") -AllowFailure
+if ($afterWrongWindow -ne "ERROR$([char]9)EMPTY") {
+    throw "Secondary node leaked into the primary provider: $afterWrongWindow"
 }
 Invoke-Adb @("shell", "run-as", $Package, "rm", "-f",
         "files/framework-accessibility-tree.txt") "clear secondary framework tree" | Out-Null
@@ -238,5 +252,6 @@ $logs = (Invoke-Adb @("logcat", "-d", "-v", "brief", "-s",
 if ($logs -match "FATAL EXCEPTION") { throw "Accessibility probe crashed: $logs" }
 Restore-AccessibilitySettings
 Write-Host ("Android accessibility bridge passed on $Serial ($AndroidAbi): " +
-        "two-window ownership, virtual trees, bounds, events, invalid-tree rollback, " +
-        "primary/secondary click, edit, scroll, disabled/oversized rejection, lifecycle.")
+        "sticky two-window ownership, cross-window rejection, virtual trees, bounds, " +
+        "events, invalid-tree rollback, primary/secondary click, edit, scroll, " +
+        "disabled/oversized rejection, lifecycle.")
