@@ -147,7 +147,7 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
     private int accessibilityFocus;
     private int inputFocus;
     interface MenuFallback {
-        void activate(int windowId, ArchpheneInputView host, float x, float y);
+        void activate(int windowId, View host, float x, float y);
     }
 
     private volatile MenuFallback menuFallback;
@@ -217,15 +217,15 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
             throw new IllegalStateException("Accessibility menu fallback is unavailable");
         }
         ArchpheneAccessibilityBridge owner = root.bridgeForNode(nodeId);
-        ArchpheneInputView currentHost;
+        View currentHost;
         int currentWindowId;
         Rect bounds;
         synchronized (owner.lock) {
             Node node = owner.nodes.get(nodeId);
-            if (node == null || !(owner.host instanceof ArchpheneInputView inputHost)) {
+            if (node == null || owner.host == null) {
                 throw new IllegalArgumentException("Accessibility menu node is unavailable");
             }
-            currentHost = inputHost;
+            currentHost = owner.host;
             currentWindowId = owner.hostWindowId;
             bounds = scaleBounds(node.bounds, currentHost,
                     owner.viewportLeft, owner.viewportTop,

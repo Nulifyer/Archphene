@@ -504,9 +504,9 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     }
 
     private void activateAccessibilityMenu(
-            int windowId, ArchpheneInputView source, float x, float y) {
+            int windowId, View host, float x, float y) {
         runOnUiThread(() -> {
-            if (session == null || source == null) return;
+            if (session == null || !(host instanceof ArchpheneInputView source)) return;
             if (source == compositorView) {
                 session.touchClick(windowId, source, x, y);
                 return;
