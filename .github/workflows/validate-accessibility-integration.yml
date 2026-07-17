@@ -1,0 +1,75 @@
+name: Validate Accessibility Integration
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/validate-accessibility-integration.yml"
+      - "prototypes/accessibility-capability-probe/**"
+      - "prototypes/shared-android-bridge/src/org/archphene/bridge/**"
+      - "native/archphene-android-capability/**"
+      - "scripts/build-accessibility-capability-probe.sh"
+  pull_request:
+    paths:
+      - ".github/workflows/validate-accessibility-integration.yml"
+      - "prototypes/accessibility-capability-probe/**"
+      - "prototypes/shared-android-bridge/src/org/archphene/bridge/**"
+      - "native/archphene-android-capability/**"
+      - "scripts/build-accessibility-capability-probe.sh"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-accessibility-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build framework probes for both ABIs
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Java
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+
+      - name: Install Android build tools and NDK
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;29.0.14206865"
+
+      - name: Create test-only signing key
+        run: |
+          keytool -genkeypair -noprompt \
+            -keystore "$RUNNER_TEMP/accessibility-probe.keystore" \
+            -storepass android -keypass android -alias androiddebugkey \
+            -dname "CN=Archphene Accessibility Probe,O=Archphene,C=US" \
+            -keyalg RSA -keysize 2048 -validity 30
+
+      - name: Build and verify both ABIs
+        env:
+          KEYSTORE_PATH: ${{ runner.temp }}/accessibility-probe.keystore
+          KEY_ALIAS: androiddebugkey
+          KEYSTORE_PASSWORD: android
+          KEY_PASSWORD: android
+          ANDROID_BUILD_TOOLS_VERSION: 36.0.0
+          NDK_VERSION: 29.0.14206865
+        run: |
+          for abi in x86_64 arm64-v8a; do
+            ANDROID_ABI="$abi" bash scripts/build-accessibility-capability-probe.sh
+          done
+
+      - name: Upload test probe APKs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: archphene-accessibility-probes-${{ github.sha }}
+          path: prototypes/accessibility-capability-probe/out-*/archphene-accessibility-probe.apk
+          if-no-files-found: error
+          retention-days: 14
