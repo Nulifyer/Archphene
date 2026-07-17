@@ -24,6 +24,7 @@ This is the prioritized completion queue for the Archphene Android application. 
   - [x] Add authenticated runtime-pack leases backed by stable provider clients and Binder death tokens. Running wrappers survive unbinding/GC and release on exit/death; Terminal leases each pack until its private copy is hash-verified and committed.
   - [x] Reconcile external Android uninstalls and revoke grants per package without disrupting wrappers that share a pack.
   - [x] Reuse unchanged closures before copying runtime-pack modules.
+  - [x] Store verified modules once as manager-owned content-addressed blobs, migrate legacy per-pack copies, preserve per-pack authorization, garbage-collect unreferenced blobs, and validate migration plus generated KCalc launch on physical AArch64.
   - [x] Validate 4 KB and 16 KB ELF page compatibility. Runtime executables and published modules now fail closed before execution when an ELF load segment is incompatible; the AArch64 runtime is 64 KB-aligned, while current upstream Arch x86_64 packages remain 4 KB-only and are explicitly unsupported on 16 KB x86_64 Android until rebuilt.
   - [x] Clean up the complete Linux process tree when a wrapper exits. Managed launches use a dedicated process group, parent-death signal, cancellable execution registry, and final dedicated-UID descendant sweep.
 - [x] Finish the Terminal product.
@@ -50,8 +51,11 @@ This is the prioritized completion queue for the Archphene Android application. 
     - [x] Add the private PipeWire producer and XDG Camera portal adapter required by unmodified Linux camera consumers.
       - [x] Validate an official unmodified Arch Snapshot package on the x86_64 emulator through Android grant and denial paths, timestamped PipeWire frames, and process/lease cleanup.
       - [x] Repeat the generated unmodified-consumer validation with the AArch64 runtime on a physical ARM device.
-    - [x] Add a bounded virtual-node accessibility tree, Android framework events/focus, and reverse click/edit/scroll action queue; validate through a test-only AccessibilityService on x86_64 emulator and physical AArch64.
+    - [x] Add a bounded virtual-node accessibility tree, Android framework events/focus, and reverse click/edit/scroll action queue; validate through a test-only AccessibilityService on 4 KB and 16 KB x86_64 emulators and physical AArch64.
     - [ ] Add the private AT-SPI2 D-Bus adapter and secondary-window semantic ownership required by unmodified Qt/GTK applications.
+      - [x] Implement and source-validate the private bus/status, socket/embed, registry/event, bounded traversal/publication, cross-process child, reverse-action, password-redaction, and transient-snapshot contracts.
+      - [x] Validate Android semantic queue retention, sticky multi-window ownership, cross-window action rejection, offset-root bounds, and lifecycle on 4 KB and 16 KB x86_64 emulators and physical AArch64.
+      - [ ] Build and link the adapter in the reproducible Linux toolchain, then validate real unmodified Qt and GTK controls, focus, edits, menus, dialogs, and secondary windows on x86_64 and AArch64.
     - [x] Add a per-wrapper Android Keystore-backed encrypted secret store with bounded descriptor APIs for store/read/list/delete; validate ciphertext, metadata, overwrite, process-restart persistence, limits, deletion, lifecycle, and no log exposure on x86_64 emulator and physical AArch64.
     - [x] Add a capability-gated private Secret Service D-Bus adapter with sender-bound sessions, login collection/search/properties, create/get/set/replace/delete, zero-length values, and disconnect cleanup; validate its wire contract on 4 KB and 16 KB x86_64 emulators and physical AArch64.
     - [ ] Validate packaged Arch libsecret and KWallet clients against the private Secret Service adapter before claiming broad unmodified-toolkit compatibility.
@@ -61,7 +65,7 @@ This is the prioritized completion queue for the Archphene Android application. 
   - [x] Reject broad all-files access as the default. Use user-selected Storage Access Framework documents and trees; reconsider an optional advanced flow only with a concrete compatibility requirement.
 - [ ] Complete platform compatibility.
   - [x] Keep the manager usable on 16 KB x86_64 without Android's generic page-size dialog; show an explicit in-app restriction and block package transactions before incompatible 4 KB Arch ELF execution. Rebuilding the upstream x86_64 runtime remains a broader package-compatibility task.
-  - AT-SPI2 accessibility adapter, packaged AArch64 libsecret/KWallet validation, and remaining portals.
+  - Native/runtime validation of the source-complete AT-SPI2 adapter, packaged AArch64 KWallet validation, and remaining portals.
   - Broader Qt, GTK, SDL, Electron, Rust-native, XWayland, Vulkan, and zero-copy GPU validation.
   - General secondary-window policy for phone, tablet, freeform, and external displays.
 - [ ] Complete end-user release and update lifecycle.
@@ -71,7 +75,9 @@ This is the prioritized completion queue for the Archphene Android application. 
   - [ ] Publish `v1.0.1`, verify both ABI artifacts and embedded companions, then run the exact-ABI live update and the real published `v1.0.0` x86 migration regression.
 - [ ] Pass the public release validation gate.
   - Emulator phone/tablet/docked/freeform matrix, Samsung ARM64 control plane, physical x86_64 target, GrapheneOS Pixel, sustained desktop mode, dark/light, rotation, IME, lifecycle, update, uninstall, and concurrent-failure tests.
-  - Publish measured manager, Terminal, generated-wrapper, shared-runtime, and per-application storage costs.
+  - [x] Add reproducible Android storage measurement that separates APK, installed code, persistent app data, transient execution cache, shared runtime blobs, pack metadata, downloads, and staging.
+  - Publish clean-install manager, Terminal, generated-wrapper, shared-runtime, and per-application storage costs; development-device snapshots are not release baselines.
+  - Validate descriptor-only runtime module paths against late `dlopen()` in unmodified Qt and GTK applications before deciding whether the current bounded transient named-module cache can be removed.
 
 ## P1 - Product and UX
 
@@ -93,7 +99,9 @@ This is the prioritized completion queue for the Archphene Android application. 
 - [x] Ignore repository-local generated tooling and external reference checkouts.
 - [ ] Review the remaining untracked package matrix, generated artifacts, licenses, and source provenance before tracking or deleting anything.
 - [ ] Update README, focused user docs, roadmap, project status, changelog, and release notes after P0/P1 behavior is final.
-- [ ] Run a final public-repository audit for secrets, binaries, oversized files, stale experiment claims, duplicate docs, CI reproducibility, issue templates, and contribution instructions.
+- [ ] Run a final public-repository audit after P0/P1 behavior is final.
+  - [x] Add an automated source audit for required community files, stale licensing claims, generated/secret/release artifacts, oversized tracked files, private-key material, prebuilt manifests/checksums, and commit-pinned Actions.
+  - [ ] Recheck stale experiment claims, duplicate docs, source provenance, release notes, and CI results immediately before publication.
 
 ## Next project - ArchpheneOS
 
