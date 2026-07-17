@@ -3,12 +3,15 @@ package org.archphene.bridge;
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.AccessibilityServiceInfo;
 import android.graphics.Rect;
+import android.os.Build;
 import android.util.Log;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
+import android.view.accessibility.AccessibilityWindowInfo;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 
 /** Test-only framework consumer proving virtual nodes reach Android accessibility. */
 public final class ProbeAccessibilityService extends AccessibilityService {
@@ -35,9 +38,23 @@ public final class ProbeAccessibilityService extends AccessibilityService {
         AccessibilityNodeInfo root = getRootInActiveWindow();
         Log.i(TAG, "Accessibility event type=" + event.getEventType()
                 + " root=" + (root != null));
-        if (root == null) return;
         StringBuilder output = new StringBuilder();
-        appendNode(root, output, 0);
+        List<AccessibilityWindowInfo> windows = getWindows();
+        for (AccessibilityWindowInfo window : windows) {
+            Rect bounds = new Rect();
+            window.getBoundsInScreen(bounds);
+            CharSequence title = Build.VERSION.SDK_INT >= 24 ? window.getTitle() : null;
+            output.append("WINDOW|").append(window.getId()).append('|')
+                    .append(window.getType()).append('|').append(title).append('|')
+                    .append(bounds.flattenToString()).append('\n');
+            AccessibilityNodeInfo windowRoot = window.getRoot();
+            if (windowRoot != null) {
+                appendNode(windowRoot, output, 0);
+                windowRoot.recycle();
+            }
+            window.recycle();
+        }
+        if (windows.isEmpty() && root != null) appendNode(root, output, 0);
         File target = new File(getFilesDir(), "framework-accessibility-tree.txt");
         try (FileOutputStream stream = new FileOutputStream(target, false)) {
             stream.write(output.toString().getBytes(StandardCharsets.UTF_8));
@@ -46,7 +63,7 @@ public final class ProbeAccessibilityService extends AccessibilityService {
         } catch (Exception ignored) {
             // The device test treats a missing result as failure.
         } finally {
-            root.recycle();
+            if (root != null) root.recycle();
         }
     }
 

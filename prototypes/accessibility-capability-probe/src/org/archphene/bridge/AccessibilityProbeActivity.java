@@ -1,15 +1,20 @@
 package org.archphene.bridge;
 
 import android.app.Activity;
+import android.app.Dialog;
 import android.content.Context;
 import android.content.Intent;
+import android.graphics.Color;
 import android.os.Bundle;
 import android.view.View;
+import android.view.Window;
+import android.view.WindowManager;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityNodeProvider;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Set;
 
 /** Device host for semantic-tree publication and reverse accessibility actions. */
@@ -26,7 +31,14 @@ public final class AccessibilityProbeActivity extends Activity {
             + "{\"id\":3,\"parent\":1,\"role\":\"edit\","
             + "\"text\":\"Accessible editor\",\"description\":\"Document text\","
             + "\"x\":40,\"y\":180,\"width\":280,\"height\":96,"
-            + "\"editable\":true,\"focusable\":true}]}";
+            + "\"editable\":true,\"focusable\":true},"
+            + "{\"id\":11,\"parent\":0,\"role\":\"window\","
+            + "\"text\":\"Secondary probe\",\"windowTitle\":\"Secondary probe\","
+            + "\"x\":0,\"y\":0,\"width\":300,\"height\":240},"
+            + "{\"id\":12,\"parent\":11,\"role\":\"button\","
+            + "\"text\":\"Secondary accessible button\",\"x\":30,\"y\":60,"
+            + "\"width\":240,\"height\":72,\"clickable\":true,"
+            + "\"focusable\":true}]}";
     private static final String BAD_TREE = "{"
             + "\"viewportWidth\":360,\"viewportHeight\":640,\"nodes\":["
             + "{\"id\":1,\"parent\":2,\"role\":\"view\",\"x\":0,\"y\":0,"
@@ -38,6 +50,8 @@ public final class AccessibilityProbeActivity extends Activity {
             new ArchpheneAccessibilityBridge();
     private AndroidCapabilityBroker broker;
     private ProbeView view;
+    private ProbeView secondaryView;
+    private Dialog secondaryDialog;
     private File brokerFile;
 
     @Override
@@ -45,10 +59,30 @@ public final class AccessibilityProbeActivity extends Activity {
         super.onCreate(state);
         try {
             Set<String> capabilities = BridgeCapabilities.read(this);
-            view = new ProbeView(this, accessibility);
+            view = new ProbeView(this);
             view.setBackgroundColor(0xff202124);
             setContentView(view);
-            accessibility.attach(view);
+            view.setProvider(accessibility.attach(view, 101));
+
+            secondaryView = new ProbeView(this);
+            secondaryView.setBackgroundColor(0xff303134);
+            secondaryView.setProvider(accessibility.attach(secondaryView, 202));
+            secondaryDialog = new Dialog(this);
+            secondaryDialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+            secondaryDialog.setContentView(secondaryView);
+            secondaryDialog.setCanceledOnTouchOutside(false);
+            secondaryDialog.show();
+            Window secondaryWindow = secondaryDialog.getWindow();
+            if (secondaryWindow != null) {
+                secondaryWindow.setDimAmount(0.15f);
+                secondaryWindow.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+                secondaryWindow.setLayout(300, 240);
+            }
+            accessibility.updateWindows(List.of(
+                    new ArchpheneAccessibilityBridge.WindowDescriptor(
+                            101, 0, true, "Archphene accessible window"),
+                    new ArchpheneAccessibilityBridge.WindowDescriptor(
+                            202, 101, false, "Secondary probe")), true);
             broker = new AndroidCapabilityBroker(this, capabilities, accessibility);
             broker.start();
             brokerFile = new File(getFilesDir(), "accessibility-broker-name");
@@ -69,7 +103,21 @@ public final class AccessibilityProbeActivity extends Activity {
     }
 
     private void handleActionIntent(Intent intent) {
-        if (intent == null || !intent.hasExtra("archphene_node")) return;
+        if (intent == null) return;
+        if (intent.getBooleanExtra("archphene_hide_secondary", false)) {
+            if (secondaryView != null) accessibility.detach(secondaryView);
+            if (secondaryDialog != null) secondaryDialog.dismiss();
+            secondaryView = null;
+            secondaryDialog = null;
+            accessibility.updateWindows(List.of(
+                    new ArchpheneAccessibilityBridge.WindowDescriptor(
+                            101, 0, true, "Archphene accessible window")), true);
+            if (view != null) {
+                view.postDelayed(() -> accessibility.sendNamedEvent(0, "content"), 250);
+            }
+            return;
+        }
+        if (!intent.hasExtra("archphene_node")) return;
         int node = intent.getIntExtra("archphene_node", 0);
         String action = intent.getStringExtra("archphene_action");
         int androidAction;
@@ -100,18 +148,23 @@ public final class AccessibilityProbeActivity extends Activity {
     @Override
     protected void onDestroy() {
         if (broker != null) broker.close();
+        if (secondaryView != null) accessibility.detach(secondaryView);
+        if (secondaryDialog != null) secondaryDialog.dismiss();
         if (view != null) accessibility.detach(view);
         if (brokerFile != null) brokerFile.delete();
         super.onDestroy();
     }
 
     private static final class ProbeView extends View {
-        private final AccessibilityNodeProvider provider;
+        private AccessibilityNodeProvider provider;
 
-        ProbeView(Context context, AccessibilityNodeProvider provider) {
+        ProbeView(Context context) {
             super(context);
-            this.provider = provider;
             setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_YES);
+        }
+
+        void setProvider(AccessibilityNodeProvider provider) {
+            this.provider = provider;
         }
 
         @Override

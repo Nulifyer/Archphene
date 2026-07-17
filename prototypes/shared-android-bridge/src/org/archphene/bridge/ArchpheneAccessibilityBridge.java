@@ -17,10 +17,12 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import org.json.JSONArray;
@@ -55,6 +57,20 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
         }
     }
 
+
+    static final class WindowDescriptor {
+        final int id;
+        final int parentId;
+        final boolean primary;
+        final String title;
+
+        WindowDescriptor(int id, int parentId, boolean primary, String title) {
+            this.id = id;
+            this.parentId = parentId;
+            this.primary = primary;
+            this.title = title == null ? "" : title;
+        }
+    }
     private static final class Node {
         final int id;
         final int parent;
@@ -69,6 +85,7 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
         final boolean checkable;
         final boolean checked;
         final boolean password;
+        final String windowTitle;
         final List<Integer> children = new ArrayList<>();
 
         Node(JSONObject source) throws JSONException {
@@ -92,47 +109,133 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
             checkable = source.optBoolean("checkable", false);
             checked = source.optBoolean("checked", false);
             password = source.optBoolean("password", false);
+            windowTitle = boundedString(source.optString("windowTitle", ""),
+                    "window title", MAX_TEXT);
         }
     }
 
     private final Object lock = new Object();
-    private final ArrayBlockingQueue<LinuxAction> actions =
-            new ArrayBlockingQueue<>(MAX_ACTIONS);
+    private final ArchpheneAccessibilityBridge root;
+    private final ArrayBlockingQueue<LinuxAction> actions;
+    private final Map<Integer, ArchpheneAccessibilityBridge> windowBridges =
+            new LinkedHashMap<>();
+    private final Map<Integer, String> windowTitles = new LinkedHashMap<>();
     private View host;
+    private int hostWindowId;
+    private int primaryWindowId;
+    private boolean independentWindows;
     private int viewportWidth = 1;
     private int viewportHeight = 1;
+    private Map<Integer, Node> allNodes = Collections.emptyMap();
     private Map<Integer, Node> nodes = Collections.emptyMap();
     private int accessibilityFocus;
     private int inputFocus;
 
+    ArchpheneAccessibilityBridge() {
+        root = this;
+        actions = new ArrayBlockingQueue<>(MAX_ACTIONS);
+    }
+
+    private ArchpheneAccessibilityBridge(
+            ArchpheneAccessibilityBridge root, ArrayBlockingQueue<LinuxAction> actions) {
+        this.root = root;
+        this.actions = actions;
+    }
+
     void attach(View view) {
+        attach(view, 0);
+    }
+
+    AccessibilityNodeProvider attach(View view, int windowId) {
+        if (this != root) return root.attach(view, windowId);
+        ArchpheneAccessibilityBridge provider;
         synchronized (lock) {
-            host = view;
+            if (host == null || host == view) {
+                host = view;
+                hostWindowId = windowId;
+                provider = this;
+            } else {
+                provider = windowBridges.get(windowId);
+                if (provider == null || provider.host != view) {
+                    provider = new ArchpheneAccessibilityBridge(this, actions);
+                    provider.host = view;
+                    provider.hostWindowId = windowId;
+                    windowBridges.put(windowId, provider);
+                }
+            }
         }
         view.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
+        redistribute();
         view.post(() -> view.sendAccessibilityEvent(
                 AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED));
+        return provider;
     }
 
     void detach(View view) {
+        if (this != root) {
+            root.detach(view);
+            return;
+        }
         synchronized (lock) {
             if (host == view) {
                 host = null;
-                nodes = Collections.emptyMap();
-                accessibilityFocus = 0;
-                inputFocus = 0;
+            } else {
+                windowBridges.values().removeIf(provider -> provider.host == view);
+            }
+            if (host == null && windowBridges.isEmpty()) actions.clear();
+        }
+    }
+
+    void updateWindows(List<WindowDescriptor> frames,
+            boolean independent) {
+        if (this != root) {
+            root.updateWindows(frames, independent);
+            return;
+        }
+        synchronized (lock) {
+            windowTitles.clear();
+            primaryWindowId = 0;
+            independentWindows = independent;
+            for (WindowDescriptor frame : frames) {
+                if (frame.primary) primaryWindowId = frame.id;
+            }
+            if (primaryWindowId == 0) {
+                for (WindowDescriptor frame : frames) {
+                    if (frame.parentId == 0) {
+                        primaryWindowId = frame.id;
+                        break;
+                    }
+                }
+            }
+            for (WindowDescriptor frame : frames) {
+                if (independent || frame.id == primaryWindowId) {
+                    windowTitles.put(frame.id, frame.title);
+                }
             }
         }
-        actions.clear();
+        redistribute();
     }
 
     void publish(FileDescriptor descriptor) throws Exception {
         byte[] json = readBounded(descriptor);
-        JSONObject root = new JSONObject(new String(json, StandardCharsets.UTF_8));
-        int newWidth = boundedInt(root, "viewportWidth", 1, MAX_VIEWPORT);
-        int newHeight = boundedInt(root, "viewportHeight", 1, MAX_VIEWPORT);
-        JSONArray sourceNodes = root.getJSONArray("nodes");
-        if (sourceNodes.length() < 1 || sourceNodes.length() > MAX_NODES) {
+        JSONObject document = new JSONObject(new String(json, StandardCharsets.UTF_8));
+        int newWidth = boundedInt(document, "viewportWidth", 1, MAX_VIEWPORT);
+        int newHeight = boundedInt(document, "viewportHeight", 1, MAX_VIEWPORT);
+        JSONArray sourceNodes = document.getJSONArray("nodes");
+        if (sourceNodes.length() == 0) {
+            if (!document.optBoolean("clear", false)) {
+                throw new IllegalArgumentException("Accessibility tree is empty");
+            }
+            synchronized (root.lock) {
+                root.viewportWidth = newWidth;
+                root.viewportHeight = newHeight;
+                root.allNodes = Collections.emptyMap();
+            }
+            actions.clear();
+            root.redistribute();
+            return;
+        }
+        if (sourceNodes.length() > MAX_NODES) {
             throw new IllegalArgumentException("Accessibility node count is invalid");
         }
         LinkedHashMap<Integer, Node> parsed = new LinkedHashMap<>();
@@ -156,18 +259,24 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
             validateParentChain(node, parsed);
         }
         if (!hasRoot) throw new IllegalArgumentException("Accessibility tree has no root");
-        synchronized (lock) {
-            viewportWidth = newWidth;
-            viewportHeight = newHeight;
-            nodes = Collections.unmodifiableMap(parsed);
-            if (!nodes.containsKey(accessibilityFocus)) accessibilityFocus = 0;
-            if (!nodes.containsKey(inputFocus)) inputFocus = 0;
+        ArchpheneAccessibilityBridge owner = root;
+        synchronized (owner.lock) {
+            owner.viewportWidth = newWidth;
+            owner.viewportHeight = newHeight;
+            owner.allNodes = Collections.unmodifiableMap(parsed);
         }
         actions.clear();
-        sendEvent(0, AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED);
+        owner.redistribute();
     }
 
     void sendNamedEvent(int nodeId, String type) {
+        if (this == root) {
+            ArchpheneAccessibilityBridge target = bridgeForNode(nodeId);
+            if (target != this) {
+                target.sendNamedEvent(nodeId, type);
+                return;
+            }
+        }
         int event = switch (type) {
             case "focus" -> AccessibilityEvent.TYPE_VIEW_FOCUSED;
             case "selected" -> AccessibilityEvent.TYPE_VIEW_SELECTED;
@@ -186,6 +295,108 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
         sendEvent(nodeId, event);
     }
 
+    private void redistribute() {
+        if (this != root) {
+            root.redistribute();
+            return;
+        }
+        Map<Integer, Node> source;
+        Map<Integer, String> titles;
+        int primary;
+        int rootWindow;
+        List<ArchpheneAccessibilityBridge> providers;
+        synchronized (lock) {
+            source = allNodes;
+            titles = new LinkedHashMap<>(windowTitles);
+            primary = primaryWindowId != 0 ? primaryWindowId : hostWindowId;
+            rootWindow = hostWindowId;
+            providers = new ArrayList<>(windowBridges.values());
+        }
+        Map<Integer, Integer> assignments = assignWindows(
+                source, titles, primary, independentWindows);
+        installSubset(source, assignments, rootWindow);
+        for (ArchpheneAccessibilityBridge provider : providers) {
+            provider.installSubset(source, assignments, provider.hostWindowId);
+        }
+    }
+
+    private void installSubset(Map<Integer, Node> source,
+            Map<Integer, Integer> assignments, int windowId) {
+        LinkedHashMap<Integer, Node> subset = new LinkedHashMap<>();
+        for (Map.Entry<Integer, Node> entry : source.entrySet()) {
+            if (assignments.getOrDefault(entry.getKey(), windowId) == windowId) {
+                subset.put(entry.getKey(), entry.getValue());
+            }
+        }
+        int subsetWidth = root.viewportWidth;
+        int subsetHeight = root.viewportHeight;
+        for (Node node : subset.values()) {
+            if (node.parent == 0) {
+                subsetWidth = Math.max(1, node.bounds.width());
+                subsetHeight = Math.max(1, node.bounds.height());
+                break;
+            }
+        }
+        synchronized (lock) {
+            viewportWidth = subsetWidth;
+            viewportHeight = subsetHeight;
+            nodes = Collections.unmodifiableMap(subset);
+            if (!nodes.containsKey(accessibilityFocus)) accessibilityFocus = 0;
+            if (!nodes.containsKey(inputFocus)) inputFocus = 0;
+        }
+        sendEvent(0, AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED);
+    }
+
+    private static Map<Integer, Integer> assignWindows(Map<Integer, Node> source,
+            Map<Integer, String> titles, int primary, boolean independent) {
+        HashMap<Integer, Integer> result = new HashMap<>();
+        HashSet<Integer> assignedWindows = new HashSet<>();
+        for (Node node : source.values()) {
+            if (node.parent != 0) continue;
+            String title = node.windowTitle.isBlank() ? node.text : node.windowTitle;
+            int windowId = matchingWindow(
+                    titles, title, primary, independent, assignedWindows);
+            if (windowId != 0) assignedWindows.add(windowId);
+            ArrayList<Integer> pending = new ArrayList<>();
+            pending.add(node.id);
+            for (int index = 0; index < pending.size(); index++) {
+                int id = pending.get(index);
+                if (result.put(id, windowId) != null) continue;
+                Node current = source.get(id);
+                if (current != null) pending.addAll(current.children);
+            }
+        }
+        return result;
+    }
+
+    private static int matchingWindow(Map<Integer, String> titles, String title,
+            int primary, boolean independent, Set<Integer> assignedWindows) {
+        if (!title.isBlank()) {
+            for (Map.Entry<Integer, String> entry : titles.entrySet()) {
+                if (title.equals(entry.getValue())
+                        && !assignedWindows.contains(entry.getKey())) {
+                    return entry.getKey();
+                }
+            }
+        }
+        if (!independent) return primary;
+        if (primary != 0 && !assignedWindows.contains(primary)) return primary;
+        for (int windowId : titles.keySet()) {
+            if (!assignedWindows.contains(windowId)) return windowId;
+        }
+        return 0;
+    }
+    private ArchpheneAccessibilityBridge bridgeForNode(int nodeId) {
+        synchronized (lock) {
+            if (nodeId == 0 || nodes.containsKey(nodeId)) return this;
+            for (ArchpheneAccessibilityBridge provider : windowBridges.values()) {
+                synchronized (provider.lock) {
+                    if (provider.nodes.containsKey(nodeId)) return provider;
+                }
+            }
+        }
+        return this;
+    }
     String takeAction(int timeoutMillis) throws InterruptedException {
         if (timeoutMillis < 0 || timeoutMillis > MAX_POLL_MILLIS) {
             throw new IllegalArgumentException("Accessibility action timeout is invalid");
@@ -247,15 +458,26 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
         info.addAction(node.id == currentAccessibilityFocus
                 ? AccessibilityNodeInfo.ACTION_CLEAR_ACCESSIBILITY_FOCUS
                 : AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS);
-        Rect parentBounds = scaleBounds(node.bounds, currentHost, currentWidth, currentHeight);
+        Rect windowBounds = scaleBounds(
+                node.bounds, currentHost, currentWidth, currentHeight);
+        Rect parentBounds = new Rect(windowBounds);
+        if (node.parent != 0) {
+            Node parent = currentNodes.get(node.parent);
+            if (parent != null) {
+                Rect scaledParent = scaleBounds(
+                        parent.bounds, currentHost, currentWidth, currentHeight);
+                parentBounds.offset(-scaledParent.left, -scaledParent.top);
+            }
+        }
         info.setBoundsInParent(parentBounds);
         int[] location = new int[2];
         currentHost.getLocationOnScreen(location);
-        Rect screen = new Rect(parentBounds);
-        screen.offset(location[0], location[1]);
-        info.setBoundsInScreen(screen);
+        Rect screenBounds = new Rect(windowBounds);
+        screenBounds.offset(location[0], location[1]);
+        info.setBoundsInScreen(screenBounds);
         info.setVisibleToUser(currentHost.isShown() && Rect.intersects(
-                new Rect(0, 0, currentHost.getWidth(), currentHost.getHeight()), parentBounds));
+                new Rect(0, 0, currentHost.getWidth(), currentHost.getHeight()),
+                windowBounds));
         return info;
     }
 
@@ -293,6 +515,10 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
 
     @Override
     public boolean performAction(int virtualViewId, int action, Bundle arguments) {
+        if (this == root) {
+            ArchpheneAccessibilityBridge target = bridgeForNode(virtualViewId);
+            if (target != this) return target.performAction(virtualViewId, action, arguments);
+        }
         Node node;
         synchronized (lock) {
             node = nodes.get(virtualViewId);

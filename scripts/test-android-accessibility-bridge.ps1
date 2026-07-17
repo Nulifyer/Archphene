@@ -129,10 +129,35 @@ if ($published -ne "OK") { throw "Accessibility tree publication failed: $publis
 Start-Sleep -Milliseconds 1500
 $frameworkEvent = Invoke-Probe $socket @("accessibility-event", "0", "content")
 if ($frameworkEvent -ne "OK") { throw "Accessibility readiness event failed" }
+$secondaryTree = Dump-Accessibility
+if (-not $secondaryTree.Contains("Secondary accessible button")) {
+    throw "Android did not enumerate the secondary virtual controls: $secondaryTree"
+}
+$secondaryWindowCount = ([regex]::Matches($secondaryTree, '(?m)^WINDOW\|')).Count
+if ($secondaryWindowCount -lt 2) {
+    throw "Android did not expose the active secondary accessibility window: $secondaryTree"
+}
+Invoke-Adb @("shell", "am", "start", "-n", "$Package/$Activity", `
+        "--ei", "archphene_node", "12", "--es", "archphene_action", "click") `
+        "invoke secondary Android accessibility click" | Out-Null
+$secondaryClick = Invoke-Probe $socket @("take-accessibility-action", "250")
+if ($secondaryClick -ne "OK`t12`tclick`t") {
+    throw "Secondary Android click was not routed to Linux: $secondaryClick"
+}
+Invoke-Adb @("shell", "run-as", $Package, "rm", "-f",
+        "files/framework-accessibility-tree.txt") "clear secondary framework tree" | Out-Null
+Invoke-Adb @("shell", "am", "start", "-n", "$Package/$Activity", `
+        "--ez", "archphene_hide_secondary", "true") `
+        "dismiss secondary accessibility window" | Out-Null
 $tree = Dump-Accessibility
 if (-not $tree.Contains("Archphene accessible button") `
-        -or -not $tree.Contains("Accessible editor")) {
-    throw "Android did not enumerate the published virtual controls: $tree"
+        -or -not $tree.Contains("Accessible editor") `
+        -or $tree.Contains("Secondary accessible button")) {
+    throw "Android did not restore the isolated primary virtual controls: $tree"
+}
+$windowCount = ([regex]::Matches($tree, '(?m)^WINDOW\|')).Count
+if ($windowCount -lt 2) {
+    throw "Android did not expose the restored primary accessibility window: $tree"
 }
 $button = [regex]::Match($tree,
         '(?m)^\d+\|android\.widget\.Button\|Archphene accessible button\|[^|]*\|' +
@@ -168,7 +193,6 @@ $edit = Invoke-Probe $socket @("take-accessibility-action", "250")
 if ($edit -ne "OK`t3`tset-text`tZWRpdGVkLWZyb20tQW5kcm9pZA") {
     throw "Android set-text was not routed to Linux: $edit"
 }
-
 Invoke-Adb @("shell", "am", "force-stop", $Package) "stop accessibility lifecycle" | Out-Null
 $stale = Invoke-Probe $socket @("take-accessibility-action", "0") -AllowFailure
 if ($stale -notmatch "(Connection refused|No such file|Archphene Android capability request)") {
@@ -180,4 +204,5 @@ $logs = (Invoke-Adb @("logcat", "-d", "-v", "brief", "-s",
 if ($logs -match "FATAL EXCEPTION") { throw "Accessibility probe crashed: $logs" }
 Restore-AccessibilitySettings
 Write-Host ("Android accessibility bridge passed on $Serial ($AndroidAbi): " +
-        "virtual tree, bounds, events, invalid-tree rollback, click/edit actions, lifecycle.")
+        "two-window ownership, virtual trees, bounds, events, invalid-tree rollback, " +
+        "primary/secondary click and edit actions, lifecycle.")
