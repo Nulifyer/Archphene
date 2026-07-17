@@ -304,13 +304,17 @@ static void process_action(DBusConnection *connection) {
         struct timespec deadline;
         deadline_after_millis(&deadline, 100);
         pthread_mutex_lock(&state.mutex);
-        while (!state.stopping
-                && transient_generation == state.transient_generation) {
+        bool transient_changed = false;
+        while (!state.stopping) {
+            if (transient_generation != state.transient_generation) {
+                transient_changed = true;
+                if (state.transient_root_count > 0) break;
+            }
             int wait_result = pthread_cond_timedwait(
                     &state.changed, &state.mutex, &deadline);
             if (wait_result == ETIMEDOUT) break;
         }
-        bool menu_opened = transient_generation != state.transient_generation;
+        bool menu_opened = transient_changed && state.transient_root_count > 0;
         pthread_mutex_unlock(&state.mutex);
         if (!menu_opened) {
             char fallback_response[64] = {0};
