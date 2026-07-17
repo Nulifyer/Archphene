@@ -224,7 +224,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 });
         holder[0] = session;
         if (accessibilityBridge != null) {
-            accessibilityBridge.setMenuFallback(session::pointerClickSurface);
+            accessibilityBridge.setMenuFallback(this::activateAccessibilityMenu);
         }
         session.setIndependentWindows(independentWindows);
         installInputRouting();
@@ -500,6 +500,24 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 return true;
             }
             return false;
+        });
+    }
+
+    private void activateAccessibilityMenu(
+            int windowId, ArchpheneInputView source, float x, float y) {
+        runOnUiThread(() -> {
+            if (session == null || source == null) return;
+            if (source == compositorView) {
+                session.touchClick(windowId, source, x, y);
+                return;
+            }
+            SecondaryWindow secondary = secondaryWindows.get(windowId);
+            if (secondary == null || secondary.view != source) {
+                Log.w(logTag, "Accessibility menu target window is unavailable: " + windowId);
+                return;
+            }
+            session.touchClick(windowId, source,
+                    secondary.frameWidth, secondary.frameHeight, x, y);
         });
     }
 

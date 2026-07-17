@@ -310,14 +310,14 @@ int archphene_android_take_accessibility_action(
 }
 
 int archphene_android_accessibility_menu_fallback(
-        int x, int y, char *response, size_t response_size) {
-    if (x < 0 || x > 1000000 || y < 0 || y > 1000000) {
+        int node_id, char *response, size_t response_size) {
+    if (node_id <= 0 || node_id > 1000000) {
         errno = EINVAL;
         return -1;
     }
     char request[MAX_REQUEST];
     int length = snprintf(request, sizeof(request),
-            "ARCHPHENE/1\tACCESSIBILITY_MENU_FALLBACK\t%d\t%d", x, y);
+            "ARCHPHENE/1\tACCESSIBILITY_MENU_FALLBACK\t%d", node_id);
     if (length <= 0 || (size_t)length >= sizeof(request)) {
         errno = ENOSPC;
         return -1;

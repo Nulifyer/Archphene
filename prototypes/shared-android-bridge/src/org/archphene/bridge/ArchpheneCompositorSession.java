@@ -29,6 +29,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /** One serialized native compositor runtime shared by every Linux wrapper. */
 public final class ArchpheneCompositorSession implements AutoCloseable {
     private static final String INPUT_TAG = "ArchpheneInput";
+    private static final int ACCESSIBILITY_TOUCH_ID = 32;
 
     public interface Listener {
         void onClientConnected();
@@ -240,11 +241,27 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
         events.offer(new Event(POINTER_BUTTON, pressed ? 1 : 0, (int) time, 0, 0, ""));
     }
 
-    public void pointerClickSurface(int x, int y) {
+    public void touchClick(
+            int windowId, ArchpheneInputView source, float x, float y) {
+        touchClick(windowId, source, frameWidth, frameHeight, x, y);
+    }
+
+    public void touchClick(
+            int windowId,
+            ArchpheneInputView source,
+            int targetWidth,
+            int targetHeight,
+            float x,
+            float y) {
         long now = SystemClock.uptimeMillis();
-        events.offer(new Event(POINTER_MOTION, x, y, (int) now, 0, ""));
-        events.offer(new Event(POINTER_BUTTON, 1, (int) now, 0, 0, ""));
-        events.offer(new Event(POINTER_BUTTON, 0, (int) now, 0, 0, ""));
+        releaseRetainedIme();
+        if (windowId != 0) activateWindow(windowId, source);
+        int mappedX = Math.round(mapCoordinate(x, source, targetWidth, true));
+        int mappedY = Math.round(mapCoordinate(y, source, targetHeight, false));
+        events.offer(new Event(
+                TOUCH_DOWN, ACCESSIBILITY_TOUCH_ID, mappedX, mappedY, (int) now, ""));
+        events.offer(new Event(
+                TOUCH_UP, ACCESSIBILITY_TOUCH_ID, mappedX, mappedY, (int) (now + 1), ""));
     }
 
     public void pointerAxis(float horizontal, float vertical, long time) {

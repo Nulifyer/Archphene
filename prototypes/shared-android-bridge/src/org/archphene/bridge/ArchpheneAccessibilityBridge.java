@@ -147,7 +147,7 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
     private int accessibilityFocus;
     private int inputFocus;
     interface MenuFallback {
-        void activate(int x, int y);
+        void activate(int windowId, ArchpheneInputView host, float x, float y);
     }
 
     private volatile MenuFallback menuFallback;
@@ -211,12 +211,28 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
         root.menuFallback = fallback;
     }
 
-    void activateMenuFallback(int x, int y) {
+    void activateMenuFallback(int nodeId) {
         MenuFallback fallback = root.menuFallback;
         if (fallback == null) {
             throw new IllegalStateException("Accessibility menu fallback is unavailable");
         }
-        fallback.activate(x, y);
+        ArchpheneAccessibilityBridge owner = root.bridgeForNode(nodeId);
+        ArchpheneInputView currentHost;
+        int currentWindowId;
+        Rect bounds;
+        synchronized (owner.lock) {
+            Node node = owner.nodes.get(nodeId);
+            if (node == null || !(owner.host instanceof ArchpheneInputView inputHost)) {
+                throw new IllegalArgumentException("Accessibility menu node is unavailable");
+            }
+            currentHost = inputHost;
+            currentWindowId = owner.hostWindowId;
+            bounds = scaleBounds(node.bounds, currentHost,
+                    owner.viewportLeft, owner.viewportTop,
+                    owner.viewportWidth, owner.viewportHeight);
+        }
+        fallback.activate(currentWindowId, currentHost,
+                bounds.exactCenterX(), bounds.exactCenterY());
     }
 
     void updateWindows(List<WindowDescriptor> frames,
