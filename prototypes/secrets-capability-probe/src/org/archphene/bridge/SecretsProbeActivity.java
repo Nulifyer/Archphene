@@ -36,7 +36,8 @@ public final class SecretsProbeActivity extends Activity {
                 for (String executable : new String[] {
                         "secret-tool", "gdbus", "kwalletd6", "kwallet-query"
                 }) {
-                    Os.chmod(new File(libsecretRoot, executable).getAbsolutePath(), 0700);
+                    File candidate = new File(libsecretRoot, executable);
+                    if (candidate.isFile()) Os.chmod(candidate.getAbsolutePath(), 0700);
                 }
                 writeFixture("libsecret-runtime-root", libsecretRoot.getCanonicalPath());
             }

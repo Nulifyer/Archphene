@@ -20,15 +20,22 @@ esac
 
 rm -rf "$out"
 mkdir -p "$out"/{gen,classes,dex,package/lib/$abi}
-if [[ "$abi" == "x86_64" ]]; then
-  fixture="$root/tooling/build/libsecret-probe/x86_64"
-  [[ -f "$fixture/secret-tool" ]] || {
-    echo "missing Arch libsecret probe runtime: $fixture" >&2; exit 1;
+fixture="$root/tooling/build/libsecret-probe/$dbus_arch"
+if [[ -f "$fixture/secret-tool" ]]; then
+  case "$dbus_arch" in
+    x86_64) fixture_loader=ld-linux-x86-64.so.2 ;;
+    aarch64) fixture_loader=ld-linux-aarch64.so.1 ;;
+  esac
+  [[ -f "$fixture/lib/$fixture_loader" ]] || {
+    echo "missing Arch libsecret probe loader: $fixture/lib/$fixture_loader" >&2; exit 1;
   }
   mkdir -p "$out/package/assets/libsecret"
   cp -a "$fixture"/. "$out/package/assets/libsecret/"
-  cp "$fixture/lib/ld-linux-x86-64.so.2" \
+  cp "$fixture/lib/$fixture_loader" \
     "$out/package/lib/$abi/libarchphene_libsecret_loader.so"
+elif [[ "$abi" == "x86_64" ]]; then
+  echo "missing Arch libsecret probe runtime: $fixture" >&2
+  exit 1
 fi
 "$bt/aapt2" link -o "$out/unsigned.apk" -I "$platform" \
   --manifest "$app/AndroidManifest.xml" --java "$out/gen"

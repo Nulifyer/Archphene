@@ -2,7 +2,8 @@ param(
     [ValidateSet("x86_64", "arm64-v8a")]
     [string]$AndroidAbi = "x86_64",
     [string]$Serial = "emulator-5554",
-    [int]$TimeoutSeconds = 30
+    [int]$TimeoutSeconds = 30,
+    [string]$Apk = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -10,7 +11,9 @@ $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $Adb = Join-Path $Root "tooling/android-sdk/platform-tools/adb.exe"
 $Package = "org.archphene.secretsprobe"
 $Activity = "org.archphene.bridge.SecretsProbeActivity"
-$Apk = Join-Path $Root "prototypes/secrets-capability-probe/out-$AndroidAbi/archphene-secrets-probe.apk"
+$Apk = if ($Apk) { (Resolve-Path $Apk).Path } else {
+    Join-Path $Root "prototypes/secrets-capability-probe/out-$AndroidAbi/archphene-secrets-probe.apk"
+}
 $Secret = "archphene-secret-value-284917"
 $UpdatedSecret = "archphene-updated-value-592641"
 
@@ -172,11 +175,19 @@ $libsecretValidated = $false
 $kwalletValidated = $false
 $kwalletDirectValue = "archphene-kwallet-direct-68413"
 $kwalletQueryValue = "archphene-kwallet-query-39752"
-if ($AndroidAbi -eq "x86_64" -and $pageSize -eq 4096) {
+$fixtureCheck = & $Adb -s $Serial shell run-as $Package test -f files/libsecret-runtime-root 2>&1
+$hasLibsecretFixture = $LASTEXITCODE -eq 0
+if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 1) {
+    throw "Could not inspect packaged libsecret fixture: $($fixtureCheck -join "`n")"
+}
+if ($hasLibsecretFixture -and ($AndroidAbi -eq "arm64-v8a" -or
+        ($AndroidAbi -eq "x86_64" -and $pageSize -eq 4096))) {
     $dump = (Invoke-Adb @("shell", "dumpsys", "package", $Package) `
             "read packaged libsecret paths") -join "`n"
+    $nativeSubdirectory = if ($AndroidAbi -eq "arm64-v8a") { "arm64" } else { "x86_64" }
     $nativeDirectory = [regex]::Match(
-            $dump, "legacyNativeLibraryDir=(\S+)").Groups[1].Value + "/x86_64"
+            $dump, "legacyNativeLibraryDir=(\S+)").Groups[1].Value + "/" +
+            $nativeSubdirectory
     $libsecretRoot = (Read-PrivateFile "files/libsecret-runtime-root").Trim()
     $libsecretLoader = "$nativeDirectory/libarchphene_libsecret_loader.so"
     $secretTool = "$libsecretRoot/secret-tool"
@@ -214,103 +225,105 @@ if ($AndroidAbi -eq "x86_64" -and $pageSize -eq 4096) {
     }
     $libsecretValidated = $true
 
-    $kwalletHome = "$libsecretRoot/kwallet-home"
-    $kwalletRuntime = "$libsecretRoot/kwallet-runtime"
-    $kwalletConfig = "[KSecretD]`nEnabled=false`n`n[Wallet]`nDefault Wallet=Login`n"
-    $kwalletConfigBase64 = [Convert]::ToBase64String(
-            [Text.Encoding]::UTF8.GetBytes($kwalletConfig))
-    Invoke-Libsecret ("mkdir -p $kwalletHome/.config $kwalletRuntime; " +
-            "echo $kwalletConfigBase64 | base64 -d > $kwalletHome/.config/kwalletrc; " +
-            "chmod 700 $libsecretRoot/gdbus $libsecretRoot/kwalletd6 " +
-            "$libsecretRoot/kwallet-query") | Out-Null
-    $kwalletEnvironment = "export HOME=$kwalletHome; " +
-            "export XDG_CONFIG_HOME=$kwalletHome/.config; " +
-            "export XDG_DATA_HOME=$kwalletHome/.local/share; " +
-            "export XDG_RUNTIME_DIR=$kwalletRuntime; " +
-            "export QT_QPA_PLATFORM=minimal; " +
-            "export QT_QPA_PLATFORM_PLUGIN_PATH=$libsecretRoot/qt/plugins/platforms"
+    if ($AndroidAbi -eq "x86_64") {
+        $kwalletHome = "$libsecretRoot/kwallet-home"
+        $kwalletRuntime = "$libsecretRoot/kwallet-runtime"
+        $kwalletConfig = "[KSecretD]`nEnabled=false`n`n[Wallet]`nDefault Wallet=Login`n"
+        $kwalletConfigBase64 = [Convert]::ToBase64String(
+                [Text.Encoding]::UTF8.GetBytes($kwalletConfig))
+        Invoke-Libsecret ("mkdir -p $kwalletHome/.config $kwalletRuntime; " +
+                "echo $kwalletConfigBase64 | base64 -d > $kwalletHome/.config/kwalletrc; " +
+                "chmod 700 $libsecretRoot/gdbus $libsecretRoot/kwalletd6 " +
+                "$libsecretRoot/kwallet-query") | Out-Null
+        $kwalletEnvironment = "export HOME=$kwalletHome; " +
+                "export XDG_CONFIG_HOME=$kwalletHome/.config; " +
+                "export XDG_DATA_HOME=$kwalletHome/.local/share; " +
+                "export XDG_RUNTIME_DIR=$kwalletRuntime; " +
+                "export QT_QPA_PLATFORM=minimal; " +
+                "export QT_QPA_PLATFORM_PLUGIN_PATH=$libsecretRoot/qt/plugins/platforms"
 
-    function Invoke-KWallet([string]$Command, [int[]]$AllowedExitCodes = @(0)) {
-        return Invoke-Libsecret "$kwalletEnvironment; $Command" $AllowedExitCodes
-    }
-
-    $kwalletPid = $null
-    try {
-        $started = Invoke-KWallet ("nohup $libsecretLoader $libsecretRoot/kwalletd6 " +
-                "</dev/null >$kwalletHome/kwalletd.log 2>&1 & echo `$!")
-        $kwalletPid = [int]$started.Output
-        Start-Sleep -Milliseconds 750
-
-        $gdbus = "$libsecretLoader $libsecretRoot/gdbus call --session " +
-                "--dest org.kde.kwalletd6 --object-path /modules/kwalletd6 " +
-                "--method org.kde.KWallet."
-        $wallets = Invoke-KWallet "${gdbus}wallets"
-        if ($wallets.Output -notmatch "Login") {
-            throw "KWallet daemon did not expose the Secret Service login collection: " +
-                    $wallets.Output
-        }
-        $opened = Invoke-KWallet "${gdbus}open Login 0 archphene-probe"
-        $handleMatch = [regex]::Match($opened.Output, "-?\d+")
-        if (-not $handleMatch.Success -or [int]$handleMatch.Value -le 0) {
-            throw "KWallet daemon returned an invalid handle: $($opened.Output)"
-        }
-        $handle = [int]$handleMatch.Value
-        $created = Invoke-KWallet (
-                "${gdbus}createFolder $handle Archphene archphene-probe")
-        if ($created.Output -ne "(true,)") {
-            throw "KWallet folder creation failed: $($created.Output)"
-        }
-        $written = Invoke-KWallet (
-                "${gdbus}writePassword $handle Archphene bridge-entry " +
-                "$kwalletDirectValue archphene-probe")
-        if ($written.Output -ne "(0,)") {
-            throw "KWallet direct password write failed: $($written.Output)"
-        }
-        $directRead = Invoke-KWallet (
-                "${gdbus}readPassword $handle Archphene bridge-entry archphene-probe")
-        if (-not $directRead.Output.Contains($kwalletDirectValue)) {
-            throw "KWallet direct password read mismatch: $($directRead.Output)"
+        function Invoke-KWallet([string]$Command, [int[]]$AllowedExitCodes = @(0)) {
+            return Invoke-Libsecret "$kwalletEnvironment; $Command" $AllowedExitCodes
         }
 
-        Invoke-KWallet ("printf %s\\n $kwalletQueryValue > " +
-                "$kwalletHome/query-value") | Out-Null
-        Invoke-KWallet ("$libsecretLoader $libsecretRoot/kwallet-query " +
-                "--write-password bridge-entry --folder Archphene Login " +
-                "< $kwalletHome/query-value") | Out-Null
-        $queryRead = Invoke-KWallet (
-                "$libsecretLoader $libsecretRoot/kwallet-query " +
-                "--read-password bridge-entry --folder Archphene Login")
-        if ($queryRead.Output -ne $kwalletQueryValue) {
-            throw "Packaged Arch kwallet-query read/write mismatch: $($queryRead.Output)"
-        }
-
-        Invoke-KWallet "kill $kwalletPid" | Out-Null
         $kwalletPid = $null
-        Start-Sleep -Milliseconds 300
-        $restarted = Invoke-KWallet (
-                "nohup $libsecretLoader $libsecretRoot/kwalletd6 " +
-                "</dev/null >>$kwalletHome/kwalletd.log 2>&1 & echo `$!")
-        $kwalletPid = [int]$restarted.Output
-        Start-Sleep -Milliseconds 750
-        $restartRead = Invoke-KWallet (
-                "$libsecretLoader $libsecretRoot/kwallet-query " +
-                "--read-password bridge-entry --folder Archphene Login")
-        if ($restartRead.Output -ne $kwalletQueryValue) {
-            throw "KWallet secret did not persist across daemon restart: " +
-                    $restartRead.Output
-        }
+        try {
+            $started = Invoke-KWallet ("nohup $libsecretLoader $libsecretRoot/kwalletd6 " +
+                    "</dev/null >$kwalletHome/kwalletd.log 2>&1 & echo `$!")
+            $kwalletPid = [int]$started.Output
+            Start-Sleep -Milliseconds 750
 
-        $reopened = Invoke-KWallet "${gdbus}open Login 0 archphene-probe"
-        $handle = [int][regex]::Match($reopened.Output, "-?\d+").Value
-        $removed = Invoke-KWallet (
-                "${gdbus}removeEntry $handle Archphene bridge-entry archphene-probe")
-        if ($removed.Output -ne "(0,)") {
-            throw "KWallet cleanup failed: $($removed.Output)"
-        }
-        $kwalletValidated = $true
-    } finally {
-        if ($kwalletPid) {
-            Invoke-KWallet "kill $kwalletPid" @(0, 1) | Out-Null
+            $gdbus = "$libsecretLoader $libsecretRoot/gdbus call --session " +
+                    "--dest org.kde.kwalletd6 --object-path /modules/kwalletd6 " +
+                    "--method org.kde.KWallet."
+            $wallets = Invoke-KWallet "${gdbus}wallets"
+            if ($wallets.Output -notmatch "Login") {
+                throw "KWallet daemon did not expose the Secret Service login collection: " +
+                        $wallets.Output
+            }
+            $opened = Invoke-KWallet "${gdbus}open Login 0 archphene-probe"
+            $handleMatch = [regex]::Match($opened.Output, "-?\d+")
+            if (-not $handleMatch.Success -or [int]$handleMatch.Value -le 0) {
+                throw "KWallet daemon returned an invalid handle: $($opened.Output)"
+            }
+            $handle = [int]$handleMatch.Value
+            $created = Invoke-KWallet (
+                    "${gdbus}createFolder $handle Archphene archphene-probe")
+            if ($created.Output -ne "(true,)") {
+                throw "KWallet folder creation failed: $($created.Output)"
+            }
+            $written = Invoke-KWallet (
+                    "${gdbus}writePassword $handle Archphene bridge-entry " +
+                    "$kwalletDirectValue archphene-probe")
+            if ($written.Output -ne "(0,)") {
+                throw "KWallet direct password write failed: $($written.Output)"
+            }
+            $directRead = Invoke-KWallet (
+                    "${gdbus}readPassword $handle Archphene bridge-entry archphene-probe")
+            if (-not $directRead.Output.Contains($kwalletDirectValue)) {
+                throw "KWallet direct password read mismatch: $($directRead.Output)"
+            }
+
+            Invoke-KWallet ("printf %s\\n $kwalletQueryValue > " +
+                    "$kwalletHome/query-value") | Out-Null
+            Invoke-KWallet ("$libsecretLoader $libsecretRoot/kwallet-query " +
+                    "--write-password bridge-entry --folder Archphene Login " +
+                    "< $kwalletHome/query-value") | Out-Null
+            $queryRead = Invoke-KWallet (
+                    "$libsecretLoader $libsecretRoot/kwallet-query " +
+                    "--read-password bridge-entry --folder Archphene Login")
+            if ($queryRead.Output -ne $kwalletQueryValue) {
+                throw "Packaged Arch kwallet-query read/write mismatch: $($queryRead.Output)"
+            }
+
+            Invoke-KWallet "kill $kwalletPid" | Out-Null
+            $kwalletPid = $null
+            Start-Sleep -Milliseconds 300
+            $restarted = Invoke-KWallet (
+                    "nohup $libsecretLoader $libsecretRoot/kwalletd6 " +
+                    "</dev/null >>$kwalletHome/kwalletd.log 2>&1 & echo `$!")
+            $kwalletPid = [int]$restarted.Output
+            Start-Sleep -Milliseconds 750
+            $restartRead = Invoke-KWallet (
+                    "$libsecretLoader $libsecretRoot/kwallet-query " +
+                    "--read-password bridge-entry --folder Archphene Login")
+            if ($restartRead.Output -ne $kwalletQueryValue) {
+                throw "KWallet secret did not persist across daemon restart: " +
+                        $restartRead.Output
+            }
+
+            $reopened = Invoke-KWallet "${gdbus}open Login 0 archphene-probe"
+            $handle = [int][regex]::Match($reopened.Output, "-?\d+").Value
+            $removed = Invoke-KWallet (
+                    "${gdbus}removeEntry $handle Archphene bridge-entry archphene-probe")
+            if ($removed.Output -ne "(0,)") {
+                throw "KWallet cleanup failed: $($removed.Output)"
+            }
+            $kwalletValidated = $true
+        } finally {
+            if ($kwalletPid) {
+                Invoke-KWallet "kill $kwalletPid" @(0, 1) | Out-Null
+            }
         }
     }
 }
@@ -323,6 +336,8 @@ if ($logs.Contains($Secret) -or $logs.Contains($UpdatedSecret) -or
 }
 $libsecretResult = if ($libsecretValidated -and $kwalletValidated) {
     ", and packaged Arch libsecret and KWallet clients validated"
+} elseif ($libsecretValidated) {
+    ", and packaged Arch libsecret client validated; KWallet client not included"
 } elseif ($AndroidAbi -eq "x86_64") {
     "; packaged Arch libsecret skipped because upstream Arch ELF files are 4 KB-aligned"
 } else {
