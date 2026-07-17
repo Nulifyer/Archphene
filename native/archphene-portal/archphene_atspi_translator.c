@@ -13,6 +13,8 @@
 #include <time.h>
 
 #define MAX_APPLICATIONS 16
+#define MAX_TRANSIENT_ROOTS 32
+#define ROOT_MAX (MAX_APPLICATIONS + MAX_TRANSIENT_ROOTS)
 #define ACTION_RESPONSE_MAX 4096
 #define MAX_EVENTS 64
 #define REBUILD_RETRY_MILLIS 250
@@ -40,6 +42,8 @@ static struct {
     bool dirty;
     Registration applications[MAX_APPLICATIONS];
     size_t application_count;
+    ArchpheneAtspiReference transient_roots[MAX_TRANSIENT_ROOTS];
+    size_t transient_root_count;
     uint32_t next_application_id;
     PendingEvent events[MAX_EVENTS];
     size_t event_head;
@@ -53,6 +57,53 @@ static struct {
 static void wake_worker(void) {
     state.dirty = true;
     pthread_cond_signal(&state.changed);
+}
+
+static void update_transient_root_locked(
+        const char *bus, const char *path, bool add) {
+    size_t index = 0;
+    while (index < state.transient_root_count) {
+        ArchpheneAtspiReference *root = &state.transient_roots[index];
+        if (strcmp(root->bus, bus) == 0 && strcmp(root->path, path) == 0) {
+            if (!add) {
+                memmove(root, root + 1,
+                        (state.transient_root_count - index - 1) * sizeof(*root));
+                state.transient_root_count--;
+                wake_worker();
+            }
+            return;
+        }
+        index++;
+    }
+    if (!add || state.transient_root_count >= MAX_TRANSIENT_ROOTS) return;
+    for (size_t tree_index = 0; state.tree != NULL
+            && tree_index < state.tree->count; tree_index++) {
+        ArchpheneAtspiReference *published =
+                &state.tree->nodes[tree_index].node.reference;
+        if (strcmp(published->bus, bus) == 0
+                && strcmp(published->path, path) == 0) return;
+    }
+    ArchpheneAtspiReference *root =
+            &state.transient_roots[state.transient_root_count++];
+    snprintf(root->bus, sizeof(root->bus), "%s", bus);
+    snprintf(root->path, sizeof(root->path), "%s", path);
+    wake_worker();
+}
+
+static bool remove_transient_bus_locked(const char *bus) {
+    bool removed = false;
+    for (size_t index = 0; index < state.transient_root_count;) {
+        ArchpheneAtspiReference *root = &state.transient_roots[index];
+        if (strcmp(root->bus, bus) == 0) {
+            memmove(root, root + 1,
+                    (state.transient_root_count - index - 1) * sizeof(*root));
+            state.transient_root_count--;
+            removed = true;
+        } else {
+            index++;
+        }
+    }
+    return removed;
 }
 
 static int allocate_application_id_locked(void) {
@@ -233,6 +284,9 @@ static size_t snapshot_applications(ArchpheneAtspiReference *applications) {
         snprintf(applications[index].path, sizeof(applications[index].path),
                 "%s", state.applications[index].path);
     }
+    for (size_t index = 0; index < state.transient_root_count; index++) {
+        applications[count++] = state.transient_roots[index];
+    }
     state.dirty = false;
     pthread_mutex_unlock(&state.mutex);
     return count;
@@ -246,7 +300,7 @@ static void retain_dirty(void) {
 
 static int rebuild_tree(DBusConnection *connection,
         ArchpheneAtspiTree **next_tree) {
-    ArchpheneAtspiReference applications[MAX_APPLICATIONS];
+    ArchpheneAtspiReference applications[ROOT_MAX];
     size_t count = snapshot_applications(applications);
     int build_result = archphene_atspi_tree_build(
             connection, applications, count, *next_tree);
@@ -391,6 +445,7 @@ void archphene_atspi_translator_stop(void) {
     state.worker_failed = false;
     state.dirty = false;
     state.application_count = 0;
+    state.transient_root_count = 0;
     state.next_application_id = 1;
     state.event_head = 0;
     state.event_count = 0;
@@ -447,6 +502,14 @@ void archphene_atspi_translator_unregister(
             index++;
         }
     }
+    bool bus_registered = false;
+    for (size_t index = 0; index < state.application_count; index++) {
+        if (strcmp(state.applications[index].bus, bus) == 0) {
+            bus_registered = true;
+            break;
+        }
+    }
+    if (!bus_registered && remove_transient_bus_locked(bus)) wake_worker();
     pthread_mutex_unlock(&state.mutex);
 }
 
@@ -465,6 +528,7 @@ void archphene_atspi_translator_disconnect(const char *bus) {
             index++;
         }
     }
+    if (remove_transient_bus_locked(bus)) affected = true;
     for (size_t index = 0; !affected && state.tree != NULL
             && index < state.tree->count; index++) {
         if (strcmp(state.tree->nodes[index].node.reference.bus, bus) == 0) {
@@ -484,6 +548,9 @@ dbus_bool_t archphene_atspi_translator_has_bus(const char *bus) {
             found = TRUE;
             break;
         }
+    }
+    for (size_t index = 0; !found && index < state.transient_root_count; index++) {
+        if (strcmp(state.transient_roots[index].bus, bus) == 0) found = TRUE;
     }
     for (size_t index = 0; !found && state.tree != NULL
             && index < state.tree->count; index++) {
@@ -505,8 +572,12 @@ void archphene_atspi_translator_event(DBusMessage *message) {
             || strlen(path) >= ARCHPHENE_ATSPI_PATH_MAX) return;
 
     const char *type = "content";
+    int transient_change = 0;
     if (strcmp(interface, "org.a11y.atspi.Event.Window") == 0) {
         type = "window";
+        if (strcmp(member, "Create") == 0) transient_change = 1;
+        else if (strcmp(member, "Destroy") == 0
+                || strcmp(member, "Close") == 0) transient_change = -1;
     } else if (strcmp(member, "TextChanged") == 0
             || strcmp(member, "TextCaretMoved") == 0
             || strcmp(member, "TextSelectionChanged") == 0) {
@@ -521,18 +592,24 @@ void archphene_atspi_translator_event(DBusMessage *message) {
                         == DBUS_TYPE_STRING) {
             const char *state_name = NULL;
             dbus_message_iter_get_basic(&arguments, &state_name);
-            if (state_name != NULL && strcmp(state_name, "focused") == 0
-                    && dbus_message_iter_next(&arguments)
+            if (state_name != NULL && dbus_message_iter_next(&arguments)
                     && dbus_message_iter_get_arg_type(&arguments)
                             == DBUS_TYPE_INT32) {
                 int32_t enabled = 0;
                 dbus_message_iter_get_basic(&arguments, &enabled);
-                if (enabled != 0) type = "focus";
+                if (strcmp(state_name, "focused") == 0 && enabled != 0) {
+                    type = "focus";
+                } else if (strcmp(state_name, "showing") == 0) {
+                    transient_change = enabled != 0 ? 1 : -1;
+                }
             }
         }
     }
 
     pthread_mutex_lock(&state.mutex);
+    if (transient_change != 0) {
+        update_transient_root_locked(bus, path, transient_change > 0);
+    }
     for (size_t offset = 0; offset < state.event_count; offset++) {
         size_t index = (state.event_head + offset) % MAX_EVENTS;
         PendingEvent *queued = &state.events[index];
