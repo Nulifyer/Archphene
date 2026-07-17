@@ -1783,6 +1783,41 @@ public final class MainActivity extends Activity {
         });
         updates.addView(interval, matchWrap());
         page.addView(updates, spacedWrap(dp(6)));
+        page.addView(sectionLabel("Terminal"), matchWrap());
+        LinearLayout terminalSection = verticalSection();
+        TerminalCompanionInstaller.Status terminalStatus =
+                TerminalCompanionInstaller.status(this);
+        terminalSection.addView(detailLine("Archphene Terminal", terminalStatus.summary()));
+        Button terminalAction = actionButton(terminalStatus.action(),
+                android.R.drawable.ic_media_play);
+        terminalAction.setOnClickListener(view -> {
+            TerminalCompanionInstaller.Status current =
+                    TerminalCompanionInstaller.status(this);
+            if (current.ready) {
+                try {
+                    TerminalCompanionInstaller.launch(this);
+                } catch (Exception error) {
+                    showBanner("Could not open Terminal: " + error.getMessage(), true);
+                }
+                return;
+            }
+            if (current.installed && !current.sameSigner) {
+                startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.parse("package:" + TerminalCompanionInstaller.PACKAGE)));
+                return;
+            }
+            terminalAction.setEnabled(false);
+            TerminalCompanionInstaller.ensureInstalled(this,
+                    (phase, percent, status, terminal) -> {
+                        terminalAction.setText(status
+                                + (percent > 0 && percent < 100 ? " " + percent + "%" : ""));
+                        if (!terminal) return;
+                        showBanner(status, phase == ApkUpdateInstaller.Phase.ERROR);
+                        showSettingsPage();
+                    });
+        });
+        terminalSection.addView(terminalAction, spacedWrap(dp(6)));
+        page.addView(terminalSection, spacedWrap(dp(6)));
 
         page.addView(sectionLabel("Appearance"), matchWrap());
         LinearLayout appearance = verticalSection();

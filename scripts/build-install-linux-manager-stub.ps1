@@ -2,6 +2,7 @@ param(
     [switch]$SkipInstall,
     [switch]$ReleaseBuild,
     [switch]$IncludePackageRuntime,
+    [string]$TerminalApk = "",
     [string]$Serial = "emulator-5554",
     [int]$VersionCode = 10000,
     [string]$VersionName = "1.0.0",
@@ -67,6 +68,11 @@ $PackageRuntimeStage = Join-Path $Out "package-runtime"
 $PackageLibDir = Join-Path $PackageRuntimeStage "lib/x86_64"
 $PackageAssetDir = Join-Path $PackageRuntimeStage "assets/package-runtime"
 New-Item -ItemType Directory -Force -Path $PackageLibDir, $PackageAssetDir | Out-Null
+if ($TerminalApk) {
+    $TerminalApk = Resolve-Path $TerminalApk
+    Copy-Item -LiteralPath $TerminalApk `
+        -Destination (Join-Path $PackageAssetDir "archphene-terminal.apk") -Force
+}
 Copy-Item -LiteralPath (Join-Path $App "assets/payload-hello-linux-amd64") `
     -Destination (Join-Path $PackageLibDir "libarchphene_runtime_probe.so") -Force
 Copy-Item -LiteralPath (Join-Path $App "assets/payload-hello-dynamic-amd64") `

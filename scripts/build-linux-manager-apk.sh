@@ -253,6 +253,23 @@ for required in "$x86_root" "$x86_resolved" "$x86_keyrings" "$x86_glibc" \
 done
 
 build_terminal_app "$x86_glibc/ld-linux-x86-64.so.2" "$arm_glibc/ld-linux-aarch64.so.1"
+terminal_apk="$root/prototypes/archphene-terminal-app/out-linux/archphene-terminal.apk"
+terminal_badging="$("$bt/aapt2" dump badging "$terminal_apk")"
+grep -F "versionCode='$version_code'" <<<"$terminal_badging" >/dev/null || {
+  echo "Terminal versionCode does not match manager release" >&2; exit 1;
+}
+grep -F "versionName='$version_name'" <<<"$terminal_badging" >/dev/null || {
+  echo "Terminal versionName does not match manager release" >&2; exit 1;
+}
+case "$artifact_abi" in
+  x86_64) terminal_native="native-code: 'x86_64'" ;;
+  arm64-v8a) terminal_native="native-code: 'arm64-v8a'" ;;
+  universal) terminal_native="native-code: 'x86_64' 'arm64-v8a'" ;;
+esac
+grep -F "$terminal_native" <<<"$terminal_badging" >/dev/null || {
+  echo "Terminal native ABI set does not match manager artifact $artifact_abi" >&2
+  exit 1
+}
 
 package_assets="$out/package-runtime/assets/package-runtime"
 x86_libs="$out/package-runtime/lib/x86_64"
@@ -297,8 +314,7 @@ arm64_compositor="$root/native/archphene-compositor/target/aarch64-linux-android
   exit 1
 }
 cp "$arm64_compositor" "$arm_libs/libarchphene_compositor.so"
-cp "$root/prototypes/archphene-terminal-app/out-linux/archphene-terminal.apk" \
-  "$package_assets/archphene-terminal.apk"
+cp "$terminal_apk" "$package_assets/archphene-terminal.apk"
 
 gcc -shared -fPIC -O2 -Wall -Wextra -Werror \
   -o "$x86_libs/libarchphene_path_bridge.so" \

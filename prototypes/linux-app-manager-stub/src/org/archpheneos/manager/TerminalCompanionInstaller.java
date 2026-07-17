@@ -18,23 +18,57 @@ final class TerminalCompanionInstaller {
         void onProgress(ApkUpdateInstaller.Phase phase, int percent,
                 String status, boolean terminal);
     }
+    static final class Status {
+        final boolean installed;
+        final boolean sameSigner;
+        final boolean ready;
+        final long versionCode;
+        final String versionName;
+
+        Status(boolean installed, boolean sameSigner, boolean ready,
+                long versionCode, String versionName) {
+            this.installed = installed;
+            this.sameSigner = sameSigner;
+            this.ready = ready;
+            this.versionCode = versionCode;
+            this.versionName = versionName;
+        }
+
+        String summary() {
+            if (!installed) return "Not installed";
+            if (!sameSigner) return "Different signing identity";
+            if (!ready) return "Update required | installed " + versionName;
+            return "Ready | " + versionName;
+        }
+
+        String action() {
+            if (!installed) return "Install Terminal";
+            if (!sameSigner) return "Resolve Terminal conflict";
+            return ready ? "Open Terminal" : "Update Terminal";
+        }
+    }
 
     private TerminalCompanionInstaller() {}
 
     static boolean isInstalled(Activity activity) {
+        return status(activity).ready;
+    }
+
+    static Status status(Activity activity) {
         try {
             PackageInfo terminal = activity.getPackageManager().getPackageInfo(
                     PACKAGE, PackageManager.GET_SIGNING_CERTIFICATES);
             PackageInfo manager = activity.getPackageManager().getPackageInfo(
                     activity.getPackageName(), PackageManager.GET_SIGNING_CERTIFICATES);
-            return activity.getPackageManager().checkSignatures(
-                    manager.packageName, terminal.packageName) == PackageManager.SIGNATURE_MATCH
-                    && terminal.getLongVersionCode() >= manager.getLongVersionCode();
+            boolean sameSigner = activity.getPackageManager().checkSignatures(
+                    manager.packageName, terminal.packageName) == PackageManager.SIGNATURE_MATCH;
+            return new Status(true, sameSigner, sameSigner
+                    && terminal.getLongVersionCode() >= manager.getLongVersionCode(),
+                    terminal.getLongVersionCode(), terminal.versionName);
         } catch (PackageManager.NameNotFoundException error) {
-            return false;
+            return new Status(false, false, false, 0, "");
         }
     }
-
     static ApkUpdateInstaller.Operation ensureInstalled(Activity activity, Callback callback) {
         if (isInstalled(activity)) {
             callback.onProgress(ApkUpdateInstaller.Phase.COMPLETE, 100,

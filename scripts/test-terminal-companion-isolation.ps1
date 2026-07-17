@@ -23,7 +23,14 @@ function Package-Value([string]$Package, [string]$Pattern) {
     if (-not $match.Success) { throw "Could not read $Pattern for $Package" }
     return $match.Groups[1].Value
 }
-
+function Tap-Text([string]$Ui, [string]$Text) {
+    $node = [regex]::Match($Ui,
+        "text=`"$([regex]::Escape($Text))`"[^>]*bounds=`"\[(\d+),(\d+)\]\[(\d+),(\d+)\]`"")
+    if (-not $node.Success) { throw "Could not find '$Text'" }
+    $x = ([int]$node.Groups[1].Value + [int]$node.Groups[3].Value) / 2
+    $y = ([int]$node.Groups[2].Value + [int]$node.Groups[4].Value) / 2
+    Invoke-Adb shell input tap $x $y | Out-Null
+}
 if (-not $SkipBuild) {
     & (Join-Path $PSScriptRoot "build-manager-podman.ps1") -SkipRuntime -SkipGpuHelperBuild
     if ($LASTEXITCODE -ne 0) { throw "Terminal companion build failed" }
@@ -51,6 +58,20 @@ $managerVersion = Package-Value $ManagerPackage 'versionCode=(\d+)'
 $terminalVersion = Package-Value $TerminalPackage 'versionCode=(\d+)'
 if ($managerVersion -ne $terminalVersion) {
     throw "Manager/Terminal version mismatch: $managerVersion != $terminalVersion"
+}
+Invoke-Adb shell am force-stop $ManagerPackage | Out-Null
+Invoke-Adb shell am start -W -n "$ManagerPackage/.MainActivity" | Out-Null
+Start-Sleep -Seconds 2
+Invoke-Adb shell uiautomator dump --compressed /sdcard/archphene-terminal-main.xml | Out-Null
+$mainUi = (Invoke-Adb shell cat /sdcard/archphene-terminal-main.xml) -join ""
+Tap-Text $mainUi "Settings"
+Start-Sleep -Seconds 1
+Invoke-Adb shell uiautomator dump --compressed /sdcard/archphene-terminal-settings.xml | Out-Null
+$settingsUi = (Invoke-Adb shell cat /sdcard/archphene-terminal-settings.xml) -join ""
+if ($settingsUi -notmatch 'text="Archphene Terminal"' -or
+        $settingsUi -notmatch 'text="Ready \| [^"]+"' -or
+        $settingsUi -notmatch 'text="Open Terminal"') {
+    throw "Settings does not expose the ready Terminal companion"
 }
 
 $packages = (Invoke-Adb shell cmd package list packages -U) -join "`n"
