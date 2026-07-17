@@ -85,6 +85,8 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
         final boolean checkable;
         final boolean checked;
         final boolean password;
+        final boolean scrollForward;
+        final boolean scrollBackward;
         final String windowTitle;
         final List<Integer> children = new ArrayList<>();
 
@@ -109,6 +111,8 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
             checkable = source.optBoolean("checkable", false);
             checked = source.optBoolean("checked", false);
             password = source.optBoolean("password", false);
+            scrollForward = source.optBoolean("scrollForward", false);
+            scrollBackward = source.optBoolean("scrollBackward", false);
             windowTitle = boundedString(source.optString("windowTitle", ""),
                     "window title", MAX_TEXT);
         }
@@ -454,6 +458,10 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
         if (Build.VERSION.SDK_INT >= 28) info.setScreenReaderFocusable(true);
         if (node.clickable) info.addAction(AccessibilityNodeInfo.ACTION_CLICK);
         if (node.editable) info.addAction(AccessibilityNodeInfo.ACTION_SET_TEXT);
+        if (node.scrollForward)
+            info.addAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD);
+        if (node.scrollBackward)
+            info.addAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD);
         if (node.focusable) info.addAction(AccessibilityNodeInfo.ACTION_FOCUS);
         info.addAction(node.id == currentAccessibilityFocus
                 ? AccessibilityNodeInfo.ACTION_CLEAR_ACCESSIBILITY_FOCUS
@@ -549,8 +557,10 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
             CharSequence value = arguments == null ? null : arguments.getCharSequence(
                     AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE);
             text = boundedString(value == null ? "" : value.toString(), "action text", MAX_TEXT);
-        } else if (action == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD) name = "scroll-forward";
-        else if (action == AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD) name = "scroll-backward";
+        } else if (action == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+                && node.scrollForward) name = "scroll-forward";
+        else if (action == AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+                && node.scrollBackward) name = "scroll-backward";
         else return false;
         if (!actions.offer(new LinuxAction(virtualViewId, name, text))) return false;
         if ("focus".equals(name)) {

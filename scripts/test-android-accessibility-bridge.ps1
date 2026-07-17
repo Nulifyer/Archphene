@@ -152,6 +152,7 @@ Invoke-Adb @("shell", "am", "start", "-n", "$Package/$Activity", `
 $tree = Dump-Accessibility
 if (-not $tree.Contains("Archphene accessible button") `
         -or -not $tree.Contains("Accessible editor") `
+        -or -not $tree.Contains("Scrollable list") `
         -or $tree.Contains("Secondary accessible button")) {
     throw "Android did not restore the isolated primary virtual controls: $tree"
 }
@@ -165,6 +166,13 @@ $button = [regex]::Match($tree,
 if (-not $button.Success -or [int]$button.Groups[3].Value -le [int]$button.Groups[1].Value `
         -or [int]$button.Groups[4].Value -le [int]$button.Groups[2].Value) {
     throw "Published accessibility button has invalid screen bounds"
+}
+Invoke-Adb @("shell", "am", "start", "-n", "$Package/$Activity", `
+        "--ei", "archphene_node", "4", "--es", "archphene_action", "scroll-forward") `
+        "invoke Android accessibility scroll" | Out-Null
+$scroll = Invoke-Probe $socket @("take-accessibility-action", "250")
+if ($scroll -ne "OK`t4`tscroll-forward`t") {
+    throw "Android scroll was not routed to Linux: $scroll"
 }
 $event = Invoke-Probe $socket @("accessibility-event", "3", "text")
 if ($event -ne "OK") { throw "Accessibility event publication failed: $event" }
@@ -205,4 +213,4 @@ if ($logs -match "FATAL EXCEPTION") { throw "Accessibility probe crashed: $logs"
 Restore-AccessibilitySettings
 Write-Host ("Android accessibility bridge passed on $Serial ($AndroidAbi): " +
         "two-window ownership, virtual trees, bounds, events, invalid-tree rollback, " +
-        "primary/secondary click and edit actions, lifecycle.")
+        "primary/secondary click, edit, and scroll actions, lifecycle.")

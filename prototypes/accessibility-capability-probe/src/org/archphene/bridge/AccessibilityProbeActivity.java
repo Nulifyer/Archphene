@@ -32,6 +32,9 @@ public final class AccessibilityProbeActivity extends Activity {
             + "\"text\":\"Accessible editor\",\"description\":\"Document text\","
             + "\"x\":40,\"y\":180,\"width\":280,\"height\":96,"
             + "\"editable\":true,\"focusable\":true},"
+            + "{\"id\":4,\"parent\":1,\"role\":\"list\",\"text\":\"Scrollable list\","
+            + "\"x\":40,\"y\":300,\"width\":280,\"height\":200,"
+            + "\"scrollForward\":true},"
             + "{\"id\":11,\"parent\":0,\"role\":\"window\","
             + "\"text\":\"Secondary probe\",\"windowTitle\":\"Secondary probe\","
             + "\"x\":0,\"y\":0,\"width\":300,\"height\":240},"
@@ -124,6 +127,8 @@ public final class AccessibilityProbeActivity extends Activity {
         Bundle arguments = null;
         if ("click".equals(action)) {
             androidAction = AccessibilityNodeInfo.ACTION_CLICK;
+        } else if ("scroll-forward".equals(action)) {
+            androidAction = AccessibilityNodeInfo.ACTION_SCROLL_FORWARD;
         } else if ("set-text".equals(action)) {
             androidAction = AccessibilityNodeInfo.ACTION_SET_TEXT;
             arguments = new Bundle();
