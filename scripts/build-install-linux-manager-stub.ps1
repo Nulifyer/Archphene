@@ -183,9 +183,37 @@ $RuntimeCatalog = foreach ($module in $RuntimeModules) {
     $size = (Get-Item -LiteralPath $file).Length
     "$($module.Role)`t$hash`t$size`t$($module.Library)`t$($module.Link)"
 }
-[IO.File]::WriteAllText((Join-Path $PackageAssetDir "runtime-modules.tsv"),
+[IO.File]::WriteAllText((Join-Path $PackageAssetDir "runtime-modules-x86_64.tsv"),
         "# org.archphene.runtime-modules.v1`n" + ($RuntimeCatalog -join "`n") + "`n",
         [Text.UTF8Encoding]::new($false))
+
+if ($IncludePackageRuntime) {
+    $ManagerNativeCatalog = @("# org.archphene.manager-native.v1")
+    $VersionedLibraries = @(Get-ChildItem -LiteralPath $PackageLibDir -File |
+        Where-Object { -not $_.Name.EndsWith(".so", [StringComparison]::Ordinal) } |
+        Sort-Object Name)
+    if ($VersionedLibraries.Count -eq 0) {
+        throw "Manager native soname catalog is empty"
+    }
+    foreach ($Library in $VersionedLibraries) {
+        if ($Library.Name -notmatch "^[A-Za-z0-9@._+-]{1,128}$") {
+            throw "Unsafe manager runtime library name: $($Library.Name)"
+        }
+        $IdentityBytes = [Text.Encoding]::UTF8.GetBytes($Library.Name)
+        $Identity = [Convert]::ToHexString(
+                [Security.Cryptography.SHA256]::HashData($IdentityBytes)).ToLowerInvariant()
+        $Packaged = "libarchphene_manager_$($Identity.Substring(0, 24)).so"
+        $Destination = Join-Path $PackageLibDir $Packaged
+        if (Test-Path -LiteralPath $Destination) {
+            throw "Manager runtime package alias collision: $Packaged"
+        }
+        $Hash = (Get-FileHash -LiteralPath $Library.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        $ManagerNativeCatalog += "$($Library.Name)`t$Packaged`t$Hash`t$($Library.Length)"
+        Move-Item -LiteralPath $Library.FullName -Destination $Destination
+    }
+    [IO.File]::WriteAllLines((Join-Path $PackageAssetDir "manager-native-x86_64.tsv"),
+            $ManagerNativeCatalog, [Text.UTF8Encoding]::new($false))
+}
 
 $Assets = Join-Path $App "assets"
 Run-Native { & (Join-Path $BuildTools "aapt2.exe") link -o (Join-Path $Out "unsigned.apk") -I (Join-Path $Sdk "platforms/android-36/android.jar") --version-code $VersionCode --version-name $VersionName --manifest $BuildManifest --java (Join-Path $Out "gen") -A $Assets (Join-Path $Out "compiled/res.zip") } "aapt2 link"

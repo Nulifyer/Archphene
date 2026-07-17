@@ -405,15 +405,17 @@ public final class ArchWrapperAssembler {
         collectElfFiles(canonicalRoot, libraryRoot, candidates, new HashSet<>());
         TreeMap<String, File> result = new TreeMap<>();
         TreeMap<String, File> patched = new TreeMap<>();
-        File nativeDir = new File(context.getApplicationInfo().nativeLibraryDir).getCanonicalFile();
         for (String name : new String[] {"libarchphene_ld.so", "libc.so.6", "libm.so.6",
                 "libdl.so.2", "libpthread.so.0", "librt.so.1", "libresolv.so.2",
                 "libutil.so.1", "libanl.so.1", "libnss_dns.so.2", "libnss_files.so.2"}) {
-            File value = new File(nativeDir, name);
-            if (value.isFile()) {
-                patched.put(name, value.getCanonicalFile());
-                result.put(name, value.getCanonicalFile());
+            File value;
+            try {
+                value = ManagerNativeRuntime.library(context, name);
+            } catch (SecurityException missing) {
+                continue;
             }
+            patched.put(name, value);
+            result.put(name, value);
         }
         ArrayDeque<File> pending = new ArrayDeque<>();
         HashSet<String> visited = new HashSet<>();

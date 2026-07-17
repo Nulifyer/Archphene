@@ -131,6 +131,11 @@ public final class ArchPackageRuntime {
 
     public static boolean available(Context context) {
         File nativeDir = new File(context.getApplicationInfo().nativeLibraryDir);
+        try {
+            ManagerNativeRuntime.prepare(context);
+        } catch (Exception error) {
+            return false;
+        }
         return new File(nativeDir, "libarchphene_ld.so").isFile()
                 && new File(nativeDir, "libarchphene_pacman.so").isFile()
                 && new File(nativeDir, "libarchphene_gpg.so").isFile()
@@ -643,7 +648,8 @@ public final class ArchPackageRuntime {
         ArrayList<String> command = new ArrayList<>();
         command.add(loader.getPath());
         command.add("--library-path");
-        command.add(libraryPath.getPath());
+        command.add(ManagerNativeRuntime.libraryPath(context) + File.pathSeparator
+                + libraryPath.getPath());
         command.addAll(arguments);
         ProcessBuilder builder = new ProcessBuilder(command);
         builder.directory(state(context));
@@ -696,7 +702,7 @@ public final class ArchPackageRuntime {
                 output.getFD().sync();
             }
             List<String> command = new ArrayList<>(Arrays.asList(loader.getPath(),
-                    "--library-path", nativeDir.getPath(), tool.getPath(),
+                    "--library-path", ManagerNativeRuntime.libraryPath(context), tool.getPath(),
                     "-xf", archive.getPath(), "-C", root.getPath(),
                     "--no-same-owner", "--no-same-permissions", "--null", "-T",
                     selection.getPath()));
@@ -728,7 +734,7 @@ public final class ArchPackageRuntime {
         File loader = executable(nativeDir, "libarchphene_ld.so");
         File tool = executable(nativeDir, "libarchphene_bsdtar.so");
         List<String> command = new ArrayList<>(Arrays.asList(loader.getPath(),
-                "--library-path", nativeDir.getPath(), tool.getPath(),
+                "--library-path", ManagerNativeRuntime.libraryPath(context), tool.getPath(),
                 "-xOf", archive.getPath(), entry));
         File error = new File(state(context), "bsdtar-extract-"
                 + Thread.currentThread().getId() + ".err");
@@ -898,7 +904,7 @@ public final class ArchPackageRuntime {
         List<String> command = new ArrayList<>();
 
         command.addAll(Arrays.asList(loader.getPath(),
-                "--library-path", nativeDir.getPath(), tool.getPath()));
+                "--library-path", ManagerNativeRuntime.libraryPath(context), tool.getPath()));
         command.addAll(arguments);
         ProcessBuilder builder = new ProcessBuilder(command);
         builder.directory(state);

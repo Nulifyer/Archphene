@@ -29,6 +29,7 @@
         android:label="Archphene"
         android:allowBackup="false"
         android:debuggable="true"
+        android:extractNativeLibs="true"
         android:supportsRtl="true">
         <activity
             android:name="org.archpheneos.manager.MainActivity"

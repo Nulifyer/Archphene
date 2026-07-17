@@ -60,6 +60,51 @@ manager_manifest="$("$aapt2" dump xmltree "$manager_apk" --file AndroidManifest.
 grep -F 'android:pageSizeCompat' <<<"$manager_manifest" | grep -F '=32' >/dev/null || {
   echo "manager does not enable Android page-size compatibility mode" >&2; exit 1;
 }
+grep -F 'android:extractNativeLibs' <<<"$manager_manifest" | grep -F '=true' >/dev/null || {
+  echo "manager does not enable native-library extraction" >&2; exit 1;
+}
+manager_catalog="assets/package-runtime/manager-native-${abi/arm64-v8a/aarch64}.tsv"
+unzip -Z1 "$manager_apk" | grep -Fx "$manager_catalog" >/dev/null || {
+  echo "manager native soname catalog is missing" >&2; exit 1;
+}
+catalog_file="$work/manager-native.tsv"
+unzip -p "$manager_apk" "$manager_catalog" > "$catalog_file"
+declare -A catalog_logical=() catalog_packaged=()
+catalog_count=0
+has_libc=false
+has_libalpm=false
+while IFS=$'\t' read -r logical packaged expected_hash expected_size extra; do
+  [[ -n "$logical" && "$logical" != \#* ]] || continue
+  [[ -z "$extra" && "$logical" =~ ^[A-Za-z0-9@._+-]{1,128}$ \
+      && "$packaged" =~ ^lib[A-Za-z0-9_]+\.so$ \
+      && "$expected_hash" =~ ^[0-9a-f]{64}$ \
+      && "$expected_size" =~ ^[1-9][0-9]*$ \
+      && -z "${catalog_logical[$logical]:-}" \
+      && -z "${catalog_packaged[$packaged]:-}" ]] || {
+    echo "manager native soname catalog row is invalid" >&2; exit 1;
+  }
+  catalog_logical[$logical]=1
+  catalog_packaged[$packaged]=1
+  payload="$work/$packaged"
+  unzip -p "$manager_apk" "lib/$abi/$packaged" > "$payload"
+  [[ "$(wc -c < "$payload")" == "$expected_size" \
+      && "$(sha256sum "$payload" | cut -d ' ' -f 1)" == "$expected_hash" ]] || {
+    echo "manager native soname payload failed verification: $packaged" >&2; exit 1;
+  }
+  if [[ "$logical" == libc.so.6 ]]; then has_libc=true; fi
+  if [[ "$logical" == libalpm.so.16 ]]; then has_libalpm=true; fi
+  catalog_count=$((catalog_count + 1))
+done < "$catalog_file"
+[[ "$catalog_count" -gt 0 && "$has_libc" == true && "$has_libalpm" == true ]] || {
+  echo "manager native soname catalog lacks required entries" >&2; exit 1;
+}
+invalid_native="$(unzip -Z1 "$manager_apk" | grep "^lib/$abi/" \
+  | grep -Ev "^lib/$abi/lib[A-Za-z0-9_.+-]+\\.so$" || true)"
+[[ -z "$invalid_native" ]] || {
+  echo "manager APK contains non-extractable native library names:" >&2
+  printf '%s\n' "$invalid_native" >&2
+  exit 1
+}
 "$zipalign" -c -P 16 -v 4 "$manager_apk" >/dev/null
 
 unzip -p "$manager_apk" assets/package-runtime/archphene-terminal.apk > "$terminal_apk"

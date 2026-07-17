@@ -399,6 +399,37 @@ copy_glibc_runtime() {
 copy_glibc_runtime "$x86_glibc" ld-linux-x86-64.so.2 "$x86_libs"
 copy_glibc_runtime "$arm_glibc" ld-linux-aarch64.so.1 "$arm_libs"
 
+stage_manager_native_catalog() {
+  local architecture="$1" libraries="$2" catalog logical identity packaged hash size count=0
+  catalog="$package_assets/manager-native-$architecture.tsv"
+  printf '# org.archphene.manager-native.v1\n' > "$catalog"
+  while IFS= read -r -d '' source; do
+    logical="$(basename "$source")"
+    [[ "$logical" =~ ^[A-Za-z0-9@._+-]{1,128}$ ]] || {
+      echo "unsafe manager runtime library name: $logical" >&2
+      exit 1
+    }
+    identity="$(printf '%s' "$logical" | sha256sum | cut -d ' ' -f 1)"
+    packaged="libarchphene_manager_${identity:0:24}.so"
+    [[ ! -e "$libraries/$packaged" ]] || {
+      echo "manager runtime package alias collision: $packaged" >&2
+      exit 1
+    }
+    hash="$(sha256sum "$source" | cut -d ' ' -f 1)"
+    size="$(stat -c '%s' "$source")"
+    mv "$source" "$libraries/$packaged"
+    printf '%s\t%s\t%s\t%s\n' \
+      "$logical" "$packaged" "$hash" "$size" >> "$catalog"
+    count=$((count + 1))
+  done < <(find "$libraries" -maxdepth 1 -type f ! -name '*.so' -print0 | sort -z)
+  [[ "$count" -gt 0 ]] || {
+    echo "manager runtime catalog is empty for $architecture" >&2
+    exit 1
+  }
+}
+stage_manager_native_catalog x86_64 "$x86_libs"
+stage_manager_native_catalog aarch64 "$arm_libs"
+
 add_runtime_module() {
   local catalog="$1" role="$2" file="$3" library="$4" link_name="$5" hash size
   [[ -f "$file" ]] || { echo "runtime module missing: $file" >&2; exit 1; }
@@ -434,11 +465,13 @@ prune_native_abis "$out/package-runtime/lib"
 case "$artifact_abi" in
   x86_64)
     rm -f "$package_assets"/archlinuxarm-aarch64-* \
-      "$package_assets/runtime-modules-aarch64.tsv"
+      "$package_assets/runtime-modules-aarch64.tsv" \
+      "$package_assets/manager-native-aarch64.tsv"
     ;;
   arm64-v8a)
     rm -f "$package_assets"/archlinux-x86_64-* \
-      "$package_assets/runtime-modules-x86_64.tsv"
+      "$package_assets/runtime-modules-x86_64.tsv" \
+      "$package_assets/manager-native-x86_64.tsv"
     ;;
 esac
 "$bt/aapt2" compile --dir "$app/res" -o "$out/compiled/res.zip"
