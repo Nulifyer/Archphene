@@ -1,8 +1,9 @@
 name: Publish Archphene APK
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
       tag:
@@ -14,7 +15,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: release-apk-${{ github.event.release.tag_name || inputs.tag }}
+  group: release-apk-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -22,7 +23,7 @@ jobs:
     name: Build and attach signed APK
     runs-on: ubuntu-24.04
     env:
-      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
       GH_TOKEN: ${{ github.token }}
       KEYSTORE_BASE64: ${{ secrets.ARCHPHENE_RELEASE_KEYSTORE_BASE64 }}
       KEYSTORE_PASSWORD: ${{ secrets.ARCHPHENE_RELEASE_STORE_PASSWORD }}
@@ -32,18 +33,54 @@ jobs:
 
     steps:
       - name: Check out release tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ env.RELEASE_TAG }}
 
+      - name: Resolve release version
+        run: |
+          if [[ "$RELEASE_TAG" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)([-+][0-9A-Za-z.-]+)?$ ]]; then
+            version_name="${RELEASE_TAG#v}"
+          else
+            echo "Release tag must use vMAJOR.MINOR.PATCH syntax" >&2
+            exit 1
+          fi
+          if (( GITHUB_RUN_NUMBER >= 1000000000 )); then
+            echo "GitHub run number exceeds Android versionCode range" >&2
+            exit 1
+          fi
+          {
+            echo "VERSION_NAME=$version_name"
+            echo "VERSION_CODE=$((1000000000 + GITHUB_RUN_NUMBER))"
+            echo "APK_X86_NAME=Archphene-x86_64-$version_name.apk"
+            echo "APK_ARM64_NAME=Archphene-arm64-v8a-$version_name.apk"
+          } >> "$GITHUB_ENV"
+
+      - name: Validate release contracts
+        run: python3 scripts/test-release-workflow-contract.py
+
+      - name: Ensure release is a draft
+        run: |
+          state="$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft 2>/dev/null || true)"
+          if [[ -z "$state" ]]; then
+            args=(--verify-tag --draft --generate-notes --title "Archphene $RELEASE_TAG")
+            if [[ "$VERSION_NAME" == *-* ]]; then
+              args+=(--prerelease)
+            fi
+            gh release create "$RELEASE_TAG" "${args[@]}"
+          elif [[ "$state" != true ]]; then
+            echo "Release $RELEASE_TAG is already published; release assets are immutable" >&2
+            exit 1
+          fi
+
       - name: Set up Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
         with:
           distribution: temurin
           java-version: "17"
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
 
       - name: Install Android platform and build tools
         run: sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
@@ -155,24 +192,6 @@ jobs:
               bash scripts/build-android-gpu-helper.sh "$architecture"
           done
 
-      - name: Resolve release version
-        run: |
-          if [[ "$RELEASE_TAG" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)([-+][0-9A-Za-z.-]+)?$ ]]; then
-            version_name="${RELEASE_TAG#v}"
-          else
-            echo "Release tag must use vMAJOR.MINOR.PATCH syntax" >&2
-            exit 1
-          fi
-          if (( GITHUB_RUN_NUMBER >= 1000000000 )); then
-            echo "GitHub run number exceeds Android versionCode range" >&2
-            exit 1
-          fi
-          {
-            echo "VERSION_NAME=$version_name"
-            echo "VERSION_CODE=$((1000000000 + GITHUB_RUN_NUMBER))"
-            echo "APK_X86_NAME=Archphene-x86_64-$version_name.apk"
-            echo "APK_ARM64_NAME=Archphene-arm64-v8a-$version_name.apk"
-          } >> "$GITHUB_ENV"
 
       - name: Restore release signing key
         run: |
@@ -214,21 +233,37 @@ jobs:
               > "$asset.sha256"
           done
 
+      - name: Create one-time v1.0.0 updater migration asset
+        if: env.VERSION_NAME == '1.0.1'
+        run: |
+          legacy_name="Archphene-$VERSION_NAME.apk"
+          cp "$RUNNER_TEMP/$APK_X86_NAME" "$RUNNER_TEMP/$legacy_name"
+          sha256sum "$RUNNER_TEMP/$legacy_name" | sed "s|  .*|  $legacy_name|" \
+            > "$RUNNER_TEMP/$legacy_name.sha256"
+          echo "LEGACY_X86_NAME=$legacy_name" >> "$GITHUB_ENV"
+
       - name: Upload workflow artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: Archphene-${{ env.VERSION_NAME }}
           path: |
-            ${{ runner.temp }}/${{ env.APK_X86_NAME }}
-            ${{ runner.temp }}/${{ env.APK_X86_NAME }}.sha256
-            ${{ runner.temp }}/${{ env.APK_ARM64_NAME }}
-            ${{ runner.temp }}/${{ env.APK_ARM64_NAME }}.sha256
+            ${{ runner.temp }}/Archphene-*.apk
+            ${{ runner.temp }}/Archphene-*.apk.sha256
           if-no-files-found: error
 
-      - name: Attach APKs to GitHub Release
+      - name: Attach APKs and publish release
         run: |
-          gh release upload "$RELEASE_TAG" \
-            "$RUNNER_TEMP/$APK_X86_NAME" \
-            "$RUNNER_TEMP/$APK_X86_NAME.sha256" \
-            "$RUNNER_TEMP/$APK_ARM64_NAME" \
+          assets=(
+            "$RUNNER_TEMP/$APK_X86_NAME"
+            "$RUNNER_TEMP/$APK_X86_NAME.sha256"
+            "$RUNNER_TEMP/$APK_ARM64_NAME"
             "$RUNNER_TEMP/$APK_ARM64_NAME.sha256"
+          )
+          if [[ -n "${LEGACY_X86_NAME:-}" ]]; then
+            assets+=(
+              "$RUNNER_TEMP/$LEGACY_X86_NAME"
+              "$RUNNER_TEMP/$LEGACY_X86_NAME.sha256"
+            )
+          fi
+          gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+          gh release edit "$RELEASE_TAG" --draft=false

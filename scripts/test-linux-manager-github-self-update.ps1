@@ -2,8 +2,10 @@ param(
     [string]$Serial = "emulator-5554",
     [string]$FromVersion = "0.9.0",
     [int]$FromVersionCode = 9000,
-    [string]$ToVersion = "1.0.0",
-    [switch]$RebuildBaseline
+    [string]$ToVersion = "1.0.1",
+    [switch]$RebuildBaseline,
+    [switch]$PublishedV100Migration,
+    [switch]$PrepareBaselineOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -13,6 +15,42 @@ $Package = "org.archpheneos.manager"
 $BuildDir = Join-Path $Root "tooling/build/manager-github-self-update"
 $Baseline = Join-Path $BuildDir "Archphene-$FromVersion-production.apk"
 
+if ($PrepareBaselineOnly -and -not $PublishedV100Migration) {
+    throw "-PrepareBaselineOnly requires -PublishedV100Migration"
+}
+if ($PublishedV100Migration) {
+    $abi = (& $Adb -s $Serial shell getprop ro.product.cpu.abi).Trim()
+    if ($abi -ne "x86_64") {
+        throw "The published v1.0.0 migration baseline is x86_64-only, not $abi"
+    }
+    $FromVersion = "1.0.0"
+    $FromVersionCode = 1000000002
+    $ToVersion = "1.0.1"
+    $Baseline = Join-Path $BuildDir "Archphene-1.0.0-production.apk"
+    $download = Join-Path $BuildDir "v1.0.0"
+    New-Item -ItemType Directory -Force -Path $download | Out-Null
+    if ($RebuildBaseline -or -not (Test-Path -LiteralPath $Baseline -PathType Leaf)) {
+        & gh release download v1.0.0 --repo Nulifyer/Archphene --clobber `
+            --pattern "Archphene-1.0.0.apk*" --dir $download
+        if ($LASTEXITCODE -ne 0) { throw "Could not download published v1.0.0 baseline" }
+        $apk = Join-Path $download "Archphene-1.0.0.apk"
+        $checksumPath = Join-Path $download "Archphene-1.0.0.apk.sha256"
+        $checksum = (Get-Content -LiteralPath $checksumPath -Raw).Trim()
+        $fields = $checksum -split "\s+", 2
+        $actual = (Get-FileHash -LiteralPath $apk -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($fields.Count -ne 2 -or $fields[0] -notmatch "^[0-9a-f]{64}$" -or
+                $fields[1].TrimStart("*") -ne "Archphene-1.0.0.apk" -or
+                $actual -ne $fields[0]) {
+            throw "Published v1.0.0 checksum verification failed"
+        }
+        Copy-Item -LiteralPath $apk -Destination $Baseline -Force
+    }
+}
+
+if ($PrepareBaselineOnly) {
+    Write-Host "Published v1.0.0 migration baseline verified: $Baseline"
+    return
+}
 function Invoke-Adb([string[]]$Arguments, [switch]$AllowFailure) {
     $output = & $Adb -s $Serial @Arguments 2>&1
     if ($LASTEXITCODE -ne 0 -and -not $AllowFailure) {
@@ -46,7 +84,8 @@ function Tap-Match([string]$Ui, [string]$Pattern, [string]$Step) {
     Invoke-Adb @("shell", "input", "tap", [string]$x, [string]$y) | Out-Null
 }
 
-if ($RebuildBaseline -or -not (Test-Path -LiteralPath $Baseline -PathType Leaf)) {
+if (-not $PublishedV100Migration -and ($RebuildBaseline -or
+        -not (Test-Path -LiteralPath $Baseline -PathType Leaf))) {
     & (Join-Path $PSScriptRoot "build-manager-podman.ps1") -SkipRuntime -ReleaseBuild `
         -VersionCode $FromVersionCode -VersionName $FromVersion
     if ($LASTEXITCODE -ne 0) { throw "Production baseline build failed" }
@@ -101,4 +140,5 @@ if ($ui -match "update $([regex]::Escape($ToVersion)) available") {
     throw "Manager retained stale update state after replacement"
 }
 
-Write-Host "Live GitHub self-update passed: $FromVersion -> $ToVersion with Android confirmation and reconciled restart state."
+$mode = if ($PublishedV100Migration) { "published v1.0.0 migration" } else { "exact-ABI release" }
+Write-Host "Live GitHub self-update passed ($mode): $FromVersion -> $ToVersion with Android confirmation and reconciled restart state."

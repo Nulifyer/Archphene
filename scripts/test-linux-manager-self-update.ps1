@@ -1,10 +1,17 @@
-param([switch]$SkipBuild, [string]$Serial = "emulator-5554")
+param(
+    [switch]$SkipBuild,
+    [string]$Serial = "emulator-5554",
+    [int]$FromVersionCode = 9000,
+    [string]$FromVersionName = "0.9.0",
+    [int]$ToVersionCode = 10000,
+    [string]$ToVersionName = "1.0.0"
+)
 
 $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $Adb = Join-Path $Root "tooling/android-sdk/platform-tools/adb.exe"
 $Package = "org.archpheneos.manager"
-$OldApk = Join-Path $Root "tooling/build/manager-self-update/manager-0.9.0.apk"
+$OldApk = Join-Path $Root "tooling/build/manager-self-update/manager-$FromVersionName.apk"
 $LatestApk = Join-Path $Root "prototypes/linux-app-manager-stub/out/archpheneos-manager.apk"
 
 function Get-Ui([string]$Name) {
@@ -27,10 +34,11 @@ function Tap-Text([string]$Ui, [string]$Text) {
 }
 if (-not $SkipBuild) {
     & (Join-Path $PSScriptRoot "build-install-linux-manager-stub.ps1") -SkipInstall `
-        -VersionCode 9000 -VersionName "0.9.0"
+        -VersionCode $FromVersionCode -VersionName $FromVersionName
     New-Item -ItemType Directory -Force -Path (Split-Path $OldApk) | Out-Null
     Copy-Item (Join-Path $Root "prototypes/linux-app-manager-stub/out/archpheneos-manager.apk") $OldApk -Force
-    & (Join-Path $PSScriptRoot "build-install-linux-manager-stub.ps1") -SkipInstall
+    & (Join-Path $PSScriptRoot "build-install-linux-manager-stub.ps1") -SkipInstall `
+        -VersionCode $ToVersionCode -VersionName $ToVersionName
 }
 & $Adb -s $Serial uninstall $Package 2>$null | Out-Null
 & $Adb -s $Serial install $OldApk | Out-Null
@@ -46,7 +54,8 @@ $toggle = [regex]::Match($settingsUi, 'text="Allow from this source"[^>]*bounds=
 if ($settingsUi -match 'checkable="true" checked="false"' -and $toggle.Success) {
     & $Adb -s $Serial shell input tap 900 ([int](([int]$toggle.Groups[2].Value + [int]$toggle.Groups[4].Value) / 2)) | Out-Null
     Start-Sleep -Milliseconds 500
-}& $Adb -s $Serial shell input keyevent 4 | Out-Null
+}
+& $Adb -s $Serial shell input keyevent 4 | Out-Null
 $hash = (Get-FileHash $LatestApk -Algorithm SHA256).Hash.ToLowerInvariant()
 function Start-Update {
     & $Adb -s $Serial shell am force-stop $Package | Out-Null
@@ -74,18 +83,21 @@ $deadline = [DateTime]::UtcNow.AddSeconds(20)
 do {
     Start-Sleep -Seconds 1
     $installed = (& $Adb -s $Serial shell dumpsys package $Package) -join "`n"
-} while (($installed -notmatch 'versionCode=10000' -or $installed -notmatch 'versionName=1\.0\.0') -and [DateTime]::UtcNow -lt $deadline)
-if ($installed -notmatch 'versionCode=10000' -or $installed -notmatch 'versionName=1\.0\.0') {
-    throw "Manager self-update did not install 1.0.0"
+} while (($installed -notmatch "versionCode=$([regex]::Escape([string]$ToVersionCode))" -or
+        $installed -notmatch "versionName=$([regex]::Escape($ToVersionName))") -and
+        [DateTime]::UtcNow -lt $deadline)
+if ($installed -notmatch "versionCode=$([regex]::Escape([string]$ToVersionCode))" -or
+        $installed -notmatch "versionName=$([regex]::Escape($ToVersionName))") {
+    throw "Manager self-update did not install $ToVersionName ($ToVersionCode)"
 }
 & $Adb -s $Serial shell am force-stop $Package | Out-Null
 & $Adb -s $Serial shell am start -W -n "$Package/.MainActivity" | Out-Null
 Start-Sleep -Seconds 2
 $relaunchedUi = Get-Ui "manager-self-update-relaunched"
-if ($relaunchedUi -notmatch 'text="1\.0\.0"') {
-    throw "Relaunched manager does not show its installed 1.0.0 version"
+if ($relaunchedUi -notmatch "text=`"$([regex]::Escape($ToVersionName))`"") {
+    throw "Relaunched manager does not show its installed $ToVersionName version"
 }
 if ($relaunchedUi -match 'content-desc="Archphene update .* available') {
     throw "Relaunched manager retained a stale self-update state"
 }
-Write-Host "Manager self-update passed: 0.9.0 -> 1.0.0 with reconciled restart state."
+Write-Host "Manager self-update passed: $FromVersionName -> $ToVersionName with reconciled restart state."

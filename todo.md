@@ -65,9 +65,10 @@ This is the prioritized completion queue for the Archphene Android application. 
   - Broader Qt, GTK, SDL, Electron, Rust-native, XWayland, Vulkan, and zero-copy GPU validation.
   - General secondary-window policy for phone, tablet, freeform, and external displays.
 - [ ] Complete end-user release and update lifecycle.
-  - GitHub Actions must produce signed ABI-correct manager artifacts and checksums from a reproducible Linux build.
-  - A user installing only the GitHub release APK must receive compatible manager, bridge, runtime, wrapper-template, and Terminal updates through Archphene.
-  - Validate rollback/error handling and ensure self-update never selects an incompatible universal or ABI asset.
+  - [x] Configure a commit-pinned, reproducible Linux workflow that creates a draft, builds and verifies signed x86_64 and arm64-v8a manager/Terminal/runtime artifacts, uploads checksums, and publishes only after all assets exist.
+  - [x] Require exact-ABI self-update assets; reject ABI-neutral and wrong-ABI releases on 4 KB x86_64, 16 KB x86_64, and physical AArch64.
+  - [x] Validate local Android update confirmation, restart reconciliation, signed downgrade rejection, checksum rejection, and retention of the installed version after failures.
+  - [ ] Publish `v1.0.1`, verify both ABI artifacts and embedded companions, then run the exact-ABI live update and the real published `v1.0.0` x86 migration regression.
 - [ ] Pass the public release validation gate.
   - Emulator phone/tablet/docked/freeform matrix, Samsung ARM64 control plane, physical x86_64 target, GrapheneOS Pixel, sustained desktop mode, dark/light, rotation, IME, lifecycle, update, uninstall, and concurrent-failure tests.
   - Publish measured manager, Terminal, generated-wrapper, shared-runtime, and per-application storage costs.

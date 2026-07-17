@@ -20,7 +20,6 @@ public final class GitHubReleaseClient {
     private static final int JSON_LIMIT = 4 * 1024 * 1024;
     private static final int CHECKSUM_LIMIT = 4096;
     private static final long CACHE_MILLIS = 5 * 60 * 1000L;
-    private static final String LEGACY_UNIVERSAL_VERSION = "1.0.0";
     private static List<Artifact> cachedVersions;
     private static long cachedAt;
     private static boolean cachedPrereleases;
@@ -109,36 +108,16 @@ public final class GitHubReleaseClient {
             if (prerelease && !allowPrereleases) continue;
             String apkName = "Archphene-" + releaseAbi + "-" + version + ".apk";
             String checksumName = apkName + ".sha256";
-            String fallbackApkName = "Archphene-" + version + ".apk";
-            String fallbackChecksumName = fallbackApkName + ".sha256";
             JSONObject apk = null;
             JSONObject checksum = null;
-            JSONObject fallbackApk = null;
-            JSONObject fallbackChecksum = null;
-            boolean hasAbiSpecificApk = false;
             JSONArray assets = release.optJSONArray("assets");
             if (assets == null) continue;
             for (int assetIndex = 0; assetIndex < assets.length(); assetIndex++) {
                 JSONObject asset = assets.getJSONObject(assetIndex);
                 if (!"uploaded".equals(asset.optString("state", ""))) continue;
                 String name = asset.optString("name", "");
-                if (name.matches("Archphene-(?:x86_64|arm64-v8a)-"
-                        + java.util.regex.Pattern.quote(version) + "\\.apk")) {
-                    hasAbiSpecificApk = true;
-                }
                 if (apkName.equals(name)) apk = asset;
                 if (checksumName.equals(name)) checksum = asset;
-                if (fallbackApkName.equals(name)) fallbackApk = asset;
-                if (fallbackChecksumName.equals(name)) {
-                    fallbackChecksum = asset;
-                }
-            }
-            if (apk == null || checksum == null) {
-                if (!LEGACY_UNIVERSAL_VERSION.equals(version) || hasAbiSpecificApk) continue;
-                apk = fallbackApk;
-                checksum = fallbackChecksum;
-                apkName = fallbackApkName;
-                checksumName = fallbackChecksumName;
             }
             if (apk == null || checksum == null) continue;
             long size = apk.optLong("size", -1);
@@ -177,21 +156,25 @@ public final class GitHubReleaseClient {
                 false, "x86_64");
         List<Artifact> incompatible = parseReleaseResponse("[" + stable + "]",
                 false, "arm64-v8a");
-        String legacy = stable.replace("v1.2.3", "v1.0.0")
-                .replace("Archphene-x86_64-1.2.3", "Archphene-1.0.0");
-        String unsupportedUniversal = legacy.replace("v1.0.0", "v1.2.4")
-                .replace("Archphene-1.0.0", "Archphene-1.2.4");
-        List<Artifact> legacyArm = parseReleaseResponse("[" + legacy + "]",
+        String universal = stable.replace(
+                "Archphene-x86_64-1.2.3", "Archphene-1.2.3");
+        List<Artifact> universalX86 = parseReleaseResponse("[" + universal + "]",
+                false, "x86_64");
+        List<Artifact> universalArm = parseReleaseResponse("[" + universal + "]",
                 false, "arm64-v8a");
-        List<Artifact> futureUniversal = parseReleaseResponse("[" + unsupportedUniversal + "]",
-                false, "arm64-v8a");
+        String mixed = stable.substring(0, stable.length() - 2) + ","
+                + universal.substring(universal.indexOf("{\"state\""),
+                        universal.length() - 2) + "]}";
+        List<Artifact> mixedX86 = parseReleaseResponse("[" + mixed + "]",
+                false, "x86_64");
         if (stableOnly.size() != 1 || !"1.2.3".equals(stableOnly.get(0).version)
                 || withPrerelease.size() != 2
                 || !"1.3.0-rc1".equals(withPrerelease.get(0).version)
                 || x86Only.size() != 1
                 || !"Archphene-x86_64-1.2.3.apk".equals(x86Only.get(0).assetName)
-                || !incompatible.isEmpty() || legacyArm.size() != 1
-                || !futureUniversal.isEmpty()) {
+                || !incompatible.isEmpty() || !universalX86.isEmpty()
+                || !universalArm.isEmpty() || mixedX86.size() != 1
+                || !"Archphene-x86_64-1.2.3.apk".equals(mixedX86.get(0).assetName)) {
             throw new SecurityException("GitHub release parser policy mismatch");
         }
         if (compareVersions("1.0.0-rc.10", "1.0.0-rc.2") <= 0
