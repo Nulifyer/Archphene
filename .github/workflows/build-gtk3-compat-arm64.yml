@@ -26,10 +26,24 @@ jobs:
 
       - name: Import official Arch Linux ARM userspace
         run: |
+          rootfs="$RUNNER_TEMP/archlinuxarm-aarch64.tar.gz"
           curl --fail --location --retry 3 \
-            --output "$RUNNER_TEMP/archlinuxarm-aarch64.tar.gz" \
-            https://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
-          docker import "$RUNNER_TEMP/archlinuxarm-aarch64.tar.gz" archphene/archlinuxarm:aarch64
+            --output "$rootfs" \
+            http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
+          curl --fail --location --retry 3 \
+            --output "$rootfs.sig" \
+            http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz.sig
+
+          export GNUPGHOME="$RUNNER_TEMP/archlinuxarm-gnupg"
+          mkdir -m700 "$GNUPGHOME"
+          signing_key=68B3537F39A313B3E574D06777193F152BDBE6A6
+          gpg --batch --keyserver hkps://keyserver.ubuntu.com --recv-keys "$signing_key"
+          fingerprint="$(gpg --batch --with-colons --fingerprint "$signing_key" \
+            | awk -F: '$1 == "fpr" { print $10; exit }')"
+          test "$fingerprint" = "$signing_key"
+          gpg --batch --verify "$rootfs.sig" "$rootfs"
+
+          docker import "$rootfs" archphene/archlinuxarm:aarch64
 
       - name: Build and inspect compatibility libraries
         run: |
