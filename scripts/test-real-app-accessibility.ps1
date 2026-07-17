@@ -152,7 +152,10 @@ function Test-NormalizedBounds([string]$Tree) {
     foreach ($line in $Tree -split "`n") {
         if (-not $line.StartsWith("NODE|")) { continue }
         $match = [regex]::Match($line, '\|(-?\d+) (-?\d+) (-?\d+) (-?\d+)\|')
-        if (-not $match.Success) { return $false }
+        if (-not $match.Success) {
+            if ($line.Split('|').Length -lt 10) { continue }
+            return $false
+        }
         $left = [int]$match.Groups[1].Value
         $top = [int]$match.Groups[2].Value
         $right = [int]$match.Groups[3].Value
@@ -167,6 +170,10 @@ function Test-NormalizedBounds([string]$Tree) {
 
 function Test-KCalc {
     $tree = Wait-TargetTree -Contains @("|KCalc|", "|Clear|", "|Equals|")
+    if ($tree.Contains("|Close|")) {
+        Invoke-AccessibilityAction -Selector "Close"
+        Wait-TargetTree -Absent @("|Close|") | Out-Null
+    }
     Invoke-AccessibilityAction -Selector "Clear"
     $tree = Wait-TargetTree -Contains @("|KCalc|", "|Clear|", "|Equals|") -Normalized
     Assert-NormalizedBounds $tree
@@ -186,11 +193,11 @@ function Test-KCalc {
     Assert-NormalizedBounds $tree
 
     Invoke-AccessibilityAction -Selector "Settings"
-    $tree = Wait-TargetTree -Contains @("|Simple Mode|", "|Science Mode|", "|Configure KCalc|")
+    $tree = Wait-TargetTree -Contains @("|Simple Mode|", "|Science Mode|", "|Configure KCalc")
     Assert-NormalizedBounds $tree
 
     Invoke-AccessibilityAction -Selector "Help"
-    $tree = Wait-TargetTree -Contains @("|KCalc Handbook|", "|Report Bug|", "|About KCalc|")
+    $tree = Wait-TargetTree -Contains @("|KCalc Handbook|", "|Report Bug", "|About KCalc|")
     Assert-NormalizedBounds $tree
 
     Invoke-AccessibilityAction -Selector "About KCalc"

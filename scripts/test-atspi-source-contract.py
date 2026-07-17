@@ -15,6 +15,7 @@ TRANSLATOR_SOURCE = ROOT / "native/archphene-portal/archphene_atspi_translator.c
 ANDROID_SOURCE = ROOT / "prototypes/shared-android-bridge/src/org/archphene/bridge/ArchpheneAccessibilityBridge.java"
 ANDROID_BROKER_SOURCE = ROOT / "prototypes/shared-android-bridge/src/org/archphene/bridge/AndroidCapabilityBroker.java"
 ANDROID_ACTIVITY_SOURCE = ROOT / "prototypes/shared-android-bridge/src/org/archphene/bridge/ArchpheneCompositorActivity.java"
+ANDROID_SESSION_SOURCE = ROOT / "prototypes/shared-android-bridge/src/org/archphene/bridge/ArchpheneCompositorSession.java"
 ANDROID_CAPABILITY_SOURCE = ROOT / "native/archphene-android-capability/archphene_android.c"
 ACCESSIBILITY_PROBE_SOURCE = (
     ROOT
@@ -144,6 +145,7 @@ def main() -> None:
     android_source = ANDROID_SOURCE.read_text(encoding="utf-8")
     android_broker_source = ANDROID_BROKER_SOURCE.read_text(encoding="utf-8")
     android_activity_source = ANDROID_ACTIVITY_SOURCE.read_text(encoding="utf-8")
+    android_session_source = ANDROID_SESSION_SOURCE.read_text(encoding="utf-8")
     android_capability_source = ANDROID_CAPABILITY_SOURCE.read_text(encoding="utf-8")
     accessibility_probe_source = ACCESSIBILITY_PROBE_SOURCE.read_text(encoding="utf-8")
     validate_role_constants(client_source)
@@ -308,7 +310,8 @@ def main() -> None:
         (android_source, "void setMenuFallback", "Android fallback registration"),
         (android_source, "void activateMenuFallback", "Android fallback activation"),
         (android_broker_source, "ACCESSIBILITY_MENU_FALLBACK", "broker fallback command"),
-        (android_activity_source, "KeyEvent.KEYCODE_ENTER", "compositor menu activation"),
+        (android_activity_source, "session::pointerClickSurface", "compositor menu activation"),
+        (android_session_source, "pointerClickSurface", "surface-coordinate menu activation"),
         (android_capability_source,
          "archphene_android_accessibility_menu_fallback",
          "native fallback request"),

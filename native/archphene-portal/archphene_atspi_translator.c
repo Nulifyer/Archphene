@@ -314,7 +314,14 @@ static void process_action(DBusConnection *connection) {
         pthread_mutex_unlock(&state.mutex);
         if (!menu_opened) {
             char fallback_response[64] = {0};
+            int64_t center_x = (int64_t)node.x + node.width / 2;
+            int64_t center_y = (int64_t)node.y + node.height / 2;
+            if (center_x < 0) center_x = 0;
+            if (center_x > 1000000) center_x = 1000000;
+            if (center_y < 0) center_y = 0;
+            if (center_y > 1000000) center_y = 1000000;
             archphene_android_accessibility_menu_fallback(
+                    (int)center_x, (int)center_y,
                     fallback_response, sizeof(fallback_response));
         }
     }

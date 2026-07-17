@@ -240,6 +240,13 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
         events.offer(new Event(POINTER_BUTTON, pressed ? 1 : 0, (int) time, 0, 0, ""));
     }
 
+    public void pointerClickSurface(int x, int y) {
+        long now = SystemClock.uptimeMillis();
+        events.offer(new Event(POINTER_MOTION, x, y, (int) now, 0, ""));
+        events.offer(new Event(POINTER_BUTTON, 1, (int) now, 0, 0, ""));
+        events.offer(new Event(POINTER_BUTTON, 0, (int) now, 0, 0, ""));
+    }
+
     public void pointerAxis(float horizontal, float vertical, long time) {
         events.offer(new Event(
                 POINTER_AXIS,
