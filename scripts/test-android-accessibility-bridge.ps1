@@ -83,14 +83,21 @@ function Invoke-Probe([string]$Socket, [string[]]$Arguments, [switch]$AllowFailu
 }
 
 function Dump-Accessibility {
+    param([string]$Contains = "", [string]$Absent = "")
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     do {
         $tree = & $Adb -s $Serial shell run-as $Package cat `
                 files/framework-accessibility-tree.txt 2>$null
-        if ($LASTEXITCODE -eq 0 -and $tree) { return $tree -join "`n" }
+        if ($LASTEXITCODE -eq 0 -and $tree) {
+            $rendered = $tree -join "`n"
+            if (($Contains.Length -eq 0 -or $rendered.Contains($Contains)) -and
+                    ($Absent.Length -eq 0 -or -not $rendered.Contains($Absent))) {
+                return $rendered
+            }
+        }
         Start-Sleep -Milliseconds 200
     } while ((Get-Date) -lt $deadline)
-    throw "Android AccessibilityService did not receive the virtual tree"
+    throw "Android AccessibilityService did not receive the expected virtual tree"
 }
 
 if (-not (Test-Path -LiteralPath $Apk -PathType Leaf)) {
@@ -129,7 +136,7 @@ if ($published -ne "OK") { throw "Accessibility tree publication failed: $publis
 Start-Sleep -Milliseconds 1500
 $frameworkEvent = Invoke-Probe $socket @("accessibility-event", "0", "content")
 if ($frameworkEvent -ne "OK") { throw "Accessibility readiness event failed" }
-$secondaryTree = Dump-Accessibility
+$secondaryTree = Dump-Accessibility -Contains "Secondary accessible button"
 if (-not $secondaryTree.Contains("Secondary accessible button")) {
     throw "Android did not enumerate the secondary virtual controls: $secondaryTree"
 }
@@ -149,7 +156,8 @@ Invoke-Adb @("shell", "run-as", $Package, "rm", "-f",
 Invoke-Adb @("shell", "am", "start", "-n", "$Package/$Activity", `
         "--ez", "archphene_hide_secondary", "true") `
         "dismiss secondary accessibility window" | Out-Null
-$tree = Dump-Accessibility
+$tree = Dump-Accessibility -Contains "Archphene accessible button" `
+            -Absent "Secondary accessible button"
 if (-not $tree.Contains("Archphene accessible button") `
         -or -not $tree.Contains("Accessible editor") `
         -or -not $tree.Contains("Scrollable list") `
@@ -174,6 +182,24 @@ $scroll = Invoke-Probe $socket @("take-accessibility-action", "250")
 if ($scroll -ne "OK`t4`tscroll-forward`t") {
     throw "Android scroll was not routed to Linux: $scroll"
 }
+Invoke-Adb @("shell", "am", "start", "-n", "$Package/$Activity", `
+        "--ei", "archphene_node", "5", "--es", "archphene_action", "click", `
+        "--ez", "archphene_expect_rejected", "true") `
+        "reject disabled Android accessibility action" | Out-Null
+$afterDisabled = Invoke-Probe $socket @("take-accessibility-action", "0") -AllowFailure
+if ($afterDisabled -ne "ERROR$([char]9)EMPTY") {
+    throw "Disabled accessibility action reached Linux: $afterDisabled"
+}
+$oversizedText = "x" * 1025
+Invoke-Adb @("shell", "am", "start", "-n", "$Package/$Activity", `
+        "--ei", "archphene_node", "3", "--es", "archphene_action", "set-text", `
+        "--es", "archphene_text", $oversizedText, `
+        "--ez", "archphene_expect_rejected", "true") `
+        "reject oversized Android accessibility text" | Out-Null
+$afterOversized = Invoke-Probe $socket @("take-accessibility-action", "0") -AllowFailure
+if ($afterOversized -ne "ERROR$([char]9)EMPTY") {
+    throw "Oversized accessibility text reached Linux: $afterOversized"
+}
 $event = Invoke-Probe $socket @("accessibility-event", "3", "text")
 if ($event -ne "OK") { throw "Accessibility event publication failed: $event" }
 $invalid = Invoke-Probe $socket @("publish-accessibility-tree",
@@ -181,7 +207,7 @@ $invalid = Invoke-Probe $socket @("publish-accessibility-tree",
 if ($invalid -ne "ERROR`tINVALID_REQUEST") {
     throw "Cyclic accessibility tree was accepted: $invalid"
 }
-$treeAfterInvalid = Dump-Accessibility
+$treeAfterInvalid = Dump-Accessibility -Contains "Archphene accessible button"
 if (-not $treeAfterInvalid.Contains("Archphene accessible button")) {
     throw "Invalid publication replaced the last valid accessibility tree"
 }
@@ -213,4 +239,4 @@ if ($logs -match "FATAL EXCEPTION") { throw "Accessibility probe crashed: $logs"
 Restore-AccessibilitySettings
 Write-Host ("Android accessibility bridge passed on $Serial ($AndroidAbi): " +
         "two-window ownership, virtual trees, bounds, events, invalid-tree rollback, " +
-        "primary/secondary click, edit, and scroll actions, lifecycle.")
+        "primary/secondary click, edit, scroll, disabled/oversized rejection, lifecycle.")

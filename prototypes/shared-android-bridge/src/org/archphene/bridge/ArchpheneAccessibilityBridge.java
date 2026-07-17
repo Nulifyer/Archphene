@@ -456,13 +456,16 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
         info.setPassword(node.password);
         info.setAccessibilityFocused(node.id == currentAccessibilityFocus);
         if (Build.VERSION.SDK_INT >= 28) info.setScreenReaderFocusable(true);
-        if (node.clickable) info.addAction(AccessibilityNodeInfo.ACTION_CLICK);
-        if (node.editable) info.addAction(AccessibilityNodeInfo.ACTION_SET_TEXT);
-        if (node.scrollForward)
+        if (node.enabled && node.clickable)
+            info.addAction(AccessibilityNodeInfo.ACTION_CLICK);
+        if (node.enabled && node.editable)
+            info.addAction(AccessibilityNodeInfo.ACTION_SET_TEXT);
+        if (node.enabled && node.scrollForward)
             info.addAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD);
-        if (node.scrollBackward)
+        if (node.enabled && node.scrollBackward)
             info.addAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD);
-        if (node.focusable) info.addAction(AccessibilityNodeInfo.ACTION_FOCUS);
+        if (node.enabled && node.focusable)
+            info.addAction(AccessibilityNodeInfo.ACTION_FOCUS);
         info.addAction(node.id == currentAccessibilityFocus
                 ? AccessibilityNodeInfo.ACTION_CLEAR_ACCESSIBILITY_FOCUS
                 : AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS);
@@ -550,13 +553,19 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
         }
         String name;
         String text = "";
+        if (!node.enabled) return false;
         if (action == AccessibilityNodeInfo.ACTION_CLICK && node.clickable) name = "click";
         else if (action == AccessibilityNodeInfo.ACTION_FOCUS && node.focusable) name = "focus";
         else if (action == AccessibilityNodeInfo.ACTION_SET_TEXT && node.editable) {
             name = "set-text";
             CharSequence value = arguments == null ? null : arguments.getCharSequence(
                     AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE);
-            text = boundedString(value == null ? "" : value.toString(), "action text", MAX_TEXT);
+            try {
+                text = boundedString(
+                        value == null ? "" : value.toString(), "action text", MAX_TEXT);
+            } catch (IllegalArgumentException invalidText) {
+                return false;
+            }
         } else if (action == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
                 && node.scrollForward) name = "scroll-forward";
         else if (action == AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD

@@ -35,6 +35,10 @@ public final class AccessibilityProbeActivity extends Activity {
             + "{\"id\":4,\"parent\":1,\"role\":\"list\",\"text\":\"Scrollable list\","
             + "\"x\":40,\"y\":300,\"width\":280,\"height\":200,"
             + "\"scrollForward\":true},"
+            + "{\"id\":5,\"parent\":1,\"role\":\"button\","
+            + "\"text\":\"Disabled action\",\"x\":40,\"y\":520,"
+            + "\"width\":280,\"height\":72,\"clickable\":true,"
+            + "\"focusable\":true,\"enabled\":false},"
             + "{\"id\":11,\"parent\":0,\"role\":\"window\","
             + "\"text\":\"Secondary probe\",\"windowTitle\":\"Secondary probe\","
             + "\"x\":0,\"y\":0,\"width\":300,\"height\":240},"
@@ -138,7 +142,15 @@ public final class AccessibilityProbeActivity extends Activity {
         } else {
             throw new IllegalArgumentException("Unknown probe accessibility action");
         }
-        if (!accessibility.performAction(node, androidAction, arguments)) {
+        boolean accepted = accessibility.performAction(node, androidAction, arguments);
+        boolean expectRejected = intent.getBooleanExtra(
+                "archphene_expect_rejected", false);
+        if (expectRejected) {
+            if (accepted) throw new IllegalStateException(
+                    "Accessibility action was unexpectedly accepted");
+            return;
+        }
+        if (!accepted) {
             throw new IllegalStateException("Accessibility action was rejected");
         }
     }
