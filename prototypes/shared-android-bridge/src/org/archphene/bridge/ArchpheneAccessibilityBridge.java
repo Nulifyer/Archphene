@@ -360,14 +360,31 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
         int subsetTop = 0;
         int subsetWidth = root.viewportWidth;
         int subsetHeight = root.viewportHeight;
+        WindowDescriptor descriptor;
+        synchronized (root.lock) {
+            descriptor = root.windowDescriptors.get(windowId);
+        }
+        Node viewport = null;
+        int viewportPriority = -1;
+        long viewportArea = -1;
         for (Node node : subset.values()) {
-            if (node.parent == 0) {
-                subsetLeft = node.bounds.left;
-                subsetTop = node.bounds.top;
-                subsetWidth = Math.max(1, node.bounds.width());
-                subsetHeight = Math.max(1, node.bounds.height());
-                break;
+            if (node.parent != 0) continue;
+            boolean titleMatch = descriptor != null && !descriptor.title.isBlank()
+                    && descriptor.title.equals(node.windowTitle);
+            int priority = titleMatch ? 2 : ("window".equals(node.role) ? 1 : 0);
+            long area = (long) node.bounds.width() * node.bounds.height();
+            if (viewport == null || priority > viewportPriority
+                    || (priority == viewportPriority && area > viewportArea)) {
+                viewport = node;
+                viewportPriority = priority;
+                viewportArea = area;
             }
+        }
+        if (viewport != null) {
+            subsetLeft = viewport.bounds.left;
+            subsetTop = viewport.bounds.top;
+            subsetWidth = Math.max(1, viewport.bounds.width());
+            subsetHeight = Math.max(1, viewport.bounds.height());
         }
         synchronized (lock) {
             viewportLeft = subsetLeft;

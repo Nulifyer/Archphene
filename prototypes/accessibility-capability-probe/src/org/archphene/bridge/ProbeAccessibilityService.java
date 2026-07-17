@@ -142,7 +142,14 @@ public final class ProbeAccessibilityService extends AccessibilityService {
             if (offset != bytes.length) throw new IllegalStateException("Short command read");
         }
         if (!command.delete()) throw new IllegalStateException("Could not consume command");
-        String[] fields = new String(bytes, StandardCharsets.UTF_8).trim().split("\\t", -1);
+        String payload = new String(bytes, StandardCharsets.UTF_8);
+        int payloadEnd = payload.length();
+        while (payloadEnd > 0) {
+            char last = payload.charAt(payloadEnd - 1);
+            if (last != '\r' && last != '\n') break;
+            payloadEnd--;
+        }
+        String[] fields = payload.substring(0, payloadEnd).split("\\t", -1);
         if (fields.length != 5 || fields[0].length() > 64
                 || !fields[1].startsWith(LINUX_PACKAGE_PREFIX)) {
             writeResponse(fields.length > 0 ? fields[0] : "invalid", false);

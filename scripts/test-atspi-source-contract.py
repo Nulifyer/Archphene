@@ -16,6 +16,11 @@ ANDROID_SOURCE = ROOT / "prototypes/shared-android-bridge/src/org/archphene/brid
 ANDROID_BROKER_SOURCE = ROOT / "prototypes/shared-android-bridge/src/org/archphene/bridge/AndroidCapabilityBroker.java"
 ANDROID_ACTIVITY_SOURCE = ROOT / "prototypes/shared-android-bridge/src/org/archphene/bridge/ArchpheneCompositorActivity.java"
 ANDROID_CAPABILITY_SOURCE = ROOT / "native/archphene-android-capability/archphene_android.c"
+ACCESSIBILITY_PROBE_SOURCE = (
+    ROOT
+    / "prototypes/accessibility-capability-probe/src/org/archphene/bridge"
+    / "ProbeAccessibilityService.java"
+)
 
 
 def c_string(name: str, source: str) -> str:
@@ -140,6 +145,7 @@ def main() -> None:
     android_broker_source = ANDROID_BROKER_SOURCE.read_text(encoding="utf-8")
     android_activity_source = ANDROID_ACTIVITY_SOURCE.read_text(encoding="utf-8")
     android_capability_source = ANDROID_CAPABILITY_SOURCE.read_text(encoding="utf-8")
+    accessibility_probe_source = ACCESSIBILITY_PROBE_SOURCE.read_text(encoding="utf-8")
     validate_role_constants(client_source)
     bus_root = ET.fromstring(c_string("bus_xml", source))
     socket_root = ET.fromstring(c_string("root_xml", source))
@@ -285,6 +291,7 @@ def main() -> None:
         "float uniform = Math.min(scaleX, scaleY)",
         "source.left - viewportLeft",
         "source.top - viewportTop",
+        "descriptor.title.equals(node.windowTitle)",
         "text.getBytes(StandardCharsets.UTF_8).length > MAX_TEXT",
         "manager == null || !manager.isEnabled()",
         "catch (IllegalStateException accessibilityDisabled)",
@@ -292,6 +299,9 @@ def main() -> None:
     for token in android_tokens:
         if token not in android_source:
             raise AssertionError(f"missing Android semantic ownership: {token}")
+    if "payload.substring(0, payloadEnd).split" not in accessibility_probe_source:
+        raise AssertionError("empty accessibility command values are not preserved")
+
     fallback_tokens = (
         (android_source, "void setMenuFallback", "Android fallback registration"),
         (android_source, "void activateMenuFallback", "Android fallback activation"),
