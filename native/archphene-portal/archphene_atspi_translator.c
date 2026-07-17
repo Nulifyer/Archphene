@@ -254,6 +254,20 @@ static void process_event(void) {
     archphene_android_accessibility_event(
             id, event.type, response, sizeof(response));
 }
+
+static int activate_menu_pointer(const ArchpheneAtspiNode *node) {
+    if (node == NULL) return -1;
+    char response[64] = {0};
+    int64_t center_x = (int64_t)node->x + node->width / 2;
+    int64_t center_y = (int64_t)node->y + node->height / 2;
+    if (center_x < 0) center_x = 0;
+    if (center_x > 1000000) center_x = 1000000;
+    if (center_y < 0) center_y = 0;
+    if (center_y > 1000000) center_y = 1000000;
+    return archphene_android_accessibility_menu_fallback(
+            (int)center_x, (int)center_y, response, sizeof(response));
+}
+
 static void process_action(DBusConnection *connection) {
     char response[ACTION_RESPONSE_MAX] = {0};
     if (archphene_android_take_accessibility_action(
@@ -279,15 +293,17 @@ static void process_action(DBusConnection *connection) {
 
     int result = -1;
     uint64_t transient_generation = 0;
-    bool menu_click = strcmp(action, "click") == 0
-            && (node.show_menu_action || menu_bar_child);
-    if (strcmp(action, "click") == 0) {
-        if (menu_click) {
+    bool click = strcmp(action, "click") == 0;
+    bool menu_bar_click = click && menu_bar_child;
+    bool menu_click = click && (node.show_menu_action || menu_bar_child);
+    if (click) {
+        if (menu_click && !menu_bar_click) {
             pthread_mutex_lock(&state.mutex);
             transient_generation = state.transient_generation;
             pthread_mutex_unlock(&state.mutex);
         }
-        result = archphene_atspi_client_click(connection, &node);
+        result = menu_bar_click ? activate_menu_pointer(&node)
+                : archphene_atspi_client_click(connection, &node);
     } else if (strcmp(action, "focus") == 0) {
         result = archphene_atspi_client_focus(connection, &node);
     } else if (strcmp(action, "set-text") == 0) {
@@ -300,7 +316,7 @@ static void process_action(DBusConnection *connection) {
     } else if (strcmp(action, "scroll-backward") == 0) {
         result = archphene_atspi_client_scroll(connection, &node, FALSE);
     }
-    if (result == 0 && menu_click) {
+    if (result == 0 && menu_click && !menu_bar_click) {
         struct timespec deadline;
         deadline_after_millis(&deadline, 100);
         pthread_mutex_lock(&state.mutex);
@@ -316,18 +332,7 @@ static void process_action(DBusConnection *connection) {
         }
         bool menu_opened = transient_changed && state.transient_root_count > 0;
         pthread_mutex_unlock(&state.mutex);
-        if (!menu_opened) {
-            char fallback_response[64] = {0};
-            int64_t center_x = (int64_t)node.x + node.width / 2;
-            int64_t center_y = (int64_t)node.y + node.height / 2;
-            if (center_x < 0) center_x = 0;
-            if (center_x > 1000000) center_x = 1000000;
-            if (center_y < 0) center_y = 0;
-            if (center_y > 1000000) center_y = 1000000;
-            archphene_android_accessibility_menu_fallback(
-                    (int)center_x, (int)center_y,
-                    fallback_response, sizeof(fallback_response));
-        }
+        if (!menu_opened) activate_menu_pointer(&node);
     }
     if (result == 0) {
         pthread_mutex_lock(&state.mutex);

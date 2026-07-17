@@ -260,6 +260,8 @@ def main() -> None:
         (translator_source, "state.transient_generation++", "popup generation tracking"),
         (translator_source, "bool menu_click =", "semantic menu fallback"),
         (translator_source, "parent_is_menu_bar(state.tree, id)", "menu-bar child fallback"),
+        (translator_source, "menu_bar_click ? activate_menu_pointer",
+         "serial-producing menu-bar activation"),
         (translator_source, "remove_transient_bus_locked(bus)", "transient disconnect cleanup"),
         (translator_source,
          "build_result < 0 || build_result == ARCHPHENE_ATSPI_TREE_RETRY",
