@@ -70,6 +70,7 @@ static void update_transient_root_locked(
                 memmove(root, root + 1,
                         (state.transient_root_count - index - 1) * sizeof(*root));
                 state.transient_root_count--;
+                state.transient_generation++;
                 wake_worker();
             }
             return;
@@ -105,7 +106,26 @@ static bool remove_transient_bus_locked(const char *bus) {
             index++;
         }
     }
+    if (removed) state.transient_generation++;
     return removed;
+}
+
+static bool parent_is_menu_bar(const ArchpheneAtspiTree *tree, int id) {
+    if (tree == NULL) return false;
+    int parent = 0;
+    for (size_t index = 0; index < tree->count; index++) {
+        if (tree->nodes[index].id == id) {
+            parent = tree->nodes[index].parent;
+            break;
+        }
+    }
+    if (parent == 0) return false;
+    for (size_t index = 0; index < tree->count; index++) {
+        if (tree->nodes[index].id == parent) {
+            return tree->nodes[index].node.menu_bar;
+        }
+    }
+    return false;
 }
 
 static int allocate_application_id_locked(void) {
@@ -245,19 +265,22 @@ static void process_action(DBusConnection *connection) {
     if (parse_action(response, &id, &action, &encoded_text) != 0) return;
     ArchpheneAtspiNode node;
     bool found_node = false;
+    bool menu_bar_child = false;
     pthread_mutex_lock(&state.mutex);
     const ArchpheneAtspiNode *found =
             archphene_atspi_tree_find(state.tree, id);
     if (found != NULL) {
         node = *found;
         found_node = true;
+        menu_bar_child = parent_is_menu_bar(state.tree, id);
     }
     pthread_mutex_unlock(&state.mutex);
     if (!found_node) return;
 
     int result = -1;
     uint64_t transient_generation = 0;
-    bool menu_click = strcmp(action, "click") == 0 && node.show_menu_action;
+    bool menu_click = strcmp(action, "click") == 0
+            && (node.show_menu_action || menu_bar_child);
     if (strcmp(action, "click") == 0) {
         if (menu_click) {
             pthread_mutex_lock(&state.mutex);
