@@ -174,4 +174,4 @@ Use [GitHub Issues](https://github.com/Nulifyer/Archphene/issues) for reproducib
 
 ## License
 
-A project-wide license has not been selected yet. Third-party packages, source trees, and generated artifacts retain their respective upstream licenses. Until a project license is added, the repository should be treated as source-available research rather than a redistributable software release.
+Archphene source code is licensed under the [MIT License](LICENSE). Vendored third-party code, Arch packages, prebuilt compatibility libraries, and generated artifacts retain their respective upstream licenses and notices.

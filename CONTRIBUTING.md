@@ -43,4 +43,4 @@ Do not publish vulnerabilities in a normal issue. Follow [SECURITY.md](SECURITY.
 
 ## Licensing
 
-A project-wide license has not yet been selected. Discuss non-trivial contributions with the maintainer before submitting code that may need explicit licensing or provenance review.
+Project-owned source is licensed under the [MIT License](LICENSE). Contributions are submitted under that license. Preserve upstream notices and document provenance and compatible licensing for vendored code, generated sources, and prebuilt artifacts.

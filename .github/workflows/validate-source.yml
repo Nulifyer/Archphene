@@ -1,0 +1,27 @@
+name: Validate source
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-source-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contracts:
+    name: Repository and source contracts
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Validate public repository and release contracts
+        run: |
+          python3 scripts/test-public-repository.py
+          python3 scripts/test-release-workflow-contract.py

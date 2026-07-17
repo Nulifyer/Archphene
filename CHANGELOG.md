@@ -14,6 +14,6 @@ Notable user-facing changes will be recorded here.
 
 ### Known limitations
 
-- Arbitrary Arch package resolution, wrapping, signing, and installation are not yet performed entirely on-device.
-- The Wayland compositor implementation remains duplicated across application prototypes.
-- GrapheneOS-on-Pixel validation and production security hardening remain incomplete.
+- The complete on-device resolve, verify, wrap, sign, and install path is validated for KCalc on x86_64 and AArch64; broad arbitrary-package and toolkit compatibility remains incomplete.
+- Generated Qt and GTK wrappers use the shared Rust compositor and Android bridge, but protocol, portal, toolkit, and device coverage remains incomplete.
+- AT-SPI2 toolkit integration, AArch64 KWallet compatibility, GrapheneOS-on-Pixel validation, and production security hardening remain incomplete.
