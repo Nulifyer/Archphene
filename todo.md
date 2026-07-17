@@ -39,6 +39,7 @@ This is the prioritized completion queue for the Archphene Android application. 
   - [x] Deliver a document sent to an already-running `singleTask` wrapper through a shared safe-restart policy with an explicit unsaved-work warning, Cancel action, and debug-only automated regression.
   - [x] Add a bounded same-UID Android capability broker and ABI-specific glibc client for HTTP(S) URL handling and notification permission/post/withdraw; validate unsafe-URI and cross-UID rejection and dynamic runtime-pack publication on the emulator.
   - [x] Add a private session bus and standard XDG portal adapters so unmodified applications can reach the validated URL and notification primitives.
+  - [x] Generate capability-specific wrapper manifests so camera and microphone permissions are declared only when their matching bridge capability is enabled; verify all eight document/permission variants and a manager-signed first install on the emulator.
   - [x] Add capability-scoped Linux audio playback through a wrapper-private Pulse native-protocol server backed by Android AAudio, with OpenSL ES fallback.
   - [x] Add XDG printing through the Android system print UI with bounded same-UID PDF transfer, private staging, cancellation cleanup, and invalid-document rejection.
   - [x] Add microphone capture with an explicit `RECORD_AUDIO` request and separate input capability; validate grant, denial/no-reprompt, privacy-switch silence, process cleanup, and real nonzero capture on x86_64 emulator and physical AArch64.

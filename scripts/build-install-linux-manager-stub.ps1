@@ -92,21 +92,43 @@ if ($IncludePackageRuntime) {
         }
     }
     $KeyringDir = Join-Path $Root "tooling/downloads/arch-runtime-archlinux-keyring-x86_64/runtime-root/usr/share/pacman/keyrings"
-    foreach ($name in @("archlinux.gpg", "archlinux-revoked", "archlinux-trusted")) {
+    $KeyringAssets = @{
+        "archlinux.gpg" = "archlinux-x86_64.gpg"
+        "archlinux-revoked" = "archlinux-x86_64-revoked"
+        "archlinux-trusted" = "archlinux-x86_64-trusted"
+    }
+    foreach ($name in $KeyringAssets.Keys) {
         $source = Join-Path $KeyringDir $name
         if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
             throw "Arch keyring input missing: $source"
         }
-        Copy-Item -LiteralPath $source -Destination (Join-Path $PackageAssetDir $name) -Force
+        Copy-Item -LiteralPath $source -Destination `
+            (Join-Path $PackageAssetDir $KeyringAssets[$name]) -Force
     }
-    $QtTemplate = Join-Path $Root "tooling/build/wrapper-templates/qt/qt-wrapper-template.apk"
+    $QtTemplateDirectory = Join-Path $Root "tooling/build/wrapper-templates/qt"
+    $QtTemplate = Join-Path $QtTemplateDirectory "qt-wrapper-template.apk"
     if (-not (Test-Path -LiteralPath $QtTemplate -PathType Leaf)) {
         & (Join-Path $PSScriptRoot "build-qt-wrapper-template.ps1") -AndroidSdk $Sdk
         if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $QtTemplate -PathType Leaf)) {
             throw "Qt wrapper template build failed"
         }
     }
+    $ManifestVariants = foreach ($profile in @("generic", "document")) {
+        foreach ($permissions in @("none", "audio-input", "camera", "audio-input-camera")) {
+            Join-Path $QtTemplateDirectory "qt-$profile-manifest-$permissions.bin"
+        }
+    }
+    if ($ManifestVariants.Where({ -not (Test-Path -LiteralPath $_ -PathType Leaf) }).Count -gt 0) {
+        & (Join-Path $PSScriptRoot "build-wrapper-manifest-variants.ps1") -AndroidSdk $Sdk -OutputDirectory $QtTemplateDirectory
+        if ($LASTEXITCODE -ne 0) { throw "Wrapper manifest variant build failed" }
+    }
     Copy-Item -LiteralPath $QtTemplate -Destination (Join-Path $PackageAssetDir "qt-wrapper-template.apk") -Force
+    foreach ($variant in $ManifestVariants) {
+        if (-not (Test-Path -LiteralPath $variant -PathType Leaf)) {
+            throw "Wrapper manifest variant is missing: $variant"
+        }
+        Copy-Item -LiteralPath $variant -Destination (Join-Path $PackageAssetDir ([IO.Path]::GetFileName($variant))) -Force
+    }
     $tools = @{
         "usr/bin/pacman" = "libarchphene_pacman.so"
         "usr/bin/gpg" = "libarchphene_gpg.so"

@@ -37,8 +37,7 @@ import java.util.zip.ZipOutputStream;
 
 public final class ArchWrapperAssembler {
     private static final String QT_TEMPLATE = "package-runtime/qt-wrapper-template.apk";
-    private static final String QT_DOCUMENT_TEMPLATE =
-            "package-runtime/qt-document-wrapper-template.apk";
+    private static final String QT_MANIFEST_PREFIX = "package-runtime/qt-";
     private static final int MIME_SLOT_COUNT = 16;
     private static final String PACKAGE_PLACEHOLDER =
             "org.archphene.linux.p00000000000000000000000000000000";
@@ -148,7 +147,8 @@ public final class ArchWrapperAssembler {
         verifyStoredEntryAlignment(unsigned, "resources.arsc", 4);
         ArchWrapperSigner.Result signed = ArchWrapperSigner.sign(context, unsigned, output);
         PackageInfo parsed = context.getPackageManager().getPackageArchiveInfo(output.getPath(),
-                PackageManager.GET_SIGNING_CERTIFICATES);
+                PackageManager.GET_SIGNING_CERTIFICATES | PackageManager.GET_PERMISSIONS
+                        | PackageManager.GET_META_DATA);
         if (parsed == null || !packageName.equals(parsed.packageName)
                 || parsed.applicationInfo == null) {
             output.delete();
@@ -162,6 +162,7 @@ public final class ArchWrapperAssembler {
             output.delete();
             throw new SecurityException("Generated wrapper label mismatch");
         }
+        verifyDangerousPermissionContract(parsed);
         unsigned.delete();
         return new Result(packageName, output, sha256(output), signed.signerSha256);
     }
@@ -210,9 +211,15 @@ public final class ArchWrapperAssembler {
             throw new SecurityException(
                     "Audio-enabled applications require runtime-pack publication");
         }
-        String templateAsset = mimeTypes.isEmpty() ? QT_TEMPLATE : QT_DOCUMENT_TEMPLATE;
+        String templateAsset = QT_TEMPLATE;
+        String manifestAsset = permissionManifestAsset(!mimeTypes.isEmpty(), audioInput, camera);
+        byte[] selectedManifest;
+        try (InputStream manifestInput = context.getAssets().open(manifestAsset)) {
+            selectedManifest = readEntry(manifestInput);
+        }
         android.util.Log.i("ArchphenePackages", "Wrapper template " + templateAsset
-                + " for " + sourcePackage + " with " + mimeTypes.size() + " MIME types");
+                + " with manifest " + manifestAsset + " for " + sourcePackage
+                + " and " + mimeTypes.size() + " MIME types");
         try (InputStream raw = context.getAssets().open(templateAsset);
                 ZipInputStream input = new ZipInputStream(raw);
                 CountingOutputStream counted = new CountingOutputStream(new FileOutputStream(output));
@@ -227,6 +234,7 @@ public final class ArchWrapperAssembler {
                     iconPatched = true;
                 }
                 if ("AndroidManifest.xml".equals(name)) {
+                    value = selectedManifest.clone();
                     value = replaceBinaryXmlString(value, "KCalc", appLabel);
                     value = replaceBinaryXmlString(value, "extra/kcalc",
                             repository + "/" + sourcePackage);
@@ -288,6 +296,45 @@ public final class ArchWrapperAssembler {
         }
     }
 
+    private static String permissionManifestAsset(boolean documents, boolean audioInput,
+            boolean camera) {
+        String profile = documents ? "document" : "generic";
+        String permissions;
+        if (audioInput && camera) permissions = "audio-input-camera";
+        else if (audioInput) permissions = "audio-input";
+        else if (camera) permissions = "camera";
+        else permissions = "none";
+        return QT_MANIFEST_PREFIX + profile + "-manifest-" + permissions + ".bin";
+    }
+
+    private static void verifyDangerousPermissionContract(PackageInfo parsed) {
+        String capabilities = parsed.applicationInfo.metaData == null ? ""
+                : parsed.applicationInfo.metaData.getString(
+                        "org.archphene.bridge.capabilities", "");
+        Set<String> requested = new HashSet<>();
+        if (parsed.requestedPermissions != null) {
+            Collections.addAll(requested, parsed.requestedPermissions);
+        }
+        verifyPermissionCapability(requested, capabilities,
+                "android.permission.RECORD_AUDIO", "audio-input");
+        verifyPermissionCapability(requested, capabilities,
+                "android.permission.CAMERA", "camera");
+    }
+
+    private static void verifyPermissionCapability(Set<String> requested, String capabilities,
+            String permission, String capability) {
+        boolean declared = requested.contains(permission);
+        boolean enabled = false;
+        for (String value : capabilities.split(",")) {
+            if (capability.equals(value.trim())) {
+                enabled = true;
+                break;
+            }
+        }
+        if (declared != enabled) {
+            throw new SecurityException("Generated wrapper permission mismatch: " + permission);
+        }
+    }
     private static void addAudioNativeFiles(Context context, ZipOutputStream zip,
             String architecture) throws Exception {
         File nativeDirectory = new File(context.getApplicationInfo().nativeLibraryDir)

@@ -60,17 +60,24 @@ build_qt_templates() {
     -e "s/android:debuggable=\"true\"/android:debuggable=\"$app_debuggable\"/" \
     -e 's/@drawable\/kcalc_icon/@drawable\/linux_app_icon_png/g' \
     "$app/AndroidManifest.xml" > "$out/base-manifest.xml"
-  python3 "$root/scripts/render-wrapper-manifest.py" --profile generic \
-    "$out/base-manifest.xml" "$out/generic-manifest.xml"
-  python3 "$root/scripts/render-wrapper-manifest.py" --profile document \
-    "$out/base-manifest.xml" "$out/document-manifest.xml"
-
   "$bt/aapt2" compile --dir "$app/res" -o "$out/compiled/res.zip"
-  "$bt/aapt2" link -o "$out/unsigned-generic.apk" -I "$platform" \
-    --manifest "$out/generic-manifest.xml" --java "$out/gen" \
-    "$out/compiled/res.zip"
-  "$bt/aapt2" link -o "$out/unsigned-document.apk" -I "$platform" \
-    --manifest "$out/document-manifest.xml" "$out/compiled/res.zip"
+  local profile permission_profile
+  for profile in generic document; do
+    for permission_profile in none audio-input camera audio-input-camera; do
+      local permission_args=()
+      [[ "$permission_profile" == *audio-input* ]] && permission_args+=(--permission audio-input)
+      [[ "$permission_profile" == *camera* ]] && permission_args+=(--permission camera)
+      python3 "$root/scripts/render-wrapper-manifest.py" --profile "$profile" \
+        "${permission_args[@]}" "$out/base-manifest.xml" \
+        "$out/$profile-$permission_profile-manifest.xml"
+      "$bt/aapt2" link -o "$out/unsigned-$profile-$permission_profile.apk" \
+        -I "$platform" --manifest "$out/$profile-$permission_profile-manifest.xml" \
+        --java "$out/gen" "$out/compiled/res.zip"
+      python3 -c 'import sys, zipfile; archive=zipfile.ZipFile(sys.argv[1]); open(sys.argv[2], "wb").write(archive.read("AndroidManifest.xml"))' \
+        "$out/unsigned-$profile-$permission_profile.apk" \
+        "$out/qt-$profile-manifest-$permission_profile.bin"
+    done
+  done
 
   mapfile -d '' java_files < <(find "$app/src" "$root/prototypes/shared-android-bridge/src" -type f -name '*.java' -print0)
   javac --release 17 -classpath "$platform" -d "$out/classes" "${java_files[@]}"
@@ -115,19 +122,16 @@ build_qt_templates() {
       "$out/stage/lib/arm64-v8a/libarchphene_portal_probe.so"
   fi
   prune_native_abis "$out/stage/lib"
-  for profile in generic document; do
-    (
-      cd "$out/stage"
-      mapfile -d '' entries < <(find . -type f -print0)
-      jar uf "../unsigned-$profile.apk" "${entries[@]}"
-    )
-  done
-  "$bt/zipalign" -P 16 -f 4 "$out/unsigned-generic.apk" "$out/qt-wrapper-template.apk"
-  "$bt/zipalign" -P 16 -f 4 "$out/unsigned-document.apk" "$out/qt-document-wrapper-template.apk"
+  (
+    cd "$out/stage"
+    mapfile -d '' entries < <(find . -type f -print0)
+    jar uf "../unsigned-generic-none.apk" "${entries[@]}"
+  )
+  "$bt/zipalign" -P 16 -f 4 "$out/unsigned-generic-none.apk" "$out/qt-wrapper-template.apk"
 
-  local generic_manifest document_manifest
+  local generic_manifest document_manifest variant_manifest
   generic_manifest="$("$bt/aapt2" dump xmltree "$out/qt-wrapper-template.apk" --file AndroidManifest.xml)"
-  document_manifest="$("$bt/aapt2" dump xmltree "$out/qt-document-wrapper-template.apk" --file AndroidManifest.xml)"
+  document_manifest="$("$bt/aapt2" dump xmltree "$out/unsigned-document-none.apk" --file AndroidManifest.xml)"
   if [[ "$generic_manifest" != *"$placeholder_authority"* \
       || "$generic_manifest" == *"$fixed_authority"* \
       || "$generic_manifest" == *"android.intent.action.VIEW"* \
@@ -142,6 +146,26 @@ build_qt_templates() {
     echo "compiled document wrapper template has invalid MIME slots" >&2
     exit 1
   fi
+  for profile in generic document; do
+    for permission_profile in none audio-input camera audio-input-camera; do
+      variant_manifest="$("$bt/aapt2" dump xmltree \
+        "$out/unsigned-$profile-$permission_profile.apk" --file AndroidManifest.xml)"
+      if [[ "$permission_profile" == *audio-input* ]]; then
+        [[ "$variant_manifest" == *"android.permission.RECORD_AUDIO"* ]] || {
+          echo "wrapper manifest is missing microphone permission: $profile/$permission_profile" >&2; exit 1;
+        }
+      elif [[ "$variant_manifest" == *"android.permission.RECORD_AUDIO"* ]]; then
+        echo "wrapper manifest overdeclares microphone permission: $profile/$permission_profile" >&2; exit 1
+      fi
+      if [[ "$permission_profile" == *camera* ]]; then
+        [[ "$variant_manifest" == *"android.permission.CAMERA"* ]] || {
+          echo "wrapper manifest is missing camera permission: $profile/$permission_profile" >&2; exit 1;
+        }
+      elif [[ "$variant_manifest" == *"android.permission.CAMERA"* ]]; then
+        echo "wrapper manifest overdeclares camera permission: $profile/$permission_profile" >&2; exit 1
+      fi
+    done
+  done
 }
 
 build_qt_templates
@@ -239,13 +263,18 @@ arm_audio="$root/tooling/build/android-pulse/aarch64/out"
 x86_pipewire="$root/tooling/build/pipewire-camera/x86_64"
 arm_pipewire="$root/tooling/build/pipewire-camera/aarch64"
 template="$root/tooling/build/wrapper-templates/qt/qt-wrapper-template.apk"
-document_template="$root/tooling/build/wrapper-templates/qt/qt-document-wrapper-template.apk"
+manifest_variants=()
+for profile in generic document; do
+  for permission_profile in none audio-input camera audio-input-camera; do
+    manifest_variants+=("$root/tooling/build/wrapper-templates/qt/qt-$profile-manifest-$permission_profile.bin")
+  done
+done
 for required in "$x86_root" "$x86_resolved" "$x86_keyrings" "$x86_glibc" \
     "$arm_root" "$arm_resolved" "$arm_keyrings" "$arm_glibc" "$arm_path_bridge" \
     "$x86_android_client" "$arm_android_client" \
     "$x86_audio/SHA256SUMS" "$arm_audio/SHA256SUMS" \
     "$x86_pipewire/SHA256SUMS" "$arm_pipewire/SHA256SUMS" \
-    "$template" "$document_template"; do
+    "$template" "${manifest_variants[@]}"; do
   [[ -e "$required" ]] || {
     echo "package runtime input missing: $required" >&2
     exit 1
@@ -341,7 +370,9 @@ cp "$arm_keyrings/archlinuxarm.gpg" "$package_assets/archlinuxarm-aarch64.gpg"
 cp "$arm_keyrings/archlinuxarm-revoked" "$package_assets/archlinuxarm-aarch64-revoked"
 cp "$arm_keyrings/archlinuxarm-trusted" "$package_assets/archlinuxarm-aarch64-trusted"
 cp "$template" "$package_assets/qt-wrapper-template.apk"
-cp "$document_template" "$package_assets/qt-document-wrapper-template.apk"
+for manifest_variant in "${manifest_variants[@]}"; do
+  cp "$manifest_variant" "$package_assets/$(basename "$manifest_variant")"
+done
 
 copy_package_tools() {
   local runtime_root="$1" resolved="$2" destination="$3"

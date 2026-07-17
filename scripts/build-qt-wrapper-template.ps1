@@ -94,7 +94,9 @@ Push-Location (Join-Path $Out "stage")
 $entries = Get-ChildItem -Recurse -File | ForEach-Object { $_.FullName.Substring((Get-Location).Path.Length + 1) }
 Run-Native { & jar uf "..\unsigned.apk" $entries } "add template bridge files"
 Pop-Location
-Run-Native { & (Join-Path $BuildTools "zipalign.exe") -f 4 (Join-Path $Out "unsigned.apk") (Join-Path $Out "qt-wrapper-template.apk") } "align template"
+Run-Native { & (Join-Path $BuildTools "zipalign.exe") -P 16 -f 4 (Join-Path $Out "unsigned.apk") (Join-Path $Out "qt-wrapper-template.apk") } "align template"
+& (Join-Path $PSScriptRoot "build-wrapper-manifest-variants.ps1") -AndroidSdk $Sdk -OutputDirectory $Out
+if ($LASTEXITCODE -ne 0) { throw "Wrapper manifest variant build failed" }
 $compiledManifest = (& (Join-Path $Sdk "cmdline-tools/latest/bin/apkanalyzer.bat") manifest print (Join-Path $Out "qt-wrapper-template.apk")) -join "`n"
 if ($LASTEXITCODE -ne 0 -or $compiledManifest -notmatch [regex]::Escape($placeholderAuthority) -or $compiledManifest -match [regex]::Escape($fixedAuthority)) {
     throw "Compiled wrapper template has an invalid document-provider authority"
