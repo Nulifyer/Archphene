@@ -13,6 +13,9 @@ CLIENT_SOURCE = ROOT / "native/archphene-portal/archphene_atspi_client.c"
 PUBLISH_SOURCE = ROOT / "native/archphene-portal/archphene_atspi_publish.c"
 TRANSLATOR_SOURCE = ROOT / "native/archphene-portal/archphene_atspi_translator.c"
 ANDROID_SOURCE = ROOT / "prototypes/shared-android-bridge/src/org/archphene/bridge/ArchpheneAccessibilityBridge.java"
+ANDROID_BROKER_SOURCE = ROOT / "prototypes/shared-android-bridge/src/org/archphene/bridge/AndroidCapabilityBroker.java"
+ANDROID_ACTIVITY_SOURCE = ROOT / "prototypes/shared-android-bridge/src/org/archphene/bridge/ArchpheneCompositorActivity.java"
+ANDROID_CAPABILITY_SOURCE = ROOT / "native/archphene-android-capability/archphene_android.c"
 
 
 def c_string(name: str, source: str) -> str:
@@ -134,6 +137,9 @@ def main() -> None:
     publish_source = PUBLISH_SOURCE.read_text(encoding="utf-8")
     translator_source = TRANSLATOR_SOURCE.read_text(encoding="utf-8")
     android_source = ANDROID_SOURCE.read_text(encoding="utf-8")
+    android_broker_source = ANDROID_BROKER_SOURCE.read_text(encoding="utf-8")
+    android_activity_source = ANDROID_ACTIVITY_SOURCE.read_text(encoding="utf-8")
+    android_capability_source = ANDROID_CAPABILITY_SOURCE.read_text(encoding="utf-8")
     validate_role_constants(client_source)
     bus_root = ET.fromstring(c_string("bus_xml", source))
     socket_root = ET.fromstring(c_string("root_xml", source))
@@ -223,6 +229,8 @@ def main() -> None:
         "STATE_VISIBLE = 30",
         "node->showing = has_state(states, STATE_SHOWING)",
         "node->visible = has_state(states, STATE_VISIBLE)",
+        'strcmp(normalized, "showmenu") == 0',
+        "node->show_menu_action = TRUE",
     )
     for token in client_tokens:
         if token not in client_source:
@@ -240,6 +248,8 @@ def main() -> None:
         (translator_source, "#define REBUILD_RETRY_MILLIS 250", "retry backoff"),
         (translator_source, "#define MAX_TRANSIENT_ROOTS 32", "bounded transient roots"),
         (translator_source, "transient_change = enabled != 0 ? 1 : -1", "popup visibility roots"),
+        (translator_source, "state.transient_generation++", "popup generation tracking"),
+        (translator_source, "bool menu_click =", "semantic menu fallback"),
         (translator_source, "remove_transient_bus_locked(bus)", "transient disconnect cleanup"),
         (translator_source,
          "build_result < 0 || build_result == ARCHPHENE_ATSPI_TREE_RETRY",
@@ -282,6 +292,18 @@ def main() -> None:
     for token in android_tokens:
         if token not in android_source:
             raise AssertionError(f"missing Android semantic ownership: {token}")
+    fallback_tokens = (
+        (android_source, "void setMenuFallback", "Android fallback registration"),
+        (android_source, "void activateMenuFallback", "Android fallback activation"),
+        (android_broker_source, "ACCESSIBILITY_MENU_FALLBACK", "broker fallback command"),
+        (android_activity_source, "KeyEvent.KEYCODE_ENTER", "compositor menu activation"),
+        (android_capability_source,
+         "archphene_android_accessibility_menu_fallback",
+         "native fallback request"),
+    )
+    for implementation, token, label in fallback_tokens:
+        if token not in implementation:
+            raise AssertionError(f"missing {label}: {token}")
     action_body = re.search(
         r"public boolean performAction\(.*?\n    private void sendEvent",
         android_source,

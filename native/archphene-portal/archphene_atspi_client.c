@@ -398,7 +398,10 @@ static void read_actions(DBusConnection *connection,
         }
         char normalized[64] = {0};
         normalize_action(normalized, sizeof(normalized), machine_name);
-        if (strstr(normalized, "scroll") != NULL
+        if (strcmp(normalized, "showmenu") == 0) {
+            node->click_action = index;
+            node->show_menu_action = TRUE;
+        } else if (strstr(normalized, "scroll") != NULL
                 && (strstr(normalized, "down") != NULL
                     || strstr(normalized, "forward") != NULL
                     || strstr(normalized, "next") != NULL)) {

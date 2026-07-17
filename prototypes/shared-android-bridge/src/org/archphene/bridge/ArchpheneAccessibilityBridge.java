@@ -146,6 +146,7 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
     private Map<Integer, Node> nodes = Collections.emptyMap();
     private int accessibilityFocus;
     private int inputFocus;
+    private volatile Runnable menuFallback;
 
     ArchpheneAccessibilityBridge() {
         root = this;
@@ -200,6 +201,18 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
             }
             if (host == null && windowBridges.isEmpty()) actions.clear();
         }
+    }
+
+    void setMenuFallback(Runnable fallback) {
+        root.menuFallback = fallback;
+    }
+
+    void activateMenuFallback() {
+        Runnable fallback = root.menuFallback;
+        if (fallback == null) {
+            throw new IllegalStateException("Accessibility menu fallback is unavailable");
+        }
+        fallback.run();
     }
 
     void updateWindows(List<WindowDescriptor> frames,

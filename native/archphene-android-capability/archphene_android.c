@@ -309,6 +309,12 @@ int archphene_android_take_accessibility_action(
     return broker_request(request, response, response_size);
 }
 
+int archphene_android_accessibility_menu_fallback(
+        char *response, size_t response_size) {
+    return broker_request("ARCHPHENE/1\tACCESSIBILITY_MENU_FALLBACK",
+            response, response_size);
+}
+
 int archphene_android_store_secret(
         int secret_fd, const char *id, const char *label, const char *attributes_json,
         char *response, size_t response_size) {

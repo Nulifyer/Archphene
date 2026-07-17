@@ -223,6 +223,15 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                     }
                 });
         holder[0] = session;
+        if (accessibilityBridge != null) {
+            accessibilityBridge.setMenuFallback(() -> {
+                long now = android.os.SystemClock.uptimeMillis();
+                session.key(new KeyEvent(now, now, KeyEvent.ACTION_DOWN,
+                        KeyEvent.KEYCODE_ENTER, 0));
+                session.key(new KeyEvent(now, now, KeyEvent.ACTION_UP,
+                        KeyEvent.KEYCODE_ENTER, 0));
+            });
+        }
         session.setIndependentWindows(independentWindows);
         installInputRouting();
         installDragRouting(compositorView, 0);

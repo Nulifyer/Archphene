@@ -44,6 +44,7 @@ static struct {
     size_t application_count;
     ArchpheneAtspiReference transient_roots[MAX_TRANSIENT_ROOTS];
     size_t transient_root_count;
+    uint64_t transient_generation;
     uint32_t next_application_id;
     PendingEvent events[MAX_EVENTS];
     size_t event_head;
@@ -87,6 +88,7 @@ static void update_transient_root_locked(
             &state.transient_roots[state.transient_root_count++];
     snprintf(root->bus, sizeof(root->bus), "%s", bus);
     snprintf(root->path, sizeof(root->path), "%s", path);
+    state.transient_generation++;
     wake_worker();
 }
 
@@ -254,7 +256,14 @@ static void process_action(DBusConnection *connection) {
     if (!found_node) return;
 
     int result = -1;
+    uint64_t transient_generation = 0;
+    bool menu_click = strcmp(action, "click") == 0 && node.show_menu_action;
     if (strcmp(action, "click") == 0) {
+        if (menu_click) {
+            pthread_mutex_lock(&state.mutex);
+            transient_generation = state.transient_generation;
+            pthread_mutex_unlock(&state.mutex);
+        }
         result = archphene_atspi_client_click(connection, &node);
     } else if (strcmp(action, "focus") == 0) {
         result = archphene_atspi_client_focus(connection, &node);
@@ -267,6 +276,24 @@ static void process_action(DBusConnection *connection) {
         result = archphene_atspi_client_scroll(connection, &node, TRUE);
     } else if (strcmp(action, "scroll-backward") == 0) {
         result = archphene_atspi_client_scroll(connection, &node, FALSE);
+    }
+    if (result == 0 && menu_click) {
+        struct timespec deadline;
+        deadline_after_millis(&deadline, 100);
+        pthread_mutex_lock(&state.mutex);
+        while (!state.stopping
+                && transient_generation == state.transient_generation) {
+            int wait_result = pthread_cond_timedwait(
+                    &state.changed, &state.mutex, &deadline);
+            if (wait_result == ETIMEDOUT) break;
+        }
+        bool menu_opened = transient_generation != state.transient_generation;
+        pthread_mutex_unlock(&state.mutex);
+        if (!menu_opened) {
+            char fallback_response[64] = {0};
+            archphene_android_accessibility_menu_fallback(
+                    fallback_response, sizeof(fallback_response));
+        }
     }
     if (result == 0) {
         pthread_mutex_lock(&state.mutex);
@@ -446,6 +473,7 @@ void archphene_atspi_translator_stop(void) {
     state.dirty = false;
     state.application_count = 0;
     state.transient_root_count = 0;
+    state.transient_generation = 0;
     state.next_application_id = 1;
     state.event_head = 0;
     state.event_count = 0;

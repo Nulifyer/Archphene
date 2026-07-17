@@ -34,6 +34,7 @@ typedef struct {
     dbus_bool_t visible;
     dbus_bool_t password;
     dbus_bool_t application;
+    dbus_bool_t show_menu_action;
     int click_action;
     int scroll_forward_action;
     int scroll_backward_action;

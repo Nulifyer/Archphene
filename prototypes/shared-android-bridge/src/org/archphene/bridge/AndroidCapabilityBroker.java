@@ -270,6 +270,11 @@ final class AndroidCapabilityBroker implements Closeable {
                 requireCapability(BridgeCapabilities.ACCESSIBILITY);
                 return requireAccessibilityBridge().takeAction(
                         parseBoundedInt(fields[2], 0, 250, "accessibility timeout"));
+            case "ACCESSIBILITY_MENU_FALLBACK":
+                requireFields(fields, 2);
+                requireCapability(BridgeCapabilities.ACCESSIBILITY);
+                requireAccessibilityBridge().activateMenuFallback();
+                return "OK";
             case "STORE_SECRET":
                 if (fields.length != 5 && fields.length != 6) {
                     throw new IllegalArgumentException("STORE_SECRET field count is invalid");
