@@ -47,6 +47,8 @@ This is the prioritized completion queue for the Archphene Android application. 
   - [ ] Complete camera, accessibility, and secrets/keyrings integration.
     - [x] Add a capability-scoped Camera2 permission/state and bounded one-shot JPEG descriptor API; validate the real Android grant and denial/no-reprompt paths plus 1280x720 capture on x86_64 emulator and physical AArch64.
     - [ ] Add the private PipeWire producer and XDG Camera portal adapter required by unmodified Linux camera consumers.
+      - [x] Validate an official unmodified Arch Snapshot package on the x86_64 emulator through Android grant and denial paths, timestamped PipeWire frames, and process/lease cleanup.
+      - [ ] Repeat the generated unmodified-consumer validation with the AArch64 runtime on a physical ARM device.
     - [x] Add a bounded virtual-node accessibility tree, Android framework events/focus, and reverse click/edit/scroll action queue; validate through a test-only AccessibilityService on x86_64 emulator and physical AArch64.
     - [ ] Add the private AT-SPI2 D-Bus adapter and secondary-window semantic ownership required by unmodified Qt/GTK applications.
     - [x] Add a per-wrapper Android Keystore-backed encrypted secret store with bounded descriptor APIs for store/read/list/delete; validate ciphertext, metadata, overwrite, process-restart persistence, limits, deletion, lifecycle, and no log exposure on x86_64 emulator and physical AArch64.

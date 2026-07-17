@@ -1039,7 +1039,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 cache.mkdirs();
                 config.mkdirs();
                 tmp.mkdirs();
-                startDesktopIntegration();
+                startDesktopIntegration(runtimeDir);
                 startAudioIntegration();
                 if (isActivityDestroyed()) return;
                 Map<String, String> environment = new HashMap<>();
@@ -1063,6 +1063,20 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 environment.put("FONTCONFIG_PATH", fontconfig.getParentFile().getAbsolutePath());
                 File gpuSocket = startGpuBridge();
                 applyToolkitEnvironment(environment, runtimeLib, config, gpuSocket);
+                if ((getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0
+                        && getIntent().getBooleanExtra(
+                                "archphene_test_media_debug", false)) {
+                    File pipeWireLog = new File(getCacheDir(), "pipewire-debug.log");
+                    File gstreamerLog = new File(getCacheDir(), "gstreamer-debug.log");
+                    pipeWireLog.delete();
+                    gstreamerLog.delete();
+                    environment.put("ARCHPHENE_PIPEWIRE_DEBUG_LOG",
+                            pipeWireLog.getAbsolutePath());
+                    environment.put("GST_DEBUG",
+                            "2,pipewire*:6,camerabin*:6,GST_STATES:5");
+                    environment.put("GST_DEBUG_NO_COLOR", "1");
+                    environment.put("GST_DEBUG_FILE", gstreamerLog.getAbsolutePath());
+                }
                 List<File> imported = importDocumentsIfAllowed();
                 List<String> arguments = new java.util.ArrayList<>();
                 for (File file : imported) arguments.add(file.getAbsolutePath());
@@ -1127,7 +1141,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             cache.mkdirs();
             config.mkdirs();
             tmp.mkdirs();
-            startDesktopIntegration();
+            startDesktopIntegration(waylandRuntime);
             startAudioIntegration();
             if (isActivityDestroyed()) return;
             List<File> imported = importDocumentsIfAllowed();
@@ -1187,11 +1201,13 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         audioIntegration.applyEnvironment(environment);
     }
 
-    private void startDesktopIntegration() throws IOException {
+    private void startDesktopIntegration(File runtimeDirectory) throws IOException {
+        boolean camera = capabilities.contains(BridgeCapabilities.CAMERA);
         desktopIntegration.start(new File(getApplicationInfo().nativeLibraryDir),
                 getCacheDir(), "@" + capabilityBroker.socketName(),
                 getApplicationInfo().loadLabel(getPackageManager()).toString(),
-                capabilities.contains(BridgeCapabilities.SECRETS));
+                capabilities.contains(BridgeCapabilities.SECRETS), false, camera,
+                camera ? new File(runtimeDirectory, "pipewire-0").getAbsolutePath() : null);
     }
 
     private void startAudioIntegration() throws IOException {

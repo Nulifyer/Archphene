@@ -51,7 +51,7 @@ camera_node="$(
   exit 1
 }
 
-timeout 8 gst-launch-1.0 -q \
+GST_DEBUG=pipewiresrc:6 timeout 8 gst-launch-1.0 -q \
   pipewiresrc path="$camera_node" num-buffers=3 ! \
   "video/x-raw,format=I420,width=640,height=480,framerate=30/1" ! \
   filesink location="$runtime/frames.i420" \
@@ -80,6 +80,16 @@ unique_luma="$(
   exit 1
 }
 grep -q "Archphene camera link=" "$runtime/helpers.log"
+grep -Eq "pts [1-9][0-9]+" "$runtime/gstreamer.log" || {
+  cat "$runtime/gstreamer.log" >&2
+  echo "PipeWire frames did not carry monotonic presentation timestamps" >&2
+  exit 1
+}
+! grep -q "pts 18446744073709551615" "$runtime/gstreamer.log" || {
+  cat "$runtime/gstreamer.log" >&2
+  echo "PipeWire frames carried an unknown presentation timestamp" >&2
+  exit 1
+}
 
 mapfile -t helper_pids < <(pgrep -P "$app_pid" || true)
 kill "$app_pid"

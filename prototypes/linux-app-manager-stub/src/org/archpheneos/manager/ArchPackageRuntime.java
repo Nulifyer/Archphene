@@ -584,6 +584,7 @@ public final class ArchPackageRuntime {
                 || entry.startsWith("usr/share/X11/xkb/")
                 || entry.startsWith("usr/share/xkeyboard-config-2/")
                 || entry.startsWith("usr/share/mime/")
+                || entry.startsWith("usr/share/gstreamer-1.0/")
                 || entry.startsWith("usr/share/themes/")
                 || entry.startsWith("usr/share/icons/Adwaita/")
                 || entry.startsWith("usr/share/gtksourceview-");

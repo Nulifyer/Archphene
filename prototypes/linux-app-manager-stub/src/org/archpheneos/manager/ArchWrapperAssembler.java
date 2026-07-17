@@ -203,6 +203,7 @@ public final class ArchWrapperAssembler {
                 || nativeClosure.containsKey("libcups.so.2");
         boolean secrets = hasVersionedLibrary(nativeClosure,
                 "libsecret-1.so", "libKF6Wallet.so", "libKF5Wallet.so");
+        boolean camera = hasVersionedLibrary(nativeClosure, "libpipewire-0.3.so");
         boolean audioInput = pulseClient
                 && ManagerStateStore.microphoneInputEnabled(context, packageName);
         if (pulseClient && embedNativeClosure) {
@@ -238,7 +239,8 @@ public final class ArchWrapperAssembler {
                     value = replaceBinaryXmlString(value, "qt6", toolkit);
                     value = replaceBinaryXmlString(value,
                             "wayland,input,ime,clipboard,runtime-pack,home-documents,open-uri,notifications,documents,drag-drop",
-                            capabilityMetadata(mimeTypes, pulseClient, audioInput, printing, secrets));
+                            capabilityMetadata(mimeTypes, pulseClient, audioInput, printing,
+                                    camera, secrets));
                     value = replaceBinaryXmlString(value, "archphene-executable-placeholder",
                             executableName);
                     value = replaceBinaryXmlString(value, "ArchpheneKCalc", "ArchpheneLinuxApp");
@@ -447,6 +449,25 @@ public final class ArchWrapperAssembler {
                     }
                 }
             }
+        }
+        if (hasVersionedLibrary(result, "libgstreamer-1.0.so")) {
+            File pluginRoot = new File(libraryRoot, "gstreamer-1.0").getCanonicalFile();
+            String pluginPrefix = pluginRoot.getPath() + File.separator;
+            if (!pluginRoot.isDirectory()
+                    || !pluginPrefix.startsWith(libraryRoot.getPath() + File.separator)) {
+                throw new SecurityException("GStreamer plugin directory is missing");
+            }
+            for (Map.Entry<String, File> entry : candidates.entrySet()) {
+                if (entry.getValue() == null || !entry.getKey().startsWith("libgst")
+                        || !entry.getKey().endsWith(".so")) {
+                    continue;
+                }
+                File plugin = entry.getValue().getCanonicalFile();
+                if (!plugin.getPath().startsWith(pluginPrefix)) continue;
+                addNative(result, entry.getKey(), plugin);
+                pending.add(plugin);
+            }
+            resolveDependencies(result, candidates, pending, visited);
         }
         if (result.containsKey("libEGL.so.1") || result.containsKey("libEGL.so")) {
             for (String providerName : new String[] {
@@ -853,12 +874,13 @@ public final class ArchWrapperAssembler {
     }
 
     private static String capabilityMetadata(List<String> mimeTypes, boolean audioOutput,
-            boolean audioInput, boolean printing, boolean secrets) {
+            boolean audioInput, boolean printing, boolean camera, boolean secrets) {
         String base = "wayland,input,ime,clipboard,runtime-pack,home-documents,open-uri,notifications,drag-drop";
         if (!mimeTypes.isEmpty()) base += ",documents";
         if (audioOutput) base += ",audio-output";
         if (audioInput) base += ",audio-input";
         if (printing) base += ",printing";
+        if (camera) base += ",camera";
         return secrets ? base + ",secrets" : base;
     }
 

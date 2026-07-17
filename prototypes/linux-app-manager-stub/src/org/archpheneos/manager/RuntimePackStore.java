@@ -45,6 +45,23 @@ final class RuntimePackStore {
     private static final String SAFE_REPOSITORY = "[a-z0-9-]{1,32}";
     private static final String HASH = "[0-9a-f]{64}";
     private static final String SAFE_FILE = "[A-Za-z0-9._+-]{1,128}";
+    private static final String[][] PIPEWIRE_RUNTIME = {
+            {"libarchphene_pipewire_client.so", "libpipewire-0.3.so.0"},
+            {"libarchphene_pipewire_daemon.so", "archphene-pipewire"},
+            {"libarchphene_pipewire_camera.so", "archphene-pipewire-camera"},
+            {"libarchphene_pipewire_policy.so", "archphene-pipewire-policy"},
+            {"libarchphene_pipewire_supervisor.so", "archphene-runtime-supervisor"},
+            {"libarchphene_pw_module_protocol_native.so",
+                    "libpipewire-module-protocol-native.so"},
+            {"libarchphene_pw_module_access.so", "libpipewire-module-access.so"},
+            {"libarchphene_pw_module_metadata.so", "libpipewire-module-metadata.so"},
+            {"libarchphene_pw_module_client_node.so", "libpipewire-module-client-node.so"},
+            {"libarchphene_pw_module_adapter.so", "libpipewire-module-adapter.so"},
+            {"libarchphene_pw_module_link_factory.so",
+                    "libpipewire-module-link-factory.so"},
+            {"libarchphene_spa_support.so", "libspa-support.so"},
+            {"libarchphene_spa_videoconvert.so", "libspa-videoconvert.so"}
+    };
     private static final Map<String, Pack> VERIFIED_PACKS = new HashMap<>();
 
     static final class Module {
@@ -214,6 +231,20 @@ final class RuntimePackStore {
             }
         }
         File gtkSvgLoader = null;
+        if (hasVersionedLibrary(closure, "libpipewire-0.3.so")) {
+            ArrayList<String> replacedClients = new ArrayList<>();
+            for (String name : closure.keySet()) {
+                if (name.equals("libpipewire-0.3.so")
+                        || name.startsWith("libpipewire-0.3.so.")) {
+                    replacedClients.add(name);
+                }
+            }
+            for (String name : replacedClients) closure.remove(name);
+            for (String[] module : PIPEWIRE_RUNTIME) {
+                closure.put(module[1], requireManagerNative(managerNative, module[0],
+                        "Private PipeWire camera runtime"));
+            }
+        }
         if (closure.containsKey("libgtk-3.so.0")) {
             File gtkPixbuf = new File(managerNative, "libarchphene_gtk3_pixbuf.so")
                     .getCanonicalFile();
@@ -1006,6 +1037,22 @@ final class RuntimePackStore {
                 || canonical.length() != size || !hash.equals(sha256(canonical))) {
             throw new SecurityException("Runtime-pack module verification failed");
         }
+    }
+
+    private static boolean hasVersionedLibrary(Map<String, File> closure, String name) {
+        for (String candidate : closure.keySet()) {
+            if (candidate.equals(name) || candidate.startsWith(name + ".")) return true;
+        }
+        return false;
+    }
+
+    private static File requireManagerNative(File directory, String name, String label)
+            throws Exception {
+        File file = new File(directory, name).getCanonicalFile();
+        if (!file.isFile() || !directory.equals(file.getParentFile())) {
+            throw new SecurityException(label + " is unavailable: " + name);
+        }
+        return file;
     }
 
     private static boolean safeFileName(String value) {

@@ -4,6 +4,7 @@ param(
     [switch]$SkipGpuHelperBuild,
     [switch]$SkipDesktopIntegrationBuild,
     [switch]$SkipAudioBuild,
+    [switch]$SkipPipeWireBuild,
     [ValidateSet("universal", "x86_64", "arm64-v8a")]
     [string]$ArtifactAbi = "universal",
     [int]$VersionCode = 10000,
@@ -50,6 +51,19 @@ if (-not $SkipAudioBuild) {
         $audioOutput = Join-Path $Root "tooling/build/android-pulse/$architecture/out"
         if (-not (Test-Path -LiteralPath (Join-Path $audioOutput "SHA256SUMS") -PathType Leaf)) {
             throw "Audio payload is required when skipping its build: $audioOutput"
+        }
+    }
+}
+if (-not $SkipPipeWireBuild) {
+    & (Join-Path $PSScriptRoot "build-pipewire-camera-runtime-podman.ps1") -Architecture x86_64
+    if ($LASTEXITCODE -ne 0) { throw "x86_64 PipeWire camera runtime build failed" }
+    & (Join-Path $PSScriptRoot "build-pipewire-camera-runtime-podman.ps1") -Architecture aarch64
+    if ($LASTEXITCODE -ne 0) { throw "AArch64 PipeWire camera runtime build failed" }
+} else {
+    foreach ($architecture in @("x86_64", "aarch64")) {
+        $pipeWireOutput = Join-Path $Root "tooling/build/pipewire-camera/$architecture"
+        if (-not (Test-Path -LiteralPath (Join-Path $pipeWireOutput "SHA256SUMS") -PathType Leaf)) {
+            throw "PipeWire camera runtime is required when skipping its build: $pipeWireOutput"
         }
     }
 }

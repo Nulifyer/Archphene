@@ -9568,9 +9568,17 @@ fn parse_runtime_arguments(manifest: &[u8]) -> Result<Vec<std::ffi::CString>, i3
 }
 #[cfg(any(target_os = "android", test))]
 fn runtime_plugin_alias(name: &str) -> Option<&'static str> {
+    if name.starts_with("libpipewire-module-") && name.ends_with(".so") {
+        return Some("pipewire-0.3");
+    }
+    if name.starts_with("libgst") && name.ends_with(".so") {
+        return Some("gstreamer-1.0");
+    }
     match name {
         "libqwayland.so" => Some("platforms"),
         "libxdg-shell.so" => Some("wayland-shell-integration"),
+        "libspa-support.so" => Some("spa-0.2/support"),
+        "libspa-videoconvert.so" => Some("spa-0.2/videoconvert"),
         _ => None,
     }
 }
@@ -9900,14 +9908,34 @@ fn run_glibc_fds(
             return (-libc::EINVAL, Vec::new());
         }
     };
-    let mut arguments = vec![
-        loader.as_ptr(),
-        library_path.as_ptr(),
-        directory.as_ptr(),
-        argv0.as_ptr(),
-        program_name.as_ptr(),
-        program.as_ptr(),
-    ];
+    let supervisor_name = std::ffi::CString::new("archphene-runtime-supervisor").unwrap();
+    let supervisor = link_names
+        .iter()
+        .position(|name| name == "archphene-runtime-supervisor")
+        .and_then(|index| std::ffi::CString::new(links[index].as_os_str().as_encoded_bytes()).ok());
+    let mut arguments = if let Some(supervisor) = supervisor.as_ref() {
+        vec![
+            loader.as_ptr(),
+            library_path.as_ptr(),
+            directory.as_ptr(),
+            argv0.as_ptr(),
+            supervisor_name.as_ptr(),
+            supervisor.as_ptr(),
+            loader.as_ptr(),
+            directory.as_ptr(),
+            program_name.as_ptr(),
+            program.as_ptr(),
+        ]
+    } else {
+        vec![
+            loader.as_ptr(),
+            library_path.as_ptr(),
+            directory.as_ptr(),
+            argv0.as_ptr(),
+            program_name.as_ptr(),
+            program.as_ptr(),
+        ]
+    };
     arguments.extend(runtime_arguments.iter().map(|argument| argument.as_ptr()));
     arguments.push(ptr::null());
     let mut pipe = [-1; 2];
@@ -11071,6 +11099,23 @@ mod tests {
             Some("wayland-shell-integration")
         );
         assert_eq!(runtime_plugin_alias("libQt6Core.so.6"), None);
+        assert_eq!(
+            runtime_plugin_alias("libpipewire-module-protocol-native.so"),
+            Some("pipewire-0.3")
+        );
+        assert_eq!(
+            runtime_plugin_alias("libspa-support.so"),
+            Some("spa-0.2/support")
+        );
+        assert_eq!(
+            runtime_plugin_alias("libspa-videoconvert.so"),
+            Some("spa-0.2/videoconvert")
+        );
+        assert_eq!(
+            runtime_plugin_alias("libgstpipewire.so"),
+            Some("gstreamer-1.0")
+        );
+        assert_eq!(runtime_plugin_alias("libgstreamer-1.0.so.0"), None);
     }
 
     #[test]

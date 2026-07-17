@@ -81,6 +81,13 @@ static void sleep_millis(long millis) {
     while (nanosleep(&delay, &delay) != 0 && errno == EINTR) {}
 }
 
+static void wait_for_camera_access(void) {
+    char response[256] = {0};
+    while (archphene_android_check_camera(response, sizeof(response)) != 0) {
+        sleep_millis(100);
+    }
+}
+
 static void *read_camera(void *userdata) {
     struct camera_state *state = userdata;
     while (!atomic_load(&state->stop)) {
@@ -154,7 +161,10 @@ static void on_process(void *userdata) {
     struct spa_meta_header *header = spa_buffer_find_meta_data(
             buffer, SPA_META_Header, sizeof(*header));
     if (header != NULL) {
-        header->pts = -1;
+        struct timespec now;
+        header->pts = clock_gettime(CLOCK_MONOTONIC, &now) == 0
+                ? (int64_t)now.tv_sec * 1000000000LL + now.tv_nsec
+                : -1;
         header->flags = 0;
         header->seq = app->sequence++;
         header->dts_offset = 0;
@@ -228,8 +238,12 @@ int main(int argc, char **argv) {
     pthread_mutex_init(&app.camera.lock, NULL);
     atomic_init(&app.camera.stop, 0);
     const char *test_pattern = getenv("ARCHPHENE_PIPEWIRE_TEST_PATTERN");
-    if (test_pattern != NULL && strcmp(test_pattern, "1") == 0) {
+    int test_pattern_enabled = test_pattern != NULL
+            && strcmp(test_pattern, "1") == 0;
+    if (test_pattern_enabled) {
         fill_test_frame(app.camera.frame);
+    } else {
+        wait_for_camera_access();
     }
     pw_init(&argc, &argv);
     app.loop = pw_main_loop_new(NULL);

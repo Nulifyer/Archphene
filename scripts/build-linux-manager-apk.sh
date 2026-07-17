@@ -236,12 +236,15 @@ x86_android_client="$root/tooling/build/android-capability/x86_64/libarchphene_a
 arm_android_client="$root/tooling/build/android-capability/aarch64/libarchphene_android.so"
 x86_audio="$root/tooling/build/android-pulse/x86_64/out"
 arm_audio="$root/tooling/build/android-pulse/aarch64/out"
+x86_pipewire="$root/tooling/build/pipewire-camera/x86_64"
+arm_pipewire="$root/tooling/build/pipewire-camera/aarch64"
 template="$root/tooling/build/wrapper-templates/qt/qt-wrapper-template.apk"
 document_template="$root/tooling/build/wrapper-templates/qt/qt-document-wrapper-template.apk"
 for required in "$x86_root" "$x86_resolved" "$x86_keyrings" "$x86_glibc" \
     "$arm_root" "$arm_resolved" "$arm_keyrings" "$arm_glibc" "$arm_path_bridge" \
     "$x86_android_client" "$arm_android_client" \
     "$x86_audio/SHA256SUMS" "$arm_audio/SHA256SUMS" \
+    "$x86_pipewire/SHA256SUMS" "$arm_pipewire/SHA256SUMS" \
     "$template" "$document_template"; do
   [[ -e "$required" ]] || {
     echo "package runtime input missing: $required" >&2
@@ -264,6 +267,30 @@ verify_audio_payload() {
 }
 verify_audio_payload "$x86_audio" "$x86_libs"
 verify_audio_payload "$arm_audio" "$arm_libs"
+
+copy_pipewire_payload() {
+  local source="$1" destination="$2"
+  (cd "$source" && sha256sum --check --quiet SHA256SUMS) || {
+    echo "Private PipeWire runtime verification failed: $source" >&2
+    exit 1
+  }
+  cp "$source/libpipewire-0.3.so.0" "$destination/libarchphene_pipewire_client.so"
+  cp "$source/archphene-pipewire" "$destination/libarchphene_pipewire_daemon.so"
+  cp "$source/archphene-pipewire-camera" "$destination/libarchphene_pipewire_camera.so"
+  cp "$source/archphene-pipewire-policy" "$destination/libarchphene_pipewire_policy.so"
+  cp "$source/archphene-runtime-supervisor" "$destination/libarchphene_pipewire_supervisor.so"
+  cp "$source/pipewire-0.3/libpipewire-module-protocol-native.so" "$destination/libarchphene_pw_module_protocol_native.so"
+  cp "$source/pipewire-0.3/libpipewire-module-access.so" "$destination/libarchphene_pw_module_access.so"
+  cp "$source/pipewire-0.3/libpipewire-module-metadata.so" "$destination/libarchphene_pw_module_metadata.so"
+  cp "$source/pipewire-0.3/libpipewire-module-client-node.so" "$destination/libarchphene_pw_module_client_node.so"
+  cp "$source/pipewire-0.3/libpipewire-module-adapter.so" "$destination/libarchphene_pw_module_adapter.so"
+  cp "$source/pipewire-0.3/libpipewire-module-link-factory.so" "$destination/libarchphene_pw_module_link_factory.so"
+  cp "$source/spa-0.2/support/libspa-support.so" "$destination/libarchphene_spa_support.so"
+  cp "$source/spa-0.2/videoconvert/libspa-videoconvert.so" "$destination/libarchphene_spa_videoconvert.so"
+}
+copy_pipewire_payload "$x86_pipewire" "$x86_libs"
+copy_pipewire_payload "$arm_pipewire" "$arm_libs"
+
 arm64_compositor="$root/native/archphene-compositor/target/aarch64-linux-android/release/libarchphene_compositor.so"
 [[ -f "$arm64_compositor" ]] || {
   echo "missing aarch64 compositor: $arm64_compositor" >&2

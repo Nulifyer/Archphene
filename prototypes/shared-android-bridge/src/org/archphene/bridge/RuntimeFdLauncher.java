@@ -173,6 +173,21 @@ public final class RuntimeFdLauncher {
                 launchEnvironment.put("LD_PRELOAD",
                         new File(links, "libarchphene_path_bridge.so").getAbsolutePath());
             }
+            boolean gstreamer = false;
+            for (String name : linkNames) {
+                if (name.startsWith("libgst") && name.endsWith(".so")) {
+                    gstreamer = true;
+                    break;
+                }
+            }
+            if (gstreamer) {
+                launchEnvironment.put("GST_PLUGIN_PATH",
+                        new File(links, "gstreamer-1.0").getAbsolutePath());
+                launchEnvironment.put("GST_PLUGIN_SYSTEM_PATH", "");
+                launchEnvironment.put("GST_REGISTRY_FORK", "no");
+                launchEnvironment.put("GST_REGISTRY_1_0",
+                        new File(cacheRoot, "gstreamer-registry.bin").getAbsolutePath());
+            }
             if (launchEnvironment.containsKey("QT_QPA_PLATFORM_PLUGIN_PATH")) {
                 launchEnvironment.put("QT_QPA_PLATFORM_PLUGIN_PATH",
                         new File(links, "platforms").getAbsolutePath());
@@ -199,7 +214,7 @@ public final class RuntimeFdLauncher {
             }
             File[] children = links.listFiles();
             if (children != null) {
-                for (File child : children) child.delete();
+                for (File child : children) deleteRecursively(child);
             }
             links.delete();
         }

@@ -84,6 +84,67 @@ jobs:
                 native/archphene-terminal/terminal_pty.c
             '
 
+      - name: Build Android capability and desktop integration payloads
+        run: |
+          docker build -f containers/arm-runtime-builder.Containerfile \
+            -t archphene-arm-runtime-builder:release .
+          docker run --rm \
+            -v "$PWD:/workspace" -w /workspace \
+            archlinux:base-devel bash -lc '
+              set -euo pipefail
+              mkdir -p tooling/build/android-capability/x86_64
+              gcc -shared -fPIC -O2 -Wall -Wextra -Werror \
+                -o tooling/build/android-capability/x86_64/libarchphene_android.so \
+                native/archphene-android-capability/archphene_android.c
+            '
+          docker run --rm \
+            -v "$PWD:/workspace" -w /workspace \
+            archphene-arm-runtime-builder:release bash -lc '
+              set -euo pipefail
+              mkdir -p tooling/build/android-capability/aarch64
+              aarch64-linux-gnu-gcc -shared -fPIC -O2 -Wall -Wextra -Werror \
+                -o tooling/build/android-capability/aarch64/libarchphene_android.so \
+                native/archphene-android-capability/archphene_android.c
+            '
+          for architecture in x86_64 aarch64; do
+            docker run --rm \
+              -v "$PWD:/workspace" -w /workspace \
+              archphene-android-native:release \
+              bash scripts/build-android-dbus.sh "$architecture"
+            docker run --rm \
+              -v "$PWD:/workspace" -w /workspace \
+              archphene-android-native:release \
+              bash scripts/build-android-pulse.sh "$architecture"
+          done
+
+      - name: Build pinned private PipeWire camera runtimes
+        run: |
+          source_dir=tooling/external/pipewire
+          expected=b741e0c74f5436f0c925f7741140db0efd32cf4e
+          mkdir -p "$source_dir"
+          git -C "$source_dir" init
+          git -C "$source_dir" remote add origin \
+            https://gitlab.freedesktop.org/pipewire/pipewire.git
+          git -C "$source_dir" fetch --depth=1 origin "$expected"
+          git -C "$source_dir" checkout --detach FETCH_HEAD
+          test "$(git -C "$source_dir" rev-parse HEAD)" = "$expected"
+          for architecture in x86_64 aarch64; do
+            docker run --rm \
+              -v "$PWD:/workspace" -w /workspace \
+              archphene-arm-runtime-builder:release bash -lc \
+              "pacman -Sy --noconfirm --needed meson >/dev/null && \
+               bash scripts/build-pipewire-camera-runtime.sh $architecture"
+          done
+
+      - name: Test private PipeWire camera runtime
+        run: |
+          docker run --rm \
+            -v "$PWD:/workspace" -w /workspace \
+            archlinux:base-devel bash -lc \
+            "pacman -Sy --noconfirm --needed pipewire gstreamer \
+             gst-plugin-pipewire gst-plugins-base jq >/dev/null && \
+             bash scripts/test-pipewire-camera-runtime.sh"
+
       - name: Build Android GPU helpers
         run: |
           for architecture in x86_64 aarch64; do
