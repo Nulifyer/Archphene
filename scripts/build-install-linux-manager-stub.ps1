@@ -206,7 +206,7 @@ if ($KeystorePath) {
         Run-Native { & keytool -genkeypair -keystore $Key -storepass $KeystorePassword -keypass $KeyPassword -alias $KeyAlias -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Archphene,O=Archphene,C=US" } "keytool"
     }
 }
-Run-Native { & (Join-Path $BuildTools "zipalign.exe") -f 4 (Join-Path $Out "unsigned.apk") (Join-Path $Out "aligned.apk") } "zipalign"
+Run-Native { & (Join-Path $BuildTools "zipalign.exe") -P 16 -f 4 (Join-Path $Out "unsigned.apk") (Join-Path $Out "aligned.apk") } "zipalign"
 Run-Native { & (Join-Path $BuildTools "apksigner.bat") sign --ks $Key --ks-key-alias $KeyAlias --ks-pass "pass:$KeystorePassword" --key-pass "pass:$KeyPassword" --out (Join-Path $Out "archpheneos-manager.apk") (Join-Path $Out "aligned.apk") } "apksigner sign"
 Run-Native { & (Join-Path $BuildTools "apksigner.bat") verify --verbose (Join-Path $Out "archpheneos-manager.apk") } "apksigner verify"
 

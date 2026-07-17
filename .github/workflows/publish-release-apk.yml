@@ -195,6 +195,9 @@ jobs:
             else
               name="$APK_ARM64_NAME"
             fi
+            bash scripts/verify-release-apk.sh \
+              prototypes/linux-app-manager-stub/out-linux/archphene.apk \
+              "$abi" "$VERSION_NAME"
             cp prototypes/linux-app-manager-stub/out-linux/archphene.apk \
               "$RUNNER_TEMP/$name"
           done
@@ -228,5 +231,4 @@ jobs:
             "$RUNNER_TEMP/$APK_X86_NAME" \
             "$RUNNER_TEMP/$APK_X86_NAME.sha256" \
             "$RUNNER_TEMP/$APK_ARM64_NAME" \
-            "$RUNNER_TEMP/$APK_ARM64_NAME.sha256" \
-            --clobber
+            "$RUNNER_TEMP/$APK_ARM64_NAME.sha256"

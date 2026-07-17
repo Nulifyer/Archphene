@@ -37,7 +37,7 @@ Current upstream Arch x86_64 packages are 4 KB-only. On a 16 KB x86_64 Android s
 
 The Android `versionName` comes from the release tag. The `versionCode` uses a high CI range plus the monotonic GitHub workflow run number, allowing a stable release after a prerelease with the same semantic version.
 
-The workflow can be rerun manually with **Run workflow** and an existing release tag. Uploads use `--clobber`, so a rerun replaces assets for that release.
+The workflow can be rerun manually with **Run workflow** and an existing release tag only when that release does not already contain the named assets. Published APKs and checksums are immutable: the upload fails rather than replacing an existing version. Delete an incomplete release and create a new version instead of mutating assets users may already have verified or installed.
 
 ## Validate self-update
 
