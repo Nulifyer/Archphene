@@ -47,9 +47,9 @@ This is the prioritized completion queue for the Archphene Android application. 
   - [x] Complete URI/file drag-and-drop through the SAF/document broker without exposing raw `content://` URIs to Linux applications; validate protocol negotiation, import/writeback, visible-home export, exact URI grants, denial without grants, and cleanup on x86_64 emulator and physical AArch64.
   - [ ] Complete camera, accessibility, and secrets/keyrings integration.
     - [x] Add a capability-scoped Camera2 permission/state and bounded one-shot JPEG descriptor API; validate the real Android grant and denial/no-reprompt paths plus 1280x720 capture on x86_64 emulator and physical AArch64.
-    - [ ] Add the private PipeWire producer and XDG Camera portal adapter required by unmodified Linux camera consumers.
+    - [x] Add the private PipeWire producer and XDG Camera portal adapter required by unmodified Linux camera consumers.
       - [x] Validate an official unmodified Arch Snapshot package on the x86_64 emulator through Android grant and denial paths, timestamped PipeWire frames, and process/lease cleanup.
-      - [ ] Repeat the generated unmodified-consumer validation with the AArch64 runtime on a physical ARM device.
+      - [x] Repeat the generated unmodified-consumer validation with the AArch64 runtime on a physical ARM device.
     - [x] Add a bounded virtual-node accessibility tree, Android framework events/focus, and reverse click/edit/scroll action queue; validate through a test-only AccessibilityService on x86_64 emulator and physical AArch64.
     - [ ] Add the private AT-SPI2 D-Bus adapter and secondary-window semantic ownership required by unmodified Qt/GTK applications.
     - [x] Add a per-wrapper Android Keystore-backed encrypted secret store with bounded descriptor APIs for store/read/list/delete; validate ciphertext, metadata, overwrite, process-restart persistence, limits, deletion, lifecycle, and no log exposure on x86_64 emulator and physical AArch64.
@@ -60,7 +60,7 @@ This is the prioritized completion queue for the Archphene Android application. 
   - [x] Reject broad all-files access as the default. Use user-selected Storage Access Framework documents and trees; reconsider an optional advanced flow only with a concrete compatibility requirement.
 - [ ] Complete platform compatibility.
   - [x] Keep the manager usable on 16 KB x86_64 without Android's generic page-size dialog; show an explicit in-app restriction and block package transactions before incompatible 4 KB Arch ELF execution. Rebuilding the upstream x86_64 runtime remains a broader package-compatibility task.
-  - Streaming XDG Camera/PipeWire, AT-SPI2 accessibility adapter, packaged libsecret/KWallet validation, and remaining portals.
+  - AT-SPI2 accessibility adapter, packaged AArch64 libsecret/KWallet validation, and remaining portals.
   - Broader Qt, GTK, SDL, Electron, Rust-native, XWayland, Vulkan, and zero-copy GPU validation.
   - General secondary-window policy for phone, tablet, freeform, and external displays.
 - [ ] Complete end-user release and update lifecycle.

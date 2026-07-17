@@ -73,7 +73,7 @@ Capability-scoped drag-and-drop maps Android `DragEvent` motion/drop/cancel life
 
 A wrapper declaring `camera` can request and inspect Android `CAMERA` permission through the same broker. After consent, a glibc caller supplies one regular output descriptor, requested maximum dimensions up to 8192 pixels, and front/back preference. Camera2 selects the preferred lens when present, bounds JPEG payloads to 32 MiB, closes the camera/session/ImageReader after each request, and returns the actual dimensions and byte count. Android remains the permission authority; denial is persisted and is not repeatedly prompted.
 
-The x86_64 emulator and physical AArch64 Samsung regressions validate the real permission dialog, capture before-consent rejection, 1280x720 JPEG capture and signature/byte checks, invalid-dimension rejection, denial, and no automatic reprompt. This explicit one-shot API does not yet make unmodified Linux camera applications work: the standard XDG Camera portal must return a PipeWire remote, so a private PipeWire producer backed by Camera2 remains required.
+The x86_64 emulator and physical AArch64 Samsung regressions validate the real permission dialog, capture before-consent rejection, 1280x720 JPEG capture and signature/byte checks, invalid-dimension rejection, denial, and no automatic reprompt. The private XDG Camera adapter also returns a bounded PipeWire remote backed by Camera2. An official unmodified Arch Snapshot package passes Android grant and denial paths, timestamped frame delivery, process cleanup, and runtime-pack lease cleanup on both architectures.
 
 ## Accessibility
 
@@ -93,7 +93,7 @@ The 4 KB and 16 KB x86_64 emulators and physical AArch64 Samsung regressions val
 
 ## Remaining adapters
 
-AArch64 packaged libsecret/KWallet validation, the AT-SPI2 adapter, streaming XDG Camera/PipeWire, richer notification actions, non-HTTP URI policies, and other desktop portals remain incomplete.
+AArch64 packaged libsecret/KWallet validation, the AT-SPI2 adapter, richer notification actions, non-HTTP URI policies, and other desktop portals remain incomplete.
 
 ## Native client
 

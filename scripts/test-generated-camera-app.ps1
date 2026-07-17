@@ -111,15 +111,22 @@ function Assert-Cleanup([string]$LinuxUid) {
         Invoke-Adb @("shell", "input", "keyevent", "KEYCODE_BACK") "dismiss permission UI during cleanup" | Out-Null
         Start-Sleep -Milliseconds 500
     }
+    $logsBeforeStop = Get-Logs
+    $leasePattern = [regex]::Escape("Acquired runtime pack lease $RuntimePackId for $Package")
+    $leaseAcquired = $logsBeforeStop -match $leasePattern
     Invoke-Adb @("shell", "am", "force-stop", $Package) "stop generated camera app" | Out-Null
-    $logs = Wait-For {
-        $value = Get-Logs
-        if ($value -match "(Released runtime pack lease|Runtime process died; released pack lease) " +
-                [regex]::Escape("$RuntimePackId for $Package")) {
-            return $value
-        }
-        return $null
-    } 30 "Runtime-pack lease was not released after generated app exit"
+    $logs = if ($leaseAcquired) {
+        Wait-For {
+            $value = Get-Logs
+            if ($value -match "(Released runtime pack lease|Runtime process died; released pack lease) " +
+                    [regex]::Escape("$RuntimePackId for $Package")) {
+                return $value
+            }
+            return $null
+        } 30 "Runtime-pack lease was not released after generated app exit"
+    } else {
+        Get-Logs
+    }
     if ($LinuxUid) {
         Wait-For {
             $processes = Invoke-Adb @("shell", "ps", "-A") "inspect generated app processes"
@@ -142,6 +149,7 @@ function Invoke-Case([ValidateSet("Grant", "Deny")][string]$Action,
     Invoke-Adb @("logcat", "-c") "clear generated camera logs" | Out-Null
 
     $started = $false
+    $primaryFailure = $null
     try {
         Invoke-Adb @("shell", "am", "start", "-n", "$Package/$Activity",
                 "--ez", "archphene_test_media_debug", "true") "launch generated camera app" | Out-Null
@@ -190,8 +198,18 @@ function Invoke-Case([ValidateSet("Grant", "Deny")][string]$Action,
                 throw "Camera stream started after Android permission denial"
             }
         }
+    } catch {
+        $primaryFailure = $_
+        throw
     } finally {
-        if ($started) { Assert-Cleanup $LinuxUid }
+        if ($started) {
+            try {
+                Assert-Cleanup $LinuxUid
+            } catch {
+                if ($null -eq $primaryFailure) { throw }
+                Write-Warning "Cleanup after camera test failure also failed: $($_.Exception.Message)"
+            }
+        }
     }
     Write-Host "Generated camera app $Action path passed on $Serial"
 }
