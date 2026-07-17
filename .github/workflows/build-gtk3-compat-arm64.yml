@@ -1,0 +1,48 @@
+name: Build GTK3 ARM64 Compatibility Payload
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/build-gtk3-compat-arm64.yml"
+      - "scripts/build-gtk3-compat-arm64.sh"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-gtk3-compat-arm64-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build no-Glycin GTK3 libraries on AArch64
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Import official Arch Linux ARM userspace
+        run: |
+          curl --fail --location --retry 3 \
+            --output "$RUNNER_TEMP/archlinuxarm-aarch64.tar.gz" \
+            https://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
+          docker import "$RUNNER_TEMP/archlinuxarm-aarch64.tar.gz" archphene/archlinuxarm:aarch64
+
+      - name: Build and inspect compatibility libraries
+        run: |
+          docker run --rm \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            archphene/archlinuxarm:aarch64 \
+            bash scripts/build-gtk3-compat-arm64.sh
+
+      - name: Upload verified ARM64 payload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: archphene-gtk3-compat-aarch64-${{ github.sha }}
+          path: tooling/build/gtk3-compat/aarch64
+          if-no-files-found: error
+          retention-days: 14
