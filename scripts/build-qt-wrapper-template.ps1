@@ -1,5 +1,6 @@
 param(
-    [string]$AndroidSdk = ""
+    [string]$AndroidSdk = "",
+    [switch]$SkipNativeBuild
 )
 
 $ErrorActionPreference = "Stop"
@@ -22,10 +23,12 @@ $Sdk = Resolve-Path $SdkCandidate
 $BuildTools = Join-Path $Sdk "build-tools/36.0.0"
 $App = Join-Path $Root "prototypes/kcalc-android-app"
 $Out = Join-Path $Root "tooling/build/wrapper-templates/qt"
-& (Join-Path $PSScriptRoot "build-native-compositor-podman.ps1") -Architecture x86_64 -Release
-if ($LASTEXITCODE -ne 0) { throw "Shared native compositor build failed" }
-& (Join-Path $PSScriptRoot "build-native-compositor-podman.ps1") -Architecture aarch64 -Release
-if ($LASTEXITCODE -ne 0) { throw "AArch64 shared native compositor build failed" }
+if (-not $SkipNativeBuild) {
+    & (Join-Path $PSScriptRoot "build-native-compositor-podman.ps1") -Architecture x86_64 -Release
+    if ($LASTEXITCODE -ne 0) { throw "Shared native compositor build failed" }
+    & (Join-Path $PSScriptRoot "build-native-compositor-podman.ps1") -Architecture aarch64 -Release
+    if ($LASTEXITCODE -ne 0) { throw "AArch64 shared native compositor build failed" }
+}
 $Compositor = Join-Path $Root "native/archphene-compositor/target/x86_64-linux-android/release/libarchphene_compositor.so"
 $Arm64Compositor = Join-Path $Root "native/archphene-compositor/target/aarch64-linux-android/release/libarchphene_compositor.so"
 if (-not (Test-Path -LiteralPath $Compositor -PathType Leaf) -or
@@ -87,6 +90,22 @@ if (Test-Path -LiteralPath $PrebuiltBridge -PathType Container) {
     Get-ChildItem (Join-Path $App "lib/x86_64") -File | Where-Object {
         $_.Name -like "libarchphene_*" -and $_.Name -notin @("libarchphene_kcalc.so","libarchphene_ld.so","libarchphene_ld.so.orig","libarchphene_syscall_probe.so")
     } | Copy-Item -Destination (Join-Path $Out "stage/lib/x86_64")
+}
+$DesktopPayloads = [ordered]@{
+    "dbus-daemon" = "libarchphene_dbus_daemon.so"
+    "portal-service" = "libarchphene_portal_service.so"
+    "xdg-open" = "libarchphene_xdg_open.so"
+}
+foreach ($Architecture in @("x86_64", "aarch64")) {
+    $AndroidAbi = if ($Architecture -eq "aarch64") { "arm64-v8a" } else { "x86_64" }
+    foreach ($Payload in $DesktopPayloads.GetEnumerator()) {
+        $Source = Join-Path $Root "tooling/build/android-dbus/$Architecture/$($Payload.Key)"
+        if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) {
+            throw "Verified desktop integration payload is missing: $Source"
+        }
+        Copy-Item -LiteralPath $Source -Destination `
+            (Join-Path $Out "stage/lib/$AndroidAbi/$($Payload.Value)") -Force
+    }
 }
 Copy-Item -LiteralPath $Compositor -Destination (Join-Path $Out "stage/lib/x86_64/libarchphene_compositor.so") -Force
 Copy-Item -LiteralPath $Arm64Compositor -Destination (Join-Path $Out "stage/lib/arm64-v8a/libarchphene_compositor.so") -Force
