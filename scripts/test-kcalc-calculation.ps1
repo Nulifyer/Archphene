@@ -51,16 +51,24 @@ try {
     $afterImage.Dispose()
 }
 if ($changed -lt 10) { throw "KCalc display did not visibly change after 1 + 2 = ($changed samples)" }
-
-$appPid = (& $Adb -s $Serial shell pidof $Package).Trim()
+$appPid = ((& $Adb -s $Serial shell pidof $Package) -join "").Trim()
 $processes = (& $Adb -s $Serial shell ps -A -o PID,PPID,NAME) -join "`n"
-$child = [regex]::Match($processes, "(?m)^\s*(\d+)\s+$appPid\s+\S+\s*$")
-if (-not $child.Success) { throw "KCalc GNU/Linux child is not owned by Android process $appPid" }
-$childExe = (& $Adb -s $Serial shell readlink "/proc/$($child.Groups[1].Value)/exe").Trim()
-if ($childExe -notmatch 'libarchphene_ld\.so$') { throw "KCalc child does not use the Archphene loader: $childExe" }
+$children = [regex]::Matches($processes, "(?m)^\s*(\d+)\s+$appPid\s+\S+\s*$")
+$payloadPid = ""
+foreach ($child in $children) {
+    $candidate = ((& $Adb -s $Serial shell run-as $Package readlink `
+            "/proc/$($child.Groups[1].Value)/exe" 2>$null) -join "").Trim()
+    if ($candidate -match 'libarchphene_ld\.so$') {
+        $payloadPid = $child.Groups[1].Value
+        break
+    }
+}
+if (-not $payloadPid) {
+    throw "KCalc patched-glibc child is not owned by Android process $appPid"
+}
 $log = (& $Adb -s $Serial logcat -d -s "ArchpheneInput:V" "*:S") -join [Environment]::NewLine
 if ($log -match "protocol error|native dispatch failed") {
     throw "KCalc calculation triggered a shared compositor failure"
 }
 
-Write-Host "KCalc calculation path passed on ${Serial}: 1 + 2 = changed $changed display samples; child PID $($child.Groups[1].Value)."
+Write-Host "KCalc calculation path passed on ${Serial}: 1 + 2 = changed $changed display samples; child PID $payloadPid."

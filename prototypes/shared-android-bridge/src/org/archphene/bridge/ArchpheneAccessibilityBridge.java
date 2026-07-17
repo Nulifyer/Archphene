@@ -1,5 +1,6 @@
 package org.archphene.bridge;
 
+import android.content.Context;
 import android.graphics.Rect;
 import android.os.Build;
 import android.os.Bundle;
@@ -7,6 +8,7 @@ import android.os.ParcelFileDescriptor;
 import android.util.Base64;
 import android.view.View;
 import android.view.accessibility.AccessibilityEvent;
+import android.view.accessibility.AccessibilityManager;
 import android.widget.ImageView;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityNodeProvider;
@@ -637,17 +639,24 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
         }
         if (currentHost == null) return;
         currentHost.post(() -> {
-            if (nodeId == 0) {
-                currentHost.sendAccessibilityEvent(type);
-                return;
+            AccessibilityManager manager = (AccessibilityManager) currentHost.getContext()
+                    .getSystemService(Context.ACCESSIBILITY_SERVICE);
+            if (manager == null || !manager.isEnabled()) return;
+            try {
+                if (nodeId == 0) {
+                    currentHost.sendAccessibilityEvent(type);
+                    return;
+                }
+                if (currentHost.getParent() == null) return;
+                AccessibilityEvent event = AccessibilityEvent.obtain(type);
+                event.setPackageName(currentHost.getContext().getPackageName());
+                event.setClassName(node == null ? "android.view.View" : androidClass(node.role));
+                event.setSource(currentHost, nodeId);
+                if (node != null && !node.text.isEmpty()) event.getText().add(node.text);
+                currentHost.getParent().requestSendAccessibilityEvent(currentHost, event);
+            } catch (IllegalStateException accessibilityDisabled) {
+                // Accessibility can be disabled after the state check; event delivery is optional.
             }
-            if (currentHost.getParent() == null) return;
-            AccessibilityEvent event = AccessibilityEvent.obtain(type);
-            event.setPackageName(currentHost.getContext().getPackageName());
-            event.setClassName(node == null ? "android.view.View" : androidClass(node.role));
-            event.setSource(currentHost, nodeId);
-            if (node != null && !node.text.isEmpty()) event.getText().add(node.text);
-            currentHost.getParent().requestSendAccessibilityEvent(currentHost, event);
         });
     }
 

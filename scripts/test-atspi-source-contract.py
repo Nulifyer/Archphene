@@ -268,6 +268,8 @@ def main() -> None:
         "source.left - viewportLeft",
         "source.top - viewportTop",
         "text.getBytes(StandardCharsets.UTF_8).length > MAX_TEXT",
+        "manager == null || !manager.isEnabled()",
+        "catch (IllegalStateException accessibilityDisabled)",
     )
     for token in android_tokens:
         if token not in android_source:
