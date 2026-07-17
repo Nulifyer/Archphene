@@ -214,6 +214,16 @@ $afterOversized = Invoke-Probe $socket @("take-accessibility-action", "0") -Allo
 if ($afterOversized -ne "ERROR$([char]9)EMPTY") {
     throw "Oversized accessibility text reached Linux: $afterOversized"
 }
+$multibyteText = ([string][char]0x20ac) * 400
+Invoke-Adb @("shell", "am", "start", "-n", "$Package/$Activity", `
+        "--ei", "archphene_node", "3", "--es", "archphene_action", "set-text", `
+        "--es", "archphene_text", $multibyteText, `
+        "--ez", "archphene_expect_rejected", "true") `
+        "reject oversized multibyte Android accessibility text" | Out-Null
+$afterMultibyte = Invoke-Probe $socket @("take-accessibility-action", "0") -AllowFailure
+if ($afterMultibyte -ne "ERROR$([char]9)EMPTY") {
+    throw "Oversized multibyte accessibility text reached Linux: $afterMultibyte"
+}
 $event = Invoke-Probe $socket @("accessibility-event", "3", "text")
 if ($event -ne "OK") { throw "Accessibility event publication failed: $event" }
 $invalid = Invoke-Probe $socket @("publish-accessibility-tree",

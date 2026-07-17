@@ -599,6 +599,7 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
             try {
                 text = boundedString(
                         value == null ? "" : value.toString(), "action text", MAX_TEXT);
+                if (text.getBytes(StandardCharsets.UTF_8).length > MAX_TEXT) return false;
             } catch (IllegalArgumentException invalidText) {
                 return false;
             }
