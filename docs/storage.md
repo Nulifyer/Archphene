@@ -168,11 +168,24 @@ Terminal-style apps such as `btop` should usually need only app-private paths pl
 
 Linux builds generate a bounded catalog from the exact immutable module bytes for the selected x86_64 or AArch64 release ABI and place it inside the signed manager APK. The parser rejects malformed, duplicate, traversing, unknown, and out-of-bounds entries. A non-exported provider accepts only exact catalog URIs and read mode, verifies canonical file paths, sizes, and digests, and returns read-only descriptors. The manager grants those URIs only on an explicit wrapper launch.
 
-The emulator regression proves parser rejection and both sides of the access boundary: direct wrapper access is denied, while explicit launch-time grants permit a static ELF, a patched-glibc fixture, and a program with a separately granted `DT_NEEDED` library to execute without wrapper copies. The dynamic path accepts a bounded descriptor/basename set and creates a wrapper-private symlink view over inherited program, loader, and library descriptors. Package-derived dependency-graph catalogs, complete application closures, durable cold-start access, and post-reboot reconciliation remain unfinished.
+The emulator regression proves parser rejection and both sides of the access boundary: direct wrapper access is denied, while explicit launch-time grants permit a static ELF, a patched-glibc fixture, and a program with a separately granted `DT_NEEDED` library to execute. Package-derived closures are stored persistently once under the manager UID as SHA-256-addressed blobs. Per-pack manifests authorize only the exact hashes in that pack, so deduplication does not widen a wrapper's module access. Validation migrates legacy per-pack copies into the blob store, and garbage collection retains every blob referenced by a valid installed pack.
+
+The current launcher creates a wrapper-private, bounded transient cache for the program and named libraries so the dynamic loader and late `dlopen()` calls receive stable path names. The cache is removed after a normal exit, purged on the next launch after an interrupted exit, and remains reclaimable Android cache data. It is not a second persistent package closure. A future native descriptor-only launcher may eliminate this compatibility cache, but it must first prove that applications and libraries do not close inherited descriptors before late loading.
+
+Measure an attached test device with:
+
+```powershell
+.\scripts\measure-android-storage.ps1 -Serial <serial> `
+  -OutputJson tooling/build/storage/report.json `
+  -OutputMarkdown tooling/build/storage/report.md
+```
+
+The report separates APK bytes, installed code, persistent private data, transient cache, and manager runtime-store categories. Public size claims must use a documented clean install and workload; a development device snapshot includes caches and test state and is not a release baseline.
 
 ## Next Milestones
 
 1. Add a small descriptor/RPC path-broker C API before claiming live SAF path translation.
 2. Extend GUI wrappers from individual granted documents to persisted project trees with explicit lifecycle and power policy.
 3. Add a syscall probe for app-private path operations: `mkdir`, `mkdirat`, `open`, `openat`, `rename`, `unlink`, `fsync`, and `stat`.
+4. Validate a descriptor-only dynamic-loader view against unmodified Qt and GTK applications before removing the transient named-module cache.
 

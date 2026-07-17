@@ -102,7 +102,10 @@ public final class MainActivity extends Activity {
         LinuxAppManagerService.schedule(this, ManagerStateStore.backgroundChecksEnabled(this));
         new Thread(() -> {
             try {
+                int transactions = ArchPackageRuntime.cleanupAbandonedStaging(this);
                 int removed = RuntimePackStore.garbageCollect(this);
+                if (transactions > 0) android.util.Log.i("ArchphenePackages",
+                        "removed " + transactions + " abandoned package transactions");
                 if (removed > 0) android.util.Log.i("ArchpheneRuntime",
                         "garbage-collected " + removed + " unreferenced runtime packs");
             } catch (Exception error) {
@@ -2529,14 +2532,21 @@ public final class MainActivity extends Activity {
                     ManagerStateStore.verifyPendingReinstallForTest(this);
                     ManagedPackageStore.verifyForTest(this);
                     RuntimePackStore.verifyParserForTest();
+                    RuntimePackStore.verifyStorageForTest(this);
+                    ArchPackageRuntime.verifyStagingCleanupForTest(this);
                     RuntimePackLeaseRegistry.verifyForTest(this);
                     runOnUiThread(() -> showBanner(
                             "Package job persistence and scheduler passed", false));
                     return;
                 }
                 if (getIntent().getBooleanExtra("archphene_test_runtime_pack_parser", false)) {
+                    android.util.Log.i("ArchphenePackages", "Runtime-pack self-test started");
                     RuntimePackStore.verifyParserForTest();
+                    RuntimePackStore.verifyStorageForTest(this);
+                    ArchPackageRuntime.verifyStagingCleanupForTest(this);
                     RuntimePackLeaseRegistry.verifyForTest(this);
+                    android.util.Log.i("ArchphenePackages",
+                            "Runtime-pack parser, blob storage, staging cleanup, and leases passed");
                     runOnUiThread(() -> showBanner("Runtime-pack parser passed", false));
                     return;
                 }

@@ -298,12 +298,12 @@ final class RuntimePackStore {
             pending.add(new PendingModule("library", entry.getKey(), source));
         }
         File store = directory(context.getFilesDir(), "runtime-packs");
+        File blobsRoot = directory(store, "blobs");
         File stagingRoot = directory(store, "staging");
         File packsRoot = directory(store, "packs");
         File temporary = new File(stagingRoot, "pack-" + android.os.Process.myPid()
                 + "-" + System.nanoTime());
-        File moduleRoot = new File(temporary, "modules");
-        if (!moduleRoot.mkdirs()) throw new IOException("Could not create runtime-pack staging");
+        if (!temporary.mkdirs()) throw new IOException("Could not create runtime-pack staging");
         boolean published = false;
         File publishedPath = null;
         File dataArchive = null;
@@ -334,7 +334,7 @@ final class RuntimePackStore {
                 total = Math.addExact(total, identity.size);
                 if (total > MAX_PACK_SIZE) throw new SecurityException("Runtime pack is too large");
                 modules.add(new Module(value.kind, identity.hash, identity.size,
-                        value.linkName, new File(moduleRoot, identity.hash)));
+                        value.linkName, new File(blobsRoot, identity.hash)));
             }
             byte[] manifest = manifest(sourcePackage, executableName, packages, modules);
             String packId = sha256(manifest);
@@ -347,10 +347,10 @@ final class RuntimePackStore {
             for (int index = 0; index < pending.size(); index++) {
                 PendingModule value = pending.get(index);
                 Module expected = modules.get(index);
-                CopiedModule copied = copyModule(value.source, moduleRoot,
+                File blob = publishBlob(value.source, blobsRoot,
                         expected.hash, expected.size);
-                modules.set(index, new Module(value.kind, copied.hash, copied.size,
-                        value.linkName, copied.file));
+                modules.set(index, new Module(value.kind, expected.hash, expected.size,
+                        value.linkName, blob));
             }
             File manifestFile = new File(temporary, "manifest.tsv");
             writeSynced(manifestFile, manifest);
@@ -512,6 +512,7 @@ final class RuntimePackStore {
         }
         syncDirectory(bindings);
         syncDirectory(packs);
+        garbageCollectBlobs(context, packs, directory(store, "blobs"));
         return removed;
     }
 
@@ -559,9 +560,10 @@ final class RuntimePackStore {
             VERIFIED_PACKS.remove(packId);
             deleteRecursively(pack);
             syncDirectory(packs);
+            garbageCollectBlobs(context, packs, directory(store, "blobs"));
         }
     }
-    static Pack load(Context context, String packId) throws Exception {
+    static synchronized Pack load(Context context, String packId) throws Exception {
         if (packId == null || !packId.matches(HASH)) {
             throw new FileNotFoundException("Invalid runtime-pack identity");
         }
@@ -616,6 +618,39 @@ final class RuntimePackStore {
         expectRejected(valid.replace("\t300\t", "\t0\t"));
         expectRejected(valid.replace(SCHEMA, "# org.archphene.runtime-pack.v2"));
         verifyElfPageParserForTest();
+    }
+
+    static void verifyStorageForTest(Context context) throws Exception {
+        File root = new File(context.getCacheDir(), "runtime-pack-storage-test");
+        deleteRecursively(root);
+        File store = directory(root, "runtime-packs");
+        File blobs = directory(store, "blobs");
+        File pack = directory(directory(store, "packs"), repeat('a', 64));
+        File modules = directory(pack, "modules");
+        byte[] value = "shared-runtime-module".getBytes(StandardCharsets.UTF_8);
+        String hash = sha256(value);
+        File legacy = new File(modules, hash);
+        writeSynced(legacy, value);
+        File first = verifyModule(pack, hash, value.length);
+        if (!first.getParentFile().equals(blobs.getCanonicalFile()) || legacy.exists()) {
+            throw new SecurityException("Legacy runtime module was not migrated");
+        }
+        File source = new File(root, "source");
+        writeSynced(source, value);
+        File second = publishBlob(source, blobs, hash, value.length);
+        if (!first.equals(second) || first.length() != value.length) {
+            throw new SecurityException("Runtime modules were not content-deduplicated");
+        }
+        Set<String> referenced = new HashSet<>();
+        referenced.add(hash);
+        if (garbageCollectBlobs(blobs, referenced) != 0 || !first.isFile()) {
+            throw new SecurityException("A referenced runtime blob was collected");
+        }
+        referenced.clear();
+        if (garbageCollectBlobs(blobs, referenced) != 1 || first.exists()) {
+            throw new SecurityException("An unreferenced runtime blob was retained");
+        }
+        deleteRecursively(root);
     }
 
     private static Pack parse(String packId, File root, byte[] manifest) throws Exception {
@@ -683,8 +718,9 @@ final class RuntimePackStore {
                     if ("data".equals(kind)) dataModules++;
                     total = Math.addExact(total, size);
                     if (total > MAX_PACK_SIZE) throw new IOException("Runtime pack is too large");
-                    File file = new File(new File(root, "modules"), fields[2]);
-                    if (requireFiles) verifyModule(root, file, fields[2], size);
+                    File file = requireFiles
+                            ? verifyModule(root, fields[2], size)
+                            : new File(new File(root, "modules"), fields[2]);
                     modules.add(new Module(kind, fields[2], size, fields[4], file));
                 } else {
                     throw new IOException("Malformed runtime-pack manifest entry");
@@ -798,18 +834,6 @@ final class RuntimePackStore {
         }
         zip.closeEntry();
     }
-    private static final class CopiedModule {
-        final String hash;
-        final long size;
-        final File file;
-
-        CopiedModule(String hash, long size, File file) {
-            this.hash = hash;
-            this.size = size;
-            this.file = file;
-        }
-    }
-
     static void validateRuntimeElf(File source) throws Exception {
         long pageSize = Os.sysconf(OsConstants._SC_PAGESIZE);
         if (pageSize != 4096 && pageSize != 16384) {
@@ -996,9 +1020,19 @@ final class RuntimePackStore {
         return new ModuleIdentity(hex(digest.digest()), size);
     }
 
-    private static CopiedModule copyModule(File source, File moduleRoot,
+    private static File publishBlob(File source, File blobsRoot,
             String expectedHash, long expectedSize) throws Exception {
-        File temporary = File.createTempFile("module-", ".new", moduleRoot);
+        File target = new File(blobsRoot, expectedHash).getCanonicalFile();
+        if (!target.getParentFile().equals(blobsRoot.getCanonicalFile())) {
+            throw new SecurityException("Runtime blob path escapes store");
+        }
+        if (target.isFile()) {
+            if (target.length() != expectedSize || !expectedHash.equals(sha256(target))) {
+                throw new SecurityException("Existing runtime blob failed verification");
+            }
+            return target;
+        }
+        File temporary = File.createTempFile("blob-", ".new", blobsRoot);
         MessageDigest digest = MessageDigest.getInstance("SHA-256");
         long size = 0;
         try (InputStream input = new FileInputStream(source);
@@ -1007,7 +1041,9 @@ final class RuntimePackStore {
             int read;
             while ((read = input.read(buffer)) != -1) {
                 size += read;
-                if (size > expectedSize) throw new SecurityException("Runtime module changed while copying");
+                if (size > expectedSize) {
+                    throw new SecurityException("Runtime module changed while copying");
+                }
                 digest.update(buffer, 0, read);
                 output.write(buffer, 0, read);
             }
@@ -1018,25 +1054,78 @@ final class RuntimePackStore {
             temporary.delete();
             throw new SecurityException("Runtime module changed while copying");
         }
-        File target = new File(moduleRoot, hash);
-        if (target.isFile()) {
+        if (!temporary.renameTo(target)) {
             temporary.delete();
-        } else if (!temporary.renameTo(target)) {
-            throw new IOException("Could not publish runtime-pack module");
+            throw new IOException("Could not publish runtime blob");
         }
-        syncDirectory(moduleRoot);
-        return new CopiedModule(hash, size, target);
+        Os.chmod(target.getPath(), 0400);
+        syncDirectory(blobsRoot);
+        return target;
     }
 
-    private static void verifyModule(File root, File file, String hash, long size)
+    private static int garbageCollectBlobs(Context context, File packsRoot, File blobsRoot)
             throws Exception {
+        Set<String> referenced = new HashSet<>();
+        File[] packs = packsRoot.listFiles();
+        if (packs == null) return 0;
+        for (File pack : packs) {
+            if (!pack.isDirectory() || !pack.getName().matches(HASH)) continue;
+            try {
+                VERIFIED_PACKS.remove(pack.getName());
+                for (Module module : load(context, pack.getName()).modules) {
+                    referenced.add(module.hash);
+                }
+            } catch (Exception invalidPack) {
+                return 0;
+            }
+        }
+        return garbageCollectBlobs(blobsRoot, referenced);
+    }
+
+    private static int garbageCollectBlobs(File blobsRoot, Set<String> referenced)
+            throws Exception {
+        int removed = 0;
+        File[] blobs = blobsRoot.listFiles();
+        if (blobs == null) return 0;
+        for (File blob : blobs) {
+            if (!blob.getName().matches(HASH) || !blob.isFile()
+                    || !referenced.contains(blob.getName())) {
+                deleteRecursively(blob);
+                if (!blob.exists()) removed++;
+            }
+        }
+        if (removed > 0) syncDirectory(blobsRoot);
+        return removed;
+    }
+
+    private static File verifyModule(File root, String hash, long size) throws Exception {
         File canonicalRoot = root.getCanonicalFile();
+        File packsRoot = canonicalRoot.getParentFile();
+        File store = packsRoot == null ? null : packsRoot.getParentFile();
         File moduleRoot = new File(canonicalRoot, "modules").getCanonicalFile();
-        File canonical = file.getCanonicalFile();
-        if (!canonical.isFile() || !canonical.getParentFile().equals(moduleRoot)
-                || canonical.length() != size || !hash.equals(sha256(canonical))) {
+        File legacy = new File(moduleRoot, hash).getCanonicalFile();
+        boolean legacyValid = legacy.isFile() && legacy.getParentFile().equals(moduleRoot)
+                && legacy.length() == size && hash.equals(sha256(legacy));
+        if (store != null) {
+            File blobsRoot = new File(store, "blobs").getCanonicalFile();
+            File blob = new File(blobsRoot, hash).getCanonicalFile();
+            if (blob.getParentFile().equals(blobsRoot) && blob.isFile()) {
+                if (blob.length() != size || !hash.equals(sha256(blob))) {
+                    throw new SecurityException("Runtime blob verification failed");
+                }
+                if (legacyValid && legacy.delete()) syncDirectory(moduleRoot);
+                return blob;
+            }
+            if (legacyValid && blobsRoot.isDirectory()) {
+                File published = publishBlob(legacy, blobsRoot, hash, size);
+                if (legacy.delete()) syncDirectory(moduleRoot);
+                return published;
+            }
+        }
+        if (!legacyValid) {
             throw new SecurityException("Runtime-pack module verification failed");
         }
+        return legacy;
     }
 
     private static boolean hasVersionedLibrary(Map<String, File> closure, String name) {

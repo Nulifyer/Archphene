@@ -10,6 +10,7 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.io.IOException;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
@@ -26,6 +27,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 public final class ArchPackageRuntime {
+    private static final long ABANDONED_STAGING_GRACE_MS = 24L * 60 * 60 * 1000;
     private static final int OUTPUT_LIMIT = 16 * 1024 * 1024;
     private static final String ASSET_ROOT = "package-runtime/";
     private static final ConcurrentHashMap<String, Object> DOWNLOAD_LOCKS =
@@ -1072,6 +1074,50 @@ public final class ArchPackageRuntime {
             output.write(buffer, 0, read);
         }
         return output.toString(StandardCharsets.UTF_8.name());
+    }
+
+    static int cleanupAbandonedStaging(Context context) throws Exception {
+        File staging = directory(state(context), "staging");
+        return cleanupAbandonedStaging(staging,
+                System.currentTimeMillis() - ABANDONED_STAGING_GRACE_MS);
+    }
+
+    private static int cleanupAbandonedStaging(File staging, long cutoff) throws Exception {
+        File canonical = staging.getCanonicalFile();
+        File[] transactions = canonical.listFiles();
+        if (transactions == null) return 0;
+        int removed = 0;
+        for (File transaction : transactions) {
+            File candidate = transaction.getCanonicalFile();
+            if (!candidate.getParentFile().equals(canonical)) {
+                throw new SecurityException("Transaction staging path escapes package state");
+            }
+            if (candidate.lastModified() > 0 && candidate.lastModified() < cutoff) {
+                deleteRecursively(candidate);
+                removed++;
+            }
+        }
+        return removed;
+    }
+
+    static void verifyStagingCleanupForTest(Context context) throws Exception {
+        File root = new File(context.getCacheDir(), "package-staging-cleanup-test");
+        deleteRecursively(root);
+        if (!root.mkdirs()) throw new IOException("Could not create staging cleanup test root");
+        File stale = new File(root, "stale");
+        File recent = new File(root, "recent");
+        if (!stale.mkdir() || !recent.mkdir()) {
+            throw new IOException("Could not stage cleanup test");
+        }
+        long now = System.currentTimeMillis();
+        if (!stale.setLastModified(now - 2000) || !recent.setLastModified(now)) {
+            throw new IOException("Could not timestamp staging cleanup test");
+        }
+        if (cleanupAbandonedStaging(root, now - 1000) != 1 || stale.exists()
+                || !recent.isDirectory()) {
+            throw new SecurityException("Abandoned staging cleanup policy failed");
+        }
+        deleteRecursively(root);
     }
 
     static void releaseStaging(Context context, StagedTransaction staged) {
