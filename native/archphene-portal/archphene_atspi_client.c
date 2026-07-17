@@ -21,6 +21,8 @@ enum {
     STATE_EDITABLE = 7,
     STATE_ENABLED = 8,
     STATE_FOCUSABLE = 11,
+    STATE_SHOWING = 25,
+    STATE_VISIBLE = 30,
 };
 
 enum {
@@ -588,6 +590,8 @@ int archphene_atspi_client_read_node(DBusConnection *connection,
     node->width = 1;
     node->height = 1;
     node->enabled = TRUE;
+    node->showing = TRUE;
+    node->visible = TRUE;
     node->click_action = -1;
     node->scroll_forward_action = -1;
     node->scroll_backward_action = -1;
@@ -619,6 +623,8 @@ int archphene_atspi_client_read_node(DBusConnection *connection,
         node->focusable = has_state(states, STATE_FOCUSABLE);
         node->editable = has_state(states, STATE_EDITABLE);
         node->checked = has_state(states, STATE_CHECKED);
+        node->showing = has_state(states, STATE_SHOWING);
+        node->visible = has_state(states, STATE_VISIBLE);
     }
     if (interfaces.component) read_extents(connection, reference, node);
     if (interfaces.text && !node->password && node->text[0] == '\0') {

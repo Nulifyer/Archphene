@@ -182,6 +182,7 @@ int archphene_atspi_tree_build(DBusConnection *connection,
             }
             continue;
         }
+        if (!node.showing || !node.visible) continue;
         if (tree->count >= ARCHPHENE_ATSPI_NODE_MAX) {
             truncated = 1;
             break;

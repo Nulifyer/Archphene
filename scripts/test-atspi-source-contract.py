@@ -219,6 +219,10 @@ def main() -> None:
         "int32_t end = ARCHPHENE_ATSPI_TEXT_MAX;",
         "interfaces.text && !node->password",
         "return truncated ? 1 : 0;",
+        "STATE_SHOWING = 25",
+        "STATE_VISIBLE = 30",
+        "node->showing = has_state(states, STATE_SHOWING)",
+        "node->visible = has_state(states, STATE_VISIBLE)",
     )
     for token in client_tokens:
         if token not in client_source:
@@ -228,6 +232,7 @@ def main() -> None:
 
     lifecycle_tokens = (
         (publish_source, "ARCHPHENE_ATSPI_TREE_TRUNCATED", "bounded-tree publication"),
+        (publish_source, "if (!node.showing || !node.visible) continue;", "hidden-tree pruning"),
         (publish_source, "if (tree->count == 0) goto fail;", "pre-free empty-tree check"),
         (publish_source, "size_t checkpoint = output.length;", "bounded JSON prefix"),
         (publish_source, "output.length = checkpoint;", "JSON overflow rollback"),
