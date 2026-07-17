@@ -110,6 +110,7 @@ public final class MainActivity extends Activity {
             }
         }, "archphene-runtime-pack-gc").start();
         showAppsPage();
+        showPackageCompatibilityNotice();
         handleTerminalRequestIntent();
         if (ManagerStateStore.checkOnLaunch(this) && currentPage == 0) checkAll();
         if (testHooksEnabled()) {
@@ -798,6 +799,12 @@ public final class MainActivity extends Activity {
     }
 
     private void showPackageSearchPage(String initialQuery) {
+        String compatibilityIssue = ArchRuntimePolicy.packageTransactionIssue();
+        if (!compatibilityIssue.isEmpty()) {
+            showAppsPage();
+            showBanner(compatibilityIssue, false);
+            return;
+        }
         currentPage = 3;
         setAddVisible(false);
         setNavigationSelection(true);
@@ -1034,7 +1041,17 @@ public final class MainActivity extends Activity {
     }
 
     private void startOnDevicePackageInstall(ArchPackageRepository.PackageResult source,
-            String terminalRequestId) {        try {
+            String terminalRequestId) {
+        String compatibilityIssue = ArchRuntimePolicy.packageTransactionIssue();
+        if (!compatibilityIssue.isEmpty()) {
+            showBanner(compatibilityIssue, false);
+            if (terminalRequestId != null) {
+                TerminalCommandReporter.report(this, terminalRequestId, "preflight", 0,
+                        true, "error", compatibilityIssue);
+            }
+            return;
+        }
+        try {
             InstalledLinuxAppCatalog.Entry installed = InstalledLinuxAppCatalog.findBySource(this,
                     source.repository, source.name, source.architecture);
             String generatedPackage = ArchWrapperAssembler.packageNameFor(
@@ -2710,6 +2727,10 @@ public final class MainActivity extends Activity {
         statusBanner.setVisibility(View.VISIBLE);
     }
 
+    private void showPackageCompatibilityNotice() {
+        String issue = ArchRuntimePolicy.packageTransactionIssue();
+        if (!issue.isEmpty()) showBanner(issue, false);
+    }
     private void updateNavigationBadge() {
         int updates = countUpdates();
         appsNav.setText(updates == 0 ? "Apps" : "Apps (" + updates + ")");

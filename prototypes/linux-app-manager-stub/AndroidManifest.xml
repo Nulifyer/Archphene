@@ -24,6 +24,7 @@
 
     <application
         android:theme="@style/AppTheme"
+        android:pageSizeCompat="enabled"
         android:icon="@drawable/manager_icon"
         android:label="Archphene"
         android:allowBackup="false"

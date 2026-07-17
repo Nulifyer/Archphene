@@ -1,6 +1,8 @@
 package org.archpheneos.manager;
 
 import android.os.Build;
+import android.system.Os;
+import android.system.OsConstants;
 import java.net.URL;
 
 /** Selects one fail-closed repository and trust policy for the process ABI. */
@@ -39,6 +41,14 @@ final class ArchRuntimePolicy {
         throw new UnsupportedOperationException("Archphene has no runtime for this device ABI");
     }
 
+    static String packageTransactionIssue() {
+        long pageSize = Os.sysconf(OsConstants._SC_PAGESIZE);
+        if (X86_64.equals(current().architecture) && pageSize >= 16384) {
+            return "Package installs unavailable: upstream Arch x86_64 runtime is 4 KB-only "
+                    + "on this 16 KB Android device";
+        }
+        return "";
+    }
     static void verifyForTest() throws Exception {
         ArchRuntimePolicy x86 = new ArchRuntimePolicy(X86_64,
                 "geo.mirror.pkgbuild.com", "", "archlinux-x86_64", "");

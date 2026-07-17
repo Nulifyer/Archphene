@@ -49,7 +49,7 @@ Local debug builds can remain multi-ABI. Release builds emit independently signe
 - AArch64 GTK3 wrapper assembly currently fails closed because its compatibility bridge is unavailable; physical ARM GUI document conflict validation therefore remains pending a valid document-capable runtime fixture.
 - GrapheneOS Pixel and sustained desktop-mode validation.
 - Project trees and granted GUI documents currently use explicit synchronized mirrors; a live SAF path broker remains pending. Optional shells beyond managed Bash have not been selected.
-- Rebuild or relocate the bundled upstream x86_64 control-plane tools and glibc loader so Android's 16 KB page-size compatibility dialog is not shown; incompatible package runtimes already fail closed.
+- Rebuild the upstream Arch x86_64 runtime for 16 KB ELF alignment. The manager now suppresses Android's generic compatibility dialog through the documented manifest mode, shows an explicit in-app restriction, and blocks Add/install on 16 KB x86_64 while retaining manager and self-update functions.
 - Post-compositor Qt/GTK theme, density, font, focus, menu, and dialog consistency work.
 
 ## Package-manager efficiency rules

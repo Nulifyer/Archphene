@@ -13,6 +13,7 @@
 
     <application
         android:theme="@style/AppTheme"
+        android:pageSizeCompat="enabled"
         android:icon="@drawable/terminal_icon"
         android:label="Archphene Terminal"
         android:allowBackup="false"
