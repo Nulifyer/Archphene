@@ -25,6 +25,7 @@ final class AndroidDesktopIntegration {
     private File socket;
     private File binDirectory;
     private String busAddress;
+    private boolean accessibilityEnabled;
 
     synchronized void start(File nativeLibraryDir, File cacheDirectory,
             String brokerSocket, String appName, boolean secretsEnabled) throws IOException {
@@ -43,10 +44,19 @@ final class AndroidDesktopIntegration {
             String brokerSocket, String appName, boolean secretsEnabled,
             boolean traceSecrets, boolean cameraEnabled, String pipeWireSocket)
             throws IOException {
+        start(nativeLibraryDir, cacheDirectory, brokerSocket, appName,
+                secretsEnabled, traceSecrets, cameraEnabled, pipeWireSocket, false);
+    }
+
+    synchronized void start(File nativeLibraryDir, File cacheDirectory,
+            String brokerSocket, String appName, boolean secretsEnabled,
+            boolean traceSecrets, boolean cameraEnabled, String pipeWireSocket,
+            boolean accessibilityEnabled) throws IOException {
         if (cameraEnabled && (pipeWireSocket == null || pipeWireSocket.isBlank())) {
             throw new IOException("Camera portal requires a private PipeWire socket");
         }
         stop();
+        this.accessibilityEnabled = accessibilityEnabled;
         File daemonFile = requireHelper(nativeLibraryDir, DAEMON);
         File portalFile = requireHelper(nativeLibraryDir, PORTAL);
         File xdgOpenFile = requireHelper(nativeLibraryDir, XDG_OPEN);
@@ -82,9 +92,12 @@ final class AndroidDesktopIntegration {
         Map<String, String> portalEnvironment = portalBuilder.environment();
         portalEnvironment.put("DBUS_SESSION_BUS_ADDRESS", busAddress);
         portalEnvironment.put("ARCHPHENE_ANDROID_BROKER", brokerSocket);
+        portalEnvironment.put("ARCHPHENE_RUNTIME_DIR", runtime.getAbsolutePath());
         portalEnvironment.put("ARCHPHENE_APP_NAME", appName);
         portalEnvironment.put("ARCHPHENE_ENABLE_SECRETS", secretsEnabled ? "1" : "0");
         portalEnvironment.put("ARCHPHENE_ENABLE_CAMERA", cameraEnabled ? "1" : "0");
+        portalEnvironment.put("ARCHPHENE_ENABLE_ACCESSIBILITY",
+                accessibilityEnabled ? "1" : "0");
         if (cameraEnabled) {
             portalEnvironment.put("ARCHPHENE_PIPEWIRE_SOCKET", pipeWireSocket);
         }
@@ -120,6 +133,11 @@ final class AndroidDesktopIntegration {
         environment.put("DBUS_SESSION_BUS_ADDRESS", busAddress);
         environment.put("GIO_USE_PORTALS", "1");
         environment.put("NOTIFY_FORCE_PORTAL", "1");
+        if (accessibilityEnabled) {
+            environment.put("AT_SPI_BUS_ADDRESS", busAddress);
+            environment.put("QT_LINUX_ACCESSIBILITY_ALWAYS_ON", "1");
+            environment.put("GTK_A11Y", "atspi");
+        }
         String existingPath = environment.get("PATH");
         environment.put("PATH", binDirectory.getAbsolutePath()
                 + (existingPath == null || existingPath.isBlank() ? "" : ":" + existingPath));
@@ -134,6 +152,7 @@ final class AndroidDesktopIntegration {
         socket = null;
         binDirectory = null;
         busAddress = null;
+        accessibilityEnabled = false;
     }
 
     private static void unlinkIfPresent(File path) throws IOException {

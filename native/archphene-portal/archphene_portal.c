@@ -1,6 +1,7 @@
 #include <dbus/dbus.h>
 
 #include "archphene_android.h"
+#include "archphene_atspi_bridge.h"
 #include "archphene_secret_service.h"
 
 #include <errno.h>
@@ -710,7 +711,8 @@ static void handle_properties(DBusConnection *connection, DBusMessage *request) 
 
 static void handle_introspection(DBusConnection *connection, DBusMessage *request) {
     const char *path = dbus_message_get_path(request);
-    const char *xml = archphene_secret_service_introspection(path);
+    const char *xml = archphene_atspi_introspection(path);
+    if (xml == NULL) xml = archphene_secret_service_introspection(path);
     if (xml == NULL) {
         xml = path != NULL && strcmp(path, NOTIFICATIONS_PATH) == 0
                 ? notifications_xml : portal_xml;
@@ -726,7 +728,9 @@ static void handle_introspection(DBusConnection *connection, DBusMessage *reques
 }
 
 static void handle_message(DBusConnection *connection, DBusMessage *request) {
-    if (dbus_message_is_method_call(request, INTROSPECTABLE, "Introspect")) {
+    if (archphene_atspi_handles(connection, request)) {
+        return;
+    } else if (dbus_message_is_method_call(request, INTROSPECTABLE, "Introspect")) {
         handle_introspection(connection, request);
     } else if (archphene_secret_service_handles(connection, request)) {
         return;
@@ -791,6 +795,10 @@ static int own_name(DBusConnection *connection, const char *name, DBusError *err
 }
 
 int main(void) {
+    if (!dbus_threads_init_default()) {
+        fprintf(stderr, "Archphene portal could not initialize D-Bus threading\n");
+        return 70;
+    }
     signal(SIGINT, stop_running);
     signal(SIGTERM, stop_running);
     DBusError error = DBUS_ERROR_INIT;
@@ -803,13 +811,18 @@ int main(void) {
     }
     dbus_connection_set_exit_on_disconnect(connection, FALSE);
     const char *secrets_enabled = getenv("ARCHPHENE_ENABLE_SECRETS");
+    const char *accessibility_enabled = getenv("ARCHPHENE_ENABLE_ACCESSIBILITY");
     if (own_name(connection, PORTAL_NAME, &error) != 0
             || own_name(connection, CLASSIC_NOTIFICATION, &error) != 0
             || (secrets_enabled != NULL && strcmp(secrets_enabled, "1") == 0
-                && archphene_secret_service_own_name(connection, &error) != 0)) {
+                && archphene_secret_service_own_name(connection, &error) != 0)
+            || (accessibility_enabled != NULL
+                && strcmp(accessibility_enabled, "1") == 0
+                && archphene_atspi_init(connection, &error) != 0)) {
         fprintf(stderr, "Archphene portal could not own bus name: %s\n",
                 error.message == NULL ? "name already owned" : error.message);
         dbus_error_free(&error);
+        archphene_atspi_shutdown();
         dbus_connection_close(connection);
         dbus_connection_unref(connection);
         return 70;
@@ -821,6 +834,7 @@ int main(void) {
         fprintf(stderr, "Archphene portal could not subscribe to owner changes: %s\n",
                 error.message == NULL ? "unknown error" : error.message);
         dbus_error_free(&error);
+        archphene_atspi_shutdown();
         dbus_connection_close(connection);
         dbus_connection_unref(connection);
         return 70;
@@ -833,11 +847,14 @@ int main(void) {
         while ((message = dbus_connection_pop_message(connection)) != NULL) {
             if (dbus_message_get_type(message) == DBUS_MESSAGE_TYPE_METHOD_CALL)
                 handle_message(connection, message);
-            else if (dbus_message_get_type(message) == DBUS_MESSAGE_TYPE_SIGNAL)
+            else if (dbus_message_get_type(message) == DBUS_MESSAGE_TYPE_SIGNAL) {
                 archphene_secret_service_handle_signal(message);
+                archphene_atspi_handle_signal(message);
+            }
             dbus_message_unref(message);
         }
     }
+    archphene_atspi_shutdown();
     dbus_connection_close(connection);
     dbus_connection_unref(connection);
     return 0;

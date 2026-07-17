@@ -246,7 +246,7 @@ public final class ArchWrapperAssembler {
                             "glibc-" + architecture);
                     value = replaceBinaryXmlString(value, "qt6", toolkit);
                     value = replaceBinaryXmlString(value,
-                            "wayland,input,ime,clipboard,runtime-pack,home-documents,open-uri,notifications,documents,drag-drop",
+                            "wayland,input,ime,clipboard,runtime-pack,home-documents,open-uri,notifications,documents,drag-drop,accessibility",
                             capabilityMetadata(mimeTypes, pulseClient, audioInput, printing,
                                     camera, secrets));
                     value = replaceBinaryXmlString(value, "archphene-executable-placeholder",
@@ -924,7 +924,7 @@ public final class ArchWrapperAssembler {
 
     private static String capabilityMetadata(List<String> mimeTypes, boolean audioOutput,
             boolean audioInput, boolean printing, boolean camera, boolean secrets) {
-        String base = "wayland,input,ime,clipboard,runtime-pack,home-documents,open-uri,notifications,drag-drop";
+        String base = "wayland,input,ime,clipboard,runtime-pack,home-documents,open-uri,notifications,drag-drop,accessibility";
         if (!mimeTypes.isEmpty()) base += ",documents";
         if (audioOutput) base += ",audio-output";
         if (audioInput) base += ",audio-input";

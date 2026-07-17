@@ -25,3 +25,5 @@ jobs:
         run: |
           python3 scripts/test-public-repository.py
           python3 scripts/test-release-workflow-contract.py
+      - name: Validate private AT-SPI source contract
+        run: python3 scripts/test-atspi-source-contract.py

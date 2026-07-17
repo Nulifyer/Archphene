@@ -739,6 +739,16 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     }
 
     private void updateWindows(List<ArchpheneCompositorSession.WindowFrame> windows) {
+        if (accessibilityBridge != null) {
+            List<ArchpheneAccessibilityBridge.WindowDescriptor> accessibilityWindows =
+                    new ArrayList<>();
+            for (ArchpheneCompositorSession.WindowFrame frame : windows) {
+                accessibilityWindows.add(new ArchpheneAccessibilityBridge.WindowDescriptor(
+                        frame.window.id, frame.window.parentId, frame.window.primary,
+                        frame.window.width, frame.window.height, frame.window.title));
+            }
+            accessibilityBridge.updateWindows(accessibilityWindows, independentWindows);
+        }
         if (!independentWindows) return;
         ArchpheneCompositorSession.WindowFrame nextPrimary = null;
         for (ArchpheneCompositorSession.WindowFrame frame : windows) {
@@ -757,6 +767,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         }
         if (nextPrimary != null) {
             primaryFrame = nextPrimary;
+            compositorView.setAccessibilityWindowId(nextPrimary.window.id);
             int viewportWidth = compositorView.getWidth();
             int viewportHeight = compositorView.getHeight();
             compositorView.setScaleType(ImageView.ScaleType.FIT_CENTER);
@@ -839,6 +850,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         SecondaryWindow(ArchpheneCompositorSession.WindowFrame frame) {
             id = frame.window.id;
             view = createSecondaryInputView();
+            view.setAccessibilityWindowId(id);
+            view.setAccessibilityBridge(accessibilityBridge);
             dialog = new Dialog(ArchpheneCompositorActivity.this);
             dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
             dialog.setContentView(view);
@@ -892,6 +905,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
 
         void dismissFromRegistry() {
             registryDismiss = true;
+            view.setAccessibilityBridge(null);
             dialog.dismiss();
         }
 
@@ -1207,7 +1221,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 getCacheDir(), "@" + capabilityBroker.socketName(),
                 getApplicationInfo().loadLabel(getPackageManager()).toString(),
                 capabilities.contains(BridgeCapabilities.SECRETS), false, camera,
-                camera ? new File(runtimeDirectory, "pipewire-0").getAbsolutePath() : null);
+                camera ? new File(runtimeDirectory, "pipewire-0").getAbsolutePath() : null,
+                capabilities.contains(BridgeCapabilities.ACCESSIBILITY));
     }
 
     private void startAudioIntegration() throws IOException {

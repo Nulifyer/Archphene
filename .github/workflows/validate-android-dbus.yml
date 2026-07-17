@@ -1,0 +1,53 @@
+name: Validate Android D-Bus
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/validate-android-dbus.yml"
+      - "containers/android-native.Containerfile"
+      - "native/archphene-android-capability/**"
+      - "native/archphene-dbus/**"
+      - "native/archphene-portal/**"
+      - "scripts/build-android-dbus.sh"
+      - "scripts/test-atspi-source-contract.py"
+  pull_request:
+    paths:
+      - ".github/workflows/validate-android-dbus.yml"
+      - "containers/android-native.Containerfile"
+      - "native/archphene-android-capability/**"
+      - "native/archphene-dbus/**"
+      - "native/archphene-portal/**"
+      - "scripts/build-android-dbus.sh"
+      - "scripts/test-atspi-source-contract.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-android-dbus-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build x86_64 and AArch64 portal runtimes
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Validate AT-SPI source contract
+        run: python3 scripts/test-atspi-source-contract.py
+
+      - name: Build Android native toolchain image
+        run: docker build -f containers/android-native.Containerfile -t archphene-android-native:ci .
+
+      - name: Build and inspect both ABIs
+        run: |
+          for architecture in x86_64 aarch64; do
+            docker run --rm \
+              -v "$PWD:/workspace" -w /workspace \
+              archphene-android-native:ci \
+              bash scripts/build-android-dbus.sh "$architecture"
+          done

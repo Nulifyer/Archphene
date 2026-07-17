@@ -121,6 +121,10 @@ common_flags=(
 )
 "${TOOLCHAIN}/bin/${TARGET}${API_LEVEL}-clang" "${common_flags[@]}" \
   "$ROOT/native/archphene-portal/archphene_portal.c" \
+  "$ROOT/native/archphene-portal/archphene_atspi_bridge.c" \
+  "$ROOT/native/archphene-portal/archphene_atspi_client.c" \
+  "$ROOT/native/archphene-portal/archphene_atspi_publish.c" \
+  "$ROOT/native/archphene-portal/archphene_atspi_translator.c" \
   "$ROOT/native/archphene-portal/archphene_secret_service.c" \
   "$ROOT/native/archphene-portal/archphene_secret_crypto.c" \
   "$ROOT/native/archphene-android-capability/archphene_android.c" \

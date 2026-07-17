@@ -16,6 +16,7 @@ client = CLIENT.read_text(encoding="utf-8")
 required_workflow = (
     'push:\n    tags:\n      - "v*"',
     "Ensure release is a draft",
+    "python3 scripts/test-atspi-source-contract.py",
     'args=(--verify-tag --draft',
     "Create one-time v1.0.0 updater migration asset",
     "if: env.VERSION_NAME == '1.0.1'",

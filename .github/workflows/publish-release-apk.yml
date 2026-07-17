@@ -57,7 +57,9 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Validate release contracts
-        run: python3 scripts/test-release-workflow-contract.py
+        run: |
+          python3 scripts/test-release-workflow-contract.py
+          python3 scripts/test-atspi-source-contract.py
 
       - name: Ensure release is a draft
         run: |

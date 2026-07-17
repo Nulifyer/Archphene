@@ -46,6 +46,8 @@ public final class ArchpheneInputView extends ImageView {
 
     private final InputSink sink;
     private ArchpheneAccessibilityBridge accessibilityBridge;
+    private AccessibilityNodeProvider accessibilityProvider;
+    private int accessibilityWindowId;
     private EditorState editorState = new EditorState("", 0, 0, 0, 0);
 
     public ArchpheneInputView(Context context, InputSink sink) {
@@ -60,14 +62,25 @@ public final class ArchpheneInputView extends ImageView {
     }
 
     void setAccessibilityBridge(ArchpheneAccessibilityBridge bridge) {
+        if (accessibilityBridge != null) accessibilityBridge.detach(this);
         accessibilityBridge = bridge;
-        if (bridge != null) bridge.attach(this);
+        accessibilityProvider = bridge == null
+                ? null : bridge.attach(this, accessibilityWindowId);
+    }
+
+    void setAccessibilityWindowId(int windowId) {
+        if (accessibilityWindowId == windowId) return;
+        accessibilityWindowId = windowId;
+        if (accessibilityBridge != null) {
+            accessibilityBridge.detach(this);
+            accessibilityProvider = accessibilityBridge.attach(this, windowId);
+        }
     }
 
     @Override
     public AccessibilityNodeProvider getAccessibilityNodeProvider() {
         return accessibilityBridge == null
-                ? super.getAccessibilityNodeProvider() : accessibilityBridge;
+                ? super.getAccessibilityNodeProvider() : accessibilityProvider;
     }
 
     @Override
