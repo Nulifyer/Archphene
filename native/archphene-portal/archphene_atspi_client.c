@@ -130,8 +130,22 @@ static DBusMessage *send_call_with_timeout(DBusConnection *connection,
     DBusError error = DBUS_ERROR_INIT;
     DBusMessage *reply = dbus_connection_send_with_reply_and_block(
             connection, request, timeout_millis, &error);
+    if (dbus_error_is_set(&error)) {
+        const char *destination = dbus_message_get_destination(request);
+        const char *path = dbus_message_get_path(request);
+        const char *interface = dbus_message_get_interface(request);
+        const char *member = dbus_message_get_member(request);
+        fprintf(stderr, "AT-SPI call failed bus=%s path=%s interface=%s "
+                "member=%s error=%s message=%s\n",
+                destination == NULL ? "" : destination,
+                path == NULL ? "" : path,
+                interface == NULL ? "" : interface,
+                member == NULL ? "" : member,
+                error.name == NULL ? "" : error.name,
+                error.message == NULL ? "" : error.message);
+        dbus_error_free(&error);
+    }
     dbus_message_unref(request);
-    if (dbus_error_is_set(&error)) dbus_error_free(&error);
     return reply;
 }
 
