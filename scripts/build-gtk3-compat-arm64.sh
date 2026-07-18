@@ -48,7 +48,12 @@ runuser -u archphene-builder -- bash -lc "cd '$work/gdk-pixbuf2-noglycin' && mak
 gdk_package="$(find "$work/gdk-pixbuf2-noglycin" -maxdepth 1 -type f \
   -name 'gdk-pixbuf2-noglycin-[0-9]*-aarch64.pkg.tar.*' -print -quit)"
 [[ -n "$gdk_package" ]] || { echo "gdk-pixbuf2 no-Glycin package was not produced" >&2; exit 1; }
+# The compatibility package conflicts with and provides gdk-pixbuf2. Pacman's
+# noninteractive default declines that replacement, so make it explicit in this
+# disposable build root and immediately restore the provider.
+pacman_retry -Rdd --noconfirm gdk-pixbuf2
 pacman_retry -U --noconfirm "$gdk_package"
+pacman -Q gdk-pixbuf2-noglycin >/dev/null
 
 runuser -u archphene-builder -- git clone https://aur.archlinux.org/librsvg-noglycin.git "$work/librsvg-noglycin"
 runuser -u archphene-builder -- git -C "$work/librsvg-noglycin" checkout "$rsvg_commit"
