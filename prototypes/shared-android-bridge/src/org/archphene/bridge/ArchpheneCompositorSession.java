@@ -105,6 +105,7 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
     private volatile long lastImeCommitUptime;
     private volatile boolean retainedIme;
     private volatile boolean independentWindows;
+    private volatile int activeSecondaryWindowId;
     private float gestureInitialSpan;
     private float gestureInitialAngle;
     private float gestureLastCentroidX;
@@ -176,6 +177,13 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
 
     public void closeWindow(int id) {
         events.offer(new Event(CLOSE_WINDOW, id, 0, 0, 0, ""));
+    }
+
+    public boolean closeActiveSecondaryWindow() {
+        int id = activeSecondaryWindowId;
+        if (id == 0) return false;
+        closeWindow(id);
+        return true;
     }
 
     public void androidDragMotion(
@@ -513,6 +521,7 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
                                     + " appId=" + window.appId);
                         }
                     }
+                    updateActiveSecondaryWindow(compositor);
                     publishFrame(compositor);
                 }
                 int currentClients = compositor.acceptedClients();
@@ -700,8 +709,19 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
         activity.runOnUiThread(() -> listener.onFrame(frame));
     }
 
+    private void updateActiveSecondaryWindow(NativeCompositor compositor) {
+        int selected = 0;
+        int count = compositor.windowCount();
+        for (int index = 0; index < count; index++) {
+            NativeCompositor.WindowInfo window = compositor.window(index);
+            if (window == null || !window.mapped || window.primary) continue;
+            if (selected == 0 || window.active) selected = window.id;
+        }
+        activeSecondaryWindowId = selected;
+    }
     private void publishWindows(NativeCompositor compositor) {
         List<WindowFrame> windows = new ArrayList<>();
+        int selectedSecondary = 0;
         int count = compositor.windowCount();
         for (int index = 0; index < count; index++) {
             NativeCompositor.WindowInfo window = compositor.window(index);
@@ -712,8 +732,12 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
                     window.width, window.height, Bitmap.Config.ARGB_8888);
             if (compositor.copyWindowFrame(index, frame) == 0) {
                 windows.add(new WindowFrame(window, frame));
+                if (!window.primary && (selectedSecondary == 0 || window.active)) {
+                    selectedSecondary = window.id;
+                }
             }
         }
+        activeSecondaryWindowId = selectedSecondary;
         List<WindowFrame> snapshot = List.copyOf(windows);
         activity.runOnUiThread(() -> listener.onWindows(snapshot));
     }

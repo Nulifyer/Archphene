@@ -28,6 +28,8 @@ import android.view.View;
 import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowManager;
+import android.window.OnBackInvokedCallback;
+import android.window.OnBackInvokedDispatcher;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import java.io.BufferedReader;
@@ -105,6 +107,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     private int appearanceFontPercent = 100;
     private boolean appearanceMaterialYou;
     private final Map<Integer, SecondaryWindow> secondaryWindows = new HashMap<>();
+    private OnBackInvokedCallback backInvokedCallback;
+    private int activeSecondaryWindowId;
     private boolean independentWindows;
     private ArchpheneCompositorSession.WindowFrame primaryFrame;
     private final Object linuxDragToken = new Object();
@@ -115,6 +119,11 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
+        if (Build.VERSION.SDK_INT >= 33) {
+            backInvokedCallback = this::handleSystemBack;
+            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                    OnBackInvokedDispatcher.PRIORITY_DEFAULT, backInvokedCallback);
+        }
         readMetadata();
         runBrokerPermissionProbe();
         runtimeProbeUri = getIntent().getStringExtra("archphene_test_runtime_module_uri");
@@ -760,6 +769,13 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     }
 
     private void updateWindows(List<ArchpheneCompositorSession.WindowFrame> windows) {
+        activeSecondaryWindowId = 0;
+        for (ArchpheneCompositorSession.WindowFrame frame : windows) {
+            if (frame.window.active && !frame.window.primary) {
+                activeSecondaryWindowId = frame.window.id;
+                break;
+            }
+        }
         if (accessibilityBridge != null) {
             List<ArchpheneAccessibilityBridge.WindowDescriptor> accessibilityWindows =
                     new ArrayList<>();
@@ -865,6 +881,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         private int frameWidth;
         private int frameHeight;
         private boolean registryDismiss;
+        private boolean active;
+        private OnBackInvokedCallback backInvokedCallback;
         private int layoutWidth = -1;
         private int layoutHeight = -1;
 
@@ -880,11 +898,25 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             dialog.setOnCancelListener(ignored -> {
                 if (!registryDismiss && session != null) session.closeWindow(id);
             });
-            dialog.setOnKeyListener((ignored, keyCode, event) ->
-                    session != null && session.key(event));
+            dialog.setOnKeyListener((ignored, keyCode, event) -> {
+                if (keyCode == KeyEvent.KEYCODE_BACK) {
+                    if (event.getAction() == KeyEvent.ACTION_UP && session != null) {
+                        session.closeWindow(id);
+                    }
+                    return true;
+                }
+                return session != null && session.key(event);
+            });
             installInputRouting();
             installDragRouting(view, id);
             dialog.show();
+            if (Build.VERSION.SDK_INT >= 33) {
+                backInvokedCallback = () -> {
+                    if (session != null) session.closeWindow(id);
+                };
+                dialog.getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                        OnBackInvokedDispatcher.PRIORITY_DEFAULT, backInvokedCallback);
+            }
             Window window = dialog.getWindow();
             if (window != null) {
                 window.setBackgroundDrawable(new ColorDrawable(Color.BLACK));
@@ -898,6 +930,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         }
 
         void update(ArchpheneCompositorSession.WindowFrame frame) {
+            active = frame.window.active;
             frameWidth = Math.max(1, frame.bitmap.getWidth());
             frameHeight = Math.max(1, frame.bitmap.getHeight());
             view.setImageBitmap(frame.bitmap);
@@ -927,6 +960,11 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         void dismissFromRegistry() {
             registryDismiss = true;
             view.setAccessibilityBridge(null);
+            if (Build.VERSION.SDK_INT >= 33 && backInvokedCallback != null) {
+                dialog.getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(
+                        backInvokedCallback);
+                backInvokedCallback = null;
+            }
             dialog.dismiss();
         }
 
@@ -1723,16 +1761,50 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     }
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
+        if (event.getKeyCode() == KeyEvent.KEYCODE_BACK) {
+            if (event.getAction() == KeyEvent.ACTION_UP) handleSystemBack();
+            return true;
+        }
         if (session != null && session.key(event)) return true;
         return super.dispatchKeyEvent(event);
     }
 
-    @Override
-    public void onBackPressed() {
+    private boolean closeActiveSecondaryWindow() {
+        if (session == null) return false;
+        if (session.closeActiveSecondaryWindow()) return true;
+        if (activeSecondaryWindowId != 0) {
+            session.closeWindow(activeSecondaryWindowId);
+            return true;
+        }
+        SecondaryWindow fallback = null;
+        for (SecondaryWindow window : secondaryWindows.values()) {
+            if (!window.dialog.isShowing()) continue;
+            if (window.active) {
+                session.closeWindow(window.id);
+                return true;
+            }
+            fallback = window;
+        }
+        if (fallback == null) return false;
+        session.closeWindow(fallback.id);
+        return true;
+    }
+
+    private boolean handleBridgeBack() {
         if (session != null && session.hasPopups()) {
             session.dismissPopups();
-            return;
+            return true;
         }
+        return closeActiveSecondaryWindow();
+    }
+
+    private void handleSystemBack() {
+        if (!handleBridgeBack()) finish();
+    }
+
+    @Override
+    public void onBackPressed() {
+        if (handleBridgeBack()) return;
         super.onBackPressed();
     }
 
@@ -1753,6 +1825,11 @@ public abstract class ArchpheneCompositorActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        if (Build.VERSION.SDK_INT >= 33 && backInvokedCallback != null) {
+            getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(
+                    backInvokedCallback);
+            backInvokedCallback = null;
+        }
         if (documentRestartDialog != null) {
             documentRestartDialog.dismiss();
             documentRestartDialog = null;

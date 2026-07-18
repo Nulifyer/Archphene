@@ -12,7 +12,7 @@
 #define EDITABLE_TEXT "org.a11y.atspi.EditableText"
 #define PROPERTIES "org.freedesktop.DBus.Properties"
 #define TEXT "org.a11y.atspi.Text"
-#define CALL_TIMEOUT_MILLIS 100
+#define CALL_TIMEOUT_MILLIS 1000
 #define ACTION_SCAN_MAX 8
 #define INTERFACE_SCAN_MAX 64
 

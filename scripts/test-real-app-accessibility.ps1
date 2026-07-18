@@ -3,7 +3,7 @@ param(
     [string]$Serial,
     [Parameter(Mandatory = $true)]
     [string]$TargetPackage,
-    [ValidateSet("KCalc")]
+    [ValidateSet("KCalc", "Mousepad")]
     [string]$Profile = "KCalc",
     [string]$ProbeApk = "",
     [string]$AdbPath = "",
@@ -151,15 +151,20 @@ function Test-NormalizedBounds([string]$Tree) {
     $size = Get-DisplaySize
     foreach ($line in $Tree -split "`n") {
         if (-not $line.StartsWith("NODE|")) { continue }
+        $fields = $line.Split('|')
         $match = [regex]::Match($line, '\|(-?\d+) (-?\d+) (-?\d+) (-?\d+)\|')
         if (-not $match.Success) {
-            if ($line.Split('|').Length -lt 10) { continue }
+            if ($fields.Length -lt 10) { continue }
             return $false
         }
         $left = [int]$match.Groups[1].Value
         $top = [int]$match.Groups[2].Value
         $right = [int]$match.Groups[3].Value
         $bottom = [int]$match.Groups[4].Value
+        $isHiddenSentinel = ($right - $left -le 1 -or $bottom - $top -le 1) -and
+                $fields.Length -ge 9 -and $fields[6] -eq "false" -and
+                $fields[7] -eq "false"
+        if ($isHiddenSentinel) { continue }
         if ($left -lt 0 -or $top -lt 0 -or $right -le $left -or
                 $bottom -le $top -or $right -gt $size[0] -or $bottom -gt $size[1]) {
             return $false
@@ -207,6 +212,38 @@ function Test-KCalc {
     Wait-TargetTree -Absent @("|Close|") | Out-Null
 }
 
+function Test-Mousepad {
+    $tree = Wait-TargetTree -Contains @(
+        "|Untitled 1 - Mousepad|", "|File|File menu|", "|Edit|Edit menu|")
+
+    Invoke-AccessibilityAction -Selector "File"
+    $tree = Wait-TargetTree -Contains @(
+        "|Open a file|", "|Save current document as another file|") -Normalized
+    Assert-NormalizedBounds $tree
+
+    Invoke-AccessibilityAction -Selector "Edit"
+    $tree = Wait-TargetTree -Contains @(
+        "|Paste the clipboard|", "|Show the preferences dialog|") `
+            -Absent @("|Open a file|") -Normalized
+    Assert-NormalizedBounds $tree
+
+    Invoke-AccessibilityAction -Selector "Show the preferences dialog"
+    $tree = Wait-TargetTree -Contains @("|Mousepad Preferences|") -Normalized
+    Assert-NormalizedBounds $tree
+    Invoke-Adb @("shell", "input", "keyevent", "4") `
+            "dismiss preferences dialog" | Out-Null
+    Wait-TargetTree -Absent @("|Mousepad Preferences|") | Out-Null
+
+    Invoke-AccessibilityAction -Selector "File"
+    Wait-TargetTree -Contains @("|Open a file|") | Out-Null
+    Invoke-AccessibilityAction -Selector "Open a file"
+    $tree = Wait-TargetTree -Contains @("|Open File|") -Normalized
+    Assert-NormalizedBounds $tree
+    Invoke-Adb @("shell", "input", "keyevent", "4") `
+            "dismiss open file dialog" | Out-Null
+    Wait-TargetTree -Absent @("|Open File|") | Out-Null
+}
+
 try {
     Invoke-Adb @("wait-for-device") "wait for device" | Out-Null
     $installed = (Invoke-Adb @("shell", "pm", "list", "packages", $TargetPackage) `
@@ -238,11 +275,14 @@ try {
             "enable Android accessibility" | Out-Null
     Invoke-Adb @("shell", "run-as", $ProbePackage, "rm", "-f", $TreeFile,
             $CommandFile, $ResponseFile) "clear stale accessibility files" | Out-Null
+    Invoke-Adb @("shell", "am", "force-stop", $TargetPackage) `
+            "stop target app" | Out-Null
     Invoke-Adb @("shell", "monkey", "-p", $TargetPackage, "-c",
             "android.intent.category.LAUNCHER", "1") "launch target app" | Out-Null
 
     switch ($Profile) {
         "KCalc" { Test-KCalc }
+        "Mousepad" { Test-Mousepad }
     }
 
     Write-Host "Real $Profile accessibility passed on $Serial for ${TargetPackage}: normalized bounds, semantic input, menus, and secondary dialog."
