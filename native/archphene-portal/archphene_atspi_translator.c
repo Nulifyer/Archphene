@@ -82,10 +82,23 @@ static void remove_transient_root_locked(size_t index) {
     state.transient_root_count--;
 }
 
-static bool remove_showing_transient_roots_locked(void) {
+static bool remove_captured_showing_roots_locked(
+        const ArchpheneAtspiReference *captured, size_t captured_count) {
     bool removed = false;
     for (size_t index = 0; index < state.transient_root_count;) {
-        if (!state.transient_window_roots[index]) {
+        bool matched = false;
+        for (size_t captured_index = 0;
+                !state.transient_window_roots[index]
+                && captured_index < captured_count; captured_index++) {
+            if (transient_reference_matches(
+                    &state.transient_roots[index],
+                    captured[captured_index].bus,
+                    captured[captured_index].path)) {
+                matched = true;
+                break;
+            }
+        }
+        if (matched) {
             remove_transient_root_locked(index);
             removed = true;
         } else {
@@ -95,7 +108,6 @@ static bool remove_showing_transient_roots_locked(void) {
     if (removed) state.transient_generation++;
     return removed;
 }
-
 static void update_transient_root_locked(
         const char *bus, const char *path, bool add, bool window_root) {
     size_t index = 0;
@@ -336,6 +348,8 @@ static void process_action(DBusConnection *connection) {
     bool found_node = false;
     bool menu_bar_child = false;
     bool showing_root_action = false;
+    ArchpheneAtspiReference captured_showing_roots[MAX_TRANSIENT_ROOTS];
+    size_t captured_showing_root_count = 0;
     pthread_mutex_lock(&state.mutex);
     const ArchpheneAtspiNode *found =
             archphene_atspi_tree_find(state.tree, id);
@@ -345,6 +359,14 @@ static void process_action(DBusConnection *connection) {
         menu_bar_child = parent_is_menu_bar(state.tree, id);
         showing_root_action =
                 node_belongs_to_showing_transient_locked(state.tree, id);
+        if (showing_root_action) {
+            for (size_t index = 0; index < state.transient_root_count; index++) {
+                if (!state.transient_window_roots[index]) {
+                    captured_showing_roots[captured_showing_root_count++] =
+                            state.transient_roots[index];
+                }
+            }
+        }
     }
     pthread_mutex_unlock(&state.mutex);
     if (!found_node) return;
@@ -395,7 +417,9 @@ static void process_action(DBusConnection *connection) {
     if (result == 0) {
         pthread_mutex_lock(&state.mutex);
         if (click && showing_root_action
-                && remove_showing_transient_roots_locked()) {
+                && remove_captured_showing_roots_locked(
+                        captured_showing_roots,
+                        captured_showing_root_count)) {
             state.suppress_retention = true;
         }
         state.action_refresh_passes = ACTION_REFRESH_PASSES;
