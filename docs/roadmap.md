@@ -39,7 +39,7 @@ Archphene is moving from application-specific proofs toward a package-driven And
 - general secondary-window mapping for phone, tablet, and Android desktop/freeform modes;
 - broader clipboard MIME types plus cursor and pointer protocol completeness;
 - zero-copy Android HardwareBuffer/dmabuf and Vulkan presentation building on the validated OpenGL ES virpipe path, with SHM fallback;
-- AT-SPI2 accessibility, AArch64 validation of the patched KWallet compatibility daemon, and remaining portal adapters; streaming XDG Camera/PipeWire, URL handling, notifications, printing, drag-and-drop, private Pulse-to-AAudio input/output, bounded Camera2 capture, Android accessibility semantics, encrypted Android Keystore secret storage, 4 KB x86_64 Arch libsecret/KWallet clients, and physical AArch64 libsecret are implemented;
+- Remaining portal adapters; AT-SPI2 accessibility, streaming XDG Camera/PipeWire, URL handling, notifications, printing, drag-and-drop, private Pulse-to-AAudio input/output, bounded Camera2 capture, Android accessibility semantics, encrypted Android Keystore secret storage, and unmodified Arch/Arch Linux ARM libsecret and KWallet client flows are implemented;
 - accessibility and input-method completeness;
 - rollback, health checks, storage quotas, and vulnerability status.
 

@@ -1,6 +1,6 @@
 # Secret Service and KWallet interoperability review
 
-Date: 2026-07-16
+Date: 2026-07-18
 
 This note records the source review and device evidence behind Archphene's private Secret Service implementation. It is research evidence, not a general compatibility guarantee.
 
@@ -39,7 +39,7 @@ On the 4 KB x86_64 emulator:
 - KWallet data survives daemon restart;
 - the private Android record remains encrypted and no test secret appears in Android logs.
 
-The direct encrypted store and Secret Service wire contract also pass on the 16 KB x86_64 emulator and physical AArch64 Samsung device. The official Arch x86_64 client closure is intentionally skipped on 16 KB Android because its upstream ELF load segments are 4 KB-aligned.
+The direct encrypted store and Secret Service wire contract also pass on the 16 KB x86_64 emulator and physical AArch64 Samsung device. On physical AArch64, the checksum-cataloged Arch Linux ARM closure validates official `secret-tool`, the patched compatibility `kwalletd6`, and official `kwallet-query`, including direct KWallet D-Bus writes, query overwrite/read, daemon-restart persistence, cleanup, and no plaintext in Android logs. The official Arch x86_64 client closure is intentionally skipped on 16 KB Android because its upstream ELF load segments are 4 KB-aligned.
 
 ## Observed upstream utility behavior
 
@@ -49,6 +49,4 @@ This is recorded as an upstream-client observation, not worked around by changin
 
 ## Remaining validation
 
-- Build a checksum-cataloged Arch Linux ARM libsecret/KWallet client closure and matching AArch64 compatibility daemon.
-- Run the same packaged-client matrix on physical AArch64.
 - Revisit 16 KB x86 client execution only after the upstream Arch closure is rebuilt with compatible ELF alignment.

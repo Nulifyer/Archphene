@@ -81,7 +81,7 @@ A wrapper declaring `accessibility` can publish up to 1024 virtual nodes from a 
 
 Android actions are returned to Linux through a bounded 64-entry queue. Click, focus, set-text, and forward/backward scroll are supported; set-text payloads are UTF-8 bounded to 1024 characters, and Linux polling is capped at 250 milliseconds so it cannot monopolize the shared capability dispatcher. Publishing an invalid tree leaves the last valid model intact. Accessibility does not require or justify Android's powerful accessibility-service permission: production wrappers expose only their own UI semantics. The independently built test fixture uses a test-only service solely to verify what Android receives.
 
-The x86_64 emulator and physical AArch64 Samsung regressions validate framework enumeration, scaled bounds, events, cyclic-tree rejection with rollback, click and edit action routing, empty queues, and stopped-broker rejection. Unmodified Qt/GTK applications are not complete yet: Archphene still needs a private AT-SPI2 adapter that translates their standard D-Bus object trees and actions into this transport, including secondary-window ownership.
+The private AT-SPI2 adapter translates standard toolkit D-Bus object trees and actions into this transport while retaining semantic ownership across secondary windows. Strict regressions validate normalized framework bounds, focus, edits, menus, dialogs, reverse actions, and parent restoration through unmodified KCalc/Qt and Mousepad/GTK on x86_64 and physical AArch64.
 
 ## Secrets and keyrings
 
@@ -89,11 +89,11 @@ A wrapper declaring `secrets` receives a private encrypted collection. Secret id
 
 The private session bus now owns `org.freedesktop.secrets` only for wrappers declaring `secrets`. Its [freedesktop.org Secret Service](https://specifications.freedesktop.org/secret-service/latest/) adapter exposes one always-unlocked login collection, sender-bound plain and `dh-ietf1024-sha256-aes128-cbc-pkcs7` sessions, default/login aliases, bounded search, create/replace, get/set, delete, bulk retrieval, properties, content types, zero-length values, and standard item-change signals. Secret bytes cross the Android boundary only through private regular descriptors; closed or disconnected D-Bus clients lose their session keys.
 
-The 4 KB and 16 KB x86_64 emulators and physical AArch64 Samsung regressions validate the direct encrypted API and Secret Service wire contract, including session lifecycle, create, search, exact readback, overwrite, replacement, zero-length values, deletion, persistence across process death, malformed and oversized rejection, ciphertext plaintext absence, stale-broker rejection, and absence of secret values from Android logs. On the 4 KB x86_64 emulator, unmodified Arch `secret-tool`, the KWallet D-Bus API, and Arch `kwallet-query` pass encrypted store/read/update/clear, daemon-restart persistence, and cleanup. Official Arch Linux ARM `secret-tool` also passes encrypted store/lookup/clear on physical AArch64; the patched AArch64 KWallet compatibility daemon remains pending. The upstream Arch x86_64 client closure is skipped on 16 KB Android because its ELF files are 4 KB-aligned.
+The 4 KB and 16 KB x86_64 emulators and physical AArch64 Samsung regressions validate the direct encrypted API and Secret Service wire contract, including session lifecycle, create, search, exact readback, overwrite, replacement, zero-length values, deletion, persistence across process death, malformed and oversized rejection, ciphertext plaintext absence, stale-broker rejection, and absence of secret values from Android logs. On the 4 KB x86_64 emulator, unmodified Arch `secret-tool`, the KWallet D-Bus API, and Arch `kwallet-query` pass encrypted store/read/update/clear, daemon-restart persistence, and cleanup. On physical AArch64, official Arch Linux ARM `secret-tool`, the patched compatibility `kwalletd6`, and official `kwallet-query` pass the same encrypted store/read/clear and restart-persistence flow. The upstream Arch x86_64 client closure is skipped on 16 KB Android because its ELF files are 4 KB-aligned.
 
 ## Remaining adapters
 
-AArch64 KWallet validation, the AT-SPI2 adapter, richer notification actions, non-HTTP URI policies, and other desktop portals remain incomplete.
+Richer notification actions, non-HTTP URI policies, and other desktop portals remain incomplete.
 
 ## Native client
 
