@@ -532,6 +532,10 @@ int archphene_atspi_init(DBusConnection *connection, DBusError *error) {
         dbus_bus_add_match(connection,
                 "type='signal',interface='org.a11y.atspi.Event.Window'", error);
     }
+    if (!dbus_error_is_set(error)) {
+        dbus_bus_add_match(connection,
+                "type='signal',interface='org.a11y.atspi.Cache'", error);
+    }
     if (dbus_error_is_set(error)) {
         archphene_atspi_translator_stop();
         return -1;
@@ -634,11 +638,21 @@ void archphene_atspi_handle_signal(DBusMessage *message) {
     }
     const char *sender = dbus_message_get_sender(message);
     const char *interface = dbus_message_get_interface(message);
+    const char *member = dbus_message_get_member(message);
     dbus_bool_t accessibility_event = interface != NULL
             && (strcmp(interface, "org.a11y.atspi.Event.Object") == 0
                 || strcmp(interface, "org.a11y.atspi.Event.Window") == 0);
-    if (sender != NULL && accessibility_event
-            && dbus_message_has_signature(message, "siiva{sv}")
+    dbus_bool_t cache_event = interface != NULL && member != NULL
+            && strcmp(interface, "org.a11y.atspi.Cache") == 0
+            && ((strcmp(member, "AddAccessible") == 0
+                    && dbus_message_has_signature(
+                        message, "((so)(so)(so)iiassusau)"))
+                || (strcmp(member, "RemoveAccessible") == 0
+                    && dbus_message_has_signature(message, "(so)")));
+    if (sender != NULL
+            && ((accessibility_event
+                    && dbus_message_has_signature(message, "siiva{sv}"))
+                || cache_event)
             && archphene_atspi_translator_has_bus(sender)) {
         archphene_atspi_translator_event(message);
         return;

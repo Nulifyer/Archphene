@@ -164,6 +164,30 @@ size_t archphene_atspi_tree_retain_descendants(
     return retained;
 }
 
+int archphene_atspi_tree_add_root(
+        ArchpheneAtspiTree *tree, const ArchpheneAtspiNode *node) {
+    if (tree == NULL || node == NULL) return -1;
+    if (tree_find_reference(tree, &node->reference) != NULL) return 0;
+    if (tree->count >= ARCHPHENE_ATSPI_NODE_MAX) return -1;
+    int id = stable_id(tree, &node->reference);
+    if (id < 1) return -1;
+    ArchpheneAtspiPublishedNode *published = &tree->nodes[tree->count++];
+    published->id = id;
+    published->parent = 0;
+    published->node = *node;
+    published->node.x = clamp_position(node->x);
+    published->node.y = clamp_position(node->y);
+    published->node.width = clamp_size(node->width);
+    published->node.height = clamp_size(node->height);
+    copy_title(published->window_title,
+            sizeof(published->window_title), node->text);
+    if (published->node.width > tree->viewport_width)
+        tree->viewport_width = published->node.width;
+    if (published->node.height > tree->viewport_height)
+        tree->viewport_height = published->node.height;
+    return 1;
+}
+
 static int build_deadline(struct timespec *deadline) {
     if (clock_gettime(CLOCK_MONOTONIC, deadline) != 0) return -1;
     deadline->tv_sec += TREE_BUILD_BUDGET_MILLIS / 1000;
