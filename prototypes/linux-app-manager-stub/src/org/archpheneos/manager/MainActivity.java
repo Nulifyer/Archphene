@@ -510,6 +510,19 @@ public final class MainActivity extends Activity {
         });
     }
 
+    private boolean requiresWrapperSignerMigration(
+            InstalledLinuxAppCatalog.Entry app) {
+        if (!app.managedKind.isEmpty() || getPackageName().equals(app.packageName)) return false;
+        try {
+            return !ArchWrapperSigner.signerSha256().equalsIgnoreCase(
+                    ApkUpdateInstaller.installedSignerSha256(this, app.packageName));
+        } catch (Exception error) {
+            android.util.Log.e("ArchpheneManager",
+                    "Could not verify wrapper signer for " + app.packageName, error);
+            return true;
+        }
+    }
+
     private void renderAppList() {
         if (appList == null) return;
         appList.removeAllViews();
@@ -573,6 +586,7 @@ public final class MainActivity extends Activity {
         boolean artifactInstalling = app.packageName.equals(activeInstallPackage)
                 && activeInstallOperation != null;
         boolean installing = packageInstalling || artifactInstalling;
+        boolean signerMigration = requiresWrapperSignerMigration(app);
 
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
@@ -623,6 +637,14 @@ public final class MainActivity extends Activity {
                     + (job.error.isEmpty() ? "" : ". " + job.error));
             retry.setOnClickListener(view -> startOnDevicePackageInstall(packageSource(app)));
             top.addView(retry, new LinearLayout.LayoutParams(dp(126), dp(42)));
+        } else if (signerMigration) {
+            Button replace = actionButton("Replace", android.R.drawable.stat_notify_error);
+            replace.setContentDescription("Replace " + app.label
+                    + " wrapper signed by an unavailable Archphene key");
+            replace.setOnClickListener(view -> installSelectedVersion(
+                    app, app.sourceVersion));
+            styleMigrationButton(replace);
+            top.addView(replace, new LinearLayout.LayoutParams(dp(126), dp(42)));
         } else {
             Button version = actionButton(pinnedVersion.isEmpty()
                     ? versionButtonText(app, state) : pinnedVersion,
@@ -1158,6 +1180,16 @@ public final class MainActivity extends Activity {
         return description + ". Check for updates";
     }
 
+    private void styleMigrationButton(Button button) {
+        int foreground = COLOR_WARNING;
+        int fill = darkTheme ? Color.rgb(66, 45, 22) : Color.rgb(255, 241, 216);
+        button.setTextColor(foreground);
+        button.setCompoundDrawableTintList(ColorStateList.valueOf(foreground));
+        button.setBackground(new RippleDrawable(
+                ColorStateList.valueOf((foreground & 0x00ffffff) | 0x33000000),
+                rounded(fill, 18), null));
+    }
+
     private void stylePinnedVersionButton(Button button) {
         int foreground = COLOR_WARNING;
         int fill = darkTheme ? Color.rgb(66, 45, 22) : Color.rgb(255, 241, 216);
@@ -1285,6 +1317,7 @@ public final class MainActivity extends Activity {
 
     private void showAppDetail(InstalledLinuxAppCatalog.Entry app) {
         boolean managed = !app.managedKind.isEmpty();
+        boolean signerMigration = requiresWrapperSignerMigration(app);
         currentPage = 2;
         setAddVisible(false);
         content.removeAllViews();
@@ -1359,6 +1392,8 @@ public final class MainActivity extends Activity {
                 boolean rollback = managerRollbackUnavailable(app, selectedVersion[0]);
                 installVersion.setEnabled(!rollback);
                 installVersion.setText(rollback ? "Android rollback unavailable"
+                        : signerMigration && selectedVersion[0].equals(app.sourceVersion)
+                        ? "Replace older wrapper"
                         : selectedVersion[0].equals(app.sourceVersion)
                         ? "Repair installed version" : "Install selected version");
                 versionHealth.setText(versionHealthLabel(app.packageName,
@@ -1423,11 +1458,17 @@ public final class MainActivity extends Activity {
         }
 
         LinearLayout actions = verticalSection();
-        Button launch = actionButton(managed ? "Open Terminal" : "Launch",
-                android.R.drawable.ic_media_play);
-        stylePrimaryButton(launch);
-        launch.setEnabled(managed || app.launchIntent != null);
-        if (managed) {
+        Button launch = actionButton(signerMigration ? "Replace wrapper"
+                : managed ? "Open Terminal" : "Launch",
+                signerMigration ? android.R.drawable.stat_notify_error
+                : android.R.drawable.ic_media_play);
+        if (signerMigration) styleMigrationButton(launch);
+        else stylePrimaryButton(launch);
+        launch.setEnabled(signerMigration || managed || app.launchIntent != null);
+        if (signerMigration) {
+            launch.setOnClickListener(view -> installSelectedVersion(
+                    app, app.sourceVersion));
+        } else if (managed) {
             launch.setOnClickListener(view -> {
                 launch.setEnabled(false);
                 launch.setText("Preparing Terminal...");
