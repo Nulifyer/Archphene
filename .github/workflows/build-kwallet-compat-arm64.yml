@@ -1,0 +1,71 @@
+name: Build KWallet ARM64 Compatibility Daemon
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/build-kwallet-compat-arm64.yml"
+      - "native/archphene-kwallet/**"
+      - "scripts/build-kwallet-compat-runtime.sh"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-kwallet-compat-arm64-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build patched KWallet daemon on AArch64
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Import official Arch Linux ARM userspace
+        run: |
+          rootfs="$RUNNER_TEMP/archlinuxarm-aarch64.tar.gz"
+          curl --fail --location --retry 3 \
+            --output "$rootfs" \
+            http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
+          curl --fail --location --retry 3 \
+            --output "$rootfs.sig" \
+            http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz.sig
+
+          export GNUPGHOME="$RUNNER_TEMP/archlinuxarm-gnupg"
+          mkdir -m700 "$GNUPGHOME"
+          signing_key=68B3537F39A313B3E574D06777193F152BDBE6A6
+          gpg --batch --keyserver hkps://keyserver.ubuntu.com --recv-keys "$signing_key"
+          fingerprint="$(gpg --batch --with-colons --fingerprint "$signing_key" \
+            | awk -F: '$1 == "fpr" { print $10; exit }')"
+          test "$fingerprint" = "$signing_key"
+          gpg --batch --verify "$rootfs.sig" "$rootfs"
+
+          docker import "$rootfs" archphene/archlinuxarm:aarch64
+
+      - name: Build and inspect compatibility daemon
+        run: |
+          docker run --rm \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            archphene/archlinuxarm:aarch64 \
+            bash scripts/build-kwallet-compat-runtime.sh
+          output=tooling/build/kwallet-compat/aarch64
+          test -x "$output/kwalletd6"
+          (cd "$output" && sha256sum --check SHA256SUMS)
+          docker run --rm \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            archphene/archlinuxarm:aarch64 \
+            bash -c "readelf -h '$output/kwalletd6' | grep -F AArch64"
+
+      - name: Upload verified ARM64 daemon
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: archphene-kwallet-compat-aarch64-${{ github.sha }}
+          path: tooling/build/kwallet-compat/aarch64
+          if-no-files-found: error
+          retention-days: 14
