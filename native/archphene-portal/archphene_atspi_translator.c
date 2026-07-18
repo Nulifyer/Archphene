@@ -170,6 +170,25 @@ static bool parse_cache_window(
             && parse_cache_window_iter(&outer, node);
 }
 
+static bool event_variant_string(
+        DBusMessage *message, const char **value) {
+    DBusMessageIter arguments;
+    if (message == NULL || value == NULL
+            || !dbus_message_iter_init(message, &arguments)) return false;
+    for (int skipped = 0; skipped < 3; skipped++) {
+        if (!dbus_message_iter_next(&arguments)) return false;
+    }
+    if (dbus_message_iter_get_arg_type(&arguments) != DBUS_TYPE_VARIANT) {
+        return false;
+    }
+    DBusMessageIter variant;
+    dbus_message_iter_recurse(&arguments, &variant);
+    if (dbus_message_iter_get_arg_type(&variant) != DBUS_TYPE_STRING) {
+        return false;
+    }
+    dbus_message_iter_get_basic(&variant, value);
+    return *value != NULL;
+}
 static bool transient_reference_matches(
         const ArchpheneAtspiReference *reference,
         const char *bus, const char *path) {
@@ -1060,12 +1079,37 @@ void archphene_atspi_translator_event(DBusMessage *message) {
     bool transient_window = false;
     const char *cached_state_name = NULL;
     bool cached_state_enabled = false;
+    ArchpheneAtspiNode event_window;
+    bool cache_window_add = false;
+    bool cache_window_remove = false;
     if (strcmp(interface, "org.a11y.atspi.Event.Window") == 0) {
         type = "window";
         transient_window = true;
         if (strcmp(member, "Create") == 0) transient_change = 1;
         else if (strcmp(member, "Destroy") == 0
                 || strcmp(member, "Close") == 0) transient_change = -1;
+        cache_window_add = strcmp(member, "Create") == 0
+                || strcmp(member, "Activate") == 0;
+        cache_window_remove = transient_change < 0;
+        if (cache_window_add) {
+            const char *title = NULL;
+            memset(&event_window, 0, sizeof(event_window));
+            snprintf(event_window.reference.bus,
+                    sizeof(event_window.reference.bus), "%s", bus);
+            snprintf(event_window.reference.path,
+                    sizeof(event_window.reference.path), "%s", path);
+            snprintf(event_window.role, sizeof(event_window.role), "window");
+            if (event_variant_string(message, &title)) {
+                snprintf(event_window.text, sizeof(event_window.text),
+                        "%.*s", ARCHPHENE_ATSPI_TEXT_MAX, title);
+            }
+            event_window.width = 1;
+            event_window.height = 1;
+            event_window.enabled = true;
+            event_window.focusable = true;
+            event_window.showing = true;
+            event_window.visible = true;
+        }
     } else if (strcmp(member, "TextChanged") == 0
             || strcmp(member, "TextCaretMoved") == 0
             || strcmp(member, "TextSelectionChanged") == 0) {
@@ -1103,6 +1147,15 @@ void archphene_atspi_translator_event(DBusMessage *message) {
     if (transient_change != 0) {
         update_transient_root_locked(
                 bus, path, transient_change > 0, transient_window);
+    }
+    if (cache_window_add) {
+        upsert_cached_window_locked(&event_window);
+        fprintf(stderr, "AT-SPI cached event window bus=%s path=%s title=%.*s\n",
+                bus, path, 80, event_window.text);
+    } else if (cache_window_remove
+            && remove_cached_reference_locked(bus, path)) {
+        fprintf(stderr, "AT-SPI removed event window bus=%s path=%s\n",
+                bus, path);
     }
     if (cached_state_name != NULL) {
         update_cached_state_locked(
