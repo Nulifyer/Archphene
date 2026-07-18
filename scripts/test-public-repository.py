@@ -55,23 +55,42 @@ for relative in tracked:
 
 for manifest_path in sorted((ROOT / "prebuilt").glob("*/manifest.json")):
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    base = manifest_path.parent / manifest["architecture"]
-    declared = {entry["name"]: entry for entry in manifest["files"]}
-    actual = {path.name for path in base.glob("*.so")}
-    if actual != set(declared):
-        raise SystemExit(f"prebuilt manifest file set differs in {manifest_path.relative_to(ROOT)}")
-    for name, entry in declared.items():
-        path = base / name
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        if path.stat().st_size != entry["bytes"] or digest != entry["sha256"]:
-            raise SystemExit(f"prebuilt provenance mismatch: {path.relative_to(ROOT)}")
+    variants = [{
+        "architecture": manifest["architecture"],
+        "files": manifest["files"],
+    }, *manifest.get("additionalArchitectures", [])]
+    architectures = [variant["architecture"] for variant in variants]
+    if len(architectures) != len(set(architectures)):
+        raise SystemExit(f"duplicate prebuilt architecture in {manifest_path.relative_to(ROOT)}")
+    expected_sums = {}
+    for variant in variants:
+        architecture = variant["architecture"]
+        base = manifest_path.parent / architecture
+        declared = {entry["name"]: entry for entry in variant["files"]}
+        actual = {path.name for path in base.glob("*.so")}
+        if actual != set(declared):
+            raise SystemExit(
+                f"prebuilt manifest file set differs in {manifest_path.relative_to(ROOT)} "
+                f"for {architecture}"
+            )
+        for name, entry in declared.items():
+            path = base / name
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            if path.stat().st_size != entry["bytes"] or digest != entry["sha256"]:
+                raise SystemExit(f"prebuilt provenance mismatch: {path.relative_to(ROOT)}")
+            relative = f"{architecture}/{name}"
+            if relative in expected_sums:
+                raise SystemExit(f"duplicate prebuilt checksum path: {relative}")
+            expected_sums[relative] = entry["sha256"]
     sums = {}
     for line in (manifest_path.parent / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
         digest, name = line.split(maxsplit=1)
-        sums[Path(name).name] = digest
-    if sums != {name: entry["sha256"] for name, entry in declared.items()}:
+        normalized = Path(name).as_posix()
+        if normalized in sums:
+            raise SystemExit(f"duplicate checksum path in {manifest_path.relative_to(ROOT)}")
+        sums[normalized] = digest
+    if sums != expected_sums:
         raise SystemExit(f"SHA256SUMS differs from {manifest_path.relative_to(ROOT)}")
-
 uses = re.compile(r"^\s*-?\s*uses:\s*([^\s]+)", re.MULTILINE)
 for workflow in sorted((ROOT / ".github/workflows").glob("*.y*ml")):
     for reference in uses.findall(workflow.read_text(encoding="utf-8")):

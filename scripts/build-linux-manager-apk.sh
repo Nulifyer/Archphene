@@ -354,6 +354,7 @@ cp "$arm_android_client" "$arm_libs/libarchphene_android.so"
 
 (cd "$root/prebuilt/gtk3-compat" && sha256sum --check SHA256SUMS)
 cp "$root"/prebuilt/gtk3-compat/x86_64/*.so "$x86_libs/"
+cp "$root"/prebuilt/gtk3-compat/aarch64/*.so "$arm_libs/"
 cp "$root/prototypes/linux-app-manager-stub/assets/payload-hello-linux-amd64" \
   "$x86_libs/libarchphene_runtime_probe.so"
 cp "$root/prototypes/linux-app-manager-stub/assets/payload-hello-dynamic-amd64" \

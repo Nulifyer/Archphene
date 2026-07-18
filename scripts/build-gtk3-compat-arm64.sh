@@ -10,8 +10,8 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 output="${1:-$root/tooling/build/gtk3-compat/aarch64}"
 work="${ARCHPHENE_GTK_BUILD_ROOT:-/tmp/archphene-gtk3-compat}"
 
-gdk_commit=7764d81
-rsvg_commit=92a0616
+gdk_commit=7764d81b04ac56cff9ee9d421862701c77d73e92
+rsvg_commit=92a0616013fabc2fd4d8aa9586f18920a5585a3b
 pacman_retry() {
   local attempt
   for attempt in 1 2 3 4; do

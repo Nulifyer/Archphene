@@ -20,5 +20,35 @@
       "bytes": 4756856,
       "sha256": "e77538a5e3e87f93a0082495a275b7363c47c03e12204ab3884c311d74ae410a"
     }
+  ],
+  "additionalArchitectures": [
+    {
+      "architecture": "aarch64",
+      "source": "Arch Linux ARM no-Glycin compatibility packages",
+      "provenance": {
+        "workflow": "Build GTK3 ARM64 Compatibility Payload",
+        "run": 29624473285,
+        "sourceCommit": "1b393888c3be4b400f3d61440ae078e10daf8143",
+        "gdkPixbufAurCommit": "7764d81b04ac56cff9ee9d421862701c77d73e92",
+        "librsvgAurCommit": "92a0616013fabc2fd4d8aa9586f18920a5585a3b"
+      },
+      "files": [
+        {
+          "name": "libarchphene_gtk3_pixbuf.so",
+          "bytes": 330376,
+          "sha256": "0036fa2b3c1af32845bf823e84169e90e7073cdcb16174898b389ff950baaebf"
+        },
+        {
+          "name": "libarchphene_gtk3_pixbufloader_svg.so",
+          "bytes": 255432,
+          "sha256": "3c813ef49fc2d0a383d33e27f541808364952cf03b56e7e950d636a656f5c4ee"
+        },
+        {
+          "name": "libarchphene_gtk3_rsvg.so",
+          "bytes": 4330816,
+          "sha256": "c17113da4770c2e4f3c47a3512679a3d52cff54d6b495132c60baea1dbcae0f0"
+        }
+      ]
+    }
   ]
 }
