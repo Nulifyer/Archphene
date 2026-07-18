@@ -16,7 +16,8 @@
 #define MAX_TRANSIENT_ROOTS 32
 #define MAX_CACHED_WINDOWS 32
 #define MAX_EVENTS 64
-#define ROOT_MAX (MAX_APPLICATIONS + MAX_TRANSIENT_ROOTS + MAX_EVENTS)
+#define MAX_PRIORITY_ROOTS 8
+#define ROOT_MAX (MAX_APPLICATIONS + MAX_TRANSIENT_ROOTS + MAX_PRIORITY_ROOTS)
 #define ACTION_RESPONSE_MAX 4096
 #define REBUILD_RETRY_MILLIS 1000
 #define ACTION_REFRESH_PASSES 4
@@ -686,8 +687,11 @@ static size_t snapshot_applications(ArchpheneAtspiReference *applications) {
                 "%s", state.applications[index].path);
         count++;
     }
-    for (size_t offset = 0; offset < state.event_count && count < ROOT_MAX; offset++) {
-        size_t event_index = (state.event_head + offset) % MAX_EVENTS;
+    size_t priority_count = 0;
+    for (size_t offset = 0; offset < state.event_count
+            && priority_count < MAX_PRIORITY_ROOTS; offset++) {
+        size_t event_index = (state.event_head + state.event_count - 1 - offset)
+                % MAX_EVENTS;
         const PendingEvent *pending_event = &state.events[event_index];
         if (!pending_event->priority_root) continue;
         const ArchpheneAtspiReference *event = &pending_event->reference;
@@ -699,7 +703,10 @@ static size_t snapshot_applications(ArchpheneAtspiReference *applications) {
                 break;
             }
         }
-        if (!duplicate) applications[count++] = *event;
+        if (!duplicate) {
+            applications[count++] = *event;
+            priority_count++;
+        }
     }
     if (state.action_refresh_passes > 0) state.action_refresh_passes--;
     state.dirty = false;
@@ -1213,19 +1220,8 @@ void archphene_atspi_translator_event(DBusMessage *message) {
         update_cached_state_locked(
                 bus, path, cached_state_name, cached_state_enabled);
     }
-    bool priority_root = false;
-    if (child_add) {
-        for (size_t index = 0; state.tree != NULL
-                && index < state.tree->count; index++) {
-            const ArchpheneAtspiReference *reference =
-                    &state.tree->nodes[index].node.reference;
-            if (strcmp(reference->bus, bus) == 0
-                    && strcmp(reference->path, path) == 0) {
-                priority_root = true;
-                break;
-            }
-        }
-    } else if (child_remove) {
+    bool priority_root = child_add;
+    if (child_remove) {
         for (size_t offset = 0; offset < state.event_count; offset++) {
             size_t index = (state.event_head + offset) % MAX_EVENTS;
             PendingEvent *queued = &state.events[index];
