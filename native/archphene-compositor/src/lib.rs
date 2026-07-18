@@ -4663,6 +4663,7 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                         Some((toplevel.clone(), surface, frame))
                     });
                     if let Some((toplevel, surface, frame)) = replacement {
+                        configure_toplevel_activation(state, &toplevel, true);
                         state.active_toplevel = Some(toplevel);
                         state.root_surface = Some(surface.clone());
                         state.root_frame = Some(frame);
@@ -4998,6 +4999,41 @@ fn queue_toplevel_configure(
     toplevel.configure(width, height, encode_xdg_toplevel_states(states));
     xdg_surface.configure(serial);
     serial
+}
+
+fn configure_toplevel_activation(
+    state: &mut CompositorState,
+    toplevel: &XdgToplevel,
+    activated: bool,
+) -> u32 {
+    let Some(surface) = toplevel_surface(toplevel) else {
+        return 0;
+    };
+    let Some(frame) = surface_frame(&surface) else {
+        return 0;
+    };
+    let primary = state
+        .primary_toplevel
+        .as_ref()
+        .is_some_and(|candidate| candidate.id() == toplevel.id());
+    let (content_width, content_height) = surface_content_size(&surface, &frame);
+    let (width, height) =
+        if primary && state.tile_toplevels && state.output_width > 0 && state.output_height > 0 {
+            (state.output_width, state.output_height)
+        } else {
+            (
+                i32::try_from(content_width).unwrap_or(i32::MAX),
+                i32::try_from(content_height).unwrap_or(i32::MAX),
+            )
+        };
+    let mut states = Vec::with_capacity(2);
+    if primary && state.tile_toplevels {
+        states.push(xdg_toplevel::State::Maximized);
+    }
+    if activated {
+        states.push(xdg_toplevel::State::Activated);
+    }
+    queue_toplevel_configure(state, toplevel, width, height, &states)
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ToplevelLayout {

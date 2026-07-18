@@ -540,6 +540,9 @@ def main() -> None:
          "native fallback request"),
         (compositor_source, "set_keyboard_focus(state, Some(surface));",
          "primary focus restoration after secondary unmap"),
+        (compositor_source,
+         "configure_toplevel_activation(state, &toplevel, true);",
+         "xdg activation restoration after secondary unmap"),
     )
     for implementation, token, label in fallback_tokens:
         if token not in implementation:
