@@ -52,14 +52,19 @@ It rejects publish-before-upload workflows, mutable action references, missing A
 
 ## Validate self-update
 
-The emulator regression installs an older manager signed by the production key, discovers and downloads the requested public GitHub Release through the manager, and accepts Android's system-owned update confirmation:
+The device regression installs an older exact-ABI manager signed by the production key, discovers and downloads the requested public GitHub Release through the manager, and accepts Android's system-owned update confirmation:
 
 ```powershell
 # Current exact-ABI updater
 ./scripts/test-linux-manager-github-self-update.ps1 -ToVersion 1.0.1 -RebuildBaseline
 
+# Exact-ABI updater on an attached ARM64 device
+./scripts/test-linux-manager-github-self-update.ps1 -Serial <adb-serial> -ToVersion 1.0.1 -RebuildBaseline
+
 # One-time migration from the real published x86_64 v1.0.0 APK
 ./scripts/test-linux-manager-github-self-update.ps1 -PublishedV100Migration -RebuildBaseline
 ```
 
-Run both commands after `v1.0.1` is published. The migration mode downloads the real `v1.0.0` APK and checksum, rejects a non-x86_64 target, and verifies the old updater can consume the compatibility alias. These tests uninstall the manager package and therefore clear manager-private state, but they do not remove separately installed Linux application packages.
+Use the exact-ABI command for each target. The migration mode downloads the real `v1.0.0` APK and checksum, rejects a non-x86_64 target, and verifies the old updater can consume the compatibility alias. These tests uninstall the manager package and therefore clear manager-private state, but they do not remove separately installed Linux application packages.
+
+The published `v1.0.1` release passed independent checksum, exact-ABI, embedded Terminal, alignment, and production-signer verification. Live `0.9.0 -> 1.0.1` updates pass on the x86_64 emulator and physical AArch64 Samsung, and the real published x86_64 `v1.0.0 -> v1.0.1` migration passes.

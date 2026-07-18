@@ -1,6 +1,6 @@
 # Project status
 
-Updated: 2026-07-16
+Updated: 2026-07-18
 
 This page separates validated behavior from planned platform work. Package search does not imply package compatibility.
 
@@ -8,7 +8,7 @@ This page separates validated behavior from planned platform work. Package searc
 
 | Area | Evidence |
 |---|---|
-| Manager self-update | Public GitHub Releases discovery, bounded download, SHA-256 verification, signer/package validation, Android confirmation, replacement, restart reconciliation, and 0.9.0 to 1.0.0 device test |
+| Manager self-update | Public GitHub Releases discovery, bounded download, SHA-256 verification, signer/package validation, Android confirmation, replacement, and restart reconciliation. The reproducible workflow published exact-ABI `v1.0.1` assets; live `0.9.0` to `1.0.1` updates pass on x86_64 and physical AArch64, and the real published x86_64 `v1.0.0` migration passes through its one-time compatibility alias. |
 | General x86_64 package transactions | Arch dependency resolution, package-signature verification, closure staging, desktop/terminal classification, package-specific label/executable/icon/MIME/toolkit/ABI/capability metadata, generated APK validation, persistent Android Keystore signing, and PackageInstaller installation pass with KCalc, Mousepad, and CLI packages; a concurrent missing-package failure does not block an unrelated CLI transaction |
 | AArch64 package runtime | A cacheable Linux container resolves the current Arch Linux ARM pacman/GnuPG/libarchive closure, verifies every package with the pinned build-system key, reduces it to required AArch64 ELF objects, cross-builds patched glibc and the path broker, and emits a 70-entry checksum catalog. The dual-ABI manager selects isolated ARM repository/trust assets; Samsung tests pass package search, nine-package libalpm resolution, exact build-key verification, staging, terminal classification, authenticated runtime-pack publication, Terminal UID materialization, and `btop 1.4.7` execution |
 | Qt and GTK bridge prototypes | KCalc and Mousepad GUI, input, popups, dialogs, clipboard/IME, resizing, and selected document workflows on the listed test devices |
@@ -34,7 +34,7 @@ This page separates validated behavior from planned platform work. Package searc
 Local debug builds can remain multi-ABI. Release builds emit independently signed x86_64 and arm64-v8a manager APKs whose embedded Terminal, package runtime, trust data, and wrapper templates contain only the selected ABI. Both variants launch pacman on matching devices, and the ARM manager has generated, installed, and launched a real KCalc wrapper on the Samsung test device.
 
 1. **Architecture support**
-   - exercise the ABI-specific release workflow on a tagged GitHub prerelease;
+   - maintain the validated exact-ABI release workflow and production self-update regressions;
    - use official Arch Linux packages only for x86_64 and Arch Linux ARM packages/trust roots for AArch64;
    - accept repository packages marked any, but require exact CPU ABI for native ELF files;
    - do not silently emulate x86_64 on ARM.
