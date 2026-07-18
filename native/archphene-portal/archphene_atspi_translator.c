@@ -108,6 +108,31 @@ static bool remove_captured_showing_roots_locked(
     if (removed) state.transient_generation++;
     return removed;
 }
+static void restore_captured_showing_roots_locked(
+        const ArchpheneAtspiReference *captured, size_t captured_count) {
+    bool restored = false;
+    for (size_t captured_index = 0;
+            captured_index < captured_count
+            && state.transient_root_count < MAX_TRANSIENT_ROOTS;
+            captured_index++) {
+        bool found = false;
+        for (size_t index = 0; index < state.transient_root_count; index++) {
+            if (transient_reference_matches(
+                    &state.transient_roots[index],
+                    captured[captured_index].bus,
+                    captured[captured_index].path)) {
+                found = true;
+                break;
+            }
+        }
+        if (found) continue;
+        size_t index = state.transient_root_count++;
+        state.transient_roots[index] = captured[captured_index];
+        state.transient_window_roots[index] = false;
+        restored = true;
+    }
+    if (restored) state.transient_generation++;
+}
 static void update_transient_root_locked(
         const char *bus, const char *path, bool add, bool window_root) {
     size_t index = 0;
@@ -348,6 +373,8 @@ static void process_action(DBusConnection *connection) {
     bool found_node = false;
     bool menu_bar_child = false;
     bool showing_root_action = false;
+    bool showing_roots_pruned = false;
+    bool click = strcmp(action, "click") == 0;
     ArchpheneAtspiReference captured_showing_roots[MAX_TRANSIENT_ROOTS];
     size_t captured_showing_root_count = 0;
     pthread_mutex_lock(&state.mutex);
@@ -359,13 +386,16 @@ static void process_action(DBusConnection *connection) {
         menu_bar_child = parent_is_menu_bar(state.tree, id);
         showing_root_action =
                 node_belongs_to_showing_transient_locked(state.tree, id);
-        if (showing_root_action) {
+        if (click && showing_root_action) {
             for (size_t index = 0; index < state.transient_root_count; index++) {
                 if (!state.transient_window_roots[index]) {
                     captured_showing_roots[captured_showing_root_count++] =
                             state.transient_roots[index];
                 }
             }
+            showing_roots_pruned = remove_captured_showing_roots_locked(
+                    captured_showing_roots, captured_showing_root_count);
+            if (showing_roots_pruned) state.suppress_retention = true;
         }
     }
     pthread_mutex_unlock(&state.mutex);
@@ -373,7 +403,6 @@ static void process_action(DBusConnection *connection) {
 
     int result = -1;
     uint64_t transient_generation = 0;
-    bool click = strcmp(action, "click") == 0;
     bool menu_bar_click = click && menu_bar_child;
     bool menu_click = click && (node.show_menu_action || menu_bar_child);
     if (click) {
@@ -414,18 +443,17 @@ static void process_action(DBusConnection *connection) {
         pthread_mutex_unlock(&state.mutex);
         if (!menu_opened) activate_menu_pointer(id);
     }
+    pthread_mutex_lock(&state.mutex);
     if (result == 0) {
-        pthread_mutex_lock(&state.mutex);
-        if (click && showing_root_action
-                && remove_captured_showing_roots_locked(
-                        captured_showing_roots,
-                        captured_showing_root_count)) {
-            state.suppress_retention = true;
-        }
         state.action_refresh_passes = ACTION_REFRESH_PASSES;
         wake_worker();
-        pthread_mutex_unlock(&state.mutex);
+    } else if (showing_roots_pruned) {
+        restore_captured_showing_roots_locked(
+                captured_showing_roots, captured_showing_root_count);
+        state.suppress_retention = false;
+        wake_worker();
     }
+    pthread_mutex_unlock(&state.mutex);
 }
 
 static size_t snapshot_applications(ArchpheneAtspiReference *applications) {
