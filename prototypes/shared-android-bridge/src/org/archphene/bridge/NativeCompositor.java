@@ -238,6 +238,10 @@ public final class NativeCompositor implements AutoCloseable {
                 command(WINDOW_COMPONENT, index, 17),
                 command(WINDOW_COMPONENT, index, 18),
                 command(WINDOW_COMPONENT, index, 19),
+                command(WINDOW_COMPONENT, index, 20),
+                command(WINDOW_COMPONENT, index, 21),
+                command(WINDOW_COMPONENT, index, 22),
+                command(WINDOW_COMPONENT, index, 23),
                 windowText(index, titleLength, 4),
                 windowText(index, appIdLength, 5));
     }
@@ -268,6 +272,10 @@ public final class NativeCompositor implements AutoCloseable {
         public final int contentHeight;
         public final int canvasWidth;
         public final int canvasHeight;
+        public final int compositedFrameX;
+        public final int compositedFrameY;
+        public final int compositedFrameWidth;
+        public final int compositedFrameHeight;
         public final String title;
         public final String appId;
 
@@ -275,6 +283,8 @@ public final class NativeCompositor implements AutoCloseable {
                 int x, int y, int width, int height, int frameWidth, int frameHeight,
                 int bufferScale, int contentX, int contentY, int contentWidth,
                 int contentHeight, int canvasWidth, int canvasHeight,
+                int compositedFrameX, int compositedFrameY,
+                int compositedFrameWidth, int compositedFrameHeight,
                 String title, String appId) {
             this.id = id;
             this.parentId = parentId;
@@ -294,6 +304,10 @@ public final class NativeCompositor implements AutoCloseable {
             this.contentHeight = contentHeight;
             this.canvasWidth = canvasWidth;
             this.canvasHeight = canvasHeight;
+            this.compositedFrameX = compositedFrameX;
+            this.compositedFrameY = compositedFrameY;
+            this.compositedFrameWidth = compositedFrameWidth;
+            this.compositedFrameHeight = compositedFrameHeight;
             this.title = title;
             this.appId = appId;
         }

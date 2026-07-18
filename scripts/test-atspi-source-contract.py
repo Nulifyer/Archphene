@@ -381,13 +381,27 @@ def main() -> None:
         if token not in android_source:
             raise AssertionError(f"missing Android semantic ownership: {token}")
     compositor_geometry_tokens = (
-        "frame.window.contentX",
+        "frame.window.compositedFrameX",
         "frame.window.canvasWidth",
         "compositorView.setAccessibilityWindowId(activeWindowId)",
     )
     for token in compositor_geometry_tokens:
         if token not in android_activity_source:
             raise AssertionError(f"missing compositor accessibility geometry: {token}")
+    compositor_publication_patterns = (
+        (r"updateActiveSecondaryWindow\(compositor\);\s*"
+         r"publishFrame\(compositor\);\s*publishWindows\(compositor\);",
+         "phone window metadata publication"),
+        (r"if \(commit != lastCommit\).*?"
+         r"if \(independentWindows\) publishWindows\(compositor\);",
+         "desktop commit window-frame publication"),
+        (r"Bitmap frame = null;\s*if \(independentWindows\) \{\s*"
+         r"frame = Bitmap\.createBitmap",
+         "desktop-only per-window bitmap allocation"),
+    )
+    for pattern, label in compositor_publication_patterns:
+        if re.search(pattern, android_session_source, re.DOTALL) is None:
+            raise AssertionError(f"missing {label}")
     if "payload.substring(0, payloadEnd).split" not in accessibility_probe_source:
         raise AssertionError("empty accessibility command values are not preserved")
 

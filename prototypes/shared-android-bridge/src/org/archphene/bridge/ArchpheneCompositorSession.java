@@ -516,6 +516,13 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
                                     + " geometry=" + window.x + "," + window.y + " "
                                     + window.width + "x" + window.height
                                     + " frame=" + window.frameWidth + "x" + window.frameHeight
+                                    + " content=" + window.contentX + "," + window.contentY + " "
+                                    + window.contentWidth + "x" + window.contentHeight
+                                    + " canvas=" + window.canvasWidth + "x" + window.canvasHeight
+                                    + " compositedFrame=" + window.compositedFrameX + ","
+                                    + window.compositedFrameY + " "
+                                    + window.compositedFrameWidth + "x"
+                                    + window.compositedFrameHeight
                                     + " bufferScale=" + window.bufferScale
                                     + " title=" + window.title
                                     + " appId=" + window.appId);
@@ -523,6 +530,7 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
                     }
                     updateActiveSecondaryWindow(compositor);
                     publishFrame(compositor);
+                    publishWindows(compositor);
                 }
                 int currentClients = compositor.acceptedClients();
                 if (currentClients != acceptedClients) {
@@ -681,7 +689,7 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
             case WINDOW_MODE -> {
                 compositor.setToplevelTiling(event.a == 0);
                 publishFrame(compositor);
-                if (independentWindows) publishWindows(compositor);
+                publishWindows(compositor);
             }
             case CONFIGURE_WINDOW -> compositor.configureWindow(event.a, event.b, event.c);
             case CLOSE_WINDOW -> compositor.closeWindow(event.a);
@@ -728,13 +736,15 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
             if (window == null || !window.mapped || window.width <= 0 || window.height <= 0) {
                 continue;
             }
-            Bitmap frame = Bitmap.createBitmap(
-                    window.width, window.height, Bitmap.Config.ARGB_8888);
-            if (compositor.copyWindowFrame(index, frame) == 0) {
-                windows.add(new WindowFrame(window, frame));
-                if (!window.primary && (selectedSecondary == 0 || window.active)) {
-                    selectedSecondary = window.id;
-                }
+            Bitmap frame = null;
+            if (independentWindows) {
+                frame = Bitmap.createBitmap(
+                        window.width, window.height, Bitmap.Config.ARGB_8888);
+                if (compositor.copyWindowFrame(index, frame) != 0) continue;
+            }
+            windows.add(new WindowFrame(window, frame));
+            if (!window.primary && (selectedSecondary == 0 || window.active)) {
+                selectedSecondary = window.id;
             }
         }
         activeSecondaryWindowId = selectedSecondary;

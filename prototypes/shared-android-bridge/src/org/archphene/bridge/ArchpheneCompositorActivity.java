@@ -796,8 +796,9 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 accessibilityWindows.add(new ArchpheneAccessibilityBridge.WindowDescriptor(
                         frame.window.id, frame.window.parentId, frame.window.active,
                         frame.window.primary, frame.window.width, frame.window.height,
-                        frame.window.contentX, frame.window.contentY,
-                        frame.window.contentWidth, frame.window.contentHeight,
+                        frame.window.compositedFrameX, frame.window.compositedFrameY,
+                        frame.window.compositedFrameWidth,
+                        frame.window.compositedFrameHeight,
                         frame.window.canvasWidth, frame.window.canvasHeight,
                         frame.window.title));
             }

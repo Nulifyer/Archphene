@@ -6511,6 +6511,23 @@ impl CompositorCore {
             }
             18 => toplevel_layout(&self.state).map_or(0, |layout| layout.output_width as i32),
             19 => toplevel_layout(&self.state).map_or(0, |layout| layout.output_height as i32),
+            20..=23 => {
+                if self
+                    .state
+                    .root_surface
+                    .as_ref()
+                    .is_none_or(|root| root.id() != surface.id())
+                {
+                    return 0;
+                }
+                toplevel_layout(&self.state).map_or(0, |layout| match component {
+                    20 => layout.root_x,
+                    21 => layout.root_y,
+                    22 => layout.root_width,
+                    23 => layout.root_height,
+                    _ => 0,
+                })
+            }
             _ => -1,
         }
     }
@@ -11898,6 +11915,15 @@ mod tests {
                 height: 2205,
             },
             Some((1080, 2205)),
+        );
+        assert_eq!(
+            (
+                layout.root_x,
+                layout.root_y,
+                layout.root_width,
+                layout.root_height
+            ),
+            (-19, 272, 1118, 1667)
         );
         assert_eq!(
             content_layout(

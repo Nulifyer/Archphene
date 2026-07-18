@@ -68,10 +68,10 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
         final boolean primary;
         final int width;
         final int height;
-        final int contentX;
-        final int contentY;
-        final int contentWidth;
-        final int contentHeight;
+        final int compositedFrameX;
+        final int compositedFrameY;
+        final int compositedFrameWidth;
+        final int compositedFrameHeight;
         final int canvasWidth;
         final int canvasHeight;
         final String title;
@@ -83,8 +83,9 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
         }
 
         WindowDescriptor(int id, int parentId, boolean active, boolean primary,
-                int width, int height, int contentX, int contentY,
-                int contentWidth, int contentHeight, int canvasWidth, int canvasHeight,
+                int width, int height, int compositedFrameX, int compositedFrameY,
+                int compositedFrameWidth, int compositedFrameHeight,
+                int canvasWidth, int canvasHeight,
                 String title) {
             this.id = id;
             this.parentId = parentId;
@@ -92,10 +93,10 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
             this.primary = primary;
             this.width = Math.max(1, width);
             this.height = Math.max(1, height);
-            this.contentX = contentX;
-            this.contentY = contentY;
-            this.contentWidth = Math.max(0, contentWidth);
-            this.contentHeight = Math.max(0, contentHeight);
+            this.compositedFrameX = compositedFrameX;
+            this.compositedFrameY = compositedFrameY;
+            this.compositedFrameWidth = Math.max(0, compositedFrameWidth);
+            this.compositedFrameHeight = Math.max(0, compositedFrameHeight);
             this.canvasWidth = Math.max(0, canvasWidth);
             this.canvasHeight = Math.max(0, canvasHeight);
             this.title = title == null ? "" : title;
@@ -472,12 +473,12 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
         int canvasWidth = subsetWidth;
         int canvasHeight = subsetHeight;
         if (!independent && descriptor != null
-                && descriptor.contentWidth > 0 && descriptor.contentHeight > 0
+                && descriptor.compositedFrameWidth > 0 && descriptor.compositedFrameHeight > 0
                 && descriptor.canvasWidth > 0 && descriptor.canvasHeight > 0) {
-            mappedLeft = descriptor.contentX;
-            mappedTop = descriptor.contentY;
-            mappedWidth = descriptor.contentWidth;
-            mappedHeight = descriptor.contentHeight;
+            mappedLeft = descriptor.compositedFrameX;
+            mappedTop = descriptor.compositedFrameY;
+            mappedWidth = descriptor.compositedFrameWidth;
+            mappedHeight = descriptor.compositedFrameHeight;
             canvasWidth = descriptor.canvasWidth;
             canvasHeight = descriptor.canvasHeight;
         }

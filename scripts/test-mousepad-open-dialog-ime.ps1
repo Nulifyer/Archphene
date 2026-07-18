@@ -3,7 +3,7 @@ param([string]$Serial = "emulator-5554")
 $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $Adb = Join-Path $Root "tooling/android-sdk/platform-tools/adb.exe"
-$Package = "org.archphene.linux.mousepad"
+$Package = "org.archphene.linux.p241d399e14343c53b8b766e9126776aa"
 
 function Adb([string[]]$Arguments) {
     $output = & $Adb -s $Serial @Arguments 2>&1
@@ -21,6 +21,33 @@ function Wait-Log([string]$Pattern, [int]$TimeoutSeconds) {
     throw "Timed out waiting for compositor log: $Pattern"
 }
 
+function Dump-Ui([string]$Name) {
+    $remote = "/sdcard/$Name.xml"
+    $local = Join-Path $Root "tooling/build/$Name.xml"
+    Adb @("shell", "uiautomator", "dump", $remote) | Out-Null
+    Adb @("pull", $remote, $local) | Out-Null
+    return [xml](Get-Content -LiteralPath $local -Raw)
+}
+
+function Wait-UiNode([scriptblock]$Predicate, [string]$Name, [int]$TimeoutSeconds = 10) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        $ui = Dump-Ui "mousepad-$($Name -replace '[^a-zA-Z0-9-]', '-')"
+        $node = $ui.SelectNodes("//node") | Where-Object $Predicate | Select-Object -First 1
+        if ($null -ne $node) { return $node }
+        Start-Sleep -Milliseconds 500
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "Timed out waiting for UI node: $Name"
+}
+
+function Tap-UiNode($Node, [string]$Name) {
+    if ($Node.bounds -notmatch '\[(\d+),(\d+)\]\[(\d+),(\d+)\]') {
+        throw "Invalid UI bounds for ${Name}: $($Node.bounds)"
+    }
+    $x = [int](([int]$Matches[1] + [int]$Matches[3]) / 2)
+    $y = [int](([int]$Matches[2] + [int]$Matches[4]) / 2)
+    Adb @("shell", "input", "tap", [string]$x, [string]$y) | Out-Null
+}
 function Input-Shown {
     return ((Adb @("shell", "dumpsys", "input_method")) -join "`n") -match 'mInputShown=true'
 }
@@ -32,10 +59,10 @@ if ($size -notmatch '1080x2400') {
 
 Adb @("shell", "am", "force-stop", $Package) | Out-Null
 Adb @("logcat", "-c") | Out-Null
-Adb @("shell", "am", "start", "-n", "$Package/.MainActivity") | Out-Null
+Adb @("shell", "am", "start", "-n", "$Package/org.archphene.linux.kcalc.MainActivity") | Out-Null
 Wait-Log 'mapped=true.*title=.*Mousepad' 30 | Out-Null
 $activities = (Adb @("shell", "dumpsys", "activity", "activities")) -join "`n"
-if ($activities -notmatch 'ResumedActivity:.*org\.archphene\.linux\.mousepad') {
+if ($activities -notmatch ('ResumedActivity:.*' + [regex]::Escape($Package))) {
     throw "Mousepad is not the resumed Activity"
 }
 
@@ -45,7 +72,10 @@ if (Input-Shown) {
 }
 Adb @("shell", "input", "keycombination", "113", "43") | Out-Null
 Wait-Log 'mapped=true.*title=Open File' 15 | Out-Null
-Adb @("shell", "input", "tap", "865", "197") | Out-Null
+$search = Wait-UiNode {
+    $_.GetAttribute("content-desc") -eq "Search" -and $_.clickable -eq "true"
+} "open-dialog-search"
+Tap-UiNode $search "open-dialog search"
 $deadline = [DateTime]::UtcNow.AddSeconds(5)
 while (-not (Input-Shown) -and [DateTime]::UtcNow -lt $deadline) {
     Start-Sleep -Milliseconds 250
@@ -73,7 +103,8 @@ foreach ($match in [regex]::Matches($beforeTouch, 'Android IME keyboard fallback
 if ($fallbackEvents -lt 2) {
     throw "No complete keyboard fallback event was forwarded after GTK changed text-input focus"
 }
-if ($beforeTouch -match 'org\.archphene\.linux\.mousepad:.*onRequestHide') {
+$hidePattern = [regex]::Escape($Package) + ':.*onRequestHide'
+if ($beforeTouch -match $hidePattern) {
     throw "Android requested IME hide while entering the complete arch query"
 }
 $artifact = Join-Path $Root "artifacts/mousepad-search-arch-ime.png"
@@ -88,7 +119,11 @@ while ((Input-Shown) -and [DateTime]::UtcNow -lt $deadline) {
 if (Input-Shown) { throw "Android Back did not dismiss the search keyboard" }
 
 Adb @("logcat", "-c") | Out-Null
-Adb @("shell", "input", "tap", "500", "350") | Out-Null
+$result = Wait-UiNode {
+    $_.text -match '(?i)arch' -and $_.clickable -eq "true" -and
+            $_.class -ne "android.widget.EditText"
+} "arch-search-result"
+Tap-UiNode $result "arch search result"
 Start-Sleep -Milliseconds 500
 $afterTouch = (Adb @("logcat", "-d", "-v", "brief")) -join "`n"
 if ($afterTouch -notmatch 'touch down.*result=1') {
