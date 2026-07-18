@@ -17,7 +17,8 @@
 #define MAX_CACHED_WINDOWS 32
 #define MAX_EVENTS 64
 #define MAX_PRIORITY_ROOTS 8
-#define ROOT_MAX (MAX_APPLICATIONS + MAX_TRANSIENT_ROOTS + MAX_PRIORITY_ROOTS)
+#define ROOT_MAX (MAX_APPLICATIONS + MAX_TRANSIENT_ROOTS + MAX_PRIORITY_ROOTS \
+        + MAX_CACHED_WINDOWS)
 #define ACTION_RESPONSE_MAX 4096
 #define REBUILD_RETRY_MILLIS 1000
 #define ACTION_REFRESH_PASSES 4
@@ -731,6 +732,18 @@ static size_t snapshot_cached_windows(ArchpheneAtspiNode *windows) {
     return count;
 }
 
+static bool append_root_reference(ArchpheneAtspiReference *roots,
+        size_t *count, const ArchpheneAtspiReference *reference) {
+    if (roots == NULL || count == NULL || reference == NULL) return false;
+    for (size_t index = 0; index < *count; index++) {
+        if (transient_reference_matches(
+                &roots[index], reference->bus, reference->path)) return true;
+    }
+    if (*count >= ROOT_MAX) return false;
+    roots[(*count)++] = *reference;
+    return true;
+}
+
 static void retain_dirty(void) {
     pthread_mutex_lock(&state.mutex);
     if (!state.stopping) state.dirty = true;
@@ -755,6 +768,10 @@ static int rebuild_tree(DBusConnection *connection,
     ArchpheneAtspiNode cached_windows[MAX_CACHED_WINDOWS];
     size_t count = snapshot_applications(applications);
     size_t cached_count = snapshot_cached_windows(cached_windows);
+    for (size_t index = 0; index < cached_count; index++) {
+        append_root_reference(applications, &count,
+                &cached_windows[index].reference);
+    }
     int build_result = archphene_atspi_tree_build(
             connection, applications, count, *next_tree);
     bool cache_fallback = build_result < 0;
