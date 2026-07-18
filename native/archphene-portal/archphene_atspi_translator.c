@@ -801,17 +801,6 @@ static size_t snapshot_cached_accessibles(
     return count;
 }
 
-static bool append_root_reference(ArchpheneAtspiReference *roots,
-        size_t *count, const ArchpheneAtspiReference *reference) {
-    if (roots == NULL || count == NULL || reference == NULL) return false;
-    for (size_t index = 0; index < *count; index++) {
-        if (transient_reference_matches(
-                &roots[index], reference->bus, reference->path)) return true;
-    }
-    if (*count >= ROOT_MAX) return false;
-    roots[(*count)++] = *reference;
-    return true;
-}
 
 static void retain_dirty(void) {
     pthread_mutex_lock(&state.mutex);
