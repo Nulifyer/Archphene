@@ -648,15 +648,9 @@ static void process_action(DBusConnection *connection) {
 static size_t snapshot_applications(ArchpheneAtspiReference *applications) {
     pthread_mutex_lock(&state.mutex);
     size_t count = 0;
-    for (size_t index = state.transient_root_count; index > 0; index--) {
-        if (state.transient_window_roots[index - 1]) {
-            applications[count++] = state.transient_roots[index - 1];
-        }
-    }
-    for (size_t index = 0; index < state.transient_root_count; index++) {
-        if (!state.transient_window_roots[index]) {
-            applications[count++] = state.transient_roots[index];
-        }
+    if (state.transient_root_count > 0) {
+        applications[count++] =
+                state.transient_roots[state.transient_root_count - 1];
     }
     for (size_t index = 0; index < state.application_count; index++) {
         snprintf(applications[count].bus, sizeof(applications[count].bus),
