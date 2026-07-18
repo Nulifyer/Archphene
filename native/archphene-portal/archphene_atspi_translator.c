@@ -465,9 +465,9 @@ static size_t snapshot_applications(ArchpheneAtspiReference *applications) {
             applications[count++] = state.transient_roots[index - 1];
         }
     }
-    for (size_t index = state.transient_root_count; index > 0; index--) {
-        if (!state.transient_window_roots[index - 1]) {
-            applications[count++] = state.transient_roots[index - 1];
+    for (size_t index = 0; index < state.transient_root_count; index++) {
+        if (!state.transient_window_roots[index]) {
+            applications[count++] = state.transient_roots[index];
         }
     }
     for (size_t index = 0; index < state.application_count; index++) {
