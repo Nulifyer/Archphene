@@ -134,9 +134,11 @@ $result = Wait-UiNode {
 Tap-UiNode $result "arch search result"
 Start-Sleep -Milliseconds 500
 $afterTouch = (Adb @("logcat", "-d", "-v", "brief")) -join "`n"
-if ($afterTouch -notmatch 'touch down.*result=1' -or
-        $afterTouch -notmatch 'touch up.*result=1') {
-    throw "Search result tap was not accepted as a Wayland touch"
+if (($afterTouch -notmatch 'touch down.*result=1' -or
+        $afterTouch -notmatch 'touch up.*result=1') -and
+        ($afterTouch -notmatch 'pointer button pressed=true.*result=1' -or
+        $afterTouch -notmatch 'pointer button pressed=false.*result=1')) {
+    throw "Search result tap was not accepted as Wayland input"
 }
 
 Write-Host "Mousepad open-dialog IME passed: arch query retained Gboard; Back dismissed it; result tap was routed."

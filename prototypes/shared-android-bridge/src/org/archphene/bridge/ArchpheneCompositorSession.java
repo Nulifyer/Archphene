@@ -32,10 +32,29 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
     private static final String INPUT_TAG = "ArchpheneInput";
     private static final int ACCESSIBILITY_TOUCH_ID = 32;
 
+    public static final class PopupFrame {
+        public final int x;
+        public final int y;
+        public final int width;
+        public final int height;
+        public final int frameWidth;
+        public final int frameHeight;
+
+        PopupFrame(int x, int y, int width, int height, int frameWidth, int frameHeight) {
+            this.x = x;
+            this.y = y;
+            this.width = width;
+            this.height = height;
+            this.frameWidth = frameWidth;
+            this.frameHeight = frameHeight;
+        }
+    }
+
     public interface Listener {
         void onClientConnected();
         void onFrame(Bitmap frame);
         default void onWindows(List<WindowFrame> windows) {}
+        default void onPopups(List<PopupFrame> popups) {}
         default void onLinuxDragText(String text) {}
         default void onLinuxDragUriList(String uriList) {}
         void onError(String detail);
@@ -86,6 +105,8 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
     private static final int LINUX_DRAG_FINISH = 33;
     private static final int ANDROID_DRAG_DROP_URI_LIST = 34;
     private static final long POINTER_CLICK_HOLD_MILLIS = 32;
+    private static final long MENU_TRANSITION_DELAY_MILLIS = 120;
+    private static final long TOUCH_CLICK_HOLD_MILLIS = 120;
 
     private final Activity activity;
     private final ArchpheneInputView view;
@@ -105,6 +126,7 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
     private volatile int acceptedClients;
     private volatile int popupCount;
     private volatile boolean activePopup;
+    private volatile List<PopupFrame> activePopupFrames = List.of();
     private volatile int frameWidth;
     private volatile int frameHeight;
     private volatile long lastImeCommitUptime;
@@ -286,8 +308,13 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
         int mappedY = Math.round(mapCoordinate(y, source, targetHeight, false));
         events.offer(new Event(
                 TOUCH_DOWN, ACCESSIBILITY_TOUCH_ID, mappedX, mappedY, (int) now, ""));
-        events.offer(new Event(
-                TOUCH_UP, ACCESSIBILITY_TOUCH_ID, mappedX, mappedY, (int) (now + 1), ""));
+        source.postDelayed(() -> events.offer(new Event(
+                TOUCH_UP,
+                ACCESSIBILITY_TOUCH_ID,
+                mappedX,
+                mappedY,
+                (int) SystemClock.uptimeMillis(),
+                "")), TOUCH_CLICK_HOLD_MILLIS);
     }
 
     public void accessibilityMenuAction(
@@ -302,13 +329,38 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
             int targetHeight,
             float x,
             float y) {
-        if (!activePopup) {
-            touchClick(windowId, source, targetWidth, targetHeight, x, y);
-            return;
+        releaseRetainedIme();
+        if (windowId != 0) activateWindow(windowId, source);
+        int mappedX = Math.round(mapCoordinate(x, source, targetWidth, true));
+        int mappedY = Math.round(mapCoordinate(y, source, targetHeight, false));
+        if (activePopup && !isPopupPoint(mappedX, mappedY)) {
+            queueMenuTransitionClick(source, mappedX, mappedY);
+        } else {
+            queuePointerClick(source, mappedX, mappedY);
         }
-        dismissPopups();
-        source.postDelayed(() -> touchClick(windowId, source,
-                targetWidth, targetHeight, x, y), POINTER_CLICK_HOLD_MILLIS);
+    }
+
+    public boolean isPopupAt(ArchpheneInputView source, float x, float y) {
+        return isPopupAt(source, frameWidth, frameHeight, x, y);
+    }
+
+    public boolean isPopupAt(ArchpheneInputView source, int targetWidth,
+            int targetHeight, float x, float y) {
+        int mappedX = Math.round(mapCoordinate(x, source, targetWidth, true));
+        int mappedY = Math.round(mapCoordinate(y, source, targetHeight, false));
+        return isPopupPoint(mappedX, mappedY);
+    }
+
+    private boolean isPopupPoint(int x, int y) {
+        List<PopupFrame> frames = activePopupFrames;
+        for (int index = frames.size() - 1; index >= 0; index--) {
+            PopupFrame frame = frames.get(index);
+            if (x >= frame.x && y >= frame.y
+                    && x < frame.x + frame.width && y < frame.y + frame.height) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public void pointerClick(
@@ -366,7 +418,12 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
     }
 
     public boolean touch(MotionEvent event, boolean pointerTap) {
-        return touch(0, view, frameWidth, frameHeight, event, pointerTap);
+        return touch(event, pointerTap, false);
+    }
+
+    public boolean touch(MotionEvent event, boolean pointerTap, boolean menuTransition) {
+        return touch(0, view, frameWidth, frameHeight,
+                event, pointerTap, menuTransition);
     }
 
     public boolean touch(
@@ -376,6 +433,18 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
             int targetHeight,
             MotionEvent event,
             boolean pointerTap) {
+        return touch(windowId, source, targetWidth, targetHeight,
+                event, pointerTap, false);
+    }
+
+    public boolean touch(
+            int windowId,
+            ArchpheneInputView source,
+            int targetWidth,
+            int targetHeight,
+            MotionEvent event,
+            boolean pointerTap,
+            boolean menuTransition) {
         int action = event.getActionMasked();
         if (action == MotionEvent.ACTION_DOWN) releaseRetainedIme();
         if (windowId != 0 && action == MotionEvent.ACTION_DOWN) {
@@ -456,7 +525,11 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
                         event.getX(), source, targetWidth, true));
                 int mappedY = Math.round(mapCoordinate(
                         event.getY(), source, targetHeight, false));
-                queuePointerClick(source, mappedX, mappedY);
+                if (menuTransition) {
+                    queueMenuTransitionClick(source, mappedX, mappedY);
+                } else {
+                    queuePointerClick(source, mappedX, mappedY);
+                }
             } else {
                 beginTouchSequence();
                 events.offer(new Event(
@@ -482,8 +555,19 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
         return false;
     }
 
+    private void queueMenuTransitionClick(
+            ArchpheneInputView source, int mappedX, int mappedY) {
+        Log.d(INPUT_TAG, "queue menu transition x=" + mappedX + " y=" + mappedY);
+        dismissPopups();
+        source.postDelayed(
+                () -> queuePointerClick(source, mappedX, mappedY),
+                MENU_TRANSITION_DELAY_MILLIS);
+    }
+
     private void queuePointerClick(
             ArchpheneInputView source, int mappedX, int mappedY) {
+        Log.d("ArchpheneInput", "queue pointer click x=" + mappedX + " y=" + mappedY
+                + " source=" + source.getWidth() + "x" + source.getHeight());
         long now = SystemClock.uptimeMillis();
         long start;
         synchronized (pointerClickLock) {
@@ -656,28 +740,44 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
                 popupCount = compositor.xdgPopupCount();
                 if (popupCount != lastPopupCount) {
                     lastPopupCount = popupCount;
-                    lastPopupSignature = "";
+                    lastPopupSignature = null;
                 }
                 StringBuilder popupState = new StringBuilder();
+                ArrayList<PopupFrame> nextPopupFrames = new ArrayList<>();
                 boolean nextActivePopup = false;
                 for (int index = 0; index < popupCount; index++) {
+                    int x = compositor.popupComponent(index, 0);
+                    int y = compositor.popupComponent(index, 1);
+                    int popupWidth = compositor.popupComponent(index, 2);
+                    int popupHeight = compositor.popupComponent(index, 3);
+                    int popupFrameWidth = compositor.popupComponent(index, 4);
+                    int popupFrameHeight = compositor.popupComponent(index, 5);
                     boolean grabbed = compositor.popupComponent(index, 6) == 1;
                     boolean dismissed = compositor.popupComponent(index, 7) == 1;
-                    nextActivePopup |= grabbed && !dismissed;
+                    boolean active = grabbed && !dismissed;
+                    nextActivePopup |= active;
+                    if (active && popupWidth > 0 && popupHeight > 0
+                            && popupFrameWidth > 0 && popupFrameHeight > 0) {
+                        nextPopupFrames.add(new PopupFrame(
+                                x, y, popupWidth, popupHeight, popupFrameWidth, popupFrameHeight));
+                    }
                     popupState.append(index).append(':')
-                            .append(compositor.popupComponent(index, 0)).append(',')
-                            .append(compositor.popupComponent(index, 1)).append(',')
-                            .append(compositor.popupComponent(index, 2)).append(',')
-                            .append(compositor.popupComponent(index, 3)).append(',')
-                            .append(compositor.popupComponent(index, 4)).append(',')
-                            .append(compositor.popupComponent(index, 5)).append(',')
-                            .append(compositor.popupComponent(index, 6)).append(',')
-                            .append(compositor.popupComponent(index, 7)).append(';');
+                            .append(x).append(',')
+                            .append(y).append(',')
+                            .append(popupWidth).append(',')
+                            .append(popupHeight).append(',')
+                            .append(popupFrameWidth).append(',')
+                            .append(popupFrameHeight).append(',')
+                            .append(grabbed ? 1 : 0).append(',')
+                            .append(dismissed ? 1 : 0).append(';');
                 }
                 activePopup = nextActivePopup;
+                activePopupFrames = List.copyOf(nextPopupFrames);
                 String popupSignature = popupState.toString();
                 if (!popupSignature.equals(lastPopupSignature)) {
                     lastPopupSignature = popupSignature;
+                    List<PopupFrame> publishedPopups = activePopupFrames;
+                    activity.runOnUiThread(() -> listener.onPopups(publishedPopups));
                     Log.i(INPUT_TAG, "popup registry=" + popupSignature);
                 }
                 int windowSerial = compositor.windowChangeSerial();

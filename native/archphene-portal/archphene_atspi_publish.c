@@ -17,7 +17,7 @@
 #define NODE_ID_MAX 1000000
 #define VIEWPORT_MAX 16384
 #define TRAVERSAL_MAX (ARCHPHENE_ATSPI_NODE_MAX + 16)
-#define TREE_BUILD_BUDGET_MILLIS 1500
+#define TREE_BUILD_BUDGET_MILLIS 5000
 
 typedef struct {
     ArchpheneAtspiReference reference;

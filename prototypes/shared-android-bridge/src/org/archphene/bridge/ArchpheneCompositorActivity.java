@@ -217,6 +217,11 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                     }
 
                     @Override
+                    public void onPopups(List<ArchpheneCompositorSession.PopupFrame> popups) {
+                        accessibilityBridge.updatePopups(popups);
+                    }
+
+                    @Override
                     public void onLinuxDragText(String text) {
                         startLinuxTextDrag(text);
                     }
@@ -484,10 +489,21 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                     session.pointerButton(false, event.getEventTime());
                 }
             } else {
-                boolean textInput = event.getActionMasked() == MotionEvent.ACTION_UP
+                boolean actionUp = event.getActionMasked() == MotionEvent.ACTION_UP;
+                boolean menuAt = actionUp && accessibilityBridge != null
+                        && accessibilityBridge.isMenuAt(view, event.getX(), event.getY());
+                boolean clickableAt = actionUp && accessibilityBridge != null
+                        && accessibilityBridge.isClickableAt(
+                                view, event.getX(), event.getY());
+                boolean menuTransition = session.hasPopups() && menuAt
+                        && !session.isPopupAt(compositorView, event.getX(), event.getY());
+                boolean pointerTap = actionUp
+                        && (session.hasPopups() || menuAt || clickableAt);
+                boolean textInput = actionUp
                         && accessibilityBridge != null
                         && accessibilityBridge.isTextInputAt(view, event.getX(), event.getY());
-                boolean tap = session.touch(event, textInput);
+                boolean tap = session.touch(
+                        event, pointerTap || textInput, menuTransition);
                 if (tap) session.setAccessibilityTextInput(compositorView, textInput);
             }
             if (event.getActionMasked() == MotionEvent.ACTION_UP) view.performClick();
@@ -522,7 +538,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             if (session == null || !(host instanceof ArchpheneInputView source)) return;
             if (source == compositorView) {
                 if (transition) session.accessibilityMenuAction(windowId, source, x, y);
-                else session.touchClick(windowId, source, x, y);
+                else session.pointerClick(windowId, source, x, y);
                 return;
             }
             SecondaryWindow secondary = secondaryWindows.get(windowId);
@@ -534,7 +550,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 session.accessibilityMenuAction(windowId, source,
                         secondary.frameWidth, secondary.frameHeight, x, y);
             } else {
-                session.touchClick(windowId, source,
+                session.pointerClick(windowId, source,
                         secondary.frameWidth, secondary.frameHeight, x, y);
             }
         });
@@ -945,15 +961,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         }
 
         private void handleBack() {
-            if (Build.VERSION.SDK_INT >= 30) {
-                WindowInsets insets = view.getRootWindowInsets();
-                if (insets != null && insets.isVisible(WindowInsets.Type.ime())) {
-                    if (view.getWindowInsetsController() != null) {
-                        view.getWindowInsetsController().hide(WindowInsets.Type.ime());
-                    }
-                    return;
-                }
-            }
+            if (hideVisibleIme(view)) return;
             if (session != null) session.closeWindow(id);
         }
 
@@ -1014,12 +1022,26 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                         session.pointerButton(false, event.getEventTime());
                     }
                 } else {
-                    boolean textInput = event.getActionMasked() == MotionEvent.ACTION_UP
+                    boolean actionUp = event.getActionMasked() == MotionEvent.ACTION_UP;
+                    boolean menuAt = actionUp && accessibilityBridge != null
+                            && accessibilityBridge.isMenuAt(
+                                    view, event.getX(), event.getY());
+                    boolean clickableAt = actionUp && accessibilityBridge != null
+                            && accessibilityBridge.isClickableAt(
+                                    view, event.getX(), event.getY());
+                    boolean menuTransition = session.hasPopups() && menuAt
+                            && !session.isPopupAt(
+                                    view, frameWidth, frameHeight,
+                                    event.getX(), event.getY());
+                    boolean pointerTap = actionUp
+                            && (session.hasPopups() || menuAt || clickableAt);
+                    boolean textInput = actionUp
                             && accessibilityBridge != null
                             && accessibilityBridge.isTextInputAt(
                                     view, event.getX(), event.getY());
                     boolean tap = session.touch(
-                            id, view, frameWidth, frameHeight, event, textInput);
+                            id, view, frameWidth, frameHeight, event,
+                            pointerTap || textInput, menuTransition);
                     if (tap) session.setAccessibilityTextInput(view, textInput);
                 }
                 if (event.getActionMasked() == MotionEvent.ACTION_UP) view.performClick();
@@ -1833,7 +1855,18 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     }
 
     private void handleSystemBack() {
+        if (hideVisibleIme(compositorView)) return;
         if (!handleBridgeBack()) finish();
+    }
+
+    private static boolean hideVisibleIme(View target) {
+        if (Build.VERSION.SDK_INT < 30) return false;
+        WindowInsets insets = target.getRootWindowInsets();
+        if (insets == null || !insets.isVisible(WindowInsets.Type.ime())) return false;
+        if (target.getWindowInsetsController() != null) {
+            target.getWindowInsetsController().hide(WindowInsets.Type.ime());
+        }
+        return true;
     }
 
     @Override

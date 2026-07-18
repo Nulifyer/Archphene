@@ -106,7 +106,8 @@ $child = [regex]::Match($processes, "(?m)^\s*(\d+)\s+$appPid\s+loader\s*$")
 if (-not $appPid -or -not $child.Success) {
     throw "KCalc or its Linux child exited during popup switching"
 }
-$childExe = ((Adb @("shell", "readlink", "/proc/$($child.Groups[1].Value)/exe")) | Select-Object -Last 1).Trim()
+$childExe = ((Adb @("shell", "run-as", $Package, "readlink",
+        "/proc/$($child.Groups[1].Value)/exe")) | Select-Object -Last 1).Trim()
 if ($childExe -notmatch 'libarchphene_ld\.so$') {
     throw "KCalc child does not use the Archphene loader: $childExe"
 }

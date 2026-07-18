@@ -4,6 +4,7 @@ import android.content.Context;
 import android.graphics.Rect;
 import android.os.Build;
 import android.os.Bundle;
+import android.util.Log;
 import android.os.ParcelFileDescriptor;
 import android.util.Base64;
 import android.view.View;
@@ -156,6 +157,8 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
             new LinkedHashMap<>();
     private final Map<Integer, WindowDescriptor> windowDescriptors =
             new LinkedHashMap<>();
+    private volatile List<ArchpheneCompositorSession.PopupFrame> popupFrames =
+            Collections.emptyList();
     private final Map<Integer, Integer> semanticWindowAssignments = new HashMap<>();
     private View host;
     private int hostWindowId;
@@ -166,6 +169,7 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
     private int viewportTop;
     private int viewportWidth = 1;
     private int viewportHeight = 1;
+    private int viewportRootId;
     private int targetLeft;
     private int targetTop;
     private int targetWidth = 1;
@@ -264,13 +268,64 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
                         || "text-field".equals(node.role)
                         || ("text".equals(node.role) && node.focusable);
                 if (!node.enabled || !node.focusable || !textInput) continue;
-                Rect bounds = scaleBounds(node.bounds, candidateHost,
-                        owner.viewportLeft, owner.viewportTop,
-                        owner.viewportWidth, owner.viewportHeight,
-                        owner.targetLeft, owner.targetTop,
-                        owner.targetWidth, owner.targetHeight,
-                        owner.targetCanvasWidth, owner.targetCanvasHeight);
+                Rect bounds = owner.displayBounds(node, candidateHost);
                 if (bounds.contains(pointX, pointY)) return true;
+            }
+        }
+        return false;
+    }
+
+    boolean isMenuAt(View candidateHost, float x, float y) {
+        ArchpheneAccessibilityBridge owner = null;
+        synchronized (root.lock) {
+            if (root.host == candidateHost) {
+                owner = root;
+            } else {
+                for (ArchpheneAccessibilityBridge provider : root.windowBridges.values()) {
+                    if (provider.host == candidateHost) {
+                        owner = provider;
+                        break;
+                    }
+                }
+            }
+        }
+        if (owner == null) return false;
+        int pointX = Math.round(x);
+        int pointY = Math.round(y);
+        synchronized (owner.lock) {
+            for (Node node : owner.nodes.values()) {
+                boolean menu = "menu".equals(node.role) || "menu-item".equals(node.role);
+                if (!node.enabled || !menu) continue;
+                Rect bounds = owner.displayBounds(node, candidateHost);
+                if (bounds.contains(pointX, pointY)) return true;
+            }
+        }
+        return false;
+    }
+
+    boolean isClickableAt(View candidateHost, float x, float y) {
+        ArchpheneAccessibilityBridge owner = null;
+        synchronized (root.lock) {
+            if (root.host == candidateHost) {
+                owner = root;
+            } else {
+                for (ArchpheneAccessibilityBridge provider : root.windowBridges.values()) {
+                    if (provider.host == candidateHost) {
+                        owner = provider;
+                        break;
+                    }
+                }
+            }
+        }
+        if (owner == null) return false;
+        int pointX = Math.round(x);
+        int pointY = Math.round(y);
+        synchronized (owner.lock) {
+            for (Node node : owner.nodes.values()) {
+                if (!node.enabled || !node.clickable || !node.children.isEmpty()) continue;
+                if (owner.displayBounds(node, candidateHost).contains(pointX, pointY)) {
+                    return true;
+                }
             }
         }
         return false;
@@ -285,6 +340,8 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
         View currentHost;
         int currentWindowId;
         Rect bounds;
+        Rect rawBounds;
+        String nodeSummary;
         synchronized (owner.lock) {
             Node node = owner.nodes.get(nodeId);
             if (node == null || owner.host == null) {
@@ -292,15 +349,23 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
             }
             currentHost = owner.host;
             currentWindowId = owner.hostWindowId;
-            bounds = scaleBounds(node.bounds, currentHost,
-                    owner.viewportLeft, owner.viewportTop,
-                    owner.viewportWidth, owner.viewportHeight,
-                    owner.targetLeft, owner.targetTop,
-                    owner.targetWidth, owner.targetHeight,
-                    owner.targetCanvasWidth, owner.targetCanvasHeight);
+            rawBounds = new Rect(node.bounds);
+            bounds = owner.displayBounds(node, currentHost);
+            nodeSummary = "id=" + node.id + " role=" + node.role
+                    + " text=" + node.text + " parent=" + node.parent;
         }
+        Log.d("ArchpheneAccessibility", "menu fallback " + nodeSummary
+                + " transition=" + transition + " raw=" + rawBounds
+                + " display=" + bounds + " host=" + currentHost.getWidth()
+                + "x" + currentHost.getHeight());
         fallback.activate(currentWindowId, currentHost,
                 bounds.exactCenterX(), bounds.exactCenterY(), transition);
+    }
+
+    void updatePopups(List<ArchpheneCompositorSession.PopupFrame> frames) {
+        root.popupFrames = frames == null || frames.isEmpty()
+                ? Collections.emptyList() : List.copyOf(frames);
+        root.redistribute();
     }
 
     void updateWindows(List<WindowDescriptor> frames,
@@ -522,6 +587,7 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
             viewportTop = subsetTop;
             viewportWidth = subsetWidth;
             viewportHeight = subsetHeight;
+            viewportRootId = viewport == null ? 0 : viewport.id;
             targetLeft = mappedLeft;
             targetTop = mappedTop;
             targetWidth = mappedWidth;
@@ -633,6 +699,7 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
         int currentTop;
         int currentWidth;
         int currentHeight;
+        int currentViewportRootId;
         int currentTargetLeft;
         int currentTargetTop;
         int currentTargetWidth;
@@ -648,6 +715,7 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
             currentTop = viewportTop;
             currentWidth = viewportWidth;
             currentHeight = viewportHeight;
+            currentViewportRootId = viewportRootId;
             currentTargetLeft = targetLeft;
             currentTargetTop = targetTop;
             currentTargetWidth = targetWidth;
@@ -700,7 +768,9 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
         info.addAction(node.id == currentAccessibilityFocus
                 ? AccessibilityNodeInfo.ACTION_CLEAR_ACCESSIBILITY_FOCUS
                 : AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS);
-        Rect windowBounds = scaleBounds(node.bounds, currentHost,
+        Rect adjustedBounds = popupAdjustedBounds(
+                node, currentNodes, root.popupFrames, currentViewportRootId);
+        Rect windowBounds = scaleBounds(adjustedBounds, currentHost,
                 currentLeft, currentTop, currentWidth, currentHeight,
                 currentTargetLeft, currentTargetTop,
                 currentTargetWidth, currentTargetHeight,
@@ -873,6 +943,52 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
         }
     }
 
+    private Rect displayBounds(Node node, View candidateHost) {
+        Rect adjusted = popupAdjustedBounds(
+                node, nodes, root.popupFrames, viewportRootId);
+        return scaleBounds(adjusted, candidateHost,
+                viewportLeft, viewportTop, viewportWidth, viewportHeight,
+                targetLeft, targetTop, targetWidth, targetHeight,
+                targetCanvasWidth, targetCanvasHeight);
+    }
+
+    private static Rect popupAdjustedBounds(Node node, Map<Integer, Node> nodes,
+            List<ArchpheneCompositorSession.PopupFrame> popups,
+            int viewportRootId) {
+        if (popups.isEmpty()) return node.bounds;
+        int menuDepth = 0;
+        int parentId = node.parent;
+        Node rootAncestor = node;
+        for (int depth = 0; parentId != 0 && depth < nodes.size(); depth++) {
+            Node parent = nodes.get(parentId);
+            if (parent == null) break;
+            rootAncestor = parent;
+            if ("menu".equals(parent.role)
+                    && (!parent.text.isBlank() || !parent.description.isBlank())) {
+                menuDepth++;
+            }
+            parentId = parent.parent;
+        }
+        int popupIndex = menuDepth > 0 ? Math.min(menuDepth - 1, popups.size() - 1) : -1;
+        boolean detachedPopupRoot = rootAncestor.parent == 0
+                && rootAncestor.id != viewportRootId;
+        if (popupIndex < 0 && detachedPopupRoot) {
+            popupIndex = popups.size() - 1;
+        }
+        if (popupIndex < 0) return node.bounds;
+        ArchpheneCompositorSession.PopupFrame popup = popups.get(popupIndex);
+        if (popup.width == popup.frameWidth && popup.height == popup.frameHeight) {
+            return node.bounds;
+        }
+        int frameX = popup.x - Math.floorDiv(popup.frameWidth - popup.width, 2);
+        int frameY = popup.y - Math.floorDiv(popup.frameHeight - popup.height, 2);
+        return new Rect(
+                frameX + node.bounds.left,
+                frameY + node.bounds.top,
+                frameX + node.bounds.right,
+                frameY + node.bounds.bottom);
+    }
+
     private static Rect scaleBounds(Rect source, View host, int viewportLeft,
             int viewportTop, int viewportWidth, int viewportHeight) {
         return scaleBounds(source, host, viewportLeft, viewportTop,
@@ -902,10 +1018,17 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
         float top = targetTop + (source.top - viewportTop) * contentScaleY;
         float right = targetLeft + (source.right - viewportLeft) * contentScaleX;
         float bottom = targetTop + (source.bottom - viewportTop) * contentScaleY;
-        return new Rect(Math.round(offsetX + left * hostScaleX),
+        Rect scaled = new Rect(Math.round(offsetX + left * hostScaleX),
                 Math.round(offsetY + top * hostScaleY),
                 Math.round(offsetX + right * hostScaleX),
                 Math.round(offsetY + bottom * hostScaleY));
+        int hostWidth = Math.max(1, host.getWidth());
+        int hostHeight = Math.max(1, host.getHeight());
+        scaled.left = Math.max(0, Math.min(hostWidth - 1, scaled.left));
+        scaled.top = Math.max(0, Math.min(hostHeight - 1, scaled.top));
+        scaled.right = Math.max(scaled.left + 1, Math.min(hostWidth, scaled.right));
+        scaled.bottom = Math.max(scaled.top + 1, Math.min(hostHeight, scaled.bottom));
+        return scaled;
     }
 
     private static void validateRole(String role) {
