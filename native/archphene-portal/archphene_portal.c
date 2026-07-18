@@ -849,7 +849,7 @@ int main(void) {
                 handle_message(connection, message);
             else if (dbus_message_get_type(message) == DBUS_MESSAGE_TYPE_SIGNAL) {
                 archphene_secret_service_handle_signal(message);
-                archphene_atspi_handle_signal(message);
+                archphene_atspi_handle_signal(connection, message);
             }
             dbus_message_unref(message);
         }

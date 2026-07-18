@@ -103,16 +103,14 @@ static bool cache_window_role(uint32_t role) {
             || role == 28 || role == 69;
 }
 
-static bool parse_cache_window(
-        DBusMessage *message, ArchpheneAtspiNode *node) {
-    DBusMessageIter outer;
+static bool parse_cache_window_iter(
+        DBusMessageIter *outer, ArchpheneAtspiNode *node) {
     DBusMessageIter fields;
-    if (message == NULL || node == NULL
-            || !dbus_message_iter_init(message, &outer)
-            || dbus_message_iter_get_arg_type(&outer) != DBUS_TYPE_STRUCT) {
+    if (outer == NULL || node == NULL
+            || dbus_message_iter_get_arg_type(outer) != DBUS_TYPE_STRUCT) {
         return false;
     }
-    dbus_message_iter_recurse(&outer, &fields);
+    dbus_message_iter_recurse(outer, &fields);
     memset(node, 0, sizeof(*node));
     if (!cache_reference_from_iter(&fields, &node->reference)) return false;
     for (int skipped = 0; skipped < 5; skipped++) {
@@ -163,6 +161,13 @@ static bool parse_cache_window(
     node->showing = cache_state(states, 25);
     node->visible = cache_state(states, 30);
     return true;
+}
+
+static bool parse_cache_window(
+        DBusMessage *message, ArchpheneAtspiNode *node) {
+    DBusMessageIter outer;
+    return message != NULL && dbus_message_iter_init(message, &outer)
+            && parse_cache_window_iter(&outer, node);
 }
 
 static bool transient_reference_matches(
@@ -1016,6 +1021,27 @@ static void handle_cache_signal(DBusMessage *message) {
     }
 }
 
+void archphene_atspi_translator_cache_items(DBusMessage *message) {
+    DBusMessageIter outer;
+    DBusMessageIter items;
+    if (message == NULL || !dbus_message_iter_init(message, &outer)
+            || dbus_message_iter_get_arg_type(&outer) != DBUS_TYPE_ARRAY) {
+        return;
+    }
+    dbus_message_iter_recurse(&outer, &items);
+    size_t cached = 0;
+    pthread_mutex_lock(&state.mutex);
+    while (dbus_message_iter_get_arg_type(&items) == DBUS_TYPE_STRUCT) {
+        ArchpheneAtspiNode node;
+        if (parse_cache_window_iter(&items, &node)) {
+            upsert_cached_window_locked(&node);
+            cached++;
+        }
+        if (!dbus_message_iter_next(&items)) break;
+    }
+    pthread_mutex_unlock(&state.mutex);
+    fprintf(stderr, "AT-SPI cache query loaded %zu windows\n", cached);
+}
 void archphene_atspi_translator_event(DBusMessage *message) {
     const char *bus = dbus_message_get_sender(message);
     const char *path = dbus_message_get_path(message);

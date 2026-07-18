@@ -13,6 +13,8 @@
 #define A11Y_REGISTRY "org.a11y.atspi.Registry"
 #define A11Y_REGISTRY_PATH "/org/a11y/atspi/registry"
 #define A11Y_SOCKET "org.a11y.atspi.Socket"
+#define A11Y_CACHE "org.a11y.atspi.Cache"
+#define A11Y_CACHE_PATH "/org/a11y/atspi/cache"
 #define PROPERTIES "org.freedesktop.DBus.Properties"
 #define INTROSPECTABLE "org.freedesktop.DBus.Introspectable"
 #define REGISTRY_ROOT "/org/a11y/atspi/accessible/root"
@@ -182,6 +184,44 @@ static dbus_bool_t send_available(DBusConnection *connection) {
     return send_owned(connection, signal);
 }
 
+static void cache_items_ready(DBusPendingCall *pending, void *unused) {
+    (void)unused;
+    DBusMessage *reply = dbus_pending_call_steal_reply(pending);
+    if (reply != NULL) {
+        if (dbus_message_get_type(reply) == DBUS_MESSAGE_TYPE_METHOD_RETURN) {
+            archphene_atspi_translator_cache_items(reply);
+        } else {
+            const char *name = dbus_message_get_error_name(reply);
+            fprintf(stderr, "AT-SPI cache query failed error=%s\n",
+                    name == NULL ? "unknown" : name);
+        }
+        dbus_message_unref(reply);
+    }
+    dbus_pending_call_unref(pending);
+}
+
+static dbus_bool_t request_cache_items(
+        DBusConnection *connection, const char *bus) {
+    if (connection == NULL || bus == NULL || bus[0] != ':') return FALSE;
+    DBusMessage *request = dbus_message_new_method_call(
+            bus, A11Y_CACHE_PATH, A11Y_CACHE, "GetItems");
+    if (request == NULL) return FALSE;
+    DBusPendingCall *pending = NULL;
+    dbus_bool_t sent = dbus_connection_send_with_reply(
+            connection, request, &pending, 2000);
+    dbus_message_unref(request);
+    if (!sent || pending == NULL) {
+        if (pending != NULL) dbus_pending_call_unref(pending);
+        return FALSE;
+    }
+    if (!dbus_pending_call_set_notify(
+            pending, cache_items_ready, NULL, NULL)) {
+        dbus_pending_call_cancel(pending);
+        dbus_pending_call_unref(pending);
+        return FALSE;
+    }
+    return TRUE;
+}
 static dbus_bool_t append_boolean_entry(DBusMessageIter *dictionary,
         const char *key) {
     DBusMessageIter entry;
@@ -454,6 +494,7 @@ static void handle_embed(DBusConnection *connection, DBusMessage *request) {
     fprintf(stderr, "AT-SPI application registered bus=%s root=%s\n",
             sender, path);
     send_owned(connection, reply);
+    request_cache_items(connection, sender);
 }
 
 static void handle_unembed(DBusConnection *connection, DBusMessage *request) {
@@ -631,7 +672,8 @@ dbus_bool_t archphene_atspi_handles(
     }
     return TRUE;
 }
-void archphene_atspi_handle_signal(DBusMessage *message) {
+void archphene_atspi_handle_signal(
+        DBusConnection *connection, DBusMessage *message) {
     if (message == NULL
             || dbus_message_get_type(message) != DBUS_MESSAGE_TYPE_SIGNAL) {
         return;
@@ -649,12 +691,19 @@ void archphene_atspi_handle_signal(DBusMessage *message) {
                         message, "((so)(so)(so)iiassusau)"))
                 || (strcmp(member, "RemoveAccessible") == 0
                     && dbus_message_has_signature(message, "(so)")));
-    if (sender != NULL
-            && ((accessibility_event
-                    && dbus_message_has_signature(message, "siiva{sv}"))
-                || cache_event)
+    if (sender != NULL && cache_event) {
+        archphene_atspi_translator_event(message);
+        return;
+    }
+    if (sender != NULL && accessibility_event
+            && dbus_message_has_signature(message, "siiva{sv}")
             && archphene_atspi_translator_has_bus(sender)) {
         archphene_atspi_translator_event(message);
+        if (connection != NULL
+                && strcmp(interface, "org.a11y.atspi.Event.Window") == 0
+                && strcmp(member, "Create") == 0) {
+            request_cache_items(connection, sender);
+        }
         return;
     }
     if (!dbus_message_is_signal(

@@ -12,5 +12,6 @@ void archphene_atspi_translator_disconnect(const char *bus);
 dbus_bool_t archphene_atspi_translator_has_bus(const char *bus);
 void archphene_atspi_translator_mark_dirty(void);
 void archphene_atspi_translator_event(DBusMessage *message);
+void archphene_atspi_translator_cache_items(DBusMessage *message);
 
 #endif
