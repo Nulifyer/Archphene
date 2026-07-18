@@ -225,7 +225,13 @@ if ($hasLibsecretFixture -and ($AndroidAbi -eq "arm64-v8a" -or
     }
     $libsecretValidated = $true
 
-    if ($AndroidAbi -eq "x86_64") {
+    $kwalletFixtureCheck = & $Adb -s $Serial shell run-as $Package test -x files/libsecret-runtime/kwalletd6 2>&1
+    $hasKWalletFixture = $LASTEXITCODE -eq 0
+    if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 1) {
+        throw "Could not inspect packaged KWallet fixture: " +
+                ($kwalletFixtureCheck -join "`n")
+    }
+    if ($hasKWalletFixture) {
         $kwalletHome = "$libsecretRoot/kwallet-home"
         $kwalletRuntime = "$libsecretRoot/kwallet-runtime"
         $kwalletConfig = "[KSecretD]`nEnabled=false`n`n[Wallet]`nDefault Wallet=Login`n"
@@ -341,7 +347,7 @@ $libsecretResult = if ($libsecretValidated -and $kwalletValidated) {
 } elseif ($AndroidAbi -eq "x86_64") {
     "; packaged Arch libsecret skipped because upstream Arch ELF files are 4 KB-aligned"
 } else {
-    "; packaged Arch libsecret is not included in this ABI probe"
+    "; packaged Arch libsecret and KWallet clients are not included in this ABI probe"
 }
 Write-Host ("Android secrets bridge passed on $Serial ($AndroidAbi, ${pageSize}-byte pages): " +
         "encrypted storage, metadata, overwrite, restart persistence, bounds, delete, lifecycle, " +
