@@ -46,6 +46,7 @@ static struct {
     Registration applications[MAX_APPLICATIONS];
     size_t application_count;
     ArchpheneAtspiReference transient_roots[MAX_TRANSIENT_ROOTS];
+    bool transient_window_roots[MAX_TRANSIENT_ROOTS];
     size_t transient_root_count;
     uint64_t transient_generation;
     uint32_t next_application_id;
@@ -63,16 +64,49 @@ static void wake_worker(void) {
     pthread_cond_signal(&state.changed);
 }
 
+static bool transient_reference_matches(
+        const ArchpheneAtspiReference *reference,
+        const char *bus, const char *path) {
+    return strcmp(reference->bus, bus) == 0
+            && strcmp(reference->path, path) == 0;
+}
+
+static void remove_transient_root_locked(size_t index) {
+    size_t remaining = state.transient_root_count - index - 1;
+    memmove(&state.transient_roots[index], &state.transient_roots[index + 1],
+            remaining * sizeof(state.transient_roots[0]));
+    memmove(&state.transient_window_roots[index],
+            &state.transient_window_roots[index + 1],
+            remaining * sizeof(state.transient_window_roots[0]));
+    state.transient_root_count--;
+}
+
+static bool remove_showing_transient_roots_locked(void) {
+    bool removed = false;
+    for (size_t index = 0; index < state.transient_root_count;) {
+        if (!state.transient_window_roots[index]) {
+            remove_transient_root_locked(index);
+            removed = true;
+        } else {
+            index++;
+        }
+    }
+    if (removed) state.transient_generation++;
+    return removed;
+}
+
 static void update_transient_root_locked(
-        const char *bus, const char *path, bool add) {
+        const char *bus, const char *path, bool add, bool window_root) {
     size_t index = 0;
     while (index < state.transient_root_count) {
         ArchpheneAtspiReference *root = &state.transient_roots[index];
-        if (strcmp(root->bus, bus) == 0 && strcmp(root->path, path) == 0) {
+        if (transient_reference_matches(root, bus, path)) {
             if (!add) {
-                memmove(root, root + 1,
-                        (state.transient_root_count - index - 1) * sizeof(*root));
-                state.transient_root_count--;
+                remove_transient_root_locked(index);
+                state.transient_generation++;
+                wake_worker();
+            } else if (window_root && !state.transient_window_roots[index]) {
+                state.transient_window_roots[index] = true;
                 state.transient_generation++;
                 wake_worker();
             }
@@ -85,13 +119,14 @@ static void update_transient_root_locked(
             && tree_index < state.tree->count; tree_index++) {
         ArchpheneAtspiReference *published =
                 &state.tree->nodes[tree_index].node.reference;
-        if (strcmp(published->bus, bus) == 0
-                && strcmp(published->path, path) == 0) return;
+        if (!window_root
+                && transient_reference_matches(published, bus, path)) return;
     }
-    ArchpheneAtspiReference *root =
-            &state.transient_roots[state.transient_root_count++];
+    size_t root_index = state.transient_root_count++;
+    ArchpheneAtspiReference *root = &state.transient_roots[root_index];
     snprintf(root->bus, sizeof(root->bus), "%s", bus);
     snprintf(root->path, sizeof(root->path), "%s", path);
+    state.transient_window_roots[root_index] = window_root;
     state.transient_generation++;
     wake_worker();
 }
@@ -101,9 +136,7 @@ static bool remove_transient_bus_locked(const char *bus) {
     for (size_t index = 0; index < state.transient_root_count;) {
         ArchpheneAtspiReference *root = &state.transient_roots[index];
         if (strcmp(root->bus, bus) == 0) {
-            memmove(root, root + 1,
-                    (state.transient_root_count - index - 1) * sizeof(*root));
-            state.transient_root_count--;
+            remove_transient_root_locked(index);
             removed = true;
         } else {
             index++;
@@ -277,6 +310,7 @@ static void process_action(DBusConnection *connection) {
     ArchpheneAtspiNode node;
     bool found_node = false;
     bool menu_bar_child = false;
+    bool showing_root_action = false;
     pthread_mutex_lock(&state.mutex);
     const ArchpheneAtspiNode *found =
             archphene_atspi_tree_find(state.tree, id);
@@ -284,6 +318,15 @@ static void process_action(DBusConnection *connection) {
         node = *found;
         found_node = true;
         menu_bar_child = parent_is_menu_bar(state.tree, id);
+        for (size_t index = 0; index < state.transient_root_count; index++) {
+            if (!state.transient_window_roots[index]
+                    && transient_reference_matches(
+                            &state.transient_roots[index],
+                            node.reference.bus, node.reference.path)) {
+                showing_root_action = true;
+                break;
+            }
+        }
     }
     pthread_mutex_unlock(&state.mutex);
     if (!found_node) return;
@@ -333,6 +376,9 @@ static void process_action(DBusConnection *connection) {
     }
     if (result == 0) {
         pthread_mutex_lock(&state.mutex);
+        if (click && showing_root_action) {
+            remove_showing_transient_roots_locked();
+        }
         state.action_refresh_passes = ACTION_REFRESH_PASSES;
         wake_worker();
         pthread_mutex_unlock(&state.mutex);
@@ -348,8 +394,12 @@ static size_t snapshot_applications(ArchpheneAtspiReference *applications) {
         snprintf(applications[index].path, sizeof(applications[index].path),
                 "%s", state.applications[index].path);
     }
-    for (size_t index = 0; index < state.transient_root_count; index++) {
-        applications[count++] = state.transient_roots[index];
+    for (int window_roots = 1; window_roots >= 0; window_roots--) {
+        for (size_t index = 0; index < state.transient_root_count; index++) {
+            if (state.transient_window_roots[index] == (window_roots != 0)) {
+                applications[count++] = state.transient_roots[index];
+            }
+        }
     }
     if (state.action_refresh_passes > 0) state.action_refresh_passes--;
     state.dirty = false;
@@ -669,8 +719,10 @@ void archphene_atspi_translator_event(DBusMessage *message) {
 
     const char *type = "content";
     int transient_change = 0;
+    bool transient_window = false;
     if (strcmp(interface, "org.a11y.atspi.Event.Window") == 0) {
         type = "window";
+        transient_window = true;
         if (strcmp(member, "Create") == 0) transient_change = 1;
         else if (strcmp(member, "Destroy") == 0
                 || strcmp(member, "Close") == 0) transient_change = -1;
@@ -704,7 +756,8 @@ void archphene_atspi_translator_event(DBusMessage *message) {
 
     pthread_mutex_lock(&state.mutex);
     if (transient_change != 0) {
-        update_transient_root_locked(bus, path, transient_change > 0);
+        update_transient_root_locked(
+                bus, path, transient_change > 0, transient_window);
     }
     for (size_t offset = 0; offset < state.event_count; offset++) {
         size_t index = (state.event_head + offset) % MAX_EVENTS;
