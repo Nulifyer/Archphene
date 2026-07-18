@@ -4,11 +4,19 @@ $ErrorActionPreference = "Stop"
 
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $Adb = Join-Path $Root "tooling/android-sdk/platform-tools/adb.exe"
-$Apk = Join-Path $Root "prototypes/kcalc-android-app/out/archpheneos-kcalc.apk"
 $Manager = "org.archpheneos.manager"
-$KCalc = "org.archphene.linux.kcalc"
+$KCalc = "org.archphene.linux.p0392be9c9f103a39d951c2f39c3644d2"
+$Apk = Join-Path $Root "tooling/build/package-installer-current-kcalc.apk"
 $Remote = "/data/local/tmp/archpheneos-kcalc-update.apk"
 $Private = "/data/user/0/$Manager/cache/archpheneos-kcalc-update.apk"
+
+$installedPath = ((& $Adb -s $Serial shell pm path $KCalc 2>$null) `
+    | Select-Object -First 1) -replace '^package:', ''
+if ([string]::IsNullOrWhiteSpace($installedPath)) {
+    throw "Installed generated KCalc package is unavailable: $KCalc"
+}
+& $Adb -s $Serial pull $installedPath $Apk | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Could not capture the installed KCalc APK" }
 $Hash = (Get-FileHash -LiteralPath $Apk -Algorithm SHA256).Hash.ToLowerInvariant()
 
 function Get-Ui([string]$Path) {
@@ -25,6 +33,8 @@ function Get-Ui([string]$Path) {
 & $Adb -s $Serial shell run-as $Manager cp $Remote cache/archpheneos-kcalc-update.apk
 & $Adb -s $Serial shell run-as $Manager chmod 600 cache/archpheneos-kcalc-update.apk
 & $Adb -s $Serial shell appops set $Manager REQUEST_INSTALL_PACKAGES allow
+& $Adb -s $Serial shell rm -f /sdcard/archphene-package-installer-confirm.xml `
+    /sdcard/archphene-package-installer-result.xml | Out-Null
 try {
     & $Adb -s $Serial shell am force-stop $Manager | Out-Null
     & $Adb -s $Serial shell am start -n "$Manager/.MainActivity" `
@@ -65,4 +75,5 @@ finally {
     & $Adb -s $Serial shell appops set $Manager REQUEST_INSTALL_PACKAGES default | Out-Null
     & $Adb -s $Serial shell rm -f $Remote | Out-Null
     & $Adb -s $Serial shell run-as $Manager rm -f cache/archpheneos-kcalc-update.apk | Out-Null
+    Remove-Item -LiteralPath $Apk -Force -ErrorAction SilentlyContinue
 }
