@@ -576,6 +576,23 @@ static const char *map_role_id(uint32_t role) {
     }
 }
 
+void archphene_atspi_client_apply_role_id(
+        ArchpheneAtspiNode *node, uint32_t role_id) {
+    if (node == NULL) return;
+    const char *mapped = map_role_id(role_id);
+    copy_text(node->role, sizeof(node->role),
+            mapped == NULL ? "view" : mapped);
+    node->application = role_id == ROLE_APPLICATION;
+    node->menu_bar = role_id == ROLE_MENU_BAR;
+    node->menu_item = role_id == ROLE_MENU_ITEM
+            || role_id == ROLE_CHECK_MENU_ITEM
+            || role_id == ROLE_RADIO_MENU_ITEM
+            || role_id == ROLE_TEAROFF_MENU_ITEM;
+    node->password = role_id == ROLE_PASSWORD_TEXT;
+    node->checkable = strcmp(node->role, "checkbox") == 0
+            || strcmp(node->role, "radio") == 0;
+}
+
 static void map_role(const char *source, char target[32]) {
     char role[64] = {0};
     normalize_action(role, sizeof(role), source);

@@ -524,7 +524,9 @@ static void handle_embed(DBusConnection *connection, DBusMessage *request) {
     fprintf(stderr, "AT-SPI application registered bus=%s root=%s\n",
             sender, path);
     send_owned(connection, reply);
-    request_cache_items(connection, sender);
+    if (!request_cache_items(connection, sender)) {
+        archphene_atspi_translator_mark_dirty();
+    }
 }
 
 static void handle_unembed(DBusConnection *connection, DBusMessage *request) {
@@ -726,6 +728,7 @@ dbus_bool_t archphene_atspi_handles_reply(DBusMessage *message) {
         }
         fprintf(stderr, "AT-SPI cache query failed error=%s\n",
                 name == NULL ? "unknown" : name);
+        archphene_atspi_translator_mark_dirty();
     }
     return TRUE;
 }
@@ -759,7 +762,9 @@ void archphene_atspi_handle_signal(
         if (connection != NULL
                 && strcmp(interface, "org.a11y.atspi.Event.Window") == 0
                 && strcmp(member, "Create") == 0) {
-            request_cache_items(connection, sender);
+            if (!request_cache_items(connection, sender)) {
+                archphene_atspi_translator_mark_dirty();
+            }
         }
         return;
     }

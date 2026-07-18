@@ -42,6 +42,9 @@ typedef struct {
     int scroll_backward_action;
 } ArchpheneAtspiNode;
 
+void archphene_atspi_client_apply_role_id(
+        ArchpheneAtspiNode *node, uint32_t role_id);
+
 int archphene_atspi_client_read_node(
         DBusConnection *connection,
         const ArchpheneAtspiReference *reference,

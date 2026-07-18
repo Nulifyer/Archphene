@@ -14,11 +14,10 @@
 
 #define MAX_APPLICATIONS 16
 #define MAX_TRANSIENT_ROOTS 32
-#define MAX_CACHED_WINDOWS 32
+#define MAX_CACHED_ACCESSIBLES ARCHPHENE_ATSPI_NODE_MAX
 #define MAX_EVENTS 64
 #define MAX_PRIORITY_ROOTS 8
-#define ROOT_MAX (MAX_APPLICATIONS + MAX_TRANSIENT_ROOTS + MAX_PRIORITY_ROOTS \
-        + MAX_CACHED_WINDOWS)
+#define ROOT_MAX (MAX_APPLICATIONS + MAX_TRANSIENT_ROOTS + MAX_PRIORITY_ROOTS)
 #define ACTION_RESPONSE_MAX 4096
 #define REBUILD_RETRY_MILLIS 1000
 #define ACTION_REFRESH_PASSES 4
@@ -36,6 +35,14 @@ typedef struct {
     bool priority_root;
 } PendingEvent;
 
+typedef struct {
+    ArchpheneAtspiNode node;
+    ArchpheneAtspiReference application;
+    ArchpheneAtspiReference parent;
+    int32_t index;
+    int32_t child_count;
+} CachedAccessible;
+
 static struct {
     pthread_mutex_t mutex;
     pthread_cond_t changed;
@@ -52,8 +59,8 @@ static struct {
     ArchpheneAtspiReference transient_roots[MAX_TRANSIENT_ROOTS];
     bool transient_window_roots[MAX_TRANSIENT_ROOTS];
     size_t transient_root_count;
-    ArchpheneAtspiNode cached_windows[MAX_CACHED_WINDOWS];
-    size_t cached_window_count;
+    CachedAccessible cached_accessibles[MAX_CACHED_ACCESSIBLES];
+    size_t cached_accessible_count;
     uint64_t transient_generation;
     uint32_t next_application_id;
     PendingEvent events[MAX_EVENTS];
@@ -100,25 +107,69 @@ static bool cache_state(const uint32_t states[2], unsigned int value) {
     return word < 2 && (states[word] & (1u << bit)) != 0;
 }
 
-static bool cache_window_role(uint32_t role) {
-    return role == 2 || role == 16 || role == 23
-            || role == 28 || role == 69;
+static bool cache_interfaces(
+        DBusMessageIter *iter, ArchpheneAtspiNode *node) {
+    if (iter == NULL || node == NULL
+            || dbus_message_iter_get_arg_type(iter) != DBUS_TYPE_ARRAY) {
+        return false;
+    }
+    DBusMessageIter interfaces;
+    dbus_message_iter_recurse(iter, &interfaces);
+    bool action = false;
+    size_t scanned = 0;
+    while (scanned < 64
+            && dbus_message_iter_get_arg_type(&interfaces) == DBUS_TYPE_STRING) {
+        const char *name = NULL;
+        dbus_message_iter_get_basic(&interfaces, &name);
+        if (name != NULL) {
+            if (strcmp(name, "org.a11y.atspi.Action") == 0) action = true;
+            else if (strcmp(name, "org.a11y.atspi.EditableText") == 0)
+                node->editable = TRUE;
+        }
+        scanned++;
+        dbus_message_iter_next(&interfaces);
+    }
+    if (dbus_message_iter_get_arg_type(&interfaces) != DBUS_TYPE_INVALID) {
+        return false;
+    }
+    node->clickable = action;
+    node->click_action = action ? 0 : -1;
+    node->scroll_forward_action = -1;
+    node->scroll_backward_action = -1;
+    return true;
 }
 
-static bool parse_cache_window_iter(
-        DBusMessageIter *outer, ArchpheneAtspiNode *node) {
+static bool parse_cache_accessible_iter(
+        DBusMessageIter *outer, CachedAccessible *cached) {
     DBusMessageIter fields;
-    if (outer == NULL || node == NULL
+    if (outer == NULL || cached == NULL
             || dbus_message_iter_get_arg_type(outer) != DBUS_TYPE_STRUCT) {
         return false;
     }
     dbus_message_iter_recurse(outer, &fields);
-    memset(node, 0, sizeof(*node));
-    if (!cache_reference_from_iter(&fields, &node->reference)) return false;
-    for (int skipped = 0; skipped < 5; skipped++) {
-        if (!dbus_message_iter_next(&fields)) return false;
+    memset(cached, 0, sizeof(*cached));
+    ArchpheneAtspiNode *node = &cached->node;
+    node->width = 1;
+    node->height = 1;
+    node->click_action = -1;
+    node->scroll_forward_action = -1;
+    node->scroll_backward_action = -1;
+    if (!cache_reference_from_iter(&fields, &node->reference)
+            || !dbus_message_iter_next(&fields)
+            || !cache_reference_from_iter(&fields, &cached->application)
+            || !dbus_message_iter_next(&fields)
+            || !cache_reference_from_iter(&fields, &cached->parent)
+            || !dbus_message_iter_next(&fields)
+            || dbus_message_iter_get_arg_type(&fields) != DBUS_TYPE_INT32) {
+        return false;
     }
-    if (dbus_message_iter_get_arg_type(&fields) != DBUS_TYPE_ARRAY
+    dbus_message_iter_get_basic(&fields, &cached->index);
+    if (!dbus_message_iter_next(&fields)
+            || dbus_message_iter_get_arg_type(&fields) != DBUS_TYPE_INT32) {
+        return false;
+    }
+    dbus_message_iter_get_basic(&fields, &cached->child_count);
+    if (!dbus_message_iter_next(&fields) || !cache_interfaces(&fields, node)
             || !dbus_message_iter_next(&fields)
             || dbus_message_iter_get_arg_type(&fields) != DBUS_TYPE_STRING) {
         return false;
@@ -131,7 +182,8 @@ static bool parse_cache_window_iter(
     }
     uint32_t role = 0;
     dbus_message_iter_get_basic(&fields, &role);
-    if (!cache_window_role(role) || !dbus_message_iter_next(&fields)
+    archphene_atspi_client_apply_role_id(node, role);
+    if (!dbus_message_iter_next(&fields)
             || dbus_message_iter_get_arg_type(&fields) != DBUS_TYPE_STRING) {
         return false;
     }
@@ -150,28 +202,27 @@ static bool parse_cache_window_iter(
         dbus_message_iter_get_basic(&state_values, &states[index]);
         dbus_message_iter_next(&state_values);
     }
-    snprintf(node->role, sizeof(node->role), "window");
     snprintf(node->text, sizeof(node->text), "%.*s",
             ARCHPHENE_ATSPI_TEXT_MAX, name == NULL ? "" : name);
     snprintf(node->description, sizeof(node->description), "%.*s",
             ARCHPHENE_ATSPI_TEXT_MAX,
             description == NULL ? "" : description);
-    node->width = 1;
-    node->height = 1;
     node->enabled = cache_state(states, 8);
-    node->focusable = cache_state(states, 11);
+    node->checked = cache_state(states, 4);
+    node->editable = cache_state(states, 7) || node->editable;
+    node->focusable = cache_state(states, 11)
+            || node->clickable || node->editable;
     node->showing = cache_state(states, 25);
     node->visible = cache_state(states, 30);
     return true;
 }
 
-static bool parse_cache_window(
-        DBusMessage *message, ArchpheneAtspiNode *node) {
+static bool parse_cache_accessible(
+        DBusMessage *message, CachedAccessible *cached) {
     DBusMessageIter outer;
     return message != NULL && dbus_message_iter_init(message, &outer)
-            && parse_cache_window_iter(&outer, node);
+            && parse_cache_accessible_iter(&outer, cached);
 }
-
 static bool event_variant_string(
         DBusMessage *message, const char **value) {
     DBusMessageIter arguments;
@@ -225,36 +276,58 @@ static bool transient_reference_matches(
             && strcmp(reference->path, path) == 0;
 }
 
-static void remove_cached_window_locked(size_t index) {
-    size_t remaining = state.cached_window_count - index - 1;
-    memmove(&state.cached_windows[index], &state.cached_windows[index + 1],
-            remaining * sizeof(state.cached_windows[0]));
-    state.cached_window_count--;
+static void remove_cached_accessible_locked(size_t index) {
+    size_t remaining = state.cached_accessible_count - index - 1;
+    memmove(&state.cached_accessibles[index],
+            &state.cached_accessibles[index + 1],
+            remaining * sizeof(state.cached_accessibles[0]));
+    state.cached_accessible_count--;
 }
 
-static void upsert_cached_window_locked(const ArchpheneAtspiNode *node) {
-    for (size_t index = 0; index < state.cached_window_count; index++) {
+static void upsert_cached_accessible_locked(
+        const CachedAccessible *cached) {
+    for (size_t index = 0; index < state.cached_accessible_count; index++) {
         ArchpheneAtspiReference *reference =
-                &state.cached_windows[index].reference;
+                &state.cached_accessibles[index].node.reference;
         if (transient_reference_matches(reference,
-                node->reference.bus, node->reference.path)) {
-            state.cached_windows[index] = *node;
+                cached->node.reference.bus, cached->node.reference.path)) {
+            state.cached_accessibles[index] = *cached;
             wake_worker();
             return;
         }
     }
-    if (state.cached_window_count == MAX_CACHED_WINDOWS) {
-        remove_cached_window_locked(0);
+    if (state.cached_accessible_count == MAX_CACHED_ACCESSIBLES) {
+        remove_cached_accessible_locked(0);
     }
-    state.cached_windows[state.cached_window_count++] = *node;
+    state.cached_accessibles[state.cached_accessible_count++] = *cached;
     wake_worker();
 }
 
+static void upsert_event_window_locked(const ArchpheneAtspiNode *window) {
+    for (size_t index = 0; index < state.cached_accessible_count; index++) {
+        ArchpheneAtspiNode *node = &state.cached_accessibles[index].node;
+        if (!transient_reference_matches(&node->reference,
+                window->reference.bus, window->reference.path)) continue;
+        node->enabled = window->enabled;
+        node->focusable = window->focusable;
+        node->showing = window->showing;
+        node->visible = window->visible;
+        if (window->text[0] != '\0') {
+            snprintf(node->text, sizeof(node->text), "%s", window->text);
+        }
+        wake_worker();
+        return;
+    }
+    CachedAccessible cached = {0};
+    cached.node = *window;
+    upsert_cached_accessible_locked(&cached);
+}
+
 static bool remove_cached_reference_locked(const char *bus, const char *path) {
-    for (size_t index = 0; index < state.cached_window_count; index++) {
+    for (size_t index = 0; index < state.cached_accessible_count; index++) {
         if (transient_reference_matches(
-                &state.cached_windows[index].reference, bus, path)) {
-            remove_cached_window_locked(index);
+                &state.cached_accessibles[index].node.reference, bus, path)) {
+            remove_cached_accessible_locked(index);
             wake_worker();
             return true;
         }
@@ -264,9 +337,9 @@ static bool remove_cached_reference_locked(const char *bus, const char *path) {
 
 static bool remove_cached_bus_locked(const char *bus) {
     bool removed = false;
-    for (size_t index = 0; index < state.cached_window_count;) {
-        if (strcmp(state.cached_windows[index].reference.bus, bus) == 0) {
-            remove_cached_window_locked(index);
+    for (size_t index = 0; index < state.cached_accessible_count;) {
+        if (strcmp(state.cached_accessibles[index].node.reference.bus, bus) == 0) {
+            remove_cached_accessible_locked(index);
             removed = true;
         } else {
             index++;
@@ -277,8 +350,8 @@ static bool remove_cached_bus_locked(const char *bus) {
 
 static bool update_cached_state_locked(
         const char *bus, const char *path, const char *state_name, bool enabled) {
-    for (size_t index = 0; index < state.cached_window_count; index++) {
-        ArchpheneAtspiNode *node = &state.cached_windows[index];
+    for (size_t index = 0; index < state.cached_accessible_count; index++) {
+        ArchpheneAtspiNode *node = &state.cached_accessibles[index].node;
         if (!transient_reference_matches(&node->reference, bus, path)) continue;
         if (strcmp(state_name, "showing") == 0) node->showing = enabled;
         else if (strcmp(state_name, "visible") == 0) node->visible = enabled;
@@ -288,7 +361,6 @@ static bool update_cached_state_locked(
     }
     return false;
 }
-
 static void remove_transient_root_locked(size_t index) {
     size_t remaining = state.transient_root_count - index - 1;
     memmove(&state.transient_roots[index], &state.transient_roots[index + 1],
@@ -719,15 +791,12 @@ static size_t snapshot_applications(ArchpheneAtspiReference *applications) {
     return count;
 }
 
-static size_t snapshot_cached_windows(ArchpheneAtspiNode *windows) {
+static size_t snapshot_cached_accessibles(
+        CachedAccessible *cached, size_t capacity) {
     pthread_mutex_lock(&state.mutex);
-    size_t count = 0;
-    for (size_t index = 0; index < state.cached_window_count; index++) {
-        ArchpheneAtspiNode *node = &state.cached_windows[index];
-        if (node->showing && node->visible && node->text[0] != '\0') {
-            windows[count++] = *node;
-        }
-    }
+    size_t count = state.cached_accessible_count < capacity
+            ? state.cached_accessible_count : capacity;
+    memcpy(cached, state.cached_accessibles, count * sizeof(*cached));
     pthread_mutex_unlock(&state.mutex);
     return count;
 }
@@ -762,47 +831,86 @@ static bool tree_incomplete(int result) {
             || result == ARCHPHENE_ATSPI_TREE_TRUNCATED;
 }
 
-static int rebuild_tree(DBusConnection *connection,
-        ArchpheneAtspiTree **next_tree) {
-    ArchpheneAtspiReference applications[ROOT_MAX];
-    ArchpheneAtspiNode cached_windows[MAX_CACHED_WINDOWS];
-    size_t count = snapshot_applications(applications);
-    size_t cached_count = snapshot_cached_windows(cached_windows);
-    for (size_t index = 0; index < cached_count; index++) {
-        append_root_reference(applications, &count,
-                &cached_windows[index].reference);
+static bool cache_has_reference(const CachedAccessible *cached, size_t count,
+        const ArchpheneAtspiReference *reference) {
+    for (size_t index = 0; index < count; index++) {
+        if (transient_reference_matches(&cached[index].node.reference,
+                reference->bus, reference->path)) return true;
     }
-    int build_result = archphene_atspi_tree_build(
-            connection, applications, count, *next_tree);
-    bool cache_fallback = build_result < 0;
-    if (cache_fallback) {
-        memset(*next_tree, 0, sizeof(**next_tree));
-        (*next_tree)->viewport_width = 1;
-        (*next_tree)->viewport_height = 1;
-    }
-    size_t cached_added = 0;
-    for (size_t index = 0; index < cached_count; index++) {
-        int added = archphene_atspi_tree_add_root(
-                *next_tree, &cached_windows[index]);
-        if (added > 0) cached_added++;
-    }
-    if (cache_fallback && cached_added == 0) {
-        retain_dirty();
-        return build_result;
-    }
-    if (cache_fallback) build_result = ARCHPHENE_ATSPI_TREE_TRUNCATED;
-    size_t retained = 0;
-    if (tree_incomplete(build_result)) {
-        pthread_mutex_lock(&state.mutex);
-        if (cached_added == 0) {
-            retained = archphene_atspi_tree_retain_descendants(
-                    state.tree, *next_tree);
+    return false;
+}
+
+static bool cache_node_publishable(const CachedAccessible *cached) {
+    return cached != NULL && !cached->node.application
+            && cached->node.showing && cached->node.visible;
+}
+
+static int build_cached_tree(const CachedAccessible *cached, size_t count,
+        ArchpheneAtspiTree *tree) {
+    if (cached == NULL || tree == NULL || count == 0) return -1;
+    memset(tree, 0, sizeof(*tree));
+    tree->viewport_width = 1;
+    tree->viewport_height = 1;
+    bool *added = calloc(count, sizeof(*added));
+    if (added == NULL) return -1;
+    size_t published = 0;
+    size_t publishable = 0;
+
+    for (size_t index = 0; index < count; index++) {
+        if (!cache_node_publishable(&cached[index])) {
+            added[index] = true;
+            continue;
         }
-        pthread_mutex_unlock(&state.mutex);
+        publishable++;
+        bool parent_is_application = transient_reference_matches(
+                &cached[index].parent, cached[index].application.bus,
+                cached[index].application.path);
+        bool parent_cached = cache_has_reference(
+                cached, count, &cached[index].parent);
+        bool root = strcmp(cached[index].node.role, "window") == 0
+                || parent_is_application || !parent_cached;
+        if (!root) continue;
+        int result = archphene_atspi_tree_add_root(
+                tree, &cached[index].node);
+        if (result >= 0) {
+            added[index] = true;
+            if (result > 0) published++;
+        }
     }
-    if (cached_added > 0 && cache_fallback && !action_refresh_pending()) {
-        build_result = ARCHPHENE_ATSPI_TREE_COMPLETE;
+
+    bool progressed;
+    do {
+        progressed = false;
+        for (size_t index = 0; index < count; index++) {
+            if (added[index] || !cache_node_publishable(&cached[index])) continue;
+            int result = archphene_atspi_tree_add_node(tree,
+                    &cached[index].node, &cached[index].parent);
+            if (result == -2) continue;
+            added[index] = true;
+            if (result > 0) published++;
+            progressed = true;
+        }
+    } while (progressed && tree->count < ARCHPHENE_ATSPI_NODE_MAX);
+
+    for (size_t index = 0; index < count
+            && tree->count < ARCHPHENE_ATSPI_NODE_MAX; index++) {
+        if (added[index] || !cache_node_publishable(&cached[index])) continue;
+        int result = archphene_atspi_tree_add_root(tree, &cached[index].node);
+        if (result >= 0) {
+            added[index] = true;
+            if (result > 0) published++;
+        }
     }
+    free(added);
+    if (published == 0) {
+        memset(tree, 0, sizeof(*tree));
+        return -1;
+    }
+    return published < publishable ? ARCHPHENE_ATSPI_TREE_TRUNCATED
+            : ARCHPHENE_ATSPI_TREE_COMPLETE;
+}
+
+static int publish_and_swap_tree(ArchpheneAtspiTree **next_tree) {
     if (archphene_atspi_tree_publish(*next_tree) != 0) {
         retain_dirty();
         return -1;
@@ -812,6 +920,45 @@ static int rebuild_tree(DBusConnection *connection,
     state.tree = *next_tree;
     *next_tree = previous;
     pthread_mutex_unlock(&state.mutex);
+    return 0;
+}
+
+static int rebuild_tree(DBusConnection *connection,
+        ArchpheneAtspiTree **next_tree) {
+    CachedAccessible *cached = calloc(
+            MAX_CACHED_ACCESSIBLES, sizeof(*cached));
+    if (cached == NULL) return -1;
+    size_t cached_count = snapshot_cached_accessibles(
+            cached, MAX_CACHED_ACCESSIBLES);
+    if (cached_count > 0) {
+        int cached_result = build_cached_tree(
+                cached, cached_count, *next_tree);
+        free(cached);
+        if (cached_result >= 0) {
+            if (publish_and_swap_tree(next_tree) != 0) return -1;
+            return cached_result;
+        }
+        retain_dirty();
+        return ARCHPHENE_ATSPI_TREE_RETRY;
+    }
+    free(cached);
+
+    ArchpheneAtspiReference applications[ROOT_MAX];
+    size_t count = snapshot_applications(applications);
+    int build_result = archphene_atspi_tree_build(
+            connection, applications, count, *next_tree);
+    if (build_result < 0) {
+        retain_dirty();
+        return build_result;
+    }
+    size_t retained = 0;
+    if (tree_incomplete(build_result)) {
+        pthread_mutex_lock(&state.mutex);
+        retained = archphene_atspi_tree_retain_descendants(
+                state.tree, *next_tree);
+        pthread_mutex_unlock(&state.mutex);
+    }
+    if (publish_and_swap_tree(next_tree) != 0) return -1;
     if (retained > 0) {
         fprintf(stderr, "AT-SPI retained %zu nodes during partial refresh\n",
                 retained);
@@ -821,6 +968,7 @@ static int rebuild_tree(DBusConnection *connection,
     }
     return build_result;
 }
+
 static void signal_startup(bool ready) {
     pthread_mutex_lock(&state.mutex);
     state.worker_ready = ready;
@@ -952,7 +1100,7 @@ void archphene_atspi_translator_stop(void) {
     state.action_refresh_passes = 0;
     state.application_count = 0;
     state.transient_root_count = 0;
-    state.cached_window_count = 0;
+    state.cached_accessible_count = 0;
     state.transient_generation = 0;
     state.next_application_id = 1;
     state.event_head = 0;
@@ -970,7 +1118,6 @@ int archphene_atspi_translator_register(
         if (strcmp(state.applications[index].bus, bus) == 0
                 && strcmp(state.applications[index].path, path) == 0) {
             *application_id = state.applications[index].application_id;
-            wake_worker();
             pthread_mutex_unlock(&state.mutex);
             return 0;
         }
@@ -989,7 +1136,6 @@ int archphene_atspi_translator_register(
     snprintf(entry->path, sizeof(entry->path), "%s", path);
     entry->application_id = id;
     *application_id = id;
-    wake_worker();
     pthread_mutex_unlock(&state.mutex);
     return 0;
 }
@@ -1075,15 +1221,17 @@ static void handle_cache_signal(DBusMessage *message) {
     const char *member = dbus_message_get_member(message);
     if (member == NULL) return;
     if (strcmp(member, "AddAccessible") == 0) {
-        ArchpheneAtspiNode node;
-        if (!parse_cache_window(message, &node)) return;
+        CachedAccessible cached;
+        if (!parse_cache_accessible(message, &cached)) return;
         pthread_mutex_lock(&state.mutex);
-        upsert_cached_window_locked(&node);
+        upsert_cached_accessible_locked(&cached);
         pthread_mutex_unlock(&state.mutex);
-        fprintf(stderr, "AT-SPI cached window bus=%s path=%s showing=%d "
-                "visible=%d title=%.*s\n", node.reference.bus,
-                node.reference.path, node.showing, node.visible,
-                80, node.text);
+        if (strcmp(cached.node.role, "window") == 0) {
+            fprintf(stderr, "AT-SPI cached window bus=%s path=%s showing=%d "
+                    "visible=%d title=%.*s\n", cached.node.reference.bus,
+                    cached.node.reference.path, cached.node.showing,
+                    cached.node.visible, 80, cached.node.text);
+        }
     } else if (strcmp(member, "RemoveAccessible") == 0) {
         DBusMessageIter iter;
         ArchpheneAtspiReference reference;
@@ -1094,7 +1242,7 @@ static void handle_cache_signal(DBusMessage *message) {
                 reference.bus, reference.path);
         pthread_mutex_unlock(&state.mutex);
         if (removed) {
-            fprintf(stderr, "AT-SPI removed cached window bus=%s path=%s\n",
+            fprintf(stderr, "AT-SPI removed cached accessible bus=%s path=%s\n",
                     reference.bus, reference.path);
         }
     }
@@ -1105,21 +1253,23 @@ void archphene_atspi_translator_cache_items(DBusMessage *message) {
     DBusMessageIter items;
     if (message == NULL || !dbus_message_iter_init(message, &outer)
             || dbus_message_iter_get_arg_type(&outer) != DBUS_TYPE_ARRAY) {
+        archphene_atspi_translator_mark_dirty();
         return;
     }
     dbus_message_iter_recurse(&outer, &items);
-    size_t cached = 0;
+    size_t cached_count = 0;
     pthread_mutex_lock(&state.mutex);
     while (dbus_message_iter_get_arg_type(&items) == DBUS_TYPE_STRUCT) {
-        ArchpheneAtspiNode node;
-        if (parse_cache_window_iter(&items, &node)) {
-            upsert_cached_window_locked(&node);
-            cached++;
+        CachedAccessible cached;
+        if (parse_cache_accessible_iter(&items, &cached)) {
+            upsert_cached_accessible_locked(&cached);
+            cached_count++;
         }
         if (!dbus_message_iter_next(&items)) break;
     }
     pthread_mutex_unlock(&state.mutex);
-    fprintf(stderr, "AT-SPI cache query loaded %zu windows\n", cached);
+    fprintf(stderr, "AT-SPI cache query loaded %zu accessibles\n", cached_count);
+    if (cached_count == 0) archphene_atspi_translator_mark_dirty();
 }
 void archphene_atspi_translator_event(DBusMessage *message) {
     const char *bus = dbus_message_get_sender(message);
@@ -1229,7 +1379,7 @@ void archphene_atspi_translator_event(DBusMessage *message) {
                 bus, path, transient_change > 0, transient_window);
     }
     if (cache_window_add) {
-        upsert_cached_window_locked(&event_window);
+        upsert_event_window_locked(&event_window);
         fprintf(stderr, "AT-SPI cached event window bus=%s path=%s title=%.*s\n",
                 bus, path, 80, event_window.text);
     } else if (cache_window_remove
