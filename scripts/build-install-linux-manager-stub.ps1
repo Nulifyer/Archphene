@@ -194,23 +194,7 @@ if ($IncludePackageRuntime) {
     } | ForEach-Object {
         Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $PackageLibDir $_.Name) -Force
     }
-    $RuntimeToolManifest = Get-Content -LiteralPath (Join-Path $Root "prebuilt/runtime-tools/manifest.json") -Raw | ConvertFrom-Json
-    $RuntimeToolArtifacts = @($RuntimeToolManifest.artifacts |
-        Where-Object { $_.abi -eq "x86_64" })
-    if ($RuntimeToolArtifacts.Count -eq 0) {
-        throw "Prebuilt x86_64 runtime-tool metadata is missing"
-    }
-    foreach ($artifact in $RuntimeToolArtifacts) {
-        $source = Join-Path $Root ("prebuilt/runtime-tools/" + $artifact.file)
-        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
-            throw "Prebuilt x86_64 runtime tool is missing: $source"
-        }
-        $hash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($hash -ne $artifact.sha256) {
-            throw "Prebuilt x86_64 runtime-tool checksum mismatch: $($artifact.file)"
-        }
-        Copy-Item -LiteralPath $source -Destination (Join-Path $PackageLibDir ([IO.Path]::GetFileName($artifact.file))) -Force
-    }
+    Copy-VerifiedPrebuiltBridge $Root "runtime-tools" "x86_64" $PackageLibDir
     Copy-VerifiedPrebuiltBridge $Root "gtk3-compat" "x86_64" $PackageLibDir
     Copy-VerifiedPrebuiltBridge $Root "qt-bridge" "x86_64" $PackageLibDir
 }

@@ -1,15 +1,17 @@
 {
-  "schemaVersion": 1,
-  "artifacts": [
+  "schema": "org.archphene.prebuilt-bridge.v1",
+  "architecture": "x86_64",
+  "purpose": "Android runtime capability and glibc path bridge tools",
+  "files": [
     {
-      "abi": "x86_64",
-      "file": "x86_64/libarchphene_path_bridge.so",
+      "name": "libarchphene_path_bridge.so",
+      "bytes": 21032,
       "source": "native/archphene-glibc-path-bridge/path_bridge.c",
       "sha256": "196ca5b94e00b034b10d85ebba6013c8746eb267ad9e914893f05dfe85cd032b"
     },
     {
-      "abi": "x86_64",
-      "file": "x86_64/libarchphene_android.so",
+      "name": "libarchphene_android.so",
+      "bytes": 21312,
       "source": "native/archphene-android-capability/archphene_android.c",
       "sha256": "3a27cea7a9f8dbd878cac0ec6941cae8a784b6bfaf681d49b013f46efc22392a"
     }
