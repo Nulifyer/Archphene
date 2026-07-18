@@ -629,8 +629,13 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
         stickyAssignments.keySet().removeIf(id -> !roots.contains(id));
 
         HashSet<Integer> assignedWindows = new HashSet<>();
+        ArrayList<Node> rootNodes = new ArrayList<>();
         for (Node node : source.values()) {
-            if (node.parent != 0) continue;
+            if (node.parent == 0) rootNodes.add(node);
+        }
+        rootNodes.sort((left, right) -> Integer.compare(
+                rootWindowPriority(right, windows), rootWindowPriority(left, windows)));
+        for (Node node : rootNodes) {
             Integer sticky = stickyAssignments.get(node.id);
             int windowId = sticky != null && windows.containsKey(sticky)
                     && (!independent || !assignedWindows.contains(sticky))
@@ -658,6 +663,16 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
         return result;
     }
 
+    private static int rootWindowPriority(Node node,
+            Map<Integer, WindowDescriptor> windows) {
+        String title = node.windowTitle.isBlank() ? node.text : node.windowTitle;
+        if (title.isBlank()) return 0;
+        for (WindowDescriptor window : windows.values()) {
+            if (title.equals(window.title)) return 1;
+        }
+        return 0;
+    }
+
     private static int matchingWindow(Map<Integer, WindowDescriptor> windows,
             String title, int width, int height, int primary, boolean independent,
             Set<Integer> assignedWindows) {
@@ -675,6 +690,15 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
         long closestDifference = Long.MAX_VALUE;
         for (WindowDescriptor window : windows.values()) {
             if (assignedWindows.contains(window.id)) continue;
+            long difference = Math.abs((long)width - window.width)
+                    + Math.abs((long)height - window.height);
+            if (difference < closestDifference) {
+                closest = window.id;
+                closestDifference = difference;
+            }
+        }
+        if (closest != 0) return closest;
+        for (WindowDescriptor window : windows.values()) {
             long difference = Math.abs((long)width - window.width)
                     + Math.abs((long)height - window.height);
             if (difference < closestDifference) {

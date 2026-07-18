@@ -15,9 +15,9 @@
 #define MAX_APPLICATIONS 16
 #define MAX_TRANSIENT_ROOTS 32
 #define MAX_CACHED_WINDOWS 32
-#define ROOT_MAX (MAX_APPLICATIONS + MAX_TRANSIENT_ROOTS)
-#define ACTION_RESPONSE_MAX 4096
 #define MAX_EVENTS 64
+#define ROOT_MAX (MAX_APPLICATIONS + MAX_TRANSIENT_ROOTS + MAX_EVENTS)
+#define ACTION_RESPONSE_MAX 4096
 #define REBUILD_RETRY_MILLIS 1000
 #define ACTION_REFRESH_PASSES 4
 #define ACTION_REFRESH_MILLIS 250
@@ -657,6 +657,20 @@ static size_t snapshot_applications(ArchpheneAtspiReference *applications) {
         snprintf(applications[count].path, sizeof(applications[count].path),
                 "%s", state.applications[index].path);
         count++;
+    }
+    for (size_t offset = 0; offset < state.event_count && count < ROOT_MAX; offset++) {
+        size_t event_index = (state.event_head + offset) % MAX_EVENTS;
+        const ArchpheneAtspiReference *event =
+                &state.events[event_index].reference;
+        bool duplicate = false;
+        for (size_t index = 0; index < count; index++) {
+            if (transient_reference_matches(
+                    &applications[index], event->bus, event->path)) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate) applications[count++] = *event;
     }
     if (state.action_refresh_passes > 0) state.action_refresh_passes--;
     state.dirty = false;
