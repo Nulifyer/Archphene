@@ -259,6 +259,13 @@ int archphene_atspi_tree_build(DBusConnection *connection,
         int read_result = archphene_atspi_client_read_node(
                 connection, &current.reference, &node, children,
                 ARCHPHENE_ATSPI_CHILD_MAX, &child_count);
+        if (current.parent == 0 && !node.application
+                && strcmp(node.role, "window") != 0) {
+            fprintf(stderr, "AT-SPI root path=%s role=%s text=%.*s showing=%d "
+                    "visible=%d children=%zu result=%d\n",
+                    current.reference.path, node.role, 80, node.text,
+                    node.showing, node.visible, child_count, read_result);
+        }
         if (read_result < 0) {
             truncated = 1;
             continue;
