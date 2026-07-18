@@ -43,7 +43,6 @@ static struct {
     bool worker_ready;
     bool worker_failed;
     bool dirty;
-    bool suppress_retention;
     unsigned int action_refresh_passes;
     Registration applications[MAX_APPLICATIONS];
     size_t application_count;
@@ -584,7 +583,6 @@ static void process_action(DBusConnection *connection) {
             bool showing_roots_pruned = remove_captured_showing_roots_locked(
                     captured_showing_roots, captured_showing_root_count);
             popup_state_retired = showing_roots_pruned || node.menu_item;
-            if (popup_state_retired) state.suppress_retention = true;
         }
     }
     pthread_mutex_unlock(&state.mutex);
@@ -641,7 +639,6 @@ static void process_action(DBusConnection *connection) {
     } else if (popup_state_retired) {
         restore_captured_showing_roots_locked(
                 captured_showing_roots, captured_showing_root_count);
-        state.suppress_retention = false;
         wake_worker();
     }
     pthread_mutex_unlock(&state.mutex);
@@ -724,11 +721,9 @@ static int rebuild_tree(DBusConnection *connection,
     }
     if (cache_fallback) build_result = ARCHPHENE_ATSPI_TREE_TRUNCATED;
     size_t retained = 0;
-    bool suppress_retention = false;
     if (tree_incomplete(build_result)) {
         pthread_mutex_lock(&state.mutex);
-        suppress_retention = state.suppress_retention;
-        if (!suppress_retention && cached_added == 0) {
+        if (cached_added == 0) {
             retained = archphene_atspi_tree_retain_descendants(
                     state.tree, *next_tree);
         }
@@ -745,7 +740,6 @@ static int rebuild_tree(DBusConnection *connection,
     ArchpheneAtspiTree *previous = state.tree;
     state.tree = *next_tree;
     *next_tree = previous;
-    if (suppress_retention) state.suppress_retention = false;
     pthread_mutex_unlock(&state.mutex);
     if (retained > 0) {
         fprintf(stderr, "AT-SPI retained %zu nodes during partial refresh\n",
