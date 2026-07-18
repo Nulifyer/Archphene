@@ -18,6 +18,8 @@
 #define ACTION_RESPONSE_MAX 4096
 #define MAX_EVENTS 64
 #define REBUILD_RETRY_MILLIS 1000
+#define ACTION_REFRESH_PASSES 4
+#define ACTION_REFRESH_MILLIS 250
 
 typedef struct {
     char bus[ARCHPHENE_ATSPI_BUS_MAX];
@@ -40,6 +42,7 @@ static struct {
     bool worker_ready;
     bool worker_failed;
     bool dirty;
+    unsigned int action_refresh_passes;
     Registration applications[MAX_APPLICATIONS];
     size_t application_count;
     ArchpheneAtspiReference transient_roots[MAX_TRANSIENT_ROOTS];
@@ -330,6 +333,7 @@ static void process_action(DBusConnection *connection) {
     }
     if (result == 0) {
         pthread_mutex_lock(&state.mutex);
+        state.action_refresh_passes = ACTION_REFRESH_PASSES;
         wake_worker();
         pthread_mutex_unlock(&state.mutex);
     }
@@ -347,6 +351,7 @@ static size_t snapshot_applications(ArchpheneAtspiReference *applications) {
     for (size_t index = 0; index < state.transient_root_count; index++) {
         applications[count++] = state.transient_roots[index];
     }
+    if (state.action_refresh_passes > 0) state.action_refresh_passes--;
     state.dirty = false;
     pthread_mutex_unlock(&state.mutex);
     return count;
@@ -356,6 +361,13 @@ static void retain_dirty(void) {
     pthread_mutex_lock(&state.mutex);
     if (!state.stopping) state.dirty = true;
     pthread_mutex_unlock(&state.mutex);
+}
+
+static bool action_refresh_pending(void) {
+    pthread_mutex_lock(&state.mutex);
+    bool pending = state.action_refresh_passes > 0;
+    pthread_mutex_unlock(&state.mutex);
+    return pending;
 }
 
 static bool tree_incomplete(int result) {
@@ -393,7 +405,9 @@ static int rebuild_tree(DBusConnection *connection,
         fprintf(stderr, "AT-SPI retained %zu nodes during partial refresh\n",
                 retained);
     }
-    if (tree_incomplete(build_result)) retain_dirty();
+    if (tree_incomplete(build_result) || action_refresh_pending()) {
+        retain_dirty();
+    }
     return build_result;
 }
 static void signal_startup(bool ready) {
@@ -447,10 +461,13 @@ static void *translator_worker(void *unused) {
         process_event();
         process_action(connection);
         pthread_mutex_lock(&state.mutex);
-        if (!state.stopping && (!state.dirty || delay_retry)) {
+        bool delay_action_refresh = state.action_refresh_passes > 0;
+        if (!state.stopping
+                && (!state.dirty || delay_retry || delay_action_refresh)) {
             struct timespec deadline;
-            deadline_after_millis(&deadline,
-                    delay_retry ? REBUILD_RETRY_MILLIS : 25);
+            long delay = delay_retry ? REBUILD_RETRY_MILLIS
+                    : delay_action_refresh ? ACTION_REFRESH_MILLIS : 25;
+            deadline_after_millis(&deadline, delay);
             pthread_cond_timedwait(&state.changed, &state.mutex, &deadline);
         }
         pthread_mutex_unlock(&state.mutex);
@@ -521,6 +538,7 @@ void archphene_atspi_translator_stop(void) {
     state.worker_ready = false;
     state.worker_failed = false;
     state.dirty = false;
+    state.action_refresh_passes = 0;
     state.application_count = 0;
     state.transient_root_count = 0;
     state.transient_generation = 0;
