@@ -406,6 +406,16 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
             subsetWidth = Math.max(1, viewport.bounds.width());
             subsetHeight = Math.max(1, viewport.bounds.height());
         }
+        int subsetRight = Math.addExact(subsetLeft, subsetWidth);
+        int subsetBottom = Math.addExact(subsetTop, subsetHeight);
+        for (Node node : subset.values()) {
+            subsetLeft = Math.min(subsetLeft, node.bounds.left);
+            subsetTop = Math.min(subsetTop, node.bounds.top);
+            subsetRight = Math.max(subsetRight, node.bounds.right);
+            subsetBottom = Math.max(subsetBottom, node.bounds.bottom);
+        }
+        subsetWidth = Math.max(1, subsetRight - subsetLeft);
+        subsetHeight = Math.max(1, subsetBottom - subsetTop);
         synchronized (lock) {
             viewportLeft = subsetLeft;
             viewportTop = subsetTop;
