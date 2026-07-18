@@ -627,10 +627,14 @@ static void process_action(DBusConnection *connection) {
             transient_generation = state.transient_generation;
             pthread_mutex_unlock(&state.mutex);
         }
-        bool compositor_menu_click = menu_bar_click || node.menu_item;
-        result = compositor_menu_click
-                ? activate_menu_pointer(id, menu_bar_click)
-                : archphene_atspi_client_click(connection, &node);
+        if (menu_bar_click) {
+            result = activate_menu_pointer(id, true);
+        } else {
+            result = archphene_atspi_client_click(connection, &node);
+            if (result != 0 && node.menu_item) {
+                result = activate_menu_pointer(id, false);
+            }
+        }
     } else if (strcmp(action, "focus") == 0) {
         result = archphene_atspi_client_focus(connection, &node);
     } else if (strcmp(action, "set-text") == 0) {
