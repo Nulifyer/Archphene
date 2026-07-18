@@ -9,7 +9,7 @@ expected_commit=b741e0c74f5436f0c925f7741140db0efd32cf4e
   echo "PipeWire source is missing: $source_dir" >&2
   exit 1
 }
-[[ "$(git -C "$source_dir" rev-parse HEAD)" == "$expected_commit" ]] || {
+[[ "$(git -c safe.directory="$source_dir" -C "$source_dir" rev-parse HEAD)" == "$expected_commit" ]] || {
   echo "PipeWire source must be tag 1.6.8 at $expected_commit" >&2
   exit 1
 }
