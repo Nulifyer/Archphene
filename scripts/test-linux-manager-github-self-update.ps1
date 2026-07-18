@@ -13,13 +13,13 @@ $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $Adb = Join-Path $Root "tooling/android-sdk/platform-tools/adb.exe"
 $Package = "org.archpheneos.manager"
 $BuildDir = Join-Path $Root "tooling/build/manager-github-self-update"
-$Baseline = Join-Path $BuildDir "Archphene-$FromVersion-production.apk"
 $DeviceAbi = (& $Adb -s $Serial shell getprop ro.product.cpu.abi).Trim()
 $ArtifactAbi = switch ($DeviceAbi) {
     "x86_64" { "x86_64" }
     "arm64-v8a" { "arm64-v8a" }
     default { throw "Unsupported Android ABI for self-update validation: $DeviceAbi" }
 }
+$Baseline = Join-Path $BuildDir "Archphene-$ArtifactAbi-$FromVersion-production.apk"
 
 if ($PrepareBaselineOnly -and -not $PublishedV100Migration) {
     throw "-PrepareBaselineOnly requires -PublishedV100Migration"
