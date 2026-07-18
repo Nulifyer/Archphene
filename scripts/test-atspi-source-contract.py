@@ -345,6 +345,10 @@ def main() -> None:
          "AT-SPI cache signal subscription"),
         (source, 'A11Y_CACHE, "GetItems"',
          "AT-SPI bulk cache query"),
+        (source, "cache_not_ready",
+         "transient GTK cache startup detection"),
+        (source, "if (!cache_not_ready) archphene_atspi_translator_mark_dirty();",
+         "legacy cache fallback isolation"),
         (source, "archphene_atspi_handles_reply",
          "manual AT-SPI cache response dispatch"),
         (source, "application_id_queries[APPLICATION_ID_QUERY_MAX]",
@@ -392,6 +396,8 @@ def main() -> None:
             raise AssertionError(f"missing {label}: {token}")
     if "dbus_message_set_no_reply(request, TRUE)" in source:
         raise AssertionError("application ID reply must be consumed asynchronously")
+    if "cache_query_disabled" in source:
+        raise AssertionError("transient GTK cache startup failure was made permanent")
     for forbidden in ("value == '+'", "value == '/'", "encoded[index] == '='"):
         if forbidden in translator_source:
             raise AssertionError(f"non-canonical base64url accepted: {forbidden}")

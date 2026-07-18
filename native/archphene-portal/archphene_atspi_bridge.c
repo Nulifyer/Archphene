@@ -23,7 +23,6 @@
 
 static dbus_uint32_t cache_queries[CACHE_QUERY_MAX];
 static size_t cache_query_count;
-static dbus_bool_t cache_query_disabled;
 static dbus_uint32_t application_id_queries[APPLICATION_ID_QUERY_MAX];
 static size_t application_id_query_count;
 
@@ -205,8 +204,7 @@ static dbus_bool_t send_available(DBusConnection *connection) {
 
 static dbus_bool_t request_cache_items(
         DBusConnection *connection, const char *bus) {
-    if (connection == NULL || bus == NULL || bus[0] != ':'
-            || cache_query_disabled) return FALSE;
+    if (connection == NULL || bus == NULL || bus[0] != ':') return FALSE;
     DBusMessage *request = dbus_message_new_method_call(
             bus, A11Y_CACHE_PATH, A11Y_CACHE, "GetItems");
     if (request == NULL) return FALSE;
@@ -723,12 +721,11 @@ dbus_bool_t archphene_atspi_handles_reply(DBusMessage *message) {
         archphene_atspi_translator_cache_items(message);
     } else {
         const char *name = dbus_message_get_error_name(message);
-        if (name != NULL && strcmp(name, DBUS_ERROR_UNKNOWN_METHOD) == 0) {
-            cache_query_disabled = TRUE;
-        }
+        dbus_bool_t cache_not_ready = name != NULL
+                && strcmp(name, DBUS_ERROR_UNKNOWN_METHOD) == 0;
         fprintf(stderr, "AT-SPI cache query failed error=%s\n",
                 name == NULL ? "unknown" : name);
-        archphene_atspi_translator_mark_dirty();
+        if (!cache_not_ready) archphene_atspi_translator_mark_dirty();
     }
     return TRUE;
 }
