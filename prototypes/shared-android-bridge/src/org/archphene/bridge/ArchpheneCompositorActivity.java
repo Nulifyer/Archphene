@@ -508,7 +508,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         runOnUiThread(() -> {
             if (session == null || !(host instanceof ArchpheneInputView source)) return;
             if (source == compositorView) {
-                session.touchClick(windowId, source, x, y);
+                session.pointerClick(windowId, source, x, y);
                 return;
             }
             SecondaryWindow secondary = secondaryWindows.get(windowId);
@@ -516,7 +516,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 Log.w(logTag, "Accessibility menu target window is unavailable: " + windowId);
                 return;
             }
-            session.touchClick(windowId, source,
+            session.pointerClick(windowId, source,
                     secondary.frameWidth, secondary.frameHeight, x, y);
         });
     }

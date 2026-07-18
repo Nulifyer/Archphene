@@ -264,6 +264,31 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
                 TOUCH_UP, ACCESSIBILITY_TOUCH_ID, mappedX, mappedY, (int) (now + 1), ""));
     }
 
+    public void pointerClick(
+            int windowId, ArchpheneInputView source, float x, float y) {
+        pointerClick(windowId, source, frameWidth, frameHeight, x, y);
+    }
+
+    public void pointerClick(
+            int windowId,
+            ArchpheneInputView source,
+            int targetWidth,
+            int targetHeight,
+            float x,
+            float y) {
+        long now = SystemClock.uptimeMillis();
+        releaseRetainedIme();
+        if (windowId != 0) activateWindow(windowId, source);
+        int mappedX = Math.round(mapCoordinate(x, source, targetWidth, true));
+        int mappedY = Math.round(mapCoordinate(y, source, targetHeight, false));
+        events.offer(new Event(
+                POINTER_MOTION, mappedX, mappedY, (int) now, 0, ""));
+        events.offer(new Event(
+                POINTER_BUTTON, 1, (int) (now + 1), 0, 0, ""));
+        events.offer(new Event(
+                POINTER_BUTTON, 0, (int) (now + 2), 0, 0, ""));
+    }
+
     public void pointerAxis(float horizontal, float vertical, long time) {
         events.offer(new Event(
                 POINTER_AXIS,
