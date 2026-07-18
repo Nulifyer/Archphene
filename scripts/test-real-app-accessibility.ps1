@@ -96,6 +96,21 @@ function Wait-TargetTree {
     throw "Timed out waiting for target accessibility tree. Required=$($Contains -join ', ') absent=$($Absent -join ', ')"
 }
 
+function Test-TargetTreeAbsentBriefly {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Value,
+        [int]$TimeoutMilliseconds = 2000
+    )
+    $deadline = (Get-Date).AddMilliseconds($TimeoutMilliseconds)
+    do {
+        $tree = Get-TargetTree
+        if ($null -ne $tree -and -not $tree.Contains($Value)) { return $true }
+        Start-Sleep -Milliseconds 100
+    } while ((Get-Date) -lt $deadline)
+    return $false
+}
+
 function Invoke-AccessibilityAction {
     param(
         [Parameter(Mandatory = $true)]
@@ -241,6 +256,10 @@ function Test-Mousepad {
     Assert-NormalizedBounds $tree
     Invoke-Adb @("shell", "input", "keyevent", "4") `
             "dismiss open file dialog" | Out-Null
+    if (-not (Test-TargetTreeAbsentBriefly -Value "|Open File|")) {
+        Invoke-Adb @("shell", "input", "keyevent", "4") `
+                "dismiss open file dialog after IME" | Out-Null
+    }
     Wait-TargetTree -Absent @("|Open File|") | Out-Null
 }
 
