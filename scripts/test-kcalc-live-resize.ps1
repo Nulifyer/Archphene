@@ -24,17 +24,20 @@ function Resolve-LauncherActivity {
 }
 
 function Get-ProcessState {
-    $appPid = (& $Adb -s $Serial shell pidof $Package).Trim()
+    $appPid = ((& $Adb -s $Serial shell pidof $Package 2>$null) -join "").Trim()
     if (-not $appPid) { throw "KCalc Android process is not running" }
     $processes = (& $Adb -s $Serial shell ps -A -o PID,PPID,NAME) -join [Environment]::NewLine
-    $match = [regex]::Match($processes, "(?m)^\s*(\d+)\s+$appPid\s+\S+\s*$")
-    if (-not $match.Success) { throw "KCalc Linux child is not owned by Android PID $appPid" }
-    $childPid = $match.Groups[1].Value
-    $childExe = (& $Adb -s $Serial shell readlink "/proc/$childPid/exe").Trim()
-    if ($childExe -notmatch 'libarchphene_ld\.so$') { throw "KCalc child does not use the Archphene loader: $childExe" }
-    [pscustomobject]@{ App = $appPid; Child = $childPid }
+    $children = [regex]::Matches(
+            $processes, "(?m)^\s*(\d+)\s+$appPid\s+\S+\s*$")
+    foreach ($child in $children) {
+        $candidate = $child.Groups[1].Value
+        $childExe = ((& $Adb -s $Serial shell run-as $Package readlink "/proc/$candidate/exe" 2>$null) -join "").Trim()
+        if ($LASTEXITCODE -eq 0 -and $childExe -match 'libarchphene_ld\.so$') {
+            return [pscustomobject]@{ App = $appPid; Child = $candidate }
+        }
+    }
+    throw "KCalc Linux loader is not a direct child of Android PID $appPid"
 }
-
 function Capture-State([string]$Name) {
     $remoteXml = "/sdcard/kcalc-rotation-$Name.xml"
     $remotePng = "/sdcard/kcalc-rotation-$Name.png"
