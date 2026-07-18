@@ -95,6 +95,75 @@ static int seen_reference(const ArchpheneAtspiReference *seen, size_t count,
     return 0;
 }
 
+static const ArchpheneAtspiPublishedNode *tree_find_id(
+        const ArchpheneAtspiTree *tree, int id) {
+    for (size_t index = 0; index < tree->count; index++) {
+        if (tree->nodes[index].id == id) return &tree->nodes[index];
+    }
+    return NULL;
+}
+
+static const ArchpheneAtspiPublishedNode *tree_find_reference(
+        const ArchpheneAtspiTree *tree,
+        const ArchpheneAtspiReference *reference) {
+    for (size_t index = 0; index < tree->count; index++) {
+        if (same_reference(&tree->nodes[index].node.reference, reference)) {
+            return &tree->nodes[index];
+        }
+    }
+    return NULL;
+}
+
+static const ArchpheneAtspiPublishedNode *tree_root(
+        const ArchpheneAtspiTree *tree,
+        const ArchpheneAtspiPublishedNode *node) {
+    const ArchpheneAtspiPublishedNode *current = node;
+    for (size_t depth = 0; current->parent != 0 && depth < tree->count; depth++) {
+        current = tree_find_id(tree, current->parent);
+        if (current == NULL) return NULL;
+    }
+    return current->parent == 0 ? current : NULL;
+}
+
+size_t archphene_atspi_tree_retain_descendants(
+        const ArchpheneAtspiTree *previous,
+        ArchpheneAtspiTree *current) {
+    if (previous == NULL || current == NULL || previous->count == 0
+            || current->count == 0) return 0;
+
+    size_t retained = 0;
+    int changed;
+    do {
+        changed = 0;
+        for (size_t index = 0; index < previous->count
+                && current->count < ARCHPHENE_ATSPI_NODE_MAX; index++) {
+            const ArchpheneAtspiPublishedNode *node = &previous->nodes[index];
+            if (node->parent == 0 || tree_find_reference(
+                    current, &node->node.reference) != NULL) continue;
+            const ArchpheneAtspiPublishedNode *previous_parent =
+                    tree_find_id(previous, node->parent);
+            const ArchpheneAtspiPublishedNode *previous_root =
+                    tree_root(previous, node);
+            if (previous_parent == NULL || previous_root == NULL
+                    || tree_find_reference(current,
+                        &previous_root->node.reference) == NULL) continue;
+            const ArchpheneAtspiPublishedNode *current_parent =
+                    tree_find_reference(current,
+                            &previous_parent->node.reference);
+            if (current_parent == NULL) continue;
+
+            ArchpheneAtspiPublishedNode copy = *node;
+            copy.id = stable_id(current, &copy.node.reference);
+            if (copy.id < 1) continue;
+            copy.parent = current_parent->id;
+            current->nodes[current->count++] = copy;
+            retained++;
+            changed = 1;
+        }
+    } while (changed && current->count < ARCHPHENE_ATSPI_NODE_MAX);
+    return retained;
+}
+
 static int build_deadline(struct timespec *deadline) {
     if (clock_gettime(CLOCK_MONOTONIC, deadline) != 0) return -1;
     deadline->tv_sec += TREE_BUILD_BUDGET_MILLIS / 1000;

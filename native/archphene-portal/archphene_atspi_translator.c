@@ -358,6 +358,11 @@ static void retain_dirty(void) {
     pthread_mutex_unlock(&state.mutex);
 }
 
+static bool tree_incomplete(int result) {
+    return result == ARCHPHENE_ATSPI_TREE_RETRY
+            || result == ARCHPHENE_ATSPI_TREE_TRUNCATED;
+}
+
 static int rebuild_tree(DBusConnection *connection,
         ArchpheneAtspiTree **next_tree) {
     ArchpheneAtspiReference applications[ROOT_MAX];
@@ -368,6 +373,13 @@ static int rebuild_tree(DBusConnection *connection,
         retain_dirty();
         return build_result;
     }
+    size_t retained = 0;
+    if (tree_incomplete(build_result)) {
+        pthread_mutex_lock(&state.mutex);
+        retained = archphene_atspi_tree_retain_descendants(
+                state.tree, *next_tree);
+        pthread_mutex_unlock(&state.mutex);
+    }
     if (archphene_atspi_tree_publish(*next_tree) != 0) {
         retain_dirty();
         return -1;
@@ -377,7 +389,11 @@ static int rebuild_tree(DBusConnection *connection,
     state.tree = *next_tree;
     *next_tree = previous;
     pthread_mutex_unlock(&state.mutex);
-    if (build_result == ARCHPHENE_ATSPI_TREE_RETRY) retain_dirty();
+    if (retained > 0) {
+        fprintf(stderr, "AT-SPI retained %zu nodes during partial refresh\n",
+                retained);
+    }
+    if (tree_incomplete(build_result)) retain_dirty();
     return build_result;
 }
 static void signal_startup(bool ready) {
@@ -420,7 +436,7 @@ static void *translator_worker(void *unused) {
         if (dirty) {
             int rebuild_result = rebuild_tree(connection, &next_tree);
             delay_retry = rebuild_result < 0
-                    || rebuild_result == ARCHPHENE_ATSPI_TREE_RETRY;
+                    || tree_incomplete(rebuild_result);
             if (delay_retry && !retrying) {
                 fprintf(stderr, "AT-SPI tree refresh deferred; retrying\n");
             } else if (!delay_retry && retrying) {

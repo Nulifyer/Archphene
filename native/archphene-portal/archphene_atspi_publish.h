@@ -29,6 +29,9 @@ int archphene_atspi_tree_build(
         size_t application_count,
         ArchpheneAtspiTree *tree);
 int archphene_atspi_tree_publish(const ArchpheneAtspiTree *tree);
+size_t archphene_atspi_tree_retain_descendants(
+        const ArchpheneAtspiTree *previous,
+        ArchpheneAtspiTree *current);
 const ArchpheneAtspiNode *archphene_atspi_tree_find(
         const ArchpheneAtspiTree *tree, int id);
 
