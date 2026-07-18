@@ -251,6 +251,8 @@ def main() -> None:
         (publish_source, "ARCHPHENE_ATSPI_TREE_TRUNCATED", "bounded-tree publication"),
         (publish_source, "if (!node.showing || !node.visible) continue;", "hidden-tree pruning"),
         (publish_source, "if (tree->count == 0) goto fail;", "pre-free empty-tree check"),
+        (publish_source, "if (read_result < 0) {\n            truncated = 1;",
+         "unreadable transient child isolation"),
         (publish_source, "size_t checkpoint = output.length;", "bounded JSON prefix"),
         (publish_source, "output.length = checkpoint;", "JSON overflow rollback"),
         (publish_source, "if (emitted == 0) output.failed = 1;", "non-empty JSON prefix"),

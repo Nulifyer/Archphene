@@ -167,7 +167,7 @@ int archphene_atspi_tree_build(DBusConnection *connection,
                 connection, &current.reference, &node, children,
                 ARCHPHENE_ATSPI_CHILD_MAX, &child_count);
         if (read_result < 0) {
-            retry = 1;
+            truncated = 1;
             continue;
         }
         if (read_result > 0) truncated = 1;
