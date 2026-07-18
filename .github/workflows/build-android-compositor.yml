@@ -65,14 +65,16 @@ jobs:
               "$readelf_bin" -h "$x86" | grep -F "Advanced Micro Devices X86-64"
               "$readelf_bin" -h "$arm" | grep -F "AArch64"
               for library in "$x86" "$arm"; do
-                "$readelf_bin" -lW "$library" | awk '
-                  $1 == "LOAD" {
-                    alignment = strtonum($NF)
-                    if (alignment < 16384) exit 1
-                    count++
+                count=0
+                while read -r alignment; do
+                  ((count += 1))
+                  ((alignment >= 16384)) || {
+                    echo "LOAD segment alignment is below 16 KiB: $library $alignment" >&2
+                    exit 1
                   }
-                  END { if (count == 0) exit 1 }
-                '
+                done < <("$readelf_bin" -lW "$library" | \
+                  awk "\$1 == \"LOAD\" { print \$NF }")
+                ((count > 0)) || { echo "ELF has no LOAD segments: $library" >&2; exit 1; }
               done
             '
 
