@@ -31,6 +31,7 @@ if (-not $SkipPackageInstaller) {
 if (-not $SkipDocumentWorkflow) {
     $tests += @{ Name = "Mousepad Android document workflow"; Command = { & "$PSScriptRoot/test-mousepad-android-document-workflow.ps1" -Serial $Serial } }
     $tests += @{ Name = "Mousepad open-dialog IME"; Command = { & "$PSScriptRoot/test-mousepad-open-dialog-ime.ps1" -Serial $Serial } }
+    $tests += @{ Name = "Mousepad touch routing"; Command = { & "$PSScriptRoot/test-mousepad-touch-routing.ps1" -Serial $Serial } }
     $tests += @{ Name = "Mousepad secondary windows"; Command = { & "$PSScriptRoot/test-mousepad-secondary-window.ps1" -Serial $Serial } }
 }
 

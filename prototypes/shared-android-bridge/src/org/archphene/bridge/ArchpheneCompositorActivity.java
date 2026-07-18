@@ -484,7 +484,11 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                     session.pointerButton(false, event.getEventTime());
                 }
             } else {
-                session.touch(event);
+                boolean textInput = event.getActionMasked() == MotionEvent.ACTION_UP
+                        && accessibilityBridge != null
+                        && accessibilityBridge.isTextInputAt(view, event.getX(), event.getY());
+                boolean tap = session.touch(event, textInput);
+                if (tap) session.setAccessibilityTextInput(compositorView, textInput);
             }
             if (event.getActionMasked() == MotionEvent.ACTION_UP) view.performClick();
             return true;
@@ -517,11 +521,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         runOnUiThread(() -> {
             if (session == null || !(host instanceof ArchpheneInputView source)) return;
             if (source == compositorView) {
-                if ("qt6".equals(toolkit)) {
-                    session.touchClick(windowId, source, x, y);
-                } else {
-                    session.pointerClick(windowId, source, x, y);
-                }
+                session.accessibilityMenuAction(windowId, source, x, y);
                 return;
             }
             SecondaryWindow secondary = secondaryWindows.get(windowId);
@@ -529,13 +529,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 Log.w(logTag, "Accessibility menu target window is unavailable: " + windowId);
                 return;
             }
-            if ("qt6".equals(toolkit)) {
-                session.touchClick(windowId, source,
-                        secondary.frameWidth, secondary.frameHeight, x, y);
-            } else {
-                session.pointerClick(windowId, source,
-                        secondary.frameWidth, secondary.frameHeight, x, y);
-            }
+            session.accessibilityMenuAction(windowId, source,
+                    secondary.frameWidth, secondary.frameHeight, x, y);
         });
     }
 
@@ -1004,7 +999,13 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                         session.pointerButton(false, event.getEventTime());
                     }
                 } else {
-                    session.touch(id, view, frameWidth, frameHeight, event);
+                    boolean textInput = event.getActionMasked() == MotionEvent.ACTION_UP
+                            && accessibilityBridge != null
+                            && accessibilityBridge.isTextInputAt(
+                                    view, event.getX(), event.getY());
+                    boolean tap = session.touch(
+                            id, view, frameWidth, frameHeight, event, textInput);
+                    if (tap) session.setAccessibilityTextInput(view, textInput);
                 }
                 if (event.getActionMasked() == MotionEvent.ACTION_UP) view.performClick();
                 return true;

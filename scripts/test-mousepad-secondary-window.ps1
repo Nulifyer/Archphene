@@ -3,7 +3,7 @@ param([string]$Serial = "emulator-5554")
 $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $Adb = Join-Path $Root "tooling/android-sdk/platform-tools/adb.exe"
-$Package = "org.archphene.linux.mousepad"
+$Package = "org.archphene.linux.p241d399e14343c53b8b766e9126776aa"
 
 function Adb([string[]]$Arguments) {
     $output = & $Adb -s $Serial @Arguments 2>&1
@@ -68,7 +68,7 @@ function Map-FitCenterPoint([int[]]$Bounds, [int]$ContentWidth, [int]$ContentHei
 
 Adb @("shell", "pm", "clear", $Package) | Out-Null
 Adb @("logcat", "-c") | Out-Null
-Adb @("shell", "am", "start", "--windowingMode", "5", "-n", "$Package/.MainActivity") | Out-Null
+Adb @("shell", "am", "start", "--windowingMode", "5", "-n", "$Package/org.archphene.linux.kcalc.MainActivity") | Out-Null
 $mainLog = Wait-BridgeLog 'window id=([0-9]+).*mapped=true.*active=true.*primary=true.*geometry=[^ ]+ ([0-9]+)x([0-9]+).*title=.*Mousepad' 30
 $main = [regex]::Match(
     $mainLog,
@@ -85,16 +85,18 @@ if ($settledFrames.Count -eq 0) {
 $settledFrame = $settledFrames[$settledFrames.Count - 1]
 $mainWidth = [int]$settledFrame.Groups[1].Value
 $mainHeight = [int]$settledFrame.Groups[2].Value
-$edit = Map-FitCenterPoint $mainBounds $mainWidth $mainHeight 90 103
+$edit = Map-FitCenterPoint $mainBounds $mainWidth $mainHeight 190 220
 Adb @("shell", "input", "tap", [string]$edit[0], [string]$edit[1]) | Out-Null
 Wait-BridgeLog 'popup registry=.*:\d+,\d+,\d+,\d+,[1-9]\d*,[1-9]\d*,1,0;' 10 | Out-Null
+Start-Sleep -Milliseconds 800
 Adb @("shell", "input", "keyevent", "KEYCODE_MOVE_END") | Out-Null
+Start-Sleep -Milliseconds 500
 Adb @("shell", "input", "keyevent", "KEYCODE_ENTER") | Out-Null
 
-$childLog = Wait-BridgeLog 'window id=([0-9]+) parent=([0-9]+) mapped=true active=true primary=false geometry=[^ ]+ ([0-9]+)x([0-9]+) title=Mousepad Preferences' 15
+$childLog = Wait-BridgeLog 'window id=([0-9]+) parent=([0-9]+) mapped=true active=(?:true|false) primary=false geometry=[^ ]+ ([0-9]+)x([0-9]+).*title=Mousepad Preferences' 15
 $child = [regex]::Match(
     $childLog,
-    'window id=([0-9]+) parent=([0-9]+) mapped=true active=true primary=false geometry=[^ ]+ ([0-9]+)x([0-9]+) title=Mousepad Preferences')
+    'window id=([0-9]+) parent=([0-9]+) mapped=true active=(?:true|false) primary=false geometry=[^ ]+ ([0-9]+)x([0-9]+).*title=Mousepad Preferences')
 $childId = [int]$child.Groups[1].Value
 if ([int]$child.Groups[2].Value -ne $mainId) {
     throw "Preferences window is not parented to the Mousepad toplevel"
@@ -112,7 +114,7 @@ if ($toggleLog -notmatch "touch up.*result=1") {
 }
 
 Adb @("logcat", "-c") | Out-Null
-$close = Map-Point $childBounds $childWidth $childHeight ($childWidth - 14) 13
+$close = Map-Point $childBounds $childWidth $childHeight ($childWidth - 96) 13
 Adb @("shell", "input", "tap", [string]$close[0], [string]$close[1]) | Out-Null
 $closeLog = Wait-BridgeLog "window id=$mainId parent=0 mapped=true active=true primary=true" 10
 $latestParent = $closeLog.LastIndexOf(

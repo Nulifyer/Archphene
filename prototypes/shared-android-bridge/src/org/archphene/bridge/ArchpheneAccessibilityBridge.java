@@ -241,6 +241,41 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
         root.menuFallback = fallback;
     }
 
+    boolean isTextInputAt(View candidateHost, float x, float y) {
+        ArchpheneAccessibilityBridge owner = null;
+        synchronized (root.lock) {
+            if (root.host == candidateHost) {
+                owner = root;
+            } else {
+                for (ArchpheneAccessibilityBridge provider : root.windowBridges.values()) {
+                    if (provider.host == candidateHost) {
+                        owner = provider;
+                        break;
+                    }
+                }
+            }
+        }
+        if (owner == null) return false;
+        int pointX = Math.round(x);
+        int pointY = Math.round(y);
+        synchronized (owner.lock) {
+            for (Node node : owner.nodes.values()) {
+                boolean textInput = node.editable || "edit".equals(node.role)
+                        || "text-field".equals(node.role)
+                        || ("text".equals(node.role) && node.focusable);
+                if (!node.enabled || !node.focusable || !textInput) continue;
+                Rect bounds = scaleBounds(node.bounds, candidateHost,
+                        owner.viewportLeft, owner.viewportTop,
+                        owner.viewportWidth, owner.viewportHeight,
+                        owner.targetLeft, owner.targetTop,
+                        owner.targetWidth, owner.targetHeight,
+                        owner.targetCanvasWidth, owner.targetCanvasHeight);
+                if (bounds.contains(pointX, pointY)) return true;
+            }
+        }
+        return false;
+    }
+
     void activateMenuFallback(int nodeId) {
         MenuFallback fallback = root.menuFallback;
         if (fallback == null) {

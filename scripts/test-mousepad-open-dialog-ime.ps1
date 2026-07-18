@@ -76,6 +76,11 @@ $search = Wait-UiNode {
     $_.GetAttribute("content-desc") -eq "Search" -and $_.clickable -eq "true"
 } "open-dialog-search"
 Tap-UiNode $search "open-dialog search"
+$searchInput = Wait-UiNode {
+    $_.text -eq "Search" -and $_.clickable -eq "true" -and
+            $_.GetAttribute("content-desc") -ne "Search"
+} "open-dialog-search-input"
+Tap-UiNode $searchInput "open-dialog search input"
 $deadline = [DateTime]::UtcNow.AddSeconds(5)
 while (-not (Input-Shown) -and [DateTime]::UtcNow -lt $deadline) {
     Start-Sleep -Milliseconds 250
@@ -126,8 +131,9 @@ $result = Wait-UiNode {
 Tap-UiNode $result "arch search result"
 Start-Sleep -Milliseconds 500
 $afterTouch = (Adb @("logcat", "-d", "-v", "brief")) -join "`n"
-if ($afterTouch -notmatch 'touch down.*result=1') {
-    throw "Search result touch was not accepted by the Wayland client"
+if ($afterTouch -notmatch 'touch down.*result=1' -or
+        $afterTouch -notmatch 'touch up.*result=1') {
+    throw "Search result tap was not accepted as a Wayland touch"
 }
 
-Write-Host "Mousepad open-dialog IME passed: arch query retained Gboard; Back dismissed it; result touch was routed."
+Write-Host "Mousepad open-dialog IME passed: arch query retained Gboard; Back dismissed it; result tap was routed."

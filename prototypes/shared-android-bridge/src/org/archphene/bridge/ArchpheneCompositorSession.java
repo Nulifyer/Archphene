@@ -10,6 +10,7 @@ import android.view.KeyEvent;
 import android.view.KeyCharacterMap;
 import android.view.MotionEvent;
 import android.view.PointerIcon;
+import android.view.ViewConfiguration;
 import android.view.WindowInsets;
 import android.view.inputmethod.InputMethodManager;
 import java.io.ByteArrayOutputStream;
@@ -84,6 +85,7 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
     private static final int ANDROID_DRAG_CANCEL = 32;
     private static final int LINUX_DRAG_FINISH = 33;
     private static final int ANDROID_DRAG_DROP_URI_LIST = 34;
+    private static final long POINTER_CLICK_HOLD_MILLIS = 32;
 
     private final Activity activity;
     private final ArchpheneInputView view;
@@ -92,7 +94,9 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
     private final Listener listener;
     private final ArchpheneClipboardBroker clipboard;
     private final LinkedBlockingQueue<Event> events = new LinkedBlockingQueue<>();
+    private final Object pointerClickLock = new Object();
     private final Set<Integer> pointerFallbackTouches = new HashSet<>();
+    private final int touchSlopSquared;
     private final AtomicBoolean running = new AtomicBoolean();
     private final CountDownLatch ready = new CountDownLatch(1);
     private volatile Throwable startupError;
@@ -100,10 +104,13 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
     private Thread thread;
     private volatile int acceptedClients;
     private volatile int popupCount;
+    private volatile boolean activePopup;
     private volatile int frameWidth;
     private volatile int frameHeight;
     private volatile long lastImeCommitUptime;
     private volatile boolean retainedIme;
+    private volatile boolean accessibilityImeActive;
+    private volatile boolean nativeImeActive;
     private volatile boolean independentWindows;
     private volatile int activeSecondaryWindowId;
     private float gestureInitialSpan;
@@ -112,6 +119,15 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
     private float gestureLastCentroidY;
     private boolean gestureActive;
     private boolean holdActive;
+    private boolean pendingTouch;
+    private boolean forwardingTouch;
+    private int pendingTouchId;
+    private int pendingTouchX;
+    private int pendingTouchY;
+    private int pendingTouchTime;
+    private float pendingTouchViewX;
+    private float pendingTouchViewY;
+    private long nextPointerClickUptime;
 
     public ArchpheneCompositorSession(
             Activity activity, ArchpheneInputView view, Listener listener) {
@@ -119,6 +135,8 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
         this.view = view;
         inputView = view;
         this.listener = listener;
+        int touchSlop = ViewConfiguration.get(activity).getScaledTouchSlop();
+        touchSlopSquared = touchSlop * touchSlop;
         clipboard = new ArchpheneClipboardBroker(
                 activity, () -> events.offer(Event.simple(CLIPBOARD_CHANGED)));
     }
@@ -272,6 +290,27 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
                 TOUCH_UP, ACCESSIBILITY_TOUCH_ID, mappedX, mappedY, (int) (now + 1), ""));
     }
 
+    public void accessibilityMenuAction(
+            int windowId, ArchpheneInputView source, float x, float y) {
+        accessibilityMenuAction(windowId, source, frameWidth, frameHeight, x, y);
+    }
+
+    public void accessibilityMenuAction(
+            int windowId,
+            ArchpheneInputView source,
+            int targetWidth,
+            int targetHeight,
+            float x,
+            float y) {
+        if (!activePopup) {
+            touchClick(windowId, source, targetWidth, targetHeight, x, y);
+            return;
+        }
+        dismissPopups();
+        source.postDelayed(() -> touchClick(windowId, source,
+                targetWidth, targetHeight, x, y), POINTER_CLICK_HOLD_MILLIS);
+    }
+
     public void pointerClick(
             int windowId, ArchpheneInputView source, float x, float y) {
         pointerClick(windowId, source, frameWidth, frameHeight, x, y);
@@ -289,12 +328,7 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
         if (windowId != 0) activateWindow(windowId, source);
         int mappedX = Math.round(mapCoordinate(x, source, targetWidth, true));
         int mappedY = Math.round(mapCoordinate(y, source, targetHeight, false));
-        events.offer(new Event(
-                POINTER_MOTION, mappedX, mappedY, (int) now, 0, ""));
-        events.offer(new Event(
-                POINTER_BUTTON, 1, (int) (now + 1), 0, 0, ""));
-        events.offer(new Event(
-                POINTER_BUTTON, 0, (int) (now + 2), 0, 0, ""));
+        queuePointerClick(source, mappedX, mappedY);
     }
 
     public void pointerAxis(float horizontal, float vertical, long time) {
@@ -309,26 +343,97 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
 
     public void pointerLeave() { events.offer(Event.simple(POINTER_LEAVE)); }
 
-    public void touch(MotionEvent event) {
-        touch(0, view, frameWidth, frameHeight, event);
+    public void setAccessibilityTextInput(ArchpheneInputView target, boolean enabled) {
+        if (!enabled) {
+            if (accessibilityImeActive) {
+                accessibilityImeActive = false;
+                hideIme();
+            }
+            return;
+        }
+        if (nativeImeActive) return;
+        if (target != inputView) {
+            inputView = target;
+            inputViewGeneration++;
+        }
+        accessibilityImeActive = true;
+        requestIme(target, new ArchpheneInputView.EditorState("", 0, 0, 0, 0),
+                "AT-SPI text focus");
     }
 
-    public void touch(
+    public boolean touch(MotionEvent event) {
+        return touch(event, false);
+    }
+
+    public boolean touch(MotionEvent event, boolean pointerTap) {
+        return touch(0, view, frameWidth, frameHeight, event, pointerTap);
+    }
+
+    public boolean touch(
             int windowId,
             ArchpheneInputView source,
             int targetWidth,
             int targetHeight,
-            MotionEvent event) {
-        if (event.getActionMasked() == MotionEvent.ACTION_DOWN) releaseRetainedIme();
-        if (windowId != 0 && event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+            MotionEvent event,
+            boolean pointerTap) {
+        int action = event.getActionMasked();
+        if (action == MotionEvent.ACTION_DOWN) releaseRetainedIme();
+        if (windowId != 0 && action == MotionEvent.ACTION_DOWN) {
             activateWindow(windowId, source);
         }
-        if (event.getActionMasked() == MotionEvent.ACTION_DOWN
-                && !insideDisplayedImage(source, event.getX(), event.getY())) return;
-        routeGesture(event, source, targetWidth, targetHeight);
-        int action = event.getActionMasked();
+        if (action == MotionEvent.ACTION_DOWN) {
+            if (forwardingTouch) events.offer(Event.simple(TOUCH_CANCEL));
+            resetTouchSequence();
+            if (!insideDisplayedImage(source, event.getX(), event.getY())) return false;
+            pendingTouch = true;
+            pendingTouchId = event.getPointerId(0);
+            pendingTouchViewX = event.getX();
+            pendingTouchViewY = event.getY();
+            pendingTouchX = Math.round(mapCoordinate(
+                    pendingTouchViewX, source, targetWidth, true));
+            pendingTouchY = Math.round(mapCoordinate(
+                    pendingTouchViewY, source, targetHeight, false));
+            pendingTouchTime = (int) event.getEventTime();
+            return false;
+        }
+
+        if (!pendingTouch) return false;
         int time = (int) event.getEventTime();
+        if (action == MotionEvent.ACTION_POINTER_DOWN) {
+            beginTouchSequence();
+            int firstIndex = event.findPointerIndex(pendingTouchId);
+            if (firstIndex >= 0
+                    && (event.getX(firstIndex) != pendingTouchViewX
+                            || event.getY(firstIndex) != pendingTouchViewY)) {
+                events.offer(new Event(
+                        TOUCH_MOTION,
+                        pendingTouchId,
+                        Math.round(mapCoordinate(
+                                event.getX(firstIndex), source, targetWidth, true)),
+                        Math.round(mapCoordinate(
+                                event.getY(firstIndex), source, targetHeight, false)),
+                        time,
+                        ""));
+            }
+            int index = event.getActionIndex();
+            events.offer(new Event(
+                    TOUCH_DOWN,
+                    event.getPointerId(index),
+                    Math.round(mapCoordinate(event.getX(index), source, targetWidth, true)),
+                    Math.round(mapCoordinate(event.getY(index), source, targetHeight, false)),
+                    time,
+                    ""));
+            routeGesture(event, source, targetWidth, targetHeight);
+            return false;
+        }
         if (action == MotionEvent.ACTION_MOVE) {
+            if (!forwardingTouch && event.getPointerCount() == 1) {
+                float dx = event.getX() - pendingTouchViewX;
+                float dy = event.getY() - pendingTouchViewY;
+                if (dx * dx + dy * dy <= touchSlopSquared) return false;
+                beginTouchSequence();
+            }
+            routeGesture(event, source, targetWidth, targetHeight);
             for (int i = 0; i < event.getPointerCount(); i++) {
                 events.offer(new Event(
                         TOUCH_MOTION,
@@ -338,17 +443,32 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
                         time,
                         ""));
             }
-            return;
+            return false;
         }
         if (action == MotionEvent.ACTION_CANCEL) {
-            events.offer(Event.simple(TOUCH_CANCEL));
-            return;
+            if (forwardingTouch) events.offer(Event.simple(TOUCH_CANCEL));
+            resetTouchSequence();
+            return false;
         }
+        if (action == MotionEvent.ACTION_UP && !forwardingTouch) {
+            if (pointerTap) {
+                int mappedX = Math.round(mapCoordinate(
+                        event.getX(), source, targetWidth, true));
+                int mappedY = Math.round(mapCoordinate(
+                        event.getY(), source, targetHeight, false));
+                queuePointerClick(source, mappedX, mappedY);
+            } else {
+                beginTouchSequence();
+                events.offer(new Event(
+                        TOUCH_UP, pendingTouchId, 0, time, 0, ""));
+            }
+            resetTouchSequence();
+            return true;
+        }
+        routeGesture(event, source, targetWidth, targetHeight);
         int index = event.getActionIndex();
-        int type = action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN
-                ? TOUCH_DOWN
-                : action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP
-                        ? TOUCH_UP : 0;
+        int type = action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP
+                ? TOUCH_UP : 0;
         if (type != 0) {
             events.offer(new Event(
                     type,
@@ -358,6 +478,60 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
                     time,
                     ""));
         }
+        if (action == MotionEvent.ACTION_UP) resetTouchSequence();
+        return false;
+    }
+
+    private void queuePointerClick(
+            ArchpheneInputView source, int mappedX, int mappedY) {
+        long now = SystemClock.uptimeMillis();
+        long start;
+        synchronized (pointerClickLock) {
+            start = Math.max(now, nextPointerClickUptime);
+            nextPointerClickUptime = start + POINTER_CLICK_HOLD_MILLIS + 1;
+        }
+        long startDelay = start - now;
+        Runnable press = () -> {
+            int eventTime = (int) SystemClock.uptimeMillis();
+            events.offer(new Event(
+                    POINTER_MOTION, mappedX, mappedY, eventTime, 0, ""));
+            events.offer(new Event(
+                    POINTER_BUTTON, 1, eventTime, 0, 0, ""));
+        };
+        if (startDelay == 0) {
+            press.run();
+        } else {
+            source.postDelayed(press, startDelay);
+        }
+        source.postDelayed(() -> events.offer(new Event(
+                POINTER_BUTTON,
+                0,
+                (int) SystemClock.uptimeMillis(),
+                0,
+                0,
+                "")), startDelay + POINTER_CLICK_HOLD_MILLIS);
+    }
+    private void beginTouchSequence() {
+        if (forwardingTouch) return;
+        forwardingTouch = true;
+        events.offer(new Event(
+                TOUCH_DOWN,
+                pendingTouchId,
+                pendingTouchX,
+                pendingTouchY,
+                pendingTouchTime,
+                ""));
+    }
+
+    private void resetTouchSequence() {
+        pendingTouch = false;
+        forwardingTouch = false;
+        pendingTouchId = 0;
+        pendingTouchX = 0;
+        pendingTouchY = 0;
+        pendingTouchTime = 0;
+        pendingTouchViewX = 0;
+        pendingTouchViewY = 0;
     }
 
     private void routeGesture(
@@ -452,7 +626,7 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
 
     public void dismissPopups() { events.offer(Event.simple(DISMISS_POPUPS)); }
 
-    public boolean hasPopups() { return popupCount > 0; }
+    public boolean hasPopups() { return activePopup; }
 
     private void run(File socket, int width, int height) {
         try (NativeCompositor compositor = new NativeCompositor(socket)) {
@@ -485,7 +659,11 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
                     lastPopupSignature = "";
                 }
                 StringBuilder popupState = new StringBuilder();
+                boolean nextActivePopup = false;
                 for (int index = 0; index < popupCount; index++) {
+                    boolean grabbed = compositor.popupComponent(index, 6) == 1;
+                    boolean dismissed = compositor.popupComponent(index, 7) == 1;
+                    nextActivePopup |= grabbed && !dismissed;
                     popupState.append(index).append(':')
                             .append(compositor.popupComponent(index, 0)).append(',')
                             .append(compositor.popupComponent(index, 1)).append(',')
@@ -496,6 +674,7 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
                             .append(compositor.popupComponent(index, 6)).append(',')
                             .append(compositor.popupComponent(index, 7)).append(';');
                 }
+                activePopup = nextActivePopup;
                 String popupSignature = popupState.toString();
                 if (!popupSignature.equals(lastPopupSignature)) {
                     lastPopupSignature = popupSignature;
@@ -555,6 +734,7 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
                                         0, 0, 0, ""));
                             }));
                 }
+                nativeImeActive = compositor.imeActive();
                 int show = compositor.imeShowRequests();
                 int imeViewGeneration = inputViewGeneration;
                 if (show != lastShow) {
@@ -563,7 +743,7 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
                     retainedIme = false;
                     Log.d(INPUT_TAG, "Wayland IME show request=" + show);
                     showIme(compositor);
-                } else if (compositor.imeActive() && imeViewGeneration != lastImeViewGeneration) {
+                } else if (nativeImeActive && imeViewGeneration != lastImeViewGeneration) {
                     lastImeViewGeneration = imeViewGeneration;
                     Log.d(INPUT_TAG, "Wayland IME retarget generation=" + imeViewGeneration);
                     showIme(compositor);
@@ -794,12 +974,17 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
     }
 
     private void showIme(NativeCompositor compositor) {
+        accessibilityImeActive = false;
         String text = compositor.imeSurroundingText();
         int anchor = utf8OffsetToUtf16(text, compositor.imeAnchor());
         int cursor = utf8OffsetToUtf16(text, compositor.imeCursor());
-        ArchpheneInputView.EditorState state = new ArchpheneInputView.EditorState(
-                text, anchor, cursor, compositor.imeHint(), compositor.imePurpose());
-        ArchpheneInputView target = inputView;
+        requestIme(inputView, new ArchpheneInputView.EditorState(
+                text, anchor, cursor, compositor.imeHint(), compositor.imePurpose()),
+                "Wayland text-input-v3");
+    }
+
+    private void requestIme(ArchpheneInputView target,
+            ArchpheneInputView.EditorState state, String source) {
         activity.runOnUiThread(() -> {
             target.setEditorState(state);
             target.requestFocus();
@@ -811,7 +996,8 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
                     target.getWindowInsetsController().show(WindowInsets.Type.ime());
                 }
                 boolean accepted = input.showSoftInput(target, InputMethodManager.SHOW_IMPLICIT);
-                Log.d(INPUT_TAG, "IME show focused=" + target.hasWindowFocus()
+                Log.d(INPUT_TAG, "IME show source=" + source
+                        + " focused=" + target.hasWindowFocus()
                         + " accepted=" + accepted);
             }, 150);
         });

@@ -71,6 +71,11 @@ $ui = Dump-Ui "mousepad-document-picker-roots"
 Tap-UiNode $ui "text" "Downloads" "open Downloads"
 Start-Sleep -Seconds 1
 $ui = Dump-Ui "mousepad-document-picker-downloads"
+Tap-UiNode $ui "content-desc" "Search" "search Downloads"
+Start-Sleep -Milliseconds 500
+Invoke-Adb @("shell", "input", "text", "workflow") "type Downloads search query" | Out-Null
+Start-Sleep -Seconds 1
+$ui = Dump-Ui "mousepad-document-picker-search"
 Tap-UiNode $ui "text" $Name "select Downloads document"
 
 Wait-For {
@@ -106,9 +111,18 @@ $ui = Dump-Ui "mousepad-provider-picker"
 Tap-UiNode $ui "content-desc" "Show roots" "open provider roots"
 Start-Sleep -Milliseconds 700
 $ui = Dump-Ui "mousepad-provider-roots"
-Tap-UiNode $ui "text" "Archphene Home" "open brokered Linux home"
-Start-Sleep -Seconds 1
-$ui = Dump-Ui "mousepad-provider-home"
+if ($ui.OuterXml.Contains('text="Archphene Apps"')) {
+    Tap-UiNode $ui "text" "Archphene Apps" "open brokered Linux apps"
+} else {
+    Tap-UiNode $ui "text" "Archphene Home" "open brokered Linux home"
+}
+Start-Sleep -Seconds 2
+$ui = Dump-Ui "mousepad-provider-apps"
+if ($ui.OuterXml.Contains('text="Mousepad"')) {
+    Tap-UiNode $ui "text" "Mousepad" "open Mousepad brokered home"
+    Start-Sleep -Seconds 1
+    $ui = Dump-Ui "mousepad-provider-home"
+}
 Tap-UiNode $ui "text" "Documents" "open brokered Documents folder"
 Start-Sleep -Milliseconds 700
 $ui = Dump-Ui "mousepad-provider-documents"

@@ -738,7 +738,7 @@ static int rebuild_tree(DBusConnection *connection,
         }
         pthread_mutex_unlock(&state.mutex);
     }
-    if (cached_added > 0 && tree_incomplete(build_result)) {
+    if (cached_added > 0 && cache_fallback && !action_refresh_pending()) {
         build_result = ARCHPHENE_ATSPI_TREE_COMPLETE;
     }
     if (archphene_atspi_tree_publish(*next_tree) != 0) {
@@ -755,8 +755,7 @@ static int rebuild_tree(DBusConnection *connection,
         fprintf(stderr, "AT-SPI retained %zu nodes during partial refresh\n",
                 retained);
     }
-    if (tree_incomplete(build_result)
-            || (cached_added == 0 && action_refresh_pending())) {
+    if (tree_incomplete(build_result) || action_refresh_pending()) {
         retain_dirty();
     }
     return build_result;

@@ -102,7 +102,7 @@ if ((Get-Item -LiteralPath $Screenshot).Length -lt 20000) {
 }
 $appPid = ((Adb @("shell", "pidof", $Package)) | Select-Object -Last 1).Trim()
 $processes = (Adb @("shell", "ps", "-A", "-o", "PID,PPID,NAME")) -join [Environment]::NewLine
-$child = [regex]::Match($processes, "(?m)^\s*(\d+)\s+$appPid\s+\S+\s*$")
+$child = [regex]::Match($processes, "(?m)^\s*(\d+)\s+$appPid\s+loader\s*$")
 if (-not $appPid -or -not $child.Success) {
     throw "KCalc or its Linux child exited during popup switching"
 }
