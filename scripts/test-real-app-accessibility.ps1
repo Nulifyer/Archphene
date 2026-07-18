@@ -111,6 +111,33 @@ function Test-TargetTreeAbsentBriefly {
     return $false
 }
 
+function Wait-AccessibilityTargetAction {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Selector,
+        [Parameter(Mandatory = $true)]
+        [int]$RequiredAction
+    )
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $tree = Get-TargetTree
+        if ($null -ne $tree) {
+            foreach ($line in $tree -split "`n") {
+                if (-not $line.StartsWith("NODE|")) { continue }
+                $fields = $line.TrimEnd("`r").Split('|')
+                if ($fields.Length -lt 10 -or
+                        ($fields[3] -ne $Selector -and $fields[4] -ne $Selector) -or
+                        $fields[6] -ne "true") { continue }
+                $actions = 0L
+                if ([long]::TryParse($fields[$fields.Length - 1], [ref]$actions) -and
+                        ($actions -band $RequiredAction) -ne 0) { return }
+            }
+        }
+        Start-Sleep -Milliseconds 100
+    } while ((Get-Date) -lt $deadline)
+    throw "Timed out waiting for accessibility action '$Selector' flag $RequiredAction"
+}
+
 function Invoke-AccessibilityAction {
     param(
         [Parameter(Mandatory = $true)]
@@ -119,6 +146,14 @@ function Invoke-AccessibilityAction {
         [string]$Action = "click",
         [string]$Value = ""
     )
+    $requiredAction = switch ($Action) {
+        "click" { 16 }
+        "focus" { 1 }
+        "scroll-forward" { 4096 }
+        "scroll-backward" { 8192 }
+        "set-text" { 2097152 }
+    }
+    Wait-AccessibilityTargetAction -Selector $Selector -RequiredAction $requiredAction
     $id = "real-$([Guid]::NewGuid().ToString('N').Substring(0, 12))"
     $selectorEncoded = ConvertTo-Base64Url $Selector
     $valueEncoded = ConvertTo-Base64Url $Value
