@@ -148,8 +148,7 @@ public final class RuntimeFdLauncher {
         long executionId = 0;
         try {
             if (execution != null) executionId = execution.begin();
-            ParcelFileDescriptor program = materializeElf(resolver, programUri,
-                    new File(links, ".program"), execution);
+            ParcelFileDescriptor program = openElf(resolver, programUri);
             descriptors.add(program);
             ParcelFileDescriptor loader = openElf(resolver, loaderUri);
             descriptors.add(loader);
@@ -160,8 +159,7 @@ public final class RuntimeFdLauncher {
                         || !linkNames.add(libraryNames[index])) {
                     throw new SecurityException("Unsafe or duplicate runtime library name");
                 }
-                ParcelFileDescriptor library = materializeElf(resolver, libraryUris[index],
-                        new File(links, ".library-" + index), execution);
+                ParcelFileDescriptor library = openElf(resolver, libraryUris[index]);
                 descriptors.add(library);
                 manifest.append(library.getFd()).append('\t')
                         .append(libraryNames[index]).append('\n');
@@ -290,35 +288,6 @@ public final class RuntimeFdLauncher {
             }
         }
         return true;
-    }
-
-    private static ParcelFileDescriptor materializeElf(ContentResolver resolver, Uri uri,
-            File temporary, Execution execution) throws Exception {
-        try (ParcelFileDescriptor source = openElf(resolver, uri);
-                ParcelFileDescriptor duplicate = ParcelFileDescriptor.dup(
-                        source.getFileDescriptor());
-                FileInputStream input = new FileInputStream(duplicate.getFileDescriptor());
-                java.io.FileOutputStream output = new java.io.FileOutputStream(temporary)) {
-            long total = 0;
-            byte[] buffer = new byte[64 * 1024];
-            int count;
-            while ((count = input.read(buffer)) != -1) {
-                if (execution != null) execution.throwIfCancelled();
-                total += count;
-                if (total > 2L * 1024 * 1024 * 1024) {
-                    throw new SecurityException("Runtime module exceeds bounds");
-                }
-                output.write(buffer, 0, count);
-            }
-            if (total <= 0) throw new SecurityException("Runtime module is empty");
-            output.getFD().sync();
-        }
-        android.system.Os.chmod(temporary.getAbsolutePath(), 0500);
-        ParcelFileDescriptor descriptor = ParcelFileDescriptor.open(
-                temporary, ParcelFileDescriptor.MODE_READ_ONLY);
-        // Keep the verified wrapper-private inode named until the child exits. Desktop
-        // frameworks use late dlopen(), after they may have closed inherited descriptors.
-        return descriptor;
     }
 
     private static ParcelFileDescriptor openElf(ContentResolver resolver, Uri uri)
