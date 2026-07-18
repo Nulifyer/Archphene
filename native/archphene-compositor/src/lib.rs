@@ -4664,12 +4664,20 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                     });
                     if let Some((toplevel, surface, frame)) = replacement {
                         state.active_toplevel = Some(toplevel);
-                        state.root_surface = Some(surface);
+                        state.root_surface = Some(surface.clone());
                         state.root_frame = Some(frame);
+                        state.pointer_focus_surface = Some(surface.clone());
+                        state.pointer_inside = false;
+                        state.pointer_pressed = false;
+                        set_keyboard_focus(state, Some(surface));
                     } else {
                         state.active_toplevel = None;
                         state.root_surface = None;
                         state.root_frame = None;
+                        state.pointer_focus_surface = None;
+                        state.pointer_inside = false;
+                        state.pointer_pressed = false;
+                        set_keyboard_focus(state, None);
                     }
                     state.window_change_serial = state.window_change_serial.wrapping_add(1).max(1);
                 }

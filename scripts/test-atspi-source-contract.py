@@ -17,6 +17,7 @@ ANDROID_BROKER_SOURCE = ROOT / "prototypes/shared-android-bridge/src/org/archphe
 ANDROID_ACTIVITY_SOURCE = ROOT / "prototypes/shared-android-bridge/src/org/archphene/bridge/ArchpheneCompositorActivity.java"
 ANDROID_SESSION_SOURCE = ROOT / "prototypes/shared-android-bridge/src/org/archphene/bridge/ArchpheneCompositorSession.java"
 ANDROID_CAPABILITY_SOURCE = ROOT / "native/archphene-android-capability/archphene_android.c"
+COMPOSITOR_SOURCE = ROOT / "native/archphene-compositor/src/lib.rs"
 ACCESSIBILITY_PROBE_SOURCE = (
     ROOT
     / "prototypes/accessibility-capability-probe/src/org/archphene/bridge"
@@ -147,6 +148,7 @@ def main() -> None:
     android_activity_source = ANDROID_ACTIVITY_SOURCE.read_text(encoding="utf-8")
     android_session_source = ANDROID_SESSION_SOURCE.read_text(encoding="utf-8")
     android_capability_source = ANDROID_CAPABILITY_SOURCE.read_text(encoding="utf-8")
+    compositor_source = COMPOSITOR_SOURCE.read_text(encoding="utf-8")
     accessibility_probe_source = ACCESSIBILITY_PROBE_SOURCE.read_text(encoding="utf-8")
     validate_role_constants(client_source)
     bus_root = ET.fromstring(c_string("bus_xml", source))
@@ -536,6 +538,8 @@ def main() -> None:
         (android_capability_source,
          "archphene_android_accessibility_menu_fallback",
          "native fallback request"),
+        (compositor_source, "set_keyboard_focus(state, Some(surface));",
+         "primary focus restoration after secondary unmap"),
     )
     for implementation, token, label in fallback_tokens:
         if token not in implementation:
