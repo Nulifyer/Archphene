@@ -232,7 +232,7 @@ int archphene_atspi_tree_build(DBusConnection *connection,
             break;
         }
         PendingNode current = pending[cursor++];
-        bool initial_root = cursor <= application_count;
+        int initial_root = cursor <= application_count;
         if (seen_reference(seen, seen_count, &current.reference)) continue;
         if (seen_count >= TRAVERSAL_MAX) {
             truncated = 1;
