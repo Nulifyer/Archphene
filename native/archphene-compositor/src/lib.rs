@@ -11805,7 +11805,8 @@ mod tests {
             Some((540, 1102)),
         );
         assert_eq!((chooser.output_width, chooser.output_height), (540, 1102));
-        assert_eq!((chooser.root_x, chooser.root_y), (-10, 91));
+        assert_eq!((chooser.root_x, chooser.root_y), (0, 107));
+        assert_eq!((chooser.root_width, chooser.root_height), (540, 887));
         assert!(chooser.overlay_primary);
     }
 
