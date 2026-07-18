@@ -4,7 +4,6 @@ $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $Adb = Join-Path $Root "tooling/android-sdk/platform-tools/adb.exe"
 
-& $Adb -s $Serial shell pm clear org.archpheneos.manager | Out-Null
 & $Adb -s $Serial shell am start -S -W -n org.archpheneos.manager/.MainActivity | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Could not launch Linux app manager" }
 Start-Sleep -Seconds 2
@@ -16,10 +15,12 @@ foreach ($required in @("Archphene", "KCalc", "Mousepad", "extra/kcalc", "extra/
     if (-not $catalog.Contains($required)) { throw "Manager catalog is missing $required" }
 }
 
-$kcalc = (& $Adb -s $Serial shell cmd package list packages -U org.archphene.linux.kcalc |
-    Select-String '^package:org\.archphene\.linux\.kcalc uid:\d+$' | Select-Object -First 1).Line
-$mousepad = (& $Adb -s $Serial shell cmd package list packages -U org.archphene.linux.mousepad |
-    Select-String '^package:org\.archphene\.linux\.mousepad uid:\d+$' | Select-Object -First 1).Line
+$kcalcPackage = "org.archphene.linux.p0392be9c9f103a39d951c2f39c3644d2"
+$mousepadPackage = "org.archphene.linux.p241d399e14343c53b8b766e9126776aa"
+$kcalc = (& $Adb -s $Serial shell cmd package list packages -U $kcalcPackage |
+    Select-String "^package:$([regex]::Escape($kcalcPackage)) uid:\d+$" | Select-Object -First 1).Line
+$mousepad = (& $Adb -s $Serial shell cmd package list packages -U $mousepadPackage |
+    Select-String "^package:$([regex]::Escape($mousepadPackage)) uid:\d+$" | Select-Object -First 1).Line
 if (-not $kcalc -or -not $mousepad -or $kcalc -eq $mousepad) {
     throw "KCalc and Mousepad do not have distinct Android UIDs: $kcalc / $mousepad"
 }

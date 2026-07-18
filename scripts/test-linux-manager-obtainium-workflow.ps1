@@ -35,6 +35,14 @@ function Tap-Description([string]$Ui, [string]$Description, [string]$Step) {
     Adb @("shell", "input", "tap", [string][int]$x, [string][int]$y) | Out-Null
 }
 
+function Tap-DescriptionPattern([string]$Ui, [string]$Pattern, [string]$Step) {
+    $node = [regex]::Match($Ui, "content-desc=`"$Pattern`"[^>]*bounds=`"\[(\d+),(\d+)\]\[(\d+),(\d+)\]`"")
+    if (-not $node.Success) { throw "Could not find $Step control matching '$Pattern'" }
+    $x = ([int]$node.Groups[1].Value + [int]$node.Groups[3].Value) / 2
+    $y = ([int]$node.Groups[2].Value + [int]$node.Groups[4].Value) / 2
+    Adb @("shell", "input", "tap", [string][int]$x, [string][int]$y) | Out-Null
+}
+
 function Wait-Ui([string]$Pattern, [string]$Name, [int]$Seconds = 15) {
     $deadline = [DateTime]::UtcNow.AddSeconds($Seconds)
     do {
@@ -46,17 +54,24 @@ function Wait-Ui([string]$Pattern, [string]$Name, [int]$Seconds = 15) {
 }
 
 $enabledBackground = $false
-Adb @("shell", "pm", "clear", $Package) | Out-Null
 Adb @("shell", "pm", "grant", $Package, "android.permission.POST_NOTIFICATIONS") | Out-Null
 try {
     Adb @("shell", "am", "force-stop", $Package) | Out-Null
     Adb @("shell", "am", "start", "-W", "-n", "$Package/.MainActivity") | Out-Null
     $ui = Wait-Ui 'text="Apps"' "manager-obtainium-home"
+    if ($ui -notmatch 'text="KCalc"') {
+        Tap-Description $ui "Filter and sort apps" "reset initial filter"
+        $ui = Wait-Ui 'text="Filter and sorting"' "manager-obtainium-reset-filter"
+        Tap-Text $ui "All apps" "all apps filter"
+        $ui = Wait-Ui 'text="APPLY"' "manager-obtainium-reset-apply"
+        Tap-Text $ui "APPLY" "apply all apps filter"
+        $ui = Wait-Ui 'text="KCalc"' "manager-obtainium-home-all"
+    }
     foreach ($expected in @('text="Search apps"', 'text="KCalc"', 'text="Mousepad"', 'text="Apps"', 'text="Settings"')) {
         if ($ui -notmatch [regex]::Escape($expected)) { throw "Home UI is missing $expected" }
     }
 
-    Tap-Description $ui "Check KCalc for updates. Installed 26.04.3-1. Not checked" "KCalc update"
+    Tap-DescriptionPattern $ui 'KCalc [^"]*Check again' "KCalc update"
     $ui = Wait-Ui 'content-desc="KCalc 26\.04\.3-1 is up to date\. Check again"' "manager-obtainium-update" 20
 
     Adb @("shell", "am", "force-stop", $Package) | Out-Null
@@ -114,6 +129,12 @@ try {
     $ui = Wait-Ui 'text="APPLY"' "manager-obtainium-filter-apply"
     Tap-Text $ui "APPLY" "apply filter"
     $ui = Wait-Ui 'text="No updates available\."' "manager-obtainium-updates-only"
+
+    Tap-Description $ui "Filter and sort apps" "restore filter"
+    $ui = Wait-Ui 'text="Filter and sorting"' "manager-obtainium-restore-filter"
+    Tap-Text $ui "All apps" "all apps filter"
+    $ui = Wait-Ui 'text="APPLY"' "manager-obtainium-restore-apply"
+    Tap-Text $ui "APPLY" "restore all apps filter"
 
     Write-Host "Linux manager Obtainium workflow passed: persistent updates, details, settings, scheduled checks, search, and update filtering."
 } finally {
