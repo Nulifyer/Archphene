@@ -52,6 +52,16 @@ function Input-Shown {
     return ((Adb @("shell", "dumpsys", "input_method")) -join "`n") -match 'mInputShown=true'
 }
 
+try {
+    $recent = (Adb @("shell", "run-as", $Package, "cat",
+            "files/linux-home/.local/share/recently-used.xbel")) -join "`n"
+} catch {
+    throw "Mousepad recent-file fixture is unavailable; run test-mousepad-android-document-workflow.ps1 first"
+}
+if ($recent -notmatch '(?i)archphene') {
+    throw "Mousepad recent-file fixture has no archphene document; run test-mousepad-android-document-workflow.ps1 first"
+}
+
 $size = (Adb @("shell", "wm", "size")) -join "`n"
 if ($size -notmatch '1080x2400') {
     throw "This touch regression currently requires the 1080x2400 emulator; got $size"
