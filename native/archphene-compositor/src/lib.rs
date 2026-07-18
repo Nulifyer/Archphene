@@ -5079,47 +5079,37 @@ fn calculate_toplevel_layout(
             overlay_primary: true,
         };
     }
-    let oversized = root_width > primary_width || root_height > primary_height;
-    let (content_width, content_height, frame_width, frame_height, geometry_x, geometry_y) =
-        if oversized {
-            let width_limited = u64::from(root_width) * u64::from(primary_height)
-                >= u64::from(root_height) * u64::from(primary_width);
-            let (numerator, denominator) = if width_limited {
-                (primary_width, root_width)
-            } else {
-                (primary_height, root_height)
-            };
-            let scale_u32 = |value: u32| {
-                ((u64::from(value) * u64::from(numerator)) / u64::from(denominator)).max(1) as u32
-            };
-            let scale_i32 = |value: i32| {
-                ((i64::from(value) * i64::from(numerator)) / i64::from(denominator)) as i32
-            };
-            (
-                scale_u32(root_width),
-                scale_u32(root_height),
-                scale_u32(root_frame_width),
-                scale_u32(root_frame_height),
-                scale_i32(root_geometry.x),
-                scale_i32(root_geometry.y),
-            )
+    let oversized = root_frame_width > primary_width || root_frame_height > primary_height;
+    if oversized {
+        let width_limited = u64::from(root_frame_width) * u64::from(primary_height)
+            >= u64::from(root_frame_height) * u64::from(primary_width);
+        let (numerator, denominator) = if width_limited {
+            (primary_width, root_frame_width)
         } else {
-            (
-                root_width,
-                root_height,
-                root_frame_width,
-                root_frame_height,
-                root_geometry.x,
-                root_geometry.y,
-            )
+            (primary_height, root_frame_height)
         };
+        let scale_u32 = |value: u32| {
+            ((u64::from(value) * u64::from(numerator)) / u64::from(denominator)).max(1) as u32
+        };
+        let frame_width = scale_u32(root_frame_width);
+        let frame_height = scale_u32(root_frame_height);
+        return ToplevelLayout {
+            output_width: primary_width,
+            output_height: primary_height,
+            root_x: ((primary_width.saturating_sub(frame_width)) / 2) as i32,
+            root_y: ((primary_height.saturating_sub(frame_height)) / 2) as i32,
+            root_width: frame_width as i32,
+            root_height: frame_height as i32,
+            overlay_primary: true,
+        };
+    }
     ToplevelLayout {
         output_width: primary_width,
         output_height: primary_height,
-        root_x: ((primary_width.saturating_sub(content_width)) / 2) as i32 - geometry_x,
-        root_y: ((primary_height.saturating_sub(content_height)) / 2) as i32 - geometry_y,
-        root_width: frame_width as i32,
-        root_height: frame_height as i32,
+        root_x: ((primary_width.saturating_sub(root_width)) / 2) as i32 - root_geometry.x,
+        root_y: ((primary_height.saturating_sub(root_height)) / 2) as i32 - root_geometry.y,
+        root_width: root_frame_width as i32,
+        root_height: root_frame_height as i32,
         overlay_primary: true,
     }
 }
@@ -11923,7 +11913,7 @@ mod tests {
                 layout.root_width,
                 layout.root_height
             ),
-            (-19, 272, 1118, 1667)
+            (0, 297, 1080, 1610)
         );
         assert_eq!(
             content_layout(
@@ -11937,7 +11927,7 @@ mod tests {
                     height: 2205,
                 },
             ),
-            (0, 288, 1079, 1628)
+            (18, 313, 1042, 1572)
         );
     }
 
