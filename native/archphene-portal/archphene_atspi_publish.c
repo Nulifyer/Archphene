@@ -261,10 +261,20 @@ int archphene_atspi_tree_build(DBusConnection *connection,
                 ARCHPHENE_ATSPI_CHILD_MAX, &child_count);
 
         if (read_result < 0) {
+            if (current.parent == 0) {
+                fprintf(stderr, "AT-SPI supplemental root path=%s result=%d\n",
+                        current.reference.path, read_result);
+            }
             truncated = 1;
             continue;
         }
         if (read_result > 0) truncated = 1;
+        if (current.parent == 0 && !node.application) {
+            fprintf(stderr, "AT-SPI supplemental root path=%s role=%s text=%.*s "
+                    "showing=%d visible=%d children=%zu result=%d\n",
+                    current.reference.path, node.role, 80, node.text,
+                    node.showing, node.visible, child_count, read_result);
+        }
         if (node.application) {
             if (child_count == 0) retry = 1;
             size_t available = TRAVERSAL_MAX - pending_count;
