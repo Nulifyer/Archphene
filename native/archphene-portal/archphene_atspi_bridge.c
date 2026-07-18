@@ -19,10 +19,13 @@
 #define INTROSPECTABLE "org.freedesktop.DBus.Introspectable"
 #define REGISTRY_ROOT "/org/a11y/atspi/accessible/root"
 #define CACHE_QUERY_MAX 8
+#define APPLICATION_ID_QUERY_MAX 16
 
 static dbus_uint32_t cache_queries[CACHE_QUERY_MAX];
 static size_t cache_query_count;
 static dbus_bool_t cache_query_disabled;
+static dbus_uint32_t application_id_queries[APPLICATION_ID_QUERY_MAX];
+static size_t application_id_query_count;
 
 static const char bus_xml[] =
         "<node>"
@@ -168,8 +171,19 @@ static dbus_bool_t set_application_id(DBusConnection *connection,
         dbus_message_unref(request);
         return FALSE;
     }
-    dbus_message_set_no_reply(request, TRUE);
-    return send_owned(connection, request);
+    dbus_uint32_t serial = 0;
+    dbus_bool_t sent = dbus_connection_send(connection, request, &serial);
+    dbus_message_unref(request);
+    if (!sent || serial == 0) return FALSE;
+    if (application_id_query_count == APPLICATION_ID_QUERY_MAX) {
+        memmove(application_id_queries, application_id_queries + 1,
+                (APPLICATION_ID_QUERY_MAX - 1)
+                        * sizeof(application_id_queries[0]));
+        application_id_query_count--;
+    }
+    application_id_queries[application_id_query_count++] = serial;
+    dbus_connection_flush(connection);
+    return TRUE;
 }
 
 static dbus_bool_t send_available(DBusConnection *connection) {
@@ -222,6 +236,22 @@ static dbus_bool_t take_cache_query(DBusMessage *message) {
     }
     return FALSE;
 }
+
+static dbus_bool_t take_application_id_query(DBusMessage *message) {
+    dbus_uint32_t serial = dbus_message_get_reply_serial(message);
+    if (serial == 0) return FALSE;
+    for (size_t index = 0; index < application_id_query_count; index++) {
+        if (application_id_queries[index] != serial) continue;
+        memmove(&application_id_queries[index],
+                &application_id_queries[index + 1],
+                (application_id_query_count - index - 1)
+                        * sizeof(application_id_queries[0]));
+        application_id_query_count--;
+        return TRUE;
+    }
+    return FALSE;
+}
+
 static dbus_bool_t append_boolean_entry(DBusMessageIter *dictionary,
         const char *key) {
     DBusMessageIter entry;
@@ -675,10 +705,18 @@ dbus_bool_t archphene_atspi_handles(
 dbus_bool_t archphene_atspi_handles_reply(DBusMessage *message) {
     if (message == NULL
             || (dbus_message_get_type(message) != DBUS_MESSAGE_TYPE_METHOD_RETURN
-                && dbus_message_get_type(message) != DBUS_MESSAGE_TYPE_ERROR)
-            || !take_cache_query(message)) {
+                && dbus_message_get_type(message) != DBUS_MESSAGE_TYPE_ERROR)) {
         return FALSE;
     }
+    if (take_application_id_query(message)) {
+        if (dbus_message_get_type(message) == DBUS_MESSAGE_TYPE_ERROR) {
+            const char *name = dbus_message_get_error_name(message);
+            fprintf(stderr, "AT-SPI application ID assignment failed error=%s\n",
+                    name == NULL ? "unknown" : name);
+        }
+        return TRUE;
+    }
+    if (!take_cache_query(message)) return FALSE;
     if (dbus_message_get_type(message) == DBUS_MESSAGE_TYPE_METHOD_RETURN) {
         archphene_atspi_translator_cache_items(message);
     } else {

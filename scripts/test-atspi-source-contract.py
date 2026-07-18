@@ -347,6 +347,10 @@ def main() -> None:
          "AT-SPI bulk cache query"),
         (source, "archphene_atspi_handles_reply",
          "manual AT-SPI cache response dispatch"),
+        (source, "application_id_queries[APPLICATION_ID_QUERY_MAX]",
+         "bounded asynchronous application ID replies"),
+        (source, "take_application_id_query(message)",
+         "application ID reply consumption"),
         (source, 'message, "((so)(so)(so)iiassusau)"',
          "modern AT-SPI cache signature"),
         (translator_source, "#define MAX_CACHED_WINDOWS 32",
@@ -386,6 +390,8 @@ def main() -> None:
     for implementation, token, label in lifecycle_tokens:
         if token not in implementation:
             raise AssertionError(f"missing {label}: {token}")
+    if "dbus_message_set_no_reply(request, TRUE)" in source:
+        raise AssertionError("application ID reply must be consumed asynchronously")
     for forbidden in ("value == '+'", "value == '/'", "encoded[index] == '='"):
         if forbidden in translator_source:
             raise AssertionError(f"non-canonical base64url accepted: {forbidden}")
