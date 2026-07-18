@@ -368,10 +368,11 @@ def main() -> None:
         "stickyAssignments.keySet().removeIf",
         "Math.abs((long)width - window.width)",
         "image.getScaleType() == ImageView.ScaleType.FIT_CENTER",
-        "float uniform = Math.min(scaleX, scaleY)",
-        "source.left - viewportLeft",
-        "source.top - viewportTop",
+        "float uniform = Math.min(hostScaleX, hostScaleY)",
+        "targetLeft + (source.left - viewportLeft) * contentScaleX",
+        "targetTop + (source.top - viewportTop) * contentScaleY",
         "descriptor.title.equals(node.windowTitle)",
+        "if (frame.active) nextActiveWindowId = frame.id",
         "text.getBytes(StandardCharsets.UTF_8).length > MAX_TEXT",
         "manager == null || !manager.isEnabled()",
         "catch (IllegalStateException accessibilityDisabled)",
@@ -379,6 +380,14 @@ def main() -> None:
     for token in android_tokens:
         if token not in android_source:
             raise AssertionError(f"missing Android semantic ownership: {token}")
+    compositor_geometry_tokens = (
+        "frame.window.contentX",
+        "frame.window.canvasWidth",
+        "compositorView.setAccessibilityWindowId(activeWindowId)",
+    )
+    for token in compositor_geometry_tokens:
+        if token not in android_activity_source:
+            raise AssertionError(f"missing compositor accessibility geometry: {token}")
     if "payload.substring(0, payloadEnd).split" not in accessibility_probe_source:
         raise AssertionError("empty accessibility command values are not preserved")
 
@@ -403,7 +412,7 @@ def main() -> None:
          "activity secondary Back routing"),
         (android_activity_source, "if (window.active)",
          "active secondary selection"),
-        (android_activity_source, "frame.window.active && !frame.window.primary",
+        (android_activity_source, "if (!frame.window.primary) activeSecondaryWindowId",
          "phone secondary selection"),
         (android_activity_source, "session.closeWindow(activeSecondaryWindowId)",
          "phone secondary Back close"),

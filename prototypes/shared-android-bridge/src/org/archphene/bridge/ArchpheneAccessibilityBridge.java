@@ -64,18 +64,40 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
     static final class WindowDescriptor {
         final int id;
         final int parentId;
+        final boolean active;
         final boolean primary;
         final int width;
         final int height;
+        final int contentX;
+        final int contentY;
+        final int contentWidth;
+        final int contentHeight;
+        final int canvasWidth;
+        final int canvasHeight;
         final String title;
 
         WindowDescriptor(int id, int parentId, boolean primary,
                 int width, int height, String title) {
+            this(id, parentId, primary, primary, width, height,
+                    0, 0, width, height, width, height, title);
+        }
+
+        WindowDescriptor(int id, int parentId, boolean active, boolean primary,
+                int width, int height, int contentX, int contentY,
+                int contentWidth, int contentHeight, int canvasWidth, int canvasHeight,
+                String title) {
             this.id = id;
             this.parentId = parentId;
+            this.active = active;
             this.primary = primary;
             this.width = Math.max(1, width);
             this.height = Math.max(1, height);
+            this.contentX = contentX;
+            this.contentY = contentY;
+            this.contentWidth = Math.max(0, contentWidth);
+            this.contentHeight = Math.max(0, contentHeight);
+            this.canvasWidth = Math.max(0, canvasWidth);
+            this.canvasHeight = Math.max(0, canvasHeight);
             this.title = title == null ? "" : title;
         }
     }
@@ -137,11 +159,18 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
     private View host;
     private int hostWindowId;
     private int primaryWindowId;
+    private int activeWindowId;
     private boolean independentWindows;
     private int viewportLeft;
     private int viewportTop;
     private int viewportWidth = 1;
     private int viewportHeight = 1;
+    private int targetLeft;
+    private int targetTop;
+    private int targetWidth = 1;
+    private int targetHeight = 1;
+    private int targetCanvasWidth = 1;
+    private int targetCanvasHeight = 1;
     private Map<Integer, Node> allNodes = Collections.emptyMap();
     private Map<Integer, Node> nodes = Collections.emptyMap();
     private int accessibilityFocus;
@@ -229,7 +258,10 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
             currentWindowId = owner.hostWindowId;
             bounds = scaleBounds(node.bounds, currentHost,
                     owner.viewportLeft, owner.viewportTop,
-                    owner.viewportWidth, owner.viewportHeight);
+                    owner.viewportWidth, owner.viewportHeight,
+                    owner.targetLeft, owner.targetTop,
+                    owner.targetWidth, owner.targetHeight,
+                    owner.targetCanvasWidth, owner.targetCanvasHeight);
         }
         fallback.activate(currentWindowId, currentHost,
                 bounds.exactCenterX(), bounds.exactCenterY());
@@ -256,11 +288,15 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
                     }
                 }
             }
+            int nextActiveWindowId = primaryWindowId;
             for (WindowDescriptor frame : frames) {
-                if (independent || frame.id == primaryWindowId) {
-                    windowDescriptors.put(frame.id, frame);
-                }
+                windowDescriptors.put(frame.id, frame);
+                if (frame.active) nextActiveWindowId = frame.id;
             }
+            if (!independent && activeWindowId != nextActiveWindowId) {
+                semanticWindowAssignments.clear();
+            }
+            activeWindowId = nextActiveWindowId;
             semanticWindowAssignments.values().removeIf(
                     windowId -> !windowDescriptors.containsKey(windowId));
         }
@@ -357,9 +393,10 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
         synchronized (lock) {
             source = allNodes;
             int primary = primaryWindowId != 0 ? primaryWindowId : hostWindowId;
-            rootWindow = hostWindowId;
+            int active = activeWindowId != 0 ? activeWindowId : primary;
+            rootWindow = independentWindows ? hostWindowId : active;
             providers = new ArrayList<>(windowBridges.values());
-            assignments = assignWindows(source, windowDescriptors, primary,
+            assignments = assignWindows(source, windowDescriptors, active,
                     independentWindows, semanticWindowAssignments);
         }
         installSubset(source, assignments, rootWindow);
@@ -381,8 +418,10 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
         int subsetWidth = root.viewportWidth;
         int subsetHeight = root.viewportHeight;
         WindowDescriptor descriptor;
+        boolean independent;
         synchronized (root.lock) {
             descriptor = root.windowDescriptors.get(windowId);
+            independent = root.independentWindows;
         }
         Node viewport = null;
         int viewportPriority = -1;
@@ -405,29 +444,60 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
             subsetTop = viewport.bounds.top;
             subsetWidth = Math.max(1, viewport.bounds.width());
             subsetHeight = Math.max(1, viewport.bounds.height());
+        } else if (!subset.isEmpty()) {
+            int subsetRight = subsetLeft;
+            int subsetBottom = subsetTop;
+            boolean first = true;
+            for (Node node : subset.values()) {
+                if (first) {
+                    subsetLeft = node.bounds.left;
+                    subsetTop = node.bounds.top;
+                    subsetRight = node.bounds.right;
+                    subsetBottom = node.bounds.bottom;
+                    first = false;
+                } else {
+                    subsetLeft = Math.min(subsetLeft, node.bounds.left);
+                    subsetTop = Math.min(subsetTop, node.bounds.top);
+                    subsetRight = Math.max(subsetRight, node.bounds.right);
+                    subsetBottom = Math.max(subsetBottom, node.bounds.bottom);
+                }
+            }
+            subsetWidth = Math.max(1, subsetRight - subsetLeft);
+            subsetHeight = Math.max(1, subsetBottom - subsetTop);
         }
-        int subsetRight = Math.addExact(subsetLeft, subsetWidth);
-        int subsetBottom = Math.addExact(subsetTop, subsetHeight);
-        for (Node node : subset.values()) {
-            subsetLeft = Math.min(subsetLeft, node.bounds.left);
-            subsetTop = Math.min(subsetTop, node.bounds.top);
-            subsetRight = Math.max(subsetRight, node.bounds.right);
-            subsetBottom = Math.max(subsetBottom, node.bounds.bottom);
+        int mappedLeft = 0;
+        int mappedTop = 0;
+        int mappedWidth = subsetWidth;
+        int mappedHeight = subsetHeight;
+        int canvasWidth = subsetWidth;
+        int canvasHeight = subsetHeight;
+        if (!independent && descriptor != null
+                && descriptor.contentWidth > 0 && descriptor.contentHeight > 0
+                && descriptor.canvasWidth > 0 && descriptor.canvasHeight > 0) {
+            mappedLeft = descriptor.contentX;
+            mappedTop = descriptor.contentY;
+            mappedWidth = descriptor.contentWidth;
+            mappedHeight = descriptor.contentHeight;
+            canvasWidth = descriptor.canvasWidth;
+            canvasHeight = descriptor.canvasHeight;
         }
-        subsetWidth = Math.max(1, subsetRight - subsetLeft);
-        subsetHeight = Math.max(1, subsetBottom - subsetTop);
         synchronized (lock) {
             viewportLeft = subsetLeft;
             viewportTop = subsetTop;
             viewportWidth = subsetWidth;
             viewportHeight = subsetHeight;
+            targetLeft = mappedLeft;
+            targetTop = mappedTop;
+            targetWidth = mappedWidth;
+            targetHeight = mappedHeight;
+            targetCanvasWidth = canvasWidth;
+            targetCanvasHeight = canvasHeight;
             nodes = Collections.unmodifiableMap(subset);
             if (!nodes.containsKey(accessibilityFocus)) accessibilityFocus = 0;
             if (!nodes.containsKey(inputFocus)) inputFocus = 0;
         }
         sendEvent(0, AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED);
     }
-
     private static Map<Integer, Integer> assignWindows(Map<Integer, Node> source,
             Map<Integer, WindowDescriptor> windows, int primary, boolean independent,
             Map<Integer, Integer> stickyAssignments) {
@@ -527,6 +597,12 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
         int currentTop;
         int currentWidth;
         int currentHeight;
+        int currentTargetLeft;
+        int currentTargetTop;
+        int currentTargetWidth;
+        int currentTargetHeight;
+        int currentCanvasWidth;
+        int currentCanvasHeight;
         int currentAccessibilityFocus;
         int currentInputFocus;
         synchronized (lock) {
@@ -536,6 +612,12 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
             currentTop = viewportTop;
             currentWidth = viewportWidth;
             currentHeight = viewportHeight;
+            currentTargetLeft = targetLeft;
+            currentTargetTop = targetTop;
+            currentTargetWidth = targetWidth;
+            currentTargetHeight = targetHeight;
+            currentCanvasWidth = targetCanvasWidth;
+            currentCanvasHeight = targetCanvasHeight;
             currentAccessibilityFocus = accessibilityFocus;
             currentInputFocus = inputFocus;
         }
@@ -583,13 +665,19 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
                 ? AccessibilityNodeInfo.ACTION_CLEAR_ACCESSIBILITY_FOCUS
                 : AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS);
         Rect windowBounds = scaleBounds(node.bounds, currentHost,
-                currentLeft, currentTop, currentWidth, currentHeight);
+                currentLeft, currentTop, currentWidth, currentHeight,
+                currentTargetLeft, currentTargetTop,
+                currentTargetWidth, currentTargetHeight,
+                currentCanvasWidth, currentCanvasHeight);
         Rect parentBounds = new Rect(windowBounds);
         if (node.parent != 0) {
             Node parent = currentNodes.get(node.parent);
             if (parent != null) {
                 Rect scaledParent = scaleBounds(parent.bounds, currentHost,
-                        currentLeft, currentTop, currentWidth, currentHeight);
+                        currentLeft, currentTop, currentWidth, currentHeight,
+                        currentTargetLeft, currentTargetTop,
+                        currentTargetWidth, currentTargetHeight,
+                        currentCanvasWidth, currentCanvasHeight);
                 parentBounds.offset(-scaledParent.left, -scaledParent.top);
             }
         }
@@ -751,22 +839,37 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
 
     private static Rect scaleBounds(Rect source, View host, int viewportLeft,
             int viewportTop, int viewportWidth, int viewportHeight) {
-        float scaleX = host.getWidth() / (float)Math.max(1, viewportWidth);
-        float scaleY = host.getHeight() / (float)Math.max(1, viewportHeight);
+        return scaleBounds(source, host, viewportLeft, viewportTop,
+                viewportWidth, viewportHeight, 0, 0, viewportWidth, viewportHeight,
+                viewportWidth, viewportHeight);
+    }
+
+    private static Rect scaleBounds(Rect source, View host, int viewportLeft,
+            int viewportTop, int viewportWidth, int viewportHeight,
+            int targetLeft, int targetTop, int targetWidth, int targetHeight,
+            int canvasWidth, int canvasHeight) {
+        float contentScaleX = targetWidth / (float)Math.max(1, viewportWidth);
+        float contentScaleY = targetHeight / (float)Math.max(1, viewportHeight);
+        float hostScaleX = host.getWidth() / (float)Math.max(1, canvasWidth);
+        float hostScaleY = host.getHeight() / (float)Math.max(1, canvasHeight);
         float offsetX = 0;
         float offsetY = 0;
         if (host instanceof ImageView image
                 && image.getScaleType() == ImageView.ScaleType.FIT_CENTER) {
-            float uniform = Math.min(scaleX, scaleY);
-            scaleX = uniform;
-            scaleY = uniform;
-            offsetX = (host.getWidth() - viewportWidth * uniform) / 2f;
-            offsetY = (host.getHeight() - viewportHeight * uniform) / 2f;
+            float uniform = Math.min(hostScaleX, hostScaleY);
+            hostScaleX = uniform;
+            hostScaleY = uniform;
+            offsetX = (host.getWidth() - canvasWidth * uniform) / 2f;
+            offsetY = (host.getHeight() - canvasHeight * uniform) / 2f;
         }
-        return new Rect(Math.round(offsetX + (source.left - viewportLeft) * scaleX),
-                Math.round(offsetY + (source.top - viewportTop) * scaleY),
-                Math.round(offsetX + (source.right - viewportLeft) * scaleX),
-                Math.round(offsetY + (source.bottom - viewportTop) * scaleY));
+        float left = targetLeft + (source.left - viewportLeft) * contentScaleX;
+        float top = targetTop + (source.top - viewportTop) * contentScaleY;
+        float right = targetLeft + (source.right - viewportLeft) * contentScaleX;
+        float bottom = targetTop + (source.bottom - viewportTop) * contentScaleY;
+        return new Rect(Math.round(offsetX + left * hostScaleX),
+                Math.round(offsetY + top * hostScaleY),
+                Math.round(offsetX + right * hostScaleX),
+                Math.round(offsetY + bottom * hostScaleY));
     }
 
     private static void validateRole(String role) {

@@ -5175,27 +5175,41 @@ fn scale_surface_coordinate(value: i32, target_extent: i32, source_extent: u32) 
 }
 
 fn root_content_origin(state: &CompositorState) -> (i32, i32) {
-    let (surface_x, surface_y) = root_surface_origin(state);
-    let Some(layout) = toplevel_layout(state) else {
-        return (surface_x, surface_y);
-    };
-    let Some(frame) = state.root_frame.as_ref() else {
-        return (surface_x, surface_y);
-    };
-    root_window_geometry(state).map_or((surface_x, surface_y), |geometry| {
-        (
-            surface_x.saturating_add(scale_surface_coordinate(
-                geometry.x,
-                layout.root_width,
-                frame.width,
-            )),
-            surface_y.saturating_add(scale_surface_coordinate(
-                geometry.y,
-                layout.root_height,
-                frame.height,
-            )),
-        )
-    })
+    root_content_layout(state).map_or(root_surface_origin(state), |layout| (layout.0, layout.1))
+}
+
+fn content_layout(
+    layout: ToplevelLayout,
+    frame_width: u32,
+    frame_height: u32,
+    geometry: WindowGeometry,
+) -> (i32, i32, i32, i32) {
+    (
+        layout.root_x.saturating_add(scale_surface_coordinate(
+            geometry.x,
+            layout.root_width,
+            frame_width,
+        )),
+        layout.root_y.saturating_add(scale_surface_coordinate(
+            geometry.y,
+            layout.root_height,
+            frame_height,
+        )),
+        scale_surface_coordinate(geometry.width, layout.root_width, frame_width).max(1),
+        scale_surface_coordinate(geometry.height, layout.root_height, frame_height).max(1),
+    )
+}
+
+fn root_content_layout(state: &CompositorState) -> Option<(i32, i32, i32, i32)> {
+    let layout = toplevel_layout(state)?;
+    let frame = state.root_frame.as_ref()?;
+    let geometry = root_window_geometry(state).unwrap_or(WindowGeometry {
+        x: 0,
+        y: 0,
+        width: frame.width as i32,
+        height: frame.height as i32,
+    });
+    Some(content_layout(layout, frame.width, frame.height, geometry))
 }
 
 fn root_input_dimensions(state: &CompositorState) -> (i32, i32) {
@@ -6478,6 +6492,25 @@ impl CompositorCore {
                     .unwrap_or_else(|error| error.into_inner())
                     .committed_buffer_scale
             }),
+            14..=17 => {
+                if self
+                    .state
+                    .root_surface
+                    .as_ref()
+                    .is_none_or(|root| root.id() != surface.id())
+                {
+                    return 0;
+                }
+                root_content_layout(&self.state).map_or(0, |layout| match component {
+                    14 => layout.0,
+                    15 => layout.1,
+                    16 => layout.2,
+                    17 => layout.3,
+                    _ => 0,
+                })
+            }
+            18 => toplevel_layout(&self.state).map_or(0, |layout| layout.output_width as i32),
+            19 => toplevel_layout(&self.state).map_or(0, |layout| layout.output_height as i32),
             _ => -1,
         }
     }
@@ -11847,6 +11880,39 @@ mod tests {
         assert_eq!((layout.root_x, layout.root_y), (0, 665));
         assert_eq!((layout.root_width, layout.root_height), (1080, 875));
         assert!(layout.overlay_primary);
+    }
+
+    #[test]
+    fn maps_phone_file_chooser_content_into_composited_output() {
+        let layout = calculate_toplevel_layout(
+            1080,
+            2205,
+            1462,
+            2205,
+            1514,
+            2257,
+            WindowGeometry {
+                x: 26,
+                y: 23,
+                width: 1462,
+                height: 2205,
+            },
+            Some((1080, 2205)),
+        );
+        assert_eq!(
+            content_layout(
+                layout,
+                1514,
+                2257,
+                WindowGeometry {
+                    x: 26,
+                    y: 23,
+                    width: 1462,
+                    height: 2205,
+                },
+            ),
+            (0, 288, 1080, 1628)
+        );
     }
 
     #[test]

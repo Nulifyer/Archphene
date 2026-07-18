@@ -779,19 +779,27 @@ public abstract class ArchpheneCompositorActivity extends Activity {
 
     private void updateWindows(List<ArchpheneCompositorSession.WindowFrame> windows) {
         activeSecondaryWindowId = 0;
+        int activeWindowId = 0;
         for (ArchpheneCompositorSession.WindowFrame frame : windows) {
-            if (frame.window.active && !frame.window.primary) {
-                activeSecondaryWindowId = frame.window.id;
-                break;
-            }
+            if (!frame.window.active) continue;
+            activeWindowId = frame.window.id;
+            if (!frame.window.primary) activeSecondaryWindowId = frame.window.id;
+            break;
+        }
+        if (!independentWindows && activeWindowId != 0) {
+            compositorView.setAccessibilityWindowId(activeWindowId);
         }
         if (accessibilityBridge != null) {
             List<ArchpheneAccessibilityBridge.WindowDescriptor> accessibilityWindows =
                     new ArrayList<>();
             for (ArchpheneCompositorSession.WindowFrame frame : windows) {
                 accessibilityWindows.add(new ArchpheneAccessibilityBridge.WindowDescriptor(
-                        frame.window.id, frame.window.parentId, frame.window.primary,
-                        frame.window.width, frame.window.height, frame.window.title));
+                        frame.window.id, frame.window.parentId, frame.window.active,
+                        frame.window.primary, frame.window.width, frame.window.height,
+                        frame.window.contentX, frame.window.contentY,
+                        frame.window.contentWidth, frame.window.contentHeight,
+                        frame.window.canvasWidth, frame.window.canvasHeight,
+                        frame.window.title));
             }
             accessibilityBridge.updateWindows(accessibilityWindows, independentWindows);
         }

@@ -232,6 +232,12 @@ public final class NativeCompositor implements AutoCloseable {
                 command(WINDOW_COMPONENT, index, 11),
                 command(WINDOW_COMPONENT, index, 12),
                 command(WINDOW_COMPONENT, index, 13),
+                command(WINDOW_COMPONENT, index, 14),
+                command(WINDOW_COMPONENT, index, 15),
+                command(WINDOW_COMPONENT, index, 16),
+                command(WINDOW_COMPONENT, index, 17),
+                command(WINDOW_COMPONENT, index, 18),
+                command(WINDOW_COMPONENT, index, 19),
                 windowText(index, titleLength, 4),
                 windowText(index, appIdLength, 5));
     }
@@ -256,12 +262,20 @@ public final class NativeCompositor implements AutoCloseable {
         public final int frameWidth;
         public final int frameHeight;
         public final int bufferScale;
+        public final int contentX;
+        public final int contentY;
+        public final int contentWidth;
+        public final int contentHeight;
+        public final int canvasWidth;
+        public final int canvasHeight;
         public final String title;
         public final String appId;
 
         WindowInfo(int id, int parentId, boolean mapped, boolean active, boolean primary,
                 int x, int y, int width, int height, int frameWidth, int frameHeight,
-                int bufferScale, String title, String appId) {
+                int bufferScale, int contentX, int contentY, int contentWidth,
+                int contentHeight, int canvasWidth, int canvasHeight,
+                String title, String appId) {
             this.id = id;
             this.parentId = parentId;
             this.mapped = mapped;
@@ -274,6 +288,12 @@ public final class NativeCompositor implements AutoCloseable {
             this.frameWidth = frameWidth;
             this.frameHeight = frameHeight;
             this.bufferScale = bufferScale;
+            this.contentX = contentX;
+            this.contentY = contentY;
+            this.contentWidth = contentWidth;
+            this.contentHeight = contentHeight;
+            this.canvasWidth = canvasWidth;
+            this.canvasHeight = canvasHeight;
             this.title = title;
             this.appId = appId;
         }
