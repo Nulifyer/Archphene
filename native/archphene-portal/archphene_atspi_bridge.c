@@ -18,6 +18,10 @@
 #define PROPERTIES "org.freedesktop.DBus.Properties"
 #define INTROSPECTABLE "org.freedesktop.DBus.Introspectable"
 #define REGISTRY_ROOT "/org/a11y/atspi/accessible/root"
+#define CACHE_QUERY_MAX 8
+
+static dbus_uint32_t cache_queries[CACHE_QUERY_MAX];
+static size_t cache_query_count;
 
 static const char bus_xml[] =
         "<node>"
@@ -184,43 +188,37 @@ static dbus_bool_t send_available(DBusConnection *connection) {
     return send_owned(connection, signal);
 }
 
-static void cache_items_ready(DBusPendingCall *pending, void *unused) {
-    (void)unused;
-    DBusMessage *reply = dbus_pending_call_steal_reply(pending);
-    if (reply != NULL) {
-        if (dbus_message_get_type(reply) == DBUS_MESSAGE_TYPE_METHOD_RETURN) {
-            archphene_atspi_translator_cache_items(reply);
-        } else {
-            const char *name = dbus_message_get_error_name(reply);
-            fprintf(stderr, "AT-SPI cache query failed error=%s\n",
-                    name == NULL ? "unknown" : name);
-        }
-        dbus_message_unref(reply);
-    }
-    dbus_pending_call_unref(pending);
-}
-
 static dbus_bool_t request_cache_items(
         DBusConnection *connection, const char *bus) {
     if (connection == NULL || bus == NULL || bus[0] != ':') return FALSE;
     DBusMessage *request = dbus_message_new_method_call(
             bus, A11Y_CACHE_PATH, A11Y_CACHE, "GetItems");
     if (request == NULL) return FALSE;
-    DBusPendingCall *pending = NULL;
-    dbus_bool_t sent = dbus_connection_send_with_reply(
-            connection, request, &pending, 2000);
+    dbus_uint32_t serial = 0;
+    dbus_bool_t sent = dbus_connection_send(connection, request, &serial);
     dbus_message_unref(request);
-    if (!sent || pending == NULL) {
-        if (pending != NULL) dbus_pending_call_unref(pending);
-        return FALSE;
+    if (!sent || serial == 0) return FALSE;
+    if (cache_query_count == CACHE_QUERY_MAX) {
+        memmove(cache_queries, cache_queries + 1,
+                (CACHE_QUERY_MAX - 1) * sizeof(cache_queries[0]));
+        cache_query_count--;
     }
-    if (!dbus_pending_call_set_notify(
-            pending, cache_items_ready, NULL, NULL)) {
-        dbus_pending_call_cancel(pending);
-        dbus_pending_call_unref(pending);
-        return FALSE;
-    }
+    cache_queries[cache_query_count++] = serial;
+    dbus_connection_flush(connection);
     return TRUE;
+}
+
+static dbus_bool_t take_cache_query(DBusMessage *message) {
+    dbus_uint32_t serial = dbus_message_get_reply_serial(message);
+    if (serial == 0) return FALSE;
+    for (size_t index = 0; index < cache_query_count; index++) {
+        if (cache_queries[index] != serial) continue;
+        memmove(&cache_queries[index], &cache_queries[index + 1],
+                (cache_query_count - index - 1) * sizeof(cache_queries[0]));
+        cache_query_count--;
+        return TRUE;
+    }
+    return FALSE;
 }
 static dbus_bool_t append_boolean_entry(DBusMessageIter *dictionary,
         const char *key) {
@@ -669,6 +667,22 @@ dbus_bool_t archphene_atspi_handles(
     } else {
         send_error(connection, message, DBUS_ERROR_UNKNOWN_METHOD,
                 "Unsupported private AT-SPI registry method");
+    }
+    return TRUE;
+}
+dbus_bool_t archphene_atspi_handles_reply(DBusMessage *message) {
+    if (message == NULL
+            || (dbus_message_get_type(message) != DBUS_MESSAGE_TYPE_METHOD_RETURN
+                && dbus_message_get_type(message) != DBUS_MESSAGE_TYPE_ERROR)
+            || !take_cache_query(message)) {
+        return FALSE;
+    }
+    if (dbus_message_get_type(message) == DBUS_MESSAGE_TYPE_METHOD_RETURN) {
+        archphene_atspi_translator_cache_items(message);
+    } else {
+        const char *name = dbus_message_get_error_name(message);
+        fprintf(stderr, "AT-SPI cache query failed error=%s\n",
+                name == NULL ? "unknown" : name);
     }
     return TRUE;
 }

@@ -850,6 +850,8 @@ int main(void) {
             else if (dbus_message_get_type(message) == DBUS_MESSAGE_TYPE_SIGNAL) {
                 archphene_secret_service_handle_signal(message);
                 archphene_atspi_handle_signal(connection, message);
+            } else {
+                archphene_atspi_handles_reply(message);
             }
             dbus_message_unref(message);
         }
