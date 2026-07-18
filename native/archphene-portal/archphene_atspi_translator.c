@@ -41,6 +41,7 @@ typedef struct {
     ArchpheneAtspiReference parent;
     int32_t index;
     int32_t child_count;
+    bool authoritative;
 } CachedAccessible;
 
 static struct {
@@ -148,6 +149,7 @@ static bool parse_cache_accessible_iter(
     }
     dbus_message_iter_recurse(outer, &fields);
     memset(cached, 0, sizeof(*cached));
+    cached->authoritative = true;
     ArchpheneAtspiNode *node = &cached->node;
     node->width = 1;
     node->height = 1;
@@ -919,7 +921,11 @@ static int rebuild_tree(DBusConnection *connection,
     if (cached == NULL) return -1;
     size_t cached_count = snapshot_cached_accessibles(
             cached, MAX_CACHED_ACCESSIBLES);
-    if (cached_count > 0) {
+    bool authoritative_cache = false;
+    for (size_t index = 0; index < cached_count; index++) {
+        if (cached[index].authoritative) authoritative_cache = true;
+    }
+    if (authoritative_cache) {
         int cached_result = build_cached_tree(
                 cached, cached_count, *next_tree);
         free(cached);
@@ -930,16 +936,23 @@ static int rebuild_tree(DBusConnection *connection,
         retain_dirty();
         return ARCHPHENE_ATSPI_TREE_RETRY;
     }
-    free(cached);
 
     ArchpheneAtspiReference applications[ROOT_MAX];
     size_t count = snapshot_applications(applications);
     int build_result = archphene_atspi_tree_build(
             connection, applications, count, *next_tree);
     if (build_result < 0) {
+        int fallback_result = build_cached_tree(
+                cached, cached_count, *next_tree);
+        free(cached);
+        if (fallback_result >= 0) {
+            if (publish_and_swap_tree(next_tree) != 0) return -1;
+            return fallback_result;
+        }
         retain_dirty();
         return build_result;
     }
+    free(cached);
     size_t retained = 0;
     if (tree_incomplete(build_result)) {
         pthread_mutex_lock(&state.mutex);
