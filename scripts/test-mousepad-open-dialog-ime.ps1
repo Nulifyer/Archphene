@@ -122,10 +122,13 @@ while ((Input-Shown) -and [DateTime]::UtcNow -lt $deadline) {
     Start-Sleep -Milliseconds 250
 }
 if (Input-Shown) { throw "Android Back did not dismiss the search keyboard" }
+Wait-UiNode {
+    $_.text -eq "Open File"
+} "open-dialog-after-ime-back" | Out-Null
 
 Adb @("logcat", "-c") | Out-Null
 $result = Wait-UiNode {
-    $_.text -match '(?i)arch' -and $_.clickable -eq "true" -and
+    $_.text -match '(?i)^archphene' -and $_.clickable -eq "true" -and
             $_.class -ne "android.widget.EditText"
 } "arch-search-result"
 Tap-UiNode $result "arch search result"

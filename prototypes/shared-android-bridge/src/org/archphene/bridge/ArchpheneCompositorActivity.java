@@ -517,11 +517,12 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     }
 
     private void activateAccessibilityMenu(
-            int windowId, View host, float x, float y) {
+            int windowId, View host, float x, float y, boolean transition) {
         runOnUiThread(() -> {
             if (session == null || !(host instanceof ArchpheneInputView source)) return;
             if (source == compositorView) {
-                session.accessibilityMenuAction(windowId, source, x, y);
+                if (transition) session.accessibilityMenuAction(windowId, source, x, y);
+                else session.touchClick(windowId, source, x, y);
                 return;
             }
             SecondaryWindow secondary = secondaryWindows.get(windowId);
@@ -529,8 +530,13 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 Log.w(logTag, "Accessibility menu target window is unavailable: " + windowId);
                 return;
             }
-            session.accessibilityMenuAction(windowId, source,
-                    secondary.frameWidth, secondary.frameHeight, x, y);
+            if (transition) {
+                session.accessibilityMenuAction(windowId, source,
+                        secondary.frameWidth, secondary.frameHeight, x, y);
+            } else {
+                session.touchClick(windowId, source,
+                        secondary.frameWidth, secondary.frameHeight, x, y);
+            }
         });
     }
 
@@ -913,9 +919,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             });
             dialog.setOnKeyListener((ignored, keyCode, event) -> {
                 if (keyCode == KeyEvent.KEYCODE_BACK) {
-                    if (event.getAction() == KeyEvent.ACTION_UP && session != null) {
-                        session.closeWindow(id);
-                    }
+                    if (event.getAction() == KeyEvent.ACTION_UP) handleBack();
                     return true;
                 }
                 return session != null && session.key(event);
@@ -924,9 +928,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             installDragRouting(view, id);
             dialog.show();
             if (Build.VERSION.SDK_INT >= 33) {
-                backInvokedCallback = () -> {
-                    if (session != null) session.closeWindow(id);
-                };
+                backInvokedCallback = this::handleBack;
                 dialog.getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
                         OnBackInvokedDispatcher.PRIORITY_DEFAULT, backInvokedCallback);
             }
@@ -940,6 +942,19 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             update(frame);
             view.requestFocus();
             if (session != null) session.activateWindow(id, view);
+        }
+
+        private void handleBack() {
+            if (Build.VERSION.SDK_INT >= 30) {
+                WindowInsets insets = view.getRootWindowInsets();
+                if (insets != null && insets.isVisible(WindowInsets.Type.ime())) {
+                    if (view.getWindowInsetsController() != null) {
+                        view.getWindowInsetsController().hide(WindowInsets.Type.ime());
+                    }
+                    return;
+                }
+            }
+            if (session != null) session.closeWindow(id);
         }
 
         void update(ArchpheneCompositorSession.WindowFrame frame) {

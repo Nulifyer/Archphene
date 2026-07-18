@@ -541,11 +541,11 @@ static void process_event(void) {
             id, event.type, response, sizeof(response));
 }
 
-static int activate_menu_pointer(int node_id) {
+static int activate_menu_pointer(int node_id, bool transition) {
     if (node_id <= 0) return -1;
     char response[64] = {0};
-    return archphene_android_accessibility_menu_fallback(
-            node_id, response, sizeof(response));
+    return archphene_android_accessibility_menu_action(
+            node_id, transition ? 1 : 0, response, sizeof(response));
 }
 
 static void process_action(DBusConnection *connection) {
@@ -600,7 +600,9 @@ static void process_action(DBusConnection *connection) {
             transient_generation = state.transient_generation;
             pthread_mutex_unlock(&state.mutex);
         }
-        result = menu_bar_click ? activate_menu_pointer(id)
+        bool compositor_menu_click = menu_bar_click || node.menu_item;
+        result = compositor_menu_click
+                ? activate_menu_pointer(id, menu_bar_click)
                 : archphene_atspi_client_click(connection, &node);
     } else if (strcmp(action, "focus") == 0) {
         result = archphene_atspi_client_focus(connection, &node);
@@ -630,7 +632,7 @@ static void process_action(DBusConnection *connection) {
         }
         bool menu_opened = transient_changed && state.transient_root_count > 0;
         pthread_mutex_unlock(&state.mutex);
-        if (!menu_opened) activate_menu_pointer(id);
+        if (!menu_opened) activate_menu_pointer(id, false);
     }
     pthread_mutex_lock(&state.mutex);
     if (result == 0) {

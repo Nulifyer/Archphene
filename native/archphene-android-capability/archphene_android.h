@@ -31,6 +31,8 @@ int archphene_android_take_accessibility_action(
         int timeout_millis, char *response, size_t response_size);
 int archphene_android_accessibility_menu_fallback(
         int node_id, char *response, size_t response_size);
+int archphene_android_accessibility_menu_action(
+        int node_id, int transition, char *response, size_t response_size);
 
 int archphene_android_store_secret(
         int secret_fd, const char *id, const char *label, const char *attributes_json,

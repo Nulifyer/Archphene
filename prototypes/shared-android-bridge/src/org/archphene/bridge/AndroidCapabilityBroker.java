@@ -274,7 +274,14 @@ final class AndroidCapabilityBroker implements Closeable {
                 requireFields(fields, 3);
                 requireCapability(BridgeCapabilities.ACCESSIBILITY);
                 requireAccessibilityBridge().activateMenuFallback(
-                        parseBoundedInt(fields[2], 1, 1_000_000, "accessibility node"));
+                        parseBoundedInt(fields[2], 1, 1_000_000, "accessibility node"), false);
+                return "OK";
+            case "ACCESSIBILITY_MENU_ACTION":
+                requireFields(fields, 4);
+                requireCapability(BridgeCapabilities.ACCESSIBILITY);
+                requireAccessibilityBridge().activateMenuFallback(
+                        parseBoundedInt(fields[2], 1, 1_000_000, "accessibility node"),
+                        parseBoundedInt(fields[3], 0, 1, "menu transition") == 1);
                 return "OK";
             case "STORE_SECRET":
                 if (fields.length != 5 && fields.length != 6) {

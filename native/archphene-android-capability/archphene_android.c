@@ -325,6 +325,24 @@ int archphene_android_accessibility_menu_fallback(
     return broker_request(request, response, response_size);
 }
 
+int archphene_android_accessibility_menu_action(
+        int node_id, int transition, char *response, size_t response_size) {
+    if (node_id <= 0 || node_id > 1000000
+            || (transition != 0 && transition != 1)) {
+        errno = EINVAL;
+        return -1;
+    }
+    char request[MAX_REQUEST];
+    int length = snprintf(request, sizeof(request),
+            "ARCHPHENE/1\tACCESSIBILITY_MENU_ACTION\t%d\t%d",
+            node_id, transition);
+    if (length <= 0 || (size_t)length >= sizeof(request)) {
+        errno = ENOSPC;
+        return -1;
+    }
+    return broker_request(request, response, response_size);
+}
+
 int archphene_android_store_secret(
         int secret_fd, const char *id, const char *label, const char *attributes_json,
         char *response, size_t response_size) {
