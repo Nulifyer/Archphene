@@ -459,19 +459,23 @@ static void process_action(DBusConnection *connection) {
 
 static size_t snapshot_applications(ArchpheneAtspiReference *applications) {
     pthread_mutex_lock(&state.mutex);
-    size_t count = state.application_count;
-    for (size_t index = 0; index < count; index++) {
-        snprintf(applications[index].bus, sizeof(applications[index].bus),
-                "%s", state.applications[index].bus);
-        snprintf(applications[index].path, sizeof(applications[index].path),
-                "%s", state.applications[index].path);
-    }
-    for (int window_roots = 1; window_roots >= 0; window_roots--) {
-        for (size_t index = 0; index < state.transient_root_count; index++) {
-            if (state.transient_window_roots[index] == (window_roots != 0)) {
-                applications[count++] = state.transient_roots[index];
-            }
+    size_t count = 0;
+    for (size_t index = state.transient_root_count; index > 0; index--) {
+        if (state.transient_window_roots[index - 1]) {
+            applications[count++] = state.transient_roots[index - 1];
         }
+    }
+    for (size_t index = state.transient_root_count; index > 0; index--) {
+        if (!state.transient_window_roots[index - 1]) {
+            applications[count++] = state.transient_roots[index - 1];
+        }
+    }
+    for (size_t index = 0; index < state.application_count; index++) {
+        snprintf(applications[count].bus, sizeof(applications[count].bus),
+                "%s", state.applications[index].bus);
+        snprintf(applications[count].path, sizeof(applications[count].path),
+                "%s", state.applications[index].path);
+        count++;
     }
     if (state.action_refresh_passes > 0) state.action_refresh_passes--;
     state.dirty = false;
