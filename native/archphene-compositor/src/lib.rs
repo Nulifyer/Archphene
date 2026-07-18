@@ -9849,11 +9849,14 @@ fn run_glibc_fds(
         .iter()
         .map(|name| link_root.join(name))
         .collect::<Vec<_>>();
-    for (link, fd) in links.iter().zip(inherited.iter()) {
-        // The child inherits these descriptors for its complete lifetime, including
-        // late dlopen(). Named symlinks preserve normal ELF lookup without copying
-        // the manager-owned runtime closure into the Android wrapper UID.
-        let target = PathBuf::from(format!("/proc/self/fd/{fd}"));
+    for (index, (link, fd)) in links.iter().zip(inherited.iter()).enumerate() {
+        let target = if index == 0 {
+            link_root.join(".program")
+        } else if index == 1 {
+            PathBuf::from(format!("/proc/self/fd/{fd}"))
+        } else {
+            link_root.join(format!(".library-{}", index - 2))
+        };
         let _ = std::fs::remove_file(link);
         if std::os::unix::fs::symlink(target, link).is_err() {
             cleanup_runtime_fd_view(&mut inherited, &links);
@@ -9873,7 +9876,9 @@ fn run_glibc_fds(
         }
         let alias = plugin_directory.join(name);
         let _ = std::fs::remove_file(&alias);
-        if std::os::unix::fs::symlink(link_root.join(name), &alias).is_err() {
+        if std::os::unix::fs::symlink(link_root.join(format!(".library-{}", index - 2)), &alias)
+            .is_err()
+        {
             cleanup_runtime_fd_view(&mut inherited, &links);
             return (-libc::EIO, Vec::new());
         }

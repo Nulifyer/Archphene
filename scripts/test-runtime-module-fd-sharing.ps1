@@ -83,26 +83,34 @@ try {
     if ($androidPidText -notmatch '^\d+$') { throw "Could not identify the wrapper Android PID" }
     $androidPid = [int]$androidPidText
     $linuxPid = Wait-Loader $androidPid
+    $runtimeLog = (Adb @("logcat", "-d", "-v", "brief", "-s", "ArchpheneRuntime:V", "*:S")) -join "`n"
+    if ($runtimeLog -match 'Runtime GUI exit=') {
+        throw "Runtime failed before the Linux loader became interactive`n$runtimeLog"
+    }
     $fds = (Adb @("shell", "run-as", $Wrapper, "ls", "-l", "/proc/$linuxPid/fd")) -join "`n"
-    $runtimeFds = @($fds -split "`n" | Where-Object { $_ -match 'runtime-packs|runtime-fd-' })
+    $runtimeFds = @($fds -split "`n" | Where-Object { $_ -match 'runtime-fd-' })
     $fdSummary = ($runtimeFds | Select-Object -First 12) -join "`n"
-    if ($fds -notmatch [regex]::Escape("org.archpheneos.manager/files/runtime-packs/$packId")) {
-        throw "Linux loader is not consuming manager-owned runtime-pack descriptors`n$fdSummary"
-    }
-    if ($fds -match 'runtime-fd-[^/]+/\.(program|library-)') {
-        throw "Linux closure was copied into the wrapper cache instead of using descriptors`n$fdSummary"
+    if ($fds -notmatch 'runtime-fd-[^/]+/\.program' -or
+            $fds -notmatch 'runtime-fd-[^/]+/\.library-') {
+        throw "Linux loader is missing its bounded wrapper-private executable view`n$fdSummary"
     }
 
-    $cacheSize = ((Adb @("shell", "run-as", $Wrapper, "du", "-sk", "cache")) -join "`n")
-    $cacheKiB = [int64]([regex]::Match($cacheSize, '^(\d+)').Groups[1].Value)
-    if ($cacheKiB -ge 65536) {
-        throw "Wrapper cache contains an unexpected runtime closure: $cacheSize"
+    $liveCacheSize = ((Adb @("shell", "run-as", $Wrapper, "du", "-sk", "cache")) -join "`n")
+    $liveCacheKiB = [int64]([regex]::Match($liveCacheSize, '^(\d+)').Groups[1].Value)
+    if ($liveCacheKiB -le 0 -or $liveCacheKiB -ge 524288) {
+        throw "Wrapper execution cache is outside the 512 MiB bound: $liveCacheSize"
     }
 
-    Adb @("shell", "am", "force-stop", $Wrapper) | Out-Null
+    Adb @("shell", "input", "keyevent", "4") | Out-Null
     Wait-RuntimeLog "(Released runtime pack lease|Runtime process died; released pack lease) $packId" 20 | Out-Null
+    Start-Sleep -Seconds 1
+    $cleanCacheSize = ((Adb @("shell", "run-as", $Wrapper, "du", "-sk", "cache")) -join "`n")
+    $cleanCacheKiB = [int64]([regex]::Match($cleanCacheSize, '^(\d+)').Groups[1].Value)
+    if ($cleanCacheKiB -ge 65536) {
+        throw "Wrapper retained a runtime closure after process exit: $cleanCacheSize"
+    }
 
-    Write-Host "Runtime FD sharing passed on ${Serial}: manager UID $managerUid -> wrapper UID $wrapperUid; pack $packId executed through inherited descriptors with a ${cacheKiB} KiB wrapper cache."
+    Write-Host "Runtime-pack execution passed on ${Serial}: manager UID $managerUid -> wrapper UID $wrapperUid; pack $packId used a bounded ${liveCacheKiB} KiB executable view and cleaned to ${cleanCacheKiB} KiB on exit."
 } finally {
     Adb @("shell", "am", "force-stop", $Wrapper) | Out-Null
     Adb @("shell", "am", "force-stop", $Manager) | Out-Null
