@@ -207,20 +207,11 @@ static int deadline_expired(const struct timespec *deadline) {
                 && now.tv_nsec >= deadline->tv_nsec);
 }
 
-static long elapsed_millis(const struct timespec *started) {
-    struct timespec now;
-    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return -1;
-    return (now.tv_sec - started->tv_sec) * 1000L
-            + (now.tv_nsec - started->tv_nsec) / 1000000L;
-}
-
 int archphene_atspi_tree_build(DBusConnection *connection,
         const ArchpheneAtspiReference *applications, size_t application_count,
         ArchpheneAtspiTree *tree) {
     if (connection == NULL || tree == NULL
             || (application_count > 0 && applications == NULL)) return -1;
-    struct timespec started;
-    if (clock_gettime(CLOCK_MONOTONIC, &started) != 0) return -1;
     struct timespec deadline;
     if (build_deadline(&deadline) != 0) return -1;
     memset(tree, 0, sizeof(*tree));
@@ -256,7 +247,6 @@ int archphene_atspi_tree_build(DBusConnection *connection,
             break;
         }
         PendingNode current = pending[cursor++];
-        int initial_root = cursor <= application_count;
         if (seen_reference(seen, seen_count, &current.reference)) continue;
         if (seen_count >= TRAVERSAL_MAX) {
             truncated = 1;
@@ -269,16 +259,6 @@ int archphene_atspi_tree_build(DBusConnection *connection,
         int read_result = archphene_atspi_client_read_node(
                 connection, &current.reference, &node, children,
                 ARCHPHENE_ATSPI_CHILD_MAX, &child_count);
-        if (initial_root) {
-            fprintf(stderr,
-                    "AT-SPI root %zu/%zu result=%d elapsed=%ldms "
-                    "role=%s showing=%d visible=%d children=%zu "
-                    "bus=%s path=%s text=%.*s\n",
-                    cursor, application_count, read_result,
-                    elapsed_millis(&started), node.role, node.showing,
-                    node.visible, child_count, current.reference.bus,
-                    current.reference.path, 80, node.text);
-        }
         if (read_result < 0) {
             truncated = 1;
             continue;
