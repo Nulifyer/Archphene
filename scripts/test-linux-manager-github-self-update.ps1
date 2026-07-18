@@ -14,14 +14,19 @@ $Adb = Join-Path $Root "tooling/android-sdk/platform-tools/adb.exe"
 $Package = "org.archpheneos.manager"
 $BuildDir = Join-Path $Root "tooling/build/manager-github-self-update"
 $Baseline = Join-Path $BuildDir "Archphene-$FromVersion-production.apk"
+$DeviceAbi = (& $Adb -s $Serial shell getprop ro.product.cpu.abi).Trim()
+$ArtifactAbi = switch ($DeviceAbi) {
+    "x86_64" { "x86_64" }
+    "arm64-v8a" { "arm64-v8a" }
+    default { throw "Unsupported Android ABI for self-update validation: $DeviceAbi" }
+}
 
 if ($PrepareBaselineOnly -and -not $PublishedV100Migration) {
     throw "-PrepareBaselineOnly requires -PublishedV100Migration"
 }
 if ($PublishedV100Migration) {
-    $abi = (& $Adb -s $Serial shell getprop ro.product.cpu.abi).Trim()
-    if ($abi -ne "x86_64") {
-        throw "The published v1.0.0 migration baseline is x86_64-only, not $abi"
+    if ($DeviceAbi -ne "x86_64") {
+        throw "The published v1.0.0 migration baseline is x86_64-only, not $DeviceAbi"
     }
     $FromVersion = "1.0.0"
     $FromVersionCode = 1000000002
@@ -87,7 +92,7 @@ function Tap-Match([string]$Ui, [string]$Pattern, [string]$Step) {
 if (-not $PublishedV100Migration -and ($RebuildBaseline -or
         -not (Test-Path -LiteralPath $Baseline -PathType Leaf))) {
     & (Join-Path $PSScriptRoot "build-manager-podman.ps1") -SkipRuntime -ReleaseBuild `
-        -VersionCode $FromVersionCode -VersionName $FromVersion
+        -ArtifactAbi $ArtifactAbi -VersionCode $FromVersionCode -VersionName $FromVersion
     if ($LASTEXITCODE -ne 0) { throw "Production baseline build failed" }
     New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
     Copy-Item -LiteralPath (Join-Path $Root `
