@@ -43,6 +43,24 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
     private static final int MAX_VIEWPORT = 16384;
     private static final int MAX_POLL_MILLIS = 250;
 
+    static final class PopupFrame {
+        final int x;
+        final int y;
+        final int width;
+        final int height;
+        final int frameWidth;
+        final int frameHeight;
+
+        PopupFrame(int x, int y, int width, int height,
+                int frameWidth, int frameHeight) {
+            this.x = x;
+            this.y = y;
+            this.width = width;
+            this.height = height;
+            this.frameWidth = frameWidth;
+            this.frameHeight = frameHeight;
+        }
+    }
     static final class LinuxAction {
         final int nodeId;
         final String action;
@@ -157,7 +175,7 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
             new LinkedHashMap<>();
     private final Map<Integer, WindowDescriptor> windowDescriptors =
             new LinkedHashMap<>();
-    private volatile List<ArchpheneCompositorSession.PopupFrame> popupFrames =
+    private volatile List<PopupFrame> popupFrames =
             Collections.emptyList();
     private final Map<Integer, Integer> semanticWindowAssignments = new HashMap<>();
     private View host;
@@ -362,7 +380,7 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
                 bounds.exactCenterX(), bounds.exactCenterY(), transition);
     }
 
-    void updatePopups(List<ArchpheneCompositorSession.PopupFrame> frames) {
+    void updatePopups(List<PopupFrame> frames) {
         root.popupFrames = frames == null || frames.isEmpty()
                 ? Collections.emptyList() : List.copyOf(frames);
         root.redistribute();
@@ -953,7 +971,7 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
     }
 
     private static Rect popupAdjustedBounds(Node node, Map<Integer, Node> nodes,
-            List<ArchpheneCompositorSession.PopupFrame> popups,
+            List<PopupFrame> popups,
             int viewportRootId) {
         if (popups.isEmpty()) return node.bounds;
         int menuDepth = 0;
@@ -976,7 +994,7 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
             popupIndex = popups.size() - 1;
         }
         if (popupIndex < 0) return node.bounds;
-        ArchpheneCompositorSession.PopupFrame popup = popups.get(popupIndex);
+        PopupFrame popup = popups.get(popupIndex);
         if (popup.width == popup.frameWidth && popup.height == popup.frameHeight) {
             return node.bounds;
         }

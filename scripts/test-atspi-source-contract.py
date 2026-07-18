@@ -464,6 +464,8 @@ def main() -> None:
         (android_source, "boolean isMenuAt(", "semantic menu hit testing"),
         (android_source, "boolean isClickableAt(", "semantic control hit testing"),
         (android_source, "popupAdjustedBounds(", "popup semantic bounds transform"),
+        (android_source, "static final class PopupFrame",
+         "standalone accessibility popup geometry"),
         (android_source, "popup.width == popup.frameWidth",
          "unscaled global popup semantic geometry"),
         (android_source, "boolean detachedPopupRoot",

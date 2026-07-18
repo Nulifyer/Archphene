@@ -218,7 +218,14 @@ public abstract class ArchpheneCompositorActivity extends Activity {
 
                     @Override
                     public void onPopups(List<ArchpheneCompositorSession.PopupFrame> popups) {
-                        accessibilityBridge.updatePopups(popups);
+                        ArrayList<ArchpheneAccessibilityBridge.PopupFrame> frames =
+                                new ArrayList<>(popups.size());
+                        for (ArchpheneCompositorSession.PopupFrame popup : popups) {
+                            frames.add(new ArchpheneAccessibilityBridge.PopupFrame(
+                                    popup.x, popup.y, popup.width, popup.height,
+                                    popup.frameWidth, popup.frameHeight));
+                        }
+                        accessibilityBridge.updatePopups(frames);
                     }
 
                     @Override
