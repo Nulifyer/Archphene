@@ -275,7 +275,17 @@ int archphene_atspi_tree_build(DBusConnection *connection,
             }
             continue;
         }
-        if (!node.showing || !node.visible) continue;
+        if (!node.showing || !node.visible) {
+            if (current.parent != 0 || strcmp(node.role, "window") == 0) continue;
+            size_t available = TRAVERSAL_MAX - pending_count;
+            size_t enqueue = child_count < available ? child_count : available;
+            if (enqueue < child_count) truncated = 1;
+            for (size_t index = 0; index < enqueue; index++) {
+                pending[pending_count].reference = children[index];
+                pending[pending_count++].parent = 0;
+            }
+            continue;
+        }
         if (tree->count >= ARCHPHENE_ATSPI_NODE_MAX) {
             truncated = 1;
             break;

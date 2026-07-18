@@ -253,7 +253,7 @@ def main() -> None:
 
     lifecycle_tokens = (
         (publish_source, "ARCHPHENE_ATSPI_TREE_TRUNCATED", "bounded-tree publication"),
-        (publish_source, "if (!node.showing || !node.visible) continue;", "hidden-tree pruning"),
+        (publish_source, "if (!node.showing || !node.visible) {", "hidden-node pruning"),
         (publish_source, "if (tree->count == 0) goto fail;", "pre-free empty-tree check"),
         (publish_source, "if (read_result < 0) {\n            truncated = 1;",
          "unreadable transient child isolation"),
@@ -286,6 +286,9 @@ def main() -> None:
          "retained parent remapping"),
         (publish_source, "#define TREE_BUILD_BUDGET_MILLIS 5000",
          "complete AT-SPI traversal budget"),
+        (publish_source,
+         "current.parent != 0 || strcmp(node.role, \"window\") == 0",
+         "supplemental hidden-root traversal"),
         (translator_source, "#define MAX_TRANSIENT_ROOTS 32", "bounded transient roots"),
         (translator_source, "bool transient_window_roots[MAX_TRANSIENT_ROOTS]",
          "transient root classification"),
