@@ -384,6 +384,8 @@ def main() -> None:
         (translator_source,
          "snapshot_cached_accessibles(",
          "atomic cached snapshot"),
+        (translator_source, "retain_previous_geometry(*next_tree);",
+         "transient sentinel geometry retention"),
         (translator_source, "if (!found_node) return;", "action lookup lifetime"),
         (translator_source,
          "state.tree->nodes[index].node.reference.bus",

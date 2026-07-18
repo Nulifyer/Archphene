@@ -901,7 +901,43 @@ static int build_cached_tree(const CachedAccessible *cached, size_t count,
             : ARCHPHENE_ATSPI_TREE_COMPLETE;
 }
 
+static void retain_previous_geometry(ArchpheneAtspiTree *tree) {
+    if (tree == NULL || (tree->viewport_width > 1 && tree->viewport_height > 1)) return;
+    pthread_mutex_lock(&state.mutex);
+    const ArchpheneAtspiTree *previous = state.tree;
+    if (previous == NULL
+            || previous->viewport_width <= 1 || previous->viewport_height <= 1) {
+        pthread_mutex_unlock(&state.mutex);
+        return;
+    }
+    bool restored_root = false;
+    for (size_t index = 0; index < tree->count; index++) {
+        ArchpheneAtspiPublishedNode *node = &tree->nodes[index];
+        if (node->node.width > 1 && node->node.height > 1) continue;
+        for (size_t previous_index = 0;
+                previous_index < previous->count; previous_index++) {
+            const ArchpheneAtspiPublishedNode *known =
+                    &previous->nodes[previous_index];
+            if (!transient_reference_matches(&known->node.reference,
+                    node->node.reference.bus, node->node.reference.path)
+                    || known->node.width <= 1 || known->node.height <= 1) continue;
+            node->node.x = known->node.x;
+            node->node.y = known->node.y;
+            node->node.width = known->node.width;
+            node->node.height = known->node.height;
+            if (node->parent == 0) restored_root = true;
+            break;
+        }
+    }
+    if (restored_root) {
+        tree->viewport_width = previous->viewport_width;
+        tree->viewport_height = previous->viewport_height;
+    }
+    pthread_mutex_unlock(&state.mutex);
+}
+
 static int publish_and_swap_tree(ArchpheneAtspiTree **next_tree) {
+    retain_previous_geometry(*next_tree);
     if (archphene_atspi_tree_publish(*next_tree) != 0) {
         retain_dirty();
         return -1;
