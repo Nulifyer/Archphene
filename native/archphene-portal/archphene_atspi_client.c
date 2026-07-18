@@ -13,6 +13,7 @@
 #define PROPERTIES "org.freedesktop.DBus.Properties"
 #define TEXT "org.a11y.atspi.Text"
 #define CALL_TIMEOUT_MILLIS 1000
+#define ROLE_CALL_TIMEOUT_MILLIS 250
 #define ACTION_SCAN_MAX 8
 #define INTERFACE_SCAN_MAX 64
 
@@ -120,17 +121,22 @@ static void copy_text(char *target, size_t capacity, const char *source) {
     target[output] = '\0';
 }
 
-static DBusMessage *send_call(DBusConnection *connection, DBusMessage *request) {
+static DBusMessage *send_call_with_timeout(DBusConnection *connection,
+        DBusMessage *request, int timeout_millis) {
     if (connection == NULL || request == NULL) {
         if (request != NULL) dbus_message_unref(request);
         return NULL;
     }
     DBusError error = DBUS_ERROR_INIT;
     DBusMessage *reply = dbus_connection_send_with_reply_and_block(
-            connection, request, CALL_TIMEOUT_MILLIS, &error);
+            connection, request, timeout_millis, &error);
     dbus_message_unref(request);
     if (dbus_error_is_set(&error)) dbus_error_free(&error);
     return reply;
+}
+
+static DBusMessage *send_call(DBusConnection *connection, DBusMessage *request) {
+    return send_call_with_timeout(connection, request, CALL_TIMEOUT_MILLIS);
 }
 
 static dbus_bool_t exact_reply(DBusMessage *reply, const char *signature) {
@@ -197,8 +203,10 @@ static dbus_bool_t read_string_property(DBusConnection *connection,
 
 static dbus_bool_t read_method_string(DBusConnection *connection,
         const ArchpheneAtspiReference *reference, const char *interface,
-        const char *method, char *target, size_t capacity) {
-    DBusMessage *reply = send_call(connection, new_call(reference, interface, method));
+        const char *method, char *target, size_t capacity,
+        int timeout_millis) {
+    DBusMessage *reply = send_call_with_timeout(connection,
+            new_call(reference, interface, method), timeout_millis);
     DBusMessageIter output;
     dbus_bool_t ok = exact_reply(reply, "s")
             && dbus_message_iter_init(reply, &output);
@@ -213,8 +221,9 @@ static dbus_bool_t read_method_string(DBusConnection *connection,
 
 static dbus_bool_t read_method_uint32(DBusConnection *connection,
         const ArchpheneAtspiReference *reference, const char *interface,
-        const char *method, uint32_t *target) {
-    DBusMessage *reply = send_call(connection, new_call(reference, interface, method));
+        const char *method, uint32_t *target, int timeout_millis) {
+    DBusMessage *reply = send_call_with_timeout(connection,
+            new_call(reference, interface, method), timeout_millis);
     DBusMessageIter output;
     dbus_bool_t ok = target != NULL && exact_reply(reply, "u")
             && dbus_message_iter_init(reply, &output);
@@ -600,10 +609,12 @@ int archphene_atspi_client_read_node(DBusConnection *connection,
     node->scroll_backward_action = -1;
     uint32_t role_id = 0;
     dbus_bool_t role_id_available = read_method_uint32(
-            connection, reference, ACCESSIBLE, "GetRole", &role_id);
+            connection, reference, ACCESSIBLE, "GetRole", &role_id,
+            ROLE_CALL_TIMEOUT_MILLIS);
     char role_name[64] = {0};
     dbus_bool_t role_name_available = read_method_string(connection, reference,
-            ACCESSIBLE, "GetRoleName", role_name, sizeof(role_name));
+            ACCESSIBLE, "GetRoleName", role_name, sizeof(role_name),
+            ROLE_CALL_TIMEOUT_MILLIS);
     if (!role_id_available && !role_name_available) return -1;
     const char *mapped_role = role_id_available ? map_role_id(role_id) : NULL;
     if (mapped_role != NULL) copy_text(node->role, sizeof(node->role), mapped_role);
