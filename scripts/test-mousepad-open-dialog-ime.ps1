@@ -81,7 +81,33 @@ if (Input-Shown) {
     Start-Sleep -Milliseconds 500
 }
 Adb @("shell", "input", "keycombination", "113", "43") | Out-Null
-Wait-Log 'mapped=true.*title=Open File' 15 | Out-Null
+$openLog = Wait-Log 'mapped=true.*title=Open File' 15
+$openLayouts = [regex]::Matches($openLog,
+    'mapped=true.*content=(-?[0-9]+),(-?[0-9]+) ([0-9]+)x([0-9]+) canvas=([0-9]+)x([0-9]+) compositedFrame=(-?[0-9]+),(-?[0-9]+) ([0-9]+)x([0-9]+).*title=Open File')
+if ($openLayouts.Count -eq 0) {
+    throw "Open dialog did not publish composited frame geometry"
+}
+$openLayout = $openLayouts[$openLayouts.Count - 1]
+$contentX = [int]$openLayout.Groups[1].Value
+$contentY = [int]$openLayout.Groups[2].Value
+$contentWidth = [int]$openLayout.Groups[3].Value
+$contentHeight = [int]$openLayout.Groups[4].Value
+$canvasWidth = [int]$openLayout.Groups[5].Value
+$canvasHeight = [int]$openLayout.Groups[6].Value
+$frameX = [int]$openLayout.Groups[7].Value
+$frameY = [int]$openLayout.Groups[8].Value
+$frameWidth = [int]$openLayout.Groups[9].Value
+$frameHeight = [int]$openLayout.Groups[10].Value
+if ($frameX -lt 0 -or $frameY -lt 0 -or
+        $frameX + $frameWidth -gt $canvasWidth -or
+        $frameY + $frameHeight -gt $canvasHeight) {
+    throw "Open dialog frame is outside its Android viewport"
+}
+if ($contentX -lt 0 -or $contentY -lt 0 -or
+        $contentX + $contentWidth -gt $canvasWidth -or
+        $contentY + $contentHeight -gt $canvasHeight) {
+    throw "Open dialog content is outside its Android viewport"
+}
 $search = Wait-UiNode {
     $_.GetAttribute("content-desc") -eq "Search" -and $_.clickable -eq "true"
 } "open-dialog-search"
