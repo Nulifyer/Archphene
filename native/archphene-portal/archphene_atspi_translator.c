@@ -42,6 +42,7 @@ static struct {
     bool worker_ready;
     bool worker_failed;
     bool dirty;
+    bool suppress_retention;
     unsigned int action_refresh_passes;
     Registration applications[MAX_APPLICATIONS];
     size_t application_count;
@@ -160,6 +161,30 @@ static bool parent_is_menu_bar(const ArchpheneAtspiTree *tree, int id) {
         if (tree->nodes[index].id == parent) {
             return tree->nodes[index].node.menu_bar;
         }
+    }
+    return false;
+}
+
+static bool node_belongs_to_showing_transient_locked(
+        const ArchpheneAtspiTree *tree, int id) {
+    for (size_t depth = 0; tree != NULL && id > 0
+            && depth <= tree->count; depth++) {
+        const ArchpheneAtspiPublishedNode *node = NULL;
+        for (size_t index = 0; index < tree->count; index++) {
+            if (tree->nodes[index].id == id) {
+                node = &tree->nodes[index];
+                break;
+            }
+        }
+        if (node == NULL) return false;
+        for (size_t index = 0; index < state.transient_root_count; index++) {
+            if (!state.transient_window_roots[index]
+                    && transient_reference_matches(
+                            &state.transient_roots[index],
+                            node->node.reference.bus,
+                            node->node.reference.path)) return true;
+        }
+        id = node->parent;
     }
     return false;
 }
@@ -318,15 +343,8 @@ static void process_action(DBusConnection *connection) {
         node = *found;
         found_node = true;
         menu_bar_child = parent_is_menu_bar(state.tree, id);
-        for (size_t index = 0; index < state.transient_root_count; index++) {
-            if (!state.transient_window_roots[index]
-                    && transient_reference_matches(
-                            &state.transient_roots[index],
-                            node.reference.bus, node.reference.path)) {
-                showing_root_action = true;
-                break;
-            }
-        }
+        showing_root_action =
+                node_belongs_to_showing_transient_locked(state.tree, id);
     }
     pthread_mutex_unlock(&state.mutex);
     if (!found_node) return;
@@ -376,8 +394,9 @@ static void process_action(DBusConnection *connection) {
     }
     if (result == 0) {
         pthread_mutex_lock(&state.mutex);
-        if (click && showing_root_action) {
-            remove_showing_transient_roots_locked();
+        if (click && showing_root_action
+                && remove_showing_transient_roots_locked()) {
+            state.suppress_retention = true;
         }
         state.action_refresh_passes = ACTION_REFRESH_PASSES;
         wake_worker();
@@ -436,10 +455,14 @@ static int rebuild_tree(DBusConnection *connection,
         return build_result;
     }
     size_t retained = 0;
+    bool suppress_retention = false;
     if (tree_incomplete(build_result)) {
         pthread_mutex_lock(&state.mutex);
-        retained = archphene_atspi_tree_retain_descendants(
-                state.tree, *next_tree);
+        suppress_retention = state.suppress_retention;
+        if (!suppress_retention) {
+            retained = archphene_atspi_tree_retain_descendants(
+                    state.tree, *next_tree);
+        }
         pthread_mutex_unlock(&state.mutex);
     }
     if (archphene_atspi_tree_publish(*next_tree) != 0) {
@@ -450,6 +473,7 @@ static int rebuild_tree(DBusConnection *connection,
     ArchpheneAtspiTree *previous = state.tree;
     state.tree = *next_tree;
     *next_tree = previous;
+    if (suppress_retention) state.suppress_retention = false;
     pthread_mutex_unlock(&state.mutex);
     if (retained > 0) {
         fprintf(stderr, "AT-SPI retained %zu nodes during partial refresh\n",
