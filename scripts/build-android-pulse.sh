@@ -101,6 +101,8 @@ for file in "$output"/*.so; do
   done < <(readelf -d "$file" | awk '/Shared library:/ {gsub(/\[|\]/, "", $5); print $5}')
 done
 
+chmod 0644 "$output"/*.so
 (cd "$output" && sha256sum ./*.so | sort -k2 > SHA256SUMS)
+chmod 0644 "$output/SHA256SUMS"
 printf 'Android PulseAudio payload ready: %s (%s bytes)\n' \
   "$output" "$(du -sb "$output" | cut -f1)"
