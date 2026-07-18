@@ -22,6 +22,40 @@ function Run-Native([scriptblock]$Command, [string]$Step) {
     }
 }
 
+function Copy-VerifiedPrebuiltBridge(
+        [string]$Root,
+        [string]$BridgeName,
+        [string]$Architecture,
+        [string]$Destination) {
+    $BridgeRoot = Join-Path $Root "prebuilt/$BridgeName"
+    $ManifestPath = Join-Path $BridgeRoot "manifest.json"
+    if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) {
+        throw "Prebuilt $BridgeName manifest is missing: $ManifestPath"
+    }
+    $Manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
+    if ($Manifest.architecture -ne $Architecture) {
+        throw "Prebuilt $BridgeName manifest does not describe $Architecture"
+    }
+    $Files = @($Manifest.files)
+    if ($Files.Count -eq 0) {
+        throw "Prebuilt $BridgeName manifest has no files"
+    }
+    foreach ($Artifact in $Files) {
+        $Source = Join-Path $BridgeRoot "$Architecture/$($Artifact.name)"
+        if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) {
+            throw "Prebuilt $BridgeName artifact is missing: $Source"
+        }
+        $Hash = (Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($Hash -ne $Artifact.sha256) {
+            throw "Prebuilt $BridgeName checksum mismatch: $($Artifact.name)"
+        }
+        if ((Get-Item -LiteralPath $Source).Length -ne $Artifact.bytes) {
+            throw "Prebuilt $BridgeName size mismatch: $($Artifact.name)"
+        }
+        Copy-Item -LiteralPath $Source -Destination (Join-Path $Destination $Artifact.name) -Force
+    }
+}
+
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $LocalSdk = Join-Path $Root "tooling/android-sdk"
 $SdkCandidate = if ($AndroidSdk) { $AndroidSdk }
@@ -160,6 +194,25 @@ if ($IncludePackageRuntime) {
     } | ForEach-Object {
         Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $PackageLibDir $_.Name) -Force
     }
+    $RuntimeToolManifest = Get-Content -LiteralPath (Join-Path $Root "prebuilt/runtime-tools/manifest.json") -Raw | ConvertFrom-Json
+    $RuntimeToolArtifacts = @($RuntimeToolManifest.artifacts |
+        Where-Object { $_.abi -eq "x86_64" })
+    if ($RuntimeToolArtifacts.Count -eq 0) {
+        throw "Prebuilt x86_64 runtime-tool metadata is missing"
+    }
+    foreach ($artifact in $RuntimeToolArtifacts) {
+        $source = Join-Path $Root ("prebuilt/runtime-tools/" + $artifact.file)
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+            throw "Prebuilt x86_64 runtime tool is missing: $source"
+        }
+        $hash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($hash -ne $artifact.sha256) {
+            throw "Prebuilt x86_64 runtime-tool checksum mismatch: $($artifact.file)"
+        }
+        Copy-Item -LiteralPath $source -Destination (Join-Path $PackageLibDir ([IO.Path]::GetFileName($artifact.file))) -Force
+    }
+    Copy-VerifiedPrebuiltBridge $Root "gtk3-compat" "x86_64" $PackageLibDir
+    Copy-VerifiedPrebuiltBridge $Root "qt-bridge" "x86_64" $PackageLibDir
 }
 
 $RuntimeModules = @(

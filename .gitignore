@@ -157,6 +157,11 @@ window.xml
 !/prebuilt/gtk3-compat/x86_64/*.so
 !/prebuilt/gtk3-compat/aarch64/
 !/prebuilt/gtk3-compat/aarch64/*.so
+!/prebuilt/runtime-tools/
+!/prebuilt/runtime-tools/manifest.json
+!/prebuilt/runtime-tools/SHA256SUMS
+!/prebuilt/runtime-tools/x86_64/
+!/prebuilt/runtime-tools/x86_64/*.so
 # Android resource images are source assets, not test screenshots
 !prototypes/**/res/**/*.png
 
