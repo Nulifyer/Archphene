@@ -312,6 +312,8 @@ def main() -> None:
          "bounded event-priority roots"),
         (translator_source, "&state.events[event_index].reference",
          "event-source traversal priority"),
+        (translator_source, "event_variant_reference(message, &child_reference)",
+         "children-changed child traversal"),
         (translator_source, "transient_change = enabled != 0 ? 1 : -1", "popup visibility roots"),
         (translator_source, "state.transient_generation++", "popup generation tracking"),
         (translator_source, "bool menu_click =", "semantic menu fallback"),

@@ -188,6 +188,22 @@ static bool event_variant_string(
     dbus_message_iter_get_basic(&variant, value);
     return *value != NULL;
 }
+
+static bool event_variant_reference(
+        DBusMessage *message, ArchpheneAtspiReference *reference) {
+    DBusMessageIter arguments;
+    if (message == NULL || reference == NULL
+            || !dbus_message_iter_init(message, &arguments)) return false;
+    for (int skipped = 0; skipped < 3; skipped++) {
+        if (!dbus_message_iter_next(&arguments)) return false;
+    }
+    if (dbus_message_iter_get_arg_type(&arguments) != DBUS_TYPE_VARIANT) {
+        return false;
+    }
+    DBusMessageIter variant;
+    dbus_message_iter_recurse(&arguments, &variant);
+    return cache_reference_from_iter(&variant, reference);
+}
 static bool transient_reference_matches(
         const ArchpheneAtspiReference *reference,
         const char *bus, const char *path) {
@@ -1083,6 +1099,12 @@ void archphene_atspi_translator_event(DBusMessage *message) {
     const char *cached_state_name = NULL;
     bool cached_state_enabled = false;
     ArchpheneAtspiNode event_window;
+    ArchpheneAtspiReference child_reference;
+    bool child_event = strcmp(member, "ChildrenChanged") == 0
+            && event_variant_reference(message, &child_reference);
+    const char *queued_bus = child_event && child_reference.bus[0] != '\0'
+            ? child_reference.bus : bus;
+    const char *queued_path = child_event ? child_reference.path : path;
     bool cache_window_add = false;
     bool cache_window_remove = false;
     if (strcmp(interface, "org.a11y.atspi.Event.Window") == 0) {
@@ -1150,8 +1172,8 @@ void archphene_atspi_translator_event(DBusMessage *message) {
             || strcmp(member, "SelectionChanged") == 0
             || strcmp(member, "ActiveDescendantChanged") == 0
             || strcmp(member, "TextChanged") == 0) {
-        fprintf(stderr, "AT-SPI event member=%s path=%s type=%s\n",
-                member, path, type);
+        fprintf(stderr, "AT-SPI event member=%s path=%s queued=%s type=%s\n",
+                member, path, queued_path, type);
     }
 
     pthread_mutex_lock(&state.mutex);
@@ -1175,8 +1197,8 @@ void archphene_atspi_translator_event(DBusMessage *message) {
     for (size_t offset = 0; offset < state.event_count; offset++) {
         size_t index = (state.event_head + offset) % MAX_EVENTS;
         PendingEvent *queued = &state.events[index];
-        if (strcmp(queued->reference.bus, bus) == 0
-                && strcmp(queued->reference.path, path) == 0
+        if (strcmp(queued->reference.bus, queued_bus) == 0
+                && strcmp(queued->reference.path, queued_path) == 0
                 && strcmp(queued->type, type) == 0) {
             wake_worker();
             pthread_mutex_unlock(&state.mutex);
@@ -1189,8 +1211,8 @@ void archphene_atspi_translator_event(DBusMessage *message) {
     }
     size_t tail = (state.event_head + state.event_count) % MAX_EVENTS;
     PendingEvent *event = &state.events[tail];
-    snprintf(event->reference.bus, sizeof(event->reference.bus), "%s", bus);
-    snprintf(event->reference.path, sizeof(event->reference.path), "%s", path);
+    snprintf(event->reference.bus, sizeof(event->reference.bus), "%s", queued_bus);
+    snprintf(event->reference.path, sizeof(event->reference.path), "%s", queued_path);
     snprintf(event->type, sizeof(event->type), "%s", type);
     state.event_count++;
     wake_worker();
