@@ -364,7 +364,7 @@ static int rebuild_tree(DBusConnection *connection,
     size_t count = snapshot_applications(applications);
     int build_result = archphene_atspi_tree_build(
             connection, applications, count, *next_tree);
-    if (build_result < 0 || build_result == ARCHPHENE_ATSPI_TREE_RETRY) {
+    if (build_result < 0) {
         retain_dirty();
         return build_result;
     }
@@ -377,6 +377,7 @@ static int rebuild_tree(DBusConnection *connection,
     state.tree = *next_tree;
     *next_tree = previous;
     pthread_mutex_unlock(&state.mutex);
+    if (build_result == ARCHPHENE_ATSPI_TREE_RETRY) retain_dirty();
     return build_result;
 }
 static void signal_startup(bool ready) {
