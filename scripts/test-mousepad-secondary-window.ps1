@@ -4,6 +4,15 @@ $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $Adb = Join-Path $Root "tooling/android-sdk/platform-tools/adb.exe"
 $Package = "org.archphene.linux.p241d399e14343c53b8b766e9126776aa"
+$ProbePackage = "org.archphene.accessibilityprobe"
+$ProbeActivity = "org.archphene.bridge.AccessibilityProbeActivity"
+$ProbeService = "$ProbePackage/org.archphene.bridge.ProbeAccessibilityService"
+$TreeFile = "files/framework-accessibility-tree-$Package.txt"
+$CommandFile = "files/framework-accessibility-command.txt"
+$ResponseFile = "files/framework-accessibility-response.txt"
+$script:SettingsCaptured = $false
+$script:OriginalServices = $null
+$script:OriginalAccessibilityEnabled = $null
 
 function Adb([string[]]$Arguments) {
     $output = & $Adb -s $Serial @Arguments 2>&1
@@ -25,105 +34,132 @@ function Wait-BridgeLog([string]$Pattern, [int]$TimeoutSeconds) {
     throw "Timed out waiting for bridge log: $Pattern"
 }
 
-function Read-ActiveImageBounds([string]$Name) {
-    $remote = "/sdcard/$Name.xml"
-    $local = Join-Path $Root "artifacts/$Name.xml"
-    Adb @("shell", "uiautomator", "dump", $remote) | Out-Null
-    Adb @("pull", $remote, $local) | Out-Null
-    $xml = Get-Content -LiteralPath $local -Raw
-    $matches = [regex]::Matches(
-        $xml,
-        'class="android\.widget\.ImageView"[^>]*bounds="\[([0-9]+),([0-9]+)\]\[([0-9]+),([0-9]+)\]"')
-    if ($matches.Count -ne 1) {
-        throw "Expected one active compositor ImageView, found $($matches.Count)"
+function ConvertTo-Base64Url([string]$Value) {
+    $bytes = [Text.Encoding]::UTF8.GetBytes($Value)
+    return [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+}
+
+function Get-TargetTree {
+    $tree = & $Adb -s $Serial shell run-as $ProbePackage cat $TreeFile 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $tree) { return $null }
+    return $tree -join "`n"
+}
+
+function Wait-TargetTree([string[]]$Contains, [string[]]$Absent = @(),
+        [int]$TimeoutSeconds = 15) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        $tree = Get-TargetTree
+        if ($null -ne $tree) {
+            $present = @($Contains | Where-Object { -not $tree.Contains($_) }).Count -eq 0
+            $missing = @($Absent | Where-Object { $tree.Contains($_) }).Count -eq 0
+            if ($present -and $missing) { return $tree }
+        }
+        Start-Sleep -Milliseconds 200
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "Timed out waiting for accessibility tree: $($Contains -join ', ')"
+}
+
+function Invoke-AccessibilityAction([string]$Selector) {
+    $id = "secondary-$([Guid]::NewGuid().ToString('N').Substring(0, 12))"
+    $selectorEncoded = ConvertTo-Base64Url $Selector
+    $payload = "$id`t$Package`tclick`t$selectorEncoded`t"
+    Adb @("shell", "run-as", $ProbePackage, "rm", "-f", $ResponseFile) | Out-Null
+    $teeOutput = $payload | & $Adb -s $Serial shell run-as $ProbePackage tee $CommandFile 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not write accessibility command: $($teeOutput -join "`n")"
     }
-    $match = $matches[0]
-    return @(
-        [int]$match.Groups[1].Value,
-        [int]$match.Groups[2].Value,
-        [int]$match.Groups[3].Value,
-        [int]$match.Groups[4].Value)
+    $deadline = [DateTime]::UtcNow.AddSeconds(15)
+    do {
+        $response = & $Adb -s $Serial shell run-as $ProbePackage cat $ResponseFile 2>$null
+        if ($LASTEXITCODE -eq 0 -and $response) {
+            $rendered = ($response -join "").Trim()
+            if ($rendered.StartsWith("$id`t")) {
+                if ($rendered -ne "$id`tOK") {
+                    throw "Accessibility action '$Selector' was rejected: $rendered"
+                }
+                return
+            }
+        }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "Timed out waiting for accessibility action '$Selector'"
 }
 
-function Map-Point([int[]]$Bounds, [int]$FrameWidth, [int]$FrameHeight,
-        [int]$LocalX, [int]$LocalY) {
-    $width = $Bounds[2] - $Bounds[0]
-    $height = $Bounds[3] - $Bounds[1]
-    return @(
-        ($Bounds[0] + [Math]::Round($LocalX * $width / $FrameWidth)),
-        ($Bounds[1] + [Math]::Round($LocalY * $height / $FrameHeight)))
+function Restore-AccessibilitySettings {
+    if (-not $script:SettingsCaptured) { return }
+    if ([string]::IsNullOrWhiteSpace($script:OriginalServices) -or
+            $script:OriginalServices -eq "null") {
+        Adb @("shell", "settings", "delete", "secure",
+                "enabled_accessibility_services") | Out-Null
+    } else {
+        Adb @("shell", "settings", "put", "secure",
+                "enabled_accessibility_services", $script:OriginalServices) | Out-Null
+    }
+    if ([string]::IsNullOrWhiteSpace($script:OriginalAccessibilityEnabled) -or
+            $script:OriginalAccessibilityEnabled -eq "null") {
+        Adb @("shell", "settings", "delete", "secure", "accessibility_enabled") | Out-Null
+    } else {
+        Adb @("shell", "settings", "put", "secure", "accessibility_enabled",
+                $script:OriginalAccessibilityEnabled) | Out-Null
+    }
+    $script:SettingsCaptured = $false
 }
 
-function Map-FitCenterPoint([int[]]$Bounds, [int]$ContentWidth, [int]$ContentHeight,
-        [int]$LocalX, [int]$LocalY) {
-    $viewWidth = $Bounds[2] - $Bounds[0]
-    $viewHeight = $Bounds[3] - $Bounds[1]
-    $scale = [Math]::Min($viewWidth / $ContentWidth, $viewHeight / $ContentHeight)
-    $left = ($viewWidth - $ContentWidth * $scale) / 2
-    $top = ($viewHeight - $ContentHeight * $scale) / 2
-    return @(
-        ($Bounds[0] + [Math]::Round($left + $LocalX * $scale)),
-        ($Bounds[1] + [Math]::Round($top + $LocalY * $scale)))
-}
+try {
+    $probeInstalled = (Adb @("shell", "pm", "list", "packages", $ProbePackage)) -join "`n"
+    if ($probeInstalled -notmatch "package:$([regex]::Escape($ProbePackage))") {
+        throw "Accessibility probe is not installed"
+    }
+    $script:OriginalServices = ((Adb @("shell", "settings", "get", "secure",
+            "enabled_accessibility_services")) -join "").Trim()
+    $script:OriginalAccessibilityEnabled = ((Adb @("shell", "settings", "get", "secure",
+            "accessibility_enabled")) -join "").Trim()
+    $script:SettingsCaptured = $true
 
-Adb @("shell", "pm", "clear", $Package) | Out-Null
-Adb @("logcat", "-c") | Out-Null
-Adb @("shell", "am", "start", "--windowingMode", "5", "-n", "$Package/org.archphene.linux.kcalc.MainActivity") | Out-Null
-$mainLog = Wait-BridgeLog 'window id=([0-9]+).*mapped=true.*active=true.*primary=true.*geometry=[^ ]+ ([0-9]+)x([0-9]+).*title=.*Mousepad' 30
-$main = [regex]::Match(
-    $mainLog,
-    'window id=([0-9]+).*mapped=true.*active=true.*primary=true.*geometry=[^ ]+ ([0-9]+)x([0-9]+).*title=.*Mousepad')
-$mainId = [int]$main.Groups[1].Value
-$mainWidth = [int]$main.Groups[2].Value
-$mainHeight = [int]$main.Groups[3].Value
-$surfaceHeight = $mainHeight
-$mainBounds = Read-ActiveImageBounds "mousepad-freeform-main"
-$settledFrames = [regex]::Matches((Read-BridgeLog), 'output frame=([0-9]+)x([0-9]+)')
-if ($settledFrames.Count -eq 0) {
-    throw "Mousepad did not publish a settled freeform frame"
-}
-$settledFrame = $settledFrames[$settledFrames.Count - 1]
-$mainWidth = [int]$settledFrame.Groups[1].Value
-$mainHeight = [int]$settledFrame.Groups[2].Value
-$edit = Map-FitCenterPoint $mainBounds $mainWidth $mainHeight 190 220
-Adb @("shell", "input", "tap", [string]$edit[0], [string]$edit[1]) | Out-Null
-Wait-BridgeLog 'popup registry=.*:\d+,\d+,\d+,\d+,[1-9]\d*,[1-9]\d*,1,0;' 10 | Out-Null
-Start-Sleep -Milliseconds 800
-Adb @("shell", "input", "keyevent", "KEYCODE_MOVE_END") | Out-Null
-Start-Sleep -Milliseconds 500
-Adb @("shell", "input", "keyevent", "KEYCODE_ENTER") | Out-Null
+    Adb @("shell", "am", "start", "-W", "-n", "$ProbePackage/$ProbeActivity") | Out-Null
+    Adb @("shell", "settings", "put", "secure", "enabled_accessibility_services",
+            $ProbeService) | Out-Null
+    Adb @("shell", "settings", "put", "secure", "accessibility_enabled", "1") | Out-Null
+    Adb @("shell", "run-as", $ProbePackage, "rm", "-f", $TreeFile,
+            $CommandFile, $ResponseFile) | Out-Null
 
-$childLog = Wait-BridgeLog 'window id=([0-9]+) parent=([0-9]+) mapped=true active=(?:true|false) primary=false geometry=[^ ]+ ([0-9]+)x([0-9]+).*title=Mousepad Preferences' 15
-$child = [regex]::Match(
-    $childLog,
-    'window id=([0-9]+) parent=([0-9]+) mapped=true active=(?:true|false) primary=false geometry=[^ ]+ ([0-9]+)x([0-9]+).*title=Mousepad Preferences')
-$childId = [int]$child.Groups[1].Value
-if ([int]$child.Groups[2].Value -ne $mainId) {
-    throw "Preferences window is not parented to the Mousepad toplevel"
-}
-$childWidth = [int]$child.Groups[3].Value
-$childHeight = [int]$child.Groups[4].Value
-$childBounds = Read-ActiveImageBounds "mousepad-freeform-preferences"
+    Adb @("shell", "pm", "clear", $Package) | Out-Null
+    Adb @("logcat", "-c") | Out-Null
+    Adb @("shell", "am", "start", "--windowingMode", "5", "-n",
+            "$Package/org.archphene.linux.kcalc.MainActivity") | Out-Null
+    $mainLog = Wait-BridgeLog 'window id=([0-9]+).*mapped=true.*active=true.*primary=true.*title=.*Mousepad' 30
+    $mainMatches = [regex]::Matches($mainLog,
+        'window id=([0-9]+).*mapped=true.*active=true.*primary=true.*title=.*Mousepad')
+    $mainId = [int]$mainMatches[$mainMatches.Count - 1].Groups[1].Value
+    Wait-TargetTree @("|Untitled 1 - Mousepad|", "|Edit|Edit menu|") | Out-Null
 
-Adb @("logcat", "-c") | Out-Null
-$toggle = Map-Point $childBounds $childWidth $childHeight 33 118
-Adb @("shell", "input", "tap", [string]$toggle[0], [string]$toggle[1]) | Out-Null
-$toggleLog = Wait-BridgeLog 'touch down.*result=1' 5
-if ($toggleLog -notmatch "touch up.*result=1") {
-    throw "Preferences control did not receive a complete Wayland touch"
-}
+    Invoke-AccessibilityAction "Edit"
+    Wait-BridgeLog 'popup registry=.*:[0-9]+,[0-9]+,[0-9]+,[0-9]+,[1-9][0-9]*,[1-9][0-9]*,1,0;' 10 | Out-Null
+    Wait-TargetTree @("|Show the preferences dialog|") | Out-Null
+    Invoke-AccessibilityAction "Show the preferences dialog"
 
-Adb @("logcat", "-c") | Out-Null
-$close = Map-Point $childBounds $childWidth $childHeight ($childWidth - 96) 13
-Adb @("shell", "input", "tap", [string]$close[0], [string]$close[1]) | Out-Null
-$closeLog = Wait-BridgeLog "window id=$mainId parent=0 mapped=true active=true primary=true" 10
-$latestParent = $closeLog.LastIndexOf(
-    "window id=$mainId parent=0 mapped=true active=true primary=true")
-$latestRegistry = $closeLog.Substring($latestParent)
-if ($latestRegistry -match "window id=$childId .*mapped=true") {
-    throw "Preferences child remained mapped after its close control"
-}
-$appPid = (Adb @("shell", "pidof", $Package)) -join ""
-if (-not $appPid.Trim()) { throw "Mousepad parent exited when the child closed" }
+    $childLog = Wait-BridgeLog 'window id=([0-9]+) parent=([0-9]+) mapped=true active=(?:true|false) primary=false .*title=Mousepad Preferences' 15
+    $childMatches = [regex]::Matches($childLog,
+        'window id=([0-9]+) parent=([0-9]+) mapped=true active=(?:true|false) primary=false .*title=Mousepad Preferences')
+    $child = $childMatches[$childMatches.Count - 1]
+    $childId = [int]$child.Groups[1].Value
+    if ([int]$child.Groups[2].Value -ne $mainId) {
+        throw "Preferences window is not parented to the Mousepad toplevel"
+    }
 
-Write-Host "Mousepad secondary-window bridge passed: freeform child $childId received input, closed, and parent $mainId remained active."
+    Wait-TargetTree @("|Mousepad Preferences|", "|Show line numbers|",
+            "|Use system monospace font|") | Out-Null
+    Invoke-AccessibilityAction "Show line numbers"
+
+    Adb @("shell", "input", "keyevent", "4") | Out-Null
+    Wait-BridgeLog "window id=$childId parent=$mainId mapped=false" 10 | Out-Null
+    Wait-BridgeLog "window id=$mainId parent=0 mapped=true active=true primary=true" 10 | Out-Null
+    Wait-TargetTree @("|Untitled 1 - Mousepad|") @("|Mousepad Preferences|") | Out-Null
+    $appPid = (Adb @("shell", "pidof", $Package)) -join ""
+    if (-not $appPid.Trim()) { throw "Mousepad parent exited when the child closed" }
+
+    Write-Host "Mousepad secondary-window bridge passed: freeform child $childId accepted a semantic control action, closed, and parent $mainId remained active."
+} finally {
+    Restore-AccessibilitySettings
+}
