@@ -18,8 +18,8 @@ mkdir -p "$work" "$output"
 
 pacman-key --init
 pacman-key --populate archlinuxarm
-pacman -Syu --noconfirm
-pacman -S --needed --noconfirm \
+pacman --disable-sandbox -Syu --noconfirm
+pacman --disable-sandbox -S --needed --noconfirm \
   base-devel cairo cargo-c dav1d fontconfig freetype2 gi-docgen git glib2-devel \
   gobject-introspection harfbuzz libjpeg-turbo libpng libtiff libxml2 llvm \
   meson pango python-docutils rust shared-mime-info vala
@@ -35,7 +35,7 @@ runuser -u archphene-builder -- bash -lc "cd '$work/gdk-pixbuf2-noglycin' && mak
 gdk_package="$(find "$work/gdk-pixbuf2-noglycin" -maxdepth 1 -type f \
   -name 'gdk-pixbuf2-noglycin-[0-9]*-aarch64.pkg.tar.zst' -print -quit)"
 [[ -n "$gdk_package" ]] || { echo "gdk-pixbuf2 no-Glycin package was not produced" >&2; exit 1; }
-pacman -U --noconfirm "$gdk_package"
+pacman --disable-sandbox -U --noconfirm "$gdk_package"
 
 runuser -u archphene-builder -- git clone https://aur.archlinux.org/librsvg-noglycin.git "$work/librsvg-noglycin"
 runuser -u archphene-builder -- git -C "$work/librsvg-noglycin" checkout "$rsvg_commit"
