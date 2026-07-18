@@ -2,7 +2,7 @@
 pulseaudio|aarch64|17.0-1|844184|5a52eb2d58300e7b399157cf41b0d4d69043ee6fe4a2f3ce6a6686c58130a5fc|pool/main/p/pulseaudio/pulseaudio_17.0-1_aarch64.deb
 dbus|aarch64|1.16.2-3|428952|1b6d5e349708414acbbb1404210e32d4e3f390890d02e162639dec1016a8657b|pool/main/d/dbus/dbus_1.16.2-3_aarch64.deb
 libandroid-execinfo|aarch64|0.1-3|14964|725dd2c6da7fc96e860fcc928e18aa9fb0e85e0bdcaf4f8ce0f0654ca6860fc2|pool/main/liba/libandroid-execinfo/libandroid-execinfo_0.1-3_aarch64.deb
-libltdl|aarch64|2.5.4-2|18024|320c0767f036356b922205f820e3c7424703b085c2c5c949d388b5aae2188fb4|pool/main/libl/libltdl/libltdl_2.5.4-2_aarch64.deb
+libltdl|aarch64|2.6.2|17996|7b4643fe9d0ab42c0c3c8a1018640816bdb43d422f2268a5e4ea80675624f539|pool/main/libl/libltdl/libltdl_2.6.2_aarch64.deb
 libsndfile|aarch64|1.2.2-2|217128|f71cca07c3209d6baadd9bd51ab239d66ea89b5dc10bcb86637050b9463ad8da|pool/main/libs/libsndfile/libsndfile_1.2.2-2_aarch64.deb
 libsoxr|aarch64|0.1.3-8|282436|a1c5f66aae3b9900e9a492b43901b2b98586870c7905feb9f3c835cc9af464be|pool/main/libs/libsoxr/libsoxr_0.1.3-8_aarch64.deb
 speexdsp|aarch64|1.2.1-1|37332|21cd5d122a8d24dffb9b2926dff7059f8f42cde7c5a91f27ea5c9b4f40356be0|pool/main/s/speexdsp/speexdsp_1.2.1-1_aarch64.deb
@@ -16,7 +16,7 @@ libvorbis|aarch64|1.3.7-4|261740|6bfd70c4b570b85594bd06116b75a6f8109ec58cbc123e9
 pulseaudio|x86_64|17.0-1|928184|0dd521766d8a170aad3fe82af1c08de04c5a8c4a8a44265fd3b5ef4d6ec4f800|pool/main/p/pulseaudio/pulseaudio_17.0-1_x86_64.deb
 dbus|x86_64|1.16.2-3|448316|7860940419ff89270227063267f7aab3e3b7a91789359d9296190e50a361aff7|pool/main/d/dbus/dbus_1.16.2-3_x86_64.deb
 libandroid-execinfo|x86_64|0.1-3|15184|348582b47b4b6dec8c13147437d8bd93d029239bc95f30635074cad08efb6220|pool/main/liba/libandroid-execinfo/libandroid-execinfo_0.1-3_x86_64.deb
-libltdl|x86_64|2.5.4-2|18840|9ee9b4538a7804feb9381941047a9496bf2476b13bf7418b01a24cde3d7d21d9|pool/main/libl/libltdl/libltdl_2.5.4-2_x86_64.deb
+libltdl|x86_64|2.6.2|18664|9a71bef5c3ba9da2a90ec6dfa0fd99e1802cb03cc3ec37059340c6c7b7f441fd|pool/main/libl/libltdl/libltdl_2.6.2_x86_64.deb
 libsndfile|x86_64|1.2.2-2|222852|b1464c23bbef58256b837a2ffafbc372e9464c295490e68e9307c22945e9055a|pool/main/libs/libsndfile/libsndfile_1.2.2-2_x86_64.deb
 libsoxr|x86_64|0.1.3-8|371684|3cd66761119a4f4cb621a701279c2b2edc9a6c4e9f1872dbfc8058fb76c6a66f|pool/main/libs/libsoxr/libsoxr_0.1.3-8_x86_64.deb
 speexdsp|x86_64|1.2.1-1|39172|9d8b3656fb666b524cd46ef6c37b3323033e7398400746fc09945dc004fb0e7f|pool/main/s/speexdsp/speexdsp_1.2.1-1_x86_64.deb
