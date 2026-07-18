@@ -615,6 +615,12 @@ int archphene_atspi_client_read_node(DBusConnection *connection,
     node->menu_bar = (role_id_available && role_id == ROLE_MENU_BAR)
             || strcmp(normalized_role, "menu-bar") == 0
             || strcmp(normalized_role, "menubar") == 0;
+    node->menu_item = (role_id_available
+            && (role_id == ROLE_MENU_ITEM
+                    || role_id == ROLE_CHECK_MENU_ITEM
+                    || role_id == ROLE_RADIO_MENU_ITEM
+                    || role_id == ROLE_TEAROFF_MENU_ITEM))
+            || strstr(normalized_role, "menu-item") != NULL;
     node->password = (role_id_available && role_id == ROLE_PASSWORD_TEXT)
             || strstr(normalized_role, "password") != NULL;
     read_string_property(connection, reference, "Name",
