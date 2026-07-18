@@ -1146,6 +1146,14 @@ void archphene_atspi_translator_event(DBusMessage *message) {
         }
     }
 
+    if (strcmp(member, "ChildrenChanged") == 0
+            || strcmp(member, "SelectionChanged") == 0
+            || strcmp(member, "ActiveDescendantChanged") == 0
+            || strcmp(member, "TextChanged") == 0) {
+        fprintf(stderr, "AT-SPI event member=%s path=%s type=%s\n",
+                member, path, type);
+    }
+
     pthread_mutex_lock(&state.mutex);
     if (transient_change != 0) {
         update_transient_root_locked(
