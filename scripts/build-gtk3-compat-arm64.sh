@@ -33,7 +33,7 @@ sed -i 's/^arch=(x86_64)$/arch=(aarch64)/' "$work/gdk-pixbuf2-noglycin/PKGBUILD"
 runuser -u archphene-builder -- bash -lc "cd '$work/gdk-pixbuf2-noglycin' && makepkg --cleanbuild --clean --nodeps --noconfirm"
 
 gdk_package="$(find "$work/gdk-pixbuf2-noglycin" -maxdepth 1 -type f \
-  -name 'gdk-pixbuf2-noglycin-[0-9]*-aarch64.pkg.tar.zst' -print -quit)"
+  -name 'gdk-pixbuf2-noglycin-[0-9]*-aarch64.pkg.tar.*' -print -quit)"
 [[ -n "$gdk_package" ]] || { echo "gdk-pixbuf2 no-Glycin package was not produced" >&2; exit 1; }
 pacman --disable-sandbox -U --noconfirm "$gdk_package"
 
@@ -43,7 +43,7 @@ sed -i 's/^arch=(x86_64)$/arch=(aarch64)/' "$work/librsvg-noglycin/PKGBUILD"
 runuser -u archphene-builder -- bash -lc "cd '$work/librsvg-noglycin' && makepkg --cleanbuild --clean --nodeps --noconfirm"
 
 rsvg_package="$(find "$work/librsvg-noglycin" -maxdepth 1 -type f \
-  -name 'librsvg-noglycin-[0-9]*-aarch64.pkg.tar.zst' -print -quit)"
+  -name 'librsvg-noglycin-[0-9]*-aarch64.pkg.tar.*' -print -quit)"
 [[ -n "$rsvg_package" ]] || { echo "librsvg no-Glycin package was not produced" >&2; exit 1; }
 
 extract="$work/extract"
