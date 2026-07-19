@@ -290,12 +290,20 @@ grep -F "versionCode='$version_code'" <<<"$terminal_badging" >/dev/null || {
 grep -F "versionName='$version_name'" <<<"$terminal_badging" >/dev/null || {
   echo "Terminal versionName does not match manager release" >&2; exit 1;
 }
+terminal_native="$(grep '^native-code:' <<<"$terminal_badging" || true)"
 case "$artifact_abi" in
-  x86_64) terminal_native="native-code: 'x86_64'" ;;
-  arm64-v8a) terminal_native="native-code: 'arm64-v8a'" ;;
-  universal) terminal_native="native-code: 'x86_64' 'arm64-v8a'" ;;
+  x86_64)
+    [[ "$terminal_native" == "native-code: 'x86_64'" ]] || terminal_native=""
+    ;;
+  arm64-v8a)
+    [[ "$terminal_native" == "native-code: 'arm64-v8a'" ]] || terminal_native=""
+    ;;
+  universal)
+    [[ "$terminal_native" == *"'x86_64'"*
+        && "$terminal_native" == *"'arm64-v8a'"* ]] || terminal_native=""
+    ;;
 esac
-grep -F "$terminal_native" <<<"$terminal_badging" >/dev/null || {
+[[ -n "$terminal_native" ]] || {
   echo "Terminal native ABI set does not match manager artifact $artifact_abi" >&2
   exit 1
 }
