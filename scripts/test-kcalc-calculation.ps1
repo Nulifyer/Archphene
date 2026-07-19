@@ -53,12 +53,10 @@ try {
 if ($changed -lt 10) { throw "KCalc display did not visibly change after 1 + 2 = ($changed samples)" }
 $appPid = ((& $Adb -s $Serial shell pidof $Package) -join "").Trim()
 $processes = (& $Adb -s $Serial shell ps -A -o PID,PPID,NAME) -join "`n"
-$children = [regex]::Matches($processes, "(?m)^\s*(\d+)\s+$appPid\s+\S+\s*$")
+$children = [regex]::Matches($processes, "(?m)^\s*(\d+)\s+$appPid\s+(\S+)\s*$")
 $payloadPid = ""
 foreach ($child in $children) {
-    $candidate = ((& $Adb -s $Serial shell run-as $Package readlink `
-            "/proc/$($child.Groups[1].Value)/exe" 2>$null) -join "").Trim()
-    if ($candidate -match 'libarchphene_ld\.so$') {
+    if ($child.Groups[2].Value -match '^(loader|libarchphene_ld\.so)$') {
         $payloadPid = $child.Groups[1].Value
         break
     }

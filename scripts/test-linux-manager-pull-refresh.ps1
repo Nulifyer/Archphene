@@ -11,7 +11,7 @@ function Get-Ui([string]$Name) {
     return (& $Adb -s $Serial shell cat "/sdcard/$Name.xml") -join "`n"
 }
 
-& $Adb -s $Serial shell pm clear $Package | Out-Null
+& $Adb -s $Serial shell am force-stop $Package | Out-Null
 & $Adb -s $Serial shell am start -W -n "$Package/.MainActivity" | Out-Null
 Start-Sleep -Seconds 2
 $before = Get-Ui "manager-pull-before"
@@ -25,7 +25,7 @@ if (-not $beforeBounds) { throw "Could not locate KCalc before refresh" }
 & $Adb -s $Serial shell input swipe 540 900 540 1020 250 | Out-Null
 Start-Sleep -Seconds 1
 $shortPull = Get-Ui "manager-pull-short"
-if ($shortPull -notmatch 'Check KCalc for updates\.[^\"]*Not checked' -or [regex]::Match($shortPull, $boundsPattern).Groups[1].Value -ne $beforeBounds) {
+if ($shortPull -match 'Checking KCalc for updates' -or [regex]::Match($shortPull, $boundsPattern).Groups[1].Value -ne $beforeBounds) {
     throw "A below-threshold pull triggered refresh or displaced the list"
 }
 

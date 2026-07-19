@@ -24,11 +24,19 @@ function Wait-Ui([string]$Pattern, [string]$Name, [int]$Seconds = 15) {
     return $ui
 }
 
-& $Adb -s $Serial shell pm clear $Package | Out-Null
+& $Adb -s $Serial shell am force-stop $Package | Out-Null
 & $Adb -s $Serial shell am start -W -n "$Package/.MainActivity" | Out-Null
 $ui = Wait-Ui 'text="KCalc"' "version-home"
 Tap $ui 'text="KCalc"' "KCalc detail"
 $ui = Wait-Ui 'content-desc="Version selector, 4 versions"' "version-detail" 20
+$checkedPin = [regex]::Match($ui,
+    'text="Pin selected version"[^>]*checked="true"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"')
+if ($checkedPin.Success) {
+    & $Adb -s $Serial shell input tap `
+        ([int](([int]$checkedPin.Groups[1].Value + [int]$checkedPin.Groups[3].Value) / 2)) `
+        ([int](([int]$checkedPin.Groups[2].Value + [int]$checkedPin.Groups[4].Value) / 2)) | Out-Null
+    $ui = Wait-Ui 'text="Pin selected version"[^>]*checked="false"' "version-unpinned"
+}
 Tap $ui 'text="Check for update"' "check for update"
 $ui = Wait-Ui 'content-desc="Version selector, 4 versions"' "version-after-check" 20
 Tap $ui 'content-desc="Version selector, 4 versions"' "version selector"
@@ -37,8 +45,13 @@ Tap $ui 'text="26\.04\.0-1"' "archived KCalc version"
 $ui = Wait-Ui 'text="Archived version; compatibility not verified"' "version-selected"
 Tap $ui 'text="Pin selected version"' "pin selected version"
 Tap $ui 'text="Apps"' "back to apps"
-$ui = Wait-Ui 'content-desc="Pinned to 26\.04\.0-1\. glibc-x86_64"' "version-pinned-list"
+$ui = Wait-Ui 'content-desc="Pinned to 26\.04\.0-1\. glibc-x86_64[^\"]*"' "version-pinned-list"
 Tap $ui 'text="KCalc"' "pinned KCalc detail"
 $ui = Wait-Ui 'content-desc="26\.04\.3-1, newer version available"' "newer-version-indicator"
-& $Adb -s $Serial shell pm clear $Package | Out-Null
+$checkedPin = [regex]::Match($ui,
+    'text="Pin selected version"[^>]*checked="true"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"')
+if (-not $checkedPin.Success) { throw "Pinned-version switch was not enabled" }
+& $Adb -s $Serial shell input tap `
+    ([int](([int]$checkedPin.Groups[1].Value + [int]$checkedPin.Groups[3].Value) / 2)) `
+    ([int](([int]$checkedPin.Groups[2].Value + [int]$checkedPin.Groups[4].Value) / 2)) | Out-Null
 Write-Host "Version selector passed: pin icon shown and newer available version remains selectable."

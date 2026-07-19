@@ -52,6 +52,16 @@ function Wait-Ui([string]$Pattern, [string]$Name, [int]$Seconds = 15) {
     if ($ui -notmatch $Pattern) { throw "Timed out waiting for $Pattern" }
     return $ui
 }
+function Select-FilterChoice([string]$Ui, [string]$Choice, [string]$Name) {
+    $current = [regex]::Match($Ui,
+        'text="(All apps|Updates available|Pinned versions)"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"')
+    if (-not $current.Success) { throw "Could not find current filter choice" }
+    $x = ([int]$current.Groups[2].Value + [int]$current.Groups[4].Value) / 2
+    $y = ([int]$current.Groups[3].Value + [int]$current.Groups[5].Value) / 2
+    Adb @("shell", "input", "tap", [string][int]$x, [string][int]$y) | Out-Null
+    $options = Wait-Ui ('text="' + [regex]::Escape($Choice) + '"') $Name
+    Tap-Text $options $Choice "$Choice filter"
+}
 
 $enabledBackground = $false
 Adb @("shell", "pm", "grant", $Package, "android.permission.POST_NOTIFICATIONS") | Out-Null
@@ -62,7 +72,7 @@ try {
     if ($ui -notmatch 'text="KCalc"') {
         Tap-Description $ui "Filter and sort apps" "reset initial filter"
         $ui = Wait-Ui 'text="Filter and sorting"' "manager-obtainium-reset-filter"
-        Tap-Text $ui "All apps" "all apps filter"
+        Select-FilterChoice $ui "All apps" "manager-obtainium-reset-options"
         $ui = Wait-Ui 'text="APPLY"' "manager-obtainium-reset-apply"
         Tap-Text $ui "APPLY" "apply all apps filter"
         $ui = Wait-Ui 'text="KCalc"' "manager-obtainium-home-all"
@@ -123,16 +133,14 @@ try {
     $ui = Get-Ui "manager-obtainium-search-cleared"
     Tap-Description $ui "Filter and sort apps" "filter and sorting"
     $ui = Wait-Ui 'text="Filter and sorting"' "manager-obtainium-filter-dialog"
-    Tap-Text $ui "All apps" "filter choice"
-    $ui = Wait-Ui 'text="Updates available"' "manager-obtainium-filter-options"
-    Tap-Text $ui "Updates available" "updates filter"
+    Select-FilterChoice $ui "Updates available" "manager-obtainium-filter-options"
     $ui = Wait-Ui 'text="APPLY"' "manager-obtainium-filter-apply"
     Tap-Text $ui "APPLY" "apply filter"
     $ui = Wait-Ui 'text="No updates available\."' "manager-obtainium-updates-only"
 
     Tap-Description $ui "Filter and sort apps" "restore filter"
     $ui = Wait-Ui 'text="Filter and sorting"' "manager-obtainium-restore-filter"
-    Tap-Text $ui "All apps" "all apps filter"
+    Select-FilterChoice $ui "All apps" "manager-obtainium-restore-options"
     $ui = Wait-Ui 'text="APPLY"' "manager-obtainium-restore-apply"
     Tap-Text $ui "APPLY" "restore all apps filter"
 

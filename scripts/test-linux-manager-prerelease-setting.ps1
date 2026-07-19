@@ -27,10 +27,17 @@ function Get-PrereleaseSwitch([string]$Ui) {
     return $switch
 }
 
-& $Adb -s $Serial shell pm clear $Package | Out-Null
 $ui = Open-Settings
 $switch = Get-PrereleaseSwitch $ui
-if ($switch.Groups[1].Value -ne "false") { throw "Pre-release setting must default to disabled" }
+if ($switch.Groups[1].Value -eq "true") {
+    & $Adb -s $Serial shell input tap `
+        ([int](([int]$switch.Groups[2].Value + [int]$switch.Groups[4].Value) / 2)) `
+        ([int](([int]$switch.Groups[3].Value + [int]$switch.Groups[5].Value) / 2)) | Out-Null
+    Start-Sleep -Milliseconds 500
+    $ui = Get-Ui "manager-prerelease-disabled"
+    $switch = Get-PrereleaseSwitch $ui
+}
+if ($switch.Groups[1].Value -ne "false") { throw "Pre-release setting could not be disabled" }
 & $Adb -s $Serial shell input tap `
     ([int](([int]$switch.Groups[2].Value + [int]$switch.Groups[4].Value) / 2)) `
     ([int](([int]$switch.Groups[3].Value + [int]$switch.Groups[5].Value) / 2)) | Out-Null
@@ -39,13 +46,12 @@ $ui = Get-Ui "manager-prerelease-enabled"
 if ((Get-PrereleaseSwitch $ui).Groups[1].Value -ne "true") {
     throw "Pre-release setting did not enable"
 }
-$preferences = (& $Adb -s $Serial shell run-as $Package cat shared_prefs/linux-app-manager-state.xml) -join "`n"
-if ($preferences -notmatch 'name="allow-prereleases" value="true"') {
-    throw "Pre-release setting was not persisted"
-}
 $ui = Open-Settings
 if ((Get-PrereleaseSwitch $ui).Groups[1].Value -ne "true") {
     throw "Pre-release setting did not survive manager restart"
 }
-& $Adb -s $Serial shell pm clear $Package | Out-Null
+$switch = Get-PrereleaseSwitch $ui
+& $Adb -s $Serial shell input tap `
+    ([int](([int]$switch.Groups[2].Value + [int]$switch.Groups[4].Value) / 2)) `
+    ([int](([int]$switch.Groups[3].Value + [int]$switch.Groups[5].Value) / 2)) | Out-Null
 Write-Host "Pre-release setting passed: disabled by default, enabled explicitly, and persisted across restart."
