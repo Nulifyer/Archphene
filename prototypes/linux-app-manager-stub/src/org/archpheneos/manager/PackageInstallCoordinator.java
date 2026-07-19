@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.os.Handler;
 import android.os.Looper;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -79,9 +80,11 @@ final class PackageInstallCoordinator {
                     "Resolving signed Arch transaction", "", false);
             staged = ArchPackageRuntime.stageTransaction(
                     activity.getApplicationContext(), source.name, source.executable,
-                    (percent, status) -> update(activity, listener, id,
-                            PackageInstallJobStore.RUNNING,
-                            ApkUpdateInstaller.Phase.DOWNLOAD, percent, status, "", false));
+                    (percent, status) -> {
+                        if (!preparation.canCancel()) throw new CancellationException();
+                        update(activity, listener, id, PackageInstallJobStore.RUNNING,
+                                ApkUpdateInstaller.Phase.DOWNLOAD, percent, status, "", false);
+                    });
             checkInterrupted();
             if (staged.classification.kind == ArchPackageClassifier.Kind.TERMINAL) {
                 update(activity, listener, id, PackageInstallJobStore.RUNNING,
@@ -142,7 +145,7 @@ final class PackageInstallCoordinator {
                 releaseInstallSlot(installSlot);
                 throw error;
             }
-        } catch (InterruptedException cancelled) {
+        } catch (InterruptedException | CancellationException cancelled) {
             Thread.interrupted();
             OPERATIONS.remove(id, preparation);
             update(activity, listener, id, PackageInstallJobStore.CANCELLED,

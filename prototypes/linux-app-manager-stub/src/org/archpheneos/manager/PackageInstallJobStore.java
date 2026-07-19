@@ -238,8 +238,8 @@ final class PackageInstallJobStore {
         String safeError = bounded(error, 4096);
         int safePercent = Math.max(0, Math.min(100, percent));
         long now = System.currentTimeMillis();
+        JSONObject value = new JSONObject();
         try {
-            JSONObject value = new JSONObject();
             value.put("state", state);
             value.put("phase", phase.name());
             value.put("percent", safePercent);
@@ -251,16 +251,16 @@ final class PackageInstallJobStore {
             value.put("runtimePackId", bounded(runtimePackId, 64));
             value.put("artifactsAt", artifactsAt);
             value.put("updatedAt", now);
-            if (!preferences(context).edit().putString(PREFIX + id, value.toString()).commit()) {
-                throw new IllegalStateException("Could not persist package job state");
-            }
-            return new Snapshot(id, state, phase, safePercent, safeStatus, safeError,
-                    value.getJSONArray("diagnostics").toString(),
-                    bounded(androidPackage, 255), bounded(runtimePackId, 64),
-                    artifactsAt, now);
         } catch (Exception errorValue) {
             throw new IllegalStateException("Could not encode package job state", errorValue);
         }
+        if (!preferences(context).edit().putString(PREFIX + id, value.toString()).commit()) {
+            throw new IllegalStateException("Could not persist package job state");
+        }
+        return new Snapshot(id, state, phase, safePercent, safeStatus, safeError,
+                value.optJSONArray("diagnostics").toString(),
+                bounded(androidPackage, 255), bounded(runtimePackId, 64),
+                artifactsAt, now);
     }
 
     private static Snapshot idle(String id) {

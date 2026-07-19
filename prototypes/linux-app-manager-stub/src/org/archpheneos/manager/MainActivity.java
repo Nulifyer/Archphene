@@ -15,6 +15,7 @@ import android.graphics.drawable.RippleDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.SystemClock;
 import android.provider.Settings;
 import android.text.Editable;
 import android.text.TextWatcher;
@@ -82,6 +83,9 @@ public final class MainActivity extends Activity {
     private String packageJobDetailId = "";
     private InstalledLinuxAppCatalog.Entry packageJobDetailApp;
     private final AtomicInteger packageSearchGeneration = new AtomicInteger();
+    private static final long PROGRESS_RENDER_INTERVAL_MILLIS = 1500;
+    private long nextProgressRenderAt;
+    private boolean progressRenderPending;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -1040,8 +1044,10 @@ public final class MainActivity extends Activity {
                         activeInstallPackage = "";
                         showBanner(status, phase == ApkUpdateInstaller.Phase.ERROR);
                         loadCatalog();
-                    } else if (currentPage == 0) {
-                        renderAppList();
+                    } else {
+                        renderProgressAtStableCadence(() -> {
+                            if (currentPage == 0) renderAppList();
+                        });
                     }
                 });
         renderAppList();
@@ -1127,12 +1133,8 @@ public final class MainActivity extends Activity {
                 }
                 showBanner(detail, failed);
                 loadCatalog();
-            } else if (currentPage == 0) {
-                renderAppList();
-            } else if (currentPage == 2 && state.id.equals(packageJobDetailId)) {
-                renderPackageJobDetail();
-            } else if (currentPage == 4) {
-                showPackageResultDetail(source, true);
+            } else {
+                renderPackageProgress(source, state);
             }
         });
         if (!started) {
@@ -1144,6 +1146,37 @@ public final class MainActivity extends Activity {
         }
         showAppsPage();
     }
+    private void renderPackageProgress(ArchPackageRepository.PackageResult source,
+            PackageInstallJobStore.Snapshot state) {
+        renderProgressAtStableCadence(() -> {
+            if (currentPage == 0) {
+                renderAppList();
+            } else if (currentPage == 2 && state.id.equals(packageJobDetailId)) {
+                renderPackageJobDetail();
+            } else if (currentPage == 4) {
+                showPackageResultDetail(source, true);
+            }
+        });
+    }
+
+    private void renderProgressAtStableCadence(Runnable render) {
+        long now = SystemClock.uptimeMillis();
+        long delay = nextProgressRenderAt - now;
+        if (delay <= 0) {
+            nextProgressRenderAt = now + PROGRESS_RENDER_INTERVAL_MILLIS;
+            render.run();
+            return;
+        }
+        if (progressRenderPending) return;
+        progressRenderPending = true;
+        content.postDelayed(() -> {
+            progressRenderPending = false;
+            nextProgressRenderAt = SystemClock.uptimeMillis()
+                    + PROGRESS_RENDER_INTERVAL_MILLIS;
+            render.run();
+        }, delay);
+    }
+
     private View installingAction(String label, Runnable cancel) {
         LinearLayout action = new LinearLayout(this);
         action.setGravity(Gravity.CENTER);
@@ -1790,8 +1823,10 @@ public final class MainActivity extends Activity {
                         activeInstallPackage = "";
                         showBanner(status, phase == ApkUpdateInstaller.Phase.ERROR);
                         loadCatalog();
-                    } else if (currentPage == 0) {
-                        renderAppList();
+                    } else {
+                        renderProgressAtStableCadence(() -> {
+                            if (currentPage == 0) renderAppList();
+                        });
                     }
                 });
         renderAppList();
@@ -1811,8 +1846,10 @@ public final class MainActivity extends Activity {
                         activeInstallPackage = "";
                         showBanner(status, phase == ApkUpdateInstaller.Phase.ERROR);
                         loadCatalog();
-                    } else if (currentPage == 0) {
-                        renderAppList();
+                    } else {
+                        renderProgressAtStableCadence(() -> {
+                            if (currentPage == 0) renderAppList();
+                        });
                     }
                 });
         renderAppList();
@@ -2825,11 +2862,15 @@ public final class MainActivity extends Activity {
                         activeInstallPercent = percent;
                         activeInstallStatus = status;
                         if (terminal) {
-                        activeInstallOperation = null;
+                            activeInstallOperation = null;
                             activeInstallPackage = "";
                             showBanner(status, phase == ApkUpdateInstaller.Phase.ERROR);
+                            if (currentPage == 0) renderAppList();
+                        } else {
+                            renderProgressAtStableCadence(() -> {
+                                if (currentPage == 0) renderAppList();
+                            });
                         }
-                        if (currentPage == 0) renderAppList();
                     });
         }
     }
@@ -2846,16 +2887,7 @@ public final class MainActivity extends Activity {
         if (!issue.isEmpty()) showBanner(issue, false);
     }
     private void updateNavigationBadge() {
-        int updates = countUpdates();
-        appsNav.setText(updates == 0 ? "Apps" : "Apps (" + updates + ")");
-    }
-
-    private int countUpdates() {
-        int count = 0;
-        for (InstalledLinuxAppCatalog.Entry entry : apps) {
-            if (ManagerStateStore.read(this, entry.packageName).updateAvailable) count++;
-        }
-        return count;
+        appsNav.setText("Apps");
     }
 
     private void setNavigationSelection(boolean appsSelected) {
