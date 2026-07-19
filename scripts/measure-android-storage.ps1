@@ -30,6 +30,25 @@ function Invoke-Adb([string[]]$Arguments, [switch]$AllowFailure) {
     return [pscustomobject]@{ Output = @($output); ExitCode = $exitCode }
 }
 
+$AdbIsRoot = (((Invoke-Adb @("shell", "id", "-u") -AllowFailure).Output -join "").Trim() -eq "0")
+
+function Invoke-Private([string]$Package, [string[]]$Arguments) {
+    $runAs = Invoke-Adb (@("shell", "run-as", $Package) + $Arguments) -AllowFailure
+    if ($runAs.ExitCode -eq 0 -or -not $AdbIsRoot) { return $runAs }
+    $root = "/data/user/0/$Package"
+    $mapped = @($Arguments | ForEach-Object {
+        $value = [string]$_
+        if ($value -eq ".") {
+            $root
+        } elseif ($value -match '^(files|cache|code_cache)(/|$)') {
+            "$root/$value"
+        } else {
+            $value
+        }
+    })
+    return Invoke-Adb (@("shell") + $mapped) -AllowFailure
+}
+
 function Parse-KiB([object]$Result) {
     if ($Result.ExitCode -ne 0 -or $Result.Output.Count -eq 0) { return $null }
     $match = [regex]::Match([string]$Result.Output[0], '^\s*(\d+)\s+')
@@ -64,7 +83,7 @@ function Get-ApkBytes([string]$Package) {
 }
 
 function Get-PrivateKiB([string]$Package, [string]$Path) {
-    return Parse-KiB (Invoke-Adb @("shell", "run-as", $Package, "du", "-sk", $Path) -AllowFailure)
+    return Parse-KiB (Invoke-Private -Package $Package -Arguments @("du", "-sk", $Path))
 }
 
 function Format-MiB([Nullable[int64]]$KiB) {
@@ -88,19 +107,16 @@ $Packages = @($Packages | Select-Object -Unique)
 
 $runtimeSources = @{}
 if ($installed -contains "org.archpheneos.manager" -and
-        (Invoke-Adb @("shell", "run-as", "org.archpheneos.manager", "pwd") -AllowFailure).ExitCode -eq 0) {
-    $bindings = (Invoke-Adb @("shell", "run-as", "org.archpheneos.manager",
-            "find", "files/runtime-packs/bindings", "-type", "f") -AllowFailure).Output
+        (Invoke-Private -Package "org.archpheneos.manager" -Arguments @("pwd")).ExitCode -eq 0) {
+    $bindings = (Invoke-Private -Package "org.archpheneos.manager" -Arguments @("find", "files/runtime-packs/bindings", "-type", "f")).Output
     foreach ($binding in $bindings) {
-        $bindingText = (Invoke-Adb @("shell", "run-as", "org.archpheneos.manager",
-                "cat", [string]$binding) -AllowFailure).Output -join "`n"
+        $bindingText = (Invoke-Private -Package "org.archpheneos.manager" -Arguments @("cat", [string]$binding)).Output -join "`n"
         $packageMatch = [regex]::Match($bindingText, '(?m)^package\t([^\r\n]+)$')
         $packMatch = [regex]::Match($bindingText, '(?m)^pack\t([0-9a-f]{64})$')
         if (-not $packageMatch.Success -or -not $packMatch.Success) { continue }
         $androidPackage = $packageMatch.Groups[1].Value
-        $manifestResult = Invoke-Adb -Arguments @("shell", "run-as",
-                "org.archpheneos.manager", "cat",
-                "files/runtime-packs/packs/$($packMatch.Groups[1].Value)/manifest.tsv") -AllowFailure
+        $manifestResult = Invoke-Private -Package "org.archpheneos.manager" -Arguments @("cat",
+                "files/runtime-packs/packs/$($packMatch.Groups[1].Value)/manifest.tsv")
         $manifest = $manifestResult.Output -join "`n"
         $source = [regex]::Match($manifest, '(?m)^source\t([^\r\n]+)$')
         if ($source.Success) { $runtimeSources[$androidPackage] = $source.Groups[1].Value }
@@ -113,12 +129,11 @@ $rows = foreach ($package in $Packages) {
     $versionCode = if ($dump -match 'versionCode=(\d+)') { [int64]$matches[1] } else { $null }
     $versionName = if ($dump -match 'versionName=([^\s]+)') { $matches[1] } else { "" }
     $abi = if ($dump -match 'primaryCpuAbi=([^\s]+)') { $matches[1] } else { "" }
-    $runAs = Invoke-Adb @("shell", "run-as", $package, "pwd") -AllowFailure
-    $dataAccessible = $runAs.ExitCode -eq 0
-    $totalData = if ($dataAccessible) { Get-PrivateKiB $package "." } else { $null }
-    $files = if ($dataAccessible) { Get-PrivateKiB $package "files" } else { $null }
-    $cache = if ($dataAccessible) { Get-PrivateKiB $package "cache" } else { $null }
-    $codeCache = if ($dataAccessible) { Get-PrivateKiB $package "code_cache" } else { $null }
+    $dataAccessible = (Invoke-Private -Package $package -Arguments @("pwd")).ExitCode -eq 0
+    $totalData = if ($dataAccessible) { Get-PrivateKiB -Package $package -Path "." } else { $null }
+    $files = if ($dataAccessible) { Get-PrivateKiB -Package $package -Path "files" } else { $null }
+    $cache = if ($dataAccessible) { Get-PrivateKiB -Package $package -Path "cache" } else { $null }
+    $codeCache = if ($dataAccessible) { Get-PrivateKiB -Package $package -Path "code_cache" } else { $null }
     $kind = if ($package -eq "org.archpheneos.manager") { "manager" }
         elseif ($package -eq "org.archpheneos.terminal") { "terminal" }
         else { "generated-wrapper" }
@@ -155,7 +170,7 @@ $rows = foreach ($package in $Packages) {
 
 $managerBreakdown = [ordered]@{}
 if ($installed -contains "org.archpheneos.manager" -and
-        (Invoke-Adb @("shell", "run-as", "org.archpheneos.manager", "pwd") -AllowFailure).ExitCode -eq 0) {
+        (Invoke-Private -Package "org.archpheneos.manager" -Arguments @("pwd")).ExitCode -eq 0) {
     foreach ($entry in ([ordered]@{
         RuntimeTotal = "files/runtime-packs"
         RuntimeBlobs = "files/runtime-packs/blobs"
@@ -166,7 +181,7 @@ if ($installed -contains "org.archpheneos.manager" -and
         TransactionStaging = "files/package-runtime/staging"
         ManagerNativeLinks = "files/package-runtime/manager-native"
     }).GetEnumerator()) {
-        $managerBreakdown[$entry.Key] = Get-PrivateKiB "org.archpheneos.manager" $entry.Value
+        $managerBreakdown[$entry.Key] = Get-PrivateKiB -Package "org.archpheneos.manager" -Path $entry.Value
     }
 }
 
