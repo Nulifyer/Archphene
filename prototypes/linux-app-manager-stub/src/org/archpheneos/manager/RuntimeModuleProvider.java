@@ -35,7 +35,7 @@ public final class RuntimeModuleProvider extends ContentProvider {
     public static final String APPEARANCE_METHOD =
             "org.archphene.runtime.APPEARANCE_V1";
     public static final String TERMINAL_CATALOG_METHOD =
-            "org.archphene.runtime.TERMINAL_CATALOG_V1";
+            "org.archphene.runtime.TERMINAL_CATALOG_V2";
     public static final String TERMINAL_PACK_METHOD =
             "org.archphene.runtime.TERMINAL_PACK_V1";
     private static final String TERMINAL_PACKAGE = "org.archpheneos.terminal";
@@ -151,8 +151,8 @@ public final class RuntimeModuleProvider extends ContentProvider {
         String[] encoded = new String[entries.size()];
         for (int index = 0; index < entries.size(); index++) {
             ManagedPackageStore.Entry entry = entries.get(index);
-            encoded[index] = entry.runtimePackId + "\t" + entry.name + "\t"
-                    + entry.version + "\t" + entry.repository + "\t"
+            encoded[index] = entry.kind + "\t" + entry.runtimePackId + "\t"
+                    + entry.name + "\t" + entry.version + "\t" + entry.repository + "\t"
                     + entry.executable + "\t" + String.join(",", entry.commands);
         }
         Bundle result = new Bundle();

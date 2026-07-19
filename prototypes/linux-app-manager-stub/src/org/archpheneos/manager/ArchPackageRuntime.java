@@ -412,6 +412,7 @@ public final class ArchPackageRuntime {
             if (!root.mkdirs()) throw new IllegalStateException("Could not create transaction root");
             File downloads = directory(state(context), "downloads");
             LinkedHashSet<String> sourceCommands = new LinkedHashSet<>();
+            LinkedHashSet<String> sourceLibraries = new LinkedHashSet<>();
             for (int index = 0; index < packages.size(); index++) {
                 if (Thread.currentThread().isInterrupted()) throw new InterruptedException();
                 ResolvedPackage value = packages.get(index);
@@ -424,7 +425,7 @@ public final class ArchPackageRuntime {
                 progress.onProgress(Math.min(59, base + 1), "Staging verified " + value.name);
                 File archive = new File(downloads, value.filename.replace(':', '_'));
                 stageVerifiedArchive(context, archive, root,
-                        value.name.equals(packageName), sourceCommands);
+                        value.name.equals(packageName), sourceCommands, sourceLibraries);
             }
             progress.onProgress(60, "Preparing shared toolkit data");
             prepareSharedData(context, root);
@@ -433,22 +434,24 @@ public final class ArchPackageRuntime {
             android.util.Log.i("ArchphenePackages", "classified " + packageName + " as "
                     + classification.kind + " executable=" + classification.executable
                     + " commands=" + classification.commands.size());
-            if (classification.kind == ArchPackageClassifier.Kind.DEPENDENCY) {
-                deleteRecursively(staging);
-                throw new IllegalArgumentException(packageName
-                        + " does not provide a desktop entry or terminal command");
-            }
-            executableName = classification.executable;
-            File executable = new File(root, "usr/bin/" + executableName).getCanonicalFile();
-            if (!executable.isFile() || !executable.getPath().startsWith(root.getCanonicalPath()
-                    + File.separator)) {
-                deleteRecursively(staging);
-                throw new SecurityException("Resolved package has no safe desktop executable");
-            }
             progress.onProgress(62, "Publishing verified runtime pack");
-            RuntimePackStore.Pack pack = RuntimePackStore.build(
-                    context, packageName, executableName, packages,
-                    classification.commands, root);
+            RuntimePackStore.Pack pack;
+            if (classification.kind == ArchPackageClassifier.Kind.DEPENDENCY) {
+                pack = RuntimePackStore.buildDependency(
+                        context, packageName, packages, sourceLibraries, root);
+            } else {
+                executableName = classification.executable;
+                File executable = new File(root, "usr/bin/" + executableName)
+                        .getCanonicalFile();
+                if (!executable.isFile() || !executable.getPath().startsWith(
+                        root.getCanonicalPath() + File.separator)) {
+                    deleteRecursively(staging);
+                    throw new SecurityException(
+                            "Resolved package has no safe desktop executable");
+                }
+                pack = RuntimePackStore.build(context, packageName, executableName,
+                        packages, classification.commands, root);
+            }
             progress.onProgress(65, "Runtime pack ready");
             StagedTransaction transaction = new StagedTransaction(packageName, packages, root,
                     pack.id, classification, pack.toolkit());
@@ -467,8 +470,8 @@ public final class ArchPackageRuntime {
     }
 
     private static void stageVerifiedArchive(Context context, File archive, File root,
-            boolean sourceArchive, Set<String> sourceCommands)
-            throws Exception {
+            boolean sourceArchive, Set<String> sourceCommands,
+            Set<String> sourceLibraries) throws Exception {
         Result namesResult = runTool(context, "libarchphene_bsdtar.so",
                 Arrays.asList("-tf", archive.getPath()));
         if (namesResult.exitCode != 0) {
@@ -481,6 +484,9 @@ public final class ArchPackageRuntime {
             if (sourceArchive && isDirectUsrBinEntry(entry)) {
                 sourceCommands.add(entry.substring("usr/bin/".length()));
                 hasSourceCommand = true;
+            }
+            if (sourceArchive && isRuntimeLibraryEntry(entry) && !entry.endsWith("/")) {
+                sourceLibraries.add(entry.substring(entry.lastIndexOf('/') + 1));
             }
         }
         boolean hasSelectedEntry = hasSourceCommand;

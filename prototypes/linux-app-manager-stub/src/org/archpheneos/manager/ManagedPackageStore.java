@@ -16,6 +16,7 @@ import org.json.JSONObject;
 /** Explicit non-launcher packages installed into a shared Archphene environment. */
 final class ManagedPackageStore {
     static final String TERMINAL = "terminal";
+    static final String DEPENDENCY = "dependency";
     private static final String PREFS = "archphene-managed-packages-v1";
     private static final String ENTRIES = "entries";
     private static final String SAFE_ID = "[a-zA-Z0-9@._+:-]{1,128}";
@@ -79,18 +80,26 @@ final class ManagedPackageStore {
     static Entry install(Context context,
             ArchPackageRepository.PackageResult source,
             ArchPackageRuntime.StagedTransaction staged) throws Exception {
-        if (staged.classification.kind != ArchPackageClassifier.Kind.TERMINAL) {
-            throw new IllegalArgumentException("Only terminal packages use the shared environment");
+        ArchPackageClassifier.Kind classification = staged.classification.kind;
+        if (classification != ArchPackageClassifier.Kind.TERMINAL
+                && classification != ArchPackageClassifier.Kind.DEPENDENCY) {
+            throw new IllegalArgumentException(
+                    "Only terminal and dependency packages use the shared environment");
         }
         RuntimePackStore.Pack pack = RuntimePackStore.load(context, staged.runtimePackId);
+        String executable = classification == ArchPackageClassifier.Kind.TERMINAL
+                ? staged.classification.executable : pack.executableName;
         if (!source.name.equals(pack.sourcePackage)
-                || !staged.classification.executable.equals(pack.executableName)) {
+                || !executable.equals(pack.executableName)) {
             throw new SecurityException("Managed package runtime identity mismatch");
         }
-        Entry entry = new Entry(TERMINAL, source.repository, source.name,
-                source.architecture, staged.sourceVersion(), staged.classification.executable,
-                staged.classification.commands, staged.runtimePackId,
-                System.currentTimeMillis());
+        String kind = classification == ArchPackageClassifier.Kind.TERMINAL
+                ? TERMINAL : DEPENDENCY;
+        List<String> commands = classification == ArchPackageClassifier.Kind.TERMINAL
+                ? staged.classification.commands : Collections.emptyList();
+        Entry entry = new Entry(kind, source.repository, source.name,
+                source.architecture, staged.sourceVersion(), executable,
+                commands, staged.runtimePackId, System.currentTimeMillis());
         synchronized (ManagedPackageStore.class) {
             ArrayList<Entry> entries = new ArrayList<>(list(context));
             entries.removeIf(value -> value.identity().equals(entry.identity()));
@@ -148,11 +157,13 @@ final class ManagedPackageStore {
         String executable = value.getString("executable");
         String pack = value.getString("runtimePackId");
         JSONArray commandValues = value.getJSONArray("commands");
-        if (!TERMINAL.equals(kind) || !repository.matches("[a-z0-9-]{1,32}")
+        if (!(TERMINAL.equals(kind) || DEPENDENCY.equals(kind))
+                || !repository.matches("[a-z0-9-]{1,32}")
                 || !name.matches(SAFE_ID) || !architecture.matches(SAFE_ID)
                 || !version.matches(SAFE_ID) || !executable.matches(SAFE_ID)
-                || !pack.matches(HASH) || commandValues.length() < 1
-                || commandValues.length() > 512) {
+                || !pack.matches(HASH) || commandValues.length() > 512
+                || TERMINAL.equals(kind) && commandValues.length() < 1
+                || DEPENDENCY.equals(kind) && commandValues.length() != 0) {
             throw new SecurityException("Malformed managed package entry");
         }
         ArrayList<String> commands = new ArrayList<>();
@@ -164,7 +175,7 @@ final class ManagedPackageStore {
             }
             commands.add(command);
         }
-        if (!commands.contains(executable)) {
+        if (TERMINAL.equals(kind) && !commands.contains(executable)) {
             throw new SecurityException("Managed package executable is missing");
         }
         return new Entry(kind, repository, name, architecture, version, executable,

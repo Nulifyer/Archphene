@@ -15,7 +15,7 @@ Archphene provides a first-party **Archphene Terminal** companion for command-li
 - Home, `.config`, and `.cache` persist under the Terminal UID. GUI wrappers remain separate Android UIDs.
 - CLI packages do not create launcher APKs. A package with a usable `.desktop` entry is handled as a GUI wrapper; CLI/TUI packages are exposed in Terminal; dependency-only packages create neither launcher nor command.
 
-Installing btop does not implicitly install curl. Commands become available only when their source package is explicitly installed. Multiple commands from one source package are exposed together.
+Installing btop does not implicitly install curl. Commands become available only when their source package is explicitly installed. Multiple commands from one source package are exposed together. Explicitly installed dependency-only packages contribute their verified libraries and toolkit data to managed commands without creating commands or Android launchers. On the x86_64 emulator, installing `vulkan-swrast` independently makes the existing `vulkaninfo` command enumerate llvmpipe; confirmed removal withdraws the ICD from the next prepared Terminal environment.
 
 Installing `bash` through Archphene publishes its verified runtime closure to Terminal and makes it the default user shell for subsequent sessions. The launcher scopes the patched glibc loader, library path, path bridge, and `C.UTF-8` locale root to managed commands; it clears those variables before invoking Android's Bionic utilities. Fish remains a possible future opt-in shell rather than a release dependency.
 

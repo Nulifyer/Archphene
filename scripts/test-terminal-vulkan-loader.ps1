@@ -1,7 +1,9 @@
 param(
     [string]$Serial = "emulator-5554",
     [string]$Package = "org.archpheneos.terminal",
-    [int]$CaptureDelayMilliseconds = 30000
+    [int]$CaptureDelayMilliseconds = 30000,
+    [switch]$RequireDevice,
+    [string]$ExpectedDevicePattern = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -47,4 +49,13 @@ if ($log -notmatch 'Vulkan Instance Version|Found no drivers') {
             [Environment]::NewLine + $log)
 }
 
-Write-Host "Terminal Vulkan loader discovery passed on $Serial."
+if ($RequireDevice -and $log -notmatch 'GPU0:') {
+    throw ("Vulkan loader reached ICD discovery but exposed no device." +
+            [Environment]::NewLine + $log)
+}
+if ($ExpectedDevicePattern -and $log -notmatch $ExpectedDevicePattern) {
+    throw ("Vulkan device output did not match '$ExpectedDevicePattern'." +
+            [Environment]::NewLine + $log)
+}
+
+Write-Host "Terminal Vulkan loader/device discovery passed on $Serial."

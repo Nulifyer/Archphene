@@ -69,7 +69,7 @@ This is the prioritized completion queue for the Archphene Android application. 
   - [ ] Build and sign a separate no-mixing 16 KB x86_64 package repository, then validate a complete GUI closure including late-loaded modules before enabling package transactions.
   - Remaining portal and broad toolkit/runtime validation.
   - Broader Qt, GTK, SDL, Electron, Rust-native, XWayland, Vulkan, and zero-copy GPU validation.
-    - [x] Include runtime-loaded Vulkan loader aliases and validate unmodified Arch `vulkaninfo` through ICD discovery in Terminal.
+    - [x] Include runtime-loaded Vulkan loader aliases, compose a separately managed `vulkan-swrast` dependency pack, and validate unmodified Arch `vulkaninfo` through llvmpipe device discovery plus confirmed removal/reinstall on x86_64.
   - [x] Detect mid-session virgl helper loss and restart the payload once with llvmpipe while preserving the Android Activity; validate by same-UID fault injection against a manager-generated GLMark2 wrapper.
   - [x] Bound the shared xdg_toplevel registry, reject cyclic/cross-client parent chains, clear destroyed-parent references, and validate a real GTK child control/close/parent-restoration flow.
   - General secondary-window policy for phone, tablet, freeform, and external displays.

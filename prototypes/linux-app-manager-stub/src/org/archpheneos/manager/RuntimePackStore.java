@@ -176,6 +176,29 @@ final class RuntimePackStore {
     static synchronized Pack build(Context context, String sourcePackage, String executableName,
             List<ArchPackageRuntime.ResolvedPackage> packages, List<String> commandNames,
             File stagedRoot) throws Exception {
+        return build(context, sourcePackage, executableName, packages, commandNames,
+                stagedRoot, Collections.emptySet());
+    }
+
+    static synchronized Pack buildDependency(Context context, String sourcePackage,
+            List<ArchPackageRuntime.ResolvedPackage> packages, Set<String> libraryNames,
+            File stagedRoot) throws Exception {
+        File bin = directory(new File(stagedRoot, "usr"), "bin");
+        File marker = new File(bin, "archphene-dependency");
+        if (marker.exists()) throw new SecurityException("Dependency marker path collides");
+        try (FileOutputStream output = new FileOutputStream(marker)) {
+            output.write("#!/system/bin/sh\nexit 0\n".getBytes(StandardCharsets.UTF_8));
+            output.getFD().sync();
+        }
+        return build(context, sourcePackage, marker.getName(), packages,
+                Collections.singletonList(marker.getName()), stagedRoot,
+                libraryNames == null ? Collections.emptySet() : libraryNames);
+    }
+
+    private static synchronized Pack build(Context context, String sourcePackage,
+            String executableName, List<ArchPackageRuntime.ResolvedPackage> packages,
+            List<String> commandNames, File stagedRoot, Set<String> dependencyLibraries)
+            throws Exception {
         if (stagedRoot == null || sourcePackage == null || !sourcePackage.matches(SAFE_ID)
                 || executableName == null || !executableName.matches(SAFE_ID)
                 || commandNames == null || commandNames.isEmpty()
@@ -227,6 +250,19 @@ final class RuntimePackStore {
                 File previous = closure.putIfAbsent(entry.getKey(), dependency);
                 if (previous != null && !previous.equals(dependency)) {
                     throw new SecurityException("Commands require conflicting runtime libraries");
+                }
+            }
+        }
+        if (dependencyLibraries != null && !dependencyLibraries.isEmpty()) {
+            Map<String, File> dependencyClosure =
+                    ArchWrapperAssembler.collectNativeLibraryClosure(
+                            context, canonicalRoot, dependencyLibraries);
+            for (Map.Entry<String, File> entry : dependencyClosure.entrySet()) {
+                File dependency = entry.getValue().getCanonicalFile();
+                File previous = closure.putIfAbsent(entry.getKey(), dependency);
+                if (previous != null && !previous.equals(dependency)) {
+                    throw new SecurityException(
+                            "Dependency package has conflicting runtime libraries");
                 }
             }
         }

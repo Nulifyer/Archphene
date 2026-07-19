@@ -533,6 +533,42 @@ public final class ArchWrapperAssembler {
         return result;
     }
 
+    static Map<String, File> collectNativeLibraryClosure(Context context, File runtimeRoot,
+            java.util.Set<String> libraryNames) throws Exception {
+        if (libraryNames == null || libraryNames.isEmpty() || libraryNames.size() > 512) {
+            throw new IllegalArgumentException("Dependency package has no runtime libraries");
+        }
+        File canonicalRoot = runtimeRoot.getCanonicalFile();
+        File libraryRoot = new File(canonicalRoot, "usr/lib").getCanonicalFile();
+        if (!libraryRoot.getPath().startsWith(canonicalRoot.getPath() + File.separator)) {
+            throw new SecurityException("Invalid staged dependency root");
+        }
+        TreeMap<String, File> candidates = new TreeMap<>();
+        collectElfFiles(canonicalRoot, libraryRoot, candidates, new HashSet<>());
+        TreeMap<String, File> result = new TreeMap<>();
+        for (String name : new String[] {"libarchphene_ld.so", "libc.so.6", "libm.so.6",
+                "libdl.so.2", "libpthread.so.0", "librt.so.1", "libresolv.so.2",
+                "libutil.so.1", "libanl.so.1", "libnss_dns.so.2", "libnss_files.so.2"}) {
+            try {
+                result.put(name, ManagerNativeRuntime.library(context, name));
+            } catch (SecurityException ignored) {}
+        }
+        ArrayDeque<File> pending = new ArrayDeque<>();
+        for (String name : libraryNames) {
+            if (name == null || !name.matches("[A-Za-z0-9._+-]{1,128}")) {
+                throw new SecurityException("Unsafe dependency library name: " + name);
+            }
+            File library = candidates.get(name);
+            if (library == null) {
+                throw new SecurityException("Missing staged dependency library " + name);
+            }
+            addNative(result, name, library);
+            pending.add(library);
+        }
+        resolveDependencies(result, candidates, pending, new HashSet<>());
+        return result;
+    }
+
     private static void resolveDependencies(Map<String, File> result,
             Map<String, File> candidates, ArrayDeque<File> pending, Set<String> visited)
             throws Exception {

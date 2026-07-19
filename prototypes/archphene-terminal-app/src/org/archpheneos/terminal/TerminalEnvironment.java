@@ -29,14 +29,14 @@ import java.util.zip.ZipInputStream;
 /** Builds a hash-verified command view in the isolated Terminal UID. */
 final class TerminalEnvironment {
     private static final Uri PROVIDER = Uri.parse("content://org.archpheneos.manager.runtime");
-    private static final String CATALOG_METHOD = "org.archphene.runtime.TERMINAL_CATALOG_V1";
+    private static final String CATALOG_METHOD = "org.archphene.runtime.TERMINAL_CATALOG_V2";
     private static final String PACK_METHOD = "org.archphene.runtime.TERMINAL_PACK_V1";
     private static final String RELEASE_METHOD =
             "org.archphene.runtime.RELEASE_LEASE_V1";
     private static final String TAG = "ArchpheneTerminal";
     private static final String SAFE_ID = "[a-zA-Z0-9@._+:-]{1,128}";
     private static final String HASH = "[0-9a-f]{64}";
-    private static final String MATERIALIZATION_SCHEMA = "v3:";
+    private static final String MATERIALIZATION_SCHEMA = "v4:";
     private static final int MAX_PACKAGES = 512;
     private static final int MAX_MODULES = 4096;
     private static final int MAX_DATA_FILES = 100000;
@@ -64,6 +64,7 @@ final class TerminalEnvironment {
     }
 
     private static final class PackageEntry {
+        final String kind;
         final String packId;
         final String name;
         final String version;
@@ -73,19 +74,23 @@ final class TerminalEnvironment {
 
         PackageEntry(String encoded) {
             String[] fields = encoded.split("\\t", -1);
-            if (fields.length != 6 || !fields[0].matches(HASH)
-                    || !fields[1].matches(SAFE_ID) || !fields[2].matches(SAFE_ID)
-                    || !fields[3].matches("[a-z0-9-]{1,32}")
-                    || !fields[4].matches(SAFE_ID)) {
+            if (fields.length != 7
+                    || !("terminal".equals(fields[0]) || "dependency".equals(fields[0]))
+                    || !fields[1].matches(HASH) || !fields[2].matches(SAFE_ID)
+                    || !fields[3].matches(SAFE_ID)
+                    || !fields[4].matches("[a-z0-9-]{1,32}")
+                    || !fields[5].matches(SAFE_ID)) {
                 throw new SecurityException("Malformed Terminal package catalog");
             }
-            packId = fields[0];
-            name = fields[1];
-            version = fields[2];
-            repository = fields[3];
-            executable = fields[4];
-            commands = fields[5].split(",", -1);
-            if (commands.length < 1 || commands.length > 512) {
+            kind = fields[0];
+            packId = fields[1];
+            name = fields[2];
+            version = fields[3];
+            repository = fields[4];
+            executable = fields[5];
+            commands = fields[6].isEmpty() ? new String[0] : fields[6].split(",", -1);
+            if (commands.length > 512 || "terminal".equals(kind) && commands.length < 1
+                    || "dependency".equals(kind) && commands.length != 0) {
                 throw new SecurityException("Malformed Terminal command list");
             }
             HashSet<String> unique = new HashSet<>();
@@ -94,7 +99,7 @@ final class TerminalEnvironment {
                     throw new SecurityException("Malformed Terminal command name");
                 }
             }
-            if (!unique.contains(executable)) {
+            if ("terminal".equals(kind) && !unique.contains(executable)) {
                 throw new SecurityException("Terminal executable is not in its command list");
             }
         }
@@ -220,7 +225,9 @@ final class TerminalEnvironment {
         ArrayList<PackageEntry> packages = new ArrayList<>();
         Set<String> livePacks = new HashSet<>();
         LinkedHashMap<String, Command> commands = new LinkedHashMap<>();
+        ArrayList<String> dependencyLibraries = new ArrayList<>();
         ArrayList<String> dataDirectories = new ArrayList<>();
+        ArrayList<String> vulkanIcdFiles = new ArrayList<>();
         try (ProviderSession provider = ProviderSession.open(context)) {
             Bundle catalog = provider.catalog();
             String[] encoded = catalog.getStringArray("packages");
@@ -240,7 +247,11 @@ final class TerminalEnvironment {
                 File libraries = new File(packRoot, "lib");
                 File dataRoot = new File(packRoot, "root");
                 File loader = packagedLoader;
+                if ("dependency".equals(entry.kind)) {
+                    dependencyLibraries.add(libraries.getAbsolutePath());
+                }
                 dataDirectories.add(new File(dataRoot, "usr/share").getAbsolutePath());
+                collectVulkanIcdFiles(dataRoot, vulkanIcdFiles);
                 for (String commandName : entry.commands) {
                     File program = new File(new File(packRoot, "bin"), commandName);
                     Command command = new Command(entry.packId, commandName,
@@ -264,13 +275,14 @@ final class TerminalEnvironment {
         writeInstalledList(installed, packages);
         File rc = new File(runtime, "shell.rc");
         writeAtomically(rc, shellRc(home, config, cache, tmp, requests, responses,
-                installed, rc, commands, dataDirectories));
+                installed, rc, commands, dependencyLibraries, dataDirectories,
+                vulkanIcdFiles));
         Command bash = commands.get("bash");
         if (bash != null && !bash.interpreter.isEmpty()) {
             throw new SecurityException("Managed Bash command is not an ELF executable");
         }
         File launcher = new File(runtime, "launch.sh");
-        writeAtomically(launcher, launchScript(rc, bash));
+        writeAtomically(launcher, launchScript(rc, bash, dependencyLibraries));
 
         ArrayList<String> env = new ArrayList<>();
         env.add("HOME=" + home.getAbsolutePath());
@@ -439,7 +451,8 @@ final class TerminalEnvironment {
     }
 
     private static String managedInvocation(Command executable, File runtimeRoot,
-            File script, File rc, boolean replaceProcess) {
+            File script, File rc, boolean replaceProcess,
+            List<String> dependencyLibraries) {
         StringBuilder value = new StringBuilder();
         value.append("ARCHPHENE_RUNTIME_ROOT=").append(quote(runtimeRoot.getAbsolutePath()))
                 .append(" LOCPATH=").append(quote(new File(runtimeRoot,
@@ -450,27 +463,35 @@ final class TerminalEnvironment {
         if (script != null && "bash".equals(executable.name)) {
             value.append(" BASH_ENV=").append(quote(rc.getAbsolutePath()));
         }
+        ArrayList<String> libraryPath = new ArrayList<>();
+        libraryPath.add(executable.libraries.getAbsolutePath());
+        for (String dependency : dependencyLibraries) {
+            if (!libraryPath.contains(dependency)) libraryPath.add(dependency);
+        }
         value.append(replaceProcess ? " exec " : " ")
                 .append(quote(executable.loader.getAbsolutePath()))
-                .append(" --library-path ").append(quote(executable.libraries.getAbsolutePath()))
+                .append(" --library-path ").append(quote(String.join(":", libraryPath)))
                 .append(' ').append(quote(executable.program.getAbsolutePath()));
         if (script != null) value.append(' ').append(quote(script.getAbsolutePath()));
         return value.toString();
     }
 
-    private static String launchScript(File rc, Command bash) {
+    private static String launchScript(File rc, Command bash,
+            List<String> dependencyLibraries) {
         StringBuilder value = new StringBuilder("#!/system/bin/sh\n");
         if (bash == null) {
             return value.append("exec /system/bin/sh -i\n").toString();
         }
-        value.append(managedInvocation(bash, bash.runtimeRoot, null, rc, true))
+        value.append(managedInvocation(bash, bash.runtimeRoot, null, rc, true,
+                dependencyLibraries))
                 .append(" --noprofile --rcfile ").append(quote(rc.getAbsolutePath()))
                 .append(" -i\n");
         return value.toString();
     }
     private static String shellRc(File home, File config, File cache, File tmp,
             File requests, File responses, File installed, File rcFile,
-            Map<String, Command> commands, List<String> dataDirectories) {
+            Map<String, Command> commands, List<String> dependencyLibraries,
+            List<String> dataDirectories, List<String> vulkanIcdFiles) {
         StringBuilder rc = new StringBuilder();
         rc.append("export HOME=").append(quote(home.getAbsolutePath())).append('\n');
         rc.append("export TMPDIR=").append(quote(tmp.getAbsolutePath())).append('\n');
@@ -488,14 +509,15 @@ final class TerminalEnvironment {
         for (Command command : commands.values()) {
             rc.append("    ").append(quote(command.packId + "/" + command.name)).append(") ");
             if (command.interpreter.isEmpty()) {
-                rc.append(managedInvocation(command, command.runtimeRoot, null, rcFile, false));
+                rc.append(managedInvocation(command, command.runtimeRoot, null, rcFile, false,
+                        dependencyLibraries));
             } else {
                 Command interpreter = ("sh".equals(command.interpreter)
                         || "bash".equals(command.interpreter))
                         ? managedBash : commands.get(command.interpreter);
                 if (interpreter != null && interpreter.interpreter.isEmpty()) {
                     rc.append(managedInvocation(interpreter, command.runtimeRoot,
-                            command.program, rcFile, false));
+                            command.program, rcFile, false, dependencyLibraries));
                 } else if ("sh".equals(command.interpreter)) {
                     rc.append("/system/bin/sh ").append(quote(command.program.getAbsolutePath()));
                 } else {
@@ -564,6 +586,11 @@ final class TerminalEnvironment {
                 .append("    -R|-Rs|-Rns) shift; [ \"$#\" -eq 1 ] || { echo 'pacman -R accepts one package per command' >&2; return 2; }; _archphene_manager_request remove \"$1\" ;;\n")
                 .append("    -Syu|-Syyu) _archphene_manager_request upgrade all ;;\n")
                 .append("    *) echo 'Archphene pacman supports -Q, -Qi, -Qs, -Ss, -S, -R, and -Syu.' >&2; return 2 ;;\n  esac\n}\n");
+        if (!vulkanIcdFiles.isEmpty()) {
+            String icdFiles = String.join(":", vulkanIcdFiles);
+            rc.append("export VK_DRIVER_FILES=").append(quote(icdFiles)).append('\n');
+            rc.append("export VK_ICD_FILENAMES=").append(quote(icdFiles)).append('\n');
+        }
         if (!dataDirectories.isEmpty()) {
             rc.append("export XDG_DATA_DIRS=").append(quote(String.join(":", dataDirectories))).append('\n');
             ArrayList<String> terminfo = new ArrayList<>();
@@ -588,6 +615,23 @@ final class TerminalEnvironment {
         writeAtomically(output, value.toString());
     }
 
+    private static void collectVulkanIcdFiles(File dataRoot, List<String> output)
+            throws IOException {
+        File directory = new File(dataRoot, "usr/share/vulkan/icd.d").getCanonicalFile();
+        if (!directory.getPath().startsWith(dataRoot.getCanonicalPath() + File.separator)
+                || !directory.isDirectory()) return;
+        File[] files = directory.listFiles((parent, name) -> name.matches(
+                "[A-Za-z0-9._+-]{1,128}\\.json"));
+        if (files == null) throw new IOException("Could not list Vulkan ICD manifests");
+        java.util.Arrays.sort(files, (left, right) -> left.getName().compareTo(right.getName()));
+        for (File file : files) {
+            File canonical = file.getCanonicalFile();
+            if (!canonical.getParentFile().equals(directory) || !canonical.isFile()) {
+                throw new SecurityException("Vulkan ICD manifest escaped dependency data");
+            }
+            output.add(canonical.getAbsolutePath());
+        }
+    }
     private static void extractData(File archive, File root) throws Exception {
         int files = 0;
         long bytes = 0;

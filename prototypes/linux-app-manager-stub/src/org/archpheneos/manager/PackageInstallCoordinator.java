@@ -86,10 +86,14 @@ final class PackageInstallCoordinator {
                                 ApkUpdateInstaller.Phase.DOWNLOAD, percent, status, "", false);
                     });
             checkInterrupted();
-            if (staged.classification.kind == ArchPackageClassifier.Kind.TERMINAL) {
+            if (staged.classification.kind == ArchPackageClassifier.Kind.TERMINAL
+                    || staged.classification.kind == ArchPackageClassifier.Kind.DEPENDENCY) {
+                boolean dependency = staged.classification.kind
+                        == ArchPackageClassifier.Kind.DEPENDENCY;
                 update(activity, listener, id, PackageInstallJobStore.RUNNING,
                         ApkUpdateInstaller.Phase.INSTALL, 90,
-                        "Publishing Terminal environment package", "", false);
+                        dependency ? "Publishing shared dependency package"
+                                : "Publishing Terminal environment package", "", false);
                 ManagedPackageStore.install(activity, source, staged);
                 TrackedPackageStore.remove(activity, source.repository,
                         source.name, source.architecture);
@@ -98,7 +102,8 @@ final class PackageInstallCoordinator {
                 OPERATIONS.remove(id, preparation);
                 update(activity, listener, id, PackageInstallJobStore.COMPLETE,
                         ApkUpdateInstaller.Phase.COMPLETE, 100,
-                        "Installed in Archphene Terminal", "", true);
+                        dependency ? "Installed as shared runtime dependency"
+                                : "Installed in Archphene Terminal", "", true);
                 return;
             }
             if (staged.classification.kind != ArchPackageClassifier.Kind.DESKTOP) {
