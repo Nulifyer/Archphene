@@ -69,7 +69,6 @@ public final class TerminalActivity extends Activity
             serviceBound = true;
             terminalService.attachClient(TerminalActivity.this);
             terminalService.refreshEnvironmentIfChanged();
-            terminalService.refreshEnvironmentIfChanged();
         }
         @Override public void onServiceDisconnected(ComponentName name) {
             serviceBound = false;
@@ -94,7 +93,10 @@ public final class TerminalActivity extends Activity
     @Override
     protected void onResume() {
         super.onResume();
-        if (terminalService != null) terminalService.refreshEnvironmentIfChanged();
+        if (terminalService != null) {
+            terminalService.attachClient(this);
+            terminalService.refreshEnvironmentIfChanged();
+        }
     }
 
     private void buildUi() {
@@ -296,7 +298,9 @@ public final class TerminalActivity extends Activity
             tabs.addView(tab, parameters);
         }
         TerminalSession session = terminalService.activeSession();
-        terminalView.attachSession(session);
+        if (terminalView.attachSession(session)) {
+            terminalView.onScreenUpdated(true);
+        }
         if (activeInfo != null) {
             title.setText(activeInfo.title);
         } else if (terminalService.isPreparing()) {

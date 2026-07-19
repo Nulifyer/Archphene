@@ -313,6 +313,12 @@ final class TerminalEnvironment {
         }
         File launcher = new File(generation, "launch.sh");
         writeAtomically(launcher, launchScript(rc, bash, dependencyLibraries));
+        if (initial) {
+            removeStalePacks(generations, Collections.singleton(catalogId));
+            deleteRecursively(new File(runtime, "installed.tsv"));
+            deleteRecursively(new File(runtime, "shell.rc"));
+            deleteRecursively(new File(runtime, "launch.sh"));
+        }
 
         ArrayList<String> env = new ArrayList<>();
         env.add("HOME=" + home.getAbsolutePath());

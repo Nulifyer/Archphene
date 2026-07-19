@@ -77,6 +77,7 @@ public final class TerminalService extends Service implements TerminalSessionCli
     private final LocalBinder binder = new LocalBinder();
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ArrayList<Record> sessions = new ArrayList<>();
+    private final ArrayList<Client> clients = new ArrayList<>();
     private TerminalEnvironment.Session environment;
     private Throwable preparationError;
     private Client client;
@@ -120,12 +121,17 @@ public final class TerminalService extends Service implements TerminalSessionCli
     }
 
     void attachClient(Client value) {
+        clients.remove(value);
+        clients.add(value);
         client = value;
         notifyClient();
     }
 
     void detachClient(Client value) {
-        if (client == value) client = null;
+        clients.remove(value);
+        if (client == value) {
+            client = clients.isEmpty() ? null : clients.get(clients.size() - 1);
+        }
     }
 
     List<SessionInfo> sessionInfos() {
@@ -267,8 +273,16 @@ public final class TerminalService extends Service implements TerminalSessionCli
                     refreshing = false;
                     if (stopping) return;
                     environment = prepared;
-                    if (sessions.size() < MAX_SESSIONS) createSession();
-                    else notifyClient();
+                    if (sessions.size() < MAX_SESSIONS) {
+                        createSession();
+                        Log.i(TAG, "Terminal catalog changed " + previous + " -> "
+                                + prepared.catalogId + "; opened " + activeHandle);
+                    } else {
+                        Log.w(TAG, "Terminal catalog changed " + previous + " -> "
+                                + prepared.catalogId
+                                + "; close a tab before opening the refreshed environment");
+                        notifyClient();
+                    }
                 });
             } catch (Throwable error) {
                 Log.e(TAG, "Could not refresh terminal environment", error);
@@ -322,7 +336,9 @@ public final class TerminalService extends Service implements TerminalSessionCli
     }
 
     private void notifyClient() {
-        if (client != null) client.onServiceStateChanged();
+        for (Client observer : new ArrayList<>(clients)) {
+            observer.onServiceStateChanged();
+        }
     }
 
     private void createNotificationChannel() {
