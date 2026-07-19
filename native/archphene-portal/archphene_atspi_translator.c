@@ -140,6 +140,31 @@ static bool cache_interfaces(
     return true;
 }
 
+static bool cache_legacy_child_count(
+        DBusMessageIter *iter, int32_t *child_count) {
+    if (iter == NULL || child_count == NULL
+            || dbus_message_iter_get_arg_type(iter) != DBUS_TYPE_ARRAY) {
+        return false;
+    }
+    DBusMessageIter children;
+    dbus_message_iter_recurse(iter, &children);
+    int32_t count = 0;
+    while (dbus_message_iter_get_arg_type(&children) == DBUS_TYPE_STRUCT) {
+        ArchpheneAtspiReference reference;
+        if (!cache_reference_from_iter(&children, &reference)
+                || count == INT32_MAX) {
+            return false;
+        }
+        count++;
+        dbus_message_iter_next(&children);
+    }
+    if (dbus_message_iter_get_arg_type(&children) != DBUS_TYPE_INVALID) {
+        return false;
+    }
+    *child_count = count;
+    return true;
+}
+
 static bool parse_cache_accessible_iter(
         DBusMessageIter *outer, CachedAccessible *cached) {
     DBusMessageIter fields;
@@ -161,16 +186,24 @@ static bool parse_cache_accessible_iter(
             || !cache_reference_from_iter(&fields, &cached->application)
             || !dbus_message_iter_next(&fields)
             || !cache_reference_from_iter(&fields, &cached->parent)
-            || !dbus_message_iter_next(&fields)
-            || dbus_message_iter_get_arg_type(&fields) != DBUS_TYPE_INT32) {
+            || !dbus_message_iter_next(&fields)) {
         return false;
     }
-    dbus_message_iter_get_basic(&fields, &cached->index);
-    if (!dbus_message_iter_next(&fields)
-            || dbus_message_iter_get_arg_type(&fields) != DBUS_TYPE_INT32) {
+    if (dbus_message_iter_get_arg_type(&fields) == DBUS_TYPE_INT32) {
+        dbus_message_iter_get_basic(&fields, &cached->index);
+        if (!dbus_message_iter_next(&fields)
+                || dbus_message_iter_get_arg_type(&fields) != DBUS_TYPE_INT32) {
+            return false;
+        }
+        dbus_message_iter_get_basic(&fields, &cached->child_count);
+    } else if (dbus_message_iter_get_arg_type(&fields) == DBUS_TYPE_ARRAY) {
+        cached->index = -1;
+        if (!cache_legacy_child_count(&fields, &cached->child_count)) {
+            return false;
+        }
+    } else {
         return false;
     }
-    dbus_message_iter_get_basic(&fields, &cached->child_count);
     if (!dbus_message_iter_next(&fields) || !cache_interfaces(&fields, node)
             || !dbus_message_iter_next(&fields)
             || dbus_message_iter_get_arg_type(&fields) != DBUS_TYPE_STRING) {
@@ -1296,8 +1329,10 @@ void archphene_atspi_translator_cache_items(DBusMessage *message) {
     }
     dbus_message_iter_recurse(&outer, &items);
     size_t cached_count = 0;
+    size_t record_count = 0;
     pthread_mutex_lock(&state.mutex);
     while (dbus_message_iter_get_arg_type(&items) == DBUS_TYPE_STRUCT) {
+        record_count++;
         CachedAccessible cached;
         if (parse_cache_accessible_iter(&items, &cached)) {
             upsert_cached_accessible_locked(&cached);
@@ -1306,7 +1341,8 @@ void archphene_atspi_translator_cache_items(DBusMessage *message) {
         if (!dbus_message_iter_next(&items)) break;
     }
     pthread_mutex_unlock(&state.mutex);
-    fprintf(stderr, "AT-SPI cache query loaded %zu accessibles\n", cached_count);
+    fprintf(stderr, "AT-SPI cache query loaded %zu/%zu accessibles signature=%s\n",
+            cached_count, record_count, dbus_message_get_signature(message));
     if (cached_count == 0) archphene_atspi_translator_mark_dirty();
 }
 void archphene_atspi_translator_event(DBusMessage *message) {

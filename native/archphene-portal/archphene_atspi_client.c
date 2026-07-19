@@ -1,10 +1,14 @@
 #include "archphene_atspi_client.h"
 
 #include <ctype.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define ACCESSIBLE "org.a11y.atspi.Accessible"
 #define ACTION "org.a11y.atspi.Action"
@@ -121,30 +125,75 @@ static void copy_text(char *target, size_t capacity, const char *source) {
     target[output] = '\0';
 }
 
+static int64_t monotonic_millis(void) {
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return -1;
+    return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
 static DBusMessage *send_call_with_timeout(DBusConnection *connection,
         DBusMessage *request, int timeout_millis) {
     if (connection == NULL || request == NULL) {
         if (request != NULL) dbus_message_unref(request);
         return NULL;
     }
-    DBusError error = DBUS_ERROR_INIT;
-    DBusMessage *reply = dbus_connection_send_with_reply_and_block(
-            connection, request, timeout_millis, &error);
-    if (dbus_error_is_set(&error)) {
+    DBusPendingCall *pending = NULL;
+    DBusMessage *reply = NULL;
+    int fd = -1;
+    if (!dbus_connection_get_unix_fd(connection, &fd)) fd = -1;
+    if (fd >= 0) {
+        int flags = fcntl(fd, F_GETFL, 0);
+        if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) {
+            fd = -1;
+        }
+    }
+    int64_t started = monotonic_millis();
+    dbus_bool_t sent = started >= 0
+            && dbus_connection_send_with_reply(
+                    connection, request, &pending, timeout_millis)
+            && pending != NULL;
+    if (sent) {
+        dbus_connection_flush(connection);
+        int64_t deadline = started + timeout_millis;
+        while (!dbus_pending_call_get_completed(pending)) {
+            int64_t now = monotonic_millis();
+            if (now < 0 || now >= deadline || fd < 0) break;
+            int remaining = (int)(deadline - now);
+            struct pollfd descriptor = {.fd = fd, .events = POLLIN};
+            int ready = poll(&descriptor, 1, remaining < 25 ? remaining : 25);
+            if (ready < 0) {
+                if (errno == EINTR) continue;
+                break;
+            }
+            if (ready > 0) {
+                if (!dbus_connection_read_write(connection, 0)) break;
+                while (dbus_connection_dispatch(connection)
+                        == DBUS_DISPATCH_DATA_REMAINS) {
+                }
+            }
+        }
+        if (dbus_pending_call_get_completed(pending)) {
+            reply = dbus_pending_call_steal_reply(pending);
+        } else {
+            dbus_pending_call_cancel(pending);
+        }
+    }
+    if (reply == NULL || dbus_message_get_type(reply) == DBUS_MESSAGE_TYPE_ERROR) {
         const char *destination = dbus_message_get_destination(request);
         const char *path = dbus_message_get_path(request);
         const char *interface = dbus_message_get_interface(request);
         const char *member = dbus_message_get_member(request);
+        const char *error = reply == NULL ? "org.archphene.Timeout"
+                : dbus_message_get_error_name(reply);
         fprintf(stderr, "AT-SPI call failed bus=%s path=%s interface=%s "
-                "member=%s error=%s message=%s\n",
+                "member=%s error=%s\n",
                 destination == NULL ? "" : destination,
                 path == NULL ? "" : path,
                 interface == NULL ? "" : interface,
                 member == NULL ? "" : member,
-                error.name == NULL ? "" : error.name,
-                error.message == NULL ? "" : error.message);
-        dbus_error_free(&error);
+                error == NULL ? "unknown" : error);
     }
+    if (pending != NULL) dbus_pending_call_unref(pending);
     dbus_message_unref(request);
     return reply;
 }

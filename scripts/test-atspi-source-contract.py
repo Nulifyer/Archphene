@@ -227,6 +227,11 @@ def main() -> None:
         "dbus_validate_bus_name(reference->bus, NULL)",
         "dbus_validate_path(reference->path, NULL)",
         "#define CALL_TIMEOUT_MILLIS 1000",
+        "static int64_t monotonic_millis",
+        "dbus_connection_get_unix_fd(connection, &fd)",
+        "fcntl(fd, F_SETFL, flags | O_NONBLOCK)",
+        "dbus_connection_send_with_reply(",
+        "dbus_pending_call_cancel(pending)",
         "static size_t utf8_sequence_length",
         "read_method_uint32(",
         'ACCESSIBLE, "GetRole", &role_id',
@@ -252,6 +257,8 @@ def main() -> None:
             raise AssertionError(f"missing client validation: {token}")
     if "strcmp(child.bus, reference->bus)" in client_source:
         raise AssertionError("cross-process AT-SPI children are still rejected")
+    if "dbus_connection_send_with_reply_and_block" in client_source:
+        raise AssertionError("AT-SPI traversal still uses a blocking D-Bus call")
 
     lifecycle_tokens = (
         (publish_source, "ARCHPHENE_ATSPI_TREE_TRUNCATED", "bounded-tree publication"),
@@ -351,6 +358,8 @@ def main() -> None:
          "AT-SPI cache signal subscription"),
         (source, 'A11Y_CACHE, "GetItems"',
          "AT-SPI bulk cache query"),
+        (source, 'strcmp(member, "Activate") == 0',
+         "Qt activation cache refresh"),
         (source, "cache_not_ready",
          "transient GTK cache startup detection"),
         (source, "if (!cache_not_ready) archphene_atspi_translator_mark_dirty();",
@@ -363,12 +372,16 @@ def main() -> None:
          "application ID reply consumption"),
         (source, 'message, "((so)(so)(so)iiassusau)"',
          "modern AT-SPI cache signature"),
+        (source, 'message, "((so)(so)(so)a(so)assusau)"',
+         "legacy Qt AT-SPI cache signature"),
         (translator_source, "CachedAccessible cached_accessibles[MAX_CACHED_ACCESSIBLES]",
          "bounded cache storage"),
         (translator_source, "parse_cache_accessible(message, &cached)",
          "complete cache item parsing"),
         (translator_source, "archphene_atspi_translator_cache_items",
          "bulk accessible cache parsing"),
+        (translator_source, "cache_legacy_child_count",
+         "legacy Qt AT-SPI cache parsing"),
         (translator_source, "event_variant_string",
          "event-carried window title parsing"),
         (translator_source, "cache_window_add",

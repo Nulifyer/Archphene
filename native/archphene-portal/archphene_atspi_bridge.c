@@ -744,8 +744,10 @@ void archphene_atspi_handle_signal(
     dbus_bool_t cache_event = interface != NULL && member != NULL
             && strcmp(interface, "org.a11y.atspi.Cache") == 0
             && ((strcmp(member, "AddAccessible") == 0
-                    && dbus_message_has_signature(
-                        message, "((so)(so)(so)iiassusau)"))
+                    && (dbus_message_has_signature(
+                            message, "((so)(so)(so)iiassusau)")
+                        || dbus_message_has_signature(
+                            message, "((so)(so)(so)a(so)assusau)")))
                 || (strcmp(member, "RemoveAccessible") == 0
                     && dbus_message_has_signature(message, "(so)")));
     if (sender != NULL && cache_event) {
@@ -758,7 +760,8 @@ void archphene_atspi_handle_signal(
         archphene_atspi_translator_event(message);
         if (connection != NULL
                 && strcmp(interface, "org.a11y.atspi.Event.Window") == 0
-                && strcmp(member, "Create") == 0) {
+                && (strcmp(member, "Create") == 0
+                    || strcmp(member, "Activate") == 0)) {
             if (!request_cache_items(connection, sender)) {
                 archphene_atspi_translator_mark_dirty();
             }

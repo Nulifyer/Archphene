@@ -507,6 +507,13 @@ int archphene_atspi_tree_publish(const ArchpheneAtspiTree *tree) {
                 descriptor, response, sizeof(response));
         if (result == 0 && strcmp(response, "OK") != 0) result = -1;
     }
+    static size_t last_logged_count = SIZE_MAX;
+    if (result != 0 || tree->count != last_logged_count) {
+        fprintf(stderr, "AT-SPI publish nodes=%zu bytes=%zu result=%d response=%s\n",
+                tree->count, json_length, result,
+                response[0] == '\0' ? "none" : response);
+        last_logged_count = tree->count;
+    }
     close(descriptor);
     return result;
 }
