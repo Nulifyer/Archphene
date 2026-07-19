@@ -18,7 +18,7 @@ Arch repository metadata
   -> Android PackageInstaller
 ```
 
-The full on-device transaction is proven for supported x86_64 Qt, GTK, and CLI packages: Arch resolution, signature verification, staging, closure reduction, package classification, wrapper assembly, persistent Android Keystore signing, and PackageInstaller installation. Generated wrappers carry the selected desktop label, executable, icon, MIME intents, toolkit, ABI, source URL, and an enforced bridge-capability contract. Broader toolkit coverage and AArch64 package runtime support remain incomplete.
+The full on-device transaction is proven for supported x86_64 Qt, GTK, and CLI packages and for AArch64 Qt and CLI packages: repository resolution, signature verification, staging, closure reduction, package classification, wrapper assembly, persistent Android Keystore signing, and PackageInstaller installation. Generated wrappers carry the selected desktop label, executable, icon, MIME intents, toolkit, ABI, source URL, and an enforced bridge-capability contract. AArch64 GTK3 wrapper assembly and broader toolkit coverage remain incomplete.
 
 Package conversions run as durable per-package jobs. Two package preparation jobs may overlap, while wrapper mutation/signing and Android installation confirmation use fair single-slot gates. State is committed before phase transitions, failures and cancellation are isolated by canonical package identity, and startup reconciles an Android install that completed after the manager process stopped.
 

@@ -16,8 +16,8 @@ Archphene is moving from application-specific proofs toward a package-driven And
    - allow bounded parallel preparation while serializing wrapper mutation, signing, and Android confirmation.
 
 2. **Shared Wayland compositor**
-   - replace duplicated KCalc and Mousepad Java implementations;
-   - use generated Wayland protocol bindings;
+   - maintain the shared Rust compositor used by KCalc, Mousepad, generated wrappers, and native probes;
+   - expand generated Wayland protocol bindings beyond the validated core;
    - retain the validated native SHM, xdg-toplevel, pointer, XKB keymap, focus, and hardware-key lifecycle gates for x86_64 and AArch64;
    - enforce object, role, version, configure/ack, buffer, popup, and subsurface lifecycles;
    - add deterministic protocol errors and fuzzable parsers.
@@ -48,7 +48,7 @@ Archphene is moving from application-specific proofs toward a package-driven And
 - broader Qt, GTK, SDL, Electron, and Rust-native application coverage;
 - reproducible x86_64 and AArch64 CI package fixtures;
 - supported GrapheneOS Pixel validation;
-- 16 KB page-size Android devices;
+- broader 16 KB device coverage; current ARM64 runtime artifacts and manager/self-update paths pass, while upstream Arch x86_64 packages remain 4 KB-only;
 - sustained desktop-mode performance and multi-window testing.
 
 Historical alternatives and evidence are indexed under [Research](../research/README.md).

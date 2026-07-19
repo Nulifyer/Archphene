@@ -40,7 +40,7 @@ The Android 16 x86_64 emulator uses host GPU acceleration backed by an NVIDIA Ge
 - `Surface Size: 1080x2205 windowed`;
 - completion of every default GLMark2 scene with final score 12.
 
-The release helper remained alive through repeated scene transitions with no fence-export, context-loss, dispatch, or disconnect errors. The aarch64 helper also cross-compiles and creates its private socket under the Archphene app UID on a Samsung Galaxy S22 Ultra whose system renderer is Qualcomm Adreno 730 / OpenGL ES 3.2. A complete ARM GLMark2 run still requires aarch64 manager/runtime-pack generation.
+The release helper remained alive through repeated scene transitions with no fence-export, context-loss, dispatch, or disconnect errors. On a Samsung Galaxy S22 Ultra, the AArch64 manager resolved, verified, wrapped, signed, installed, and launched GLMark2 through the same private helper path. Virgl used the Qualcomm Adreno 730 / OpenGL ES 3.2 system renderer; all 1080x2202 scenes completed with exit code 0 and final score 15.
 
 ## Current limits
 

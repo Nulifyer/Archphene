@@ -1,6 +1,6 @@
 # Project status
 
-Updated: 2026-07-18
+Updated: 2026-07-19
 
 This page separates validated behavior from planned platform work. Package search does not imply package compatibility.
 
@@ -27,7 +27,7 @@ This page separates validated behavior from planned platform work. Package searc
 | Drag-and-drop | Generated GUI wrappers declare a `drag-drop` capability. Bounded plain text and `text/uri-list` map bidirectionally between Android `DragEvent` and standard Wayland data devices. Android files import through the conflict-safe document session; Linux exports are restricted to visible-home files and use exact Android URI grants. Copy negotiation, transfer, import/writeback, denied and granted provider access, completion, cancellation, and cleanup pass on x86_64 emulator and physical AArch64. |
 | GUI application documents | One manager-owned **Archphene Apps** DocumentsProvider exposes each generated GUI wrapper's visible Linux home while dotfiles and runtime state remain private. Per-wrapper endpoints require the manager signature permission and verify the calling package. `ACTION_VIEW` and `ACTION_EDIT` support up to 32 URI grants, collision-safe same-name imports, hash-based writeback, and concurrent Android-edit conflict copies. A document sent to an active `singleTask` wrapper presents a native warning before a generic safe restart; Cancel preserves the running app. Manager CRUD, direct-provider denial, active-app restart, same-name import, conflict preservation, and writeback pass on the x86_64 emulator; manager CRUD and denial pass on physical AArch64 |
 | Package discovery | Official Arch name/description candidates use deterministic exact, executable, prefix, token, and description ranking; executable ownership is merged from repository file databases, glmark2-es2-wayland resolves to glmark2, and installed-app multi-term search shares the same matching rules |
-| OpenGL ES bridge | A manager-generated GLMark2 wrapper starts a same-UID Android virglrenderer helper, Mesa reports a virgl renderer backed by the emulator NVIDIA OpenGL ES translator, and the complete 1080x2205 suite finishes with score 12. The final fence-compatible build remains stable through repeated scenes without renderer errors. The aarch64 helper builds and creates its private socket under the Archphene UID on a Samsung Galaxy S22 Ultra |
+| OpenGL ES bridge | Manager-generated GLMark2 wrappers start a same-UID Android virglrenderer helper. Mesa reports virgl over the emulator NVIDIA OpenGL ES translator and completes the 1080x2205 suite with score 12. On the Samsung Galaxy S22 Ultra, virgl uses Qualcomm Adreno 730 / OpenGL ES 3.2 and completes every 1080x2202 scene with score 15 and exit code 0. Both helpers remain stable without fence-export, context-loss, dispatch, or disconnect errors |
 
 ## In progress
 
@@ -43,7 +43,7 @@ Local debug builds can remain multi-ABI. Release builds emit independently signe
 ## Pending
 
 - Broaden printing, audio, accessibility, and keyring compatibility beyond the validated applications and devices.
-- Zero-copy Android HardwareBuffer/dmabuf presentation, Vulkan, physical ARM end-to-end GL application validation, and robust helper-loss recovery; the current OpenGL ES virpipe path presents through SHM.
+- Zero-copy Android HardwareBuffer/dmabuf presentation, Vulkan, robust helper-loss recovery, and broader physical-device GL application coverage; the current validated x86_64 and AArch64 OpenGL ES virpipe path presents through SHM.
 - Rich notification actions, non-HTTP URI policies, and remaining desktop portals.
 - Broader Qt, GTK, SDL, Electron, and Rust-native compatibility.
 - AArch64 GTK3 wrapper assembly currently fails closed because its compatibility bridge is unavailable; physical ARM GUI document conflict validation therefore remains pending a valid document-capable runtime fixture.
