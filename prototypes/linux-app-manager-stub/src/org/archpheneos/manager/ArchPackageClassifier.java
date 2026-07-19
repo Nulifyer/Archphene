@@ -87,6 +87,12 @@ final class ArchPackageClassifier {
                     entry.relativePath, entry.iconName, entry.mimeTypes,
                     true, commands);
         }
+        String waylandExecutable = preferredWaylandCommand(
+                commands, packageName, executableHint);
+        if (!waylandExecutable.isEmpty()) {
+            return new Result(Kind.DESKTOP, waylandExecutable, packageName, "", packageName,
+                    Collections.emptyList(), false, commands);
+        }
         String executable = preferredCommand(commands, packageName, executableHint);
         if (!executable.isEmpty()) {
             return new Result(Kind.TERMINAL, executable, packageName, "", "",
@@ -222,6 +228,21 @@ final class ArchPackageClassifier {
         return commands.isEmpty() ? "" : commands.get(0);
     }
 
+    private static String preferredWaylandCommand(List<String> commands, String packageName,
+            String executableHint) {
+        if (commands.contains(executableHint) && executableHint.endsWith("-wayland")) {
+            return executableHint;
+        }
+        for (String suffix : new String[] {"-es2-wayland", "-wayland"}) {
+            String candidate = packageName + suffix;
+            if (commands.contains(candidate)) return candidate;
+        }
+        for (String command : commands) {
+            if (command.endsWith("-wayland")) return command;
+        }
+        return "";
+    }
+
     private static boolean booleanValue(String value) {
         return "true".equalsIgnoreCase(value) || "1".equals(value);
     }
@@ -244,6 +265,7 @@ final class ArchPackageClassifier {
         if (!bin.mkdirs() || !apps.mkdirs()) throw new IllegalStateException("Classifier fixture failed");
         write(new File(bin, "editor"), "#!/bin/sh\n");
         write(new File(bin, "dependency-helper"), "#!/bin/sh\n");
+        write(new File(bin, "benchmark-es2-wayland"), "#!/bin/sh\n");
         java.util.Set<String> sourceCommands = Collections.singleton("editor");
         write(new File(apps, "editor.desktop"), "[Desktop Entry]\nType=Application\n"
                 + "Name=Editor\nExec=editor %F\nIcon=editor-icon\nMimeType=text/plain;application/json;invalid\nTerminal=false\n");
@@ -252,6 +274,8 @@ final class ArchPackageClassifier {
                 + "Name=Editor\nExec=editor\nNoDisplay=true\n");
         Result terminal = classify(root, "editor", "editor", sourceCommands);
         Result dependency = classify(root, "library", "library", Collections.emptySet());
+        Result wayland = classify(root, "benchmark", "benchmark",
+                Collections.singleton("benchmark-es2-wayland"));
         delete(root);
         if (desktop.kind != Kind.DESKTOP || !"Editor".equals(desktop.displayName)
                 || !"editor".equals(desktop.executable)
@@ -260,6 +284,8 @@ final class ArchPackageClassifier {
                 || !desktop.mimeTypes.contains("application/json")
                 || desktop.commands.size() != 1 || !desktop.commands.contains("editor")
                 || terminal.kind != Kind.TERMINAL || dependency.kind != Kind.DEPENDENCY
+                || wayland.kind != Kind.DESKTOP
+                || !"benchmark-es2-wayland".equals(wayland.executable)
                 || !"quoted".equals(execProgram("\"/usr/bin/quoted\" %F"))) {
             throw new SecurityException("Package classification policy mismatch");
         }
