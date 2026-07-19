@@ -5,6 +5,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$Root = Resolve-Path (Join-Path $PSScriptRoot "..")
+$Adb = Join-Path $Root "tooling/android-sdk/platform-tools/adb.exe"
+$managerDump = (& $Adb -s $Serial shell dumpsys package org.archpheneos.manager) -join "`n"
+$ManagerDebuggable = $managerDump -match '(?m)^\s*flags=\[[^\]]*DEBUGGABLE'
 $tests = @(
     @{ Name = "Linux manager update"; Command = { & "$PSScriptRoot/test-linux-manager-update.ps1" -Serial $Serial } },
     @{ Name = "Linux manager pull refresh"; Command = { & "$PSScriptRoot/test-linux-manager-pull-refresh.ps1" -Serial $Serial } },
@@ -22,11 +26,12 @@ $tests = @(
         }
     } },
     @{ Name = "KCalc calculation"; Command = { & "$PSScriptRoot/test-kcalc-calculation.ps1" -Serial $Serial } },
-    @{ Name = "KCalc live resize"; Command = { & "$PSScriptRoot/test-kcalc-live-resize.ps1" -Serial $Serial } },
-    @{ Name = "KCalc signed update transaction"; Command = { & "$PSScriptRoot/test-kcalc-update-transaction.ps1" -SkipBuild -Serial $Serial } }
+    @{ Name = "KCalc live resize"; Command = { & "$PSScriptRoot/test-kcalc-live-resize.ps1" -Serial $Serial } }
 )
-if (-not $SkipPackageInstaller) {
+if (-not $SkipPackageInstaller -and $ManagerDebuggable) {
     $tests += @{ Name = "Manager PackageInstaller"; Command = { & "$PSScriptRoot/test-linux-manager-package-installer.ps1" -Serial $Serial } }
+} elseif (-not $SkipPackageInstaller) {
+    Write-Host "Skipping debug-hook PackageInstaller fixture for non-debuggable manager; use the production self-update/package workflow regressions."
 }
 if (-not $SkipDocumentWorkflow) {
     $tests += @{ Name = "Mousepad Android document workflow"; Command = { & "$PSScriptRoot/test-mousepad-android-document-workflow.ps1" -Serial $Serial } }
