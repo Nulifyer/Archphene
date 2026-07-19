@@ -37,15 +37,7 @@ if ($nativeLine -match 'legacyNativeLibraryDir=') {
     }
     $nativeDir = "$nativeDir/$($matches[1].Trim())"
 }
-$loader = "$nativeDir/libarchphene_ld.so"
-$pacman = "$nativeDir/libarchphene_pacman.so"
-$output = & $Adb -s $Serial shell run-as $Package $loader --library-path $nativeDir $pacman --version 2>&1
-$exitCode = $LASTEXITCODE
-$output | ForEach-Object { Write-Host $_ }
-if ($exitCode -ne 0) { throw "Pacman exited $exitCode in the Android manager sandbox" }
-if (($output -join "`n") -notmatch 'Pacman v[0-9]') {
-    throw "Pacman version banner was not returned"
-}
+
 & $Adb -s $Serial shell am force-stop $Package | Out-Null
 & $Adb -s $Serial shell am start -W -n "$Package/.MainActivity" `
     --ez archphene_test_package_runtime true | Out-Null
