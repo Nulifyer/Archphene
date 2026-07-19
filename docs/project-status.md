@@ -45,7 +45,7 @@ Local debug builds can remain multi-ABI. Release builds emit independently signe
 ## Pending
 
 - Broaden printing, audio, accessibility, and keyring compatibility beyond the validated applications and devices.
-- Zero-copy Android HardwareBuffer/dmabuf presentation, Vulkan, robust helper-loss recovery, and broader physical-device GL application coverage; the current validated x86_64 and AArch64 OpenGL ES virpipe path presents through SHM.
+- Zero-copy Android HardwareBuffer/dmabuf presentation, Vulkan, and broader physical-device GL application coverage; the current validated x86_64 and AArch64 OpenGL ES virpipe path presents through SHM and falls back once to llvmpipe after unexpected helper loss.
 - Rich notification actions, non-HTTP URI policies, and remaining desktop portals.
 - Broader Qt, GTK, SDL, Electron, and Rust-native compatibility.
 - GrapheneOS Pixel and sustained desktop-mode validation.

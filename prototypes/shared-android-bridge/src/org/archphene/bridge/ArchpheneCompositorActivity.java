@@ -1224,6 +1224,31 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                         runtimeProgramName, arguments, execution);
                 Log.i("ArchpheneRuntime", "Runtime GUI exit=" + result.exitCode);
                 logRuntimeOutput(result.output);
+                if (result.exitCode != 0 && gpuSocket != null
+                        && gpuBridge.failedUnexpectedly() && !isActivityDestroyed()) {
+                    Log.w("ArchpheneRuntime",
+                            "GPU helper failed; restarting runtime once with llvmpipe");
+                    clearManagedRuntimeExecution(execution);
+                    gpuBridge.stop();
+                    environment.remove("VTEST_SOCKET_NAME");
+                    environment.put("GALLIUM_DRIVER", "llvmpipe");
+                    Log.i("ArchpheneLinuxApp",
+                            "Graphics renderer=llvmpipe helper-loss fallback");
+                    execution = RuntimeFdLauncher.newExecution();
+                    if (!registerManagedRuntimeExecution(execution)) {
+                        execution.cancel();
+                        throw new java.util.concurrent.CancellationException(
+                                "Activity was destroyed before GPU recovery");
+                    }
+                    result = RuntimeFdLauncher.runGlibc(
+                            getContentResolver(), android.net.Uri.parse(runtimeProbeUri),
+                            android.net.Uri.parse(runtimeLoaderUri), libraries,
+                            runtimeLibraryNames, getCacheDir(), environment,
+                            runtimeProgramName, arguments, execution);
+                    Log.i("ArchpheneRuntime", "Runtime GPU fallback exit="
+                            + result.exitCode);
+                    logRuntimeOutput(result.output);
+                }
             } catch (Throwable error) {
                 Log.e("ArchpheneRuntime", "Could not launch runtime GUI", error);
             } finally {
@@ -1310,17 +1335,28 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             applyToolkitEnvironment(env, runtimeLib, config, gpuSocket);
             if (isActivityDestroyed()) return;
             builder.redirectErrorStream(true);
-            linuxProcess = builder.start();
-            Log.i(logTag, "Started Linux payload executable=" + executable.getName());
-            try (BufferedReader output = new BufferedReader(new InputStreamReader(
-                    linuxProcess.getInputStream(), StandardCharsets.UTF_8))) {
-                String line;
-                while ((line = output.readLine()) != null) {
-                    if (shouldLogLinuxLine(line)) Log.i(logTag, "linux: " + line);
+            boolean recoveredGpu = false;
+            while (true) {
+                linuxProcess = builder.start();
+                Log.i(logTag, "Started Linux payload executable=" + executable.getName());
+                try (BufferedReader output = new BufferedReader(new InputStreamReader(
+                        linuxProcess.getInputStream(), StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = output.readLine()) != null) {
+                        if (shouldLogLinuxLine(line)) Log.i(logTag, "linux: " + line);
+                    }
                 }
+                int exit = linuxProcess.waitFor();
+                Log.i(logTag, "Linux payload exited code=" + exit);
+                if (exit == 0 || recoveredGpu || gpuSocket == null
+                        || !gpuBridge.failedUnexpectedly() || isActivityDestroyed()) break;
+                Log.w(logTag, "GPU helper failed; restarting payload once with llvmpipe");
+                recoveredGpu = true;
+                gpuBridge.stop();
+                env.remove("VTEST_SOCKET_NAME");
+                env.put("GALLIUM_DRIVER", "llvmpipe");
+                Log.i(logTag, "Graphics renderer=llvmpipe helper-loss fallback");
             }
-            int exit = linuxProcess.waitFor();
-            Log.i(logTag, "Linux payload exited code=" + exit);
         } catch (Throwable error) {
             Log.e(logTag, "Could not launch Linux payload", error);
         } finally {

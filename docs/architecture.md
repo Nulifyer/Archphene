@@ -43,9 +43,9 @@ KCalc and Mousepad use the same Android Activity, input, clipboard, window host,
 
 ### Graphics bridge
 
-For Wayland applications, the wrapper starts a Bionic virglrenderer helper under the same Android UID and exposes a private Unix socket inside the app cache directory. The glibc Mesa client selects `virpipe` and sends Gallium commands over that socket. Virglrenderer executes those commands through Android EGL/OpenGL ES. If the helper cannot initialize, the launcher selects `llvmpipe` without changing Android permissions or sandbox identity.
+For Wayland applications, the wrapper starts a Bionic virglrenderer helper under the same Android UID and exposes a private Unix socket inside the app cache directory. The glibc Mesa client selects `virpipe` and sends Gallium commands over that socket. Virglrenderer executes those commands through Android EGL/OpenGL ES. If the helper cannot initialize, the launcher selects `llvmpipe` without changing Android permissions or sandbox identity. Unexpected helper loss causes one payload restart under `llvmpipe`; the Android Activity and compositor remain alive, while normal exits and repeated failures do not loop.
 
-The current compositor accepts `wl_shm` output, so rendered frames still return through a CPU-visible shared-memory presentation path. This accelerates GL command execution but is not a zero-copy pipeline. Android HardwareBuffer/dmabuf import, Vulkan, and robust helper-loss recovery remain future work. See [GPU acceleration](gpu-acceleration.md).
+The current compositor accepts `wl_shm` output, so rendered frames still return through a CPU-visible shared-memory presentation path. This accelerates GL command execution but is not a zero-copy pipeline. Android HardwareBuffer/dmabuf import and Vulkan remain future work. See [GPU acceleration](gpu-acceleration.md).
 
 ### Runtime compatibility
 

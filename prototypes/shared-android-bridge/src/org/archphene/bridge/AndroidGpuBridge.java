@@ -14,9 +14,13 @@ final class AndroidGpuBridge {
 
     private Process process;
     private File socket;
+    private boolean stopping;
+    private boolean unexpectedExit;
 
     synchronized File start(File nativeLibraryDir, File runtimeDir) {
         stop();
+        stopping = false;
+        unexpectedExit = false;
         File helper = new File(nativeLibraryDir, HELPER);
         if (!helper.isFile()) {
             Log.w(TAG, "GPU helper is unavailable; using software rendering");
@@ -54,6 +58,7 @@ final class AndroidGpuBridge {
                 android.os.SystemClock.sleep(25);
             }
             if (socket.exists() && processAlive(process)) {
+                startExitMonitor(process);
                 Log.i(TAG, "GPU bridge ready socket=" + socket.getAbsolutePath());
                 return socket;
             }
@@ -67,6 +72,7 @@ final class AndroidGpuBridge {
 
     synchronized void stop() {
         Process current = process;
+        stopping = true;
         process = null;
         if (current != null) {
             current.destroy();
@@ -80,6 +86,10 @@ final class AndroidGpuBridge {
             socket.delete();
             socket = null;
         }
+    }
+
+    synchronized boolean failedUnexpectedly() {
+        return unexpectedExit || (process != null && !stopping && !processAlive(process));
     }
 
     private static boolean processAlive(Process value) {
@@ -103,6 +113,26 @@ final class AndroidGpuBridge {
                 Log.d(TAG, "GPU helper log stream closed: " + error.getMessage());
             }
         }, "archphene-gpu-log");
+        thread.setDaemon(true);
+        thread.start();
+    }
+
+    private void startExitMonitor(Process value) {
+        Thread thread = new Thread(() -> {
+            int exitCode;
+            try {
+                exitCode = value.waitFor();
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+            synchronized (AndroidGpuBridge.this) {
+                if (process != value || stopping) return;
+                unexpectedExit = true;
+                if (socket != null) socket.delete();
+            }
+            Log.e(TAG, "GPU helper exited unexpectedly code=" + exitCode);
+        }, "archphene-gpu-exit");
         thread.setDaemon(true);
         thread.start();
     }
