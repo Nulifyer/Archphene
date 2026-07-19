@@ -1,12 +1,18 @@
+#include <QApplication>
 #include <QColor>
 #include <QDir>
 #include <QFont>
+#include <QGuiApplication>
 #include <QPalette>
 #include <QSettings>
+#include <QStyle>
 #include <QStringList>
+#include <QTimer>
 #include <QVariant>
+#include <QWidget>
 #include <qpa/qplatformtheme.h>
 #include <qpa/qplatformthemeplugin.h>
+#include <memory>
 
 namespace {
 
@@ -48,11 +54,25 @@ class ArchphenePlatformTheme final : public QPlatformTheme
 {
 public:
     ArchphenePlatformTheme()
+        : ArchphenePlatformTheme(true)
     {
-        const bool dark = qEnvironmentVariable("ARCHPHENE_COLOR_SCHEME") == QLatin1String("dark");
+    }
+
+private:
+    explicit ArchphenePlatformTheme(bool watch)
+    {
         const QString configHome = qEnvironmentVariable("XDG_CONFIG_HOME",
                 QDir::homePath() + QStringLiteral("/.config"));
-        QSettings settings(configHome + QStringLiteral("/kdeglobals"), QSettings::IniFormat);
+        m_configPath = configHome + QStringLiteral("/kdeglobals");
+        QSettings settings(m_configPath, QSettings::IniFormat);
+        settings.sync();
+        const QString configuredScheme = settings.value(
+                QStringLiteral("General/ColorScheme")).toString();
+        const bool dark = configuredScheme.endsWith(
+                QStringLiteral("Dark"), Qt::CaseInsensitive)
+                || (configuredScheme.isEmpty()
+                    && qEnvironmentVariable("ARCHPHENE_COLOR_SCHEME")
+                            == QLatin1String("dark"));
 
         const QColor fallbackWindow = dark ? QColor(35, 38, 41) : QColor(239, 240, 241);
         const QColor fallbackView = dark ? QColor(27, 30, 32) : QColor(255, 255, 255);
@@ -130,8 +150,40 @@ public:
                 {QStringLiteral("Noto Sans Mono"), QStringLiteral("monospace")});
         m_fixedFont.setPointSize(pointSize);
         m_scheme = dark ? Qt::ColorScheme::Dark : Qt::ColorScheme::Light;
+
+        if (watch) {
+            m_pollTimer = std::make_unique<QTimer>();
+            m_pollTimer->setInterval(500);
+            QObject::connect(m_pollTimer.get(), &QTimer::timeout, [this]() {
+                ArchphenePlatformTheme refreshed(false);
+                if (m_scheme == refreshed.m_scheme && m_palette == refreshed.m_palette) {
+                    return;
+                }
+                m_palette = refreshed.m_palette;
+                m_font = refreshed.m_font;
+                m_fixedFont = refreshed.m_fixedFont;
+                m_scheme = refreshed.m_scheme;
+                if (qobject_cast<QApplication *>(QCoreApplication::instance()) != nullptr) {
+                    QApplication::setPalette(m_palette);
+                    for (QWidget *widget : QApplication::allWidgets()) {
+                        widget->setPalette(m_palette);
+                        if (widget->style() != nullptr) {
+                            widget->style()->unpolish(widget);
+                            widget->style()->polish(widget);
+                        }
+                        widget->update();
+                    }
+                } else if (qGuiApp != nullptr) {
+                    QGuiApplication::setPalette(m_palette);
+                }
+            });
+            QTimer::singleShot(0, QCoreApplication::instance(), [this]() {
+                m_pollTimer->start();
+            });
+        }
     }
 
+public:
     const QPalette *palette(Palette) const override
     {
         return &m_palette;
@@ -174,6 +226,8 @@ private:
     QFont m_font;
     QFont m_fixedFont;
     Qt::ColorScheme m_scheme = Qt::ColorScheme::Unknown;
+    QString m_configPath;
+    std::unique_ptr<QTimer> m_pollTimer;
 };
 
 class ArchphenePlatformThemePlugin final : public QPlatformThemePlugin

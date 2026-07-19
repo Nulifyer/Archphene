@@ -15,7 +15,7 @@ Package search results are candidates, not compatibility claims. A package reach
 
 | Package | Stack | Status | Validated coverage |
 |---|---|---|---|
-| `kcalc` | Qt 6/KDE | Validated | Manager resolve/verify/wrap/sign/install/update/uninstall, app-drawer launch, input, menus, scaling, light/dark appearance, secondary windows, accessibility, and process cleanup on x86_64; generated wrapper launch on physical AArch64. |
+| `kcalc` | Qt 6/KDE | Validated | Manager resolve/verify/wrap/sign/install/update/uninstall, app-drawer launch, input, menus, scaling, secondary windows, accessibility, and process cleanup on x86_64; generated wrapper launch and same-process bidirectional Android light/dark palette switching on physical AArch64. |
 | `mousepad` | GTK 3 | Validated | Menus, dialogs, IME, Android document import/edit/save/writeback/cold reopen, conflict preservation, and DocumentsProvider access on x86_64 and physical AArch64. |
 | `glmark2` | Mesa/Wayland/OpenGL ES | Validated | `glmark2-es2-wayland` completes all scenes through virgl on the x86_64 emulator and Samsung AArch64 device. Final presentation still uses SHM. |
 | `snapshot` | GTK 4/GStreamer/PipeWire | Validated | Unmodified camera consumer, Android grant/denial, timestamped frames, and cleanup on x86_64 and physical AArch64. |

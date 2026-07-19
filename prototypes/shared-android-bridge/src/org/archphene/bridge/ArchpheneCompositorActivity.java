@@ -107,6 +107,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     private int appearanceScalePercent;
     private int appearanceFontPercent = 100;
     private boolean appearanceMaterialYou;
+    private boolean activeDarkAppearance;
     private final Map<Integer, SecondaryWindow> secondaryWindows = new HashMap<>();
     private OnBackInvokedCallback backInvokedCallback;
     private int activeSecondaryWindowId;
@@ -161,10 +162,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         } catch (IOException error) {
             throw new IllegalStateException("Could not start Android capability broker", error);
         }
-        int systemChrome = resolvedDarkAppearance() ? Color.rgb(35, 38, 41)
-                : Color.rgb(239, 240, 241);
-        getWindow().setStatusBarColor(systemChrome);
-        getWindow().setNavigationBarColor(systemChrome);
+        activeDarkAppearance = resolvedDarkAppearance();
+        int systemChrome = applySystemChrome(activeDarkAppearance);
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
                 | WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
 
@@ -1412,21 +1411,56 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         return "dark".equals(appearanceTheme)
                 || (!"light".equals(appearanceTheme) && systemDark);
     }
+    private int applySystemChrome(boolean dark) {
+        int color = dark ? Color.rgb(35, 38, 41) : Color.rgb(239, 240, 241);
+        getWindow().setStatusBarColor(color);
+        getWindow().setNavigationBarColor(color);
+        if (compositorView != null) compositorView.setBackgroundColor(color);
+        return color;
+    }
+
+    private int resolvedScalePercent(Configuration configuration) {
+        if (appearanceScalePercent != 0) return appearanceScalePercent;
+        int smallestWidth = configuration.smallestScreenWidthDp;
+        return smallestWidth >= 840 ? 100 : smallestWidth >= 600 ? 125 : 150;
+    }
+
+    private int resolvedFontPointSize(Configuration configuration, int scalePercent) {
+        float appScale = scalePercent / 100f;
+        float requestedBodyPixels = 16f * getResources().getDisplayMetrics().scaledDensity
+                * appearanceFontPercent / 100f;
+        return Math.max(9, Math.min(30,
+                Math.round(requestedBodyPixels * 72f / 96f / appScale)));
+    }
+
+    private void refreshToolkitAppearance(Configuration configuration) {
+        boolean dark = resolvedDarkAppearance();
+        if (dark == activeDarkAppearance) return;
+        activeDarkAppearance = dark;
+        applySystemChrome(dark);
+        File config = new File(new File(getFilesDir(), "linux-home"), ".config");
+        int scalePercent = resolvedScalePercent(configuration);
+        int fontPointSize = resolvedFontPointSize(configuration, scalePercent);
+        try {
+            if ("gtk3".equals(toolkit) || "gtk4".equals(toolkit)) {
+                writeGtkTheme(config, dark, fontPointSize, scalePercent / 100f);
+            } else if (!"wayland".equals(toolkit)) {
+                writeKdeTheme(config, dark);
+            }
+            Log.i(logTag, "Appearance configuration changed resolved="
+                    + (dark ? "dark" : "light") + " without restarting Linux payload");
+        } catch (IOException error) {
+            Log.e(logTag, "Could not refresh Linux toolkit appearance", error);
+        }
+    }
+
     private void applyToolkitEnvironment(Map<String, String> env, File runtimeLib,
             File configDir, File gpuSocket) throws IOException {
         Configuration configuration = getResources().getConfiguration();
         boolean dark = resolvedDarkAppearance();
-        int scalePercent = appearanceScalePercent;
-        if (scalePercent == 0) {
-            int smallestWidth = configuration.smallestScreenWidthDp;
-            scalePercent = smallestWidth >= 840 ? 100 : smallestWidth >= 600 ? 125 : 150;
-        }
+        int scalePercent = resolvedScalePercent(configuration);
         float appScale = scalePercent / 100f;
-        float scaledDensity = getResources().getDisplayMetrics().scaledDensity;
-        float requestedBodyPixels = 16f * scaledDensity
-                * appearanceFontPercent / 100f;
-        int fontPointSize = Math.max(9, Math.min(30,
-                Math.round(requestedBodyPixels * 72f / 96f / appScale)));
+        int fontPointSize = resolvedFontPointSize(configuration, scalePercent);
         env.put("QT_SCALE_FACTOR", String.format(Locale.US, "%.2f", appScale));
         env.put("QT_SCALE_FACTOR_ROUNDING_POLICY", "PassThrough");
         env.put("QT_FONT_DPI", "96");
@@ -1868,6 +1902,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     public void onConfigurationChanged(Configuration newConfiguration) {
         super.onConfigurationChanged(newConfiguration);
         applyWindowMode();
+        refreshToolkitAppearance(newConfiguration);
     }
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {

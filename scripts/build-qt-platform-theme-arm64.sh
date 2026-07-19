@@ -31,9 +31,9 @@ bsdtar -xf "$package" -C "$sysroot"
   -I/usr/include/qt6 -I/usr/include/qt6/QtWidgets -I/usr/include/qt6/QtGui \
   -I/usr/include/qt6/QtCore "$source_dir/archphenestyle.cpp" \
   -o "$work/style/archphenestyle.moc"
-/usr/lib/qt6/moc -DQT_NO_DEBUG -DQT_PLUGIN -DQT_GUI_LIB -DQT_CORE_LIB \
+/usr/lib/qt6/moc -DQT_NO_DEBUG -DQT_PLUGIN -DQT_WIDGETS_LIB -DQT_GUI_LIB -DQT_CORE_LIB \
   -I/usr/include/qt6/QtGui/$qt_version -I/usr/include/qt6/QtGui/$qt_version/QtGui \
-  -I/usr/include/qt6 -I/usr/include/qt6/QtGui \
+  -I/usr/include/qt6 -I/usr/include/qt6/QtWidgets -I/usr/include/qt6/QtGui \
   -I/usr/include/qt6/QtCore/$qt_version -I/usr/include/qt6/QtCore/$qt_version/QtCore \
   -I/usr/include/qt6/QtCore "$source_dir/archpheneplatformtheme.cpp" \
   -o "$work/platform/archpheneplatformtheme.moc"
@@ -50,11 +50,12 @@ aarch64-linux-gnu-g++ -shared -fPIC -Wl,-O1 -Wl,-rpath,/usr/lib \
   -L"$sysroot/usr/lib" -lQt6Widgets -lQt6Gui -lQt6Core -lpthread
 
 aarch64-linux-gnu-g++ -c -O2 -std=gnu++17 -Wall -Wextra -fPIC \
-  -DQT_NO_DEBUG -DQT_PLUGIN -DQT_GUI_LIB -DQT_CORE_LIB \
+  -DQT_NO_DEBUG -DQT_PLUGIN -DQT_WIDGETS_LIB -DQT_GUI_LIB -DQT_CORE_LIB \
   -I"$source_dir" -I"$work/platform" \
   -I"$sysroot/usr/include/qt6/QtGui/$qt_version" \
   -I"$sysroot/usr/include/qt6/QtGui/$qt_version/QtGui" \
-  -I"$sysroot/usr/include/qt6" -I"$sysroot/usr/include/qt6/QtGui" \
+  -I"$sysroot/usr/include/qt6" -I"$sysroot/usr/include/qt6/QtWidgets" \
+  -I"$sysroot/usr/include/qt6/QtGui" \
   -I"$sysroot/usr/include/qt6/QtCore/$qt_version" \
   -I"$sysroot/usr/include/qt6/QtCore/$qt_version/QtCore" \
   -I"$sysroot/usr/include/qt6/QtCore" \
@@ -64,7 +65,7 @@ aarch64-linux-gnu-g++ -shared -fPIC -Wl,-O1 -Wl,-rpath,/usr/lib \
   -Wl,-rpath-link,"$sysroot/usr/lib" -Wl,--allow-shlib-undefined \
   -o "$output/libarchphene_qt_platform_theme.so" \
   "$work/platform/archpheneplatformtheme.o" \
-  -L"$sysroot/usr/lib" -lQt6Gui -lQt6Core -lpthread
+  -L"$sysroot/usr/lib" -lQt6Widgets -lQt6Gui -lQt6Core -lpthread
 
 aarch64-linux-gnu-strip --strip-unneeded \
   "$output/libarchphene_qt_style.so" \

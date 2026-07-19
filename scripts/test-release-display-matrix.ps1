@@ -124,6 +124,8 @@ try {
     if ($log -match 'FATAL EXCEPTION|protocol error|InvalidGrab|UnconfiguredBuffer|native dispatch failed') {
         throw "Display matrix produced a runtime or protocol failure`n$log"
     }
+    & (Join-Path $PSScriptRoot "test-kcalc-live-theme.ps1") `
+            -Serial $Serial -Package $KCalcPackage
     Write-Host "Release display matrix passed on $Serial with stable Android PID $($initial.App) and Linux PID $($initial.Child)."
 } finally {
     & $Adb -s $Serial shell wm size reset | Out-Null

@@ -1,4 +1,4 @@
-QT += core gui-private
+QT += core gui-private widgets
 TEMPLATE = lib
 CONFIG += plugin c++17 release
 CONFIG -= app_bundle

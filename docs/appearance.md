@@ -12,13 +12,13 @@ Settings exposes separate controls for:
 - Linux app text scale
 - Material You semantic colors on Android 12 and newer
 
-Changes apply on the next Linux app launch. Automatic geometry scale is 150% on phones, 125% on tablets, and 100% on desktop-sized displays. Phone text choices are constrained to 100%, 110%, and 120% so standard menus remain usable in a narrow viewport. Larger tablet and desktop choices remain available.
+Manager preference changes apply on the next Linux app launch. A running Qt 6 app set to follow Android changes between the system light and dark palettes without restarting its Linux process. Automatic geometry scale is 150% on phones, 125% on tablets, and 100% on desktop-sized displays. Phone text choices are constrained to 100%, 110%, and 120% so standard menus remain usable in a narrow viewport. Larger tablet and desktop choices remain available.
 
 The manager keeps initial focus on the page rather than its search field, so a previously visible IME cannot compress the app list on launch. Search still opens the keyboard on explicit focus. Phone, tablet, and docked-display checks cover 1080x2400, 1280x1920, and 1920x1080 layouts.
 
 ## Toolkit integration
 
-Qt 6 apps load the `archphene` QPA platform-theme and widget-style plugins. They supply the application palette, color-scheme hint, proportional and fixed fonts, mobile-sized text editors, style choice, and icon-theme hints. The bridge writes role-based Window, View, Button, Selection, and Tooltip colors rather than recoloring individual applications. The platform-theme plugin uses Qt private QPA interfaces and must be rebuilt against the exact Qt minor version in the runtime closure.
+Qt 6 apps load the `archphene` QPA platform-theme and widget-style plugins. They supply the application palette, color-scheme hint, proportional and fixed fonts, mobile-sized text editors, style choice, and icon-theme hints. The bridge writes role-based Window, View, Button, Selection, and Tooltip colors rather than recoloring individual applications. The platform theme synchronizes its `QSettings` view of `kdeglobals` on a 500 ms event-loop timer and only repolishes widgets when the parsed palette changes; this avoids Android filesystem-watcher and Qt settings-cache races while preserving application state. The platform-theme plugin uses Qt private QPA interfaces and must be rebuilt against the exact Qt minor version in the runtime closure.
 
 GTK 3 apps receive equivalent dark/light selection and runtime data paths through generated GTK settings.ini and gtk.css files. The bridge keeps Wayland buffers at the native Android viewport size while scaling toolkit fonts, touch targets, and scrollbars from the same geometry and text policy used for Qt. A native GTK settings broker remains future work; current GTK support uses the toolkit's Adwaita themes.
 
@@ -60,4 +60,4 @@ The script rejects a Qt private-ABI mismatch, cross-compiles the ARM plugins aga
 KCalc is the Qt metric reference application. The x86_64 emulator and an AArch64 Samsung phone have both passed light/dark and portrait/landscape checks at the phone default of 150% geometry scale. Status indicators such as `NORM` retain font-relative frame padding instead of using KCalc's exact one-line fixed height, which prevents clipping with Android-sized text.
 
 
-The AArch64 plugin was validated on a Samsung SM-S908U at 1080x2316. A manager-generated KCalc wrapper followed Android light and dark modes, committed exact 1080x2202 portrait and 2316x978 landscape buffers, and rendered the full `NORM` status label in every tested layout.
+The AArch64 plugin was validated on a Samsung SM-S908U at 1080x2316. A manager-generated KCalc wrapper followed Android light and dark modes in both directions without changing its Android or Linux PID, committed exact 1080x2202 portrait and 2316x978 landscape buffers, and rendered the full `NORM` status label in every tested layout. `scripts/test-kcalc-live-theme.ps1` measures the rendered app pixels so Android chrome changes alone cannot satisfy the release check.
