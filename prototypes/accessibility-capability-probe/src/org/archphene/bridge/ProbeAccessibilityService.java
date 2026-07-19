@@ -205,7 +205,12 @@ public final class ProbeAccessibilityService extends AccessibilityService {
                     break;
                 default: return false;
             }
-            if (node.performAction(androidAction, arguments)) return true;
+            boolean refreshed = node.refresh();
+            boolean accepted = node.performAction(androidAction, arguments);
+            Log.i(TAG, "Accessibility command selector=" + selector
+                    + " action=" + action + " refreshed=" + refreshed
+                    + " accepted=" + accepted + " actions=" + node.getActions());
+            if (accepted) return true;
         }
         int children = Math.min(node.getChildCount(), 1024);
         for (int index = 0; index < children; index++) {

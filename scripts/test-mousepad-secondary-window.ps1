@@ -1,9 +1,12 @@
-param([string]$Serial = "emulator-5554")
+param(
+    [string]$Serial = "emulator-5554",
+    [string]$Package = "org.archphene.linux.p241d399e14343c53b8b766e9126776aa",
+    [string]$Activity = "org.archphene.linux.kcalc.MainActivity"
+)
 
 $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $Adb = Join-Path $Root "tooling/android-sdk/platform-tools/adb.exe"
-$Package = "org.archphene.linux.p241d399e14343c53b8b766e9126776aa"
 $ProbePackage = "org.archphene.accessibilityprobe"
 $ProbeActivity = "org.archphene.bridge.AccessibilityProbeActivity"
 $ProbeService = "$ProbePackage/org.archphene.bridge.ProbeAccessibilityService"
@@ -127,7 +130,7 @@ try {
     Adb @("shell", "pm", "clear", $Package) | Out-Null
     Adb @("logcat", "-c") | Out-Null
     Adb @("shell", "am", "start", "--windowingMode", "5", "-n",
-            "$Package/org.archphene.linux.kcalc.MainActivity") | Out-Null
+            "$Package/$Activity") | Out-Null
     $mainLog = Wait-BridgeLog 'window id=([0-9]+).*mapped=true.*active=true.*primary=true.*title=.*Mousepad' 30
     $mainMatches = [regex]::Matches($mainLog,
         'window id=([0-9]+).*mapped=true.*active=true.*primary=true.*title=.*Mousepad')
@@ -152,8 +155,8 @@ try {
             "|Use system monospace font|") | Out-Null
     Invoke-AccessibilityAction "Show line numbers"
 
-    Adb @("shell", "input", "keyevent", "4") | Out-Null
-    Wait-BridgeLog "window id=$childId parent=$mainId mapped=false" 10 | Out-Null
+    Adb @("logcat", "-c") | Out-Null
+    Invoke-AccessibilityAction "Close"
     Wait-BridgeLog "window id=$mainId parent=0 mapped=true active=true primary=true" 10 | Out-Null
     Wait-TargetTree @("|Untitled 1 - Mousepad|") @("|Mousepad Preferences|") | Out-Null
     $appPid = (Adb @("shell", "pidof", $Package)) -join ""

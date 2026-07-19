@@ -135,7 +135,9 @@ $JavaFiles = @(
 Run-Native { & javac --release 17 -classpath (Join-Path $Sdk "platforms/android-36/android.jar") -d (Join-Path $Out "classes") $JavaFiles } "javac"
 
 $ClassFiles = Get-ChildItem -LiteralPath (Join-Path $Out "classes") -Recurse -Filter *.class | ForEach-Object { $_.FullName }
-Run-Native { & (Join-Path $BuildTools "d8.bat") --lib (Join-Path $Sdk "platforms/android-36/android.jar") --min-api 23 --output (Join-Path $Out "dex") $ClassFiles } "d8"
+$D8ArgFile = Join-Path $Out "d8-inputs.txt"
+[IO.File]::WriteAllLines($D8ArgFile, $ClassFiles, [Text.UTF8Encoding]::new($false))
+Run-Native { & (Join-Path $BuildTools "d8.bat") --lib (Join-Path $Sdk "platforms/android-36/android.jar") --min-api 23 --output (Join-Path $Out "dex") "@$D8ArgFile" } "d8"
 
 Push-Location (Join-Path $Out "dex")
 Run-Native { & jar uf "..\unsigned.apk" classes.dex } "jar add classes"
@@ -159,7 +161,7 @@ if (-not (Test-Path -LiteralPath $Key)) {
     Run-Native { & keytool -genkeypair -keystore $Key -storepass android -keypass android -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=KCalc,O=ArchpheneOS,C=US" } "keytool"
 }
 
-Run-Native { & (Join-Path $BuildTools "zipalign.exe") -f 4 (Join-Path $Out "unsigned.apk") (Join-Path $Out "aligned.apk") } "zipalign"
+Run-Native { & (Join-Path $BuildTools "zipalign.exe") -P 16 -f 4 (Join-Path $Out "unsigned.apk") (Join-Path $Out "aligned.apk") } "zipalign"
 $ApkName = if ($AndroidAbi -eq "arm64-v8a") { "archpheneos-kcalc-arm64.apk" } else { "archpheneos-kcalc.apk" }
 $Apk = Join-Path $Out $ApkName
 Run-Native { & (Join-Path $BuildTools "apksigner.bat") sign --ks $Key --ks-pass pass:android --key-pass pass:android --out $Apk (Join-Path $Out "aligned.apk") } "apksigner sign"

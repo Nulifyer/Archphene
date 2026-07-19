@@ -64,6 +64,8 @@ use wayland_server::{
     backend::ClientId,
 };
 
+const MAX_TOPLEVELS: usize = 32;
+
 /// Owns protocol dispatch independently from Android Activity and rendering state.
 pub struct CompositorCore {
     display: Display<CompositorState>,
@@ -1454,6 +1456,13 @@ impl Dispatch<XdgSurface, XdgSurfaceData> for CompositorState {
                 }
             }
             xdg_surface::Request::GetToplevel { id } => {
+                if toplevel_limit_reached(state.toplevels.len()) {
+                    resource.post_error(
+                        xdg_surface::Error::AlreadyConstructed,
+                        "Archphene supports at most 32 simultaneous toplevel windows",
+                    );
+                    return;
+                }
                 let Some(surface_data) = data.wl_surface.data::<SurfaceData>() else {
                     data.wm_base
                         .post_error(xdg_wm_base::Error::Role, "unknown wl_surface");
@@ -1917,13 +1926,10 @@ impl Dispatch<XdgToplevel, XdgToplevelData> for CompositorState {
         match request {
             xdg_toplevel::Request::Destroy => {}
             xdg_toplevel::Request::SetParent { parent } => {
-                if parent.as_ref().is_some_and(|candidate| {
-                    candidate.id() == resource.id()
-                        || !candidate.id().same_client_as(&resource.id())
-                }) {
+                if invalid_toplevel_parent(resource, &parent) {
                     resource.post_error(
                         xdg_toplevel::Error::InvalidParent,
-                        "xdg_toplevel parent must be a different toplevel from the same client",
+                        "xdg_toplevel parent must be an acyclic toplevel from the same client",
                     );
                     return;
                 }
@@ -2001,6 +2007,21 @@ impl Dispatch<XdgToplevel, XdgToplevelData> for CompositorState {
         state
             .toplevels
             .retain(|toplevel| toplevel.id() != resource.id());
+        for toplevel in &state.toplevels {
+            let Some(child_data) = toplevel.data::<XdgToplevelData>() else {
+                continue;
+            };
+            let mut parent = child_data
+                .parent
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if parent
+                .as_ref()
+                .is_some_and(|candidate| candidate.id() == resource.id())
+            {
+                *parent = None;
+            }
+        }
         if was_primary {
             state.primary_toplevel = state.toplevels.iter().find_map(|toplevel| {
                 surface_frame(&toplevel_surface(toplevel)?).map(|_| toplevel.clone())
@@ -2033,6 +2054,32 @@ impl Dispatch<XdgToplevel, XdgToplevelData> for CompositorState {
         state.xdg_toplevel_count = state.xdg_toplevel_count.saturating_sub(1);
     }
 }
+
+fn toplevel_limit_reached(count: usize) -> bool {
+    count >= MAX_TOPLEVELS
+}
+
+fn invalid_toplevel_parent(resource: &XdgToplevel, parent: &Option<XdgToplevel>) -> bool {
+    let mut current = parent.clone();
+    for _ in 0..MAX_TOPLEVELS {
+        let Some(candidate) = current else {
+            return false;
+        };
+        if candidate.id() == resource.id() || !candidate.id().same_client_as(&resource.id()) {
+            return true;
+        }
+        let Some(candidate_data) = candidate.data::<XdgToplevelData>() else {
+            return true;
+        };
+        current = candidate_data
+            .parent
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+    }
+    current.is_some()
+}
+
 fn create_keymap_file() -> io::Result<File> {
     let name = b"archphene-keymap\0";
     let raw_fd = unsafe {
@@ -11766,6 +11813,13 @@ mod tests {
         assert_eq!(core.last_frame_height(), 0);
         assert_eq!(core.last_frame_checksum(), 0);
         assert_eq!(archphene_compositor_protocol_version(), 1);
+    }
+
+    #[test]
+    fn bounds_simultaneous_toplevel_windows() {
+        assert!(!toplevel_limit_reached(MAX_TOPLEVELS - 1));
+        assert!(toplevel_limit_reached(MAX_TOPLEVELS));
+        assert!(toplevel_limit_reached(MAX_TOPLEVELS + 1));
     }
 
     #[test]

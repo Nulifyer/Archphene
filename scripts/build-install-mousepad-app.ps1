@@ -62,6 +62,17 @@ New-Item -ItemType Directory -Force -Path `
 
 $NativeLibDir = Join-Path $App "lib/x86_64"
 New-Item -ItemType Directory -Force -Path $NativeLibDir | Out-Null
+$DesktopHelperDir = Join-Path $Root "tooling/build/wrapper-templates/qt/stage/lib/x86_64"
+foreach ($DesktopHelper in @(
+        "libarchphene_dbus_daemon.so",
+        "libarchphene_portal_service.so",
+        "libarchphene_xdg_open.so")) {
+    $Source = Join-Path $DesktopHelperDir $DesktopHelper
+    if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) {
+        throw "Shared desktop helper is missing: $Source"
+    }
+    Copy-Item -LiteralPath $Source -Destination (Join-Path $NativeLibDir $DesktopHelper) -Force
+}
 & (Join-Path $PSScriptRoot "build-native-compositor-podman.ps1") `
     -Architecture x86_64 -Release
 if ($LASTEXITCODE -ne 0) { throw "Shared native compositor build failed" }
@@ -225,7 +236,9 @@ $JavaFiles = @(
 Run-Native { & javac --release 17 -classpath (Join-Path $Sdk "platforms/android-36/android.jar") -d (Join-Path $Out "classes") $JavaFiles } "javac"
 
 $ClassFiles = Get-ChildItem -LiteralPath (Join-Path $Out "classes") -Recurse -Filter *.class | ForEach-Object { $_.FullName }
-Run-Native { & cmd.exe /d /c call (Join-Path $BuildTools "d8.bat") --lib (Join-Path $Sdk "platforms/android-36/android.jar") --min-api 23 --output (Join-Path $Out "dex") $ClassFiles } "d8"
+$D8ArgFile = Join-Path $Out "d8-inputs.txt"
+[IO.File]::WriteAllLines($D8ArgFile, $ClassFiles, [Text.UTF8Encoding]::new($false))
+Run-Native { & cmd.exe /d /c call (Join-Path $BuildTools "d8.bat") --lib (Join-Path $Sdk "platforms/android-36/android.jar") --min-api 23 --output (Join-Path $Out "dex") "@$D8ArgFile" } "d8"
 
 Push-Location (Join-Path $Out "dex")
 Run-Native { & jar uf "..\unsigned.apk" classes.dex } "jar add classes"
@@ -237,8 +250,8 @@ if ($NativeFiles.Count -gt 0) {
     Run-Native { & jar uf "out\unsigned.apk" $NativeFiles } "jar add native payloads"
 }
 $AssetFiles = Get-ChildItem -LiteralPath (Join-Path $App "assets") -File | ForEach-Object { "assets\$($_.Name)" }
-foreach ($AssetFile in $AssetFiles) {
-    Run-Native { & jar uf "out\unsigned.apk" $AssetFile } "jar add asset $AssetFile"
+if ($AssetFiles.Count -gt 0) {
+    Run-Native { & jar uf "out\unsigned.apk" $AssetFiles } "jar add assets"
 }
 Pop-Location
 
@@ -249,14 +262,14 @@ if (-not (Test-Path -LiteralPath $Key)) {
     Run-Native { & keytool -genkeypair -keystore $Key -storepass android -keypass android -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Mousepad,O=ArchpheneOS,C=US" } "keytool"
 }
 
-Run-Native { & (Join-Path $BuildTools "zipalign.exe") -f 4 (Join-Path $Out "unsigned.apk") (Join-Path $Out "aligned.apk") } "zipalign"
+Run-Native { & (Join-Path $BuildTools "zipalign.exe") -P 16 -f 4 (Join-Path $Out "unsigned.apk") (Join-Path $Out "aligned.apk") } "zipalign"
 Run-Native { & (Join-Path $BuildTools "apksigner.bat") sign --ks $Key --ks-pass pass:android --key-pass pass:android --out (Join-Path $Out "archpheneos-mousepad.apk") (Join-Path $Out "aligned.apk") } "apksigner sign"
 Run-Native { & (Join-Path $BuildTools "apksigner.bat") verify --verbose (Join-Path $Out "archpheneos-mousepad.apk") } "apksigner verify"
 
 $Adb = Join-Path $Sdk "platform-tools/adb.exe"
 if (-not $SkipInstall) {
     if (-not $Serial) { throw "-Serial is required when installing with multiple ADB devices" }
-    Run-Native { & $Adb -s $Serial install -r (Join-Path $Out "archpheneos-mousepad.apk") } "adb install"
+    Run-Native { & $Adb -s $Serial install --no-incremental -r (Join-Path $Out "archpheneos-mousepad.apk") } "adb install"
     Run-Native { & $Adb -s $Serial shell am start -n org.archphene.linux.mousepad/org.archphene.linux.mousepad.MainActivity } "adb launch"
 }
 

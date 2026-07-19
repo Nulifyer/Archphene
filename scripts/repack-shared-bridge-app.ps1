@@ -51,8 +51,10 @@ Run-Step { & javac --release 17 -classpath $PlatformJar -d (Join-Path $Work "cla
 
 $ClassFiles = Get-ChildItem -LiteralPath (Join-Path $Work "classes") -Recurse -Filter *.class |
     ForEach-Object { $_.FullName }
+$D8ArgFile = Join-Path $Work "d8-inputs.txt"
+[IO.File]::WriteAllLines($D8ArgFile, $ClassFiles, [Text.UTF8Encoding]::new($false))
 Run-Step { & cmd.exe /d /c call (Join-Path $BuildTools "d8.bat") --lib $PlatformJar --min-api 23 `
-        --output (Join-Path $Work "dex") $ClassFiles } "d8"
+        --output (Join-Path $Work "dex") "@$D8ArgFile" } "d8"
 
 $UnsignedApk = Join-Path $Work "unsigned.apk"
 $AlignedApk = Join-Path $Work "aligned.apk"
@@ -72,7 +74,7 @@ finally {
     Pop-Location
 }
 
-Run-Step { & (Join-Path $BuildTools "zipalign.exe") -f 4 $UnsignedApk $AlignedApk } "zipalign"
+Run-Step { & (Join-Path $BuildTools "zipalign.exe") -P 16 -f 4 $UnsignedApk $AlignedApk } "zipalign"
 Run-Step { & (Join-Path $BuildTools "apksigner.bat") sign --ks $Keystore --ks-pass pass:android `
         --key-pass pass:android --out $RepackedApk $AlignedApk } "apksigner sign"
 Run-Step { & (Join-Path $BuildTools "apksigner.bat") verify --verbose $RepackedApk } "apksigner verify"
