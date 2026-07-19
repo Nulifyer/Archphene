@@ -1410,7 +1410,10 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     }
 
     private boolean resolvedDarkAppearance() {
-        boolean systemDark = (getResources().getConfiguration().uiMode
+        return resolvedDarkAppearance(getResources().getConfiguration());
+    }
+    private boolean resolvedDarkAppearance(Configuration configuration) {
+        boolean systemDark = (configuration.uiMode
                 & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
         return "dark".equals(appearanceTheme)
                 || (!"light".equals(appearanceTheme) && systemDark);
@@ -1448,8 +1451,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     }
 
     private void refreshToolkitAppearance(Configuration configuration) {
-        boolean dark = resolvedDarkAppearance();
-        if (dark == activeDarkAppearance) return;
+        boolean dark = resolvedDarkAppearance(configuration);
         activeDarkAppearance = dark;
         applySystemChrome(dark);
         File config = new File(new File(getFilesDir(), "linux-home"), ".config");
@@ -1514,13 +1516,19 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             env.put("GDK_DPI_SCALE", "1.0");
             writeGtkTheme(configDir, dark, fontPointSize, appScale);
             if ("gtk3".equals(toolkit)) {
+                File settingsModule = new File(
+                        runtimeLib, "libarchphene_gtk3_settings.so");
+                if (settingsModule.isFile()) {
+                    env.put("GTK_MODULES", settingsModule.getAbsolutePath());
+                    env.put("ARCHPHENE_GTK_SETTINGS_FILE", new File(
+                            configDir, "gtk-3.0/settings.ini").getAbsolutePath());
+                }
                 env.put("GTK_IM_MODULE", "wayland");
                 env.put("GTK_IM_MODULE_FILE", new File(
                         runtimeLib, "gtk-3.0/3.0.0/immodules.cache").getAbsolutePath());
             }
 
             env.put("GTK_USE_PORTAL", "0");
-            env.put("GTK_THEME", dark ? "Adwaita:dark" : "Adwaita");
             env.put("GTK_DATA_PREFIX", new File(root, "usr").getAbsolutePath());
             env.put("XDG_DATA_DIRS", new File(root, "usr/share").getAbsolutePath());
             env.put("GIO_USE_VFS", "local");
@@ -1558,6 +1566,29 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         int menuBorder = Math.max(2, Math.round(1f * density));
         String outline = dark ? "rgba(255,255,255,0.28)" : "rgba(0,0,0,0.24)";
         String shadow = dark ? "rgba(0,0,0,0.72)" : "rgba(0,0,0,0.38)";
+        String foreground = dark ? "239,240,241" : "35,38,41";
+        String inactive = dark ? "174,181,185" : "91,99,104";
+        String window = dark ? "35,38,41" : "239,240,241";
+        String alternate = dark ? "42,46,50" : "246,247,248";
+        String view = dark ? "27,30,32" : "255,255,255";
+        String button = dark ? "49,54,59" : "239,240,241";
+        String accent = dark ? "86,188,236" : "23,147,209";
+        String selectionForeground = dark ? "17,20,23" : "255,255,255";
+        if (appearanceMaterialYou && Build.VERSION.SDK_INT >= 31) {
+            foreground = rgb(getColor(dark ? android.R.color.system_neutral1_10
+                    : android.R.color.system_neutral1_900));
+            inactive = rgb(getColor(dark ? android.R.color.system_neutral1_200
+                    : android.R.color.system_neutral1_700));
+            window = rgb(getColor(dark ? android.R.color.system_neutral1_900
+                    : android.R.color.system_neutral1_10));
+            alternate = rgb(getColor(dark ? android.R.color.system_neutral1_800
+                    : android.R.color.system_neutral1_50));
+            view = window;
+            button = alternate;
+            accent = rgb(getColor(dark ? android.R.color.system_accent1_200
+                    : android.R.color.system_accent1_600));
+            selectionForeground = window;
+        }
         String baseSettings = "[Settings]\n"
                 + "gtk-theme-name=" + (dark ? "Adwaita-dark" : "Adwaita") + "\n"
                 + "gtk-icon-theme-name=Adwaita\n"
@@ -1567,7 +1598,34 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 + "gtk-menu-images=false\n"
                 + "gtk-button-images=false\n";
         writeText(new File(gtkConfig, "settings.ini"), settings);
-        String css = "* {\n"
+        String css = "window, dialog, .background {\n"
+                + "  background-color: rgb(" + window + ");\n"
+                + "  color: rgb(" + foreground + ");\n"
+                + "}\n"
+                + "headerbar, menubar, toolbar, .titlebar {\n"
+                + "  background-color: rgb(" + alternate + ");\n"
+                + "  color: rgb(" + foreground + ");\n"
+                + "}\n"
+                + "textview, textview text, entry, treeview.view, iconview.view, .view {\n"
+                + "  background-color: rgb(" + view + ");\n"
+                + "  color: rgb(" + foreground + ");\n"
+                + "}\n"
+                + "button, combobox button {\n"
+                + "  background-image: none;\n"
+                + "  background-color: rgb(" + button + ");\n"
+                + "  color: rgb(" + foreground + ");\n"
+                + "  border-color: " + outline + ";\n"
+                + "}\n"
+                + "menu, menuitem, popover {\n"
+                + "  background-color: rgb(" + alternate + ");\n"
+                + "  color: rgb(" + foreground + ");\n"
+                + "}\n"
+                + "*:disabled { color: rgb(" + inactive + "); }\n"
+                + "*:selected, selection, menuitem:hover {\n"
+                + "  background-color: rgb(" + accent + ");\n"
+                + "  color: rgb(" + selectionForeground + ");\n"
+                + "}\n"
+                + "* {\n"
                 + "  font-size: " + uiFontSize + "px;\n"
                 + "}\n"
                 + "button, entry, combobox, menuitem {\n"

@@ -19,6 +19,11 @@
       "name": "libarchphene_gtk3_rsvg.so",
       "bytes": 4756856,
       "sha256": "e77538a5e3e87f93a0082495a275b7363c47c03e12204ab3884c311d74ae410a"
+    },
+    {
+      "name": "libarchphene_gtk3_settings.so",
+      "bytes": 14400,
+      "sha256": "fdf4acce0fc5ffb6ed1a06a95b49ab0ae08d1de9c7103922483991c349fa4c3d"
     }
   ],
   "additionalArchitectures": [
@@ -47,6 +52,11 @@
           "name": "libarchphene_gtk3_rsvg.so",
           "bytes": 4330816,
           "sha256": "c17113da4770c2e4f3c47a3512679a3d52cff54d6b495132c60baea1dbcae0f0"
+        },
+        {
+          "name": "libarchphene_gtk3_settings.so",
+          "bytes": 67680,
+          "sha256": "2717b738a7643f8249f0899edc943e8e63d6c04c59c142e66fcf1f58b38870fb"
         }
       ]
     }

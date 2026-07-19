@@ -94,7 +94,7 @@ This is the prioritized completion queue for the Archphene Android application. 
 - [x] Refine search controls and empty/loading/error states using the same compact visual language.
 - [x] Finish Qt and GTK appearance consistency.
   - Physical AArch64 dark/light validation covers KCalc and Mousepad at the automatic 150% phone geometry scale and 17 pt toolkit text.
-  - Qt system-theme changes repalette running widgets without restarting the Linux process; a screenshot-pixel regression rejects Android-chrome-only false positives.
+  - Qt and GTK 3 system-theme changes repalette running widgets without restarting the Linux process; screenshot-pixel regressions reject Android-chrome-only false positives.
   - Menus, popup borders/shadows, close targets, status labels, contrast, and full-window rendering are readable and bounded; tablet/docked density remains configurable in Appearance settings.
 - [ ] Execute the release-gate representatives in `docs/compatibility-matrix.md`.
   - [x] Promote the reviewed package matrix into maintained documentation and separate non-normative research candidates.

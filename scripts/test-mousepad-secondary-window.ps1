@@ -37,6 +37,29 @@ function Wait-BridgeLog([string]$Pattern, [int]$TimeoutSeconds) {
     throw "Timed out waiting for bridge log: $Pattern"
 }
 
+function Wait-PrimaryLayoutStable([int]$TimeoutSeconds = 15) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $lastLayout = $null
+    $stablePolls = 0
+    do {
+        $log = Read-BridgeLog
+        $layouts = [regex]::Matches($log,
+            'window id=([0-9]+).*mapped=true.*primary=true.*geometry=.* ([0-9]+)x([0-9]+).*canvas=([0-9]+)x([0-9]+).*title=.*Mousepad')
+        if ($layouts.Count -gt 0) {
+            $layout = $layouts[$layouts.Count - 1]
+            $signature = $layout.Groups[1].Value + ':' +
+                    $layout.Groups[2].Value + 'x' + $layout.Groups[3].Value + ':' +
+                    $layout.Groups[4].Value + 'x' + $layout.Groups[5].Value
+            if ($signature -eq $lastLayout) { $stablePolls++ } else {
+                $lastLayout = $signature
+                $stablePolls = 0
+            }
+            if ($stablePolls -ge 3) { return $log }
+        }
+        Start-Sleep -Milliseconds 300
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "Timed out waiting for a stable Mousepad primary layout"
+}
 function ConvertTo-Base64Url([string]$Value) {
     $bytes = [Text.Encoding]::UTF8.GetBytes($Value)
     return [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
@@ -129,9 +152,14 @@ try {
 
     Adb @("shell", "pm", "clear", $Package) | Out-Null
     Adb @("logcat", "-c") | Out-Null
-    Adb @("shell", "am", "start", "--windowingMode", "5", "-n",
-            "$Package/$Activity") | Out-Null
-    $mainLog = Wait-BridgeLog 'window id=([0-9]+).*mapped=true.*active=true.*primary=true.*title=.*Mousepad' 30
+    $freeformSupport = ((Adb @("shell", "settings", "get", "global",
+            "enable_freeform_support")) -join "").Trim() -eq "1"
+    $startArguments = @("shell", "am", "start")
+    if ($freeformSupport) { $startArguments += @("--windowingMode", "5") }
+    $startArguments += @("-n", "$Package/$Activity")
+    Adb $startArguments | Out-Null
+    Wait-BridgeLog 'window id=([0-9]+).*mapped=true.*active=true.*primary=true.*title=.*Mousepad' 30 | Out-Null
+    $mainLog = Wait-PrimaryLayoutStable
     $mainMatches = [regex]::Matches($mainLog,
         'window id=([0-9]+).*mapped=true.*active=true.*primary=true.*title=.*Mousepad')
     $mainId = [int]$mainMatches[$mainMatches.Count - 1].Groups[1].Value
@@ -162,7 +190,7 @@ try {
     $appPid = (Adb @("shell", "pidof", $Package)) -join ""
     if (-not $appPid.Trim()) { throw "Mousepad parent exited when the child closed" }
 
-    Write-Host "Mousepad secondary-window bridge passed: freeform child $childId accepted a semantic control action, closed, and parent $mainId remained active."
+    Write-Host "Mousepad secondary-window bridge passed: child $childId accepted a semantic control action, closed, and parent $mainId remained active."
 } finally {
     Restore-AccessibilitySettings
 }

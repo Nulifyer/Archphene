@@ -38,6 +38,7 @@ if (-not $SkipDocumentWorkflow) {
     $tests += @{ Name = "Mousepad open-dialog IME"; Command = { & "$PSScriptRoot/test-mousepad-open-dialog-ime.ps1" -Serial $Serial } }
     $tests += @{ Name = "Mousepad touch routing"; Command = { & "$PSScriptRoot/test-mousepad-touch-routing.ps1" -Serial $Serial } }
     $tests += @{ Name = "Mousepad secondary windows"; Command = { & "$PSScriptRoot/test-mousepad-secondary-window.ps1" -Serial $Serial } }
+    $tests += @{ Name = "Mousepad live theme"; Command = { & "$PSScriptRoot/test-mousepad-live-theme.ps1" -Serial $Serial } }
 }
 
 $results = @()
