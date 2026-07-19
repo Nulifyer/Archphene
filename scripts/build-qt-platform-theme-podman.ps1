@@ -30,7 +30,7 @@ if ($LASTEXITCODE -ne 0 -or $QtVersion -ne $ExpectedQtVersion) {
 $command = @"
 set -euo pipefail
 rm -rf /tmp/archphene-qt-platform-theme
-mkdir -p /tmp/archphene-qt-platform-theme/platform /tmp/archphene-qt-platform-theme/style
+mkdir -p /tmp/archphene-qt-platform-theme/platform /tmp/archphene-qt-platform-theme/style /tmp/archphene-qt-platform-theme/kde-config
 cd /tmp/archphene-qt-platform-theme/platform
 qmake6 /workspace/native/archphene-qt-platform-theme/archphene-qt-platform-theme.pro
 make -j$Jobs
@@ -39,6 +39,10 @@ cd /tmp/archphene-qt-platform-theme/style
 qmake6 /workspace/native/archphene-qt-platform-theme/archphene-qt-style.pro
 make -j$Jobs
 install -Dm755 libarchphene_qt_style.so /workspace/prebuilt/qt-bridge/x86_64/libarchphene_qt_style.so
+cd /tmp/archphene-qt-platform-theme/kde-config
+qmake6 /workspace/native/archphene-qt-platform-theme/archphene-kde-config.pro
+make -j$Jobs
+install -Dm755 libarchphene_kde_config.so /workspace/prebuilt/qt-bridge/x86_64/libarchphene_kde_config.so
 "@
 podman run --rm -v "${Root}:/workspace" -w /workspace $Image bash -lc $command
 if ($LASTEXITCODE -ne 0) { throw "Qt platform-theme plugin build failed" }

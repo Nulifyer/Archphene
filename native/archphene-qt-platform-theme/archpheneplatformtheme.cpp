@@ -1,17 +1,20 @@
 #include <QApplication>
 #include <QColor>
 #include <QDir>
+#include <QEvent>
+#include <QFile>
 #include <QFont>
 #include <QGuiApplication>
+#include <QLibrary>
 #include <QPalette>
 #include <QSettings>
-#include <QStyle>
 #include <QStringList>
 #include <QTimer>
 #include <QVariant>
 #include <QWidget>
 #include <qpa/qplatformtheme.h>
 #include <qpa/qplatformthemeplugin.h>
+#include <qpa/qwindowsysteminterface.h>
 #include <memory>
 
 namespace {
@@ -48,6 +51,35 @@ QColor blend(const QColor &foreground, const QColor &background, qreal amount)
             foreground.redF() * amount + background.redF() * (1.0 - amount),
             foreground.greenF() * amount + background.greenF() * (1.0 - amount),
             foreground.blueF() * amount + background.blueF() * (1.0 - amount));
+}
+
+void logKdeHelperError(const QString &message)
+{
+    QFile log(QDir::homePath() + QStringLiteral("/.cache/archphene-qt-theme.log"));
+    if (log.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+        log.write(message.toUtf8());
+        log.write("\n");
+    }
+}
+
+void reparseKdeColorConfig()
+{
+    QLibrary helper(QDir(QDir::homePath()).filePath(
+            QStringLiteral("../linux-runtime/lib/libarchphene_kde_config.so")));
+    if (!helper.load()) {
+        logKdeHelperError(helper.errorString());
+        return;
+    }
+    using Reparse = bool (*)();
+    Reparse reparse = reinterpret_cast<Reparse>(
+            helper.resolve("archphene_reparse_kde_config"));
+    if (reparse == nullptr) {
+        logKdeHelperError(helper.errorString());
+        return;
+    }
+    if (!reparse()) {
+        logKdeHelperError(QStringLiteral("KF6Config helper rejected the reparse request"));
+    }
 }
 
 class ArchphenePlatformTheme final : public QPlatformTheme
@@ -163,18 +195,27 @@ private:
                 m_font = refreshed.m_font;
                 m_fixedFont = refreshed.m_fixedFont;
                 m_scheme = refreshed.m_scheme;
+                if (qApp != nullptr) {
+                    // Plasma reparses kdeglobals before ApplicationPaletteChange so
+                    // KColorScheme-backed custom painting reads the new colors.
+                    qApp->setProperty("KDE_COLOR_SCHEME_PATH", QString());
+                    reparseKdeColorConfig();
+                }
                 if (qobject_cast<QApplication *>(QCoreApplication::instance()) != nullptr) {
                     QApplication::setPalette(m_palette);
-                    for (QWidget *widget : QApplication::allWidgets()) {
-                        widget->setPalette(m_palette);
-                        if (widget->style() != nullptr) {
-                            widget->style()->unpolish(widget);
-                            widget->style()->polish(widget);
-                        }
+                    if (qApp != nullptr) {
+                        QEvent applicationChange(QEvent::ApplicationPaletteChange);
+                        QCoreApplication::sendEvent(qApp, &applicationChange);
+                    }
+                    QWindowSystemInterface::handleThemeChange();
+                    for (QWidget *widget : QApplication::topLevelWidgets()) {
+                        QEvent widgetChange(QEvent::ApplicationPaletteChange);
+                        QCoreApplication::sendEvent(widget, &widgetChange);
                         widget->update();
                     }
                 } else if (qGuiApp != nullptr) {
                     QGuiApplication::setPalette(m_palette);
+                    QWindowSystemInterface::handleThemeChange();
                 }
             });
             QTimer::singleShot(0, QCoreApplication::instance(), [this]() {

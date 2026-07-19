@@ -13,6 +13,6 @@ RUN printf '%s\n' \
         '[extra]' \
         'Server = https://archive.archlinux.org/repos/2026/07/05/$repo/os/$arch' \
         > /etc/pacman.conf \
-    && pacman -Syu --noconfirm --needed aarch64-linux-gnu-gcc qt6-base \
+    && pacman -Syu --noconfirm --needed aarch64-linux-gnu-gcc kconfig qt6-base \
     && test "$(pkg-config --modversion Qt6Core)" = 6.11.1 \
     && pacman -Scc --noconfirm

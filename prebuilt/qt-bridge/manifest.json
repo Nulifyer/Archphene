@@ -10,14 +10,19 @@
       "sha256": "54a378433c17cd4e0f80e6f9e40dc27afb8f3a14127507a261bba1c6b951bbe3"
     },
     {
+      "name": "libarchphene_kde_config.so",
+      "bytes": 16208,
+      "sha256": "e43c899cac04076f38014fc335f8c27278b859dd66bf996c92bf71934a7cdeef"
+    },
+    {
       "name": "libarchphene_qt_clipboard_probe.so",
       "bytes": 23616,
       "sha256": "e1974aa4ddb45fc7ec8b2071a1e6bf9555ddbf911613140e6466feb3317b5438"
     },
     {
       "name": "libarchphene_qt_platform_theme.so",
-      "bytes": 61872,
-      "sha256": "0109fab4182eb3c3c99eb8f605d11b1112b8eb056bbf4b769d9817a516455b8d"
+      "bytes": 63184,
+      "sha256": "fb7e388e061153fe751cadf0cabf97d2003bb7cd8f83f2580e51be1dd2013fac"
     },
     {
       "name": "libarchphene_qt_style.so",
@@ -90,9 +95,14 @@
       "architecture": "arm64-v8a",
       "files": [
         {
+          "name": "libarchphene_kde_config.so",
+          "bytes": 67672,
+          "sha256": "90224e6be2c6503b44405b9e15fa2cebe0410a10ec0056e6fe4ff1c3c6de0311"
+        },
+        {
           "name": "libarchphene_qt_platform_theme.so",
-          "bytes": 68808,
-          "sha256": "2ab70d081c5d9f5b9459e65a06c02138b4292cde6609f1e53372136328a9cc2d"
+          "bytes": 68944,
+          "sha256": "9319984d30e48fe9c22299cfeb58321de3dd3f9093146c85712ab4b5fbd408e0"
         },
         {
           "name": "libarchphene_qt_style.so",

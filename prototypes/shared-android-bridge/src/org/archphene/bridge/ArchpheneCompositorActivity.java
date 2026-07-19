@@ -27,6 +27,7 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowInsets;
+import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.window.OnBackInvokedCallback;
 import android.window.OnBackInvokedDispatcher;
@@ -72,6 +73,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     private final AtomicBoolean launched = new AtomicBoolean();
     private final AtomicBoolean packagedRuntimeActive = new AtomicBoolean();
     private ArchpheneInputView compositorView;
+    private FrameLayout rootView;
     private ArchpheneCompositorSession session;
     private AndroidDocumentSession documentSession;
     private AndroidCapabilityBroker capabilityBroker;
@@ -257,6 +259,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         installDragRouting(compositorView, 0);
 
         FrameLayout root = new FrameLayout(this);
+        rootView = root;
         root.setBackgroundColor(systemChrome);
         root.addView(compositorView, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
@@ -269,7 +272,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             });
         }
         setContentView(root);
-        if (Build.VERSION.SDK_INT >= 30 && getWindow().getInsetsController() != null) {
+        if (compositorView != null && Build.VERSION.SDK_INT >= 30
+                && getWindow().getInsetsController() != null) {
             int lightBars = resolvedDarkAppearance() ? 0
                     : android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
                             | android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
@@ -1415,6 +1419,16 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         int color = dark ? Color.rgb(35, 38, 41) : Color.rgb(239, 240, 241);
         getWindow().setStatusBarColor(color);
         getWindow().setNavigationBarColor(color);
+        if (compositorView != null && Build.VERSION.SDK_INT >= 30
+                && getWindow().getInsetsController() != null) {
+            int lightBars = dark ? 0
+                    : WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                            | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+            getWindow().getInsetsController().setSystemBarsAppearance(lightBars,
+                    WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                            | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS);
+        }
+        if (rootView != null) rootView.setBackgroundColor(color);
         if (compositorView != null) compositorView.setBackgroundColor(color);
         return color;
     }

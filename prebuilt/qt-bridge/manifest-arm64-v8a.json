@@ -5,9 +5,14 @@
   "purpose": "Qt Wayland Android bridge template",
   "files": [
     {
+      "name": "libarchphene_kde_config.so",
+      "bytes": 67672,
+      "sha256": "90224e6be2c6503b44405b9e15fa2cebe0410a10ec0056e6fe4ff1c3c6de0311"
+    },
+    {
       "name": "libarchphene_qt_platform_theme.so",
-      "bytes": 68808,
-      "sha256": "2ab70d081c5d9f5b9459e65a06c02138b4292cde6609f1e53372136328a9cc2d"
+      "bytes": 68944,
+      "sha256": "9319984d30e48fe9c22299cfeb58321de3dd3f9093146c85712ab4b5fbd408e0"
     },
     {
       "name": "libarchphene_qt_style.so",
