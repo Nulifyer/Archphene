@@ -5,6 +5,13 @@ $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $Adb = Join-Path $Root "tooling/android-sdk/platform-tools/adb.exe"
 $Manager = "org.archpheneos.manager"
+$AdbIsRoot = (((& $Adb -s $Serial shell id -u 2>$null) -join "").Trim() -eq "0")
+
+function Read-ProcessExecutable([string]$Package, [string]$ProcessId) {
+    $executable = ((& $Adb -s $Serial shell run-as $Package readlink "/proc/$ProcessId/exe" 2>$null) -join "").Trim()
+    if ($LASTEXITCODE -eq 0 -or -not $AdbIsRoot) { return $executable }
+    return ((& $Adb -s $Serial shell readlink "/proc/$ProcessId/exe" 2>$null) -join "").Trim()
+}
 
 function Read-Ui([string]$RemotePath) {
     & $Adb -s $Serial shell uiautomator dump --compressed $RemotePath | Out-Null
@@ -67,15 +74,16 @@ do {
                 $processes, "(?m)^\s*(\d+)\s+$appPid\s+\S+\s*$")
         foreach ($child in $children) {
             $candidate = $child.Groups[1].Value
-            $executable = ((& $Adb -s $Serial shell run-as $kcalc readlink "/proc/$candidate/exe" 2>$null) -join "").Trim()
-            if ($LASTEXITCODE -eq 0 -and $executable -match 'libarchphene_ld\.so$') {
+            $executable = Read-ProcessExecutable -Package $kcalc -ProcessId $candidate
+            if ($executable -match 'libarchphene_ld\.so$') {
                 $loaderPid = $candidate
                 break
             }
         }
     }
     if (-not $loaderPid) { Start-Sleep -Milliseconds 500 }
-} while (-not $loaderPid -and [DateTime]::UtcNow -lt $loaderDeadline)if (-not $loaderPid) {
+} while (-not $loaderPid -and [DateTime]::UtcNow -lt $loaderDeadline)
+if (-not $loaderPid) {
     throw "Manager launched $kcalc, but its managed Linux loader is missing"
 }
 
