@@ -423,7 +423,8 @@ public final class ArchWrapperAssembler {
         pending.add(executable);
         resolveDependencies(result, candidates, pending, visited);
         for (String dynamicName : new String[] {
-                "libEGL.so", "libEGL.so.1", "libGLESv2.so", "libGLESv2.so.2"}) {
+                "libEGL.so", "libEGL.so.1", "libGLESv2.so", "libGLESv2.so.2",
+                "libvulkan.so", "libvulkan.so.1"}) {
             if (!containsAscii(executable, dynamicName)) continue;
             File dynamic = candidates.get(dynamicName);
             if (dynamic == null) {

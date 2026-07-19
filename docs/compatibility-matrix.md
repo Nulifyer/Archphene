@@ -40,7 +40,7 @@ These packages cover distinct bridge contracts. They are deliberately smaller th
 | Electron | `code` | Multiprocess runtime, PTY, file watching, project tree, IME, GPU, dialogs, and extension host. | Planned |
 | Rust-native | `zed` | GPU UI, project tree, language servers, PTY, dialogs, clipboard, and multiwindow behavior. | Planned |
 | X11 compatibility | `xorg-xwayland` + `xterm` | Rootless XWayland startup, input, selection, clipboard, resize, and teardown. | Planned |
-| Vulkan | `vulkan-tools` | Device enumeration and `vkcube-wayland` presentation through an Android-backed path. | Planned |
+| Vulkan | `vulkan-tools` | Device enumeration and `vkcube-wayland` presentation through an Android-backed path. | Loader/CLI packaging validated; Android-backed ICD and presentation planned |
 | Heavy documents | `libreoffice-fresh` | Open/save, locking, autosave, fonts, printing, accessibility, and multiple windows. | Planned |
 | Browser | `firefox` | WebRender, tabs, downloads/uploads, media, WebRTC permissions, credentials, notifications, and intents. | Planned |
 | Complex GPU UI | `blender` | Continuous viewport rendering, custom UI input, dialogs, popups, and lifecycle. | Planned |

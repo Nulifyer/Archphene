@@ -44,7 +44,7 @@ The release helper remained alive through repeated scene transitions with no fen
 
 ## Current limits
 
-GPU commands execute on Android's GLES driver, but the final Linux window is currently copied through `wl_shm`. This is not zero-copy and caps benchmark throughput. The next presentation milestone is Android `AHardwareBuffer`/dmabuf import with explicit synchronization and SHM fallback. Vulkan/venus, production power/thermal measurements, and broad physical-device testing are not complete.
+GPU commands execute on Android's GLES driver, but the final Linux window is currently copied through `wl_shm`. This is not zero-copy and caps benchmark throughput. The next presentation milestone is Android `AHardwareBuffer`/dmabuf import with explicit synchronization and SHM fallback. The unmodified Arch `vulkaninfo` command and its runtime-loaded `libvulkan.so.1` now execute in Archphene Terminal and reach ICD discovery. No Venus ICD is published yet, so device enumeration and Wayland Vulkan presentation still fail closed. Vulkan/venus, production power/thermal measurements, and broad physical-device testing are not complete.
 
 References:
 
