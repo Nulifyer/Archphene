@@ -23,6 +23,18 @@ function Invoke-Native([string]$Step, [scriptblock]$Command) {
     }
 }
 
+$lockBytes = [Text.Encoding]::UTF8.GetBytes($Root.ToLowerInvariant())
+$lockHash = [Convert]::ToHexString(
+    [Security.Cryptography.SHA256]::HashData($lockBytes)).Substring(0, 24)
+$buildMutex = [Threading.Mutex]::new($false, "ArchpheneManagerBuild-$lockHash")
+$buildMutexHeld = $false
+try {
+    try {
+        $buildMutexHeld = $buildMutex.WaitOne([TimeSpan]::FromMinutes(15))
+    } catch [Threading.AbandonedMutexException] {
+        $buildMutexHeld = $true
+    }
+    if (-not $buildMutexHeld) { throw "Timed out waiting for another manager build" }
 Invoke-Native "Podman availability check" { podman info --format "{{.Host.OS}}/{{.Host.Arch}}" }
 & (Join-Path $PSScriptRoot "build-android-capability-client-podman.ps1")
 if ($LASTEXITCODE -ne 0) { throw "Android capability client build failed" }
@@ -165,3 +177,7 @@ try {
 
 $Apk = Join-Path $Root "prototypes/linux-app-manager-stub/out-linux/archphene.apk"
 Write-Host "Container-built APK: $Apk"
+} finally {
+    if ($buildMutexHeld) { $buildMutex.ReleaseMutex() }
+    $buildMutex.Dispose()
+}
