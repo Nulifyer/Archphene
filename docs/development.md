@@ -119,6 +119,14 @@ Broad suites:
 
 Focused scripts under `scripts/` cover manager workflows, package signatures, update transactions, KCalc input/clipboard/resize, Mousepad documents and IME, rotation, and file-descriptor lifecycle.
 
+Run the release display profiles independently with:
+
+```powershell
+./scripts/test-release-display-matrix.ps1 -Serial emulator-5554
+```
+
+The script restores display size, density, Android font scale, and night mode in a `finally` block.
+
 ## Development rules
 
 - Keep Android as the authority for identity, permissions, storage grants, lifecycle, and installation.

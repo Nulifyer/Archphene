@@ -8,10 +8,13 @@ param(
 $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $Adb = Join-Path $Root "tooling/android-sdk/platform-tools/adb.exe"
+if ($Serial -like "emulator-*") {
+    & $Adb -s $Serial root | Out-Null
+    & $Adb -s $Serial wait-for-device
+}
 $Local = Join-Path $Root "artifacts/$Name"
 $Remote = "/sdcard/Download/$Name"
-$DataRoot = "/data/user/0/$Package"
-$Imported = "$DataRoot/files/linux-home/Documents/Android/$Name"
+$Imported = "files/linux-home/Documents/Android/$Name"
 $EncodedRaw = [Uri]::EscapeDataString("raw:/storage/emulated/0/Download/$Name")
 $SourceUri = "content://com.android.providers.downloads.documents/document/$EncodedRaw"
 
@@ -23,6 +26,29 @@ function Invoke-Adb([string[]]$Arguments, [string]$Step) {
     return $output
 }
 
+function Invoke-Private([string[]]$Arguments, [string]$Step) {
+    $output = & $Adb -s $Serial shell run-as $Package @Arguments 2>&1
+    if ($LASTEXITCODE -eq 0) { return $output }
+    $uid = ((& $Adb -s $Serial shell id -u 2>$null) -join "").Trim()
+    if ($uid -ne "0") {
+        throw "$Step requires a debuggable wrapper or rooted ADB: $($output -join "`n")"
+    }
+    $mapped = @($Arguments | ForEach-Object {
+        if ($_ -match '^(files|cache|code_cache)(/|$)') {
+            "/data/user/0/$Package/$_"
+        } else { $_ }
+    })
+    return Invoke-Adb (@("shell") + $mapped) $Step
+}
+
+function Test-PrivateFile([string]$Path) {
+    & $Adb -s $Serial shell run-as $Package test -f $Path 2>$null
+    if ($LASTEXITCODE -eq 0) { return $true }
+    $uid = ((& $Adb -s $Serial shell id -u 2>$null) -join "").Trim()
+    if ($uid -ne "0") { return $false }
+    & $Adb -s $Serial shell test -f "/data/user/0/$Package/$Path" 2>$null
+    return $LASTEXITCODE -eq 0
+}
 function Wait-For([scriptblock]$Condition, [string]$Failure, [int]$Seconds = 15) {
     $deadline = (Get-Date).AddSeconds($Seconds)
     do {
@@ -56,8 +82,6 @@ function Tap-UiNode([xml]$Ui, [string]$Attribute, [string]$Value, [string]$Step)
 New-Item -ItemType Directory -Force -Path (Split-Path $Local) | Out-Null
 [IO.File]::WriteAllText($Local, "Android workflow original`nsecond source line`n",
         (New-Object Text.UTF8Encoding($false)))
-Invoke-Adb @("root") "enable emulator root for production-wrapper inspection" | Out-Null
-Invoke-Adb @("wait-for-device") "wait for rooted emulator" | Out-Null
 Invoke-Adb @("push", $Local, $Remote) "stage Downloads test document" | Out-Null
 Invoke-Adb @("shell", "am", "force-stop", $Package) "stop Mousepad" | Out-Null
 Invoke-Adb @("shell", "pm", "clear", $Package) "clear Mousepad test state" | Out-Null
@@ -79,9 +103,8 @@ $ui = Dump-Ui "mousepad-document-picker-search"
 Tap-UiNode $ui "text" $Name "select Downloads document"
 
 Wait-For {
-    $result = & $Adb -s $Serial shell test -f $Imported 2>$null
-    $LASTEXITCODE -eq 0
-} "Mousepad did not import the Android document" 30
+    Test-PrivateFile $Imported
+} "Mousepad did not import the Android document" 60
 Start-Sleep -Seconds 5
 
 Invoke-Adb @("shell", "input", "keycombination", "113", "123") "move to document end" | Out-Null
@@ -101,7 +124,7 @@ Invoke-Adb @("shell", "am", "start", "-W", "-a", "android.intent.action.EDIT",
         "-c", "android.intent.category.DEFAULT", "-t", "text/plain", "-d", $SourceUri, $Package) `
         "reopen persisted Android document" | Out-Null
 Wait-For {
-    $text = (& $Adb -s $Serial shell cat $Imported 2>$null) -join "`n"
+    $text = (Invoke-Private @("cat", $Imported) "read imported document") -join "`n"
     $text.Contains($Marker)
 } "Cold-reopened Mousepad document did not contain the saved marker"
 

@@ -55,7 +55,7 @@ The Terminal companion provides the first concrete Android-facing side of this s
 
 Generated GUI wrappers now expose the same policy through one manager-owned **Archphene Apps** document root. Each installed generated GUI app appears as a directory backed by its visible `files/linux-home` entries. Dotfiles are never enumerated. The wrapper endpoint is not a browsable public DocumentsProvider: manager operations require the manager signature permission and package identity. It also accepts Android-enforced, exact per-URI grants for visible-home files exported by Linux drag-and-drop; ungranted callers and dotfile paths remain denied. Android Files normally interacts with the manager DocumentsProvider.
 
-`ACTION_VIEW` and `ACTION_EDIT` launches accept up to 32 granted documents. The bridge imports them atomically into `Documents/Android`, allocates distinct Linux names for identical display names, hashes local and provider state, and writes back only changed writable documents. If Android and Linux both changed a document, the Android version is retained as `<name>.android-conflict-<hash>` before the Linux edit is written to the granted URI. A new document sent to an active `singleTask` wrapper displays a native warning that unsaved changes may be lost; Cancel leaves the app running, while **Restart and open** closes the previous document session, terminates the Linux process tree, and recreates the same generic wrapper with the new grants. The x86_64 emulator regression verifies manager create/read/write/rename/delete, private-provider denial, active-app restart, same-name import, conflict preservation, and writeback. A physical AArch64 device verifies manager CRUD and denial; a complete ARM conflict run still needs a document-capable wrapper with a valid active runtime pack.
+`ACTION_VIEW` and `ACTION_EDIT` launches accept up to 32 granted documents. The bridge imports them atomically into `Documents/Android`, allocates distinct Linux names for identical display names, hashes local and provider state, and writes back only changed writable documents. If Android and Linux both changed a document, the Android version is retained as `<name>.android-conflict-<hash>` before the Linux edit is written to the granted URI. A new document sent to an active `singleTask` wrapper displays a native warning that unsaved changes may be lost; Cancel leaves the app running, while **Restart and open** closes the previous document session, terminates the Linux process tree, and recreates the same generic wrapper with the new grants. The x86_64 emulator and a physical AArch64 device both verify manager create/read/write/rename/delete, private-provider denial, active-app restart, same-name import, conflict preservation, writeback, and DocumentsUI browse through a real Mousepad wrapper.
 
 SAF is not a POSIX filesystem and unprivileged Android cannot mount arbitrary document trees with FUSE. The current project bridge therefore synchronizes explicitly rather than intercepting every filesystem syscall. It preserves simultaneous edits as conflict copies, defers deletions, rejects symlinks/path escapes, and retains the local mirror when a mapping is removed. A future live path broker would require OS support or a descriptor/RPC interception layer with clearly documented compatibility limits.
 
@@ -181,6 +181,23 @@ Measure an attached test device with:
 ```
 
 The report separates APK bytes, installed code, persistent private data, transient cache, and manager runtime-store categories. Public size claims must use a documented clean install and workload; a development device snapshot includes caches and test state and is not a release baseline.
+
+## Clean v1.0.1 x86_64 Baseline
+
+Measured on 2026-07-19 using a wiped Android 16 x86_64 AVD with 4 KB pages. Values are MiB rounded to one decimal and come from `measure-android-storage.ps1` reports under the ignored `tooling/build/storage/` directory.
+
+| State | APK | Installed code | Persistent data | Transient cache |
+|---|---:|---:|---:|---:|
+| Manager installed, before first launch | 89.8 | 196.1 | 0.0 | 0.0 |
+| Manager after first launch | 89.8 | 196.1 | 0.1 | 0.1 |
+| Terminal after first launch | 1.3 | 2.9 | 0.1 | 0.1 |
+| Generated KCalc after install, before launch | 3.2 | 7.7 | 0.0 | 0.0 |
+| Generated KCalc after first launch | 3.2 | 7.7 | 29.1 | 359.1 |
+| Generated KCalc after normal Back/exit | 3.2 | 7.7 | 29.1 | 0.1 |
+
+Installing KCalc made the manager retain 582.7 MiB of package state: 362.8 MiB for the content-addressed runtime-pack store and 219.8 MiB for package-runtime state. The latter included 206.4 MiB of verified package archives, which the **Clear cache and refresh all** action can delete when no package operation is active. Shared blobs are persistent because installed wrappers depend on them; unreferenced packs are garbage-collected.
+
+The 359.1 MiB KCalc launch cache is the named private view required by the current dynamic-loader and late-`dlopen()` compatibility path. A normal app exit removes it. Android force-stop prevents lifecycle cleanup, so the cache can remain until the next wrapper launch purges stale views or Android reclaims cache storage. This peak must not be presented as steady-state application data.
 
 ## Next Milestones
 

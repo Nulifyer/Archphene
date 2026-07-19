@@ -2036,10 +2036,12 @@ public final class MainActivity extends Activity {
             ManagedRepositoryStore.clearCache(this);
             new Thread(() -> {
                 try {
+                    int archives = ArchPackageRuntime.clearDownloadCache(this);
                     int removed = RuntimePackStore.garbageCollectNow(this);
                     runOnUiThread(() -> {
-                        Toast.makeText(this, "Cache cleared; removed " + removed
-                                + " unused runtime packs", Toast.LENGTH_SHORT).show();
+                        Toast.makeText(this, "Cache cleared: " + archives
+                                + " package files and " + removed
+                                + " unused runtime packs removed", Toast.LENGTH_SHORT).show();
                         showAppsPage();
                         checkAll();
                     });
@@ -2675,6 +2677,7 @@ public final class MainActivity extends Activity {
                     RuntimePackStore.verifyParserForTest();
                     RuntimePackStore.verifyStorageForTest(this);
                     ArchPackageRuntime.verifyStagingCleanupForTest(this);
+                    ArchPackageRuntime.verifyDownloadCleanupForTest(this);
                     RuntimePackLeaseRegistry.verifyForTest(this);
                     runOnUiThread(() -> showBanner(
                             "Package job persistence and scheduler passed", false));
@@ -2685,6 +2688,7 @@ public final class MainActivity extends Activity {
                     RuntimePackStore.verifyParserForTest();
                     RuntimePackStore.verifyStorageForTest(this);
                     ArchPackageRuntime.verifyStagingCleanupForTest(this);
+                    ArchPackageRuntime.verifyDownloadCleanupForTest(this);
                     RuntimePackLeaseRegistry.verifyForTest(this);
                     android.util.Log.i("ArchphenePackages",
                             "Runtime-pack parser, blob storage, staging cleanup, and leases passed");

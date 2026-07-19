@@ -1082,6 +1082,26 @@ public final class ArchPackageRuntime {
                 System.currentTimeMillis() - ABANDONED_STAGING_GRACE_MS);
     }
 
+    static int clearDownloadCache(Context context) throws Exception {
+        return clearDirectoryContents(directory(state(context), "downloads"));
+    }
+
+    private static int clearDirectoryContents(File root) throws Exception {
+        File canonical = root.getCanonicalFile();
+        File[] children = canonical.listFiles();
+        if (children == null) return 0;
+        int removed = 0;
+        for (File child : children) {
+            File candidate = child.getCanonicalFile();
+            if (!candidate.getParentFile().equals(canonical)) {
+                throw new SecurityException("Cache entry escapes package state");
+            }
+            deleteRecursively(child);
+            removed++;
+        }
+        return removed;
+    }
+
     private static int cleanupAbandonedStaging(File staging, long cutoff) throws Exception {
         File canonical = staging.getCanonicalFile();
         File[] transactions = canonical.listFiles();
@@ -1116,6 +1136,18 @@ public final class ArchPackageRuntime {
         if (cleanupAbandonedStaging(root, now - 1000) != 1 || stale.exists()
                 || !recent.isDirectory()) {
             throw new SecurityException("Abandoned staging cleanup policy failed");
+        }
+        deleteRecursively(root);
+    }
+
+    static void verifyDownloadCleanupForTest(Context context) throws Exception {
+        File root = new File(context.getCacheDir(), "package-download-cleanup-test");
+        deleteRecursively(root);
+        if (!root.mkdirs()) throw new IOException("Could not create download cleanup test root");
+        writeText(new File(root, "package.pkg.tar.zst"), "package");
+        writeText(new File(root, "package.pkg.tar.zst.sig"), "signature");
+        if (clearDirectoryContents(root) != 2 || root.list().length != 0) {
+            throw new SecurityException("Package download cache was not cleared");
         }
         deleteRecursively(root);
     }
