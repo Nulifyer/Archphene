@@ -23,6 +23,9 @@ Invoke-Adb shell input keyevent KEYCODE_WAKEUP | Out-Null
 Invoke-Adb shell wm dismiss-keyguard | Out-Null
 Invoke-Adb logcat -c
 & (Join-Path $PSScriptRoot "install-apk.ps1") -Apk $Apk -Serial $Serial -Package org.archphene.compositorprobe
+Invoke-Adb shell am force-stop org.archphene.compositorprobe | Out-Null
+Invoke-Adb logcat -c
+Invoke-Adb @("shell", "am", "start", "-W", "-n", "org.archphene.compositorprobe/.MainActivity") | Out-Null
 Invoke-Adb shell wm dismiss-keyguard | Out-Null
 
 $keySent = $false

@@ -877,19 +877,31 @@ public final class MainActivity extends Activity {
                 output.flush();
                 dispatch(core);
                 readUntilCallback(input, 53);
-                if (nativeLastFrameWidth(core) != 4
-                        || nativeLastFrameHeight(core) != 2
-                        || nativeLastFrameChecksum(core) != 560
-                        || nativeCopyLastFrameToBitmap(core, renderedFrame) != 0
-                        || renderedFrame.getPixel(2, 0) != 0xff030201
-                        || renderedFrame.getPixel(3, 1) != 0xff1f1e1d) {
-                    throw new IllegalStateException("parent popup pixels were not composed");
+                int popupWidth = nativeLastFrameWidth(core);
+                int popupHeight = nativeLastFrameHeight(core);
+                int popupChecksum = nativeLastFrameChecksum(core);
+                int popupCopy = nativeCopyLastFrameToBitmap(core, renderedFrame);
+                int popupTopRight = renderedFrame.getPixel(2, 0);
+                int popupBottomRight = renderedFrame.getPixel(3, 1);
+                if (popupWidth != 4
+                        || popupHeight != 2
+                        || popupChecksum != 584
+                        || popupCopy != 0
+                        || popupTopRight != 0xff030201
+                        || popupBottomRight != 0xff232221) {
+                    throw new IllegalStateException(
+                            "parent popup pixels were not composed width=" + popupWidth
+                                    + " height=" + popupHeight
+                                    + " checksum=" + popupChecksum
+                                    + " copy=" + popupCopy
+                                    + " pixels=" + Integer.toHexString(popupTopRight)
+                                    + "," + Integer.toHexString(popupBottomRight));
                 }
                 if (nativePointerMotion(core, 3, 1, 9001) != 1) {
                     throw new IllegalStateException("parent popup pointer routing failed");
                 }
                 dispatch(core);
-                readPointerEnterAndFrame(input, 34, 47, 1, 1);
+                readPointerEnterAndFrame(input, 34, 47, 2, 1);
                 expectedPointerEvents++;
 
                 int popupFocusedResizeSerial = nativeConfigureFocusedToplevel(core, 4, 2);
@@ -921,7 +933,7 @@ public final class MainActivity extends Activity {
                 dispatch(core);
                 int reactivePopupConfigureSerial =
                         readPopupConfigureUntilCallback(input, 49, 50, 54, 3, 0, 2, 2);
-                if (nativeLastFrameChecksum(core) != 560
+                if (nativeLastFrameChecksum(core) != 584
                         || nativeCopyLastFrameToBitmap(core, renderedFrame) != 0
                         || renderedFrame.getPixel(2, 0) != 0xff030201) {
                     throw new IllegalStateException("unacknowledged popup geometry became visible");
@@ -940,7 +952,7 @@ public final class MainActivity extends Activity {
                     throw new IllegalStateException("reactive popup pointer routing failed");
                 }
                 dispatch(core);
-                readPointerMotionAndFrame(input, 34, 1, 1, 9002);
+                readPointerMotionAndFrame(input, 34, 2, 1, 9002);
                 expectedPointerEvents++;
 
                 output.write(createNestedPositionerAndSyncRequest(reactivePopupConfigureSerial));
@@ -4286,11 +4298,20 @@ public final class MainActivity extends Activity {
         }
         ByteBuffer body = ByteBuffer.wrap(message.body).order(ByteOrder.nativeOrder());
         int serial = body.getInt();
+        int actualSurfaceId = body.getInt();
+        int actualX = body.getInt();
+        int actualY = body.getInt();
         if (serial == 0
-                || body.getInt() != surfaceId
-                || body.getInt() != x * 256
-                || body.getInt() != y * 256) {
-            throw new IllegalStateException("invalid wl_pointer.enter event");
+                || actualSurfaceId != surfaceId
+                || actualX != x * 256
+                || actualY != y * 256) {
+            throw new IllegalStateException(
+                    "invalid wl_pointer.enter event surface=" + actualSurfaceId
+                            + " x=" + actualX
+                            + " y=" + actualY
+                            + " expected=" + surfaceId
+                            + "," + (x * 256)
+                            + "," + (y * 256));
         }
         readPointerFrame(input, pointerId);
         return serial;
