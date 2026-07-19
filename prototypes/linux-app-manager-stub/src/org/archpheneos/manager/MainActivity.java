@@ -2437,13 +2437,37 @@ public final class MainActivity extends Activity {
                                 ArchRuntimePolicy.current().architecture, staged.toolkit,
                                 staged.classification, staged.root);
                 if (getIntent().getBooleanExtra("archphene_test_install_assembled", false)) {
+                    ArchPackageRuntime.StagedTransaction installedStaged = staged;
+                    staged = null;
                     runOnUiThread(() -> {
                         showBanner("Generated " + result.packageName + "\nOpening Android installer", false);
                         ApkUpdateInstaller.installWithProgress(this, result.apk.toURI().toString(),
                                 result.apkSha256, result.packageName, result.signerSha256,
                                 (phase, percent, status, terminal) -> {
-                                    if (terminal) showBanner(status,
-                                            phase == ApkUpdateInstaller.Phase.ERROR);
+                                    if (!terminal) return;
+                                    boolean failed = phase != ApkUpdateInstaller.Phase.COMPLETE;
+                                    String finalStatus = status;
+                                    if (!failed && installedStaged != null) {
+                                        try {
+                                            RuntimePackStore.activate(this, result.packageName,
+                                                    installedStaged.runtimePackId);
+                                            RuntimePackStore.grantActive(this, result.packageName);
+                                            finalStatus = "Android package installed and runtime activated";
+                                            android.util.Log.i("ArchpheneRuntime",
+                                                    "activated generated wrapper " + result.packageName
+                                                    + " pack=" + installedStaged.runtimePackId);
+                                        } catch (Exception activationError) {
+                                            failed = true;
+                                            finalStatus = "Installed APK but runtime activation failed: "
+                                                    + activationError.getMessage();
+                                            android.util.Log.e("ArchpheneRuntime",
+                                                    "Generated wrapper activation failed", activationError);
+                                        }
+                                    }
+                                    if (installedStaged != null) {
+                                        ArchPackageRuntime.releaseStaging(this, installedStaged);
+                                    }
+                                    showBanner(finalStatus, failed);
                                 });
                     });
                 } else {
