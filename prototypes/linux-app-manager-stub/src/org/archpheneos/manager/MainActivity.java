@@ -620,15 +620,16 @@ public final class MainActivity extends Activity {
         if (installing) {
             ApkUpdateInstaller.Phase phase = packageInstalling ? job.phase : activeInstallPhase;
             int percent = packageInstalling ? job.percent : activeInstallPercent;
-            String label = phase == ApkUpdateInstaller.Phase.DOWNLOAD
-                    ? "Preparing " + percent + "%" : "Installing...";
+            String label = packageInstalling ? compactPackageOperationLabel(job)
+                    : phase == ApkUpdateInstaller.Phase.DOWNLOAD
+                    ? "Downloading " + percent + "%" : "Installing...";
             ApkUpdateInstaller.Operation operation = packageInstalling
                     ? PackageInstallCoordinator.operation(jobId) : activeInstallOperation;
-            View action = operation != null && operation.canCancel()
-                    ? cancelAction(() -> {
-                        if (packageInstalling) PackageInstallCoordinator.cancel(jobId);
-                        else if (activeInstallOperation != null) activeInstallOperation.cancel();
-                    }) : installingAction(label);
+            Runnable cancel = operation != null && operation.canCancel() ? () -> {
+                if (packageInstalling) PackageInstallCoordinator.cancel(jobId);
+                else if (activeInstallOperation != null) activeInstallOperation.cancel();
+            } : null;
+            View action = installingAction(label, cancel);
             top.addView(action, new LinearLayout.LayoutParams(dp(126), dp(42)));
         } else if (job != null && job.retryable()) {
             Button retry = actionButton("Retry", android.R.drawable.stat_notify_error);
@@ -726,11 +727,11 @@ public final class MainActivity extends Activity {
                     ? "Preparing " + job.percent + "%" : "Installing...";
             ApkUpdateInstaller.Operation operation = artifactInstalling
                     ? activeInstallOperation : PackageInstallCoordinator.operation(jobId);
-            View action = operation != null && operation.canCancel()
-                    ? cancelAction(() -> {
-                        if (artifactInstalling) operation.cancel();
-                        else PackageInstallCoordinator.cancel(jobId);
-                    }) : installingAction(label);
+            Runnable cancel = operation != null && operation.canCancel() ? () -> {
+                if (artifactInstalling) operation.cancel();
+                else PackageInstallCoordinator.cancel(jobId);
+            } : null;
+            View action = installingAction(label, cancel);
             top.addView(action, new LinearLayout.LayoutParams(dp(126), dp(42)));
         } else {
             String label = PackageInstallJobStore.ERROR.equals(job.state) ? "Failed"
@@ -996,27 +997,30 @@ public final class MainActivity extends Activity {
                 progress.setState(job.phase, job.percent, job.status);
                 jobDetails.addView(progress, new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT, dp(52)));
-                ApkUpdateInstaller.Operation operation =
-                        PackageInstallCoordinator.operation(jobId);
-                if (operation != null && operation.canCancel()) {
-                    Button cancel = actionButton("Cancel install",
-                            android.R.drawable.ic_menu_close_clear_cancel);
-                    cancel.setOnClickListener(view -> PackageInstallCoordinator.cancel(jobId));
-                    jobDetails.addView(cancel, spacedWrap(dp(8)));
-                }
+
             }
             page.addView(jobDetails, spacedWrap(dp(10)));
         }
-        String installLabel = job.active() ? "Install in progress"
-                : job.retryable() ? "Retry install" : "Install";
-        Button install = actionButton(installLabel, android.R.drawable.stat_sys_download_done);
         boolean supported = ArchRuntimePolicy.supports(app.architecture);
-        install.setEnabled(supported && !job.active());
-        install.setContentDescription(supported
-                ? "Resolve, verify, build, and install " + app.name
-                : app.name + " is not available for this device architecture");
-        install.setOnClickListener(view -> startOnDevicePackageInstall(app));
-        page.addView(install, spacedWrap(dp(8)));
+        if (job.active()) {
+            ApkUpdateInstaller.Operation operation =
+                    PackageInstallCoordinator.operation(jobId);
+            Runnable cancel = operation != null && operation.canCancel()
+                    ? () -> PackageInstallCoordinator.cancel(jobId) : null;
+            page.addView(installingAction(packageOperationLabel(job), cancel),
+                    spacedWrap(dp(8)));
+        } else {
+            String installLabel = job.retryable() ? "Retry install" : "Install";
+            Button install = actionButton(installLabel,
+                    job.retryable() ? android.R.drawable.stat_notify_error
+                            : android.R.drawable.stat_sys_download_done);
+            install.setEnabled(supported);
+            install.setContentDescription(supported
+                    ? "Resolve, verify, build, and install " + app.name
+                    : app.name + " is not available for this device architecture");
+            install.setOnClickListener(view -> startOnDevicePackageInstall(app));
+            page.addView(install, spacedWrap(dp(8)));
+        }
         scroll.addView(page);
         content.addView(scroll, frameMatch());
     }
@@ -1140,30 +1144,50 @@ public final class MainActivity extends Activity {
         }
         showAppsPage();
     }
-    private View installingAction(String label) {
+    private View installingAction(String label, Runnable cancel) {
         LinearLayout action = new LinearLayout(this);
         action.setGravity(Gravity.CENTER);
         action.setPadding(dp(8), 0, dp(8), 0);
-        action.setBackground(rounded(COLOR_SURFACE_ACTIVE, 18));
+        action.setBackground(new RippleDrawable(
+                ColorStateList.valueOf((COLOR_PRIMARY & 0x00ffffff) | 0x33000000),
+                rounded(COLOR_SURFACE_ACTIVE, 18), null));
         ProgressBar spinner = new ProgressBar(this, null,
                 android.R.attr.progressBarStyleSmall);
         spinner.setIndeterminateTintList(ColorStateList.valueOf(COLOR_PRIMARY));
         action.addView(spinner, new LinearLayout.LayoutParams(dp(20), dp(20)));
         TextView status = text(label, 11, COLOR_PRIMARY);
         status.setGravity(Gravity.CENTER);
+        status.setMaxLines(2);
         LinearLayout.LayoutParams textParams =
                 new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
         textParams.leftMargin = dp(6);
         action.addView(status, textParams);
-        action.setContentDescription(label);
+        boolean canCancel = cancel != null;
+        action.setClickable(canCancel);
+        action.setFocusable(canCancel);
+        if (canCancel) action.setOnClickListener(view -> cancel.run());
+        action.setContentDescription(label + (canCancel ? ". Tap to cancel" : ""));
         return action;
     }
 
-    private Button cancelAction(Runnable cancel) {
-        Button action = actionButton("Cancel", android.R.drawable.ic_menu_close_clear_cancel);
-        action.setContentDescription("Cancel current package operation");
-        action.setOnClickListener(view -> cancel.run());
-        return action;
+    private String packageOperationLabel(PackageInstallJobStore.Snapshot job) {
+        if (PackageInstallJobStore.QUEUED.equals(job.state)) return "Queued";
+        String status = job.status == null ? "" : job.status.trim();
+        if (!status.isEmpty()) {
+            return job.percent > 0 && !status.contains("%")
+                    ? status + " " + job.percent + "%" : status;
+        }
+        return job.phase == ApkUpdateInstaller.Phase.DOWNLOAD
+                ? "Preparing " + job.percent + "%" : "Installing...";
+    }
+
+    private String compactPackageOperationLabel(PackageInstallJobStore.Snapshot job) {
+        if (PackageInstallJobStore.QUEUED.equals(job.state)) return "Queued";
+        String status = job.status == null ? "" : job.status.trim();
+        int separator = status.indexOf(' ');
+        String stage = status.isEmpty() ? "Preparing"
+                : status.substring(0, separator < 0 ? status.length() : separator);
+        return job.percent > 0 ? stage + " " + job.percent + "%" : stage;
     }
 
     private String pinnedVersionDescription(InstalledLinuxAppCatalog.Entry app,
@@ -1383,12 +1407,34 @@ public final class MainActivity extends Activity {
         versions.addView(pin, spacedWrap(dp(8)));
         Button installVersion = actionButton("Install selected version",
                 android.R.drawable.stat_sys_download_done);
-        installVersion.setOnClickListener(view -> installSelectedVersion(app, selectedVersion[0]));
+        ApkUpdateInstaller.Operation packageOperation = packageJob != null && packageJob.active()
+                ? PackageInstallCoordinator.operation(packageJobId) : null;
+        boolean packageCanCancel = packageOperation != null && packageOperation.canCancel();
+        if (packageJob != null && packageJob.active()) {
+            installVersion.setText(packageOperationLabel(packageJob));
+            installVersion.setCompoundDrawablesWithIntrinsicBounds(
+                    android.R.drawable.ic_menu_close_clear_cancel, 0, 0, 0);
+            installVersion.setEnabled(packageCanCancel);
+            installVersion.setContentDescription(packageOperationLabel(packageJob)
+                    + (packageCanCancel ? ". Tap to cancel" : ""));
+            if (packageCanCancel) {
+                installVersion.setOnClickListener(view ->
+                        PackageInstallCoordinator.cancel(packageJobId));
+            }
+        } else {
+            installVersion.setOnClickListener(view ->
+                    installSelectedVersion(app, selectedVersion[0]));
+        }
         versions.addView(installVersion, spacedWrap(dp(8)));
         versionSelector.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(AdapterView<?> parent, View view,
                     int position, long id) {
                 selectedVersion[0] = versionValues.get(position);
+                if (packageJob != null && packageJob.active()) {
+                    installVersion.setEnabled(packageCanCancel);
+                    installVersion.setText(packageOperationLabel(packageJob));
+                    return;
+                }
                 boolean rollback = managerRollbackUnavailable(app, selectedVersion[0]);
                 installVersion.setEnabled(!rollback);
                 installVersion.setText(rollback ? "Android rollback unavailable"
@@ -1602,16 +1648,8 @@ public final class MainActivity extends Activity {
             progress.setState(job.phase, job.percent, job.status);
             packageJobDetail.addView(progress, new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, dp(52)));
-            ApkUpdateInstaller.Operation operation =
-                    PackageInstallCoordinator.operation(packageJobDetailId);
-            if (operation != null && operation.canCancel()) {
-                Button cancel = actionButton("Cancel install",
-                        android.R.drawable.ic_menu_close_clear_cancel);
-                cancel.setOnClickListener(view ->
-                        PackageInstallCoordinator.cancel(packageJobDetailId));
-                packageJobDetail.addView(cancel, spacedWrap(dp(8)));
-            }
             return;
+
         }
         TextView failure = text(job.error.isEmpty() ? job.status : job.error,
                 12, COLOR_ERROR);
@@ -2859,7 +2897,7 @@ public final class MainActivity extends Activity {
         }
         item.setCompoundDrawablePadding(dp(2));
         item.setGravity(Gravity.CENTER);
-        item.setPadding(0, dp(6), 0, 0);
+        item.setPadding(0, dp(8), 0, 0);
         item.setOnClickListener(view -> action.run());
         return item;
     }
