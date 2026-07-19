@@ -71,7 +71,7 @@ Rebuild the exact-ABI Qt appearance plugin and refresh its prebuilt checksums:
 ./scripts/build-qt-platform-theme-podman.ps1 -RebuildImage
 ```
 
-The script uses the pinned Arch Linux snapshot and fails if Qt does not match the runtime manifest.
+The script uses the pinned Arch Linux snapshot for host tools, a checksum-pinned official Arch Linux ARM Qt package for target headers and libraries, and the existing AArch64 cross-toolchain. It fails if Qt does not match the runtime manifest or either output has the wrong ELF architecture.
 
 ### Native compositor probe
 

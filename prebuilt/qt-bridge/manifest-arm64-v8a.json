@@ -1,0 +1,18 @@
+{
+  "schema": "org.archphene.prebuilt-bridge.v1",
+  "architecture": "arm64-v8a",
+  "qtVersion": "6.11.1",
+  "purpose": "Qt Wayland Android bridge template",
+  "files": [
+    {
+      "name": "libarchphene_qt_platform_theme.so",
+      "bytes": 68632,
+      "sha256": "87b427ef962028f916d1f229c342659824d4567c93f93a21d8348533a9be92bf"
+    },
+    {
+      "name": "libarchphene_qt_style.so",
+      "bytes": 68520,
+      "sha256": "4b1fe6cea16e085b844503e05b40f131d376b8947abab4cf325f7d2f34fe72c9"
+    }
+  ]
+}

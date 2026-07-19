@@ -147,9 +147,12 @@ window.xml
 !/prebuilt/
 !/prebuilt/qt-bridge/
 !/prebuilt/qt-bridge/manifest.json
+!/prebuilt/qt-bridge/manifest-arm64-v8a.json
 !/prebuilt/qt-bridge/SHA256SUMS
 !/prebuilt/qt-bridge/x86_64/
 !/prebuilt/qt-bridge/x86_64/*.so
+!/prebuilt/qt-bridge/arm64-v8a/
+!/prebuilt/qt-bridge/arm64-v8a/*.so
 !/prebuilt/gtk3-compat/
 !/prebuilt/gtk3-compat/manifest.json
 !/prebuilt/gtk3-compat/SHA256SUMS

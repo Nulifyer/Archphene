@@ -89,6 +89,7 @@ build_qt_templates() {
   cp "$app/assets/kcalc.PKGINFO" "$out/stage/assets/kcalc.PKGINFO"
   (cd "$root/prebuilt/qt-bridge" && sha256sum --check SHA256SUMS)
   cp "$root"/prebuilt/qt-bridge/x86_64/*.so "$out/stage/lib/x86_64/"
+  cp "$root"/prebuilt/qt-bridge/arm64-v8a/*.so "$out/stage/lib/arm64-v8a/"
   compositor="$root/native/archphene-compositor/target/x86_64-linux-android/release/libarchphene_compositor.so"
   [[ -f "$compositor" ]] || { echo "missing shared compositor: $compositor" >&2; exit 1; }
   cp "$compositor" "$out/stage/lib/x86_64/libarchphene_compositor.so"

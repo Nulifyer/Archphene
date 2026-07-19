@@ -49,10 +49,15 @@ popup decoration.
 
 ## Rebuild the Qt plugin
 
-The checked-in x86_64 plugin is reproducible in the pinned Linux container:
+The checked-in x86_64 and AArch64 plugins are reproducible in the pinned Linux container:
 
 ```powershell
 ./scripts/build-qt-platform-theme-podman.ps1 -RebuildImage
 ```
 
-The script rejects a Qt private-ABI mismatch and regenerates the prebuilt manifest and checksums. Runtime visual validation must cover light and dark palettes, menus, secondary windows, and portrait/landscape layouts.
+The script rejects a Qt private-ABI mismatch, cross-compiles the ARM plugins against the checksum-pinned official Arch Linux ARM Qt package, verifies both ELF architectures, and regenerates the exact-ABI manifests and shared checksum catalog. Runtime visual validation must cover light and dark palettes, menus, secondary windows, status labels, and portrait/landscape layouts.
+
+KCalc is the Qt metric reference application. The x86_64 emulator and an AArch64 Samsung phone have both passed light/dark and portrait/landscape checks at the phone default of 150% geometry scale. Status indicators such as `NORM` retain font-relative frame padding instead of using KCalc's exact one-line fixed height, which prevents clipping with Android-sized text.
+
+
+The AArch64 plugin was validated on a Samsung SM-S908U at 1080x2316. A manager-generated KCalc wrapper followed Android light and dark modes, committed exact 1080x2202 portrait and 2316x978 landscape buffers, and rendered the full `NORM` status label in every tested layout.

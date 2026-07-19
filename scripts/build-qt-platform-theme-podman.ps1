@@ -11,7 +11,12 @@ $ExpectedQtVersion = "6.11.1"
 
 podman image exists $Image
 $ImageExists = $LASTEXITCODE -eq 0
-if ($RebuildImage -or -not $ImageExists) {
+$ImageNeedsCrossCompiler = $false
+if ($ImageExists -and -not $RebuildImage) {
+    podman run --rm $Image bash -lc "command -v aarch64-linux-gnu-g++" | Out-Null
+    $ImageNeedsCrossCompiler = $LASTEXITCODE -ne 0
+}
+if ($RebuildImage -or -not $ImageExists -or $ImageNeedsCrossCompiler) {
     podman build -f (Join-Path $Root "containers/qt-platform-theme.Containerfile") `
         -t $Image (Join-Path $Root "containers")
     if ($LASTEXITCODE -ne 0) { throw "Qt platform-theme build image failed" }
@@ -37,6 +42,9 @@ install -Dm755 libarchphene_qt_style.so /workspace/prebuilt/qt-bridge/x86_64/lib
 "@
 podman run --rm -v "${Root}:/workspace" -w /workspace $Image bash -lc $command
 if ($LASTEXITCODE -ne 0) { throw "Qt platform-theme plugin build failed" }
+podman run --rm -v "${Root}:/workspace" -w /workspace $Image `
+    bash scripts/build-qt-platform-theme-arm64.sh
+if ($LASTEXITCODE -ne 0) { throw "AArch64 Qt platform-theme plugin build failed" }
 
 $Prebuilt = Join-Path $Root "prebuilt/qt-bridge"
 $Files = Get-ChildItem -LiteralPath (Join-Path $Prebuilt "x86_64") -Filter "*.so" |
@@ -56,10 +64,31 @@ $Manifest = [ordered]@{
 }
 $Manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath `
     (Join-Path $Prebuilt "manifest.json") -Encoding utf8NoBOM
+$ArmFiles = Get-ChildItem -LiteralPath (Join-Path $Prebuilt "arm64-v8a") -Filter "*.so" |
+    Sort-Object Name
+$ArmManifest = [ordered]@{
+    schema = "org.archphene.prebuilt-bridge.v1"
+    architecture = "arm64-v8a"
+    qtVersion = $ExpectedQtVersion
+    purpose = "Qt Wayland Android bridge template"
+    files = @($ArmFiles | ForEach-Object {
+        [ordered]@{
+            name = $_.Name
+            bytes = $_.Length
+            sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+    })
+}
+$ArmManifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath `
+    (Join-Path $Prebuilt "manifest-arm64-v8a.json") -Encoding utf8NoBOM
 $Checksums = $Files | ForEach-Object {
     "{0}  x86_64/{1}" -f `
         (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name
 }
+$Checksums += $ArmFiles | ForEach-Object {
+    "{0}  arm64-v8a/{1}" -f `
+        (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name
+}
 $Checksums | Set-Content -LiteralPath (Join-Path $Prebuilt "SHA256SUMS") -Encoding utf8NoBOM
 
-Write-Host "Qt $QtVersion appearance plugins: prebuilt/qt-bridge/x86_64/libarchphene_qt_{platform_theme,style}.so"
+Write-Host "Qt $QtVersion appearance plugins built for x86_64 and arm64-v8a."
