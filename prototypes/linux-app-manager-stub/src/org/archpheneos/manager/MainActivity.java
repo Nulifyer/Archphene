@@ -424,8 +424,7 @@ public final class MainActivity extends Activity {
         page.setFocusableInTouchMode(true);
         page.requestFocus();
 
-        TextView title = text("Apps", 28, COLOR_TEXT);
-        title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        TextView title = text("Apps", 26, COLOR_TEXT);
         page.addView(title, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(54)));
 
@@ -456,7 +455,8 @@ public final class MainActivity extends Activity {
         filter = actionButton("", android.R.drawable.ic_menu_sort_by_size);
         filter.setContentDescription("Filter and sort apps");
         filter.setOnClickListener(view -> showFilterSortDialog());
-        searchRow.addView(filter, new LinearLayout.LayoutParams(dp(52), dp(44)));        page.addView(searchRow, matchWrap());
+        searchRow.addView(filter, new LinearLayout.LayoutParams(dp(52), dp(44)));
+        page.addView(searchRow, matchWrap());
 
         ScrollView scroll = new ScrollView(this);
         appList = new LinearLayout(this);
@@ -899,6 +899,10 @@ public final class MainActivity extends Activity {
         int generation = packageSearchGeneration.incrementAndGet();
         progress.setVisibility(View.VISIBLE);
         results.removeAllViews();
+        TextView loading = text("Searching repositories...", 14, COLOR_MUTED);
+        loading.setGravity(Gravity.CENTER);
+        loading.setPadding(0, dp(40), 0, 0);
+        results.addView(loading, matchWrap());
         new Thread(() -> {
             try {
                 List<ArchPackageRepository.PackageResult> found =
@@ -906,6 +910,7 @@ public final class MainActivity extends Activity {
                 runOnUiThread(() -> {
                     if (generation != packageSearchGeneration.get()) return;
                     progress.setVisibility(View.GONE);
+                    results.removeAllViews();
                     for (ArchPackageRepository.PackageResult app : found) {
                         results.addView(createSearchResultRow(app), spacedWrap(dp(6)));
                     }
@@ -920,6 +925,16 @@ public final class MainActivity extends Activity {
                 runOnUiThread(() -> {
                     if (generation != packageSearchGeneration.get()) return;
                     progress.setVisibility(View.GONE);
+                    results.removeAllViews();
+                    TextView error = text("Repository search failed", 15, COLOR_ERROR);
+                    error.setGravity(Gravity.CENTER);
+                    error.setPadding(0, dp(40), 0, dp(8));
+                    results.addView(error, matchWrap());
+                    Button retry = actionButton("Retry", android.R.drawable.ic_popup_sync);
+                    retry.setOnClickListener(view -> searchPackages(normalized,
+                            results, progress));
+                    results.addView(retry, new LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT, dp(44)));
                     showBanner("Repository search failed: " + e.getMessage(), true);
                 });
             }
@@ -2998,10 +3013,17 @@ public final class MainActivity extends Activity {
         Button button = new Button(this);
         button.setText(label);
         button.setTextSize(13);
+        button.setSingleLine(true);
+        button.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        if (Build.VERSION.SDK_INT >= 26) {
+            button.setAutoSizeTextTypeUniformWithConfiguration(8, 13, 1,
+                    android.util.TypedValue.COMPLEX_UNIT_SP);
+        }
         button.setAllCaps(false);
         button.setCompoundDrawablesWithIntrinsicBounds(icon, 0, 0, 0);
         button.setCompoundDrawablePadding(dp(7));
         styleTonalButton(button);
+        button.setPadding(dp(6), 0, dp(6), 0);
         return button;
     }
 
