@@ -101,6 +101,24 @@ function Count-ChangedSamples([string]$Before, [string]$After) {
     }
 }
 
+function Tap-AccessibleControl([string]$XmlPath, [string]$Text) {
+    [xml]$ui = Get-Content $XmlPath -Raw
+    $node = $ui.SelectSingleNode("//node[@text='$Text' and @clickable='true']")
+    if ($null -eq $node -or $node.bounds -notmatch '^\[(\d+),(\d+)\]\[(\d+),(\d+)\]$') {
+        throw "Could not resolve accessible KCalc control $Text"
+    }
+    $centerX = [int](([int]$Matches[1] + [int]$Matches[3]) / 2)
+    $centerY = [int](([int]$Matches[2] + [int]$Matches[4]) / 2)
+    Invoke-Adb @("shell", "input", "tap", "$centerX", "$centerY") "tap landscape $Text"
+    Start-Sleep -Milliseconds 250
+}
+
+function Get-DisplayText([string]$XmlPath) {
+    [xml]$ui = Get-Content $XmlPath -Raw
+    $display = $ui.SelectSingleNode("//node[@class='android.widget.TextView' and @text!='' and @text!='NORM']")
+    if ($null -eq $display) { return "" }
+    return [string]$display.text
+}
 $Activity = Resolve-LauncherActivity
 $state = (& $Adb -s $Serial get-state 2>$null).Trim()
 if ($LASTEXITCODE -ne 0 -or $state -ne "device") { throw "$Serial is not an authorized ADB device" }
@@ -131,14 +149,29 @@ try {
     }
     if ($landscapeBefore.Colors -lt 40) { throw "Landscape frame is blank or visually incomplete" }
 
-    foreach ($keyCode in @(8, 81, 9, 70)) {
-        Invoke-Adb @("shell", "input", "keyevent", "$keyCode") "send landscape calculator key"
-        Start-Sleep -Milliseconds 250
+    [xml]$landscapeUi = Get-Content $landscapeBefore.Xml -Raw
+    $hasAccessibleControls = $null -ne $landscapeUi.SelectSingleNode(
+            "//node[@text='One' and @clickable='true']")
+    if ($hasAccessibleControls) {
+        foreach ($control in @("One", "Add", "Two", "Equals")) {
+            Tap-AccessibleControl $landscapeBefore.Xml $control
+        }
+    } else {
+        foreach ($keyCode in @(8, 81, 9, 70)) {
+            Invoke-Adb @("shell", "input", "keyevent", "$keyCode") "send landscape calculator key"
+            Start-Sleep -Milliseconds 250
+        }
     }
     Start-Sleep -Seconds 2
     $landscapeAfter = Capture-State "landscape-after"
     $changed = Count-ChangedSamples $landscapeBefore.Png $landscapeAfter.Png
-    if ($changed -lt 15) { throw "Landscape KCalc input did not visibly update the display ($changed samples)" }
+    if ($hasAccessibleControls) {
+        $display = Get-DisplayText $landscapeAfter.Xml
+        if ($display -ne "3") { throw "Landscape KCalc calculation produced '$display', expected 3" }
+        if ($changed -lt 1) { throw "Landscape KCalc display did not visibly update" }
+    } elseif ($changed -lt 15) {
+        throw "Legacy KCalc input did not visibly update the display ($changed samples)"
+    }
 
     Invoke-Adb @("shell", "settings", "put", "system", "user_rotation", "0") "restore portrait"
     Start-Sleep -Seconds 7

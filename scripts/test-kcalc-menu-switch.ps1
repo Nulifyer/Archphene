@@ -57,6 +57,15 @@ function Map-RootPoint(
         [int]($ViewTop + (($rootY + $LocalY) * [long]$ViewHeight) / $outputHeight))
 }
 
+function Get-NodeCenter([string]$Ui, [string]$Text) {
+    $node = [regex]::Match(
+            $Ui,
+            '<node[^>]*text="' + [regex]::Escape($Text) + '"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"')
+    if (-not $node.Success) { return $null }
+    return @(
+        [int](([int]$node.Groups[1].Value + [int]$node.Groups[3].Value) / 2),
+        [int](([int]$node.Groups[2].Value + [int]$node.Groups[4].Value) / 2))
+}
 Adb @("shell", "am", "force-stop", $Package) | Out-Null
 Adb @("logcat", "-c") | Out-Null
 $activity = Resolve-LauncherActivity
@@ -77,11 +86,17 @@ $top = [int]$bounds.Groups[2].Value
 $width = [int]$bounds.Groups[3].Value - $left
 $height = [int]$bounds.Groups[4].Value - $top
 
-$file = Map-RootPoint 25 10 $left $top $width $height $rootWidth $rootHeight
+$file = Get-NodeCenter $ui "File"
+if ($null -eq $file) {
+    $file = Map-RootPoint 25 10 $left $top $width $height $rootWidth $rootHeight
+}
 Adb @("shell", "input", "tap", [string]$file[0], [string]$file[1]) | Out-Null
 Wait-Log 'popup registry=0:[^;]+,(\d+),(\d+),1,0;' 10 | Out-Null
 
-$settings = Map-RootPoint 250 10 $left $top $width $height $rootWidth $rootHeight
+$settings = Get-NodeCenter $ui "Settings"
+if ($null -eq $settings) {
+    $settings = Map-RootPoint 250 10 $left $top $width $height $rootWidth $rootHeight
+}
 Adb @("shell", "input", "tap", [string]$settings[0], [string]$settings[1]) | Out-Null
 Start-Sleep -Seconds 2
 $finalLog = (Adb @("logcat", "-d", "-s", "ArchpheneInput:V", "*:S")) -join [Environment]::NewLine

@@ -1,13 +1,17 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$Serial,
-    [int]$Cycles = 6
+    [int]$Cycles = 6,
+    [string]$Package = "org.archphene.linux.p0392be9c9f103a39d951c2f39c3644d2"
 )
 
 $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $Adb = Join-Path $Root "tooling/android-sdk/platform-tools/adb.exe"
-$Package = "org.archphene.linux.kcalc"
+$Activity = ((& $Adb -s $Serial shell cmd package resolve-activity --brief `
+        -a android.intent.action.MAIN -c android.intent.category.LAUNCHER $Package) |
+    Select-Object -Last 1).Trim()
+if ($Activity -notmatch '/') { throw "Could not resolve launcher activity for $Package" }
 
 function Invoke-Adb([string[]]$Arguments, [string]$Step) {
     & $Adb -s $Serial @Arguments | Out-Null
@@ -44,7 +48,7 @@ try {
     Invoke-Adb @("shell", "settings", "put", "system", "accelerometer_rotation", "0") "disable sensor rotation"
     Invoke-Adb @("shell", "settings", "put", "system", "user_rotation", "0") "force portrait"
     Invoke-Adb @("shell", "am", "force-stop", $Package) "force-stop KCalc"
-    Invoke-Adb @("shell", "am", "start", "-W", "-n", "$Package/.MainActivity") "launch KCalc"
+    Invoke-Adb @("shell", "am", "start", "-W", "-n", $Activity) "launch KCalc"
     Start-Sleep -Seconds 8
 
     $appPid = Get-AppPid
