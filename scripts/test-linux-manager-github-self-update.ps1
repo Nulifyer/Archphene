@@ -105,6 +105,11 @@ Invoke-Adb @("install", $Baseline) | Out-Null
 Invoke-Adb @("shell", "appops", "set", $Package, "REQUEST_INSTALL_PACKAGES", "allow") | Out-Null
 Invoke-Adb @("shell", "am", "start", "-W", "-n", "$Package/.MainActivity") | Out-Null
 
+$startupUi = Get-Ui "archphene-github-startup"
+if ($startupUi -match 'This app isn.t 16 KB compatible') {
+    Tap-Match $startupUi 'text="OK"' "Android 16 KB compatibility warning"
+}
+
 $ui = Wait-Ui "Installed $([regex]::Escape($FromVersion))\. Not checked" `
     "archphene-github-baseline"
 Tap-Match $ui "content-desc=`"Check Archphene for updates[^`"]*`"" "update check"
