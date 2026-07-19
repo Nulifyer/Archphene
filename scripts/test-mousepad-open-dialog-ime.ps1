@@ -52,11 +52,18 @@ function Input-Shown {
     return ((Adb @("shell", "dumpsys", "input_method")) -join "`n") -match 'mInputShown=true'
 }
 
+$recentPath = "/data/user/0/$Package/files/linux-home/.local/share/recently-used.xbel"
 try {
     $recent = (Adb @("shell", "run-as", $Package, "cat",
             "files/linux-home/.local/share/recently-used.xbel")) -join "`n"
 } catch {
-    throw "Mousepad recent-file fixture is unavailable; run test-mousepad-android-document-workflow.ps1 first"
+    # Production wrappers are intentionally not debuggable. The emulator is
+    # rooted by the document workflow, so inspect the fixture as root there.
+    try {
+        $recent = (Adb @("shell", "cat", $recentPath)) -join "`n"
+    } catch {
+        throw "Mousepad recent-file fixture is unavailable; run test-mousepad-android-document-workflow.ps1 first"
+    }
 }
 if ($recent -notmatch '(?i)archphene') {
     throw "Mousepad recent-file fixture has no archphene document; run test-mousepad-android-document-workflow.ps1 first"

@@ -28,11 +28,10 @@ function Get-ProcessState {
     if (-not $appPid) { throw "KCalc Android process is not running" }
     $processes = (& $Adb -s $Serial shell ps -A -o PID,PPID,NAME) -join [Environment]::NewLine
     $children = [regex]::Matches(
-            $processes, "(?m)^\s*(\d+)\s+$appPid\s+\S+\s*$")
+            $processes, "(?m)^\s*(\d+)\s+$appPid\s+(\S+)\s*$")
     foreach ($child in $children) {
         $candidate = $child.Groups[1].Value
-        $childExe = ((& $Adb -s $Serial shell run-as $Package readlink "/proc/$candidate/exe" 2>$null) -join "").Trim()
-        if ($LASTEXITCODE -eq 0 -and $childExe -match 'libarchphene_ld\.so$') {
+        if ($child.Groups[2].Value -match '^(loader|libarchphene_ld\.so)$') {
             return [pscustomobject]@{ App = $appPid; Child = $candidate }
         }
     }

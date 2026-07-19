@@ -102,15 +102,10 @@ if ((Get-Item -LiteralPath $Screenshot).Length -lt 20000) {
 }
 $appPid = ((Adb @("shell", "pidof", $Package)) | Select-Object -Last 1).Trim()
 $processes = (Adb @("shell", "ps", "-A", "-o", "PID,PPID,NAME")) -join [Environment]::NewLine
-$child = [regex]::Match($processes, "(?m)^\s*(\d+)\s+$appPid\s+loader\s*$")
+$child = [regex]::Match($processes,
+        "(?m)^\s*(\d+)\s+$appPid\s+(loader|libarchphene_ld\.so)\s*$")
 if (-not $appPid -or -not $child.Success) {
     throw "KCalc or its Linux child exited during popup switching"
 }
-$childExe = ((Adb @("shell", "run-as", $Package, "readlink",
-        "/proc/$($child.Groups[1].Value)/exe")) | Select-Object -Last 1).Trim()
-if ($childExe -notmatch 'libarchphene_ld\.so$') {
-    throw "KCalc child does not use the Archphene loader: $childExe"
-}
-
 Write-Host "KCalc shared-compositor menu switching passed: File -> Settings."
 Write-Host "Screenshot: $Screenshot"

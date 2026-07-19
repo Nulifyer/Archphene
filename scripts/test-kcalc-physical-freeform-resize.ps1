@@ -1,18 +1,20 @@
 param(
     [Parameter(Mandatory = $true)]
-    [string]$Serial
+    [string]$Serial,
+    [string]$Package = "org.archphene.linux.p0392be9c9f103a39d951c2f39c3644d2"
 )
 
 $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $Adb = Join-Path $Root "tooling/android-sdk/platform-tools/adb.exe"
-$Package = "org.archphene.linux.kcalc"
 
+$Activity = ((& $Adb -s $Serial shell cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER $Package) | Select-Object -Last 1).Trim()
+if ($Activity -notmatch '/') { throw "Could not resolve launcher activity for $Package" }
 
 function Get-Child([string]$AppPid) {
     $processes = (& $Adb -s $Serial shell ps -A -o PID,PPID,NAME) -join "`n"
     return [regex]::Match($processes,
-            "(?m)^\s*(\d+)\s+$AppPid\s+libarchphene_ld\.so\s*$").Groups[1].Value
+            "(?m)^\s*(\d+)\s+$AppPid\s+(?:loader|libarchphene_ld\.so)\s*$").Groups[1].Value
 }
 function Get-ImageBounds([string]$Name) {
     $remote = "/sdcard/$Name.xml"
@@ -26,14 +28,13 @@ function Get-ImageBounds([string]$Name) {
 }
 
 & $Adb -s $Serial shell pm clear $Package | Out-Null
-& $Adb -s $Serial shell am start -W --windowingMode 5 -n "$Package/.MainActivity" | Out-Null
+& $Adb -s $Serial shell am start -W --windowingMode 5 -n $Activity | Out-Null
 Start-Sleep -Seconds 8
 $appPid = (& $Adb -s $Serial shell pidof $Package).Trim()
 $child = Get-Child $appPid
 $activities = (& $Adb -s $Serial shell dumpsys activity activities) -join "`n"
-$taskMatch = [regex]::Match(
-        $activities,
-        'Task\{[^\r\n]*#(\d+)[^\r\n]*org\.archphene\.linux\.kcalc[^\r\n]*mode=freeform')
+$taskPattern = 'Task\{[^\r\n]*#(\d+)[^\r\n]*' + [regex]::Escape($Package) + '[^\r\n]*mode=freeform'
+$taskMatch = [regex]::Match($activities, $taskPattern)
 $task = $taskMatch.Groups[1].Value
 if (-not $appPid -or -not $child -or -not $task) {
     throw "Could not identify freeform KCalc app=$appPid child=$child task=$task"
