@@ -2,8 +2,10 @@
 #include <QApplication>
 #include <QDialog>
 #include <QFont>
+#include <QLabel>
 #include <QLineEdit>
 #include <QProxyStyle>
+#include <QStatusBar>
 #include <QStyleFactory>
 #include <QStylePlugin>
 
@@ -20,6 +22,17 @@ public:
     void polish(QWidget *widget) override
     {
         QProxyStyle::polish(widget);
+        if (auto *statusBar = qobject_cast<QStatusBar *>(widget)) {
+            const int padding = qMax(6, statusBar->fontMetrics().height() / 3);
+            statusBar->setMinimumHeight(statusBar->fontMetrics().height() + padding);
+            return;
+        }
+        if (auto *label = qobject_cast<QLabel *>(widget);
+                label && qobject_cast<QStatusBar *>(label->parentWidget())) {
+            const int padding = qMax(6, label->fontMetrics().height() / 3);
+            label->setFixedHeight(label->fontMetrics().height() + padding);
+            return;
+        }
         auto *editor = qobject_cast<QLineEdit *>(widget);
         if (!editor || qobject_cast<QAbstractSpinBox *>(editor->parentWidget())
                 || qobject_cast<QDialog *>(editor->window())) {
