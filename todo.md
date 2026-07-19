@@ -46,7 +46,7 @@ This is the prioritized completion queue for the Archphene Android application. 
   - [x] Add microphone capture with an explicit `RECORD_AUDIO` request and separate input capability; validate grant, denial/no-reprompt, privacy-switch silence, process cleanup, and real nonzero capture on x86_64 emulator and physical AArch64.
   - [x] Add capability-scoped bidirectional plain-text drag-and-drop between Android and standard Wayland data devices; validate copy negotiation, bounded payload transfer, completion, cancellation, and resource cleanup on x86_64 emulator and physical AArch64.
   - [x] Complete URI/file drag-and-drop through the SAF/document broker without exposing raw `content://` URIs to Linux applications; validate protocol negotiation, import/writeback, visible-home export, exact URI grants, denial without grants, and cleanup on x86_64 emulator and physical AArch64.
-  - [ ] Complete camera, accessibility, and secrets/keyrings integration.
+  - [x] Complete camera, accessibility, and secrets/keyrings integration.
     - [x] Add a capability-scoped Camera2 permission/state and bounded one-shot JPEG descriptor API; validate the real Android grant and denial/no-reprompt paths plus 1280x720 capture on x86_64 emulator and physical AArch64.
     - [x] Add the private PipeWire producer and XDG Camera portal adapter required by unmodified Linux camera consumers.
       - [x] Validate an official unmodified Arch Snapshot package on the x86_64 emulator through Android grant and denial paths, timestamped PipeWire frames, and process/lease cleanup.
@@ -89,13 +89,12 @@ This is the prioritized completion queue for the Archphene Android application. 
 
 ## P1 - Product and UX
 
-- [ ] Refresh the manager UI against current Obtainium.
-  - Use its compact row hierarchy, spacing, progress presentation, top-right Settings action, bottom-right + Add action, and bottom list padding as references while retaining Archphene's explicit phase/error status.
-  - Remove the old bottom navigation only after phone, tablet, accessibility, and back-navigation validation.
-- [ ] Refine search controls and empty/loading/error states using the same compact visual language.
-- [ ] Finish Qt and GTK appearance consistency.
-  - Validate actual pixel text/control sizes against Android font scale and density.
-  - Match Material You light/dark colors while preserving usable toolkit contrast, popup borders/shadows, close targets, and desktop-mode density controls.
+- [x] Refresh the manager UI against current Obtainium while retaining the user-selected bottom Apps/Settings navigation and centered Add action.
+  - Compact rows use one stateful action, full-width phase progress, bounded version labels, accessible controls, and enough bottom padding on phone and tablet layouts.
+- [x] Refine search controls and empty/loading/error states using the same compact visual language.
+- [x] Finish Qt and GTK appearance consistency.
+  - Physical AArch64 dark/light validation covers KCalc and Mousepad at the automatic 150% phone geometry scale and 17 pt toolkit text.
+  - Menus, popup borders/shadows, close targets, status labels, contrast, and full-window rendering are readable and bounded; tablet/docked density remains configurable in Appearance settings.
 - [ ] Review and execute the compatibility matrix in pacman-test-packages.md.
   - Promote the reviewed matrix into docs/ or research/, then test representative phone, tablet, docked, GPU, document, multimedia, accessibility, and failure cases.
 
