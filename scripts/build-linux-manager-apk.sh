@@ -181,11 +181,15 @@ build_terminal_app() {
   local out="${ARCHPHENE_TERMINAL_OUT:-$app/out-linux}"
   local native_x86="$root/native/archphene-terminal/out/x86_64/libtermux.so"
   local native_arm64="$root/native/archphene-terminal/out/aarch64/libtermux.so"
+  local font_dir="$root/third_party/jetbrains-mono-nerd-font"
   [[ -f "$native_x86" && -f "$native_arm64" && -f "$loader_x86" && -f "$loader_arm64" ]] || {
     echo "Terminal PTY and glibc loader libraries are required" >&2; exit 1;
   }
+  (cd "$font_dir" && sha256sum --check --quiet SHA256SUMS) || {
+    echo "Bundled Terminal font verification failed" >&2; exit 1;
+  }
   rm -rf "$out"
-  mkdir -p "$out"/{compiled,gen,classes,dex,stage/lib/x86_64,stage/lib/arm64-v8a}
+  mkdir -p "$out"/{compiled,gen,classes,dex,stage/lib/x86_64,stage/lib/arm64-v8a,stage/assets/licenses}
 
   sed \
     -e "s/android:versionCode=\"[^\"]*\"/android:versionCode=\"$version_code\"/" \
@@ -209,6 +213,8 @@ build_terminal_app() {
   cp "$native_arm64" "$out/stage/lib/arm64-v8a/libtermux.so"
   cp "$loader_x86" "$out/stage/lib/x86_64/libarchphene_ld.so"
   cp "$loader_arm64" "$out/stage/lib/arm64-v8a/libarchphene_ld.so"
+  cp "$font_dir/JetBrainsMonoNLNerdFontMono-Regular.ttf" "$out/stage/assets/"
+  cp "$font_dir/OFL.txt" "$out/stage/assets/licenses/JetBrainsMonoNerdFont-OFL.txt"
   prune_native_abis "$out/stage/lib"
   (
     cd "$out/stage"

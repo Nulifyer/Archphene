@@ -11,6 +11,7 @@ import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.graphics.Color;
+import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
 import android.os.Build;
 import android.os.Bundle;
@@ -43,6 +44,8 @@ public final class TerminalActivity extends Activity
         implements TerminalViewClient, TerminalService.Client {
     private static final String TAG = "ArchpheneTerminal";
     private static final int NOTIFICATION_PERMISSION_REQUEST = 70;
+    private static final String TERMINAL_FONT_ASSET =
+            "JetBrainsMonoNLNerdFontMono-Regular.ttf";
     private LinearLayout root;
     private LinearLayout toolbar;
     private LinearLayout tabs;
@@ -161,6 +164,12 @@ public final class TerminalActivity extends Activity
         terminalView.setBackgroundColor(isDark() ? Color.rgb(13, 15, 17) : Color.WHITE);
         fontPixels = Math.round(16f * getResources().getDisplayMetrics().scaledDensity);
         terminalView.setTextSize(fontPixels);
+        try {
+            terminalView.setTypeface(Typeface.createFromAsset(
+                    getAssets(), TERMINAL_FONT_ASSET));
+        } catch (RuntimeException error) {
+            throw new IllegalStateException("Bundled Terminal font is unavailable", error);
+        }
         root.addView(terminalView, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
         setContentView(root);
