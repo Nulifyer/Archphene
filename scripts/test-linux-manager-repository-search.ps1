@@ -22,9 +22,27 @@ function Wait-Ui([string]$Pattern, [string]$Name, [int]$Seconds = 15) {
     if ($ui -notmatch $Pattern) { throw "Timed out waiting for $Pattern" }
     return $ui
 }
+function Show-AllApps {
+    $ui = Wait-Ui 'content-desc="Filter and sort apps"' "repo-filter-home"
+    Tap-Pattern $ui 'content-desc="Filter and sort apps"' "filter and sort"
+    $ui = Wait-Ui 'text="Filter and sorting"' "repo-filter-dialog"
+    Tap-Pattern $ui 'text="(?:All apps|Updates available|Pinned versions)"' "current app filter"
+    $ui = Wait-Ui 'text="All apps"' "repo-filter-options"
+    Tap-Pattern $ui 'text="All apps"' "all apps filter"
+    $ui = Wait-Ui 'text="APPLY"' "repo-filter-apply"
+    Tap-Pattern $ui 'text="APPLY"' "apply all apps filter"
+    return Wait-Ui 'content-desc="Add Linux app"' "repo-all-apps"
+}
+
 & $Adb -s $Serial shell am force-stop $Package | Out-Null
 & $Adb -s $Serial shell am start -W -n "$Package/.MainActivity" | Out-Null
-$ui = Wait-Ui 'content-desc="Add Linux app"' "repo-home"
+$ui = Show-AllApps
+if ($ui -match 'text="btop"' -and $ui -match 'text="Not installed"') {
+    Tap-Pattern $ui 'text="btop"' "stale tracked btop"
+    $ui = Wait-Ui 'text="Remove from apps"' "repo-stale-btop"
+    Tap-Pattern $ui 'text="Remove from apps"' "remove stale btop"
+    $ui = Wait-Ui 'content-desc="Add Linux app"' "repo-clean-home"
+}
 Tap-Pattern $ui 'content-desc="Add Linux app"' "Add button"
 $ui = Wait-Ui 'text="Search official Arch packages"' "repo-add"
 Tap-Pattern $ui 'text="Search official Arch packages"' "repository search field"
