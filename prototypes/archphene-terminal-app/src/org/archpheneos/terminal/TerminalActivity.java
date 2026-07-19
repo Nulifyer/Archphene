@@ -68,6 +68,8 @@ public final class TerminalActivity extends Activity
             terminalService = ((TerminalService.LocalBinder) binder).service();
             serviceBound = true;
             terminalService.attachClient(TerminalActivity.this);
+            terminalService.refreshEnvironmentIfChanged();
+            terminalService.refreshEnvironmentIfChanged();
         }
         @Override public void onServiceDisconnected(ComponentName name) {
             serviceBound = false;
@@ -87,6 +89,12 @@ public final class TerminalActivity extends Activity
         buildUi();
         requestNotificationPermission();
         startAndBindService();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (terminalService != null) terminalService.refreshEnvironmentIfChanged();
     }
 
     private void buildUi() {

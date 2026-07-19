@@ -17,6 +17,7 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -43,6 +44,8 @@ final class TerminalEnvironment {
     private static final long MAX_DATA_BYTES = 2L * 1024 * 1024 * 1024;
 
     static final class Session {
+        final String catalogId;
+        final Set<String> packIds;
         final File home;
         final File requestDirectory;
         final File responseDirectory;
@@ -51,8 +54,11 @@ final class TerminalEnvironment {
         final String shellName;
         final String[] environment;
 
-        Session(File home, File requestDirectory, File responseDirectory, File rc,
+        Session(String catalogId, Set<String> packIds, File home,
+                File requestDirectory, File responseDirectory, File rc,
                 File launcher, String shellName, String[] environment) {
+            this.catalogId = catalogId;
+            this.packIds = Collections.unmodifiableSet(new HashSet<>(packIds));
             this.home = home;
             this.requestDirectory = requestDirectory;
             this.responseDirectory = responseDirectory;
@@ -205,6 +211,22 @@ final class TerminalEnvironment {
     private TerminalEnvironment() {}
 
     static synchronized Session prepare(Context context) throws Exception {
+        return prepare(context, true);
+    }
+
+    static synchronized Session refresh(Context context) throws Exception {
+        return prepare(context, false);
+    }
+
+    static String catalogId(Context context) throws Exception {
+        try (ProviderSession provider = ProviderSession.open(context)) {
+            Bundle catalog = provider.catalog();
+            return catalogId(catalog.getStringArray("packages"));
+        }
+    }
+
+    private static synchronized Session prepare(Context context, boolean initial)
+            throws Exception {
         File terminal = directory(context.getFilesDir(), "terminal");
         File home = directory(terminal, "home");
         File config = directory(home, ".config");
@@ -212,10 +234,14 @@ final class TerminalEnvironment {
         File runtime = directory(terminal, "runtime");
         File packsRoot = directory(runtime, "packs");
         File tmp = directory(context.getCacheDir(), "terminal-tmp");
+        File xdgRuntime = directory(context.getCacheDir(), "terminal-xdg-runtime");
+        android.system.Os.chmod(xdgRuntime.getPath(), 0700);
         File requests = directory(runtime, "requests");
         File responses = directory(runtime, "responses");
-        clearFiles(requests);
-        clearFiles(responses);
+        if (initial) {
+            clearFiles(requests);
+            clearFiles(responses);
+        }
 
         File packagedLoader = new File(context.getApplicationInfo().nativeLibraryDir,
                 "libarchphene_ld.so");
@@ -228,12 +254,14 @@ final class TerminalEnvironment {
         ArrayList<String> dependencyLibraries = new ArrayList<>();
         ArrayList<String> dataDirectories = new ArrayList<>();
         ArrayList<String> vulkanIcdFiles = new ArrayList<>();
+        String catalogId;
         try (ProviderSession provider = ProviderSession.open(context)) {
             Bundle catalog = provider.catalog();
             String[] encoded = catalog.getStringArray("packages");
             if (encoded == null || encoded.length > MAX_PACKAGES) {
                 throw new SecurityException("Terminal package catalog exceeds its limit");
             }
+            catalogId = catalogId(encoded);
             for (String value : encoded) {
                 PackageEntry entry = new PackageEntry(value);
                 if (!livePacks.add(entry.packId)) {
@@ -269,11 +297,13 @@ final class TerminalEnvironment {
                 packages.add(entry);
             }
         }
-        removeStalePacks(packsRoot, livePacks);
+        if (initial) removeStalePacks(packsRoot, livePacks);
 
-        File installed = new File(runtime, "installed.tsv");
+        File generations = directory(runtime, "generations");
+        File generation = directory(generations, catalogId);
+        File installed = new File(generation, "installed.tsv");
         writeInstalledList(installed, packages);
-        File rc = new File(runtime, "shell.rc");
+        File rc = new File(generation, "shell.rc");
         writeAtomically(rc, shellRc(home, config, cache, tmp, requests, responses,
                 installed, rc, commands, dependencyLibraries, dataDirectories,
                 vulkanIcdFiles));
@@ -281,12 +311,13 @@ final class TerminalEnvironment {
         if (bash != null && !bash.interpreter.isEmpty()) {
             throw new SecurityException("Managed Bash command is not an ELF executable");
         }
-        File launcher = new File(runtime, "launch.sh");
+        File launcher = new File(generation, "launch.sh");
         writeAtomically(launcher, launchScript(rc, bash, dependencyLibraries));
 
         ArrayList<String> env = new ArrayList<>();
         env.add("HOME=" + home.getAbsolutePath());
         env.add("TMPDIR=" + tmp.getAbsolutePath());
+        env.add("XDG_RUNTIME_DIR=" + xdgRuntime.getAbsolutePath());
         env.add("XDG_CONFIG_HOME=" + config.getAbsolutePath());
         env.add("XDG_CACHE_HOME=" + cache.getAbsolutePath());
         env.add("TERM=xterm-256color");
@@ -297,8 +328,30 @@ final class TerminalEnvironment {
         env.add("ENV=" + rc.getAbsolutePath());
         env.add("ARCHPHENE_MANAGER_REQUESTS=" + requests.getAbsolutePath());
         env.add("ARCHPHENE_MANAGER_RESPONSES=" + responses.getAbsolutePath());
-        return new Session(home, requests, responses, rc, launcher,
+        return new Session(catalogId, livePacks, home, requests, responses, rc, launcher,
                 bash == null ? "Bionic sh" : "Arch Bash", env.toArray(new String[0]));
+    }
+
+    private static String catalogId(String[] encoded) throws Exception {
+        if (encoded == null || encoded.length > MAX_PACKAGES) {
+            throw new SecurityException("Terminal package catalog exceeds its limit");
+        }
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        for (String value : encoded) {
+            if (value == null) {
+                throw new SecurityException("Malformed Terminal package catalog");
+            }
+            digest.update(value.getBytes(StandardCharsets.UTF_8));
+            digest.update((byte) '\n');
+        }
+        return hex(digest.digest());
+    }
+
+    static synchronized void prune(Context context, Set<String> generationIds,
+            Set<String> packIds) throws IOException {
+        File runtime = directory(directory(context.getFilesDir(), "terminal"), "runtime");
+        removeStalePacks(directory(runtime, "generations"), generationIds);
+        removeStalePacks(directory(runtime, "packs"), packIds);
     }
 
     static File responseDirectory(Context context) throws IOException {

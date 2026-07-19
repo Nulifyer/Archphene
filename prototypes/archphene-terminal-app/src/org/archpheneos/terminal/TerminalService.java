@@ -21,6 +21,7 @@ import com.termux.terminal.TerminalSessionClient;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 
 /** Foreground owner for persistent PTY sessions. */
@@ -56,10 +57,13 @@ public final class TerminalService extends Service implements TerminalSessionCli
 
     private static final class Record {
         final TerminalSession session;
+        final TerminalEnvironment.Session environment;
         String title;
 
-        Record(TerminalSession session, String title) {
+        Record(TerminalSession session, TerminalEnvironment.Session environment,
+                String title) {
             this.session = session;
+            this.environment = environment;
             this.title = title;
         }
     }
@@ -78,6 +82,7 @@ public final class TerminalService extends Service implements TerminalSessionCli
     private Client client;
     private String activeHandle;
     private boolean preparing;
+    private boolean refreshing;
     private boolean stopping;
 
     @Override
@@ -184,7 +189,7 @@ public final class TerminalService extends Service implements TerminalSessionCli
                         new String[] {"sh", environment.launcher.getAbsolutePath()},
                         environment.environment, 10000, this);
                 session.mSessionName = candidate;
-                sessions.add(new Record(session, candidate));
+                sessions.add(new Record(session, environment, candidate));
                 activeHandle = session.mHandle;
                 Log.i(TAG, "Created terminal session " + candidate
                         + " shell=" + environment.shellName
@@ -217,6 +222,7 @@ public final class TerminalService extends Service implements TerminalSessionCli
         Log.i(TAG, "Closed terminal session handle=" + handle);
         updateNotification();
         notifyClient();
+        pruneUnusedEnvironment();
         if (sessions.isEmpty()) stopForegroundAndSelf();
     }
 
@@ -243,6 +249,51 @@ public final class TerminalService extends Service implements TerminalSessionCli
                 });
             }
         }, "archphene-terminal-prepare").start();
+    }
+
+    void refreshEnvironmentIfChanged() {
+        if (preparing || refreshing || environment == null || stopping) return;
+        refreshing = true;
+        String previous = environment.catalogId;
+        new Thread(() -> {
+            try {
+                String current = TerminalEnvironment.catalogId(this);
+                if (previous.equals(current)) {
+                    main.post(() -> refreshing = false);
+                    return;
+                }
+                TerminalEnvironment.Session prepared = TerminalEnvironment.refresh(this);
+                main.post(() -> {
+                    refreshing = false;
+                    if (stopping) return;
+                    environment = prepared;
+                    if (sessions.size() < MAX_SESSIONS) createSession();
+                    else notifyClient();
+                });
+            } catch (Throwable error) {
+                Log.e(TAG, "Could not refresh terminal environment", error);
+                main.post(() -> refreshing = false);
+            }
+        }, "archphene-terminal-refresh").start();
+    }
+
+    private void pruneUnusedEnvironment() {
+        if (environment == null) return;
+        HashSet<String> generations = new HashSet<>();
+        HashSet<String> packs = new HashSet<>();
+        generations.add(environment.catalogId);
+        packs.addAll(environment.packIds);
+        for (Record record : sessions) {
+            generations.add(record.environment.catalogId);
+            packs.addAll(record.environment.packIds);
+        }
+        new Thread(() -> {
+            try {
+                TerminalEnvironment.prune(this, generations, packs);
+            } catch (Exception error) {
+                Log.w(TAG, "Could not prune stale Terminal environments", error);
+            }
+        }, "archphene-terminal-prune").start();
     }
 
     private Record find(String handle) {
