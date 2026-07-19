@@ -429,6 +429,27 @@ public final class TerminalBuffer {
         }
     }
 
+    /** Delete visible rows without losing wrap and style metadata from retained rows. */
+    public void deleteLines(int startRow, int count, long style) {
+        if (startRow < 0 || count < 1 || startRow + count > mScreenRows) {
+            throw new IllegalArgumentException();
+        }
+        TerminalRow[] recycled = new TerminalRow[count];
+        for (int row = 0; row < count; row++) {
+            recycled[row] = mLines[externalToInternalRow(startRow + row)];
+        }
+        int rowsToMove = mScreenRows - startRow - count;
+        for (int row = 0; row < rowsToMove; row++) {
+            mLines[externalToInternalRow(startRow + row)] =
+                    mLines[externalToInternalRow(startRow + count + row)];
+        }
+        for (int row = 0; row < count; row++) {
+            TerminalRow line = recycled[row];
+            if (line == null) line = new TerminalRow(mColumns, style);
+            else line.clear(style);
+            mLines[externalToInternalRow(mScreenRows - count + row)] = line;
+        }
+    }
     /**
      * Block set characters. All characters must be within the bounds of the screen, or else and
      * InvalidParemeterException will be thrown. Typically this is called with a "val" argument of 32 to clear a block

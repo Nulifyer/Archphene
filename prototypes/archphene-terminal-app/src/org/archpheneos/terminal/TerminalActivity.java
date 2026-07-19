@@ -16,6 +16,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.FileObserver;
 import android.os.IBinder;
+import android.util.Base64;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -62,6 +63,7 @@ public final class TerminalActivity extends Activity
     private int activeSurface;
     private boolean debugSessionTestStarted;
     private boolean debugCommandTestStarted;
+    private int debugCommandTestAttempts;
 
     private final ServiceConnection serviceConnection = new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name, IBinder binder) {
@@ -342,17 +344,33 @@ public final class TerminalActivity extends Activity
         if (debugCommandTestStarted || terminalService == null
                 || (getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) == 0) return;
         String command = getIntent().getStringExtra("archphene_test_terminal_command");
+        String encoded = getIntent().getStringExtra(
+                "archphene_test_terminal_command_base64");
+        if (encoded != null && !encoded.isEmpty()) {
+            command = new String(Base64.decode(encoded, Base64.DEFAULT),
+                    StandardCharsets.UTF_8);
+        }
         if (command == null || command.isEmpty()) return;
         if (command.length() > 512 || command.indexOf((char) 10) >= 0
                 || command.indexOf((char) 13) >= 0) {
             throw new SecurityException("Invalid Terminal test command");
         }
         TerminalSession session = terminalService.activeSession();
-        if (session == null || session.getEmulator() == null) return;
+        if (session == null || session.getEmulator() == null) {
+            if (++debugCommandTestAttempts <= 40) {
+                root.postDelayed(this::runDebugCommandTestIfRequested, 250);
+            } else {
+                Log.e(TAG, "Terminal command probe could not acquire a session");
+            }
+            return;
+        }
         debugCommandTestStarted = true;
         int delay = Math.max(1000, Math.min(300000,
                 getIntent().getIntExtra("archphene_test_terminal_capture_delay_ms", 30000)));
-        session.write(command + (char) 13);
+        int sendDelay = Math.max(0, Math.min(30000,
+                getIntent().getIntExtra("archphene_test_terminal_send_delay_ms", 0)));
+        String testCommand = command;
+        root.postDelayed(() -> session.write(testCommand + (char) 13), sendDelay);
         root.postDelayed(() -> {
             TerminalSession active = terminalService == null
                     ? null : terminalService.activeSession();
@@ -362,7 +380,7 @@ public final class TerminalActivity extends Activity
             }
             String transcript = active.getEmulator().getScreen().getTranscriptText();
             Log.i(TAG, "Terminal command probe transcript=" + transcript);
-        }, delay);
+        }, sendDelay + delay);
     }
     private void observeManagerRequests(File requestDirectory) {
         stopRequestObserver();

@@ -35,9 +35,8 @@ function Get-AllLog {
 function Start-Probe([string]$Command, [int]$CaptureDelayMilliseconds) {
     Invoke-Adb shell am force-stop $TerminalPackage | Out-Null
     Invoke-Adb logcat -c | Out-Null
-    $remote = 'am start -n {0}/.TerminalActivity --es archphene_test_terminal_command "{1}" --ei archphene_test_terminal_capture_delay_ms {2}' -f `
-        $TerminalPackage, $Command.Replace('"', '\"'), $CaptureDelayMilliseconds
-    Invoke-Adb shell $remote | Out-Null
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Command))
+    Invoke-Adb shell am start -n "$TerminalPackage/.TerminalActivity" --es archphene_test_terminal_command_base64 $encoded --ei archphene_test_terminal_capture_delay_ms $CaptureDelayMilliseconds | Out-Null
 }
 
 function Wait-Probe([string[]]$Patterns, [int]$TimeoutSeconds) {

@@ -187,6 +187,8 @@ public final class TerminalEmulator {
 
     /** Holds OSC and device control arguments, which can be strings. */
     private final StringBuilder mOSCOrDeviceControlArgs = new StringBuilder();
+    private int mPromptStartRow = -1;
+    private int mPromptCommandRow = -1;
 
     /**
      * True if the current escape sequence should continue, false if the current escape sequence should be terminated.
@@ -393,6 +395,7 @@ public final class TerminalEmulator {
             throw new IllegalArgumentException("rows=" + rows + ", columns=" + columns);
         }
 
+        boolean columnsChanged = mColumns != columns;
         if (mRows != rows) {
             mRows = rows;
             mTopMargin = 0;
@@ -411,6 +414,10 @@ public final class TerminalEmulator {
         }
 
         resizeScreen();
+        // Showing the IME changes only the row count. Keep the active prompt markers so
+        // the command can still collapse after that resize. Width changes reflow rows,
+        // so their markers cannot be retained without mapping buffer coordinates.
+        if (columnsChanged) resetShellIntegrationPrompt();
     }
 
     private void resizeScreen() {
@@ -2148,11 +2155,63 @@ public final class TerminalEmulator {
                 break;
             case 119: // Reset highlight color.
                 break;
+            case 133: // FinalTerm shell integration markers.
+                processShellIntegrationMarker(textParameter);
+                break;
             default:
                 unknownParameter(value);
                 break;
         }
         finishSequence();
+    }
+
+    private void processShellIntegrationMarker(String marker) {
+        if (mScreen != mMainBuffer) {
+            resetShellIntegrationPrompt();
+            return;
+        }
+        if ("A".equals(marker)) {
+            mPromptStartRow = mCursorRow;
+            mPromptCommandRow = -1;
+        } else if ("B".equals(marker)) {
+            if (mPromptStartRow < 0) mPromptStartRow = findShellIntegrationPrompt();
+            if (mPromptStartRow >= 0 && mCursorRow > mPromptStartRow
+                    && mCursorRow - mPromptStartRow <= 8) {
+                mPromptCommandRow = mCursorRow;
+            } else if (mPromptStartRow >= 0) {
+                resetShellIntegrationPrompt();
+            }
+        } else if ("C".equals(marker)) {
+            collapseShellIntegrationPrompt();
+        } else if (marker.startsWith("D")) {
+            resetShellIntegrationPrompt();
+        }
+    }
+
+    private int findShellIntegrationPrompt() {
+        int first = Math.max(0, mCursorRow - 8);
+        for (int row = mCursorRow - 1; row >= first; row--) {
+            String text = mScreen.getSelectedText(0, row, mColumns - 1, row, false).trim();
+            if ("archphene".equals(text) || text.startsWith("archphene ")) return row;
+        }
+        return -1;
+    }
+
+    private void collapseShellIntegrationPrompt() {
+        if (mPromptStartRow < 0 || mPromptCommandRow <= mPromptStartRow
+                || mPromptCommandRow >= mRows || mCursorRow < mPromptCommandRow) {
+            resetShellIntegrationPrompt();
+            return;
+        }
+        int rowsToRemove = mPromptCommandRow - mPromptStartRow;
+        mScreen.deleteLines(mPromptStartRow, rowsToRemove, getStyle());
+        mCursorRow = Math.max(mPromptStartRow, mCursorRow - rowsToRemove);
+        resetShellIntegrationPrompt();
+    }
+
+    private void resetShellIntegrationPrompt() {
+        mPromptStartRow = -1;
+        mPromptCommandRow = -1;
     }
 
     private void blockClear(int sx, int sy, int w) {
@@ -2205,6 +2264,13 @@ public final class TerminalEmulator {
 
     private void scrollDownOneLine() {
         mScrollCounter++;
+        if (mScreen == mMainBuffer && mLeftMargin == 0 && mRightMargin == mColumns
+                && mTopMargin == 0 && mBottomMargin == mRows
+                && mPromptStartRow >= 0) {
+            mPromptStartRow--;
+            if (mPromptCommandRow >= 0) mPromptCommandRow--;
+            if (mPromptStartRow < 0) resetShellIntegrationPrompt();
+        }
         long currentStyle = getStyle();
         if (mLeftMargin != 0 || mRightMargin != mColumns) {
             // Horizontal margin: Do not put anything into scroll history, just non-margin part of screen up.

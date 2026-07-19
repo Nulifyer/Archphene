@@ -169,12 +169,16 @@ build_qt_templates() {
   done
 }
 
-build_qt_templates
+terminal_only="${ARCHPHENE_TERMINAL_ONLY:-false}"
+[[ "$terminal_only" == "true" || "$terminal_only" == "false" ]] || {
+  echo "ARCHPHENE_TERMINAL_ONLY must be true or false" >&2; exit 1;
+}
+[[ "$terminal_only" == "true" ]] || build_qt_templates
 
 build_terminal_app() {
   local loader_x86="$1" loader_arm64="$2"
   local app="$root/prototypes/archphene-terminal-app"
-  local out="$app/out-linux"
+  local out="${ARCHPHENE_TERMINAL_OUT:-$app/out-linux}"
   local native_x86="$root/native/archphene-terminal/out/x86_64/libtermux.so"
   local native_arm64="$root/native/archphene-terminal/out/aarch64/libtermux.so"
   [[ -f "$native_x86" && -f "$native_arm64" && -f "$loader_x86" && -f "$loader_arm64" ]] || {
@@ -217,6 +221,13 @@ build_terminal_app() {
     --out "$out/archphene-terminal.apk" "$out/aligned.apk"
   "$bt/apksigner" verify --verbose --print-certs "$out/archphene-terminal.apk"
 }
+
+if [[ "$terminal_only" == "true" ]]; then
+  build_terminal_app \
+    "$root/tooling/build/ci-package-runtime/tooling/build/glibc-archphene-runtime-x86_64/ld-linux-x86-64.so.2" \
+    "$root/tooling/build/ci-package-runtime-arm64/tooling/build/glibc-archphene-runtime-aarch64/ld-linux-aarch64.so.1"
+  exit 0
+fi
 
 app="$root/prototypes/linux-app-manager-stub"
 out="$app/out-linux"

@@ -21,6 +21,8 @@ Returning to Terminal after a package catalog change opens a new tab backed by a
 
 Installing `bash` through Archphene publishes its verified runtime closure to Terminal and makes it the default user shell for subsequent sessions. The launcher scopes the patched glibc loader, library path, path bridge, and `C.UTF-8` locale root to managed commands; it clears those variables before invoking Android's Bionic utilities. Fish remains a possible future opt-in shell rather than a release dependency.
 
+Managed Bash uses a compact two-line prompt for portrait displays. The active prompt shows `archphene` and the current directory above a separate `$` input line; intermediate directories are abbreviated in the Fish style while the final directory remains readable, for example `~/Documents/source/ArchpheneOS` becomes `~/D/s/ArchpheneOS`. OSC 133 shell markers let the terminal remove that context after submission while retaining the `$ command` and its output. Height-only IME resizes preserve the markers. The default monospace size follows Android's 16sp scaled text size, and pinch zoom supports a bounded 10sp to 32sp range.
+
 ## Pacman compatibility
 
 `pacman` in Terminal is an Archphene facade. It never mutates manager state directly.

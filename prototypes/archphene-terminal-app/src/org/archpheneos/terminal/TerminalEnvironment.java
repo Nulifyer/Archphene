@@ -562,7 +562,27 @@ final class TerminalEnvironment {
         rc.append("unset LD_PRELOAD\n");
         rc.append("case \"$-\" in *i*) _ap_interactive=1;; *) _ap_interactive=0;; esac\n");
         rc.append("[ -z \"$BASH_VERSION\" ] || shopt -s expand_aliases\n");
-        rc.append("[ \"$_ap_interactive\" = 0 ] || export PS1='archphene \\w $ '\n");
+        rc.append("if [ \"$_ap_interactive\" != 0 ]; then\n")
+                .append("  _archphene_prompt_path() {\n")
+                .append("    local path=$PWD part short out= index last\n")
+                .append("    [[ $path == /data/data/* && $HOME == /data/user/0/* ]] && path=\"/data/user/0/${path#/data/data/}\"\n")
+                .append("    if [[ $path == \"$HOME\" ]]; then path='~';\n")
+                .append("    elif [[ $path == \"$HOME/\"* ]]; then path=\"~${path:${#HOME}}\"; fi\n")
+                .append("    [ \"$path\" = / ] && { printf /; return; }\n")
+                .append("    local IFS=/; local -a parts; read -ra parts <<< \"$path\"\n")
+                .append("    last=$((${#parts[@]} - 1)); [[ $path = /* ]] && out=/\n")
+                .append("    for index in \"${!parts[@]}\"; do\n")
+                .append("      part=${parts[index]}; [ -z \"$part\" ] && continue\n")
+                .append("      if (( index < last )) && [ \"$part\" != '~' ]; then\n")
+                .append("        [[ $part = .* && ${#part} -gt 1 ]] && short=${part:0:2} || short=${part:0:1}\n")
+                .append("      else short=$part; fi\n")
+                .append("      [[ -n $out && $out != / ]] && out+=/; out+=$short\n")
+                .append("    done\n")
+                .append("    printf '%s' \"$out\"\n")
+                .append("  }\n")
+                .append("  export PS1='\\[\\e]133;A\\a\\]\\[\\e[38;2;23;147;209m\\]archphene\\[\\e[0m\\] \\[\\e[2m\\]$(_archphene_prompt_path)\\[\\e[0m\\]\\n\\[\\e]133;B\\a\\]\\[\\e[38;2;23;147;209m\\]$\\[\\e[0m\\] '\n")
+                .append("  export PS0=$'\\e]133;C\\a'\n")
+                .append("fi\n");
         rc.append("_archphene_run() {\n  _ap_key=\"$1/$2\"; shift 2\n  case \"$_ap_key\" in\n");
         Command managedBash = commands.get("bash");
         for (Command command : commands.values()) {
