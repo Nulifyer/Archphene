@@ -89,6 +89,9 @@ $Checksums += $ArmFiles | ForEach-Object {
     "{0}  arm64-v8a/{1}" -f `
         (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name
 }
-$Checksums | Set-Content -LiteralPath (Join-Path $Prebuilt "SHA256SUMS") -Encoding utf8NoBOM
+[IO.File]::WriteAllText(
+    (Join-Path $Prebuilt "SHA256SUMS"),
+    (($Checksums -join "`n") + "`n"),
+    [Text.UTF8Encoding]::new($false))
 
 Write-Host "Qt $QtVersion appearance plugins built for x86_64 and arm64-v8a."
