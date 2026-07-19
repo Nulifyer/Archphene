@@ -129,9 +129,12 @@ try {
 
     Adb @("shell", "input", "keyevent", "4") | Out-Null
     Wait-RuntimeLog "(Released runtime pack lease|Runtime process died; released pack lease) $packId" 20 | Out-Null
-    Start-Sleep -Seconds 1
-    $cleanCacheSize = ((Invoke-PrivateAdb -Package $Wrapper -Arguments @("du", "-sk", "cache")) -join "`n")
-    $cleanCacheKiB = [int64]([regex]::Match($cleanCacheSize, '^(\d+)').Groups[1].Value)
+    $cleanupDeadline = [DateTime]::UtcNow.AddSeconds(20)
+    do {
+        Start-Sleep -Milliseconds 500
+        $cleanCacheSize = ((Invoke-PrivateAdb -Package $Wrapper -Arguments @("du", "-sk", "cache")) -join "`n")
+        $cleanCacheKiB = [int64]([regex]::Match($cleanCacheSize, '^(\d+)').Groups[1].Value)
+    } while ($cleanCacheKiB -ge 65536 -and [DateTime]::UtcNow -lt $cleanupDeadline)
     if ($cleanCacheKiB -ge 65536) {
         throw "Wrapper retained a runtime closure after process exit: $cleanCacheSize"
     }
