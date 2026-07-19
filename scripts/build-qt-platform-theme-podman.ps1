@@ -62,8 +62,6 @@ $Manifest = [ordered]@{
         }
     })
 }
-$Manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath `
-    (Join-Path $Prebuilt "manifest.json") -Encoding utf8NoBOM
 $ArmFiles = Get-ChildItem -LiteralPath (Join-Path $Prebuilt "arm64-v8a") -Filter "*.so" |
     Sort-Object Name
 $ArmManifest = [ordered]@{
@@ -79,6 +77,14 @@ $ArmManifest = [ordered]@{
         }
     })
 }
+$Manifest.additionalArchitectures = @(
+    [ordered]@{
+        architecture = "arm64-v8a"
+        files = $ArmManifest.files
+    }
+)
+$Manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath `
+    (Join-Path $Prebuilt "manifest.json") -Encoding utf8NoBOM
 $ArmManifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath `
     (Join-Path $Prebuilt "manifest-arm64-v8a.json") -Encoding utf8NoBOM
 $Checksums = $Files | ForEach-Object {
