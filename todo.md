@@ -65,6 +65,8 @@ This is the prioritized completion queue for the Archphene Android application. 
   - [x] Reject broad all-files access as the default. Use user-selected Storage Access Framework documents and trees; reconsider an optional advanced flow only with a concrete compatibility requirement.
 - [ ] Complete platform compatibility.
   - [x] Keep the manager usable on 16 KB x86_64 without Android's generic page-size dialog; show an explicit in-app restriction and block package transactions before incompatible 4 KB Arch ELF execution. Rebuilding the upstream x86_64 runtime remains a broader package-compatibility task.
+  - [x] Build patched x86_64 glibc with 64 KB ELF alignment and execute an aligned dynamic probe under the manager UID on a real 16 KB Android emulator.
+  - [ ] Build and sign a separate no-mixing 16 KB x86_64 package repository, then validate a complete GUI closure including late-loaded modules before enabling package transactions.
   - Remaining portal and broad toolkit/runtime validation.
   - Broader Qt, GTK, SDL, Electron, Rust-native, XWayland, Vulkan, and zero-copy GPU validation.
   - General secondary-window policy for phone, tablet, freeform, and external displays.

@@ -68,10 +68,9 @@ tar -xJf "$archive" --strip-components=1 -C "$work/source"
 patch --directory="$work/source" --strip=1 --input="$patch_file"
 
 build_triplet="$("$work/source/scripts/config.guess")"
-configure_environment=("CPPFLAGS=-DARCHPHENE_ANDROID_APP_COMPAT=1")
-if [[ "$architecture" == aarch64 ]]; then
-  configure_environment+=("LDFLAGS=-Wl,-z,max-page-size=65536")
-fi
+configure_environment=(
+  "CPPFLAGS=-DARCHPHENE_ANDROID_APP_COMPAT=1"
+)
 (
   cd "$work/build"
   env "${configure_environment[@]}" "$work/source/configure" \
@@ -79,6 +78,10 @@ fi
     --build="$build_triplet" \
     --disable-werror \
     --enable-kernel=5.10
+  cat > configparms <<EOF
+LDFLAGS.so += -Wl,-z,max-page-size=65536 -Wl,-z,common-page-size=16384
+LDFLAGS-rtld += -Wl,-z,max-page-size=65536 -Wl,-z,common-page-size=16384
+EOF
   make -s -j"${JOBS:-2}"
   make -s install DESTDIR="$work/install"
 )
@@ -97,14 +100,12 @@ for name in "${runtime_files[@]}"; do
   }
   cp -L "$source_file" "$out/$name"
   readelf -h "$out/$name" | grep -F 'Machine:' | grep -F "$expected_machine" >/dev/null
-  if [[ "$architecture" == aarch64 ]]; then
-    while read -r alignment; do
-      (( alignment >= 0x4000 )) || {
-        echo "AArch64 glibc LOAD alignment is below 16 KB: $name $alignment" >&2
-        exit 1
-      }
-    done < <(readelf -lW "$out/$name" | awk '/ LOAD / { print $NF }')
-  fi
+  while read -r alignment; do
+    (( alignment >= 0x4000 )) || {
+      echo "$architecture glibc LOAD alignment is below 16 KB: $name $alignment" >&2
+      exit 1
+    }
+  done < <(readelf -lW "$out/$name" | awk '/ LOAD / { print $NF }')
 done
 
 cat > "$out/source-commit.txt" <<EOF

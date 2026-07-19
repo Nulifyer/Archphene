@@ -12,6 +12,7 @@ stage="tooling/build/ci-package-runtime"
 container_cli="${CONTAINER_CLI:-docker}"
 
 mkdir -p tooling/build
+rm -rf "$glibc_out" "$stage"
 build_root="$(mktemp -d "$root/tooling/build/ci-runtime.XXXXXX")"
 trap 'rm -rf "$build_root"' EXIT
 container_out="$build_root/linux-runtime"
@@ -97,6 +98,10 @@ mkdir "$obj"
   cd "$obj"
   CPPFLAGS="-DARCHPHENE_ANDROID_APP_COMPAT=1" "$source/configure" \
     --prefix=/usr --disable-werror --enable-kernel=5.10
+  cat > configparms <<EOF
+LDFLAGS.so += -Wl,-z,max-page-size=65536 -Wl,-z,common-page-size=16384
+LDFLAGS-rtld += -Wl,-z,max-page-size=65536 -Wl,-z,common-page-size=16384
+EOF
   make -s -j"$JOBS"
   make -s install DESTDIR="$install"
 )
@@ -115,6 +120,12 @@ for name in "${runtime_files[@]}"; do
     exit 1
   }
   cp -L "$source_file" "/out/glibc/$name"
+  while read -r alignment; do
+    (( alignment >= 0x4000 )) || {
+      echo "x86_64 glibc LOAD alignment is below 16 KB: $name $alignment" >&2
+      exit 1
+    }
+  done < <(readelf -lW "/out/glibc/$name" | awk "/ LOAD / { print \$NF }")
 done
 printf "glibc-%s+sha256.%s\n" "$GLIBC_VERSION" "$GLIBC_SHA256" \
   > /out/glibc/source-commit.txt
@@ -124,10 +135,8 @@ if [[ "$SKIP_CHOWN" != "1" ]]; then
 fi
 '
 
-rm -rf "$glibc_out"
 cp -a "$container_out/glibc" "$glibc_out"
 
-rm -rf "$stage"
 pacman_stage="$stage/tooling/downloads/arch-runtime-pacman-x86_64"
 keyring_stage="$stage/tooling/downloads/arch-runtime-archlinux-keyring-x86_64"
 mkdir -p "$pacman_stage" \
