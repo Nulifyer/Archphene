@@ -19,6 +19,21 @@ function Adb([string[]]$Arguments) {
     return $output
 }
 
+function Invoke-PrivateAdb([string]$Package, [string[]]$Arguments) {
+    $output = & $Adb -s $Serial shell run-as $Package @Arguments 2>&1
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -eq 0) { return $output }
+    if (-not $AdbIsRoot) {
+        throw "run-as failed for $Package`: $($output -join "`n")"
+    }
+    $root = "/data/user/0/$Package"
+    $mapped = @($Arguments | ForEach-Object {
+        $value = [string]$_
+        if ($value -eq "cache") { "$root/cache" } else { $value }
+    })
+    return Adb (@("shell") + $mapped)
+}
+
 function Wait-RuntimeLog([string]$Pattern, [int]$Seconds = 20) {
     $deadline = [DateTime]::UtcNow.AddSeconds($Seconds)
     do {
@@ -45,6 +60,10 @@ function Wait-Loader([int]$AndroidPid, [int]$Seconds = 30) {
     throw "Timed out waiting for the managed Linux loader child of Android PID $AndroidPid"
 }
 
+$AdbIsRoot = (((Adb @("shell", "id", "-u")) -join "").Trim() -eq "0")
+$managerDump = (Adb @("shell", "dumpsys", "package", $Manager)) -join "`n"
+$ManagerDebuggable = $managerDump -match '(?m)^\s*flags=\[[^\]]*DEBUGGABLE'
+
 $legacyUri = RuntimeUri (Join-Path $Root "prototypes/linux-app-manager-stub/assets/payload-hello-linux-amd64")
 $packages = (Adb @("shell", "cmd", "package", "list", "packages", "-U")) -join "`n"
 $managerUid = [regex]::Match($packages, "package:$([regex]::Escape($Manager)) uid:(\d+)").Groups[1].Value
@@ -56,20 +75,27 @@ $wrapperActivity = Adb @("shell", "cmd", "package", "resolve-activity", "--brief
 if (-not $wrapperActivity) { throw "Runtime wrapper has no resolved launcher Activity" }
 
 try {
-    Adb @("logcat", "-c") | Out-Null
-    Adb @("shell", "am", "force-stop", $Manager) | Out-Null
-    Adb @("shell", "am", "start", "-W", "-n", "$Manager/.MainActivity",
-        "--es", "archphene_test_runtime_module_package", $Wrapper,
-        "--es", "archphene_test_runtime_module_action", "verify_catalog") | Out-Null
-    Wait-RuntimeLog "Runtime catalog parser passed" | Out-Null
+    if ($ManagerDebuggable) {
+        Adb @("logcat", "-c") | Out-Null
+        Adb @("shell", "am", "force-stop", $Manager) | Out-Null
+        Adb @("shell", "am", "start", "-W", "-n", "$Manager/.MainActivity",
+            "--es", "archphene_test_runtime_module_package", $Wrapper,
+            "--es", "archphene_test_runtime_module_action", "verify_catalog") | Out-Null
+        Wait-RuntimeLog "Runtime catalog parser passed" | Out-Null
 
-    Adb @("logcat", "-c") | Out-Null
-    Adb @("shell", "am", "force-stop", $Wrapper) | Out-Null
-    Adb @("shell", "am", "start", "-W", "-n", $wrapperActivity,
-        "--es", "archphene_test_runtime_module_uri", $legacyUri) | Out-Null
-    $denied = Wait-RuntimeLog "Runtime FD probe failed"
-    if ($denied -match "Runtime FD probe exit=0") {
-        throw "Wrapper opened an unbound legacy runtime module"
+        Adb @("logcat", "-c") | Out-Null
+        Adb @("shell", "am", "force-stop", $Wrapper) | Out-Null
+        Adb @("shell", "am", "start", "-W", "-n", $wrapperActivity,
+            "--es", "archphene_test_runtime_module_uri", $legacyUri) | Out-Null
+        $denied = Wait-RuntimeLog "Runtime FD probe failed"
+        if ($denied -match "Runtime FD probe exit=0") {
+            throw "Wrapper opened an unbound legacy runtime module"
+        }
+    } else {
+        $denied = (Adb @("shell", "content", "read", "--uri", $legacyUri)) -join "`n"
+        if ($denied -notmatch 'Runtime module is unavailable to this caller|Permission Denial') {
+            throw "Production runtime provider did not reject the ungranted shell caller`n$denied"
+        }
     }
 
     Adb @("logcat", "-c") | Out-Null
@@ -87,7 +113,7 @@ try {
     if ($runtimeLog -match 'Runtime GUI exit=') {
         throw "Runtime failed before the Linux loader became interactive`n$runtimeLog"
     }
-    $fds = (Adb @("shell", "run-as", $Wrapper, "ls", "-l", "/proc/$linuxPid/fd")) -join "`n"
+    $fds = (Invoke-PrivateAdb -Package $Wrapper -Arguments @("ls", "-l", "/proc/$linuxPid/fd")) -join "`n"
     $runtimeFds = @($fds -split "`n" | Where-Object { $_ -match 'runtime-fd-' })
     $fdSummary = ($runtimeFds | Select-Object -First 12) -join "`n"
     if ($fds -notmatch 'runtime-fd-[^/]+/\.program' -or
@@ -95,7 +121,7 @@ try {
         throw "Linux loader is missing its bounded wrapper-private executable view`n$fdSummary"
     }
 
-    $liveCacheSize = ((Adb @("shell", "run-as", $Wrapper, "du", "-sk", "cache")) -join "`n")
+    $liveCacheSize = ((Invoke-PrivateAdb -Package $Wrapper -Arguments @("du", "-sk", "cache")) -join "`n")
     $liveCacheKiB = [int64]([regex]::Match($liveCacheSize, '^(\d+)').Groups[1].Value)
     if ($liveCacheKiB -le 0 -or $liveCacheKiB -ge 524288) {
         throw "Wrapper execution cache is outside the 512 MiB bound: $liveCacheSize"
@@ -104,7 +130,7 @@ try {
     Adb @("shell", "input", "keyevent", "4") | Out-Null
     Wait-RuntimeLog "(Released runtime pack lease|Runtime process died; released pack lease) $packId" 20 | Out-Null
     Start-Sleep -Seconds 1
-    $cleanCacheSize = ((Adb @("shell", "run-as", $Wrapper, "du", "-sk", "cache")) -join "`n")
+    $cleanCacheSize = ((Invoke-PrivateAdb -Package $Wrapper -Arguments @("du", "-sk", "cache")) -join "`n")
     $cleanCacheKiB = [int64]([regex]::Match($cleanCacheSize, '^(\d+)').Groups[1].Value)
     if ($cleanCacheKiB -ge 65536) {
         throw "Wrapper retained a runtime closure after process exit: $cleanCacheSize"
