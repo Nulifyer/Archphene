@@ -170,7 +170,9 @@ Linux builds generate a bounded catalog from the exact immutable module bytes fo
 
 The emulator regression proves parser rejection and both sides of the access boundary: direct wrapper access is denied, while explicit launch-time grants permit a static ELF, a patched-glibc fixture, and a program with a separately granted `DT_NEEDED` library to execute. Package-derived closures are stored persistently once under the manager UID as SHA-256-addressed blobs. Per-pack manifests authorize only the exact hashes in that pack, so deduplication does not widen a wrapper's module access. Validation migrates legacy per-pack copies into the blob store, and garbage collection retains every blob referenced by a valid installed pack.
 
-The current launcher creates a wrapper-private, bounded transient cache for the program and named libraries so the dynamic loader and late `dlopen()` calls receive stable path names. The cache is removed after a normal exit, purged on the next launch after an interrupted exit, and remains reclaimable Android cache data. It is not a second persistent package closure. A future native descriptor-only launcher may eliminate this compatibility cache, but it must first prove that applications and libraries do not close inherited descriptors before late loading.
+The current launcher creates a wrapper-private, bounded transient cache for the program and named libraries so the dynamic loader and late `dlopen()` calls receive stable path names. The cache is removed after a normal exit, purged on the next launch after an interrupted exit, and remains reclaimable Android cache data. It is not a second persistent package closure.
+
+A debug-only descriptor-library probe keeps the executable named while exposing every library through inherited read-only descriptors. Unmodified KCalc and Mousepad both fail closed before toolkit startup: Android permits the inherited descriptors but stock glibc cannot resolve soname links through `/proc/self/fd`, producing missing `libKF6Notifications.so.6` and `libmousepad.so.0` respectively. The failed probes clean to less than 64 MiB, and immediate normal launches of both applications succeed. Archphene therefore retains the named transient cache. Removing it requires an FD-aware glibc object loader, not a Wayland or toolkit change. Reproduce the gate with `scripts/test-runtime-descriptor-libraries.ps1` on debug wrappers.
 
 Measure an attached test device with:
 
@@ -199,10 +201,7 @@ Installing KCalc made the manager retain 582.7 MiB of package state: 362.8 MiB f
 
 The 359.1 MiB KCalc launch cache is the named private view required by the current dynamic-loader and late-`dlopen()` compatibility path. A normal app exit removes it. Android force-stop prevents lifecycle cleanup, so the cache can remain until the next wrapper launch purges stale views or Android reclaims cache storage. This peak must not be presented as steady-state application data.
 
-## Next Milestones
+## Runtime Cache Decision
 
-1. Add a small descriptor/RPC path-broker C API before claiming live SAF path translation.
-2. Extend GUI wrappers from individual granted documents to persisted project trees with explicit lifecycle and power policy.
-3. Add a syscall probe for app-private path operations: `mkdir`, `mkdirat`, `open`, `openat`, `rename`, `unlink`, `fsync`, and `stat`.
-4. Validate a descriptor-only dynamic-loader view against unmodified Qt and GTK applications before removing the transient named-module cache.
+The bounded named-module cache is required by the supported stock-glibc runtime. Persistent package bytes remain deduplicated under the manager UID; the per-wrapper cache exists only while Linux processes need pathname-based loading and is reclaimable by normal exit, the next launch, or Android cache management.
 

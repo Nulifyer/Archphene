@@ -95,6 +95,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     private String[] runtimeLibraryUris;
     private String[] runtimeLibraryNames;
     private boolean runtimeGui;
+    private boolean runtimeDescriptorLibraries;
     private boolean processTreeProbe;
     private final Binder runtimeLeaseToken = new Binder();
     private ContentProviderClient runtimeProviderClient;
@@ -133,6 +134,10 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         runtimeLibraryNames = getIntent().getStringArrayExtra(
                 "archphene_test_runtime_library_names");
         runtimeGui = getIntent().getBooleanExtra("archphene_runtime_gui", false);
+        runtimeDescriptorLibraries = (getApplicationInfo().flags
+                & ApplicationInfo.FLAG_DEBUGGABLE) != 0
+                && getIntent().getBooleanExtra(
+                        "archphene_test_descriptor_libraries_runtime", false);
         processTreeProbe = (getApplicationInfo().flags
                 & ApplicationInfo.FLAG_DEBUGGABLE) != 0
                 && getIntent().getBooleanExtra(
@@ -1131,7 +1136,9 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 }
                 RuntimeFdLauncher.Result result = RuntimeFdLauncher.runGlibc(
                         getContentResolver(), android.net.Uri.parse(program),
-                        android.net.Uri.parse(loader), libraries, libraryNames, getCacheDir());
+                        android.net.Uri.parse(loader), libraries, libraryNames, getCacheDir(),
+                        java.util.Collections.emptyMap(), "program",
+                        java.util.Collections.emptyList(), null, runtimeDescriptorLibraries);
                 Log.i("ArchpheneRuntime", "Runtime glibc probe exit=" + result.exitCode
                         + " output=" + result.output.replace('\n', ' '));
             } catch (Exception error) {
@@ -1214,6 +1221,9 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                     environment.put("GST_DEBUG_NO_COLOR", "1");
                     environment.put("GST_DEBUG_FILE", gstreamerLog.getAbsolutePath());
                 }
+                Log.i("ArchpheneRuntime", "Runtime module view="
+                        + (runtimeDescriptorLibraries
+                                ? "named-program-descriptor-libraries" : "named-private"));
                 List<File> imported = importDocumentsIfAllowed();
                 List<String> arguments = new java.util.ArrayList<>();
                 for (File file : imported) arguments.add(file.getAbsolutePath());
@@ -1221,7 +1231,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                         getContentResolver(), android.net.Uri.parse(runtimeProbeUri),
                         android.net.Uri.parse(runtimeLoaderUri), libraries,
                         runtimeLibraryNames, getCacheDir(), environment,
-                        runtimeProgramName, arguments, execution);
+                        runtimeProgramName, arguments, execution, runtimeDescriptorLibraries);
                 Log.i("ArchpheneRuntime", "Runtime GUI exit=" + result.exitCode);
                 logRuntimeOutput(result.output);
                 if (result.exitCode != 0 && gpuSocket != null
@@ -1244,7 +1254,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                             getContentResolver(), android.net.Uri.parse(runtimeProbeUri),
                             android.net.Uri.parse(runtimeLoaderUri), libraries,
                             runtimeLibraryNames, getCacheDir(), environment,
-                            runtimeProgramName, arguments, execution);
+                            runtimeProgramName, arguments, execution, runtimeDescriptorLibraries);
                     Log.i("ArchpheneRuntime", "Runtime GPU fallback exit="
                             + result.exitCode);
                     logRuntimeOutput(result.output);

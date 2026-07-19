@@ -9916,6 +9916,7 @@ fn run_glibc_fds(
     program_name: &[u8],
     argument_manifest: &[u8],
     execution_id: i64,
+    descriptor_libraries: bool,
 ) -> (i32, Vec<u8>) {
     let execution = match RuntimeExecutionGuard::begin(execution_id) {
         Ok(execution) => execution,
@@ -9983,6 +9984,8 @@ fn run_glibc_fds(
     for (index, (link, fd)) in links.iter().zip(inherited.iter()).enumerate() {
         let target = if index == 0 {
             link_root.join(".program")
+        } else if descriptor_libraries {
+            PathBuf::from(format!("/proc/self/fd/{fd}"))
         } else if index == 1 {
             PathBuf::from(format!("/proc/self/fd/{fd}"))
         } else {
@@ -10007,9 +10010,12 @@ fn run_glibc_fds(
         }
         let alias = plugin_directory.join(name);
         let _ = std::fs::remove_file(&alias);
-        if std::os::unix::fs::symlink(link_root.join(format!(".library-{}", index - 2)), &alias)
-            .is_err()
-        {
+        let target = if descriptor_libraries {
+            link_root.join(name)
+        } else {
+            link_root.join(format!(".library-{}", index - 2))
+        };
+        if std::os::unix::fs::symlink(target, &alias).is_err() {
             cleanup_runtime_fd_view(&mut inherited, &links);
             return (-libc::EIO, Vec::new());
         }
@@ -10211,6 +10217,7 @@ pub unsafe extern "system" fn Java_org_archphene_bridge_RuntimeFdLauncher_native
     program_name: jbyteArray,
     runtime_arguments: jbyteArray,
     execution_id: i64,
+    descriptor_libraries: i32,
     output: jbyteArray,
 ) -> i32 {
     let (
@@ -10238,6 +10245,7 @@ pub unsafe extern "system" fn Java_org_archphene_bridge_RuntimeFdLauncher_native
         &program_name,
         &runtime_arguments,
         execution_id,
+        descriptor_libraries != 0,
     );
     if copy_to_java_byte_array(environment, output, &captured) < 0 {
         return -libc::EFAULT;

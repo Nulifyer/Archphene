@@ -132,6 +132,14 @@ public final class RuntimeFdLauncher {
             Uri loaderUri, Uri[] libraryUris, String[] libraryNames, File cacheRoot,
             Map<String, String> environment, String programName, List<String> arguments,
             Execution execution) throws Exception {
+        return runGlibc(resolver, programUri, loaderUri, libraryUris, libraryNames,
+                cacheRoot, environment, programName, arguments, execution, false);
+    }
+
+    public static Result runGlibc(ContentResolver resolver, Uri programUri,
+            Uri loaderUri, Uri[] libraryUris, String[] libraryNames, File cacheRoot,
+            Map<String, String> environment, String programName, List<String> arguments,
+            Execution execution, boolean descriptorLibraries) throws Exception {
         if (programName == null || !programName.matches("[a-zA-Z0-9@._+:-]{1,128}")) {
             throw new IllegalArgumentException("Invalid runtime program name");
         }
@@ -148,6 +156,9 @@ public final class RuntimeFdLauncher {
         long executionId = 0;
         try {
             if (execution != null) executionId = execution.begin();
+            // Android procfs does not permit glibc to reopen the executable through
+            // /proc/self/fd. Keep only the main program as a private named file;
+            // Descriptor-library mode still avoids materializing the runtime closure.
             ParcelFileDescriptor program = materializeElf(resolver, programUri,
                     new File(links, ".program"), execution);
             descriptors.add(program);
@@ -160,8 +171,10 @@ public final class RuntimeFdLauncher {
                         || !linkNames.add(libraryNames[index])) {
                     throw new SecurityException("Unsafe or duplicate runtime library name");
                 }
-                ParcelFileDescriptor library = materializeElf(resolver, libraryUris[index],
-                        new File(links, ".library-" + index), execution);
+                ParcelFileDescriptor library = descriptorLibraries
+                        ? openElf(resolver, libraryUris[index])
+                        : materializeElf(resolver, libraryUris[index],
+                                new File(links, ".library-" + index), execution);
                 descriptors.add(library);
                 manifest.append(library.getFd()).append('\t')
                         .append(libraryNames[index]).append('\n');
@@ -201,7 +214,7 @@ public final class RuntimeFdLauncher {
                     links.getAbsolutePath().getBytes(StandardCharsets.UTF_8),
                     encodeEnvironment(launchEnvironment),
                     programName.getBytes(StandardCharsets.UTF_8),
-                    encodeArguments(arguments), executionId, output);
+                    encodeArguments(arguments), executionId, descriptorLibraries ? 1 : 0, output);
             return result(exitCode, output);
         } finally {
             if (execution != null) execution.finish();
@@ -354,7 +367,8 @@ public final class RuntimeFdLauncher {
     private static native int nativeRunFd(int fd, byte[] output);
     private static native int nativeRunGlibc(int programFd, int loaderFd,
             byte[] libraryManifest, byte[] linkDirectory, byte[] environment,
-            byte[] programName, byte[] arguments, long executionId, byte[] output);
+            byte[] programName, byte[] arguments, long executionId,
+            int descriptorLibraries, byte[] output);
     private static native void nativeCancelGlibc(long executionId);
     private static native void nativeForgetGlibc(long executionId);
     private static native int nativeTerminateUidProcesses();

@@ -85,7 +85,7 @@ This is the prioritized completion queue for the Archphene Android application. 
   - [ ] Supported GrapheneOS Pixel and sustained external-display desktop mode.
   - [x] Add reproducible Android storage measurement that separates APK, installed code, persistent app data, transient execution cache, shared runtime blobs, pack metadata, downloads, and staging.
   - [x] Publish clean-install manager, Terminal, generated-wrapper, shared-runtime, and per-application storage costs; distinguish steady-state data from transient loader cache and clearable archives.
-  - Validate descriptor-only runtime module paths against late `dlopen()` in unmodified Qt and GTK applications before deciding whether the current bounded transient named-module cache can be removed.
+  - [x] Validate descriptor-library runtime paths with unmodified Qt and GTK applications. Stock glibc cannot resolve sonames through Android `/proc/self/fd` links, so retain the bounded transient named-module cache; normal KCalc and Mousepad launches remain healthy after the fail-closed probes.
 
 ## P1 - Product and UX
 
