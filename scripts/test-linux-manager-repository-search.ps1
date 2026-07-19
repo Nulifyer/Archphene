@@ -22,7 +22,7 @@ function Wait-Ui([string]$Pattern, [string]$Name, [int]$Seconds = 15) {
     if ($ui -notmatch $Pattern) { throw "Timed out waiting for $Pattern" }
     return $ui
 }
-& $Adb -s $Serial shell pm clear $Package | Out-Null
+& $Adb -s $Serial shell am force-stop $Package | Out-Null
 & $Adb -s $Serial shell am start -W -n "$Package/.MainActivity" | Out-Null
 $ui = Wait-Ui 'content-desc="Add Linux app"' "repo-home"
 Tap-Pattern $ui 'content-desc="Add Linux app"' "Add button"

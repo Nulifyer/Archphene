@@ -2511,7 +2511,8 @@ public final class MainActivity extends Activity {
             if (installedNames.contains(candidate)) continue;
             for (ArchPackageRepository.PackageResult value
                     : ArchPackageRepository.search(this, candidate)) {
-                if (candidate.equals(value.name) && "x86_64".equals(value.architecture)) {
+                if (candidate.equals(value.name)
+                        && ArchRuntimePolicy.supports(value.architecture)) {
                     success = value;
                     break;
                 }
