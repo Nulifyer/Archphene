@@ -140,6 +140,16 @@ public final class RuntimeFdLauncher {
             Uri loaderUri, Uri[] libraryUris, String[] libraryNames, File cacheRoot,
             Map<String, String> environment, String programName, List<String> arguments,
             Execution execution, boolean descriptorLibraries) throws Exception {
+        return runGlibc(resolver, programUri, loaderUri, libraryUris, libraryNames,
+                cacheRoot, environment, programName, arguments, execution,
+                descriptorLibraries, new String[0], new String[0]);
+    }
+
+    public static Result runGlibc(ContentResolver resolver, Uri programUri,
+            Uri loaderUri, Uri[] libraryUris, String[] libraryNames, File cacheRoot,
+            Map<String, String> environment, String programName, List<String> arguments,
+            Execution execution, boolean descriptorLibraries, String[] commandUriValues,
+            String[] commandNames) throws Exception {
         if (programName == null || !programName.matches("[a-zA-Z0-9@._+:-]{1,128}")) {
             throw new IllegalArgumentException("Invalid runtime program name");
         }
@@ -148,11 +158,17 @@ public final class RuntimeFdLauncher {
                 || libraryUris.length == 0 || libraryUris.length > MAX_LIBRARIES) {
             throw new IllegalArgumentException("Invalid runtime library set");
         }
+        if (commandUriValues == null || commandNames == null
+                || commandUriValues.length != commandNames.length
+                || commandUriValues.length > 512) {
+            throw new IllegalArgumentException("Invalid runtime command set");
+        }
         purgeStaleViews(cacheRoot);
         File links = new File(cacheRoot, "runtime-fd-" + android.os.Process.myPid()
                 + "-" + System.nanoTime());
         if (!links.mkdir()) throw new IllegalStateException("Could not create runtime FD view");
-        List<ParcelFileDescriptor> descriptors = new ArrayList<>(libraryUris.length + 2);
+        List<ParcelFileDescriptor> descriptors = new ArrayList<>(
+                libraryUris.length + commandUriValues.length + 2);
         long executionId = 0;
         try {
             if (execution != null) executionId = execution.begin();
@@ -180,6 +196,26 @@ public final class RuntimeFdLauncher {
                         .append(libraryNames[index]).append('\n');
             }
             Map<String, String> launchEnvironment = new HashMap<>(environment);
+            File commandDirectory = new File(links, "commands");
+            if (!commandDirectory.mkdir()) {
+                throw new java.io.IOException("Could not create runtime command view");
+            }
+            Set<String> runtimeCommands = new HashSet<>();
+            for (int index = 0; index < commandUriValues.length; index++) {
+                String name = commandNames[index];
+                if (!safeLinkName(name) || !runtimeCommands.add(name)
+                        || commandUriValues[index] == null) {
+                    throw new SecurityException("Unsafe or duplicate runtime command name");
+                }
+                ParcelFileDescriptor command = materializeElf(resolver,
+                        Uri.parse(commandUriValues[index]),
+                        new File(commandDirectory, name), execution);
+                descriptors.add(command);
+            }
+            launchEnvironment.put("ARCHPHENE_RUNTIME_COMMAND_DIR",
+                    commandDirectory.getAbsolutePath());
+            launchEnvironment.put("ARCHPHENE_RUNTIME_LOADER",
+                    new File(links, "loader").getAbsolutePath());
             launchEnvironment.put("ARCHPHENE_RUNTIME_LIB", links.getAbsolutePath());
             launchEnvironment.putIfAbsent("LIBGL_DRIVERS_PATH", links.getAbsolutePath());
             if (linkNames.contains("libarchphene_path_bridge.so")) {
@@ -304,7 +340,6 @@ public final class RuntimeFdLauncher {
         }
         return true;
     }
-
     private static ParcelFileDescriptor materializeElf(ContentResolver resolver, Uri uri,
             File temporary, Execution execution) throws Exception {
         try (ParcelFileDescriptor source = openElf(resolver, uri);

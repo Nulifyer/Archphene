@@ -3,6 +3,7 @@ package org.archphene.bridge;
 import android.app.Activity;
 import android.app.Dialog;
 import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.ClipDescription;
 import android.content.ContentProviderClient;
 import android.content.Intent;
@@ -96,6 +97,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     private String runtimeDataUri;
     private String[] runtimeLibraryUris;
     private String[] runtimeLibraryNames;
+    private String[] runtimeCommandUris = new String[0];
+    private String[] runtimeCommandNames = new String[0];
     private boolean runtimeGui;
     private boolean runtimeDescriptorLibraries;
     private boolean processTreeProbe;
@@ -129,6 +132,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                     OnBackInvokedDispatcher.PRIORITY_DEFAULT, backInvokedCallback);
         }
         readMetadata();
+        seedTestClipboard();
         runBrokerPermissionProbe();
         runtimeProbeUri = getIntent().getStringExtra("archphene_test_runtime_module_uri");
         runtimeLoaderUri = getIntent().getStringExtra("archphene_test_runtime_loader_uri");
@@ -439,9 +443,13 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             String loader = runtime.getString("loader_uri");
             String[] libraries = runtime.getStringArray("library_uris");
             String[] names = runtime.getStringArray("library_names");
+            String[] commands = runtime.getStringArray("command_uris");
+            String[] commandNames = runtime.getStringArray("command_names");
             if (leasedPack == null || !leasedPack.matches("[a-f0-9]{64}")
                     || program == null || loader == null || libraries == null || names == null
-                    || libraries.length == 0 || libraries.length != names.length) {
+                    || commands == null || commandNames == null
+                    || libraries.length == 0 || libraries.length != names.length
+                    || commands.length != commandNames.length) {
                 throw new SecurityException("Manager returned an invalid runtime pack");
             }
             runtimeProbeUri = program;
@@ -449,6 +457,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             runtimeLoaderUri = loader;
             runtimeLibraryUris = libraries;
             runtimeLibraryNames = names;
+            runtimeCommandUris = commands;
+            runtimeCommandNames = commandNames;
             runtimeDataUri = runtime.getString("data_uri");
             String runtimeToolkit = runtime.getString("toolkit");
             if ("qt6".equals(runtimeToolkit) || "gtk3".equals(runtimeToolkit)
@@ -837,7 +847,6 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             }
             accessibilityBridge.updateWindows(accessibilityWindows, independentWindows);
         }
-        if (!independentWindows) return;
         ArchpheneCompositorSession.WindowFrame nextPrimary = null;
         for (ArchpheneCompositorSession.WindowFrame frame : windows) {
             if (frame.window.primary) {
@@ -853,6 +862,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 }
             }
         }
+        primaryFrame = nextPrimary;
+        if (!independentWindows) return;
         if (nextPrimary != null) {
             primaryFrame = nextPrimary;
             compositorView.setAccessibilityWindowId(nextPrimary.window.id);
@@ -1196,6 +1207,12 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 environment.put("XDG_CONFIG_HOME", config.getAbsolutePath());
                 environment.put("XDG_RUNTIME_DIR", runtimeDir.getAbsolutePath());
                 environment.put("WAYLAND_DISPLAY", "wayland-0");
+                environment.put("PATH", "/system/bin:/system/xbin");
+                if ((getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0
+                        && getIntent().getBooleanExtra("archphene.wayland_debug", false)) {
+                    environment.put("WAYLAND_DEBUG", "client");
+                    Log.i("ArchpheneLinuxApp", "Wayland client protocol trace enabled");
+                }
                 applyCapabilityEnvironment(environment);
                 environment.put("TMPDIR", tmp.getAbsolutePath());
                 File runtimeRoot = new File(getFilesDir(), "linux-runtime/root");
@@ -1229,14 +1246,18 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                                 ? "named-program-descriptor-libraries" : "named-private"));
                 List<File> imported = importDocumentsIfAllowed();
                 List<String> arguments = new java.util.ArrayList<>();
+                appendTestRuntimeArguments(arguments);
                 for (File file : imported) arguments.add(file.getAbsolutePath());
                 RuntimeFdLauncher.Result result = RuntimeFdLauncher.runGlibc(
                         getContentResolver(), android.net.Uri.parse(runtimeProbeUri),
                         android.net.Uri.parse(runtimeLoaderUri), libraries,
                         runtimeLibraryNames, getCacheDir(), environment,
-                        runtimeProgramName, arguments, execution, runtimeDescriptorLibraries);
+                        runtimeProgramName, arguments, execution, runtimeDescriptorLibraries,
+                            runtimeCommandUris, runtimeCommandNames);
                 Log.i("ArchpheneRuntime", "Runtime GUI exit=" + result.exitCode);
                 logRuntimeOutput(result.output);
+                Log.i("ArchpheneRuntime", "Clipboard Android content reads="
+                        + session.clipboardContentReadCount());
                 if (result.exitCode != 0 && gpuSocket != null
                         && gpuBridge.failedUnexpectedly() && !isActivityDestroyed()) {
                     Log.w("ArchpheneRuntime",
@@ -1257,7 +1278,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                             getContentResolver(), android.net.Uri.parse(runtimeProbeUri),
                             android.net.Uri.parse(runtimeLoaderUri), libraries,
                             runtimeLibraryNames, getCacheDir(), environment,
-                            runtimeProgramName, arguments, execution, runtimeDescriptorLibraries);
+                            runtimeProgramName, arguments, execution, runtimeDescriptorLibraries,
+                            runtimeCommandUris, runtimeCommandNames);
                     Log.i("ArchpheneRuntime", "Runtime GPU fallback exit="
                             + result.exitCode);
                     logRuntimeOutput(result.output);
@@ -1289,6 +1311,32 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         }
     }
 
+    private void seedTestClipboard() {
+        if ((getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) == 0
+                || !getIntent().hasExtra("archphene_test_android_clipboard")) return;
+        String text = getIntent().getStringExtra("archphene_test_android_clipboard");
+        if (text == null || text.length() > 16 * 1024 || text.indexOf('\0') >= 0) {
+            throw new IllegalArgumentException("Invalid test clipboard text");
+        }
+        ClipboardManager clipboard = (ClipboardManager)
+                getSystemService(CLIPBOARD_SERVICE);
+        clipboard.setPrimaryClip(ClipData.newPlainText("Archphene test clipboard", text));
+    }
+
+    private void appendTestRuntimeArguments(List<String> arguments) {
+        if ((getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) == 0) return;
+        String[] values = getIntent().getStringArrayExtra("archphene_test_runtime_args");
+        if (values == null) return;
+        if (values.length > 16) {
+            throw new IllegalArgumentException("Too many test runtime arguments");
+        }
+        for (String value : values) {
+            if (value == null || value.length() > 4096 || value.indexOf('\0') >= 0) {
+                throw new IllegalArgumentException("Invalid test runtime argument");
+            }
+            arguments.add(value);
+        }
+    }
     private void launch(int width, int height) {
         File runtimeDir = new File(getFilesDir(), "wayland-runtime");
         runtimeDir.mkdirs();
@@ -1971,6 +2019,11 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     }
 
     @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (session != null) session.setHostActive(hasFocus);
+    }
+    @Override
     public void onConfigurationChanged(Configuration newConfiguration) {
         super.onConfigurationChanged(newConfiguration);
         applyWindowMode();
@@ -2012,7 +2065,13 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             session.dismissPopups();
             return true;
         }
-        return closeActiveSecondaryWindow();
+        if (closeActiveSecondaryWindow()) return true;
+        ArchpheneCompositorSession.WindowFrame primary = primaryFrame;
+        if (session != null && primary != null && primary.window.mapped) {
+            session.closeWindow(primary.window.id);
+            return true;
+        }
+        return false;
     }
 
     private void handleSystemBack() {

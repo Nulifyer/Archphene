@@ -63,6 +63,10 @@ This is the prioritized completion queue for the Archphene Android application. 
       - [x] Build and validate the official Arch Linux ARM libsecret client closure on physical AArch64; encrypted store/lookup/clear passes through the private Secret Service adapter.
       - [x] Build the patched AArch64 KWallet compatibility daemon and validate official `kwallet-query` on physical ARM; upstream Arch x86_64 clients remain unusable on 16 KB Android because their ELF files are 4 KB-aligned.
   - [x] Reject broad all-files access as the default. Use user-selected Storage Access Framework documents and trees; reconsider an optional advanced flow only with a concrete compatibility requirement.
+- [x] Validate core raw Wayland interoperability with official unmodified diagnostic packages.
+  - [x] Run official `wev` packages on x86_64 emulator and physical AArch64 through generated wrappers; validate pointer, horizontal/vertical wheel, touch, keyboard, modifiers, repeat, focus loss/restoration, and graceful close.
+  - [x] Run official `wl-clipboard` packages on both devices; validate exact bidirectional plain-text transfer, focused selection ownership, demand-driven Android reads, Linux-to-Android source delivery, and no unsolicited clipboard reads.
+  - [x] Route verified package subprocess commands through the trusted glibc loader and provide Android-compatible POSIX shared-memory names without making wrapper-private runtime files executable.
 - [ ] Complete platform compatibility.
   - [x] Keep the manager usable on 16 KB x86_64 without Android's generic page-size dialog; show an explicit in-app restriction and block package transactions before incompatible 4 KB Arch ELF execution. Rebuilding the upstream x86_64 runtime remains a broader package-compatibility task.
   - [x] Build patched x86_64 glibc with 64 KB ELF alignment and execute an aligned dynamic probe under the manager UID on a real 16 KB Android emulator.

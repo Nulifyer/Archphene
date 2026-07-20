@@ -2522,12 +2522,24 @@ public final class MainActivity extends Activity {
                     android.util.Log.i("ArchpheneRuntime", "published pack "
                             + staged.runtimePackId + " for " + sourcePackage);
                 }
+                boolean waylandCandidate = getIntent().getBooleanExtra(
+                        "archphene_test_wayland_candidate", false);
+                String waylandExecutable = getIntent().getStringExtra(
+                        "archphene_test_wayland_executable");
                 ArchWrapperAssembler.Result result = staged == null
                         ? ArchWrapperAssembler.assembleQt(this, "extra", sourcePackage)
-                        : ArchWrapperAssembler.assembleDesktopFromRuntimePack(
-                                this, "extra", sourcePackage, staged.sourceVersion(),
-                                ArchRuntimePolicy.current().architecture, staged.toolkit,
-                                staged.classification, staged.root);
+                        : waylandCandidate
+                                ? ArchWrapperAssembler.assembleWaylandCandidateFromRuntimePack(
+                                        this, "extra", sourcePackage, staged.sourceVersion(),
+                                        ArchRuntimePolicy.current().architecture,
+                                        staged.classification, staged.root,
+                                        waylandExecutable == null
+                                                ? staged.classification.executable
+                                                : waylandExecutable)
+                                : ArchWrapperAssembler.assembleDesktopFromRuntimePack(
+                                        this, "extra", sourcePackage, staged.sourceVersion(),
+                                        ArchRuntimePolicy.current().architecture, staged.toolkit,
+                                        staged.classification, staged.root);
                 if (getIntent().getBooleanExtra("archphene_test_install_assembled", false)) {
                     ArchPackageRuntime.StagedTransaction installedStaged = staged;
                     staged = null;

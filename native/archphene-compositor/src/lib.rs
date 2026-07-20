@@ -151,6 +151,7 @@ pub struct CompositorState {
     keyboard_event_count: u32,
     keyboards: Vec<WlKeyboard>,
     keyboard_focus_surface: Option<WlSurface>,
+    selection_focus_dirty: bool,
     pressed_keys: Vec<u32>,
     data_device_manager_binds: u32,
     data_source_count: u32,
@@ -2102,12 +2103,23 @@ fn create_keymap_file() -> io::Result<File> {
     Ok(file)
 }
 
+fn remember_selection_serial(state: &mut CompositorState, serial: u32, surface: WlSurface) {
+    const MAX_RECENT_SERIALS: usize = 32;
+    state
+        .selection_serials
+        .push_back(PopupGrabSerial { serial, surface });
+    while state.selection_serials.len() > MAX_RECENT_SERIALS {
+        state.selection_serials.pop_front();
+    }
+}
+
 fn set_keyboard_focus(state: &mut CompositorState, surface: Option<WlSurface>) {
     if state.keyboard_focus_surface.as_ref().map(Resource::id) == surface.as_ref().map(Resource::id)
     {
         return;
     }
 
+    state.selection_focus_dirty = true;
     state.next_input_serial = state.next_input_serial.wrapping_add(1).max(1);
     let serial = state.next_input_serial;
     if let Some(previous) = state.keyboard_focus_surface.take() {
@@ -2157,6 +2169,7 @@ fn set_keyboard_focus(state: &mut CompositorState, surface: Option<WlSurface>) {
                     .focused_surface = Some(surface.clone());
             }
         }
+        remember_selection_serial(state, serial, surface.clone());
         state.keyboard_focus_surface = Some(surface);
     } else {
         state.pressed_keys.clear();
@@ -2212,6 +2225,13 @@ fn publish_offer_to_device(
     state.data_offers.push(offer);
 }
 
+fn data_device_has_keyboard_focus(state: &CompositorState, device: &WlDataDevice) -> bool {
+    state
+        .keyboard_focus_surface
+        .as_ref()
+        .is_some_and(|surface| device.id().same_client_as(&surface.id()))
+}
+
 fn publish_wayland_selection(
     state: &mut CompositorState,
     handle: &DisplayHandle,
@@ -2232,7 +2252,12 @@ fn publish_wayland_selection(
         .unwrap_or_else(|error| error.into_inner())
         .clone();
     let devices = state.data_devices.clone();
-    for device in &devices {
+    let focused_surface = state.keyboard_focus_surface.clone();
+    for device in devices.iter().filter(|device| {
+        focused_surface
+            .as_ref()
+            .is_some_and(|surface| device.id().same_client_as(&surface.id()))
+    }) {
         publish_offer_to_device(
             state,
             handle,
@@ -2249,7 +2274,12 @@ fn publish_android_selection(state: &mut CompositorState, handle: &DisplayHandle
         .map(|mime_type| (*mime_type).to_owned())
         .collect::<Vec<_>>();
     let devices = state.data_devices.clone();
-    for device in &devices {
+    let focused_surface = state.keyboard_focus_surface.clone();
+    for device in devices.iter().filter(|device| {
+        focused_surface
+            .as_ref()
+            .is_some_and(|surface| device.id().same_client_as(&surface.id()))
+    }) {
         publish_offer_to_device(
             state,
             handle,
@@ -2257,6 +2287,24 @@ fn publish_android_selection(state: &mut CompositorState, handle: &DisplayHandle
             ClipboardOfferSource::AndroidClipboard,
             mime_types.clone(),
         );
+    }
+}
+
+fn sync_focused_selection(state: &mut CompositorState, handle: &DisplayHandle) {
+    let source = state
+        .selection_source
+        .clone()
+        .filter(|source| source.is_alive());
+    let has_selection = state.android_clipboard_offered || source.is_some();
+    for device in state.data_devices.iter().filter(|device| {
+        device.is_alive() && (!has_selection || !data_device_has_keyboard_focus(state, device))
+    }) {
+        device.selection(None);
+    }
+    if state.android_clipboard_offered {
+        publish_android_selection(state, handle);
+    } else if let Some(source) = source {
+        publish_wayland_selection(state, handle, Some(&source));
     }
 }
 
@@ -2926,7 +2974,10 @@ impl Dispatch<WlDataDeviceManager, ()> for CompositorState {
                 let device = data_init.init(id, DataDeviceData { seat });
                 state.data_device_count = state.data_device_count.saturating_add(1);
                 state.data_devices.push(device.clone());
-                if state.clipboard_active && state.android_clipboard_offered {
+                if state.clipboard_active
+                    && state.android_clipboard_offered
+                    && data_device_has_keyboard_focus(state, &device)
+                {
                     publish_offer_to_device(
                         state,
                         handle,
@@ -3319,6 +3370,7 @@ impl Dispatch<WlSeat, ()> for CompositorState {
                     let serial = state.next_input_serial;
                     keyboard.enter(serial, surface, Vec::new());
                     keyboard.modifiers(serial, 0, 0, 0, 0);
+                    remember_selection_serial(state, serial, surface.clone());
                     state.keyboard_event_count = state.keyboard_event_count.saturating_add(2);
                 }
                 state.keyboard_count = state.keyboard_count.saturating_add(1);
@@ -6333,6 +6385,11 @@ impl CompositorCore {
     pub fn dispatch_once(&mut self) -> std::io::Result<usize> {
         let accepted = self.accept_pending_clients()?;
         let dispatched = self.display.dispatch_clients(&mut self.state)?;
+        if self.state.selection_focus_dirty {
+            self.state.selection_focus_dirty = false;
+            let handle = self.display.handle();
+            sync_focused_selection(&mut self.state, &handle);
+        }
         self.display.flush_clients()?;
         Ok(accepted.saturating_add(dispatched))
     }
@@ -6685,6 +6742,31 @@ impl CompositorCore {
             return 0;
         };
         toplevel.close();
+        1
+    }
+    pub fn set_host_active(&mut self, active: bool) -> u32 {
+        if !active {
+            let mut changed = self.touch_cancel();
+            if self.state.pointer_pressed {
+                changed = changed.saturating_add(self.pointer_button(false, 0));
+            }
+            changed = changed.saturating_add(self.pointer_leave());
+            if self.state.keyboard_focus_surface.is_some() {
+                set_keyboard_focus(&mut self.state, None);
+                changed = changed.saturating_add(1);
+            }
+            return changed;
+        }
+        let surface = self
+            .state
+            .active_toplevel
+            .as_ref()
+            .and_then(toplevel_surface)
+            .or_else(|| self.state.root_surface.clone());
+        if surface.is_none() || self.state.keyboard_focus_surface.is_some() {
+            return 0;
+        }
+        set_keyboard_focus(&mut self.state, surface);
         1
     }
     pub fn xdg_ack_count(&self) -> u32 {
@@ -7451,13 +7533,7 @@ impl CompositorCore {
         self.state.next_input_serial
     }
     fn remember_selection_serial(&mut self, serial: u32, surface: WlSurface) {
-        const MAX_RECENT_SERIALS: usize = 32;
-        self.state
-            .selection_serials
-            .push_back(PopupGrabSerial { serial, surface });
-        while self.state.selection_serials.len() > MAX_RECENT_SERIALS {
-            self.state.selection_serials.pop_front();
-        }
+        remember_selection_serial(&mut self.state, serial, surface);
     }
 
     pub fn pointer_motion(&mut self, x: f64, y: f64, time: u32) -> u32 {
@@ -10451,6 +10527,7 @@ pub unsafe extern "system" fn Java_org_archphene_bridge_NativeCompositor_nativeI
                 i32::try_from(mime_type.len()).unwrap_or(i32::MAX)
             });
         }
+        64 => return i32::try_from(core.set_host_active(a != 0)).unwrap_or(i32::MAX),
         _ => return -3,
     };
     i32::try_from(value).unwrap_or(i32::MAX)

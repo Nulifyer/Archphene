@@ -104,6 +104,7 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
     private static final int ANDROID_DRAG_CANCEL = 32;
     private static final int LINUX_DRAG_FINISH = 33;
     private static final int ANDROID_DRAG_DROP_URI_LIST = 34;
+    private static final int HOST_ACTIVE = 35;
     private static final long POINTER_CLICK_HOLD_MILLIS = 32;
     private static final long MENU_TRANSITION_DELAY_MILLIS = 120;
     private static final long TOUCH_CLICK_HOLD_MILLIS = 120;
@@ -217,6 +218,10 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
 
     public void closeWindow(int id) {
         events.offer(new Event(CLOSE_WINDOW, id, 0, 0, 0, ""));
+    }
+
+    public void setHostActive(boolean active) {
+        events.offer(new Event(HOST_ACTIVE, active ? 1 : 0, 0, 0, 0, ""));
     }
 
     public boolean closeActiveSecondaryWindow() {
@@ -815,6 +820,11 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
                 if (currentClients != acceptedClients) {
                     acceptedClients = currentClients;
                     compositor.setClipboardActive(currentClients > 0);
+                    if (currentClients > 0 && clipboard.hasTextOffer()) {
+                        compositor.offerAndroidClipboard();
+                    }
+                    Log.i(INPUT_TAG, "clipboard Android content reads="
+                            + clipboard.contentReadCount());
                     activity.runOnUiThread(listener::onClientConnected);
                 }
                 int commit = compositor.surfaceCommits();
@@ -979,6 +989,7 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
             case ANDROID_DRAG_DROP_URI_LIST -> compositor.androidDropUriList(event.text);
             case ANDROID_DRAG_CANCEL -> compositor.cancelAndroidDrag();
             case LINUX_DRAG_FINISH -> compositor.finishLinuxDrag(event.a != 0);
+            case HOST_ACTIVE -> compositor.setHostActive(event.a != 0);
             default -> throw new IllegalStateException("Unknown compositor event " + event.type);
         }
     }
@@ -1121,6 +1132,8 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
         int androidPasteFd;
         while ((androidPasteFd = compositor.takeAndroidPasteFd()) >= 0) {
             writeFd(androidPasteFd, clipboard.readTextForWaylandPaste());
+            Log.i(INPUT_TAG, "clipboard Android content reads="
+                    + clipboard.contentReadCount());
         }
     }
 
@@ -1285,6 +1298,10 @@ case KeyEvent.KEYCODE_PLUS, KeyEvent.KEYCODE_EQUALS -> 13;
                 Thread.currentThread().interrupt();
             }
         }
+    }
+
+    public int clipboardContentReadCount() {
+        return clipboard.contentReadCount();
     }
 
     private static final class Event {

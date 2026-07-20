@@ -3,6 +3,7 @@ package org.archpheneos.manager;
 import android.content.ContentProvider;
 import android.content.ContentValues;
 import android.content.Context;
+import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.Signature;
@@ -22,6 +23,7 @@ import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.security.MessageDigest;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.List;
@@ -108,7 +110,8 @@ public final class RuntimeModuleProvider extends ContentProvider {
             }
             try {
                 RuntimePackStore.grantActive(providerContext(), caller);
-                RuntimePackStore.Module program = pack.requireKind("program");
+                SelectedProgram selected = selectWrapperProgram(caller, pack);
+                RuntimePackStore.Module program = selected.module;
                 RuntimePackStore.Module data = pack.data();
                 Uri loader = uriForRole(providerContext(), "glibc-loader");
                 providerContext().grantUriPermission(caller, loader,
@@ -121,13 +124,28 @@ public final class RuntimeModuleProvider extends ContentProvider {
                     libraryUris[index] = library.uri(pack.id).toString();
                     libraryNames[index] = library.linkName;
                 }
+                ArrayList<RuntimePackStore.Module> commands = new ArrayList<>();
+                ArrayList<String> commandNames = new ArrayList<>();
+                RuntimePackStore.Module primary = pack.requireKind("program");
+                commands.add(primary);
+                commandNames.add(pack.executableName);
+                for (RuntimePackStore.Module command : pack.commands()) {
+                    commands.add(command);
+                    commandNames.add(command.linkName);
+                }
+                String[] commandUris = new String[commands.size()];
+                for (int index = 0; index < commands.size(); index++) {
+                    commandUris[index] = commands.get(index).uri(pack.id).toString();
+                }
                 Bundle result = new Bundle();
                 result.putString("pack_id", pack.id);
                 result.putString("program_uri", program.uri(pack.id).toString());
-                result.putString("program_name", pack.executableName);
+                result.putString("program_name", selected.name);
                 result.putString("loader_uri", loader.toString());
                 result.putStringArray("library_uris", libraryUris);
                 result.putStringArray("library_names", libraryNames);
+                result.putStringArray("command_uris", commandUris);
+                result.putStringArray("command_names", commandNames.toArray(new String[0]));
                 result.putString("toolkit", pack.toolkit());
                 if (data != null) {
                     result.putString("data_uri", data.uri(pack.id).toString());
@@ -353,6 +371,35 @@ public final class RuntimeModuleProvider extends ContentProvider {
         }
     }
 
+    private SelectedProgram selectWrapperProgram(String caller, RuntimePackStore.Pack pack)
+            throws Exception {
+        ApplicationInfo app = providerContext().getPackageManager().getApplicationInfo(
+                caller, PackageManager.GET_META_DATA);
+        String requested = app.metaData == null ? null
+                : app.metaData.getString("org.archphene.source.executable");
+        if (requested == null || !requested.matches("[a-zA-Z0-9@._+:-]{1,128}")) {
+            throw new SecurityException("Wrapper has no valid runtime command");
+        }
+        if (requested.equals(pack.executableName)) {
+            return new SelectedProgram(requested, pack.requireKind("program"));
+        }
+        for (RuntimePackStore.Module command : pack.commands()) {
+            if (requested.equals(command.linkName)) {
+                return new SelectedProgram(requested, command);
+            }
+        }
+        throw new SecurityException("Wrapper command is not in its verified runtime pack");
+    }
+
+    private static final class SelectedProgram {
+        final String name;
+        final RuntimePackStore.Module module;
+
+        SelectedProgram(String name, RuntimePackStore.Module module) {
+            this.name = name;
+            this.module = module;
+        }
+    }
     private String requireWrapperCaller() throws Exception {
         Context context = providerContext();
         int uid = Binder.getCallingUid();

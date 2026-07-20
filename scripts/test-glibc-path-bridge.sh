@@ -15,8 +15,24 @@ gcc -O2 -Wall -Wextra -Werror \
   -o "$root/rename-probe" native/archphene-glibc-path-bridge/rename_probe.c
 gcc -O2 -Wall -Wextra -Werror \
   -o "$root/mkdir-probe" native/archphene-glibc-path-bridge/mkdir_probe.c
+gcc -O2 -Wall -Wextra -Werror \
+  -o "$root/shm-probe" native/archphene-glibc-path-bridge/shm_probe.c
+gcc -O2 -Wall -Wextra -Werror \
+  -o "$root/exec-probe" native/archphene-glibc-path-bridge/exec_probe.c
 export LD_PRELOAD="$output"
 export ARCHPHENE_RUNTIME_ROOT="$root"
+export XDG_RUNTIME_DIR="$root/runtime"
+mkdir -p "$XDG_RUNTIME_DIR"
+mkdir -p "$root/commands"
+printf command > "$root/commands/cat"
+exec_output="$(
+  ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+  ARCHPHENE_RUNTIME_LOADER=/bin/echo \
+  ARCHPHENE_RUNTIME_LIB=/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu \
+  "$root/exec-probe"
+)"
+test "$exec_output" = "--library-path /lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu --argv0 cat $root/commands/cat bridge-arg"
+echo exec-bridge-tests-passed
 
 test "$(cat /usr/share/archphene-test/value)" = expected
 test "$(cat /usr/lib/locale/C.utf8/LC_CTYPE)" = expected-locale
@@ -40,4 +56,5 @@ printf rename-compatible > "$root/rename-source"
 test "$(cat "$root/rename-target")" = rename-compatible
 "$root/mkdir-probe" "$root/mkdir-target"
 test -d "$root/mkdir-target"
+"$root/shm-probe"
 printf 'path-bridge-tests-passed\n'

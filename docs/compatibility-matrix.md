@@ -21,7 +21,8 @@ Package search results are candidates, not compatibility claims. A package reach
 | `snapshot` | GTK 4/GStreamer/PipeWire | Validated | Unmodified camera consumer, Android grant/denial, timestamped frames, and cleanup on x86_64 and physical AArch64. |
 | `btop` | Terminal/CLI | Validated | Managed install and execution in Archphene Terminal on physical AArch64; no launcher Activity is created. |
 | `tree` | Terminal/CLI | Validated | Managed x86_64 install and fresh-session execution; no launcher Activity is created. |
-| `wev` | Native Wayland diagnostic | Partial | Official x86_64 package and dependency closure resolve through libalpm and the target archive signature verifies under the manager UID. Input-protocol execution remains planned. |
+| `wev` | Native Wayland diagnostic | Validated | Official unmodified x86_64 and AArch64 packages validate pointer motion/buttons, horizontal and vertical wheel axes, touch, keyboard/modifiers/repeat, focus loss/restoration, and graceful close on the emulator and physical Samsung. |
+| `wl-clipboard` | Native Wayland clipboard | Validated | Official unmodified x86_64 and AArch64 `wl-copy`/`wl-paste` packages transfer exact plain text in both directions. Android clipboard content is read only when a focused Wayland client requests the offer; Linux publication does not trigger an Android read. |
 | `secret-tool` | libsecret/D-Bus | Validated | Secret Service store/read/clear and persistence on x86_64 and physical AArch64. |
 | `kwallet-query` | KDE/D-Bus | Partial | Validated on 4 KB x86_64 and through the patched compatibility daemon on physical AArch64; official x86_64 closure is blocked on 16 KB Android. |
 
@@ -31,8 +32,8 @@ These packages cover distinct bridge contracts. They are deliberately smaller th
 
 | Lane | Package | Required result | Current status |
 |---|---|---|---|
-| Raw Wayland input | `wev` | Pointer, touch, keyboard, modifiers, repeat, focus, and rotation remain correct. | Partial |
-| Wayland clipboard | `wl-clipboard` | Text and MIME ownership transfer in both directions without unsolicited Android clipboard reads. | Planned |
+| Raw Wayland input | `wev` | Pointer, touch, keyboard, modifiers, repeat, focus, and graceful close remain correct. | Validated |
+| Wayland clipboard | `wl-clipboard` | Plain-text ownership transfer in both directions without unsolicited Android clipboard reads. | Validated |
 | GTK 4/libadwaita | `gnome-text-editor` | IME, adaptive layout, open/save, popups, accessibility, and lifecycle. | Planned |
 | Qt complex UI | `kate` | Tabs, split views, sessions, dialogs, secondary windows, and large text. | Planned |
 | Native Wayland terminal | `foot` | PTY, Unicode, hardware keyboard, scrolling, selection, and clipboard. | Planned |

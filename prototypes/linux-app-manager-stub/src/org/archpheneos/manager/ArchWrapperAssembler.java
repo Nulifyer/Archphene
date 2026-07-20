@@ -120,6 +120,19 @@ public final class ArchWrapperAssembler {
                 classification.mimeTypes, runtimeRoot, false);
     }
 
+    static Result assembleWaylandCandidateFromRuntimePack(Context context, String repository,
+            String sourcePackage, String sourceVersion, String architecture,
+            ArchPackageClassifier.Result classification, File runtimeRoot,
+            String executable) throws Exception {
+        if (runtimeRoot == null || classification == null
+                || classification.kind != ArchPackageClassifier.Kind.TERMINAL
+                || executable == null || !classification.commands.contains(executable)) {
+            throw new IllegalArgumentException("Terminal runtime-pack metadata is required");
+        }
+        return assembleQt(context, repository, sourcePackage, sourceVersion, architecture,
+                "wayland", executable, classification.displayName, "",
+                Collections.emptyList(), runtimeRoot, false);
+    }
     private static Result assembleQt(Context context, String repository, String sourcePackage,
             String sourceVersion, String architecture, String toolkit, String executableName,
             String appLabel, String iconName,

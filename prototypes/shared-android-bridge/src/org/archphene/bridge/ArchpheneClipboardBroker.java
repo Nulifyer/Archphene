@@ -19,6 +19,7 @@ public final class ArchpheneClipboardBroker implements AutoCloseable {
     private final ClipboardManager.OnPrimaryClipChangedListener platformListener;
     private final String ownClipLabel;
     private volatile boolean active;
+    private volatile boolean textOfferAvailable;
 
     public ArchpheneClipboardBroker(Context context, Listener listener) {
         this.context = context;
@@ -28,6 +29,7 @@ public final class ArchpheneClipboardBroker implements AutoCloseable {
         platformListener = () -> {
             if (!active) return;
             ClipDescription description = clipboard.getPrimaryClipDescription();
+            textOfferAvailable = hasTextMime(description);
             String label = description == null || description.getLabel() == null
                     ? "" : description.getLabel().toString();
             if (ownClipLabel.equals(label)) return;
@@ -38,10 +40,25 @@ public final class ArchpheneClipboardBroker implements AutoCloseable {
     public void start() {
         if (active) return;
         active = true;
+        textOfferAvailable = hasTextMime(clipboard.getPrimaryClipDescription());
         clipboard.addPrimaryClipChangedListener(platformListener);
     }
 
+    public boolean hasTextOffer() {
+        return textOfferAvailable;
+    }
+
+    private static boolean hasTextMime(ClipDescription description) {
+        if (description == null) return false;
+        for (int index = 0; index < description.getMimeTypeCount(); index++) {
+            String mimeType = description.getMimeType(index);
+            if (mimeType != null && mimeType.startsWith("text/")) return true;
+        }
+        return false;
+    }
+
     public void publishLinuxText(String text) {
+        textOfferAvailable = true;
         clipboard.setPrimaryClip(ClipData.newPlainText(ownClipLabel, text));
     }
 
@@ -57,12 +74,11 @@ public final class ArchpheneClipboardBroker implements AutoCloseable {
     public int contentReadCount() {
         return contentReadCount.get();
     }
-
-
     @Override
     public void close() {
         if (!active) return;
         active = false;
+        textOfferAvailable = false;
         clipboard.removePrimaryClipChangedListener(platformListener);
     }
 }

@@ -37,7 +37,7 @@ Archphene is moving from application-specific proofs toward a package-driven And
 ## P1: desktop usability
 
 - general secondary-window mapping for phone, tablet, and Android desktop/freeform modes;
-- broader clipboard MIME types plus cursor and pointer protocol completeness;
+- broader clipboard MIME types beyond the validated demand-driven plain-text `wl-clipboard` path, plus cursor and pointer protocol completeness;
 - zero-copy Android HardwareBuffer/dmabuf and Vulkan presentation building on the validated OpenGL ES virpipe path, with SHM fallback;
 - remaining portal adapters and richer notification, file-transfer, and device-service policies;
 - broader accessibility and input-method compatibility beyond the validated Qt/GTK AT-SPI2 paths;
