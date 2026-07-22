@@ -138,6 +138,17 @@ Run the release display profiles independently with:
 ./scripts/test-release-display-matrix.sh --serial emulator-5554
 ```
 
+Run Kate through a tablet resize and a temporary 1920x1080 emulator display
+with display-targeted input using:
+
+```bash
+./scripts/test-kate-large-display.sh --serial emulator-5554
+```
+
+The focused test refuses to reuse an existing secondary display and restores
+the emulator's prior size/density overrides after removing the display it
+created.
+
 The script restores display size, density, Android font scale, and night mode on exit.
 
 ## Development rules

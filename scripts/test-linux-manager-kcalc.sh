@@ -36,6 +36,9 @@ kcalc="$({
 })"
 [[ -n "$kcalc" ]] || archphene_die 'detail view did not expose package'
 
+# A previous lifecycle test may have left the Android task resident after its
+# Linux runtime exited. Exercise the manager's cold-launch path deterministically.
+archphene_adb_run shell am force-stop "$kcalc"
 archphene_tap_text "$detail" Launch
 
 # ActivityTaskManager can publish the task before zygote has returned the app PID.
@@ -55,7 +58,7 @@ done
 pid=
 deadline=$((SECONDS + 30))
 while ((SECONDS < deadline)); do
-  pid="$(archphene_adb_run shell pidof "$kcalc" 2>/dev/null | tr -d '\r' || true)"
+  pid="$(archphene_android_pid "$kcalc" || true)"
   [[ -n "$pid" ]] && break
   sleep .5
 done
@@ -64,10 +67,7 @@ done
 loader=
 deadline=$((SECONDS + 30))
 while ((SECONDS < deadline)); do
-  loader="$({
-    archphene_adb_run shell ps -A -o PID,PPID,NAME |
-      awk -v p="$pid" '$2 == p && ($3 == "loader" || $3 == "libarchphene_ld.so") {print $1; exit}'
-  } || true)"
+  loader="$(archphene_linux_loader_pid "$pid" || true)"
   [[ -n "$loader" ]] && break
   sleep .5
 done

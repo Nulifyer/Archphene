@@ -213,6 +213,12 @@ public final class RuntimeFdLauncher {
             }
             launchEnvironment.put("ARCHPHENE_RUNTIME_COMMAND_DIR",
                     commandDirectory.getAbsolutePath());
+            if (runtimeCommands.contains("bash")) {
+                // Keep this as a command name so the exec bridge invokes the
+                // verified ELF through the managed glibc loader. Android app
+                // data itself is intentionally non-executable.
+                launchEnvironment.putIfAbsent("SHELL", "bash");
+            }
             launchEnvironment.put("ARCHPHENE_RUNTIME_LOADER",
                     new File(links, "loader").getAbsolutePath());
             launchEnvironment.put("ARCHPHENE_RUNTIME_LIB", links.getAbsolutePath());

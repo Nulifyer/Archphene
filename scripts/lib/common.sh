@@ -80,6 +80,49 @@ archphene_adb_run() {
   "$ARCHPHENE_ADB" "${ARCHPHENE_ADB_ARGS[@]}" "$@"
 }
 
+archphene_android_pid() {
+  local package="$1" candidates processes
+  candidates="$(archphene_adb_run shell pidof "$package" 2>/dev/null | tr -d '\r')"
+  [[ -n "$candidates" ]] || return 1
+  processes="$(archphene_adb_run shell ps -A -o PID,PPID)"
+  awk -v ids="$candidates" '
+    BEGIN {
+      count = split(ids, values, / +/)
+      for (i = 1; i <= count; i++) candidate[values[i]] = 1
+    }
+    { parent[$1] = $2 }
+    END {
+      for (id in candidate) {
+        if (!(parent[id] in candidate)) {
+          print id
+          exit
+        }
+      }
+    }
+  ' <<<"$processes"
+}
+
+archphene_linux_loader_pid() {
+  local android_pid="$1" processes
+  processes="$(archphene_adb_run shell ps -A -o PID,PPID,NAME)"
+  awk -v root="$android_pid" '
+    { parent[$1] = $2; name[$1] = $3 }
+    END {
+      for (candidate in name) {
+        if (name[candidate] != "loader" && name[candidate] != "libarchphene_ld.so") continue
+        current = candidate
+        for (depth = 0; depth < 64 && current in parent; depth++) {
+          if (parent[current] == root) {
+            print candidate
+            exit
+          }
+          current = parent[current]
+        }
+      }
+    }
+  ' <<<"$processes"
+}
+
 archphene_init_adb() {
   ARCHPHENE_ADB="$(archphene_adb)"
   archphene_adb_args "${1:-}"

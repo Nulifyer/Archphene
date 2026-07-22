@@ -124,8 +124,7 @@ archphene_wait_log "Acquired runtime pack lease [a-f0-9]{64} for $android_packag
 pid=
 deadline=$((SECONDS + 30))
 while ((SECONDS < deadline)); do
-  pid="$(archphene_adb_run shell pidof "$android_package" 2>/dev/null \
-    | tr -d '\r' || true)"
+  pid="$(archphene_android_pid "$android_package" || true)"
   [[ -n "$pid" ]] && break
   sleep .5
 done
@@ -155,10 +154,7 @@ mapped_log="$(wait_candidate_log 'mapped=true.*primary=true' 60)"
 linux_pid=
 deadline=$((SECONDS + 30))
 while ((SECONDS < deadline)); do
-  linux_pid="$({
-    archphene_adb_run shell ps -A -o PID,PPID,NAME |
-      awk -v p="$pid" '$2 == p && ($3 == "loader" || $3 == "libarchphene_ld.so") {print $1; exit}'
-  } || true)"
+  linux_pid="$(archphene_linux_loader_pid "$pid" || true)"
   [[ -n "$linux_pid" ]] && break
   sleep .5
 done

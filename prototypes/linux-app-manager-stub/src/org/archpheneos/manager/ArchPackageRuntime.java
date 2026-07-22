@@ -400,6 +400,10 @@ public final class ArchPackageRuntime {
                 bridgePackages.add("shared-mime-info");
             }
         }
+        if (containsPackage(packages, "libxkbcommon")
+                && !containsPackage(packages, "libx11")) {
+            bridgePackages.add("libx11");
+        }
         if (!bridgePackages.isEmpty()) {
             packages = resolve(context, packageName,
                     bridgePackages.toArray(new String[0]));
@@ -412,6 +416,7 @@ public final class ArchPackageRuntime {
             if (!root.mkdirs()) throw new IllegalStateException("Could not create transaction root");
             File downloads = directory(state(context), "downloads");
             LinkedHashSet<String> sourceCommands = new LinkedHashSet<>();
+            LinkedHashSet<String> dependencyCommands = new LinkedHashSet<>();
             LinkedHashSet<String> sourceLibraries = new LinkedHashSet<>();
             for (int index = 0; index < packages.size(); index++) {
                 if (Thread.currentThread().isInterrupted()) throw new InterruptedException();
@@ -425,7 +430,8 @@ public final class ArchPackageRuntime {
                 progress.onProgress(Math.min(59, base + 1), "Staging verified " + value.name);
                 File archive = new File(downloads, value.filename.replace(':', '_'));
                 stageVerifiedArchive(context, archive, root,
-                        value.name.equals(packageName), sourceCommands, sourceLibraries);
+                        value.name.equals(packageName), value.name, sourceCommands,
+                        dependencyCommands, sourceLibraries);
             }
             progress.onProgress(60, "Preparing shared toolkit data");
             prepareSharedData(context, root);
@@ -449,8 +455,11 @@ public final class ArchPackageRuntime {
                     throw new SecurityException(
                             "Resolved package has no safe desktop executable");
                 }
+                LinkedHashSet<String> packCommands =
+                        new LinkedHashSet<>(classification.commands);
+                packCommands.addAll(dependencyCommands);
                 pack = RuntimePackStore.build(context, packageName, executableName,
-                        packages, classification.commands, root);
+                        packages, new ArrayList<>(packCommands), root);
             }
             progress.onProgress(65, "Runtime pack ready");
             StagedTransaction transaction = new StagedTransaction(packageName, packages, root,
@@ -470,7 +479,8 @@ public final class ArchPackageRuntime {
     }
 
     private static void stageVerifiedArchive(Context context, File archive, File root,
-            boolean sourceArchive, Set<String> sourceCommands,
+            boolean sourceArchive, String archivePackage, Set<String> sourceCommands,
+            Set<String> dependencyCommands,
             Set<String> sourceLibraries) throws Exception {
         Result namesResult = runTool(context, "libarchphene_bsdtar.so",
                 Arrays.asList("-tf", archive.getPath()));
@@ -485,11 +495,16 @@ public final class ArchPackageRuntime {
                 sourceCommands.add(entry.substring("usr/bin/".length()));
                 hasSourceCommand = true;
             }
+            if (!sourceArchive && "bash".equals(archivePackage)
+                    && "usr/bin/bash".equals(entry)) {
+                dependencyCommands.add("bash");
+            }
             if (sourceArchive && isRuntimeLibraryEntry(entry) && !entry.endsWith("/")) {
                 sourceLibraries.add(entry.substring(entry.lastIndexOf('/') + 1));
             }
         }
-        boolean hasSelectedEntry = hasSourceCommand;
+        boolean hasSelectedEntry = hasSourceCommand
+                || !dependencyCommands.isEmpty() && "bash".equals(archivePackage);
         if (!hasSelectedEntry) {
             for (String entry : names) {
                 if (isRuntimeLibraryEntry(entry) || isRuntimeToolEntry(entry)
@@ -518,6 +533,8 @@ public final class ArchPackageRuntime {
             boolean selected = isRuntimeLibraryEntry(entry)
                     || isRuntimeToolEntry(entry)
                     || sourceArchive && isDirectUsrBinEntry(entry)
+                    || !sourceArchive && "bash".equals(archivePackage)
+                            && "usr/bin/bash".equals(entry)
                     || sourceArchive && hasSourceCommand && isSourceRuntimeDataEntry(entry)
                     || isSharedRuntimeDataEntry(entry);
             if (!selected) continue;
@@ -590,6 +607,7 @@ public final class ArchPackageRuntime {
 
     private static boolean isSharedRuntimeDataEntry(String entry) {
         return entry.startsWith("usr/lib/locale/C.utf8/")
+                || entry.startsWith("usr/share/X11/locale/")
                 || entry.startsWith("usr/share/glvnd/egl_vendor.d/")
                 || entry.startsWith("usr/share/vulkan/icd.d/")
                 || entry.startsWith("usr/share/drirc.d/")

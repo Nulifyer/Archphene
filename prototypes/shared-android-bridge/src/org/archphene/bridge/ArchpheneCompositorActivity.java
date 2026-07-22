@@ -1217,6 +1217,10 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 environment.put("TMPDIR", tmp.getAbsolutePath());
                 File runtimeRoot = new File(getFilesDir(), "linux-runtime/root");
                 environment.put("ARCHPHENE_RUNTIME_ROOT", runtimeRoot.getAbsolutePath());
+                environment.put("LANG", "C.UTF-8");
+                environment.put("LC_ALL", "C.UTF-8");
+                environment.put("LOCPATH", new File(runtimeRoot,
+                        "usr/lib/locale").getAbsolutePath());
                 environment.put("XDG_DATA_DIRS",
                         new File(runtimeRoot, "usr/share").getAbsolutePath());
                 environment.put("__EGL_VENDOR_LIBRARY_DIRS", new File(runtimeRoot,

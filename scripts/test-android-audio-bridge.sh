@@ -33,7 +33,6 @@ done
 [[ "$log" == *"Private AAudio PulseAudio server ready"* ]] || archphene_die "Android AAudio sink did not start: $log"
 [[ "$log" == *"Client authenticated anonymously"* ]] || archphene_die "Linux Pulse client did not authenticate: $log"
 [[ "$log" == *'application.name = "PulseAudio Volume Control"'* ]] || archphene_die "pavucontrol did not create its Pulse stream: $log"
-process_id="$(archphene_adb_run shell pidof "$package" | tr -d '\r\n')"
+process_id="$(archphene_android_pid "$package")"
 [[ -n "$process_id" ]] || archphene_die "audio wrapper exited after connecting"
 archphene_note "Android audio bridge passed on $serial (PID $process_id)."
-

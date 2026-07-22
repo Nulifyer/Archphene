@@ -9942,6 +9942,24 @@ unsafe fn configure_runtime_child(parent: libc::pid_t) -> bool {
 }
 
 #[cfg(target_os = "android")]
+unsafe fn configure_runtime_target(supervisor: libc::pid_t) -> bool {
+    unsafe {
+        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == 0 && libc::getppid() == supervisor
+    }
+}
+
+#[cfg(target_os = "android")]
+fn runtime_exit_code(status: i32) -> i32 {
+    if libc::WIFEXITED(status) {
+        libc::WEXITSTATUS(status)
+    } else if libc::WIFSIGNALED(status) {
+        128 + libc::WTERMSIG(status)
+    } else {
+        125
+    }
+}
+
+#[cfg(target_os = "android")]
 fn establish_runtime_process_group(child: libc::pid_t) -> bool {
     if unsafe { libc::setpgid(child, child) } == 0 {
         return true;
@@ -10167,33 +10185,68 @@ fn run_glibc_fds(
             if !configure_runtime_child(parent) {
                 libc::_exit(125);
             }
-            libc::close(pipe[0]);
-            libc::dup2(pipe[1], libc::STDOUT_FILENO);
-            libc::dup2(pipe[1], libc::STDERR_FILENO);
-            if pipe[1] > libc::STDERR_FILENO {
-                libc::close(pipe[1]);
+            let name = b"loader\0";
+            if libc::prctl(libc::PR_SET_NAME, name.as_ptr()) != 0
+                || libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) != 0
+            {
+                libc::_exit(125);
             }
-            for (key, value) in &environment {
-                if libc::setenv(key.as_ptr(), value.as_ptr(), 1) != 0 {
+            let supervisor = libc::getpid();
+            let target = libc::fork();
+            if target == 0 {
+                if !configure_runtime_target(supervisor) {
+                    libc::_exit(125);
+                }
+                libc::close(pipe[0]);
+                libc::dup2(pipe[1], libc::STDOUT_FILENO);
+                libc::dup2(pipe[1], libc::STDERR_FILENO);
+                if pipe[1] > libc::STDERR_FILENO {
+                    libc::close(pipe[1]);
+                }
+                for (key, value) in &environment {
+                    if libc::setenv(key.as_ptr(), value.as_ptr(), 1) != 0 {
+                        libc::_exit(125);
+                    }
+                }
+
+                unsafe extern "C" {
+                    static mut environ: *mut *mut libc::c_char;
+                }
+                libc::execve(
+                    loader.as_ptr(),
+                    arguments.as_ptr(),
+                    environ.cast::<*const libc::c_char>(),
+                );
+                let message = b"glibc runtime exec failed\n";
+                libc::write(
+                    libc::STDERR_FILENO,
+                    message.as_ptr().cast::<libc::c_void>(),
+                    message.len(),
+                );
+                libc::_exit(126);
+            }
+            if target < 0 {
+                libc::_exit(125);
+            }
+            libc::close(pipe[0]);
+            let mut target_status = 0;
+            loop {
+                let mut status = 0;
+                let waited = libc::waitpid(-1, &mut status, 0);
+                if waited == target {
+                    target_status = status;
+                } else if waited < 0 {
+                    let error = io::Error::last_os_error().raw_os_error();
+                    if error == Some(libc::EINTR) {
+                        continue;
+                    }
+                    if error == Some(libc::ECHILD) {
+                        break;
+                    }
                     libc::_exit(125);
                 }
             }
-
-            unsafe extern "C" {
-                static mut environ: *mut *mut libc::c_char;
-            }
-            libc::execve(
-                loader.as_ptr(),
-                arguments.as_ptr(),
-                environ.cast::<*const libc::c_char>(),
-            );
-            let message = b"glibc runtime exec failed\n";
-            libc::write(
-                libc::STDERR_FILENO,
-                message.as_ptr().cast::<libc::c_void>(),
-                message.len(),
-            );
-            libc::_exit(126);
+            libc::_exit(runtime_exit_code(target_status));
         }
     }
     let fork_error = io::Error::last_os_error()
