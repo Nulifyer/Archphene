@@ -179,7 +179,7 @@ public final class MainActivity extends Activity {
         }
         if (intent.hasExtra("archphene_test_linux_font_percent")) {
             ManagerStateStore.setLinuxFontPercent(this,
-                    intent.getIntExtra("archphene_test_linux_font_percent", 100));
+                    intent.getIntExtra("archphene_test_linux_font_percent", 0));
         }
         intent.removeExtra("archphene_test_manager_theme");
         intent.removeExtra("archphene_test_linux_theme");
@@ -2040,21 +2040,21 @@ public final class MainActivity extends Activity {
                     showBanner("Running GTK apps update now; reopen other apps for full scaling", false);
                 }), spacedWrap(dp(8)));
 
-        int[] fontValues = {100, 125, 150, 175, 200};
-        String[] fontLabels = {"100%", "125%", "150%", "175%", "200%"};
+        int[] fontValues = {0, 100, 125, 150, 175, 200};
+        String[] fontLabels = {"Auto", "100%", "125%", "150%", "175%", "200%"};
         int fontIndex = indexOf(fontValues, ManagerStateStore.linuxFontPercent(this));
         appearance.addView(appearanceSlider("Linux app text",
-                "Font size only, from 100 to 200%. Very large text fits best in landscape or on a larger display. Open GTK apps update now; other apps may need reopening.",
+                "Auto follows Android's font size. Explicit values multiply that baseline from 100 to 200%. Very large text fits best in landscape or on a larger display.",
                 fontLabels, fontIndex, index -> {
                     ManagerStateStore.setLinuxFontPercent(this, fontValues[index]);
                     showBanner("Running GTK apps update text now; reopen other apps if unchanged", false);
                 }), spacedWrap(dp(8)));
 
         String[] controlValues = {"automatic", "compact", "comfortable", "touch"};
-        String[] controlLabels = {"Auto", "32 dp", "40 dp", "48 dp"};
+        String[] controlLabels = {"Auto", "18 dp", "20 dp", "22 dp"};
         int controlIndex = indexOf(controlValues, ManagerStateStore.linuxControlDensity(this));
         appearance.addView(appearanceSlider("Linux app controls",
-                "Minimum control target in dp. Auto chooses 32, 40, or 48 dp for the active display. Open GTK apps update now.",
+                "Visible control size. Auto uses 20 dp on phones; interaction areas remain larger for touch. Open GTK apps update now.",
                 controlLabels, controlIndex, index -> {
                     ManagerStateStore.setLinuxControlDensity(this, controlValues[index]);
                     showBanner("Running GTK apps update controls now; reopen other apps if unchanged", false);

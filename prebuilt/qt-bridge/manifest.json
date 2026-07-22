@@ -26,8 +26,8 @@
     },
     {
       "name": "libarchphene_qt_style.so",
-      "bytes": 38512,
-      "sha256": "ff17be3027e340b2542f7b6e5f7cd3ba881759d3c5afe47ae921f52db591c971"
+      "bytes": 38640,
+      "sha256": "d5dd947f6b2b6a6b35da0f72c5d5f7414ae4ffccea3aeac29d71982ee94e0305"
     },
     {
       "name": "libarchphene_shm_frame_client.so",
@@ -106,8 +106,8 @@
         },
         {
           "name": "libarchphene_qt_style.so",
-          "bytes": 68520,
-          "sha256": "4b1fe6cea16e085b844503e05b40f131d376b8947abab4cf325f7d2f34fe72c9"
+          "bytes": 68624,
+          "sha256": "675ef8c5a0a9bb75077b1d4226ab3d29a4655b509e0444e4a2c76848a54834b0"
         }
       ]
     }

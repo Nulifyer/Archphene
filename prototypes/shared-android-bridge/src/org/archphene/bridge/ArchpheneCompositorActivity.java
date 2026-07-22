@@ -115,7 +115,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     private boolean activityDestroyed;
     private String appearanceTheme = "system";
     private int appearanceScalePercent;
-    private int appearanceFontPercent = 100;
+    private int appearanceFontPercent;
     private String appearanceControlDensity = "automatic";
     private boolean appearanceMaterialYou;
     private boolean activeDarkAppearance;
@@ -500,9 +500,9 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             int scale = appearance.getInt("scale_percent", 0);
             appearanceScalePercent = scale == 100 || scale == 125 || scale == 150
                     || scale == 175 || scale == 200 ? scale : 0;
-            int font = appearance.getInt("font_percent", 100);
-            appearanceFontPercent = font == 125 || font == 150 || font == 175 || font == 200
-                    ? font : 100;
+            int font = appearance.getInt("font_percent", 0);
+            appearanceFontPercent = font == 100 || font == 125 || font == 150
+                    || font == 175 || font == 200 ? font : 0;
             String controls = appearance.getString("control_density", "automatic");
             appearanceControlDensity = "compact".equals(controls)
                     || "comfortable".equals(controls) || "touch".equals(controls)
@@ -523,7 +523,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 refreshToolkitAppearance(configuration);
                 Log.i(logTag, "Manager appearance policy applied live toolkit=" + toolkit
                         + " scale=" + resolvedScalePercent(configuration)
-                        + " font=" + appearanceFontPercent
+                        + " font=" + resolvedFontPercent()
                         + " controls=" + resolvedControlDensity(configuration));
             }
         };
@@ -1551,9 +1551,13 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     private int resolvedFontPointSize(Configuration configuration, int scalePercent) {
         float appScale = scalePercent / 100f;
         float requestedBodyPixels = 16f * getResources().getDisplayMetrics().scaledDensity
-                * appearanceFontPercent / 100f;
+                * resolvedFontPercent() / 100f;
         return Math.max(9, Math.min(48,
                 Math.round(requestedBodyPixels * 72f / 96f / appScale)));
+    }
+
+    private int resolvedFontPercent() {
+        return appearanceFontPercent == 0 ? 100 : appearanceFontPercent;
     }
 
     private String resolvedControlDensity(Configuration configuration) {
@@ -1570,6 +1574,15 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     private int resolvedControlTargetDp(Configuration configuration) {
         String density = resolvedControlDensity(configuration);
         return "compact".equals(density) ? 32 : "comfortable".equals(density) ? 40 : 48;
+    }
+
+    private int resolvedControlVisualDp(Configuration configuration) {
+        if ("compact".equals(appearanceControlDensity)) return 18;
+        if ("comfortable".equals(appearanceControlDensity)) return 20;
+        if ("touch".equals(appearanceControlDensity)) return 22;
+        Display display = getDisplay();
+        if (display != null && display.getDisplayId() != Display.DEFAULT_DISPLAY) return 18;
+        return configuration.smallestScreenWidthDp >= 840 ? 18 : 20;
     }
 
     private void refreshToolkitAppearance(Configuration configuration) {
@@ -1624,8 +1637,11 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         float appScale = scalePercent / 100f;
         int fontPointSize = resolvedFontPointSize(configuration, scalePercent);
         int controlTargetDp = resolvedControlTargetDp(configuration);
+        int controlVisualDp = resolvedControlVisualDp(configuration);
         int controlTargetPixels = Math.max(24,
                 Math.round(controlTargetDp * getResources().getDisplayMetrics().density));
+        int controlVisualPixels = Math.max(12,
+                Math.round(controlVisualDp * getResources().getDisplayMetrics().density));
         env.put("QT_SCALE_FACTOR", String.format(Locale.US, "%.2f", appScale));
         env.put("QT_SCALE_FACTOR_ROUNDING_POLICY", "PassThrough");
         env.put("QT_FONT_DPI", "96");
@@ -1635,6 +1651,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         env.put("ARCHPHENE_CONTROL_DENSITY", resolvedControlDensity(configuration));
         env.put("ARCHPHENE_QT_CONTROL_MIN_SIZE", Integer.toString(
                 Math.max(24, Math.round(controlTargetPixels / appScale))));
+        env.put("ARCHPHENE_QT_CONTROL_VISUAL_SIZE", Integer.toString(
+                Math.max(12, Math.round(controlVisualPixels / appScale))));
         env.put("ARCHPHENE_COLOR_SCHEME", dark ? "dark" : "light");
         File dataHome = new File(configDir.getParentFile(), ".local/share");
         dataHome.mkdirs();
@@ -1647,9 +1665,11 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         if (xkbRoot.isDirectory()) env.put("XKB_CONFIG_ROOT", xkbRoot.getAbsolutePath());
         Log.i(logTag, "Appearance theme=" + appearanceTheme + " resolved="
                 + (dark ? "dark" : "light") + " scale=" + scalePercent
-                + " font=" + appearanceFontPercent + " pointSize=" + fontPointSize
+                + " font=" + resolvedFontPercent() + " pointSize=" + fontPointSize
+                + " fontAuto=" + (appearanceFontPercent == 0)
                 + " controls=" + resolvedControlDensity(configuration)
                 + " controlTargetDp=" + controlTargetDp
+                + " controlVisualDp=" + controlVisualDp
                 + " materialYou="
                 + appearanceMaterialYou);
         if ("wayland".equals(toolkit) || "gtk4".equals(toolkit)) {
@@ -1726,7 +1746,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 Math.round(fontPointSize * 4f / 3f * appScale));
         int controlHeight = Math.max(Math.round(targetDp * density), uiFontSize + 16);
         int titleButtonSize = controlHeight;
-        int visibleAffordanceDp = targetDp >= 48 ? 22 : targetDp >= 40 ? 20 : 18;
+        int visibleAffordanceDp = resolvedControlVisualDp(
+                getResources().getConfiguration());
         int visibleAffordanceSize = Math.round(visibleAffordanceDp * density);
         String titleIconScale = String.format(Locale.US, "%.2f",
                 visibleAffordanceSize / 16f);
@@ -1931,10 +1952,14 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 .append("Enable=false\nIntensityAmount=0\nIntensityEffect=0\n");
         int targetPixels = Math.max(24, Math.round(resolvedControlTargetDp(configuration)
                 * getResources().getDisplayMetrics().density));
+        int visualPixels = Math.max(12, Math.round(resolvedControlVisualDp(configuration)
+                * getResources().getDisplayMetrics().density));
         palette.append("\n[Archphene]\nControlDensity=")
                 .append(resolvedControlDensity(configuration))
                 .append("\nControlMinSize=")
                 .append(Math.max(24, Math.round(targetPixels / appScale)))
+                .append("\nControlVisualSize=")
+                .append(Math.max(12, Math.round(visualPixels / appScale)))
                 .append('\n');
         writeText(new File(configDir, "kdeglobals"), palette.toString());
         File schemes = new File(configDir.getParentFile(), ".local/share/color-schemes");

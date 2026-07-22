@@ -36,11 +36,14 @@ until the compositor's fractional-output path is exposed end to end.
 
 Control density is independent from text and geometry scale:
 
-| Setting | Automatic use | Minimum target | Intended input |
-|---|---|---:|---|
-| Compact | desktop/docked, at least 840 dp wide | 32 dp | mouse and keyboard |
-| Comfortable | tablet, 600–839 dp wide | 40 dp | mixed pointer and touch |
-| Touch | phone, below 600 dp wide | 48 dp | touch-first |
+| Setting | Visible size | Corresponding minimum target | Intended input |
+|---|---:|---:|---|
+| 18 dp | 18 dp | 32 dp | mouse and keyboard |
+| 20 dp | 20 dp | 40 dp | mixed pointer and touch |
+| 22 dp | 22 dp | 48 dp | touch-first |
+
+Auto uses 20 dp visible controls with 48 dp interaction targets on phones,
+20/40 dp on tablets, and 18/32 dp on desktop-sized or external displays.
 
 An explicit setting overrides automatic selection on the next app start. Live
 Android configuration changes rewrite GTK metrics and Qt's shared appearance

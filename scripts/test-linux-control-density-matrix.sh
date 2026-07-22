@@ -57,15 +57,15 @@ restore() {
 trap restore EXIT
 
 profiles=(
-  'phone-auto 1080 2400 420 automatic touch 48'
-  'tablet-auto 1280 1920 280 automatic comfortable 40'
-  'docked-auto 1920 1080 240 automatic comfortable 40'
-  'phone-compact 1080 2400 420 compact compact 32'
-  'phone-comfortable 1080 2400 420 comfortable comfortable 40'
-  'phone-touch 1080 2400 420 touch touch 48'
+  'phone-auto 1080 2400 420 automatic touch 48 20'
+  'tablet-auto 1280 1920 280 automatic comfortable 40 20'
+  'docked-auto 1920 1080 240 automatic comfortable 40 20'
+  'phone-compact 1080 2400 420 compact compact 32 18'
+  'phone-comfortable 1080 2400 420 comfortable comfortable 40 20'
+  'phone-touch 1080 2400 420 touch touch 48 22'
 )
 for row in "${profiles[@]}"; do
-  read -r name width height wm_density requested resolved target_dp <<<"$row"
+  read -r name width height wm_density requested resolved target_dp affordance_dp <<<"$row"
   profile_dir="$artifact_dir/$name"
   mkdir -p "$profile_dir"
   archphene_adb_run shell wm size "${width}x${height}"
@@ -106,13 +106,6 @@ for row in "${profiles[@]}"; do
     "$profile_dir/logcat.txt"
 
   expected_pixels=$(((target_dp * wm_density + 80) / 160))
-  if ((target_dp >= 48)); then
-    affordance_dp=22
-  elif ((target_dp >= 40)); then
-    affordance_dp=20
-  else
-    affordance_dp=18
-  fi
   expected_affordance_pixels=$(((affordance_dp * wm_density + 80) / 160))
   config_artifact=
   case "$toolkit" in

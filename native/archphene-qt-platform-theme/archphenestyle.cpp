@@ -29,12 +29,17 @@ public:
     {
         const int base = QProxyStyle::pixelMetric(metric, option, widget);
         const int target = controlTarget();
+        const int visual = controlVisual();
         switch (metric) {
         case PM_ScrollBarExtent:
-            return qMax(base, target / 2);
+            return qMax(base, visual);
         case PM_SmallIconSize:
         case PM_ButtonIconSize:
-            return qMax(base, qBound(18, target * 2 / 5, 32));
+        case PM_IndicatorWidth:
+        case PM_IndicatorHeight:
+        case PM_ExclusiveIndicatorWidth:
+        case PM_ExclusiveIndicatorHeight:
+            return qMax(base, visual);
         case PM_MenuHMargin:
         case PM_MenuVMargin:
             return qMax(base, target / 8);
@@ -140,8 +145,36 @@ private:
         return m_controlTarget;
     }
 
+    int controlVisual() const
+    {
+        if (m_controlVisual > 0 && m_visualTimer.elapsed() < 250) {
+            return m_controlVisual;
+        }
+        bool ok = false;
+        int configured = qEnvironmentVariableIntValue(
+                "ARCHPHENE_QT_CONTROL_VISUAL_SIZE", &ok);
+        const QString configHome = qEnvironmentVariable("XDG_CONFIG_HOME");
+        if (!configHome.isEmpty()) {
+            QSettings settings(QDir(configHome).filePath(QStringLiteral("kdeglobals")),
+                    QSettings::IniFormat);
+            const QVariant value = settings.value(
+                    QStringLiteral("Archphene/ControlVisualSize"));
+            bool fileOk = false;
+            const int fileVisual = value.toInt(&fileOk);
+            if (fileOk) {
+                configured = fileVisual;
+                ok = true;
+            }
+        }
+        m_controlVisual = ok ? qBound(12, configured, 64) : 20;
+        m_visualTimer.restart();
+        return m_controlVisual;
+    }
+
     mutable int m_controlTarget = -1;
     mutable QElapsedTimer m_controlTimer;
+    mutable int m_controlVisual = -1;
+    mutable QElapsedTimer m_visualTimer;
 };
 
 class ArchpheneStylePlugin final : public QStylePlugin

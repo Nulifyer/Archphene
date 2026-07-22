@@ -9,8 +9,8 @@ Settings exposes separate controls for:
 - Android manager theme: system, dark, or light
 - Linux app theme: follow Android, dark, or light
 - Linux app geometry scale: automatic or an explicit percentage
-- Linux app text scale
-- Linux app control density: automatic, compact, comfortable, or touch
+- Linux app text scale: automatic or 100–200% of Android's font baseline
+- Linux app visible-control size: automatic, 18 dp, 20 dp, or 22 dp
 - Material You semantic colors on Android 12 and newer
 
 Manager preference changes apply on the next Linux app launch. A running Qt 6,
@@ -19,12 +19,12 @@ light and dark palettes without restarting its Linux process. An explicit Linux
 light or dark choice overrides the opposite Android mode. Material You keeps the
 same resolved light/dark policy while substituting Android semantic colors.
 Automatic geometry scale is 150% on phones, 125% on tablets, and 100% on
-desktop-sized displays. Phone text choices are constrained to 100%, 110%, and
-120% so standard menus remain usable in a narrow viewport. Larger tablet and
-desktop choices remain available. Automatic control density selects 48 dp touch
-targets on phones, 40 dp mixed-input targets on tablets, and 32 dp pointer-first
-targets on desktop-sized displays. Users may override that choice independently
-from text and geometry scale.
+desktop-sized displays. Automatic text uses Android's current font scale at the
+16 sp baseline; explicit choices multiply it from 100% through 200%.
+Automatic visible controls are 20 dp on phones and tablets and 18 dp on
+desktop-sized or external displays. Interaction targets remain independent:
+48 dp on phones, 40 dp on tablets, and 32 dp on desktop-sized displays. Users
+may override visible control size independently from text and geometry scale.
 
 The manager keeps initial focus on the page rather than its search field, so a previously visible IME cannot compress the app list on launch. Search still opens the keyboard on explicit focus. Phone, tablet, and docked-display checks cover 1080x2400, 1280x1920, and 1920x1080 layouts.
 
@@ -43,9 +43,9 @@ adds semantic bounds/state, contrast, clipping, and human-reviewable artifacts.
 
 ## Mobile metric calibration
 
-Automatic mode targets Android's 16 sp body text. Minimum interactive height is
-selected separately by control density: 48 dp touch, 40 dp comfortable, or 32 dp
-compact. The bridge converts Android scaledDensity into the Qt point size after
+Automatic mode targets Android's 16 sp body text. Visible controls use 18, 20,
+or 22 dp while minimum interactive height remains 32, 40, or 48 dp. The bridge
+converts Android scaledDensity into the Qt point size after
 accounting for QT_SCALE_FACTOR; GTK receives the equivalent physical-pixel font
 and control metrics while GDK_SCALE=1 preserves native Wayland buffer geometry.
 The user text percentage multiplies the 16 sp baseline, including Android's system
@@ -87,7 +87,7 @@ Rebuild the checked-in x86_64 and AArch64 plugins in the pinned Linux container:
 ./scripts/build-qt-platform-theme-podman.sh --rebuild-image
 ```
 
-The script rejects a Qt private-ABI mismatch, cross-compiles the ARM plugins against the checksum-pinned official Arch Linux ARM Qt package, verifies both ELF architectures, and regenerates the exact-ABI manifests and shared checksum catalog. Runtime visual validation must cover light and dark palettes, menus, secondary windows, status labels, and portrait/landscape layouts. The current appearance change has been rebuilt and validated for x86_64; rebuilding its AArch64 Qt binary awaits restoration of the pinned ARM Qt development runtime and must pass before release.
+The script rejects a Qt private-ABI mismatch, cross-compiles the ARM plugins against the checksum-pinned official Arch Linux ARM Qt package, verifies both ELF architectures, and regenerates the exact-ABI manifests and shared checksum catalog. Runtime visual validation must cover light and dark palettes, menus, secondary windows, status labels, and portrait/landscape layouts. The current platform-theme and style changes are rebuilt and checksum-verified for x86_64 and AArch64; current-source physical AArch64 visual repetition remains blocked by the connected device's older development signing lineage.
 
 The GTK settings bridge is rebuilt with
 `scripts/build-gtk3-settings-podman.sh`. Its checked-in x86_64 and AArch64

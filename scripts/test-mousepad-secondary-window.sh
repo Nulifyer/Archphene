@@ -43,19 +43,21 @@ main_log="$(archphene_wait_log 'window id=[0-9]+.*primary=true.*Mousepad' 30 'Ar
 main="$({
   python3 -c 'import re,sys;m=re.search(r"window id=(\d+).*primary=true.*title=[^\n]*Mousepad",sys.stdin.read());print(m.group(1) if m else "")' <<<"$main_log"
 })"
-appearance_log="$(archphene_wait_log 'controlTargetDp=[0-9]+' 10 \
+appearance_log="$(archphene_wait_log 'controlTargetDp=[0-9]+.*controlVisualDp=[0-9]+' 10 \
   'ArchpheneLinuxApp:V *:S')"
 
 read -r width height <<<"$(archphene_adb_run shell wm size | sed -n 's/.*: \([0-9]*\)x\([0-9]*\).*/\1 \2/p' | tail -n1)"
 [[ -n "${width:-}" && -n "${height:-}" ]] || archphene_die 'unable to read emulator display size'
 target_dp="$(sed -n 's/.*controlTargetDp=\([0-9][0-9]*\).*/\1/p' \
   <<<"$appearance_log" | tail -n1)"
+affordance_dp="$(sed -n 's/.*controlVisualDp=\([0-9][0-9]*\).*/\1/p' \
+  <<<"$appearance_log" | tail -n1)"
 wm_density="$(archphene_adb_run shell wm density \
   | sed -n 's/.*: \([0-9][0-9]*\).*/\1/p' | tail -n1)"
 status_top="$(archphene_adb_run shell dumpsys window \
   | sed -n 's/.*type=statusBars frame=\[[^]]*\]\[[0-9]*,\([0-9]*\)\].*/\1/p' \
   | head -n1)"
-[[ -n "$target_dp" && -n "$wm_density" && -n "$status_top" ]] \
+[[ -n "$target_dp" && -n "$affordance_dp" && -n "$wm_density" && -n "$status_top" ]] \
   || archphene_die 'unable to resolve Mousepad density or Android status inset'
 control_pixels=$(((target_dp * wm_density + 80) / 160))
 archphene_adb_run shell input tap "$((width / 4))" "$((height * 3 / 5))"
@@ -108,13 +110,6 @@ grep -Eq '^gtk-application-prefer-dark-theme=(true|false)$' <<<"$settings" \
   || archphene_die 'Mousepad is missing explicit light/dark preference'
 [[ "$css" != *'background-color:'* ]] \
   || archphene_die 'Mousepad GTK CSS still overrides partial surface colors'
-if ((target_dp >= 48)); then
-  affordance_dp=22
-elif ((target_dp >= 40)); then
-  affordance_dp=20
-else
-  affordance_dp=18
-fi
 affordance_pixels=$(((affordance_dp * wm_density + 80) / 160))
 grep -Fq 'checkbutton check, check, radiobutton radio, radio' <<<"$css" \
   || archphene_die 'Mousepad GTK CSS does not scale check and radio indicators'
