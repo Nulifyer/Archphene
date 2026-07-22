@@ -10,6 +10,7 @@ import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
+import android.database.ContentObserver;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.Insets;
@@ -18,6 +19,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Binder;
 import android.os.Bundle;
+import android.os.Handler;
 import android.util.Log;
 import android.view.DragAndDropPermissions;
 import android.view.DragEvent;
@@ -71,6 +73,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             "org.archphene.runtime.RELEASE_LEASE_V1";
     private static final String APPEARANCE_METHOD =
             "org.archphene.runtime.APPEARANCE_V1";
+    private static final Uri APPEARANCE_URI = Uri.parse(
+            "content://org.archpheneos.manager.runtime/appearance");
 
     private final AtomicBoolean launched = new AtomicBoolean();
     private final AtomicBoolean packagedRuntimeActive = new AtomicBoolean();
@@ -115,6 +119,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     private String appearanceControlDensity = "automatic";
     private boolean appearanceMaterialYou;
     private boolean activeDarkAppearance;
+    private ContentObserver managerAppearanceObserver;
     private final Map<Integer, SecondaryWindow> secondaryWindows = new HashMap<>();
     private OnBackInvokedCallback backInvokedCallback;
     private int activeSecondaryWindowId;
@@ -157,6 +162,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             runtimeLibraryNames = new String[] {"libc.so.6"};
         }
         loadManagerAppearance();
+        observeManagerAppearance();
         if (runtimeProbeUri == null && !processTreeProbe) loadManagerRuntimePack();
         independentWindows = shouldUseIndependentWindows();
         documentSession = capabilities.contains(BridgeCapabilities.DOCUMENTS)
@@ -504,6 +510,29 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             appearanceMaterialYou = appearance.getBoolean("material_you", false);
         } catch (Exception unavailable) {
             Log.d(logTag, "No manager appearance policy; using Android defaults");
+        }
+    }
+
+    private void observeManagerAppearance() {
+        managerAppearanceObserver = new ContentObserver(new Handler(getMainLooper())) {
+            @Override
+            public void onChange(boolean selfChange, Uri uri) {
+                if (isActivityDestroyed()) return;
+                loadManagerAppearance();
+                Configuration configuration = getResources().getConfiguration();
+                refreshToolkitAppearance(configuration);
+                Log.i(logTag, "Manager appearance policy applied live toolkit=" + toolkit
+                        + " scale=" + resolvedScalePercent(configuration)
+                        + " font=" + appearanceFontPercent
+                        + " controls=" + resolvedControlDensity(configuration));
+            }
+        };
+        try {
+            getContentResolver().registerContentObserver(
+                    APPEARANCE_URI, false, managerAppearanceObserver);
+        } catch (RuntimeException unavailable) {
+            managerAppearanceObserver = null;
+            Log.d(logTag, "Manager appearance observer unavailable", unavailable);
         }
     }
 
@@ -1314,6 +1343,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 audioIntegration.stop();
                 desktopIntegration.stop();
                 releaseRuntimeLease();
+                finishAfterLinuxRuntimeExit();
             }
         }, "archphene-runtime-gui").start();
     }
@@ -1442,7 +1472,16 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             audioIntegration.stop();
             desktopIntegration.stop();
             gpuBridge.stop();
+            finishAfterLinuxRuntimeExit();
         }
+    }
+
+    private void finishAfterLinuxRuntimeExit() {
+        runOnUiThread(() -> {
+            if (isFinishing() || isActivityDestroyed()) return;
+            Log.i(logTag, "Linux runtime exited; finishing Android host");
+            finish();
+        });
     }
 
     private void applyCapabilityEnvironment(Map<String, String> environment) {
@@ -1687,6 +1726,10 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 Math.round(fontPointSize * 4f / 3f * appScale));
         int controlHeight = Math.max(Math.round(targetDp * density), uiFontSize + 16);
         int titleButtonSize = controlHeight;
+        int visibleAffordanceDp = targetDp >= 48 ? 22 : targetDp >= 40 ? 20 : 18;
+        int visibleAffordanceSize = Math.round(visibleAffordanceDp * density);
+        String titleIconScale = String.format(Locale.US, "%.2f",
+                visibleAffordanceSize / 16f);
         int horizontalPadding = Math.max(12, Math.round(targetDp * density / 4f));
         int scrollbarSize = Math.max(18, Math.round(12f * density));
         int menuBorder = Math.max(2, Math.round(1f * density));
@@ -1724,6 +1767,13 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 + "button, entry, combobox, menuitem {\n"
                 + "  min-height: " + controlHeight + "px;\n"
                 + "}\n"
+                + "checkbutton, radiobutton {\n"
+                + "  min-height: " + controlHeight + "px;\n"
+                + "}\n"
+                + "checkbutton check, check, radiobutton radio, radio {\n"
+                + "  min-width: " + visibleAffordanceSize + "px;\n"
+                + "  min-height: " + visibleAffordanceSize + "px;\n"
+                + "}\n"
                 + "menubar > menuitem {\n"
                 + "  min-height: " + controlHeight + "px;\n"
                 + "  padding: 0 " + horizontalPadding + "px;\n"
@@ -1752,9 +1802,9 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 + "}\n"
                 + "headerbar button.titlebutton image, headerbar .titlebutton image,\n"
                 + ".titlebar button.titlebutton image, windowcontrols image {\n"
-                + "  -gtk-icon-transform: scale("
-                + String.format(Locale.US, "%.2f", targetDp >= 48 ? 1.5f
-                        : targetDp >= 40 ? 1.25f : 1f) + ");\n"
+                + "  min-width: " + visibleAffordanceSize + "px;\n"
+                + "  min-height: " + visibleAffordanceSize + "px;\n"
+                + "  -gtk-icon-transform: scale(" + titleIconScale + ");\n"
                 + "}\n"
                 + "scrollbar slider {\n"
                 + "  min-width: " + scrollbarSize + "px;\n"
@@ -2237,6 +2287,10 @@ public abstract class ArchpheneCompositorActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        if (managerAppearanceObserver != null) {
+            getContentResolver().unregisterContentObserver(managerAppearanceObserver);
+            managerAppearanceObserver = null;
+        }
         if (Build.VERSION.SDK_INT >= 33 && backInvokedCallback != null) {
             getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(
                     backInvokedCallback);

@@ -30,6 +30,7 @@ import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
+import android.widget.SeekBar;
 import android.widget.ScrollView;
 import android.widget.Space;
 import android.widget.Spinner;
@@ -172,10 +173,20 @@ public final class MainActivity extends Activity {
                 || "comfortable".equals(controlDensity) || "touch".equals(controlDensity)) {
             ManagerStateStore.setLinuxControlDensity(this, controlDensity);
         }
+        if (intent.hasExtra("archphene_test_linux_scale_percent")) {
+            ManagerStateStore.setLinuxScalePercent(this,
+                    intent.getIntExtra("archphene_test_linux_scale_percent", 0));
+        }
+        if (intent.hasExtra("archphene_test_linux_font_percent")) {
+            ManagerStateStore.setLinuxFontPercent(this,
+                    intent.getIntExtra("archphene_test_linux_font_percent", 100));
+        }
         intent.removeExtra("archphene_test_manager_theme");
         intent.removeExtra("archphene_test_linux_theme");
         intent.removeExtra("archphene_test_material_you");
         intent.removeExtra("archphene_test_control_density");
+        intent.removeExtra("archphene_test_linux_scale_percent");
+        intent.removeExtra("archphene_test_linux_font_percent");
     }
     @Override
     protected void onResume() {
@@ -2019,42 +2030,35 @@ public final class MainActivity extends Activity {
             showBanner("Linux app appearance applies the next time an app starts", false);
         });
         appearance.addView(linuxTheme, spacedWrap(dp(6)));
-        Button linuxScale = actionButton(linuxScaleLabel(), android.R.drawable.ic_menu_view);
-        linuxScale.setOnClickListener(view -> {
-            int current = ManagerStateStore.linuxScalePercent(this);
-            int next = current == 0 ? 100 : current == 100 ? 125
-                    : current == 125 ? 150 : current == 150 ? 175
-                    : current == 175 ? 200 : 0;
-            ManagerStateStore.setLinuxScalePercent(this, next);
-            linuxScale.setText(linuxScaleLabel());
-            showBanner("Linux app appearance applies the next time an app starts", false);
-        });
-        appearance.addView(linuxScale, spacedWrap(dp(6)));
-        Button linuxFont = actionButton(linuxFontLabel(), android.R.drawable.ic_menu_zoom);
-        linuxFont.setOnClickListener(view -> {
-            int current = ManagerStateStore.linuxFontPercent(this);
-            boolean phone = getResources().getConfiguration().smallestScreenWidthDp < 600;
-            int next = phone
-                    ? current == 100 ? 110 : current == 110 ? 120 : 100
-                    : current == 100 ? 110 : current == 110 ? 125
-                            : current == 125 ? 150 : 100;
-            ManagerStateStore.setLinuxFontPercent(this, next);
-            linuxFont.setText(linuxFontLabel());
-            showBanner("Linux app appearance applies the next time an app starts", false);
-        });
-        appearance.addView(linuxFont, spacedWrap(dp(6)));
-        Button linuxControls = actionButton(linuxControlDensityLabel(),
-                android.R.drawable.ic_menu_crop);
-        linuxControls.setOnClickListener(view -> {
-            String current = ManagerStateStore.linuxControlDensity(this);
-            String next = "automatic".equals(current) ? "compact"
-                    : "compact".equals(current) ? "comfortable"
-                    : "comfortable".equals(current) ? "touch" : "automatic";
-            ManagerStateStore.setLinuxControlDensity(this, next);
-            linuxControls.setText(linuxControlDensityLabel());
-            showBanner("Linux app appearance applies the next time an app starts", false);
-        });
-        appearance.addView(linuxControls, spacedWrap(dp(6)));
+        int[] scaleValues = {0, 100, 125, 150, 175, 200};
+        String[] scaleLabels = {"Auto", "100%", "125%", "150%", "175%", "200%"};
+        int scaleIndex = indexOf(scaleValues, ManagerStateStore.linuxScalePercent(this));
+        appearance.addView(appearanceSlider("Linux app scale",
+                "Overall Linux UI size. Auto adapts to the display; reopen an app for a complete relayout.",
+                scaleLabels, scaleIndex, index -> {
+                    ManagerStateStore.setLinuxScalePercent(this, scaleValues[index]);
+                    showBanner("Running GTK apps update now; reopen other apps for full scaling", false);
+                }), spacedWrap(dp(8)));
+
+        int[] fontValues = {100, 110, 120, 125, 150};
+        String[] fontLabels = {"100%", "110%", "120%", "125%", "150%"};
+        int fontIndex = indexOf(fontValues, ManagerStateStore.linuxFontPercent(this));
+        appearance.addView(appearanceSlider("Linux app text",
+                "Font size only. Open GTK apps update now; other apps may need reopening.",
+                fontLabels, fontIndex, index -> {
+                    ManagerStateStore.setLinuxFontPercent(this, fontValues[index]);
+                    showBanner("Running GTK apps update text now; reopen other apps if unchanged", false);
+                }), spacedWrap(dp(8)));
+
+        String[] controlValues = {"compact", "automatic", "comfortable", "touch"};
+        String[] controlLabels = {"Compact", "Auto", "Comfort", "Touch"};
+        int controlIndex = indexOf(controlValues, ManagerStateStore.linuxControlDensity(this));
+        appearance.addView(appearanceSlider("Linux app controls",
+                "Minimum touch-target size. Compact is default; Auto adapts. Open GTK apps update now.",
+                controlLabels, controlIndex, index -> {
+                    ManagerStateStore.setLinuxControlDensity(this, controlValues[index]);
+                    showBanner("Running GTK apps update controls now; reopen other apps if unchanged", false);
+                }), spacedWrap(dp(8)));
         appearance.addView(settingToggle("Material You colors",
                 "Use Android system colors when available",
                 ManagerStateStore.materialYou(this), (button, checked) -> {
@@ -2135,6 +2139,75 @@ public final class MainActivity extends Activity {
         return row;
     }
 
+    private interface SliderCommitListener {
+        void onCommit(int index);
+    }
+
+    private View appearanceSlider(String title, String description, String[] labels,
+            int selectedIndex, SliderCommitListener listener) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(12), dp(10), dp(12), dp(8));
+        card.setBackground(rounded(COLOR_SURFACE, 18));
+
+        TextView value = text(title + ": " + labels[selectedIndex], 15, COLOR_TEXT);
+        value.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        card.addView(value, matchWrap());
+        TextView help = text(description, 12, COLOR_MUTED);
+        help.setPadding(0, dp(3), 0, dp(2));
+        card.addView(help, matchWrap());
+
+        SeekBar slider = new SeekBar(this);
+        slider.setMax(labels.length - 1);
+        slider.setProgress(selectedIndex);
+        slider.setSplitTrack(false);
+        if (Build.VERSION.SDK_INT >= 24) {
+            GradientDrawable tick = oval(COLOR_MUTED);
+            tick.setSize(dp(4), dp(4));
+            slider.setTickMark(tick);
+        }
+        slider.setContentDescription(title + ", " + labels[selectedIndex]);
+        slider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                value.setText(title + ": " + labels[progress]);
+                seekBar.setContentDescription(title + ", " + labels[progress]);
+                if (fromUser) listener.onCommit(progress);
+            }
+
+            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
+
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {}
+        });
+        card.addView(slider, matchWrap());
+
+        LinearLayout ticks = new LinearLayout(this);
+        ticks.setGravity(Gravity.CENTER_VERTICAL);
+        for (String label : labels) {
+            TextView tick = text(label, 10, COLOR_MUTED);
+            tick.setGravity(Gravity.CENTER);
+            ticks.addView(tick, new LinearLayout.LayoutParams(0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        }
+        card.addView(ticks, matchWrap());
+        return card;
+    }
+
+    private static int indexOf(int[] values, int selected) {
+        for (int index = 0; index < values.length; index++) {
+            if (values[index] == selected) return index;
+        }
+        return 0;
+    }
+
+    private static int indexOf(String[] values, String selected) {
+        for (int index = 0; index < values.length; index++) {
+            if (values[index].equals(selected)) return index;
+        }
+        return 0;
+    }
+
     private TextView sectionLabel(String label) {
         TextView view = text(label, 14, COLOR_PRIMARY);
         view.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
@@ -2158,23 +2231,6 @@ public final class MainActivity extends Activity {
         String mode = ManagerStateStore.linuxThemeMode(this);
         return "Linux app theme: " + ("dark".equals(mode) ? "Dark"
                 : "light".equals(mode) ? "Light" : "Follow Android");
-    }
-
-    private String linuxScaleLabel() {
-        int percent = ManagerStateStore.linuxScalePercent(this);
-        return "Linux app scale: " + (percent == 0 ? "Automatic" : percent + "%");
-    }
-
-    private String linuxFontLabel() {
-        return "Linux app text: " + ManagerStateStore.linuxFontPercent(this) + "%";
-    }
-
-    private String linuxControlDensityLabel() {
-        String density = ManagerStateStore.linuxControlDensity(this);
-        String label = "compact".equals(density) ? "Compact"
-                : "comfortable".equals(density) ? "Comfortable"
-                : "touch".equals(density) ? "Touch" : "Automatic";
-        return "Linux app controls: " + label;
     }
 
     private void showRepositoryDialog(ManagedRepositoryStore.Repository repository) {

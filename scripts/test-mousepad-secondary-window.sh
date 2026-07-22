@@ -43,9 +43,21 @@ main_log="$(archphene_wait_log 'window id=[0-9]+.*primary=true.*Mousepad' 30 'Ar
 main="$({
   python3 -c 'import re,sys;m=re.search(r"window id=(\d+).*primary=true.*title=[^\n]*Mousepad",sys.stdin.read());print(m.group(1) if m else "")' <<<"$main_log"
 })"
+appearance_log="$(archphene_wait_log 'controlTargetDp=[0-9]+' 10 \
+  'ArchpheneLinuxApp:V *:S')"
 
 read -r width height <<<"$(archphene_adb_run shell wm size | sed -n 's/.*: \([0-9]*\)x\([0-9]*\).*/\1 \2/p' | tail -n1)"
 [[ -n "${width:-}" && -n "${height:-}" ]] || archphene_die 'unable to read emulator display size'
+target_dp="$(sed -n 's/.*controlTargetDp=\([0-9][0-9]*\).*/\1/p' \
+  <<<"$appearance_log" | tail -n1)"
+wm_density="$(archphene_adb_run shell wm density \
+  | sed -n 's/.*: \([0-9][0-9]*\).*/\1/p' | tail -n1)"
+status_top="$(archphene_adb_run shell dumpsys window \
+  | sed -n 's/.*type=statusBars frame=\[[^]]*\]\[[0-9]*,\([0-9]*\)\].*/\1/p' \
+  | head -n1)"
+[[ -n "$target_dp" && -n "$wm_density" && -n "$status_top" ]] \
+  || archphene_die 'unable to resolve Mousepad density or Android status inset'
+control_pixels=$(((target_dp * wm_density + 80) / 160))
 archphene_adb_run shell input tap "$((width / 4))" "$((height * 3 / 5))"
 sleep 1
 input_log="$(archphene_adb_run logcat -d -v brief -s ArchpheneInput:V '*:S')"
@@ -56,11 +68,18 @@ fi
 
 # Mousepad does not bind a bare comma to Preferences. Exercise the real menu
 # path so this proves popup routing as well as secondary-window composition.
-archphene_adb_run shell input tap "$((width * 18 / 100))" "$((height * 14 / 100))"
-archphene_wait_log 'popup registry=[0-9]' 10 'ArchpheneInput:V *:S' >/dev/null
-archphene_adb_run shell input tap "$((width * 28 / 100))" "$((height * 925 / 1000))"
+menu_y=$((status_top + control_pixels * 3 / 2))
+archphene_adb_run shell input tap "$((width * 18 / 100))" "$menu_y"
+popup_log="$(archphene_wait_log 'popup registry=[0-9]' 10 'ArchpheneInput:V *:S')"
+read -r popup_x popup_y popup_width popup_height <<<"$(sed -n \
+  's/.*popup registry=[0-9]*:\([0-9][0-9]*\),\([0-9][0-9]*\),\([0-9][0-9]*\),\([0-9][0-9]*\).*/\1 \2 \3 \4/p' \
+  <<<"$popup_log" | tail -n1)"
+[[ -n "${popup_height:-}" ]] || archphene_die 'unable to resolve Mousepad Edit popup geometry'
+preferences_x=$((popup_x + control_pixels * 4 / 3))
+preferences_y=$((status_top + popup_y + popup_height - control_pixels / 2))
+archphene_adb_run shell input tap "$preferences_x" "$preferences_y"
 sleep .5
-archphene_adb_run shell input tap "$((width * 28 / 100))" "$((height * 925 / 1000))"
+archphene_adb_run shell input tap "$preferences_x" "$preferences_y"
 child_log="$(archphene_wait_log 'primary=false .*title=Mousepad Preferences' 15 'ArchpheneInput:V *:S')"
 child="$({
   python3 -c 'import re,sys;m=re.search(r"window id=(\d+).*primary=false.*title=Mousepad Preferences",sys.stdin.read());print(m.group(1) if m else "")' <<<"$child_log"
@@ -89,10 +108,25 @@ grep -Eq '^gtk-application-prefer-dark-theme=(true|false)$' <<<"$settings" \
   || archphene_die 'Mousepad is missing explicit light/dark preference'
 [[ "$css" != *'background-color:'* ]] \
   || archphene_die 'Mousepad GTK CSS still overrides partial surface colors'
+if ((target_dp >= 48)); then
+  affordance_dp=22
+elif ((target_dp >= 40)); then
+  affordance_dp=20
+else
+  affordance_dp=18
+fi
+affordance_pixels=$(((affordance_dp * wm_density + 80) / 160))
+grep -Fq 'checkbutton check, check, radiobutton radio, radio' <<<"$css" \
+  || archphene_die 'Mousepad GTK CSS does not scale check and radio indicators'
+grep -Fq "min-width: ${affordance_pixels}px" <<<"$css" \
+  || archphene_die "Mousepad GTK visible affordance is not ${affordance_pixels}px"
 python3 "$ARCHPHENE_SCRIPTS_DIR/lib/visual-manifest.py" \
   "$artifact_dir/manifest.json" \
   --field "serial=$serial" --field "package=$package" --field 'app=Mousepad' \
   --field 'state=Preferences' --field 'toolkit=gtk3' \
+  --field "controlTargetDp=$target_dp" \
+  --field "visibleAffordanceDp=$affordance_dp" \
+  --field "visibleAffordancePixels=$affordance_pixels" \
   --field "primaryWindow=$main" --field "secondaryWindow=$child" \
   --artifact "$artifact_dir/preferences.raw" \
   --artifact "$artifact_dir/preferences.png" \

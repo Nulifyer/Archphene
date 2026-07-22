@@ -6,9 +6,10 @@ source "$(dirname "$0")/lib/common.sh"
 bridge="$ARCHPHENE_ROOT/prototypes/shared-android-bridge/src/org/archphene/bridge/ArchpheneCompositorActivity.java"
 store="$ARCHPHENE_ROOT/prototypes/linux-app-manager-stub/src/org/archpheneos/manager/ManagerStateStore.java"
 provider="$ARCHPHENE_ROOT/prototypes/linux-app-manager-stub/src/org/archpheneos/manager/RuntimeModuleProvider.java"
+manager="$ARCHPHENE_ROOT/prototypes/linux-app-manager-stub/src/org/archpheneos/manager/MainActivity.java"
 style="$ARCHPHENE_ROOT/native/archphene-qt-platform-theme/archphenestyle.cpp"
 
-for file in "$bridge" "$store" "$provider" "$style"; do
+for file in "$bridge" "$store" "$provider" "$manager" "$style"; do
   archphene_require_file "$file"
 done
 
@@ -23,6 +24,10 @@ gtk_method="$(sed -n '/private void writeGtkTheme(/,/private void writeKdeTheme(
     && "$gtk_method" == *'@define-color accent_bg_color'* \
     && "$gtk_method" == *'@define-color accent_fg_color'* ]] \
   || archphene_die 'GTK Material You must use semantic accent color names'
+[[ "$gtk_method" == *'checkbutton check, check, radiobutton radio, radio'* \
+    && "$gtk_method" == *'visibleAffordanceDp'* \
+    && "$gtk_method" == *'visibleAffordanceSize / 16f'* ]] \
+  || archphene_die 'GTK phone policy must scale visible checks, radios, and title icons independently from their touch targets'
 
 for density in automatic compact comfortable touch; do
   grep -Fq "\"$density\"" "$store" \
@@ -30,6 +35,16 @@ for density in automatic compact comfortable touch; do
 done
 grep -Fq 'result.putString("control_density"' "$provider" \
   || archphene_die 'runtime provider does not publish control density'
+grep -Fq 'getString("linux-control-density", "compact")' "$store" \
+  || archphene_die 'compact control density is not the fresh-install default'
+grep -Fq 'notifyChange(APPEARANCE_URI' "$store" \
+  || archphene_die 'manager appearance changes are not published to running wrappers'
+grep -Fq 'registerContentObserver(' "$bridge" \
+  || archphene_die 'running wrappers do not observe manager appearance changes'
+for slider in 'Linux app scale' 'Linux app text' 'Linux app controls'; do
+  grep -Fq "appearanceSlider(\"$slider\"" "$manager" \
+    || archphene_die "$slider is not a described discrete slider"
+done
 grep -Fq 'ARCHPHENE_QT_CONTROL_MIN_SIZE' "$bridge" \
   || archphene_die 'wrapper does not publish Qt control metrics'
 grep -Fq 'ControlMinSize=' "$bridge" \

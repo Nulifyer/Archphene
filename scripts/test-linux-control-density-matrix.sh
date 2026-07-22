@@ -89,7 +89,8 @@ for row in "${profiles[@]}"; do
       # Empty editors and terminals legitimately devote most of the surface to
       # one background color. Inspect their title/menu/prompt region instead of
       # accepting or rejecting them based on the blank document body.
-      frame_health_args=(--top-percent 4 --bottom-percent 20 --minimum-colors 8)
+      frame_health_args=(--top-percent 4 --bottom-percent 20 \
+        --minimum-colors 8 --minimum-luma-range 10)
       ;;
     foot)
       frame_health_args=(--top-percent 4 --bottom-percent 20 \
@@ -105,6 +106,14 @@ for row in "${profiles[@]}"; do
     "$profile_dir/logcat.txt"
 
   expected_pixels=$(((target_dp * wm_density + 80) / 160))
+  if ((target_dp >= 48)); then
+    affordance_dp=22
+  elif ((target_dp >= 40)); then
+    affordance_dp=20
+  else
+    affordance_dp=18
+  fi
+  expected_affordance_pixels=$(((affordance_dp * wm_density + 80) / 160))
   config_artifact=
   case "$toolkit" in
     qt6)
@@ -125,6 +134,12 @@ for row in "${profiles[@]}"; do
         >"$profile_dir/gtk.css"
       grep -Fq "min-height: ${expected_pixels}px" "$profile_dir/gtk.css" \
         || archphene_die "$name GTK target is not ${expected_pixels}px"
+      grep -Fq 'checkbutton check, check, radiobutton radio, radio' \
+        "$profile_dir/gtk.css" \
+        || archphene_die "$name GTK indicator selectors are missing"
+      grep -Fq "min-width: ${expected_affordance_pixels}px" \
+        "$profile_dir/gtk.css" \
+        || archphene_die "$name GTK visible affordance is not ${expected_affordance_pixels}px"
       python3 "$ARCHPHENE_SCRIPTS_DIR/lib/theme-contrast-check.py" gtk-accent \
         "$profile_dir/gtk.css"
       config_artifact="$profile_dir/gtk.css"
@@ -147,6 +162,8 @@ for row in "${profiles[@]}"; do
     --field "profile=$name" --field "requestedDensity=$requested" \
     --field "resolvedDensity=$resolved" --field "targetDp=$target_dp" \
     --field "targetPixels=$expected_pixels" \
+    --field "visibleAffordanceDp=$affordance_dp" \
+    --field "visibleAffordancePixels=$expected_affordance_pixels" \
     --artifact "$profile_dir/main.raw" --artifact "$profile_dir/main.png" \
     --artifact "$profile_dir/logcat.txt" --artifact "$config_artifact"
   archphene_note "$label $name rendered: requested=$requested resolved=$resolved target=${target_dp}dp/${expected_pixels}px"

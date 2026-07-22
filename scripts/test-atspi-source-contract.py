@@ -505,6 +505,8 @@ def main() -> None:
          "phone secondary selection"),
         (android_activity_source, "session.closeWindow(activeSecondaryWindowId)",
          "phone secondary Back close"),
+        (android_activity_source, "Linux runtime exited; finishing Android host",
+         "primary Linux-window Android lifecycle"),
         (android_activity_source, "backInvokedCallback = this::handleSystemBack",
          "predictive activity Back callback"),
         (android_activity_source, "dialog.getOnBackInvokedDispatcher()",
@@ -562,6 +564,8 @@ def main() -> None:
     for implementation, token, label in fallback_tokens:
         if token not in implementation:
             raise AssertionError(f"missing {label}: {token}")
+    if android_activity_source.count("finishAfterLinuxRuntimeExit();") != 2:
+        raise AssertionError("both managed and packaged Linux runtimes must finish their Android host")
     action_body = re.search(
         r"public boolean performAction\(.*?\n    private void sendEvent",
         android_source,

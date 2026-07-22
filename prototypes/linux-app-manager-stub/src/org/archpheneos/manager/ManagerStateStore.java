@@ -2,11 +2,14 @@ package org.archpheneos.manager;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.net.Uri;
 import org.json.JSONObject;
 
 public final class ManagerStateStore {
     private static final String PREFS = "linux-app-manager-state";
     private static final String BACKGROUND = "background-checks";
+    private static final Uri APPEARANCE_URI = Uri.parse(
+            "content://org.archpheneos.manager.runtime/appearance");
 
     public static final class Snapshot {
         public final String availableVersion;
@@ -202,6 +205,7 @@ public final class ManagerStateStore {
 
     public static void setMaterialYou(Context context, boolean enabled) {
         preferences(context).edit().putBoolean("material-you", enabled).apply();
+        notifyAppearanceChanged(context);
     }
 
     public static String linuxThemeMode(Context context) {
@@ -212,6 +216,7 @@ public final class ManagerStateStore {
     public static void setLinuxThemeMode(Context context, String mode) {
         String value = "light".equals(mode) || "dark".equals(mode) ? mode : "system";
         preferences(context).edit().putString("linux-theme-mode", value).apply();
+        notifyAppearanceChanged(context);
     }
 
     public static int linuxScalePercent(Context context) {
@@ -228,6 +233,7 @@ public final class ManagerStateStore {
             if (percent == allowed) value = allowed;
         }
         preferences(context).edit().putInt("linux-scale-percent", value).apply();
+        notifyAppearanceChanged(context);
     }
 
     public static int linuxFontPercent(Context context) {
@@ -244,18 +250,25 @@ public final class ManagerStateStore {
             if (percent == allowed) value = allowed;
         }
         preferences(context).edit().putInt("linux-font-percent", value).apply();
+        notifyAppearanceChanged(context);
     }
 
     public static String linuxControlDensity(Context context) {
-        String value = preferences(context).getString("linux-control-density", "automatic");
+        String value = preferences(context).getString("linux-control-density", "compact");
         return "compact".equals(value) || "comfortable".equals(value)
-                || "touch".equals(value) ? value : "automatic";
+                || "touch".equals(value) || "automatic".equals(value) ? value : "compact";
     }
 
     public static void setLinuxControlDensity(Context context, String density) {
         String value = "compact".equals(density) || "comfortable".equals(density)
-                || "touch".equals(density) ? density : "automatic";
+                || "touch".equals(density) || "automatic".equals(density)
+                ? density : "compact";
         preferences(context).edit().putString("linux-control-density", value).apply();
+        notifyAppearanceChanged(context);
+    }
+
+    private static void notifyAppearanceChanged(Context context) {
+        context.getContentResolver().notifyChange(APPEARANCE_URI, null);
     }
     static void verifyPendingReinstallForTest(Context context) {
         SharedPreferences state = preferences(context);
