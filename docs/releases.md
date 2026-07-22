@@ -6,8 +6,8 @@ GitHub Actions builds, verifies, and attaches the signed manager APK whenever a 
 
 Run:
 
-```powershell
-./scripts/setup-github-release-signing.ps1
+```bash
+./scripts/setup-github-release-signing.sh
 ```
 
 The script creates a dedicated production keystore and configures these repository Actions secrets:
@@ -44,8 +44,8 @@ The workflow can be rerun manually with **Run workflow** for an existing tag whi
 
 Run the fast source contract before tagging:
 
-```powershell
-python scripts/test-release-workflow-contract.py
+```bash
+python3 scripts/test-release-workflow-contract.py
 ```
 
 It rejects publish-before-upload workflows, mutable action references, missing ABI assets, migration aliases outside `v1.0.1`, and any manager fallback to ABI-neutral assets.
@@ -54,15 +54,15 @@ It rejects publish-before-upload workflows, mutable action references, missing A
 
 The device regression installs an older exact-ABI manager signed by the production key, discovers and downloads the requested public GitHub Release through the manager, and accepts Android's system-owned update confirmation:
 
-```powershell
+```bash
 # Current exact-ABI updater
-./scripts/test-linux-manager-github-self-update.ps1 -ToVersion 1.0.1 -RebuildBaseline
+./scripts/test-linux-manager-github-self-update.sh --to-version 1.0.1 --rebuild-baseline
 
 # Exact-ABI updater on an attached ARM64 device
-./scripts/test-linux-manager-github-self-update.ps1 -Serial <adb-serial> -ToVersion 1.0.1 -RebuildBaseline
+./scripts/test-linux-manager-github-self-update.sh --serial <adb-serial> --to-version 1.0.1 --rebuild-baseline
 
 # One-time migration from the real published x86_64 v1.0.0 APK
-./scripts/test-linux-manager-github-self-update.ps1 -PublishedV100Migration -RebuildBaseline
+./scripts/test-linux-manager-github-self-update.sh --published-v100-migration --rebuild-baseline
 ```
 
 Use the exact-ABI command for each target. The migration mode downloads the real `v1.0.0` APK and checksum, rejects a non-x86_64 target, and verifies the old updater can consume the compatibility alias. These tests uninstall the manager package and therefore clear manager-private state, but they do not remove separately installed Linux application packages.

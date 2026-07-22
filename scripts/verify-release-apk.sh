@@ -24,7 +24,7 @@ esac
 sdk_tool() {
   local name="$1"
   local candidate
-  for candidate in "$bt/$name" "$bt/$name.exe" "$bt/$name.bat"; do
+  for candidate in "$bt/$name"; do
     if [[ -f "$candidate" ]]; then
       printf '%s\n' "$candidate"
       return 0

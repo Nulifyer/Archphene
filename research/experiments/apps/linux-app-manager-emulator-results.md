@@ -12,7 +12,7 @@ The manager queries visible launcher activities, filters on `org.archphene.linux
 
 ## Emulator evidence
 
-`scripts/test-linux-manager-kcalc.ps1` verifies:
+`scripts/test-linux-manager-kcalc.sh` verifies:
 
 - KCalc appears in the manager catalog.
 - The source is `pacman: extra/kcalc 26.04.3-1`.
@@ -27,7 +27,7 @@ versionCode=26040301
 versionName=26.04.3-1
 ```
 
-`scripts/test-linux-manager-update.ps1` invokes an explicit update check against Arch's official HTTPS package JSON endpoint. The emulator currently reports:
+`scripts/test-linux-manager-update.sh` invokes an explicit update check against Arch's official HTTPS package JSON endpoint. The emulator currently reports:
 
 ```text
 Available: 26.04.3-1
@@ -56,7 +56,7 @@ official Arch metadata and signed package
 Pacman must not write into Android's host filesystem, and the manager must not execute downloaded ELF files from writable app data. Android remains the installer and sandbox authority.
 ## Signed update transaction
 
-`scripts/test-kcalc-update-transaction.ps1` now verifies the complete builder-side transaction:
+`scripts/test-kcalc-update-transaction.sh` now verifies the complete builder-side transaction:
 
 - downloads current metadata from Arch's official endpoint;
 - verifies compressed package size and filename;
@@ -75,7 +75,7 @@ Pacman must not write into Android's host filesystem, and the manager must not e
 
 The manager now has a verified APK installer path. Before creating a session it checks HTTPS for production artifact URLs, expected APK SHA-256, expected Android package name, signing certificate equality, non-decreasing version code, and a 512 MiB artifact limit.
 
-`scripts/test-linux-manager-package-installer.ps1` stages the already verified APK in manager-private cache, detects Android's system-owned KCalc update dialog, accepts the Update action, verifies the manager receives success, and reruns KCalc's clipboard health check. The manager never bypasses Android's confirmation or install authority.
+`scripts/test-linux-manager-package-installer.sh` stages the already verified APK in manager-private cache, detects Android's system-owned KCalc update dialog, accepts the Update action, verifies the manager receives success, and reruns KCalc's clipboard health check. The manager never bypasses Android's confirmation or install authority.
 
 ## Descriptor-driven generation
 

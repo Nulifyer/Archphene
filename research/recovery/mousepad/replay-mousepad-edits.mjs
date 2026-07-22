@@ -1,7 +1,8 @@
 import { readFileSync } from "fs";
+import { homedir } from "os";
 
 const LF = String.fromCharCode(10);
-const session = process.env.USERPROFILE + "/.codex/sessions/2026/07/08/rollout-2026-07-08T18-43-27-019f43e6-7edc-7eb2-87db-c6f36b37a76d.jsonl";
+const session = homedir() + "/.codex/sessions/2026/07/08/rollout-2026-07-08T18-43-27-019f43e6-7edc-7eb2-87db-c6f36b37a76d.jsonl";
 const target = "prototypes/mousepad-android-app/src/org/archphene/linux/kcalc/MainActivity.java";
 const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
 let replayed = 0;
@@ -35,7 +36,7 @@ for (const line of readFileSync(session, "utf8").split(LF)) {
   }
 
   for (let command of commands) {
-    for (const stopWord of ["build-install-mousepad-app.ps1", "adb shell", "adb logcat"]) {
+    for (const stopWord of ["build-install-mousepad-app.sh", "adb shell", "adb logcat"]) {
       const at = command.indexOf(stopWord);
       if (at >= 0) {
         const semi = Math.max(command.lastIndexOf(";", at), command.lastIndexOf(LF, at));
@@ -43,18 +44,12 @@ for (const line of readFileSync(session, "utf8").split(LF)) {
       }
     }
     if (!command.trim()) continue;
-    const result = Bun.spawnSync({
-      cmd: [process.env.ProgramFiles + "/PowerShell/7/pwsh.exe", "-NoProfile", "-Command", command],
-      cwd: process.cwd(),
-      stdout: "pipe",
-      stderr: "pipe",
-    });
+    // These archived commands use the shell syntax of the original development
+    // host. Keep them as provenance, but do not introduce a non-Linux runtime
+    // dependency into the current recovery tools.
     replayed++;
-    if (result.exitCode !== 0) {
-      failed++;
-      const err = result.stderr.toString().trim().split(LF).slice(-2).join(" ");
-      process.stdout.write("replay-failed " + row.timestamp + " " + err + LF);
-    }
+    failed++;
+    process.stdout.write("replay-skipped " + row.timestamp + " archived-host-command" + LF);
   }
 }
 process.stdout.write(JSON.stringify({ replayed, failed }) + LF);

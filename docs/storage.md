@@ -172,21 +172,21 @@ The emulator regression proves parser rejection and both sides of the access bou
 
 The current launcher creates a wrapper-private, bounded transient cache for the program and named libraries so the dynamic loader and late `dlopen()` calls receive stable path names. The cache is removed after a normal exit, purged on the next launch after an interrupted exit, and remains reclaimable Android cache data. It is not a second persistent package closure.
 
-A debug-only descriptor-library probe keeps the executable named while exposing every library through inherited read-only descriptors. Unmodified KCalc and Mousepad both fail closed before toolkit startup: Android permits the inherited descriptors but stock glibc cannot resolve soname links through `/proc/self/fd`, producing missing `libKF6Notifications.so.6` and `libmousepad.so.0` respectively. The failed probes clean to less than 64 MiB, and immediate normal launches of both applications succeed. Archphene therefore retains the named transient cache. Removing it requires an FD-aware glibc object loader, not a Wayland or toolkit change. Reproduce the gate with `scripts/test-runtime-descriptor-libraries.ps1` on debug wrappers.
+A debug-only descriptor-library probe keeps the executable named while exposing every library through inherited read-only descriptors. Unmodified KCalc and Mousepad both fail closed before toolkit startup: Android permits the inherited descriptors but stock glibc cannot resolve soname links through `/proc/self/fd`, producing missing `libKF6Notifications.so.6` and `libmousepad.so.0` respectively. The failed probes clean to less than 64 MiB, and immediate normal launches of both applications succeed. Archphene therefore retains the named transient cache. Removing it requires an FD-aware glibc object loader, not a Wayland or toolkit change. Reproduce the gate with `scripts/test-runtime-descriptor-libraries.sh` on debug wrappers.
 
 Measure an attached test device with:
 
-```powershell
-.\scripts\measure-android-storage.ps1 -Serial <serial> `
-  -OutputJson tooling/build/storage/report.json `
-  -OutputMarkdown tooling/build/storage/report.md
+```bash
+./scripts/measure-android-storage.sh --serial <serial> \
+  --output-json tooling/build/storage/report.json \
+  --output-markdown tooling/build/storage/report.md
 ```
 
 The report separates APK bytes, installed code, persistent private data, transient cache, and manager runtime-store categories. Public size claims must use a documented clean install and workload; a development device snapshot includes caches and test state and is not a release baseline.
 
 ## Clean v1.0.1 x86_64 Baseline
 
-Measured on 2026-07-19 using a wiped Android 16 x86_64 AVD with 4 KB pages. Values are MiB rounded to one decimal and come from `measure-android-storage.ps1` reports under the ignored `tooling/build/storage/` directory.
+Measured on 2026-07-19 using a wiped Android 16 x86_64 AVD with 4 KB pages. Values are MiB rounded to one decimal and come from `measure-android-storage.sh` reports under the ignored `tooling/build/storage/` directory.
 
 | State | APK | Installed code | Persistent data | Transient cache |
 |---|---:|---:|---:|---:|
@@ -204,4 +204,3 @@ The 359.1 MiB KCalc launch cache is the named private view required by the curre
 ## Runtime Cache Decision
 
 The bounded named-module cache is required by the supported stock-glibc runtime. Persistent package bytes remain deduplicated under the manager UID; the per-wrapper cache exists only while Linux processes need pathname-based loading and is reclaimable by normal exit, the next launch, or Android cache management.
-

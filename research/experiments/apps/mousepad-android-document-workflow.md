@@ -19,8 +19,8 @@ Verified sequence:
 
 The automated test is:
 
-```powershell
-.\scripts\test-mousepad-android-document-workflow.ps1
+```bash
+./scripts/test-mousepad-android-document-workflow.sh
 ```
 
 It passed the complete picker, edit, save, Downloads write-back, cold reopen, and DocumentsProvider read sequence.

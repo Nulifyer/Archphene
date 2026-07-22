@@ -9,7 +9,7 @@ glibc_sha256="d9c86c6b5dbddb43a3e08270c5844fc5177d19442cf5b8df4be7c07cd5fa3831"
 jobs="${JOBS:-2}"
 glibc_out="tooling/build/glibc-archphene-runtime-x86_64"
 stage="tooling/build/ci-package-runtime"
-container_cli="${CONTAINER_CLI:-docker}"
+container_cli="${CONTAINER_CLI:-podman}"
 
 mkdir -p tooling/build
 rm -rf "$glibc_out" "$stage"
@@ -20,14 +20,8 @@ mkdir -p "$container_out"
 
 container_volume="$container_out"
 patch_volume="$root/patches/glibc"
-msys_arg_excl=""
-if command -v cygpath >/dev/null 2>&1 && [[ "$container_cli" == *podman* ]]; then
-  container_volume="$(cygpath -w "$container_out")"
-  patch_volume="$(cygpath -w "$patch_volume")"
-  msys_arg_excl="*"
-fi
 
-MSYS2_ARG_CONV_EXCL="$msys_arg_excl" $container_cli run --rm \
+"$container_cli" run --rm \
   -e HOST_UID="$(id -u)" \
   -e HOST_GID="$(id -g)" \
   -e SKIP_CHOWN="${SKIP_CHOWN:-0}" \

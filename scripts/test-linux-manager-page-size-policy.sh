@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source "$(dirname "$0")/lib/common.sh"
+page4_serial=emulator-5554; page16_serial=emulator-5556; manager_apk="$ARCHPHENE_ROOT/prototypes/linux-app-manager-stub/out-linux/archphene.apk"
+while (($#)); do case "$1" in --page-4k-serial) page4_serial="${2:?}"; shift 2;; --page-16k-serial) page16_serial="${2:?}"; shift 2;; --manager-apk) manager_apk="${2:?}"; shift 2;; -h|--help) echo "usage: $0 [--page-4k-serial SERIAL] [--page-16k-serial SERIAL] [--manager-apk PATH]"; exit 0;; *) archphene_die "unknown argument: $1";; esac; done
+manager_apk="$(realpath "$manager_apk")"; package=org.archpheneos.manager; issue='Package installs unavailable: upstream Arch x86_64 runtime is 4 KB-only on this 16 KB Android device'; ARCHPHENE_ADB="$(archphene_adb)"
+adb_for() { "$ARCHPHENE_ADB" -s "$1" "${@:2}"; }
+capture_for() { local serial="$1" name="$2"; adb_for "$serial" shell uiautomator dump --compressed "/sdcard/$name.xml" >/dev/null; adb_for "$serial" shell cat "/sdcard/$name.xml"; }
+tap_description() { local serial="$1" ui="$2" description="$3" center x y; center="$(archphene_ui_node_center "$ui" "content-desc=\"$(printf '%s' "$description" | sed 's/[][(){}.^$*+?|\\]/\\&/g')\"" "$description")"; read -r x y <<<"$center"; adb_for "$serial" shell input tap "$x" "$y" >/dev/null; }
+for row in "$page4_serial:4096" "$page16_serial:16384"; do serial="${row%:*}"; expected="${row#*:}"; actual="$(adb_for "$serial" shell getconf PAGE_SIZE | tr -d '\r\n')"; [[ "$actual" == "$expected" ]] || archphene_die "$serial page size $actual != $expected"; adb_for "$serial" install -r -d "$manager_apk" >/dev/null; done
+adb_for "$page16_serial" logcat -c; adb_for "$page16_serial" shell am force-stop "$package"; adb_for "$page16_serial" shell am start -W -n "$package/.MainActivity" >/dev/null; sleep 2
+ui16="$(capture_for "$page16_serial" archphene-page16)"; [[ "$ui16" == *"$issue"* ]] || archphene_die "16 KB manager did not explain restriction"; [[ "$ui16" != *"This app isn't 16 KB compatible"* ]] || archphene_die "Android displayed mismatch dialog"; ! adb_for "$page16_serial" logcat -d | grep -F 'Showing PageSizeMismatchDialog' >/dev/null || archphene_die "Android logged mismatch dialog"; tap_description "$page16_serial" "$ui16" 'Add Linux app'; sleep 0.5; gate="$(capture_for "$page16_serial" archphene-page16-gate)"; [[ "$gate" != *'text="Add packages"'* && "$gate" == *"$issue"* ]] || archphene_die "16 KB Add bypassed gate"
+adb_for "$page4_serial" shell am force-stop "$package"; adb_for "$page4_serial" shell am start -W -n "$package/.MainActivity" >/dev/null; sleep 2; ui4="$(capture_for "$page4_serial" archphene-page4)"; [[ "$ui4" != *"$issue"* ]] || archphene_die "4 KB manager incorrectly disabled transactions"; tap_description "$page4_serial" "$ui4" 'Add Linux app'; sleep 0.5; add="$(capture_for "$page4_serial" archphene-page4-add)"; [[ "$add" == *'text="Add packages"'* ]] || archphene_die "4 KB Add did not open search"
+archphene_note "Manager page-size policy passed: 4 KB enabled, 16 KB explicitly gated without Android warning."
+

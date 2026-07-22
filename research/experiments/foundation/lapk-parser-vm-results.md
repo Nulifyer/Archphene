@@ -28,7 +28,7 @@ prototypes/linux-app-manager-stub/src/org/archpheneos/manager/LinuxAppManagerSer
 Updated build script to package APK assets and use a persistent signing key:
 
 ```text
-scripts/build-install-linux-manager-stub.ps1
+scripts/build-install-linux-manager-stub.sh
 tooling/signing/archpheneos-manager-debug.keystore
 ```
 

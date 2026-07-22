@@ -4,7 +4,7 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 
-container_cli="${CONTAINER_CLI:-docker}"
+container_cli="${CONTAINER_CLI:-podman}"
 keyring_commit="09fcb20da1bd9504bed249da1bc0d08f86e8bd56"
 glibc_version="2.43"
 glibc_sha256="d9c86c6b5dbddb43a3e08270c5844fc5177d19442cf5b8df4be7c07cd5fa3831"
@@ -24,18 +24,11 @@ mkdir -p "$container_out"
 container_volume="$container_out"
 patch_volume="$root/patches/glibc"
 path_bridge_volume="$root/native/archphene-glibc-path-bridge"
-msys_arg_excl=""
-if command -v cygpath >/dev/null 2>&1 && [[ "$container_cli" == *podman* ]]; then
-  container_volume="$(cygpath -w "$container_out")"
-  patch_volume="$(cygpath -w "$patch_volume")"
-  path_bridge_volume="$(cygpath -w "$path_bridge_volume")"
-  msys_arg_excl="*"
-fi
 
-MSYS2_ARG_CONV_EXCL="$msys_arg_excl" $container_cli build \
+"$container_cli" build \
   -f containers/arm-runtime-builder.Containerfile -t "$builder_image" .
 
-MSYS2_ARG_CONV_EXCL="$msys_arg_excl" $container_cli run --rm \
+"$container_cli" run --rm \
   -e HOST_UID="$(id -u)" \
   -e HOST_GID="$(id -g)" \
   -e SKIP_CHOWN="${SKIP_CHOWN:-0}" \

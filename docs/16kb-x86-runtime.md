@@ -35,8 +35,8 @@ CONTAINER_CLI=podman SKIP_CHOWN=1 JOBS=8 scripts/build-ci-package-runtime.sh
 scripts/build-16kb-glibc-probe.sh
 ```
 
-```powershell
-scripts/test-16kb-glibc-runtime.ps1 -Serial emulator-5556
+```bash
+scripts/test-16kb-glibc-runtime.sh --serial emulator-5556
 ```
 
 The test requires a debuggable Archphene manager installed on the target. It verifies `getconf PAGE_SIZE`, copies the runtime through `run-as`, executes the aligned probe under the app UID, checks exact output, and removes test state.

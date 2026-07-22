@@ -28,7 +28,7 @@ This explains why static Linux ELFs can run while a normal dynamic glibc program
 - Probe binary: `prototypes/linux-payloads/bin/syscall-probe-linux-amd64`
 - Packaged probe: `prototypes/lapk-wrapper-exec-test/lib/x86_64/libarchphene_syscall_probe.so`
 - Wrapper source: `prototypes/lapk-wrapper-exec-test/src/org/archpheneos/wrapper/MainActivity.java`
-- Build/install script: `scripts/build-install-lapk-wrapper-exec-test.ps1`
+- Build/install script: `scripts/build-install-lapk-wrapper-exec-test.sh`
 
 The probe is a static Linux x86_64 Go ELF. It is installed through the APK native library path and launched by the app process with one syscall name per child process.
 

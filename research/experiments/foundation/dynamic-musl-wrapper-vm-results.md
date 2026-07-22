@@ -25,11 +25,11 @@ The Android app then launched the dynamic musl executable through the packaged m
 - Extracted musl loader: `tooling/musl-alpine-x86_64/ld-musl-x86_64.so.1`
 - Packaged musl loader: `prototypes/lapk-wrapper-exec-test/lib/x86_64/libld-musl-x86_64.so`
 - Wrapper source: `prototypes/lapk-wrapper-exec-test/src/org/archpheneos/wrapper/MainActivity.java`
-- Build/install script: `scripts/build-install-lapk-wrapper-exec-test.ps1`
+- Build/install script: `scripts/build-install-lapk-wrapper-exec-test.sh`
 
 The dynamic musl executable was built with Zig:
 
-```powershell
+```text
 $env:ZIG_LOCAL_CACHE_DIR = (Resolve-Path .\tooling\zig-cache).Path
 $env:ZIG_GLOBAL_CACHE_DIR = (Resolve-Path .\tooling\zig-global-cache).Path
 zig cc -target x86_64-linux-musl -dynamic -O2 .\prototypes\linux-payloads\dynamic-hello\main.c -o .\prototypes\linux-payloads\bin\hello-dynamic-musl-x86_64
@@ -37,7 +37,7 @@ zig cc -target x86_64-linux-musl -dynamic -O2 .\prototypes\linux-payloads\dynami
 
 The musl loader was extracted from the locally available `postgres:16-alpine` image:
 
-```powershell
+```text
 podman cp "<container>:/lib/ld-musl-x86_64.so.1" .\tooling\musl-alpine-x86_64\ld-musl-x86_64.so.1
 ```
 

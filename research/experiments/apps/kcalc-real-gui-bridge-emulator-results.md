@@ -63,14 +63,14 @@ Validated on the running emulator:
 - Input mapping now reverses `ImageView.FIT_CENTER` using the committed SHM buffer dimensions rather than only the requested configure dimensions. This covers client-side decoration buffers larger than the logical window.
 - Popup destruction no longer infers primary-surface destruction from a missing popup record. Only the actual primary `xdg_surface` can clear the toplevel role, so sequential File -> Settings switching cannot promote a popup surface into the Android app window.
 - Partial `wl_surface.damage` and `damage_buffer` commits update a retained main-surface bitmap. Qt can rotate between SHM buffers without blanking undamaged calculator content behind menus.
-- `scripts/test-kcalc-menu-switch.ps1` clears app state, opens File, switches directly to Settings, verifies two native popup roles and valid grabs, rejects popup-to-primary promotion, and checks that the real KCalc child remains alive.
+- `scripts/test-kcalc-menu-switch.sh` clears app state, opens File, switches directly to Settings, verifies two native popup roles and valid grabs, rejects popup-to-primary promotion, and checks that the real KCalc child remains alive.
 - Android mouse hover exit and wheel input are translated to `wl_pointer.leave` and framed vertical axis events.
 - KCalc binds `wl_data_device_manager`, creates a data device/source, advertises both text MIME types, and sets a selection with a recognized recent input serial.
 - Android clipboard text is announced to Qt through a server-owned `wl_data_offer`; Qt requests its preferred MIME type and receives the complete payload through its supplied file descriptor.
 - Stock KCalc requested and received the seeded expression `6+5` through its normal Ctrl+V path without any KCalc changes.
 - Android clipboard callbacks are deduplicated and bridge-originated writes are suppressed, preventing selection feedback loops.
 - Android rotation triggers fresh `xdg_toplevel.configure` events from the actual inset-adjusted render surface; KCalc acknowledges each serial and commits a newly sized buffer without restarting.
-- The emulator round trip `1080x2205 -> 2400x943 -> 1080x2205` retained one KCalc PID and is covered by `scripts/test-kcalc-live-resize.ps1`.
+- The emulator round trip `1080x2205 -> 2400x943 -> 1080x2205` retained one KCalc PID and is covered by `scripts/test-kcalc-live-resize.sh`.
 - File -> Quit followed by launcher relaunch leaves one Android app process and exactly one new KCalc child.
 
 Screenshots:
@@ -104,6 +104,6 @@ Screenshots:
 
 This proves KCalc, not general Linux desktop compatibility. The compositor still needs a broader protocol implementation and tests for deeper nested popup stacks, drag-and-drop, richer keyboard layouts and IME, runtime density changes, accessibility, notifications, audio, GPU buffers, and Android document/permission brokers.
 
-Bidirectional text clipboard transfer is implemented. An unmodified Qt 6.11 probe decoded `ARCHPHENE_ANDROID_TO_WAYLAND` from an Android-backed `wl_data_offer`, then sent the known 25-byte text `ARCHPHENE_CLIPBOARD_PROBE` through `wl_data_source.send` for Android `ClipboardManager` to receive. Stock KCalc also requested a three-byte expression through Ctrl+V. `scripts/test-kcalc-clipboard.ps1` verifies both directions and asserts that bridge-originated clipboard writes do not create an offer feedback loop. Rich MIME types, URI/document offers, primary selection, and drag-and-drop remain pending.
+Bidirectional text clipboard transfer is implemented. An unmodified Qt 6.11 probe decoded `ARCHPHENE_ANDROID_TO_WAYLAND` from an Android-backed `wl_data_offer`, then sent the known 25-byte text `ARCHPHENE_CLIPBOARD_PROBE` through `wl_data_source.send` for Android `ClipboardManager` to receive. Stock KCalc also requested a three-byte expression through Ctrl+V. `scripts/test-kcalc-clipboard.sh` verifies both directions and asserts that bridge-originated clipboard writes do not create an offer feedback loop. Rich MIME types, URI/document offers, primary selection, and drag-and-drop remain pending.
 
 The current prototype also ships a curated app-local Qt/KF6/glibc closure. Shared dependency delivery and transactional package updates remain bridge-manager milestones.

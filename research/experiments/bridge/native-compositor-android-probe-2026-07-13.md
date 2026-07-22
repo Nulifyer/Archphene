@@ -69,10 +69,10 @@ The arm64 result is emitted through a structured logcat marker, so it remains ob
 
 ## Commands
 
-    ./scripts/build-native-compositor-probe-podman.ps1 -AndroidAbi x86_64
-    ./scripts/test-native-compositor-probe.ps1 -AndroidAbi x86_64 -Serial emulator-5554
-    ./scripts/build-native-compositor-probe-podman.ps1 -AndroidAbi arm64-v8a
-    ./scripts/test-native-compositor-probe.ps1 -AndroidAbi arm64-v8a -Serial RFCT90AEEFA
+    ./scripts/build-native-compositor-probe-podman.sh --android-abi x86_64
+    ./scripts/test-native-compositor-probe.sh --android-abi x86_64 --serial emulator-5554
+    ./scripts/build-native-compositor-probe-podman.sh --android-abi arm64-v8a
+    ./scripts/test-native-compositor-probe.sh --android-abi arm64-v8a --serial RFCT90AEEFA
 
 ## Boundary
 

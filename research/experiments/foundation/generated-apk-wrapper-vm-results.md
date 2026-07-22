@@ -15,7 +15,7 @@ The same Linux ELF payload that failed from app-private writable storage execute
 ## Prototype
 
 - Wrapper source: `prototypes/lapk-wrapper-exec-test/`
-- Build/install script: `scripts/build-install-lapk-wrapper-exec-test.ps1`
+- Build/install script: `scripts/build-install-lapk-wrapper-exec-test.sh`
 - Output APK: `prototypes/lapk-wrapper-exec-test/out/archpheneos-lapk-wrapper-exec-test.apk`
 - Payload source: `prototypes/linux-payloads/hello/main.go`
 - Payload in APK: `lib/x86_64/libarchphene_hello.so`

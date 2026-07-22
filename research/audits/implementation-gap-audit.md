@@ -6,7 +6,7 @@ Date: 2026-07-12
 
 The prototype proves that an unmodified Arch Linux GUI executable can run under a glibc runtime inside a normal Android app UID, connect to an app-local Wayland socket, render through Android, and receive pointer, keyboard, IME, clipboard, popup, resize, and limited document-broker events. KCalc runs on an ARM64 Samsung device; Mousepad runs on the x86_64 emulator. This does not prove GrapheneOS compatibility, production isolation, generic package conversion, or equivalence to a mature Wayland compositor.
 
-Rotation is now covered on both compositor forks. KCalc has an automated physical-device regression (`scripts/test-kcalc-live-resize.ps1`); Mousepad was manually verified on the emulator with one stable process across portrait, landscape, and portrait return. KCalc also has a settled descriptor regression (`scripts/test-kcalc-fd-lifecycle.ps1`).
+Rotation is now covered on both compositor forks. KCalc has an automated physical-device regression (`scripts/test-kcalc-live-resize.sh`); Mousepad was manually verified on the emulator with one stable process across portrait, landscape, and portrait return. KCalc also has a settled descriptor regression (`scripts/test-kcalc-fd-lifecycle.sh`).
 
 ## P0: blockers before broad app support
 

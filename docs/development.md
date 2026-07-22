@@ -1,43 +1,44 @@
 # Development
 
-Archphene uses Linux containers as the authoritative build environment. Windows is
-the supported host adapter for Podman, Android Emulator control, ADB, USB devices,
-screenshots, and input automation. Compilers, Arch package tools, glibc builds, APK
-assembly, signing, and release publishing should not depend on Windows-native ports.
+Archphene uses a Linux host and Linux containers as the authoritative build
+environment. Podman, Android Emulator control, ADB, USB devices, screenshots,
+and input automation all run directly on Linux.
 
 ## Prerequisites
 
-- PowerShell 7 and Podman Desktop
-- Git
-- Android platform-tools and emulator on Windows
-- ADB-enabled test device or configured AVD
-- A persistent signing key when producing release builds
+- For the normal container build: Bash 5, Podman with a working rootless setup,
+  Git, JDK 17 or newer, Python 3, jq, curl, tar, and standard GNU utilities
+- For local emulator and direct Android SDK scripts: Android command-line tools,
+  platform-tools, build-tools 36.0.0, platform 36, emulator, NDK
+  29.0.14206865, and the `system-images;android-36;google_apis;x86_64`
+  system image
+- An ADB-enabled device or an AVD named `ArchpheneOS_x86_64_api36` for tests
+- A persistent signing key only when producing release builds
 
 Build outputs, SDKs, downloaded packages, signing files, screenshots, and test artifacts are ignored.
 
 ## Build in Linux
 
-From Windows, use the thin Podman launcher:
+Use the Podman launcher:
 
-```powershell
-./scripts/build-manager-podman.ps1
+```bash
+./scripts/build-manager-podman.sh
 ```
 
-It enters the Podman Linux VM for signed Arch package tooling and the patched glibc
-build, then assembles and signs the APK in a Linux Android SDK container. No
-Windows-native compiler, archive tool, shell port, or Android build tool is used.
+It uses Linux containers for signed Arch package tooling and the patched glibc
+build, then assembles and signs the APK in a Linux Android SDK container.
 
 For repeated manager-only changes, reuse the verified runtime artifact:
 
-```powershell
-./scripts/build-manager-podman.ps1 -SkipRuntime
+```bash
+./scripts/build-manager-podman.sh --skip-runtime
 ```
 
 Build the same ABI-specific artifacts published by GitHub Releases with:
 
-```powershell
-./scripts/build-manager-podman.ps1 -SkipRuntime -ArtifactAbi x86_64
-./scripts/build-manager-podman.ps1 -SkipRuntime -ArtifactAbi arm64-v8a
+```bash
+./scripts/build-manager-podman.sh --skip-runtime --artifact-abi x86_64
+./scripts/build-manager-podman.sh --skip-runtime --artifact-abi arm64-v8a
 ```
 
 Use the universal flavor only for local cross-device development. Release APKs are single-ABI so Android installs only the matching package runtime and wrapper templates.
@@ -52,13 +53,13 @@ It uses a cacheable cross-toolchain image and a persistent package cache. Cache
 entries are signature-verified on every build before extraction. The ignored
 output is `tooling/build/ci-package-runtime-arm64/` with a complete `SHA256SUMS`
 catalog, pinned keyring/package-signer/glibc provenance, and the AArch64 glibc
-path broker. A normal non-`SkipRuntime` manager build refreshes both x86_64 and
+path broker. A normal build without `--skip-runtime` refreshes both x86_64 and
 AArch64 artifacts before APK assembly.
 
 Local builds are signed with the development key and remain debuggable so the explicit `archphene_test_*` emulator hooks work. Those hooks are ignored unless Android marks the installed APK debuggable.
 
-Use `-ReleaseBuild` only with the ignored production credentials created by
-`setup-github-release-signing.ps1`. GitHub Actions invokes the underlying Linux
+Use `--release-build` only with the ignored production credentials created by
+`setup-github-release-signing.sh`. GitHub Actions invokes the underlying Linux
 scripts directly on Ubuntu. Release builds force both APKs non-debuggable. The outputs are
 `prototypes/linux-app-manager-stub/out-linux/archphene.apk` and the companion
 `prototypes/archphene-terminal-app/out-linux/archphene-terminal.apk`; the latter is also embedded in the manager.
@@ -67,8 +68,8 @@ scripts directly on Ubuntu. Release builds force both APKs non-debuggable. The o
 
 Rebuild the exact-ABI Qt appearance plugin and refresh its prebuilt checksums:
 
-```powershell
-./scripts/build-qt-platform-theme-podman.ps1 -RebuildImage
+```bash
+./scripts/build-qt-platform-theme-podman.sh --rebuild-image
 ```
 
 The script uses the pinned Arch Linux snapshot for host tools, a checksum-pinned official Arch Linux ARM Qt package for target headers and libraries, and the existing AArch64 cross-toolchain. It fails if Qt does not match the runtime manifest or either output has the wrong ELF architecture.
@@ -77,55 +78,54 @@ The script uses the pinned Arch Linux snapshot for host tools, a checksum-pinned
 
 Build each ABI entirely in Podman:
 
-```powershell
-./scripts/build-native-compositor-probe-podman.ps1 -AndroidAbi x86_64
-./scripts/build-native-compositor-probe-podman.ps1 -AndroidAbi arm64-v8a
+```bash
+./scripts/build-native-compositor-probe-podman.sh --android-abi x86_64
+./scripts/build-native-compositor-probe-podman.sh --android-abi arm64-v8a
 ```
 
-Then use Windows only for ADB installation and result collection:
+Then use ADB for installation and result collection:
 
-```powershell
-./scripts/test-native-compositor-probe.ps1 -AndroidAbi x86_64 -Serial emulator-5554
-./scripts/test-native-compositor-probe.ps1 -AndroidAbi arm64-v8a -Serial <adb-serial>
+```bash
+./scripts/test-native-compositor-probe.sh --android-abi x86_64 --serial emulator-5554
+./scripts/test-native-compositor-probe.sh --android-abi arm64-v8a --serial <adb-serial>
 ```
 
-## Install from Windows
+## Install from Linux
 
-Windows only needs to transfer and exercise the resulting APK:
+Transfer and exercise the resulting APK:
 
-```powershell
-./scripts/install-apk.ps1 -Serial emulator-5554
+```bash
+./scripts/install-apk.sh --serial emulator-5554
 ```
 
 The adapter finds ADB under `tooling/android-sdk`, `ANDROID_SDK_ROOT`, or
 `ANDROID_HOME`. It can install another generated wrapper without rebuilding it:
 
-```powershell
-./scripts/install-apk.ps1 -Apk path/to/wrapper.apk -Package org.example.wrapper -Serial <adb-serial>
+```bash
+./scripts/install-apk.sh --apk path/to/wrapper.apk --package org.example.wrapper --serial <adb-serial>
 ```
 
-The older `build-install-*.ps1` scripts remain prototype fixtures while their
-build portions are migrated into the shared Linux toolchain. Do not extend them
-with new production build logic.
+The `build-install-*.sh` scripts remain prototype fixtures. Production builds
+use the shared Linux toolchain.
 
 ## Run tests
 
 Broad suites:
 
-```powershell
-./scripts/test-emulator-regression.ps1
-./scripts/test-arm64-physical-regression.ps1 -Serial <adb-serial>
+```bash
+./scripts/test-emulator-regression.sh
+./scripts/test-arm64-physical-regression.sh --serial <adb-serial>
 ```
 
 Focused scripts under `scripts/` cover manager workflows, package signatures, update transactions, KCalc input/clipboard/resize, Mousepad documents and IME, rotation, and file-descriptor lifecycle.
 
 Run the release display profiles independently with:
 
-```powershell
-./scripts/test-release-display-matrix.ps1 -Serial emulator-5554
+```bash
+./scripts/test-release-display-matrix.sh --serial emulator-5554
 ```
 
-The script restores display size, density, Android font scale, and night mode in a `finally` block.
+The script restores display size, density, Android font scale, and night mode on exit.
 
 ## Development rules
 

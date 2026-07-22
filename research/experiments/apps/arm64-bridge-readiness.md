@@ -21,13 +21,13 @@ The phone is not a GrapheneOS-supported Pixel, so this validates ordinary Androi
 
 Official Arch Linux supports x86_64. The AArch64 package closure therefore comes from the separate Arch Linux ARM project and is identified as `distribution: archlinuxarm`, not `archlinux`.
 
-The curated KCalc closure contains 62 signed Arch Linux ARM packages. `test-archlinuxarm-package-signatures.ps1` verifies every detached signature against the published build-key fingerprint:
+The curated KCalc closure contains 62 signed Arch Linux ARM packages. `test-archlinuxarm-package-signatures.sh` verifies every detached signature against the published build-key fingerprint:
 
 ```text
 68B3537F39A313B3E574D06777193F152BDBE6A6
 ```
 
-The stock Arch Linux ARM glibc loader is killed by Android app seccomp on startup. `build-arm64-glibc-runtime.ps1` now rebuilds glibc from pinned upstream commit `8362e8ce10b24068bacc19552c128dd10e082fd9` with `0001-android-app-seccomp-compat.patch`. The patch uses Android-permitted syscall forms and disables optional registrations blocked by the app seccomp profile. It does not grant Android permissions, alter SELinux, or change the app UID.
+The stock Arch Linux ARM glibc loader is killed by Android app seccomp on startup. `build-arm64-glibc-runtime.sh` now rebuilds glibc from pinned upstream commit `8362e8ce10b24068bacc19552c128dd10e082fd9` with `0001-android-app-seccomp-compat.patch`. The patch uses Android-permitted syscall forms and disables optional registrations blocked by the app seccomp profile. It does not grant Android permissions, alter SELinux, or change the app UID.
 
 The source-rebuildable stripped output used in the passing run was:
 
@@ -40,8 +40,8 @@ The source-rebuildable stripped output used in the passing run was:
 
 Run the complete physical gate with an explicit ADB serial:
 
-```powershell
-.\scripts\test-arm64-physical-regression.ps1 -Serial RFCT90AEEFA
+```bash
+./scripts/test-arm64-physical-regression.sh --serial RFCT90AEEFA
 ```
 
 The 2026-07-12 run passed:

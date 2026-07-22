@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source "$(dirname "$0")/lib/common.sh"
+serial=emulator-5554; while (($#)); do case "$1" in --serial) serial="${2:?}"; shift 2;; -h|--help) echo "usage: $0 [--serial SERIAL]"; exit 0;; *) archphene_die "unknown argument: $1";; esac; done
+archphene_init_adb "$serial"; package=org.archpheneos.manager
+open_settings() { archphene_adb_run shell am force-stop "$package"; archphene_adb_run shell am start -W -n "$package/.MainActivity" >/dev/null; sleep 0.8; archphene_adb_run shell input tap 850 2270; sleep 0.8; SWITCH_UI="$(archphene_capture_ui manager-prerelease-settings)"; }
+switch_info() { python3 -c 'import re,sys; t=sys.stdin.read(); i=t.find("text=\"Allow pre-release versions\""); assert i>=0,"label missing"; m=re.search(r"class=\"android.widget.Switch\"[^>]*checked=\"(true|false)\"[^>]*bounds=\"\[(\d+),(\d+)\]\[(\d+),(\d+)\]\"",t[i:i+2200]); assert m,"switch missing"; a=m.groups(); print(a[0],(int(a[1])+int(a[3]))//2,(int(a[2])+int(a[4]))//2)' <<<"$1"; }
+open_settings; read -r state x y <<<"$(switch_info "$SWITCH_UI")"; if [[ "$state" == true ]]; then archphene_adb_run shell input tap "$x" "$y"; sleep 0.5; SWITCH_UI="$(archphene_capture_ui manager-prerelease-disabled)"; read -r state x y <<<"$(switch_info "$SWITCH_UI")"; fi; [[ "$state" == false ]] || archphene_die "could not disable pre-release"; archphene_adb_run shell input tap "$x" "$y"; sleep 0.5; SWITCH_UI="$(archphene_capture_ui manager-prerelease-enabled)"; read -r state x y <<<"$(switch_info "$SWITCH_UI")"; [[ "$state" == true ]] || archphene_die "did not enable"; open_settings; read -r state x y <<<"$(switch_info "$SWITCH_UI")"; [[ "$state" == true ]] || archphene_die "did not persist"; archphene_adb_run shell input tap "$x" "$y"; archphene_note "Pre-release setting passed: disabled by default, enabled explicitly, and persisted across restart."
+

@@ -38,13 +38,20 @@ tracked = subprocess.run(
 tracked = [Path(value) for value in tracked if value]
 for relative in tracked:
     normalized = relative.as_posix()
+    path = ROOT / relative
+    if path.is_file() and relative.suffix.lower() == ".ps1":
+        raise SystemExit(f"Legacy .ps1 host script is tracked; use Bash: {normalized}")
     if normalized.startswith(("tooling/", "artifacts/")) or "/out/" in f"/{normalized}/":
         raise SystemExit(f"generated workspace is tracked: {normalized}")
     if relative.suffix.lower() in {".keystore", ".jks", ".p12", ".pfx", ".pem", ".key", ".apk", ".aab"}:
         raise SystemExit(f"secret or release artifact is tracked: {normalized}")
-    path = ROOT / relative
     if path.is_file() and path.stat().st_size > 8 * 1024 * 1024:
         raise SystemExit(f"tracked file exceeds the 8 MiB public-repository limit: {normalized}")
+
+for script in sorted(ROOT.rglob("*.sh")):
+    if any(part in {".git", "tooling"} for part in script.parts):
+        continue
+    subprocess.run(["bash", "-n", str(script)], cwd=ROOT, check=True)
 
 private_key = re.compile(br"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----")
 for relative in tracked:
@@ -103,5 +110,5 @@ for workflow in sorted((ROOT / ".github/workflows").glob("*.y*ml")):
 
 print(
     f"Public repository audit passed: {len(tracked)} tracked paths, required community files, "
-    "prebuilt checksums, size/secret policy, and commit-pinned Actions."
+    "prebuilt checksums, Bash syntax, size/secret policy, and commit-pinned Actions."
 )

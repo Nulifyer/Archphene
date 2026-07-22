@@ -179,6 +179,17 @@ terminal_only="${ARCHPHENE_TERMINAL_ONLY:-false}"
 }
 [[ "$terminal_only" == "true" ]] || build_qt_templates
 
+template_only="${ARCHPHENE_TEMPLATE_ONLY:-false}"
+[[ "$template_only" == "true" || "$template_only" == "false" ]] || {
+  echo "ARCHPHENE_TEMPLATE_ONLY must be true or false" >&2; exit 1;
+}
+if [[ "$template_only" == "true" ]]; then
+  [[ "$terminal_only" == "false" ]] || {
+    echo "ARCHPHENE_TEMPLATE_ONLY and ARCHPHENE_TERMINAL_ONLY cannot both be true" >&2; exit 1;
+  }
+  exit 0
+fi
+
 build_terminal_app() {
   local loader_x86="$1" loader_arm64="$2"
   local app="$root/prototypes/archphene-terminal-app"

@@ -84,22 +84,22 @@ The manager can generate and install the tested Qt/KCalc wrapper on x86_64 and A
 
 ### Linux release build
 
-Release CI builds the Arch runtime, patched glibc, wrapper template, isolated Terminal companion, and signed manager APK on Linux. The same-release-signed companion is embedded in the manager and installed through Android confirmation on first use. On Windows, the thin launcher runs those build phases inside Podman:
+Release CI builds the Arch runtime, patched glibc, wrapper template, isolated Terminal companion, and signed manager APK on Linux. The same-release-signed companion is embedded in the manager and installed through Android confirmation on first use. The local Linux launcher runs those build phases inside Podman:
 
-    ./scripts/build-manager-podman.ps1
+    ./scripts/build-manager-podman.sh
 
-Use `-SkipRuntime` for manager-only rebuilds and `-ReleaseBuild` for a locally production-signed APK.
+Use `--skip-runtime` for manager-only rebuilds and `--release-build` for a locally production-signed APK.
 
 Outputs: `prototypes/linux-app-manager-stub/out-linux/archphene.apk` and the embedded companion source artifact at `prototypes/archphene-terminal-app/out-linux/archphene-terminal.apk`.
 
-### Windows emulator/device adapter
+### Linux emulator/device workflow
 
-Windows is only the host adapter for Podman, ADB, emulator control, USB devices,
-screenshots, and input automation. Arch package work, native compilation, glibc,
-APK assembly, signing, and releases run in Linux.
+Use ADB directly for emulator control, USB devices, screenshots, input automation,
+and manager installation. Arch package work, native compilation, glibc, APK
+assembly, signing, and releases all run in Linux.
 
-```powershell
-./scripts/install-apk.ps1 -Serial emulator-5554
+```bash
+./scripts/install-apk.sh --serial emulator-5554
 ```
 
 Development builds use a persistent ignored debug key and remain debuggable for automated `run-as` tests. GitHub Releases use the separate non-debuggable release profile documented in [Publishing releases](docs/releases.md).
@@ -108,9 +108,9 @@ Development builds use a persistent ignored debug key and remain debuggable for 
 
 The repository contains focused emulator and physical-device tests under `scripts/`. The broad entry points are:
 
-```powershell
-./scripts/test-emulator-regression.ps1
-./scripts/test-arm64-physical-regression.ps1 -Serial <adb-serial>
+```bash
+./scripts/test-emulator-regression.sh
+./scripts/test-arm64-physical-regression.sh --serial <adb-serial>
 ```
 
 The physical suite expects the curated ARM64 package/runtime workspace and a compatible attached device. Individual scripts cover manager workflows, package signatures, KCalc interactions, Mousepad documents, IME behavior, rotation, and update transactions.

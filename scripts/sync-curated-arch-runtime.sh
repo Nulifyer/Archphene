@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source "$(dirname "$0")/lib/common.sh"
+classification=prototypes/kcalc-bridge-test/kcalc.runtime-classification.json; arch=x86_64; mirror=https://geo.mirror.pkgbuild.com; repository_path='{repo}/os/{arch}'; download_container=; work_directory=; signatures=false; refresh=false
+while (($#)); do case "$1" in --classification) classification="${2:?}"; shift 2;; --arch) arch="${2:?}"; shift 2;; --mirror) mirror="${2:?}"; shift 2;; --repository-path) repository_path="${2:?}"; shift 2;; --download-container) download_container="${2:?}"; shift 2;; --work-directory) work_directory="${2:?}"; shift 2;; --download-signatures) signatures=true; shift;; --refresh) refresh=true; shift;; -h|--help) echo "usage: $0 [options]"; exit 0;; *) archphene_die "unknown argument: $1";; esac; done
+args=(--root "$ARCHPHENE_ROOT" --curated --classification "$classification" --arch "$arch" --mirror "$mirror" --repository-path "$repository_path"); [[ -z "$download_container" ]] || args+=(--download-container "$download_container"); [[ -z "$work_directory" ]] || args+=(--work-directory "$work_directory"); [[ "$signatures" == false ]] || args+=(--download-signatures); [[ "$refresh" == false ]] || args+=(--refresh); exec python3 "$ARCHPHENE_SCRIPTS_DIR/lib/sync-arch-runtime.py" "${args[@]}"

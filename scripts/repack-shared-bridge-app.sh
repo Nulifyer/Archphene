@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source "$(dirname "$0")/lib/android-build.sh"
+app_name=; serial=; build_native=false; skip_install=false
+while (($#)); do case "$1" in --app) app_name="${2:?}"; shift 2;; --serial) serial="${2:?}"; shift 2;; --build-native) build_native=true; shift;; --skip-install) skip_install=true; shift;; -h|--help) echo "usage: $0 --app mousepad|kcalc [--serial SERIAL] [--build-native] [--skip-install]"; exit 0;; *) archphene_die "unknown argument: $1";; esac; done
+archphene_validate_choice "$app_name" app mousepad kcalc; archphene_init_android_build
+app="$ARCHPHENE_ROOT/prototypes/$app_name-android-app"; out="$app/out"; base="$out/archpheneos-$app_name.apk"; package="org.archphene.linux.$app_name"; key="$ARCHPHENE_ROOT/tooling/signing/archpheneos-$app_name-debug.keystore"; archphene_require_file "$base"; archphene_require_file "$key"
+if [[ "$build_native" == true ]]; then "$ARCHPHENE_SCRIPTS_DIR/build-native-compositor-podman.sh" --architecture x86_64 --release; cp "$ARCHPHENE_ROOT/native/archphene-compositor/target/x86_64-linux-android/release/libarchphene_compositor.so" "$app/lib/x86_64/"; fi
+work="$(archphene_mktemp_dir bridge-repack)"; mkdir -p "$work"/{classes,dex/stage/lib/x86_64}; mapfile -d '' java_files < <(find "$app/src" "$ARCHPHENE_ROOT/prototypes/shared-android-bridge/src" -name '*.java' -type f -print0); javac --release 17 -classpath "$ARCHPHENE_ANDROID_JAR" -d "$work/classes" "${java_files[@]}"; mapfile -d '' class_files < <(find "$work/classes" -name '*.class' -type f -print0); "$ARCHPHENE_BT/d8" --lib "$ARCHPHENE_ANDROID_JAR" --min-api 23 --output "$work/dex" "${class_files[@]}"
+cp "$base" "$work/unsigned.apk"; cp "$app/lib/x86_64/libarchphene_compositor.so" "$work/dex/stage/lib/x86_64/"; cp "$work/dex/classes.dex" "$work/dex/stage/"; (cd "$work/dex/stage" && jar uf "$work/unsigned.apk" classes.dex lib/x86_64/libarchphene_compositor.so)
+repacked="$out/archpheneos-$app_name-bridge.apk"; "$ARCHPHENE_BT/zipalign" -P 16 -f 4 "$work/unsigned.apk" "$work/aligned.apk"; "$ARCHPHENE_BT/apksigner" sign --ks "$key" --ks-pass pass:android --key-pass pass:android --out "$repacked" "$work/aligned.apk"; "$ARCHPHENE_BT/apksigner" verify --verbose "$repacked"
+if [[ "$skip_install" == false ]]; then [[ -n "$serial" ]] || archphene_die '--serial is required unless --skip-install is used'; archphene_init_adb "$serial"; archphene_adb_run install -r "$repacked"; archphene_adb_run shell am force-stop "$package"; archphene_adb_run shell am start -n "$package/$package.MainActivity"; fi
+archphene_note "Repacked shared bridge APK: $repacked"

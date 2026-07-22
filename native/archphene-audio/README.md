@@ -26,7 +26,7 @@ The private socket and anonymous Pulse authentication are safe only because the
 server and client share one Android application UID and sandbox. Archphene does
 not expose this socket outside the wrapper.
 
-Run `scripts/test-android-microphone-bridge.ps1` against a prepared
+Run `scripts/test-android-microphone-bridge.sh` against a prepared
 `pavucontrol` wrapper to validate real capture on a physical device. The script
 can temporarily disable and restore the device-wide microphone privacy switch;
 it never changes that setting unless explicitly requested.

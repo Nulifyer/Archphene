@@ -95,21 +95,21 @@ artifacts/archpheneos-smoke.png
 
 Start the GUI VM:
 
-```powershell
-.\scripts\start-android-vm.ps1
+```bash
+./scripts/start-android-vm.sh
 ```
 
 In another terminal, build, install, and launch the smoke APK:
 
-```powershell
-.\scripts\build-install-smoke-apk.ps1
+```bash
+./scripts/build-install-smoke-apk.sh
 ```
 
 Check boot state:
 
-```powershell
-.\tooling\android-sdk\platform-tools\adb.exe devices -l
-.\tooling\android-sdk\platform-tools\adb.exe shell getprop sys.boot_completed
+```bash
+adb devices -l
+adb shell getprop sys.boot_completed
 ```
 
 ## Interpretation

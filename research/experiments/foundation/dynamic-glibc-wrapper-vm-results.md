@@ -23,7 +23,7 @@ The same loader command succeeds from `adb shell` and `run-as`, so the packaged 
 ## Prototype
 
 - Wrapper source: `prototypes/lapk-wrapper-exec-test/`
-- Build/install script: `scripts/build-install-lapk-wrapper-exec-test.ps1`
+- Build/install script: `scripts/build-install-lapk-wrapper-exec-test.sh`
 - Dynamic payload source: `prototypes/linux-payloads/dynamic-hello/main.c`
 - Dynamic payload binary: `prototypes/linux-payloads/bin/hello-dynamic-glibc-x86_64`
 - Packaged dynamic executable: `lib/x86_64/libarchphene_dynamic_hello.so`
@@ -32,7 +32,7 @@ The same loader command succeeds from `adb shell` and `run-as`, so the packaged 
 
 The dynamic payload was built with:
 
-```powershell
+```text
 $env:ZIG_LOCAL_CACHE_DIR = (Resolve-Path .\tooling\zig-cache).Path
 $env:ZIG_GLOBAL_CACHE_DIR = (Resolve-Path .\tooling\zig-global-cache).Path
 zig cc -target x86_64-linux-gnu -O2 .\prototypes\linux-payloads\dynamic-hello\main.c -o .\prototypes\linux-payloads\bin\hello-dynamic-glibc-x86_64

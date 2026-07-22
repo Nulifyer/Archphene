@@ -1,7 +1,8 @@
 import { readFileSync, writeFileSync } from "fs";
+import { homedir } from "os";
 
 const LF = String.fromCharCode(10);
-const session = process.env.USERPROFILE + "/.codex/sessions/2026/07/08/rollout-2026-07-08T18-43-27-019f43e6-7edc-7eb2-87db-c6f36b37a76d.jsonl";
+const session = homedir() + "/.codex/sessions/2026/07/08/rollout-2026-07-08T18-43-27-019f43e6-7edc-7eb2-87db-c6f36b37a76d.jsonl";
 const target = "prototypes/mousepad-android-app/src/org/archphene/linux/kcalc/MainActivity.java";
 const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
 const replay = [];
@@ -34,7 +35,7 @@ for (const line of readFileSync(session, "utf8").split(LF)) {
   }
 
   for (let command of commands) {
-    for (const stopWord of ["build-install-mousepad-app.ps1", "adb shell", "adb logcat"]) {
+    for (const stopWord of ["build-install-mousepad-app.sh", "adb shell", "adb logcat"]) {
       const at = command.indexOf(stopWord);
       if (at >= 0) {
         const semi = Math.max(command.lastIndexOf(";", at), command.lastIndexOf(LF, at));
