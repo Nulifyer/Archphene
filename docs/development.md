@@ -156,6 +156,31 @@ configuration and rendered Linux-app pixels:
 These tests restore the prior Android night mode and manager Linux-appearance
 preferences on exit.
 
+Theme propagation is not a visual-quality pass. Run the source contract and the
+focused artifact-producing geometry/render checks with:
+
+```bash
+./scripts/test-linux-appearance-source-contract.sh
+./scripts/test-kcalc-menu-switch.sh --serial emulator-5554
+./scripts/test-mousepad-secondary-window.sh --serial emulator-5554
+./scripts/test-foot-visual-quality.sh --serial emulator-5554
+./scripts/test-foot-live-theme.sh --serial emulator-5554
+./scripts/test-linux-control-density-matrix.sh \
+  --serial emulator-5554 --package PACKAGE --app-name NAME --toolkit qt6
+./scripts/test-gpu-visual-quality.sh --serial emulator-5554 --package PACKAGE
+./scripts/test-real-app-accessibility.sh \
+  --serial emulator-5554 \
+  --target-package org.archphene.linux.p0392be9c9f103a39d951c2f39c3644d2 \
+  --profile KCalc
+```
+
+The device checks do not install missing fixtures. The real-app accessibility
+test fails closed unless the current test-only AccessibilityService is already
+installed; pass `--probe-apk` only after installation has been explicitly
+approved. KCalc and Mousepad retain PNG/raw frames, scoped logs, generated theme
+files, and exported semantic trees under `tooling/artifacts/visual-audit/`.
+Review the artifacts using [the visual-quality gate](linux-visual-quality.md).
+
 Run the release display profiles independently with:
 
 ```bash

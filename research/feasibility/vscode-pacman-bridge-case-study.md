@@ -12,6 +12,24 @@ VS Code is not a normal GTK app. It is an Electron app: Chromium renderer proces
 
 Making it usable on GrapheneOS without a VM is possible, but VS Code should be treated as a bridge v2/v3 target, not the first prototype. It requires a runtime bridge that is at least good enough for Electron/Chromium.
 
+## First real package transaction (July 22, 2026)
+
+The current x86_64 manager resolved, signature-verified, extracted, compiled
+shared schemas/MIME data for, and classified the official `code` closure. The
+closure contained 36 packages. Runtime-pack publication then failed closed on
+`usr/share/icons/hicolor/scalable/apps/com.visualstudio.code.oss.svg`, an
+absolute symlink to `/usr/lib/code/out/media/code-icon.svg`.
+
+This is not safely fixed by dropping the icon. The same package shape requires
+the complete package-owned `/usr/lib/code` data tree, and its launcher invokes
+the dependency executable supplied by `electron42`. The current generic pack
+format publishes shared libraries, selected source commands, and `/usr/share`
+data, so the next implementation milestone is verified package-owned
+`/usr/lib/<app>` data plus dependency-command publication and preserved bounded
+symlink semantics. Electron sandbox, Ozone/Wayland, GPU, and multiprocess tests
+begin only after that generic layer succeeds; no Code-specific bypass is
+acceptable.
+
 ## What the Arch package contains
 
 Current Arch package facts:

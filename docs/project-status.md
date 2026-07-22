@@ -12,17 +12,21 @@ The connected Samsung SM-S908U (Android 15, AArch64) passed the broad non-destru
 
 The repository audit, release-workflow contract, AT-SPI source contract, Bash syntax sweep, and Android test-helper regression also pass. This validates the broad entry points, not every hardware-specific or standalone script in `scripts/`. A mechanical comparison against the removed PowerShell tests found several high-risk conversions with far fewer check signals, especially secrets, accessibility, camera, and Terminal project-tree coverage. Those scripts must be restored or have their claims deliberately narrowed; completing that assertion audit remains a P0 item in `todo.md`.
 
-The first package-compatibility wave now has current-source x86_64 rendering for GNOME Text Editor, Kate, and Foot. Kate's daemonized GUI process is retained by the Activity-tied runtime supervisor and remains stable through tablet rotation and a real temporary 1920x1080 emulator display with display-targeted input. Foot now starts a warning-free verified Bash PTY with `C.UTF-8` and a monospace fallback, and executes typed input without process churn. These remain partial package results until their full workflows and current-source AArch64 lanes pass.
+The first package-compatibility wave now has current-source x86_64 rendering for GNOME Text Editor, Kate, and Foot. Kate's daemonized GUI process is retained by the Activity-tied runtime supervisor and remains stable through tablet rotation and a real temporary 1920x1080 emulator display with display-targeted input. Foot starts a warning-free verified Bash PTY, uses readable density-aware metrics, and changes live between Android light/dark without restarting Foot or Bash. These remain partial package results until their full workflows and current-source AArch64 lanes pass.
 
-Appearance validation now covers Qt 6/KDE, GTK 3, and GTK 4/libadwaita on the
-x86_64 emulator. KCalc, Kate, Mousepad, and GNOME Text Editor pass strict
-Linux-surface pixel checks for Android-following live light/dark changes,
-explicit manager light/dark overrides, and Material You semantic palettes.
-KCalc also passes the same-process live light/dark check on the installed
-physical AArch64 fixture. The current Qt appearance plugin still needs a clean
-AArch64 rebuild and current-source physical validation; the GTK settings
-bridge's declared clean container also needs its missing GLib development
-dependency restored.
+Appearance propagation now covers Qt 6/KDE, GTK 3, GTK 4/libadwaita, and adapted
+Foot on the x86_64 emulator. The rebuilt KCalc, Mousepad, and Foot fixtures pass
+semantic accessibility/content-geometry gates, live light/dark, automatic
+phone/tablet/docked density, and all explicit phone density modes. KCalc menus
+and status, Mousepad Preferences, and Foot's 42 px text/126 px touch CSD are
+readable and bounded. Current-source physical AArch64 validation remains open.
+
+The first real Code-OSS transaction resolved, signature-verified, extracted,
+and classified its 36-package closure. It then failed closed before wrapper
+creation on an absolute icon symlink into `/usr/lib/code`. This exposes the
+generic Electron package-model gap: runtime packs do not yet publish package-owned
+`/usr/lib/<app>` trees or dependency executables such as `electron42`. Code must
+not receive an application-specific bypass.
 
 ## Validated
 
@@ -31,7 +35,7 @@ dependency restored.
 | Manager self-update | Public GitHub Releases discovery, bounded download, SHA-256 verification, signer/package validation, Android confirmation, replacement, and restart reconciliation. The reproducible workflow published exact-ABI `v1.0.1` assets; live `0.9.0` to `1.0.1` updates pass on x86_64 and physical AArch64, and the real published x86_64 `v1.0.0` migration passes through its one-time compatibility alias. |
 | General x86_64 package transactions | Arch dependency resolution, package-signature verification, closure staging, desktop/terminal classification, package-specific label/executable/icon/MIME/toolkit/ABI/capability metadata, generated APK validation, persistent Android Keystore signing, and PackageInstaller installation pass with KCalc, Mousepad, and CLI packages; a concurrent missing-package failure does not block an unrelated CLI transaction |
 | AArch64 package runtime | A cacheable Linux container resolves the current Arch Linux ARM pacman/GnuPG/libarchive closure, verifies every package with the pinned build-system key, reduces it to required AArch64 ELF objects, cross-builds patched glibc and the path broker, and emits a 70-entry checksum catalog. The dual-ABI manager selects isolated ARM repository/trust assets; Samsung tests pass package search, nine-package libalpm resolution, exact build-key verification, staging, terminal classification, authenticated runtime-pack publication, Terminal UID materialization, and `btop 1.4.7` execution |
-| Qt and GTK bridge prototypes | Unmodified KCalc/Qt and Mousepad/GTK3 GUI, input, popups, dialogs, clipboard/IME, resizing, accessibility, and document workflows pass on x86_64. Current-source x86_64 KCalc, Kate, Mousepad, and GNOME Text Editor pass Linux-surface-verified live system light/dark, explicit manager overrides, and Material You palette checks across Qt 6/KDE, GTK 3, and GTK 4/libadwaita. Installed Arch Linux ARM fixtures also pass live Android light/dark changes without process restarts; Mousepad passes picker import, edit/save/writeback, cold reopen, DocumentsProvider browse, same-name conflict preservation, and manager access denial on physical AArch64. |
+| Qt, GTK, and direct-Wayland appearance | Unmodified KCalc/Qt and Mousepad/GTK3 pass functional, accessibility, geometry, contrast, popup/dialog, density, and live-theme gates on current x86_64. Foot passes a readable density-aware PTY/visual gate and exact-target live theme switching. Current-source physical AArch64 and broader application coverage remain. |
 | Shared bridge runtime | KCalc, Mousepad, generated wrappers, and native probes compile against one Android Activity/InputConnection/clipboard/window host and one Rust compositor; the application Activities are metadata-only subclasses. Official unmodified `wev` and `wl-clipboard` packages validate core seat input and demand-driven bidirectional plain-text selection transfer on x86_64 emulator and physical AArch64. |
 | Shared runtime packs | Verified Arch dependency closures are published atomically as immutable content-addressed packs owned by the manager; an exported caller-authenticated provider grants exact read-only module URIs to the generated wrapper UID, Binder-death leases protect active wrappers, cold app-drawer relaunch loads the active pack, untrusted shell access is rejected, superseded/manual-cache unbound packs are reclaimed, and the KCalc wrapper shrank from 57 MB to 629 KB. Each launch uses an Activity-tied subreaper supervisor so daemonized GUI descendants remain owned until the complete Linux tree exits. KCalc survives rotation without duplication and leaves no Linux descendants after Back or force-stop; the runtime-FD lease/cleanup regression passes after the supervisor change. |
 | Secondary-window registry | Parent/child xdg_toplevel ownership is bounded to 32 simultaneous windows, rejects cyclic and cross-client parents, and clears destroyed-parent references. Active-window routing, composited phone policy, separate Android Dialog hosting in freeform/tablet mode, semantic child input, close, and parent restoration pass the emulator regression. |
@@ -49,7 +53,7 @@ dependency restored.
 | Package discovery | Official Arch name/description candidates use deterministic exact, executable, prefix, token, and description ranking; executable ownership is merged from repository file databases, glmark2-es2-wayland resolves to glmark2, and installed-app multi-term search shares the same matching rules |
 | OpenGL ES bridge | Manager-generated GLMark2 wrappers start a same-UID Android virglrenderer helper. Mesa reports virgl over the emulator NVIDIA OpenGL ES translator and completes the 1080x2205 suite with score 12. On the Samsung Galaxy S22 Ultra, virgl uses Qualcomm Adreno 730 / OpenGL ES 3.2 and completes every 1080x2202 scene with score 15 and exit code 0. Both helpers remain stable without fence-export, context-loss, dispatch, or disconnect errors |
 | 16 KB x86_64 loader | Patched glibc 2.43 is reproducibly linked with 64 KB PT_LOAD alignment and a 16 KB common page size. Every emitted loader/runtime ELF passes an independent alignment audit, and a similarly aligned dynamic executable runs through it inside the manager UID on the API 36 16 KB x86_64 emulator. Official Arch x86_64 package closures remain 4 KB-only and stay blocked. |
-| Release display matrix | The general emulator regression applies phone portrait/light, phone landscape/dark, tablet portrait with 1.15x Android font scale, tablet landscape/dark, and a docked profile. A separate Kate regression validates stable-process 1600x2560 tablet portrait/landscape plus an actual temporary 1920x1080 emulator display, task placement on that display, full-size mapping, and display-targeted pointer/keyboard input. |
+| Release display matrix | Fail-closed KCalc, Mousepad, and Foot gates now combine raw/PNG frames, contrast, semantic trees, toolkit config, actual content geometry, scoped logs, and manifests across phone/tablet/docked density profiles. Kate separately passes stable-process tablet rotation plus an actual temporary 1920x1080 emulator display, task placement, mapping, and targeted input. Physical current-source repetition remains. |
 
 ## In progress
 

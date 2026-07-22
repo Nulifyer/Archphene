@@ -29,6 +29,30 @@ archphene_set_test_linux_appearance() {
   sleep 2
 }
 
+archphene_saved_control_density() {
+  local manager="$1" preferences
+  preferences="$(archphene_adb_run shell run-as "$manager" \
+    cat shared_prefs/linux-app-manager-state.xml 2>/dev/null || true)"
+  python3 -c '
+import sys, xml.etree.ElementTree as ET
+text = sys.stdin.read().strip()
+if not text:
+    print("automatic")
+else:
+    node = next((item for item in ET.fromstring(text)
+                 if item.attrib.get("name") == "linux-control-density"), None)
+    print(node.text if node is not None and node.text else "automatic")
+' <<<"$preferences"
+}
+
+archphene_set_test_control_density() {
+  local manager="$1" density="$2"
+  archphene_adb_run shell am force-stop "$manager"
+  archphene_adb_run shell am start -S -W -n "$manager/.MainActivity" \
+    --es archphene_test_control_density "$density" >/dev/null
+  sleep 1
+}
+
 archphene_wait_theme_runtime() {
   local package="$1" deadline=$((SECONDS + 30)) pid runtime_pid
   while ((SECONDS < deadline)); do
@@ -93,6 +117,17 @@ archphene_assert_theme_config() {
           || archphene_die "GTK4 live-settings bridge did not apply dark=$dark"
       fi
       ;;
+    wayland)
+      config="$(archphene_adb_run shell run-as "$package" \
+        cat files/linux-home/.config/archphene/foot.ini)"
+      if [[ "$dark" == true ]]; then
+        [[ "$config" == *'initial-color-theme=dark'* ]] \
+          || archphene_die 'direct-Wayland runtime configuration is not dark'
+      else
+        [[ "$config" == *'initial-color-theme=light'* ]] \
+          || archphene_die 'direct-Wayland runtime configuration is not light'
+      fi
+      ;;
     *) archphene_die "unsupported themed toolkit: $toolkit" ;;
   esac
 }
@@ -130,8 +165,13 @@ archphene_test_live_theme() {
   archphene_adb_run exec-out screencap >"$tmp/light.raw"
 
   archphene_adb_run shell cmd uimode night yes >/dev/null
-  archphene_wait_appearance_log "$pid" \
-    'Appearance configuration changed resolved=dark' 20
+  if [[ "$toolkit" == wayland ]]; then
+    archphene_wait_appearance_log "$pid" \
+      'Direct-Wayland appearance configuration changed resolved=dark liveApplied=true' 20
+  else
+    archphene_wait_appearance_log "$pid" \
+      'Appearance configuration changed resolved=dark' 20
+  fi
   sleep 3
   dark_pid="$(archphene_android_pid "$package")"
   dark_runtime_pid="$(archphene_linux_loader_pid "$dark_pid")"

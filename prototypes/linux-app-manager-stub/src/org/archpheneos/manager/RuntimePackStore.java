@@ -853,7 +853,8 @@ final class RuntimePackStore {
             return;
         }
         if (!effective.isFile()) {
-            throw new SecurityException("Runtime data contains an unsupported file type");
+            throw new SecurityException("Runtime data contains an unsupported file type: "
+                    + relative);
         }
         budget.files++;
         budget.bytes = Math.addExact(budget.bytes, effective.length());

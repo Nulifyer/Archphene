@@ -244,6 +244,7 @@ public final class RuntimeModuleProvider extends ContentProvider {
         result.putString("theme_mode", ManagerStateStore.linuxThemeMode(context));
         result.putInt("scale_percent", ManagerStateStore.linuxScalePercent(context));
         result.putInt("font_percent", ManagerStateStore.linuxFontPercent(context));
+        result.putString("control_density", ManagerStateStore.linuxControlDensity(context));
         result.putBoolean("material_you", ManagerStateStore.materialYou(context));
         return result;
     }

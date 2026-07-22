@@ -167,9 +167,15 @@ public final class MainActivity extends Activity {
             ManagerStateStore.setMaterialYou(this,
                     intent.getBooleanExtra("archphene_test_material_you", false));
         }
+        String controlDensity = intent.getStringExtra("archphene_test_control_density");
+        if ("automatic".equals(controlDensity) || "compact".equals(controlDensity)
+                || "comfortable".equals(controlDensity) || "touch".equals(controlDensity)) {
+            ManagerStateStore.setLinuxControlDensity(this, controlDensity);
+        }
         intent.removeExtra("archphene_test_manager_theme");
         intent.removeExtra("archphene_test_linux_theme");
         intent.removeExtra("archphene_test_material_you");
+        intent.removeExtra("archphene_test_control_density");
     }
     @Override
     protected void onResume() {
@@ -2037,6 +2043,18 @@ public final class MainActivity extends Activity {
             showBanner("Linux app appearance applies the next time an app starts", false);
         });
         appearance.addView(linuxFont, spacedWrap(dp(6)));
+        Button linuxControls = actionButton(linuxControlDensityLabel(),
+                android.R.drawable.ic_menu_crop);
+        linuxControls.setOnClickListener(view -> {
+            String current = ManagerStateStore.linuxControlDensity(this);
+            String next = "automatic".equals(current) ? "compact"
+                    : "compact".equals(current) ? "comfortable"
+                    : "comfortable".equals(current) ? "touch" : "automatic";
+            ManagerStateStore.setLinuxControlDensity(this, next);
+            linuxControls.setText(linuxControlDensityLabel());
+            showBanner("Linux app appearance applies the next time an app starts", false);
+        });
+        appearance.addView(linuxControls, spacedWrap(dp(6)));
         appearance.addView(settingToggle("Material You colors",
                 "Use Android system colors when available",
                 ManagerStateStore.materialYou(this), (button, checked) -> {
@@ -2149,6 +2167,14 @@ public final class MainActivity extends Activity {
 
     private String linuxFontLabel() {
         return "Linux app text: " + ManagerStateStore.linuxFontPercent(this) + "%";
+    }
+
+    private String linuxControlDensityLabel() {
+        String density = ManagerStateStore.linuxControlDensity(this);
+        String label = "compact".equals(density) ? "Compact"
+                : "comfortable".equals(density) ? "Comfortable"
+                : "touch".equals(density) ? "Touch" : "Automatic";
+        return "Linux app controls: " + label;
     }
 
     private void showRepositoryDialog(ManagedRepositoryStore.Repository repository) {

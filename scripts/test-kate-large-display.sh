@@ -81,13 +81,16 @@ archphene_adb_run logcat -c
 archphene_adb_run shell am start --display 0 -W -n "$activity" >/dev/null
 tablet_pid="$(wait_pid)"
 wait_pid_log "$tablet_pid" 'mapped=true.*primary=true' 60 >/dev/null
+wait_pid_log "$tablet_pid" 'output frame=1600x[0-9]+' 60 >/dev/null
 tablet_loader="$(archphene_linux_loader_pid "$tablet_pid")"
 [[ -n "$tablet_loader" ]] || archphene_die 'Kate tablet Linux loader is missing'
+sleep 2
 archphene_adb_run exec-out screencap -p \
   >"$artifact_dir/candidate-kate-$serial-tablet-portrait.png"
 
 archphene_adb_run shell wm size 2560x1600
-sleep 5
+wait_pid_log "$tablet_pid" 'output frame=2560x[0-9]+' 60 >/dev/null
+sleep 2
 [[ "$(archphene_android_pid "$package")" == "$tablet_pid" \
     && "$(archphene_linux_loader_pid "$tablet_pid")" == "$tablet_loader" ]] \
   || archphene_die 'Kate restarted during tablet rotation/resize'
@@ -105,8 +108,14 @@ external_display="$(archphene_adb_run shell cmd display get-displays -i \
   | tr -d '\r' | awk '$1 != 0 {print; exit}')"
 [[ "$external_display" =~ ^[0-9]+$ ]] \
   || archphene_die 'emulator secondary display was not created'
-surface_display="$(archphene_adb_run shell dumpsys SurfaceFlinger --display-id \
-  | awk '/Virtual display.*Emulator 2D Display/{print $2; exit}')"
+surface_display=
+display_deadline=$((SECONDS + 20))
+while ((SECONDS < display_deadline)); do
+  surface_display="$(archphene_adb_run shell dumpsys SurfaceFlinger --display-id \
+    | awk '/Virtual display.*Emulator 2D Display/{print $2; exit}')"
+  [[ "$surface_display" =~ ^[0-9]+$ ]] && break
+  sleep .5
+done
 [[ "$surface_display" =~ ^[0-9]+$ ]] \
   || archphene_die 'secondary SurfaceFlinger display was not found'
 
@@ -115,6 +124,7 @@ archphene_adb_run shell am start --display "$external_display" --windowingMode 5
   -f 0x18000000 -n "$activity" >/dev/null
 external_pid="$(wait_pid)"
 wait_pid_log "$external_pid" 'mapped=true.*primary=true' 60 >/dev/null
+wait_pid_log "$external_pid" 'output frame=1920x[0-9]+' 60 >/dev/null
 external_loader="$(archphene_linux_loader_pid "$external_pid")"
 [[ -n "$external_loader" ]] || archphene_die 'Kate external-display loader is missing'
 
@@ -128,8 +138,13 @@ if not any(re.search(rf"Display: mDisplayId={re.escape(display)}\b", section)
     raise SystemExit("Kate task is not hosted on the secondary display")
 ' "$external_display" "$package" <<<"$activities"
 
-archphene_adb_run shell input touchscreen -d "$external_display" tap 600 352
-sleep 2
+# Current Kate releases open on the Welcome page when no session is restored.
+# Create a document through the real hardware-keyboard path instead of relying
+# on version-specific Welcome-page coordinates.
+archphene_adb_run shell input keyboard -d "$external_display" keycombination \
+  KEYCODE_CTRL_LEFT KEYCODE_N
+wait_pid_log "$external_pid" 'title=Untitled' 30 >/dev/null
+sleep 1
 archphene_adb_run shell input touchscreen -d "$external_display" tap 700 300
 archphene_adb_run shell input keyboard -d "$external_display" text KATE_EXTERNAL_TEST
 wait_pid_log "$external_pid" 'title=Untitled.*KATE_EXTERNAL_TEST' 30 >/dev/null

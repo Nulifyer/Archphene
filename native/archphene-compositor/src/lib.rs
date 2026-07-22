@@ -9804,7 +9804,10 @@ fn cleanup_runtime_fd_view(inherited: &mut Vec<i32>, links: &[PathBuf]) {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RuntimeExecutionState {
     Starting,
-    Running(libc::pid_t),
+    Running {
+        pgid: libc::pid_t,
+        target: libc::pid_t,
+    },
     Cancelling(libc::pid_t),
     Cancelled,
 }
@@ -9844,7 +9847,7 @@ impl RuntimeExecutionGuard {
         }
     }
 
-    fn register_process_group(&self, pgid: libc::pid_t) -> bool {
+    fn register_process_group(&self, pgid: libc::pid_t, target: libc::pid_t) -> bool {
         if self.id <= 0 {
             return true;
         }
@@ -9853,7 +9856,7 @@ impl RuntimeExecutionGuard {
         };
         match executions.get_mut(&self.id) {
             Some(state @ RuntimeExecutionState::Starting) => {
-                *state = RuntimeExecutionState::Running(pgid);
+                *state = RuntimeExecutionState::Running { pgid, target };
                 true
             }
             Some(state @ RuntimeExecutionState::Cancelled) => {
@@ -9895,7 +9898,7 @@ fn cancel_runtime_execution(id: i64) {
                 *state = RuntimeExecutionState::Cancelled;
                 0
             }
-            RuntimeExecutionState::Running(pgid) => {
+            RuntimeExecutionState::Running { pgid, .. } => {
                 *state = RuntimeExecutionState::Cancelling(pgid);
                 pgid
             }
@@ -9920,6 +9923,36 @@ fn cancel_runtime_execution(id: i64) {
             }
         }
     });
+}
+
+#[cfg(target_os = "android")]
+fn signal_runtime_execution(id: i64, signal: i32) -> i32 {
+    if id <= 0 || (signal != libc::SIGUSR1 && signal != libc::SIGUSR2) {
+        return -libc::EINVAL;
+    }
+    let pgid = {
+        let Ok(executions) = runtime_executions().lock() else {
+            return -libc::EIO;
+        };
+        match executions.get(&id) {
+            Some(RuntimeExecutionState::Running { pgid, target }) => (*pgid, *target),
+            _ => return -libc::ESRCH,
+        }
+    };
+    let (pgid, target) = pgid;
+    // Signal the exact target recorded by the subreaper at fork time, not the
+    // whole process group: terminals and complex applications may have child
+    // shells and helpers for which SIGUSR1/2 have unrelated meanings.
+    if target <= 0 || unsafe { libc::getpgid(target) } != pgid {
+        return -libc::ESRCH;
+    }
+    if unsafe { libc::kill(target, signal) } == 0 {
+        0
+    } else {
+        -io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::EIO)
+    }
 }
 
 #[cfg(target_os = "android")]
@@ -10177,11 +10210,24 @@ fn run_glibc_fds(
         cleanup_runtime_fd_view(&mut inherited, &links);
         return (-error, Vec::new());
     }
+    let mut target_pipe = [-1; 2];
+    if unsafe { libc::pipe2(target_pipe.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        let error = io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::EIO);
+        unsafe {
+            libc::close(pipe[0]);
+            libc::close(pipe[1]);
+        }
+        cleanup_runtime_fd_view(&mut inherited, &links);
+        return (-error, Vec::new());
+    }
 
     let parent = unsafe { libc::getpid() };
     let child = unsafe { libc::fork() };
     if child == 0 {
         unsafe {
+            libc::close(target_pipe[0]);
             if !configure_runtime_child(parent) {
                 libc::_exit(125);
             }
@@ -10194,6 +10240,7 @@ fn run_glibc_fds(
             let supervisor = libc::getpid();
             let target = libc::fork();
             if target == 0 {
+                libc::close(target_pipe[1]);
                 if !configure_runtime_target(supervisor) {
                     libc::_exit(125);
                 }
@@ -10228,6 +10275,17 @@ fn run_glibc_fds(
             if target < 0 {
                 libc::_exit(125);
             }
+            let target_bytes = target.to_ne_bytes();
+            if libc::write(
+                target_pipe[1],
+                target_bytes.as_ptr().cast::<libc::c_void>(),
+                target_bytes.len(),
+            ) != target_bytes.len() as isize
+            {
+                libc::kill(target, libc::SIGKILL);
+                libc::_exit(125);
+            }
+            libc::close(target_pipe[1]);
             libc::close(pipe[0]);
             let mut target_status = 0;
             loop {
@@ -10253,11 +10311,15 @@ fn run_glibc_fds(
         .raw_os_error()
         .unwrap_or(libc::EIO);
     unsafe { libc::close(pipe[1]) };
+    unsafe { libc::close(target_pipe[1]) };
     for opened in inherited.drain(..) {
         unsafe { libc::close(opened) };
     }
     if child < 0 {
-        unsafe { libc::close(pipe[0]) };
+        unsafe {
+            libc::close(pipe[0]);
+            libc::close(target_pipe[0]);
+        }
         cleanup_runtime_fd_view(&mut inherited, &links);
         return (-fork_error, Vec::new());
     }
@@ -10266,11 +10328,44 @@ fn run_glibc_fds(
             libc::kill(child, libc::SIGKILL);
             libc::waitpid(child, ptr::null_mut(), 0);
             libc::close(pipe[0]);
+            libc::close(target_pipe[0]);
         }
         cleanup_runtime_fd_view(&mut inherited, &links);
         return (-libc::EIO, Vec::new());
     }
-    if !execution.register_process_group(child) {
+    let mut target_bytes = [0u8; std::mem::size_of::<libc::pid_t>()];
+    let mut target_read = 0usize;
+    while target_read < target_bytes.len() {
+        let count = unsafe {
+            libc::read(
+                target_pipe[0],
+                target_bytes[target_read..]
+                    .as_mut_ptr()
+                    .cast::<libc::c_void>(),
+                target_bytes.len() - target_read,
+            )
+        };
+        if count > 0 {
+            target_read += count as usize;
+            continue;
+        }
+        if count < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
+        break;
+    }
+    unsafe { libc::close(target_pipe[0]) };
+    if target_read != target_bytes.len() {
+        unsafe {
+            libc::kill(-child, libc::SIGKILL);
+            libc::waitpid(child, ptr::null_mut(), 0);
+            libc::close(pipe[0]);
+        }
+        cleanup_runtime_fd_view(&mut inherited, &links);
+        return (-libc::ECHILD, Vec::new());
+    }
+    let target = libc::pid_t::from_ne_bytes(target_bytes);
+    if !execution.register_process_group(child, target) {
         unsafe {
             libc::kill(-child, libc::SIGKILL);
         }
@@ -10389,6 +10484,17 @@ pub unsafe extern "system" fn Java_org_archphene_bridge_RuntimeFdLauncher_native
     execution_id: i64,
 ) {
     cancel_runtime_execution(execution_id);
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_bridge_RuntimeFdLauncher_nativeSignalGlibc(
+    _environment: *mut std::ffi::c_void,
+    _class: *mut std::ffi::c_void,
+    execution_id: i64,
+    signal: i32,
+) -> i32 {
+    signal_runtime_execution(execution_id, signal)
 }
 
 #[cfg(target_os = "android")]

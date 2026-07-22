@@ -32,6 +32,8 @@ public final class RuntimeFdLauncher {
     }
 
     public static final class Execution {
+        private static final int SIGNAL_USER_1 = 10;
+        private static final int SIGNAL_USER_2 = 12;
         private final long id;
         private final AtomicBoolean started = new AtomicBoolean();
         private final AtomicBoolean cancelled = new AtomicBoolean();
@@ -56,6 +58,17 @@ public final class RuntimeFdLauncher {
         public void cancel() {
             cancelled.set(true);
             if (started.get() && !completed.get()) nativeCancelGlibc(id);
+        }
+
+        /** Signals only the supervised Linux target, never its shell or helpers. */
+        public boolean signalUser(boolean first) {
+            if (!started.get() || completed.get() || cancelled.get()) return false;
+            int result = nativeSignalGlibc(id, first ? SIGNAL_USER_1 : SIGNAL_USER_2);
+            if (result != 0) {
+                android.util.Log.w("ArchpheneRuntime",
+                        "Could not signal supervised runtime target: " + result);
+            }
+            return result == 0;
         }
 
         private void throwIfCancelled() {
@@ -451,6 +464,7 @@ public final class RuntimeFdLauncher {
             byte[] programName, byte[] arguments, long executionId,
             int descriptorLibraries, byte[] output);
     private static native void nativeCancelGlibc(long executionId);
+    private static native int nativeSignalGlibc(long executionId, int signal);
     private static native void nativeForgetGlibc(long executionId);
     private static native int nativeTerminateUidProcesses();
 }

@@ -245,6 +245,18 @@ public final class ManagerStateStore {
         }
         preferences(context).edit().putInt("linux-font-percent", value).apply();
     }
+
+    public static String linuxControlDensity(Context context) {
+        String value = preferences(context).getString("linux-control-density", "automatic");
+        return "compact".equals(value) || "comfortable".equals(value)
+                || "touch".equals(value) ? value : "automatic";
+    }
+
+    public static void setLinuxControlDensity(Context context, String density) {
+        String value = "compact".equals(density) || "comfortable".equals(density)
+                || "touch".equals(density) ? density : "automatic";
+        preferences(context).edit().putString("linux-control-density", value).apply();
+    }
     static void verifyPendingReinstallForTest(Context context) {
         SharedPreferences state = preferences(context);
         String previous = state.getString("pending-reinstall", null);

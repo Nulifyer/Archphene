@@ -1119,6 +1119,9 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
             InputMethodManager input = (InputMethodManager)
                     activity.getSystemService(Activity.INPUT_METHOD_SERVICE);
             ArchpheneInputView target = inputView;
+            if (target.getWindowInsetsController() != null) {
+                target.getWindowInsetsController().hide(WindowInsets.Type.ime());
+            }
             input.hideSoftInputFromWindow(target.getWindowToken(), 0);
         });
     }

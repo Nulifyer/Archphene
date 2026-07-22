@@ -87,8 +87,14 @@ if [[ "$skip_install" == false ]]; then
     --ez archphene_test_install_assembled true >/dev/null
 
   package_pattern="$(python3 -c 'import re,sys;print(re.escape(sys.argv[1]))' "$package_name")"
-  archphene_wait_log "Wrapper template .* for $package_pattern" "$timeout" \
-    'ArchphenePackages:I ArchpheneRuntime:I ArchpheneManager:E AndroidRuntime:E *:S' >/dev/null
+  stage_log="$(archphene_wait_log \
+    "Wrapper template .* for $package_pattern|Wrapper assembly failed" "$timeout" \
+    'ArchphenePackages:I ArchpheneRuntime:I ArchpheneManager:E AndroidRuntime:E *:S')"
+  if [[ "$stage_log" == *'Wrapper assembly failed'* ]]; then
+    diagnostic="$(grep -m1 -E 'Runtime data contains|SecurityException|UnsupportedOperationException|IllegalStateException' \
+      <<<"$stage_log" || true)"
+    archphene_die "$package_name wrapper assembly failed${diagnostic:+: $diagnostic}"
+  fi
   archphene_wait_ui 'text="(?:Install|Update)"' \
     "candidate-$package_name-installer" 90
   archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="(?:Install|Update)"' \

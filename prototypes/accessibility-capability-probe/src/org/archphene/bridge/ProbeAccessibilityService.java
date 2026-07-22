@@ -102,7 +102,8 @@ public final class ProbeAccessibilityService extends AccessibilityService {
                 .append('|').append(node.getText()).append('|')
                 .append(node.getContentDescription()).append('|')
                 .append(bounds.flattenToString()).append('|')
-                .append(node.isClickable()).append('|').append(node.isEditable())
+                .append(node.isEnabled()).append('|').append(node.isClickable())
+                .append('|').append(node.isEditable())
                 .append('|').append(node.isFocused()).append('|')
                 .append(node.getActions()).append('\n');
         int children = Math.min(node.getChildCount(), 1024);

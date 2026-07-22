@@ -1,10 +1,14 @@
 #include <QAbstractSpinBox>
 #include <QApplication>
 #include <QDialog>
+#include <QDir>
+#include <QElapsedTimer>
 #include <QFont>
 #include <QLabel>
 #include <QLineEdit>
 #include <QProxyStyle>
+#include <QSettings>
+#include <QStyleOptionMenuItem>
 #include <QStatusBar>
 #include <QStyleFactory>
 #include <QStylePlugin>
@@ -17,20 +21,76 @@ public:
     ArchpheneStyle()
         : QProxyStyle(QStyleFactory::create(QStringLiteral("fusion")))
     {
+        m_controlTimer.start();
+    }
+
+    int pixelMetric(PixelMetric metric, const QStyleOption *option = nullptr,
+            const QWidget *widget = nullptr) const override
+    {
+        const int base = QProxyStyle::pixelMetric(metric, option, widget);
+        const int target = controlTarget();
+        switch (metric) {
+        case PM_ScrollBarExtent:
+            return qMax(base, target / 2);
+        case PM_SmallIconSize:
+        case PM_ButtonIconSize:
+            return qMax(base, qBound(18, target * 2 / 5, 32));
+        case PM_MenuHMargin:
+        case PM_MenuVMargin:
+            return qMax(base, target / 8);
+        default:
+            return base;
+        }
+    }
+
+    QSize sizeFromContents(ContentsType type, const QStyleOption *option,
+            const QSize &contentsSize, const QWidget *widget = nullptr) const override
+    {
+        QSize result = QProxyStyle::sizeFromContents(type, option, contentsSize, widget);
+        const int target = controlTarget();
+        switch (type) {
+        case CT_MenuItem: {
+            const auto *menuItem = qstyleoption_cast<const QStyleOptionMenuItem *>(option);
+            const int minimum = menuItem
+                    && menuItem->menuItemType == QStyleOptionMenuItem::Separator
+                    ? qMax(8, target / 4) : target;
+            result.setHeight(qMax(result.height(), minimum));
+            break;
+        }
+        case CT_MenuBarItem:
+            result.setHeight(qMax(result.height(), target));
+            break;
+        case CT_PushButton:
+        case CT_ToolButton:
+            result.setWidth(qMax(result.width(), target));
+            result.setHeight(qMax(result.height(), target));
+            break;
+        case CT_ComboBox:
+        case CT_LineEdit:
+        case CT_SpinBox:
+            result.setHeight(qMax(result.height(), target));
+            break;
+        default:
+            break;
+        }
+        return result;
     }
 
     void polish(QWidget *widget) override
     {
         QProxyStyle::polish(widget);
         if (auto *statusBar = qobject_cast<QStatusBar *>(widget)) {
-            const int padding = qMax(6, statusBar->fontMetrics().height() / 3);
-            statusBar->setMinimumHeight(statusBar->fontMetrics().height() + padding);
+            statusBar->setMinimumHeight(qMax(controlTarget(),
+                    statusBar->fontMetrics().height() + 8));
+            const int horizontal = qMax(4, controlTarget() / 8);
+            statusBar->setContentsMargins(horizontal, 0, horizontal, 0);
             return;
         }
         if (auto *label = qobject_cast<QLabel *>(widget);
                 label && qobject_cast<QStatusBar *>(label->parentWidget())) {
-            const int padding = qMax(6, label->fontMetrics().height() / 3);
-            label->setFixedHeight(label->fontMetrics().height() + padding);
+            label->setMinimumHeight(qMax(controlTarget(),
+                    label->fontMetrics().height() + 8));
+            label->setMaximumHeight(QWIDGETSIZE_MAX);
             return;
         }
         auto *editor = qobject_cast<QLineEdit *>(widget);
@@ -53,6 +113,35 @@ public:
         font.setPointSize(editorPointSize);
         editor->setFont(font);
     }
+
+private:
+    int controlTarget() const
+    {
+        if (m_controlTarget > 0 && m_controlTimer.elapsed() < 250) {
+            return m_controlTarget;
+        }
+        bool ok = false;
+        int configured = qEnvironmentVariableIntValue(
+                "ARCHPHENE_QT_CONTROL_MIN_SIZE", &ok);
+        const QString configHome = qEnvironmentVariable("XDG_CONFIG_HOME");
+        if (!configHome.isEmpty()) {
+            QSettings settings(QDir(configHome).filePath(QStringLiteral("kdeglobals")),
+                    QSettings::IniFormat);
+            const QVariant value = settings.value(QStringLiteral("Archphene/ControlMinSize"));
+            bool fileOk = false;
+            const int fileTarget = value.toInt(&fileOk);
+            if (fileOk) {
+                configured = fileTarget;
+                ok = true;
+            }
+        }
+        m_controlTarget = ok ? qBound(24, configured, 128) : 40;
+        m_controlTimer.restart();
+        return m_controlTarget;
+    }
+
+    mutable int m_controlTarget = -1;
+    mutable QElapsedTimer m_controlTimer;
 };
 
 class ArchpheneStylePlugin final : public QStylePlugin

@@ -8,6 +8,7 @@ This directory contains current documentation for using, building, and developin
 - [Storage and document model](storage.md)
 - [Android capability broker](android-capabilities.md)
 - [Linux application appearance](appearance.md)
+- [Linux visual quality gate](linux-visual-quality.md)
 - [GPU acceleration](gpu-acceleration.md)
 - [Release APKs](releases.md)
 - [Security model](security.md)

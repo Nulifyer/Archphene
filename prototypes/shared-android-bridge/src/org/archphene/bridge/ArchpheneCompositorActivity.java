@@ -21,6 +21,7 @@ import android.os.Bundle;
 import android.util.Log;
 import android.view.DragAndDropPermissions;
 import android.view.DragEvent;
+import android.view.Display;
 import android.view.Gravity;
 import android.view.InputDevice;
 import android.view.KeyEvent;
@@ -111,6 +112,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     private String appearanceTheme = "system";
     private int appearanceScalePercent;
     private int appearanceFontPercent = 100;
+    private String appearanceControlDensity = "automatic";
     private boolean appearanceMaterialYou;
     private boolean activeDarkAppearance;
     private final Map<Integer, SecondaryWindow> secondaryWindows = new HashMap<>();
@@ -495,6 +497,10 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             int font = appearance.getInt("font_percent", 100);
             appearanceFontPercent = font == 110 || font == 120 || font == 125 || font == 150
                     ? font : 100;
+            String controls = appearance.getString("control_density", "automatic");
+            appearanceControlDensity = "compact".equals(controls)
+                    || "comfortable".equals(controls) || "touch".equals(controls)
+                    ? controls : "automatic";
             appearanceMaterialYou = appearance.getBoolean("material_you", false);
         } catch (Exception unavailable) {
             Log.d(logTag, "No manager appearance policy; using Android defaults");
@@ -525,7 +531,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                         && !session.isPopupAt(compositorView, event.getX(), event.getY());
                 boolean pointerTap = actionUp
                         && (session.hasPopups() || menuAt || clickableAt);
-                boolean textInput = actionUp
+                boolean textInput = actionUp && !session.hasPopups()
                         && accessibilityBridge != null
                         && accessibilityBridge.isTextInputAt(view, event.getX(), event.getY());
                 boolean tap = session.touch(
@@ -829,6 +835,13 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             if (!frame.window.primary) activeSecondaryWindowId = frame.window.id;
             break;
         }
+        // AT-SPI fallback input can still describe the editor behind a newly
+        // activated modal. Drop that fallback when focus moves to a secondary
+        // toplevel; a real text-input-v3 request, or a tap on an editable node
+        // in the modal, can request the IME again.
+        if (activeSecondaryWindowId != 0 && session != null) {
+            session.setAccessibilityTextInput(compositorView, false);
+        }
         if (!independentWindows && activeWindowId != 0) {
             compositorView.setAccessibilityWindowId(activeWindowId);
         }
@@ -1062,7 +1075,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                                     event.getX(), event.getY());
                     boolean pointerTap = actionUp
                             && (session.hasPopups() || menuAt || clickableAt);
-                    boolean textInput = actionUp
+                    boolean textInput = actionUp && !session.hasPopups()
                             && accessibilityBridge != null
                             && accessibilityBridge.isTextInputAt(
                                     view, event.getX(), event.getY());
@@ -1490,6 +1503,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
 
     private int resolvedScalePercent(Configuration configuration) {
         if (appearanceScalePercent != 0) return appearanceScalePercent;
+        Display display = getDisplay();
+        if (display != null && display.getDisplayId() != Display.DEFAULT_DISPLAY) return 100;
         int smallestWidth = configuration.smallestScreenWidthDp;
         return smallestWidth >= 840 ? 100 : smallestWidth >= 600 ? 125 : 150;
     }
@@ -1502,6 +1517,22 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 Math.round(requestedBodyPixels * 72f / 96f / appScale)));
     }
 
+    private String resolvedControlDensity(Configuration configuration) {
+        if (!"automatic".equals(appearanceControlDensity)) return appearanceControlDensity;
+        Display display = getDisplay();
+        if (display != null && display.getDisplayId() != Display.DEFAULT_DISPLAY) {
+            return "compact";
+        }
+        int smallestWidth = configuration.smallestScreenWidthDp;
+        return smallestWidth >= 840 ? "compact"
+                : smallestWidth >= 600 ? "comfortable" : "touch";
+    }
+
+    private int resolvedControlTargetDp(Configuration configuration) {
+        String density = resolvedControlDensity(configuration);
+        return "compact".equals(density) ? 32 : "comfortable".equals(density) ? 40 : 48;
+    }
+
     private void refreshToolkitAppearance(Configuration configuration) {
         boolean dark = resolvedDarkAppearance(configuration);
         activeDarkAppearance = dark;
@@ -1512,14 +1543,38 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         try {
             if ("gtk3".equals(toolkit) || "gtk4".equals(toolkit)) {
                 writeGtkTheme(config, dark, fontPointSize, scalePercent / 100f);
+            } else if ("wayland".equals(toolkit)) {
+                writeDirectWaylandTheme(config, dark, fontPointSize,
+                        scalePercent / 100f, configuration);
             } else if (!"wayland".equals(toolkit)) {
-                writeKdeTheme(config, dark);
+                writeKdeTheme(config, dark, configuration, scalePercent / 100f);
             }
-            Log.i(logTag, "Appearance configuration changed resolved="
-                    + (dark ? "dark" : "light") + " without restarting Linux payload");
+            if ("wayland".equals(toolkit)) {
+                boolean applied = signalDirectWaylandTheme(dark);
+                Log.i(logTag, "Direct-Wayland appearance configuration changed resolved="
+                        + (dark ? "dark" : "light") + " liveApplied=" + applied);
+            } else {
+                Log.i(logTag, "Appearance configuration changed resolved="
+                        + (dark ? "dark" : "light")
+                        + " without restarting Linux payload");
+            }
         } catch (IOException error) {
             Log.e(logTag, "Could not refresh Linux toolkit appearance", error);
         }
+    }
+
+    private boolean signalDirectWaylandTheme(boolean dark) {
+        if (!"foot".equals(runtimeProgramName) && !"footclient".equals(runtimeProgramName)) {
+            return false;
+        }
+        RuntimeFdLauncher.Execution execution;
+        synchronized (this) {
+            execution = managedRuntimeExecution;
+        }
+        // Foot defines SIGUSR1 as dark and SIGUSR2 as light when both color
+        // sections are configured. RuntimeFdLauncher addresses only the
+        // supervised target and fails closed if that target is ambiguous.
+        return execution != null && execution.signalUser(dark);
     }
 
     private void applyToolkitEnvironment(Map<String, String> env, File runtimeLib,
@@ -1529,12 +1584,18 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         int scalePercent = resolvedScalePercent(configuration);
         float appScale = scalePercent / 100f;
         int fontPointSize = resolvedFontPointSize(configuration, scalePercent);
+        int controlTargetDp = resolvedControlTargetDp(configuration);
+        int controlTargetPixels = Math.max(24,
+                Math.round(controlTargetDp * getResources().getDisplayMetrics().density));
         env.put("QT_SCALE_FACTOR", String.format(Locale.US, "%.2f", appScale));
         env.put("QT_SCALE_FACTOR_ROUNDING_POLICY", "PassThrough");
         env.put("QT_FONT_DPI", "96");
         env.put("QT_QPA_PLATFORMTHEME", "archphene");
         env.put("QT_STYLE_OVERRIDE", "archphene");
         env.put("ARCHPHENE_FONT_POINT_SIZE", Integer.toString(fontPointSize));
+        env.put("ARCHPHENE_CONTROL_DENSITY", resolvedControlDensity(configuration));
+        env.put("ARCHPHENE_QT_CONTROL_MIN_SIZE", Integer.toString(
+                Math.max(24, Math.round(controlTargetPixels / appScale))));
         env.put("ARCHPHENE_COLOR_SCHEME", dark ? "dark" : "light");
         File dataHome = new File(configDir.getParentFile(), ".local/share");
         dataHome.mkdirs();
@@ -1548,6 +1609,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         Log.i(logTag, "Appearance theme=" + appearanceTheme + " resolved="
                 + (dark ? "dark" : "light") + " scale=" + scalePercent
                 + " font=" + appearanceFontPercent + " pointSize=" + fontPointSize
+                + " controls=" + resolvedControlDensity(configuration)
+                + " controlTargetDp=" + controlTargetDp
                 + " materialYou="
                 + appearanceMaterialYou);
         if ("wayland".equals(toolkit) || "gtk4".equals(toolkit)) {
@@ -1600,12 +1663,15 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                         new File(runtimeLib, "mousepad/plugins").getAbsolutePath());
             }
             env.put("GCONV_PATH", new File(root, "usr/lib/gconv").getAbsolutePath());
+        } else if ("wayland".equals(toolkit)) {
+            writeDirectWaylandTheme(configDir, dark, fontPointSize, appScale,
+                    configuration);
         } else if (!"wayland".equals(toolkit)) {
             env.put("QT_QPA_PLATFORM", "wayland");
             env.put("QT_QPA_PLATFORM_PLUGIN_PATH", runtimeLib.getAbsolutePath());
             env.put("QT_PLUGIN_PATH", runtimeLib.getAbsolutePath());
             env.put("QT_WAYLAND_SHELL_INTEGRATION", "xdg-shell");
-            writeKdeTheme(configDir, dark);
+            writeKdeTheme(configDir, dark, configuration, appScale);
         }
     }
 
@@ -1616,40 +1682,26 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         File gtk4Config = new File(configDir, "gtk-4.0");
         gtk4Config.mkdirs();
         float density = getResources().getDisplayMetrics().density;
+        int targetDp = resolvedControlTargetDp(getResources().getConfiguration());
         int uiFontSize = Math.max(fontPointSize,
                 Math.round(fontPointSize * 4f / 3f * appScale));
-        int controlHeight = Math.max(Math.round(48f * density), uiFontSize + 20);
-        int titleButtonSize = Math.max(Math.round(48f * density), uiFontSize + 20);
-        int horizontalPadding = Math.max(14, Math.round(12f * density));
+        int controlHeight = Math.max(Math.round(targetDp * density), uiFontSize + 16);
+        int titleButtonSize = controlHeight;
+        int horizontalPadding = Math.max(12, Math.round(targetDp * density / 4f));
         int scrollbarSize = Math.max(18, Math.round(12f * density));
         int menuBorder = Math.max(2, Math.round(1f * density));
         String outline = dark ? "rgba(255,255,255,0.28)" : "rgba(0,0,0,0.24)";
         String shadow = dark ? "rgba(0,0,0,0.72)" : "rgba(0,0,0,0.38)";
-        String foreground = dark ? "239,240,241" : "35,38,41";
-        String inactive = dark ? "174,181,185" : "91,99,104";
-        String window = dark ? "35,38,41" : "239,240,241";
-        String alternate = dark ? "42,46,50" : "246,247,248";
-        String view = dark ? "27,30,32" : "255,255,255";
-        String button = dark ? "49,54,59" : "239,240,241";
         String accent = dark ? "86,188,236" : "23,147,209";
         String selectionForeground = dark ? "17,20,23" : "255,255,255";
         if (appearanceMaterialYou && Build.VERSION.SDK_INT >= 31) {
-            foreground = rgb(getColor(dark ? android.R.color.system_neutral1_10
-                    : android.R.color.system_neutral1_900));
-            inactive = rgb(getColor(dark ? android.R.color.system_neutral1_200
-                    : android.R.color.system_neutral1_700));
-            window = rgb(getColor(dark ? android.R.color.system_neutral1_900
-                    : android.R.color.system_neutral1_10));
-            alternate = rgb(getColor(dark ? android.R.color.system_neutral1_800
-                    : android.R.color.system_neutral1_50));
-            view = window;
-            button = alternate;
             accent = rgb(getColor(dark ? android.R.color.system_accent1_200
                     : android.R.color.system_accent1_600));
-            selectionForeground = window;
+            selectionForeground = rgb(getColor(dark ? android.R.color.system_neutral1_900
+                    : android.R.color.system_neutral1_10));
         }
         String baseSettings = "[Settings]\n"
-                + "gtk-theme-name=" + (dark ? "Adwaita-dark" : "Adwaita") + "\n"
+                + "gtk-theme-name=Adwaita\n"
                 + "gtk-icon-theme-name=Adwaita\n"
                 + "gtk-font-name=Noto Sans " + fontPointSize + "\n"
                 + "gtk-application-prefer-dark-theme=" + dark + "\n";
@@ -1657,34 +1709,16 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 + "gtk-menu-images=false\n"
                 + "gtk-button-images=false\n";
         writeText(new File(gtkConfig, "settings.ini"), settings);
-        String css = "window, dialog, .background {\n"
-                + "  background-color: rgb(" + window + ");\n"
-                + "  color: rgb(" + foreground + ");\n"
-                + "}\n"
-                + "headerbar, menubar, toolbar, .titlebar {\n"
-                + "  background-color: rgb(" + alternate + ");\n"
-                + "  color: rgb(" + foreground + ");\n"
-                + "}\n"
-                + "textview, textview text, entry, treeview.view, iconview.view, .view {\n"
-                + "  background-color: rgb(" + view + ");\n"
-                + "  color: rgb(" + foreground + ");\n"
-                + "}\n"
-                + "button, combobox button {\n"
-                + "  background-image: none;\n"
-                + "  background-color: rgb(" + button + ");\n"
-                + "  color: rgb(" + foreground + ");\n"
-                + "  border-color: " + outline + ";\n"
-                + "}\n"
-                + "menu, menuitem, popover {\n"
-                + "  background-color: rgb(" + alternate + ");\n"
-                + "  color: rgb(" + foreground + ");\n"
-                + "}\n"
-                + "*:disabled { color: rgb(" + inactive + "); }\n"
-                + "*:selected, selection, menuitem:hover {\n"
-                + "  background-color: rgb(" + accent + ");\n"
-                + "  color: rgb(" + selectionForeground + ");\n"
-                + "}\n"
-                + "* {\n"
+        String materialColors = appearanceMaterialYou && Build.VERSION.SDK_INT >= 31
+                ? "@define-color accent_color rgb(" + accent + ");\n"
+                        + "@define-color accent_bg_color rgb(" + accent + ");\n"
+                        + "@define-color accent_fg_color rgb(" + selectionForeground + ");\n"
+                        + "@define-color theme_selected_bg_color rgb(" + accent + ");\n"
+                        + "@define-color theme_selected_fg_color rgb("
+                        + selectionForeground + ");\n"
+                : "";
+        String css = materialColors
+                + "window, dialog, popover, menu {\n"
                 + "  font-size: " + uiFontSize + "px;\n"
                 + "}\n"
                 + "button, entry, combobox, menuitem {\n"
@@ -1718,7 +1752,9 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 + "}\n"
                 + "headerbar button.titlebutton image, headerbar .titlebutton image,\n"
                 + ".titlebar button.titlebutton image, windowcontrols image {\n"
-                + "  -gtk-icon-transform: scale(3);\n"
+                + "  -gtk-icon-transform: scale("
+                + String.format(Locale.US, "%.2f", targetDp >= 48 ? 1.5f
+                        : targetDp >= 40 ? 1.25f : 1f) + ");\n"
                 + "}\n"
                 + "scrollbar slider {\n"
                 + "  min-width: " + scrollbarSize + "px;\n"
@@ -1728,7 +1764,74 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         writeText(new File(gtk4Config, "settings.ini"), baseSettings);
         writeText(new File(gtk4Config, "gtk.css"), css);
     }
-    private void writeKdeTheme(File configDir, boolean dark) throws IOException {
+
+    private void writeDirectWaylandTheme(File configDir, boolean dark,
+            int fontPointSize, float appScale, Configuration configuration)
+            throws IOException {
+        if (!"foot".equals(runtimeProgramName) && !"footclient".equals(runtimeProgramName)) {
+            return;
+        }
+        float density = getResources().getDisplayMetrics().density;
+        int fontPixels = Math.max(fontPointSize,
+                Math.round(fontPointSize * 4f / 3f * appScale));
+        int controlPixels = Math.max(fontPixels + 16,
+                Math.round(resolvedControlTargetDp(configuration) * density));
+        int padding = Math.max(4, Math.round(4f * density));
+        String darkForeground = "eff0f1";
+        String darkBackground = "1b1e20";
+        String darkAccent = "56bcec";
+        String lightForeground = "232629";
+        String lightBackground = "ffffff";
+        String lightAccent = "1793d1";
+        if (appearanceMaterialYou && Build.VERSION.SDK_INT >= 31) {
+            darkForeground = hexRgb(getColor(android.R.color.system_neutral1_10));
+            darkBackground = hexRgb(getColor(android.R.color.system_neutral1_900));
+            darkAccent = hexRgb(getColor(android.R.color.system_accent1_200));
+            lightForeground = hexRgb(getColor(android.R.color.system_neutral1_900));
+            lightBackground = hexRgb(getColor(android.R.color.system_neutral1_10));
+            lightAccent = hexRgb(getColor(android.R.color.system_accent1_600));
+        }
+        String foreground = dark ? darkForeground : lightForeground;
+        String background = dark ? darkBackground : lightBackground;
+        File managedDirectory = new File(configDir, "archphene");
+        managedDirectory.mkdirs();
+        File managed = new File(managedDirectory, "foot.ini");
+        String scheme = "[main]\n"
+                + "font=monospace:pixelsize=" + fontPixels + "\n"
+                + "dpi-aware=no\n"
+                + "pad=" + padding + "x" + padding + "\n"
+                + "resize-keep-grid=no\n"
+                + "initial-window-mode=maximized\n"
+                + "initial-color-theme=" + (dark ? "dark" : "light") + "\n\n"
+                + "[colors-dark]\n"
+                + "foreground=" + darkForeground + "\n"
+                + "background=" + darkBackground + "\n"
+                + "selection-foreground=" + darkBackground + "\n"
+                + "selection-background=" + darkAccent + "\n\n"
+                + "[colors-light]\n"
+                + "foreground=" + lightForeground + "\n"
+                + "background=" + lightBackground + "\n"
+                + "selection-foreground=" + lightBackground + "\n"
+                + "selection-background=" + lightAccent + "\n\n"
+                + "[csd]\n"
+                + "preferred=client\n"
+                + "size=" + controlPixels + "\n"
+                + "button-width=" + controlPixels + "\n"
+                + "color=ff" + background + "\n"
+                + "button-color=ff" + foreground + "\n";
+        writeText(managed, scheme);
+
+        File footDirectory = new File(configDir, "foot");
+        footDirectory.mkdirs();
+        File user = new File(footDirectory, "foot.ini");
+        if (!user.exists()) {
+            writeText(user, "# Archphene-managed defaults; add overrides below this line.\n"
+                    + "include=" + managed.getAbsolutePath() + "\n");
+        }
+    }
+
+    private void writeKdeTheme(File configDir, boolean dark, Configuration configuration,
+            float appScale) throws IOException {
         String foreground = dark ? "239,240,241" : "35,38,41";
         String inactive = dark ? "174,181,185" : "91,99,104";
         String window = dark ? "35,38,41" : "239,240,241";
@@ -1776,6 +1879,13 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 .append("ColorAmount=0.025\nColorEffect=2\n")
                 .append("ContrastAmount=0.1\nContrastEffect=2\n")
                 .append("Enable=false\nIntensityAmount=0\nIntensityEffect=0\n");
+        int targetPixels = Math.max(24, Math.round(resolvedControlTargetDp(configuration)
+                * getResources().getDisplayMetrics().density));
+        palette.append("\n[Archphene]\nControlDensity=")
+                .append(resolvedControlDensity(configuration))
+                .append("\nControlMinSize=")
+                .append(Math.max(24, Math.round(targetPixels / appScale)))
+                .append('\n');
         writeText(new File(configDir, "kdeglobals"), palette.toString());
         File schemes = new File(configDir.getParentFile(), ".local/share/color-schemes");
         schemes.mkdirs();
@@ -1801,6 +1911,10 @@ public abstract class ArchpheneCompositorActivity extends Activity {
 
     private static String rgb(int color) {
         return Color.red(color) + "," + Color.green(color) + "," + Color.blue(color);
+    }
+    private static String hexRgb(int color) {
+        return String.format(Locale.US, "%02x%02x%02x",
+                Color.red(color), Color.green(color), Color.blue(color));
     }
     private void prepareRuntime(File runtimeLib) throws IOException {
         runtimeLib.mkdirs();

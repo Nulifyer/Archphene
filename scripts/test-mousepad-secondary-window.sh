@@ -6,6 +6,7 @@ source "$(dirname "$0")/lib/android-test.sh"
 serial=emulator-5554
 package=org.archphene.linux.p241d399e14343c53b8b766e9126776aa
 activity=org.archphene.linux.kcalc.MainActivity
+artifact_dir=
 while (($#)); do
   case "$1" in
     --serial)
@@ -20,6 +21,10 @@ while (($#)); do
       activity="${2:?}"
       shift 2
       ;;
+    --artifact-dir)
+      artifact_dir="${2:?}"
+      shift 2
+      ;;
     *)
       archphene_die "unknown argument: $1"
       ;;
@@ -27,6 +32,9 @@ while (($#)); do
 done
 
 archphene_test_init "$serial"
+safe_serial="${serial//[^A-Za-z0-9._-]/_}"
+artifact_dir="${artifact_dir:-$ARCHPHENE_ROOT/tooling/artifacts/visual-audit/$safe_serial/mousepad-preferences}"
+mkdir -p "$artifact_dir"
 archphene_adb_run shell am force-stop "$package"
 archphene_adb_run logcat -c
 archphene_adb_run shell am start -W -n "$package/$activity" >/dev/null
@@ -59,5 +67,36 @@ child="$({
 })"
 
 [[ -n "$main" && -n "$child" && "$main" != "$child" ]] || archphene_die 'secondary preferences window not created'
+log="$(archphene_adb_run logcat -d -s ArchpheneInput:V ArchpheneLinuxApp:V '*:S')"
+printf '%s\n' "$log" >"$artifact_dir/logcat.txt"
+python3 "$ARCHPHENE_SCRIPTS_DIR/lib/wayland-geometry-check.py" \
+  "$artifact_dir/logcat.txt" --require-title 'Mousepad Preferences' --require-popup
+archphene_adb_run exec-out screencap >"$artifact_dir/preferences.raw"
+archphene_adb_run exec-out screencap -p >"$artifact_dir/preferences.png"
+python3 "$ARCHPHENE_SCRIPTS_DIR/lib/frame-health-check.py" \
+  "$artifact_dir/preferences.raw"
+settings="$(archphene_adb_run shell run-as "$package" \
+  cat files/linux-home/.config/gtk-3.0/settings.ini)"
+css="$(archphene_adb_run shell run-as "$package" \
+  cat files/linux-home/.config/gtk-3.0/gtk.css)"
+printf '%s\n' "$settings" >"$artifact_dir/settings.ini"
+printf '%s\n' "$css" >"$artifact_dir/gtk.css"
+python3 "$ARCHPHENE_SCRIPTS_DIR/lib/theme-contrast-check.py" gtk-accent \
+  "$artifact_dir/gtk.css"
+grep -Fxq 'gtk-theme-name=Adwaita' <<<"$settings" \
+  || archphene_die 'Mousepad does not use one complete Adwaita theme'
+grep -Eq '^gtk-application-prefer-dark-theme=(true|false)$' <<<"$settings" \
+  || archphene_die 'Mousepad is missing explicit light/dark preference'
+[[ "$css" != *'background-color:'* ]] \
+  || archphene_die 'Mousepad GTK CSS still overrides partial surface colors'
+python3 "$ARCHPHENE_SCRIPTS_DIR/lib/visual-manifest.py" \
+  "$artifact_dir/manifest.json" \
+  --field "serial=$serial" --field "package=$package" --field 'app=Mousepad' \
+  --field 'state=Preferences' --field 'toolkit=gtk3' \
+  --field "primaryWindow=$main" --field "secondaryWindow=$child" \
+  --artifact "$artifact_dir/preferences.raw" \
+  --artifact "$artifact_dir/preferences.png" \
+  --artifact "$artifact_dir/logcat.txt" --artifact "$artifact_dir/settings.ini" \
+  --artifact "$artifact_dir/gtk.css"
 archphene_adb_run shell input keyevent KEYCODE_BACK
-archphene_note "Mousepad secondary-window bridge passed: child $child closed and parent $main remained active."
+archphene_note "Mousepad Preferences visual gate passed: child $child is bounded, Adwaita owns complete colors, and the rendered frame is nonblank. Evidence: $artifact_dir"

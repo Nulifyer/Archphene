@@ -26,7 +26,8 @@ def frame(path: Path):
     return width, height, memoryview(data)[offset:]
 
 
-def compare(first_path: Path, second_path: Path):
+def compare(first_path: Path, second_path: Path, left_percent=5, top_percent=15,
+            right_percent=95, bottom_percent=85):
     width, height, first = frame(first_path)
     other_width, other_height, second = frame(second_path)
     if (width, height) != (other_width, other_height):
@@ -34,8 +35,8 @@ def compare(first_path: Path, second_path: Path):
 
     # Exclude Android status/navigation bars and the outermost edge. The
     # compositor-backed Linux surface occupies the center of every wrapper.
-    left, right = width * 5 // 100, width * 95 // 100
-    top, bottom = height * 15 // 100, height * 85 // 100
+    left, right = width * left_percent // 100, width * right_percent // 100
+    top, bottom = height * top_percent // 100, height * bottom_percent // 100
     first_luma = second_luma = difference = changed = samples = 0
     for y in range(top, bottom, 2):
         row = y * width * 4
@@ -65,9 +66,19 @@ def main():
     parser.add_argument("--minimum-luma-delta", type=float, default=40)
     parser.add_argument("--minimum-difference", type=float, default=2)
     parser.add_argument("--minimum-changed-ratio", type=float, default=0.2)
+    parser.add_argument("--left-percent", type=int, default=5)
+    parser.add_argument("--top-percent", type=int, default=15)
+    parser.add_argument("--right-percent", type=int, default=95)
+    parser.add_argument("--bottom-percent", type=int, default=85)
     args = parser.parse_args()
 
-    first_luma, second_luma, difference, changed = compare(args.first, args.second)
+    if not (0 <= args.left_percent < args.right_percent <= 100
+            and 0 <= args.top_percent < args.bottom_percent <= 100):
+        raise SystemExit("invalid comparison crop percentages")
+
+    first_luma, second_luma, difference, changed = compare(
+        args.first, args.second, args.left_percent, args.top_percent,
+        args.right_percent, args.bottom_percent)
     print(
         f"first_luma={first_luma:.1f} second_luma={second_luma:.1f} "
         f"mean_difference={difference:.1f} changed_ratio={changed:.3f}"
