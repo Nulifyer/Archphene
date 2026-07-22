@@ -238,15 +238,19 @@ public final class ManagerStateStore {
 
     public static int linuxFontPercent(Context context) {
         int value = preferences(context).getInt("linux-font-percent", 100);
-        for (int allowed : new int[] {100, 110, 120, 125, 150}) {
+        for (int allowed : new int[] {100, 125, 150, 175, 200}) {
             if (value == allowed) return value;
         }
+        // Normalize the two finer-grained values used by early builds to the
+        // nearest value on the public 25-percent scale.
+        if (value == 110) return 100;
+        if (value == 120) return 125;
         return 100;
     }
 
     public static void setLinuxFontPercent(Context context, int percent) {
         int value = 100;
-        for (int allowed : new int[] {100, 110, 120, 125, 150}) {
+        for (int allowed : new int[] {100, 125, 150, 175, 200}) {
             if (percent == allowed) value = allowed;
         }
         preferences(context).edit().putInt("linux-font-percent", value).apply();

@@ -501,7 +501,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             appearanceScalePercent = scale == 100 || scale == 125 || scale == 150
                     || scale == 175 || scale == 200 ? scale : 0;
             int font = appearance.getInt("font_percent", 100);
-            appearanceFontPercent = font == 110 || font == 120 || font == 125 || font == 150
+            appearanceFontPercent = font == 125 || font == 150 || font == 175 || font == 200
                     ? font : 100;
             String controls = appearance.getString("control_density", "automatic");
             appearanceControlDensity = "compact".equals(controls)
@@ -1552,7 +1552,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         float appScale = scalePercent / 100f;
         float requestedBodyPixels = 16f * getResources().getDisplayMetrics().scaledDensity
                 * appearanceFontPercent / 100f;
-        return Math.max(9, Math.min(30,
+        return Math.max(9, Math.min(48,
                 Math.round(requestedBodyPixels * 72f / 96f / appScale)));
     }
 

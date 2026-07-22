@@ -175,7 +175,7 @@ private:
         if (!pointSizeOk) {
             pointSize = 18;
         }
-        pointSize = qBound(9, pointSize, 30);
+        pointSize = qBound(9, pointSize, 48);
         m_font.setFamilies({QStringLiteral("Noto Sans"), QStringLiteral("sans-serif")});
         m_font.setPointSize(pointSize);
         m_fixedFont.setFamilies(

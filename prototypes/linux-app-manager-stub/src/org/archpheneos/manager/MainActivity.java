@@ -2040,21 +2040,21 @@ public final class MainActivity extends Activity {
                     showBanner("Running GTK apps update now; reopen other apps for full scaling", false);
                 }), spacedWrap(dp(8)));
 
-        int[] fontValues = {100, 110, 120, 125, 150};
-        String[] fontLabels = {"100%", "110%", "120%", "125%", "150%"};
+        int[] fontValues = {100, 125, 150, 175, 200};
+        String[] fontLabels = {"100%", "125%", "150%", "175%", "200%"};
         int fontIndex = indexOf(fontValues, ManagerStateStore.linuxFontPercent(this));
         appearance.addView(appearanceSlider("Linux app text",
-                "Font size only. Open GTK apps update now; other apps may need reopening.",
+                "Font size only, from 100 to 200%. Very large text fits best in landscape or on a larger display. Open GTK apps update now; other apps may need reopening.",
                 fontLabels, fontIndex, index -> {
                     ManagerStateStore.setLinuxFontPercent(this, fontValues[index]);
                     showBanner("Running GTK apps update text now; reopen other apps if unchanged", false);
                 }), spacedWrap(dp(8)));
 
-        String[] controlValues = {"compact", "automatic", "comfortable", "touch"};
-        String[] controlLabels = {"Compact", "Auto", "Comfort", "Touch"};
+        String[] controlValues = {"automatic", "compact", "comfortable", "touch"};
+        String[] controlLabels = {"Auto", "32 dp", "40 dp", "48 dp"};
         int controlIndex = indexOf(controlValues, ManagerStateStore.linuxControlDensity(this));
         appearance.addView(appearanceSlider("Linux app controls",
-                "Minimum touch-target size. Compact is default; Auto adapts. Open GTK apps update now.",
+                "Minimum control target in dp. Auto chooses 32, 40, or 48 dp for the active display. Open GTK apps update now.",
                 controlLabels, controlIndex, index -> {
                     ManagerStateStore.setLinuxControlDensity(this, controlValues[index]);
                     showBanner("Running GTK apps update controls now; reopen other apps if unchanged", false);

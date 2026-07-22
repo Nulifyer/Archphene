@@ -8,8 +8,9 @@ store="$ARCHPHENE_ROOT/prototypes/linux-app-manager-stub/src/org/archpheneos/man
 provider="$ARCHPHENE_ROOT/prototypes/linux-app-manager-stub/src/org/archpheneos/manager/RuntimeModuleProvider.java"
 manager="$ARCHPHENE_ROOT/prototypes/linux-app-manager-stub/src/org/archpheneos/manager/MainActivity.java"
 style="$ARCHPHENE_ROOT/native/archphene-qt-platform-theme/archphenestyle.cpp"
+platform_theme="$ARCHPHENE_ROOT/native/archphene-qt-platform-theme/archpheneplatformtheme.cpp"
 
-for file in "$bridge" "$store" "$provider" "$manager" "$style"; do
+for file in "$bridge" "$store" "$provider" "$manager" "$style" "$platform_theme"; do
   archphene_require_file "$file"
 done
 
@@ -45,6 +46,16 @@ for slider in 'Linux app scale' 'Linux app text' 'Linux app controls'; do
   grep -Fq "appearanceSlider(\"$slider\"" "$manager" \
     || archphene_die "$slider is not a described discrete slider"
 done
+grep -Fq 'int[] fontValues = {100, 125, 150, 175, 200}' "$manager" \
+  || archphene_die 'Linux text slider must cover 100 through 200 percent'
+grep -Fq 'String[] controlLabels = {"Auto", "32 dp", "40 dp", "48 dp"}' "$manager" \
+  || archphene_die 'Linux control slider must expose its actual dp targets'
+grep -Fq 'font == 175 || font == 200' "$bridge" \
+  || archphene_die 'wrapper does not accept the upper text slider values'
+grep -Fq 'Math.min(48,' "$bridge" \
+  || archphene_die 'wrapper font conversion still prevents a real 200-percent setting'
+grep -Fq 'qBound(9, pointSize, 48)' "$platform_theme" \
+  || archphene_die 'Qt platform theme still prevents a real 200-percent setting'
 grep -Fq 'ARCHPHENE_QT_CONTROL_MIN_SIZE' "$bridge" \
   || archphene_die 'wrapper does not publish Qt control metrics'
 grep -Fq 'ControlMinSize=' "$bridge" \
