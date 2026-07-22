@@ -106,10 +106,13 @@ This is the prioritized completion queue for the Archphene Android application. 
 - [x] Refresh the manager UI against current Obtainium while retaining the user-selected bottom Apps/Settings navigation and centered Add action.
   - Compact rows use one stateful action, full-width phase progress, bounded version labels, accessible controls, and enough bottom padding on phone and tablet layouts.
 - [x] Refine search controls and empty/loading/error states using the same compact visual language.
-- [x] Finish Qt and GTK appearance consistency.
-  - Physical AArch64 dark/light validation covers KCalc and Mousepad at the automatic 150% phone geometry scale and 17 pt toolkit text.
-  - Qt and GTK 3 system-theme changes repalette running widgets without restarting the Linux process; screenshot-pixel regressions reject Android-chrome-only false positives.
-  - Menus, popup borders/shadows, close targets, status labels, contrast, and full-window rendering are readable and bounded; tablet/docked density remains configurable in Appearance settings.
+- [ ] Finish Qt and GTK appearance consistency.
+  - [x] Physical AArch64 dark/light validation covers KCalc and Mousepad at the automatic 150% phone geometry scale and 17 pt toolkit text.
+  - [x] Qt 6/KDE, GTK 3, and GTK 4/libadwaita system-theme changes repalette running widgets without restarting the Linux process; raw screenshot-pixel regressions inspect the Linux surface and reject Android-chrome-only false positives.
+  - [x] Prove on current-source x86_64 KCalc, Kate, Mousepad, and GNOME Text Editor that explicit manager light/dark choices override the opposite Android mode and Material You changes generated semantic colors and rendered app pixels.
+  - [x] Keep menus, popup borders/shadows, close targets, status labels, contrast, and full-window rendering readable and bounded; tablet/docked density remains configurable in Appearance settings.
+  - [ ] Rebuild the current Qt platform-theme change for AArch64 from the pinned ARM Qt development runtime, then validate current-source physical manager overrides and Material You without replacing signer-bound user data.
+  - [ ] Restore the missing GLib development dependency in the GTK settings bridge's declared clean container and rerun its reproducible x86_64/AArch64 build.
 - [ ] Execute the release-gate representatives in `docs/compatibility-matrix.md`.
   - [x] Promote the reviewed package matrix into maintained documentation and separate non-normative research candidates.
   - [x] Run the first x86_64 candidate wave through official resolution/signature verification and complete-closure wrapper installation; capture GTK 4, complex Qt, and native-Wayland terminal results without promoting launch-only evidence to validated support.

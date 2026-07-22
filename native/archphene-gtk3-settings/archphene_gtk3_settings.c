@@ -5,14 +5,22 @@
 
 typedef gpointer (*GtkSettingsGetDefault)(void);
 typedef gpointer (*GdkScreenGetDefault)(void);
+typedef gpointer (*GdkDisplayGetDefault)(void);
 typedef void (*GtkStyleContextResetWidgets)(gpointer screen);
 typedef gpointer (*GtkCssProviderNew)(void);
-typedef gboolean (*GtkCssProviderLoadFromPath)(gpointer provider,
+typedef gboolean (*Gtk3CssProviderLoadFromPath)(gpointer provider,
         const gchar *path, GError **error);
+typedef void (*Gtk4CssProviderLoadFromPath)(gpointer provider, const gchar *path);
 typedef void (*GtkStyleContextAddProviderForScreen)(gpointer screen,
         gpointer provider, guint priority);
 typedef void (*GtkStyleContextRemoveProviderForScreen)(gpointer screen,
         gpointer provider);
+typedef void (*GtkStyleContextAddProviderForDisplay)(gpointer display,
+        gpointer provider, guint priority);
+typedef void (*GtkStyleContextRemoveProviderForDisplay)(gpointer display,
+        gpointer provider);
+typedef gpointer (*AdwStyleManagerGetDefault)(void);
+typedef void (*AdwStyleManagerSetColorScheme)(gpointer manager, gint scheme);
 
 static gchar *settings_path;
 static gchar *active_theme;
@@ -21,6 +29,7 @@ static gchar *active_css;
 static gboolean active_dark;
 static gboolean have_active_settings;
 static gpointer active_css_provider;
+static gboolean refresh_started;
 
 static void write_diagnostic(const gchar *status)
 {
@@ -51,14 +60,48 @@ static gpointer default_screen(void)
 
 static void reload_css_provider(gpointer screen, const gchar *css_path)
 {
-    if (screen == NULL || css_path == NULL) return;
+    if (css_path == NULL) return;
     union {
         gpointer object;
         GtkCssProviderNew function;
     } new_symbol = {dlsym(RTLD_DEFAULT, "gtk_css_provider_new")};
     union {
         gpointer object;
-        GtkCssProviderLoadFromPath function;
+        GdkDisplayGetDefault function;
+    } display_symbol = {dlsym(RTLD_DEFAULT, "gdk_display_get_default")};
+    union {
+        gpointer object;
+        GtkStyleContextAddProviderForDisplay function;
+    } add_display_symbol = {dlsym(RTLD_DEFAULT,
+            "gtk_style_context_add_provider_for_display")};
+    union {
+        gpointer object;
+        GtkStyleContextRemoveProviderForDisplay function;
+    } remove_display_symbol = {dlsym(RTLD_DEFAULT,
+            "gtk_style_context_remove_provider_for_display")};
+    if (new_symbol.function != NULL && display_symbol.function != NULL
+            && add_display_symbol.function != NULL
+            && remove_display_symbol.function != NULL) {
+        gpointer display = display_symbol.function();
+        if (display == NULL) return;
+        if (active_css_provider != NULL) {
+            remove_display_symbol.function(display, active_css_provider);
+            g_object_unref(active_css_provider);
+        }
+        active_css_provider = new_symbol.function();
+        union {
+            gpointer object;
+            Gtk4CssProviderLoadFromPath function;
+        } load_symbol = {dlsym(RTLD_DEFAULT, "gtk_css_provider_load_from_path")};
+        if (load_symbol.function == NULL) return;
+        load_symbol.function(active_css_provider, css_path);
+        add_display_symbol.function(display, active_css_provider, 801);
+        return;
+    }
+    if (screen == NULL) return;
+    union {
+        gpointer object;
+        Gtk3CssProviderLoadFromPath function;
     } load_symbol = {dlsym(RTLD_DEFAULT, "gtk_css_provider_load_from_path")};
     union {
         gpointer object;
@@ -95,6 +138,21 @@ static void reset_widgets(gpointer screen)
         GtkStyleContextResetWidgets function;
     } reset_symbol = {dlsym(RTLD_DEFAULT, "gtk_style_context_reset_widgets")};
     if (screen != NULL && reset_symbol.function != NULL) reset_symbol.function(screen);
+}
+
+static void update_libadwaita(gboolean dark)
+{
+    union {
+        gpointer object;
+        AdwStyleManagerGetDefault function;
+    } get_symbol = {dlsym(RTLD_DEFAULT, "adw_style_manager_get_default")};
+    union {
+        gpointer object;
+        AdwStyleManagerSetColorScheme function;
+    } set_symbol = {dlsym(RTLD_DEFAULT, "adw_style_manager_set_color_scheme")};
+    if (get_symbol.function == NULL || set_symbol.function == NULL) return;
+    gpointer manager = get_symbol.function();
+    if (manager != NULL) set_symbol.function(manager, dark ? 4 : 1);
 }
 
 static gboolean refresh_settings(gpointer unused)
@@ -157,6 +215,7 @@ static gboolean refresh_settings(gpointer unused)
             "gtk-application-prefer-dark-theme", dark,
             "gtk-font-name", font,
             NULL);
+    update_libadwaita(dark);
     gpointer screen = default_screen();
     reload_css_provider(screen, css_path);
     reset_widgets(screen);
@@ -177,14 +236,28 @@ static gboolean refresh_settings(gpointer unused)
     return G_SOURCE_CONTINUE;
 }
 
-G_MODULE_EXPORT void gtk_module_init(gint *argc, gchar ***argv)
+static void start_refresh(void)
 {
-    (void)argc;
-    (void)argv;
+    if (refresh_started) return;
     const gchar *configured = g_getenv("ARCHPHENE_GTK_SETTINGS_FILE");
     if (configured == NULL || !g_path_is_absolute(configured)) return;
+    refresh_started = TRUE;
     settings_path = g_strdup(configured);
     write_diagnostic("initialized\n");
     refresh_settings(NULL);
     g_timeout_add(250, refresh_settings, NULL);
+}
+
+__attribute__((constructor)) static void preload_init(void)
+{
+    if (g_strcmp0(g_getenv("ARCHPHENE_GTK_SETTINGS_PRELOAD"), "1") == 0) {
+        start_refresh();
+    }
+}
+
+G_MODULE_EXPORT void gtk_module_init(gint *argc, gchar ***argv)
+{
+    (void)argc;
+    (void)argv;
+    start_refresh();
 }

@@ -14,6 +14,16 @@ The repository audit, release-workflow contract, AT-SPI source contract, Bash sy
 
 The first package-compatibility wave now has current-source x86_64 rendering for GNOME Text Editor, Kate, and Foot. Kate's daemonized GUI process is retained by the Activity-tied runtime supervisor and remains stable through tablet rotation and a real temporary 1920x1080 emulator display with display-targeted input. Foot now starts a warning-free verified Bash PTY with `C.UTF-8` and a monospace fallback, and executes typed input without process churn. These remain partial package results until their full workflows and current-source AArch64 lanes pass.
 
+Appearance validation now covers Qt 6/KDE, GTK 3, and GTK 4/libadwaita on the
+x86_64 emulator. KCalc, Kate, Mousepad, and GNOME Text Editor pass strict
+Linux-surface pixel checks for Android-following live light/dark changes,
+explicit manager light/dark overrides, and Material You semantic palettes.
+KCalc also passes the same-process live light/dark check on the installed
+physical AArch64 fixture. The current Qt appearance plugin still needs a clean
+AArch64 rebuild and current-source physical validation; the GTK settings
+bridge's declared clean container also needs its missing GLib development
+dependency restored.
+
 ## Validated
 
 | Area | Evidence |
@@ -21,7 +31,7 @@ The first package-compatibility wave now has current-source x86_64 rendering for
 | Manager self-update | Public GitHub Releases discovery, bounded download, SHA-256 verification, signer/package validation, Android confirmation, replacement, and restart reconciliation. The reproducible workflow published exact-ABI `v1.0.1` assets; live `0.9.0` to `1.0.1` updates pass on x86_64 and physical AArch64, and the real published x86_64 `v1.0.0` migration passes through its one-time compatibility alias. |
 | General x86_64 package transactions | Arch dependency resolution, package-signature verification, closure staging, desktop/terminal classification, package-specific label/executable/icon/MIME/toolkit/ABI/capability metadata, generated APK validation, persistent Android Keystore signing, and PackageInstaller installation pass with KCalc, Mousepad, and CLI packages; a concurrent missing-package failure does not block an unrelated CLI transaction |
 | AArch64 package runtime | A cacheable Linux container resolves the current Arch Linux ARM pacman/GnuPG/libarchive closure, verifies every package with the pinned build-system key, reduces it to required AArch64 ELF objects, cross-builds patched glibc and the path broker, and emits a 70-entry checksum catalog. The dual-ABI manager selects isolated ARM repository/trust assets; Samsung tests pass package search, nine-package libalpm resolution, exact build-key verification, staging, terminal classification, authenticated runtime-pack publication, Terminal UID materialization, and `btop 1.4.7` execution |
-| Qt and GTK bridge prototypes | Unmodified KCalc/Qt and Mousepad/GTK3 GUI, input, popups, dialogs, clipboard/IME, resizing, accessibility, and document workflows pass on x86_64. Manager-generated Arch Linux ARM wrappers also pass live Android light/dark changes without process restarts; Mousepad passes picker import, edit/save/writeback, cold reopen, DocumentsProvider browse, same-name conflict preservation, and manager access denial on physical AArch64. |
+| Qt and GTK bridge prototypes | Unmodified KCalc/Qt and Mousepad/GTK3 GUI, input, popups, dialogs, clipboard/IME, resizing, accessibility, and document workflows pass on x86_64. Current-source x86_64 KCalc, Kate, Mousepad, and GNOME Text Editor pass Linux-surface-verified live system light/dark, explicit manager overrides, and Material You palette checks across Qt 6/KDE, GTK 3, and GTK 4/libadwaita. Installed Arch Linux ARM fixtures also pass live Android light/dark changes without process restarts; Mousepad passes picker import, edit/save/writeback, cold reopen, DocumentsProvider browse, same-name conflict preservation, and manager access denial on physical AArch64. |
 | Shared bridge runtime | KCalc, Mousepad, generated wrappers, and native probes compile against one Android Activity/InputConnection/clipboard/window host and one Rust compositor; the application Activities are metadata-only subclasses. Official unmodified `wev` and `wl-clipboard` packages validate core seat input and demand-driven bidirectional plain-text selection transfer on x86_64 emulator and physical AArch64. |
 | Shared runtime packs | Verified Arch dependency closures are published atomically as immutable content-addressed packs owned by the manager; an exported caller-authenticated provider grants exact read-only module URIs to the generated wrapper UID, Binder-death leases protect active wrappers, cold app-drawer relaunch loads the active pack, untrusted shell access is rejected, superseded/manual-cache unbound packs are reclaimed, and the KCalc wrapper shrank from 57 MB to 629 KB. Each launch uses an Activity-tied subreaper supervisor so daemonized GUI descendants remain owned until the complete Linux tree exits. KCalc survives rotation without duplication and leaves no Linux descendants after Back or force-stop; the runtime-FD lease/cleanup regression passes after the supervisor change. |
 | Secondary-window registry | Parent/child xdg_toplevel ownership is bounded to 32 simultaneous windows, rejects cyclic and cross-client parents, and clears destroyed-parent references. Active-window routing, composited phone policy, separate Android Dialog hosting in freeform/tablet mode, semantic child input, close, and parent restoration pass the emulator regression. |
@@ -62,7 +72,8 @@ Local debug builds can remain multi-ABI. Release builds emit independently signe
 - Exact-current-source ARM64 manager installation on the present Samsung is pending signer continuity or an explicitly approved app-data reset; the non-destructive installed-fixture regression passes.
 - Project trees and granted GUI documents currently use explicit synchronized mirrors; a live SAF path broker remains pending. Optional shells beyond managed Bash have not been selected.
 - Build a separately signed 16 KB x86_64 package universe. The Archphene-owned glibc loader now passes real 16 KB Android execution, but official Arch executables and shared objects remain 4 KB-aligned. The manager continues to block Add/install on 16 KB x86_64 until an entire no-mixing closure, including late-loaded modules, is rebuilt and validated.
-- Broaden the validated Qt/GTK theme, density, focus, menu, and dialog behavior beyond KCalc and Mousepad and across the remaining release representatives.
+- Finish the current-source AArch64 Qt appearance-plugin rebuild and physical Material You/manager-override validation; restore the GTK settings bridge's clean container dependency declaration.
+- Broaden the validated Qt/GTK theme, density, focus, menu, and dialog behavior beyond KCalc, Kate, Mousepad, and GNOME Text Editor and across the remaining release representatives.
 
 ## Package-manager efficiency rules
 

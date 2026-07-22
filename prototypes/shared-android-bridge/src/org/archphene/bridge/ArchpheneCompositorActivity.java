@@ -1567,14 +1567,21 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             env.put("GDK_SCALE", "1");
             env.put("GDK_DPI_SCALE", "1.0");
             writeGtkTheme(configDir, dark, fontPointSize, appScale);
-            if ("gtk3".equals(toolkit)) {
-                File settingsModule = new File(
-                        runtimeLib, "libarchphene_gtk3_settings.so");
-                if (settingsModule.isFile()) {
+            File settingsModule = new File(
+                    runtimeLib, "libarchphene_gtk3_settings.so");
+            if (settingsModule.isFile()) {
+                env.put("ARCHPHENE_GTK_SETTINGS_FILE", new File(
+                        configDir, "gtk3".equals(toolkit)
+                                ? "gtk-3.0/settings.ini" : "gtk-4.0/settings.ini")
+                        .getAbsolutePath());
+                if ("gtk3".equals(toolkit)) {
                     env.put("GTK_MODULES", settingsModule.getAbsolutePath());
-                    env.put("ARCHPHENE_GTK_SETTINGS_FILE", new File(
-                            configDir, "gtk-3.0/settings.ini").getAbsolutePath());
+                } else {
+                    env.put("ARCHPHENE_GTK_SETTINGS_PRELOAD", "1");
+                    env.put("LD_PRELOAD", settingsModule.getAbsolutePath());
                 }
+            }
+            if ("gtk3".equals(toolkit)) {
                 env.put("GTK_IM_MODULE", "wayland");
                 env.put("GTK_IM_MODULE_FILE", new File(
                         runtimeLib, "gtk-3.0/3.0.0/immodules.cache").getAbsolutePath());

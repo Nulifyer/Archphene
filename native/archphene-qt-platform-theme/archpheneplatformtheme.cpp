@@ -184,17 +184,28 @@ private:
         m_scheme = dark ? Qt::ColorScheme::Dark : Qt::ColorScheme::Light;
 
         if (watch) {
+            logKdeHelperError(QStringLiteral(
+                    "initialized path=%1 scheme=%2 window=%3 view=%4 button=%5 accent=%6")
+                    .arg(m_configPath, dark ? QStringLiteral("dark")
+                                            : QStringLiteral("light"),
+                            window.name(QColor::HexRgb), view.name(QColor::HexRgb),
+                            button.name(QColor::HexRgb), highlight.name(QColor::HexRgb)));
             m_pollTimer = std::make_unique<QTimer>();
             m_pollTimer->setInterval(500);
             QObject::connect(m_pollTimer.get(), &QTimer::timeout, [this]() {
                 ArchphenePlatformTheme refreshed(false);
-                if (m_scheme == refreshed.m_scheme && m_palette == refreshed.m_palette) {
+                const bool changed = m_scheme != refreshed.m_scheme
+                        || m_palette != refreshed.m_palette;
+                if (!m_forceRefresh && !changed) {
                     return;
                 }
-                m_palette = refreshed.m_palette;
-                m_font = refreshed.m_font;
-                m_fixedFont = refreshed.m_fixedFont;
-                m_scheme = refreshed.m_scheme;
+                m_forceRefresh = false;
+                if (changed) {
+                    m_palette = refreshed.m_palette;
+                    m_font = refreshed.m_font;
+                    m_fixedFont = refreshed.m_fixedFont;
+                    m_scheme = refreshed.m_scheme;
+                }
                 if (qApp != nullptr) {
                     // Plasma reparses kdeglobals before ApplicationPaletteChange so
                     // KColorScheme-backed custom painting reads the new colors.
@@ -219,6 +230,13 @@ private:
                 }
             });
             QTimer::singleShot(0, QCoreApplication::instance(), [this]() {
+                if (qobject_cast<QApplication *>(QCoreApplication::instance()) != nullptr) {
+                    QApplication::setPalette(m_palette);
+                    QWindowSystemInterface::handleThemeChange();
+                } else if (qGuiApp != nullptr) {
+                    QGuiApplication::setPalette(m_palette);
+                    QWindowSystemInterface::handleThemeChange();
+                }
                 m_pollTimer->start();
             });
         }
@@ -269,6 +287,7 @@ private:
     Qt::ColorScheme m_scheme = Qt::ColorScheme::Unknown;
     QString m_configPath;
     std::unique_ptr<QTimer> m_pollTimer;
+    bool m_forceRefresh = true;
 };
 
 class ArchphenePlatformThemePlugin final : public QPlatformThemePlugin

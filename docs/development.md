@@ -130,7 +130,31 @@ manager's `REQUEST_INSTALL_PACKAGES` app-op on that disposable target and still
 confirms every generated wrapper through Android's Package Installer. Physical
 device packages and app data are never cleared or replaced by this option.
 
-Focused scripts under `scripts/` cover manager workflows, package signatures, update transactions, KCalc input/clipboard/resize, Mousepad documents and IME, rotation, and file-descriptor lifecycle.
+Focused scripts under `scripts/` cover manager workflows, package signatures,
+update transactions, KCalc input/clipboard/resize, Mousepad documents and IME,
+rotation, file-descriptor lifecycle, and toolkit appearance. Run the live
+system-mode regressions with:
+
+```bash
+./scripts/test-kcalc-live-theme.sh --serial emulator-5554
+./scripts/test-mousepad-live-theme.sh --serial emulator-5554
+./scripts/test-gnome-text-editor-live-theme.sh --serial emulator-5554
+./scripts/test-kate-live-theme.sh --serial emulator-5554
+```
+
+The generic policy test verifies that an explicit manager choice overrides the
+opposite Android mode and that Material You changes both generated toolkit
+configuration and rendered Linux-app pixels:
+
+```bash
+./scripts/test-linux-app-appearance-policy.sh \
+  --serial emulator-5554 \
+  --package org.archphene.linux.p0392be9c9f103a39d951c2f39c3644d2 \
+  --toolkit qt6 --label KCalc
+```
+
+These tests restore the prior Android night mode and manager Linux-appearance
+preferences on exit.
 
 Run the release display profiles independently with:
 

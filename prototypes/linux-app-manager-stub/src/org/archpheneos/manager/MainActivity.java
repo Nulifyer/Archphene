@@ -89,6 +89,7 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        applyTestAppearancePreferences();
         String requestedTheme = ManagerStateStore.themeMode(this);
         if ("dark".equals(requestedTheme)) setTheme(android.R.style.Theme_Material_NoActionBar);
         if ("light".equals(requestedTheme)) setTheme(android.R.style.Theme_Material_Light_NoActionBar);
@@ -147,6 +148,28 @@ public final class MainActivity extends Activity {
     private boolean testHooksEnabled() {
         return (getApplicationInfo().flags
                 & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0;
+    }
+
+    private void applyTestAppearancePreferences() {
+        if (!testHooksEnabled()) return;
+        Intent intent = getIntent();
+        String managerTheme = intent.getStringExtra("archphene_test_manager_theme");
+        if ("system".equals(managerTheme) || "dark".equals(managerTheme)
+                || "light".equals(managerTheme)) {
+            ManagerStateStore.setThemeMode(this, managerTheme);
+        }
+        String linuxTheme = intent.getStringExtra("archphene_test_linux_theme");
+        if ("system".equals(linuxTheme) || "dark".equals(linuxTheme)
+                || "light".equals(linuxTheme)) {
+            ManagerStateStore.setLinuxThemeMode(this, linuxTheme);
+        }
+        if (intent.hasExtra("archphene_test_material_you")) {
+            ManagerStateStore.setMaterialYou(this,
+                    intent.getBooleanExtra("archphene_test_material_you", false));
+        }
+        intent.removeExtra("archphene_test_manager_theme");
+        intent.removeExtra("archphene_test_linux_theme");
+        intent.removeExtra("archphene_test_material_you");
     }
     @Override
     protected void onResume() {

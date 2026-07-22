@@ -224,8 +224,12 @@ public final class RuntimeFdLauncher {
             launchEnvironment.put("ARCHPHENE_RUNTIME_LIB", links.getAbsolutePath());
             launchEnvironment.putIfAbsent("LIBGL_DRIVERS_PATH", links.getAbsolutePath());
             if (linkNames.contains("libarchphene_path_bridge.so")) {
-                launchEnvironment.put("LD_PRELOAD",
-                        new File(links, "libarchphene_path_bridge.so").getAbsolutePath());
+                String existingPreload = launchEnvironment.get("LD_PRELOAD");
+                String pathBridge = new File(
+                        links, "libarchphene_path_bridge.so").getAbsolutePath();
+                launchEnvironment.put("LD_PRELOAD", pathBridge
+                        + (existingPreload == null || existingPreload.isEmpty()
+                                ? "" : ":" + existingPreload));
             }
             boolean gstreamer = false;
             for (String name : linkNames) {

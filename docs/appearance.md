@@ -12,15 +12,31 @@ Settings exposes separate controls for:
 - Linux app text scale
 - Material You semantic colors on Android 12 and newer
 
-Manager preference changes apply on the next Linux app launch. A running Qt 6 app set to follow Android changes between the system light and dark palettes without restarting its Linux process. Automatic geometry scale is 150% on phones, 125% on tablets, and 100% on desktop-sized displays. Phone text choices are constrained to 100%, 110%, and 120% so standard menus remain usable in a narrow viewport. Larger tablet and desktop choices remain available.
+Manager preference changes apply on the next Linux app launch. A running Qt 6,
+GTK 3, or GTK 4/libadwaita app set to follow Android changes between the system
+light and dark palettes without restarting its Linux process. An explicit Linux
+light or dark choice overrides the opposite Android mode. Material You keeps the
+same resolved light/dark policy while substituting Android semantic colors.
+Automatic geometry scale is 150% on phones, 125% on tablets, and 100% on
+desktop-sized displays. Phone text choices are constrained to 100%, 110%, and
+120% so standard menus remain usable in a narrow viewport. Larger tablet and
+desktop choices remain available.
 
 The manager keeps initial focus on the page rather than its search field, so a previously visible IME cannot compress the app list on launch. Search still opens the keyboard on explicit focus. Phone, tablet, and docked-display checks cover 1080x2400, 1280x1920, and 1920x1080 layouts.
 
 ## Toolkit integration
 
-Qt 6 apps load the `archphene` QPA platform-theme and widget-style plugins. They supply the application palette, color-scheme hint, proportional and fixed fonts, mobile-sized text editors, style choice, and icon-theme hints. The bridge writes role-based Window, View, Button, Selection, and Tooltip colors rather than recoloring individual applications. The platform theme synchronizes its `QSettings` view of `kdeglobals` on a 500 ms event-loop timer. Before dispatching `ApplicationPaletteChange`, it asks an optional KF6Config helper to reparse the default `kdeglobals` `KSharedConfig`, matching KDE's platform-integration ordering. This refreshes KDE custom-painted widgets and preserves application state without forcing palettes onto individual widgets. Pure Qt applications still load the platform theme without a KDE Frameworks dependency. The platform-theme plugin uses Qt private QPA interfaces and must be rebuilt against the exact Qt minor version in the runtime closure.
+Qt 6 apps load the `archphene` QPA platform-theme and widget-style plugins. They supply the application palette, color-scheme hint, proportional and fixed fonts, mobile-sized text editors, style choice, and icon-theme hints. The bridge writes role-based Window, View, Button, Selection, and Tooltip colors rather than recoloring individual applications. The platform theme synchronizes its `QSettings` view of `kdeglobals` on a 500 ms event-loop timer. Before dispatching `ApplicationPaletteChange`, it asks an optional KF6Config helper to reparse the default `kdeglobals` `KSharedConfig`, matching KDE's platform-integration ordering. A deferred first refresh also reapplies the resolved palette after KDE startup code has initialized. This refreshes KDE custom-painted widgets and preserves application state without forcing palettes onto individual widgets. Pure Qt applications still load the platform theme without a KDE Frameworks dependency. The platform-theme plugin uses Qt private QPA interfaces and must be rebuilt against the exact Qt minor version in the runtime closure.
 
-GTK 3 apps receive equivalent dark/light selection and runtime data paths through generated `settings.ini` and `gtk.css` files. A shared native GTK module follows KDE's color-reload design: it applies `GtkSettings` inside the running process, replaces the generated CSS provider at user priority, and invalidates existing widget style contexts. The generated palette carries Material You semantic colors when enabled while Adwaita retains GTK widget behavior and metrics. The bridge keeps Wayland buffers at the native Android viewport size while scaling toolkit fonts, touch targets, and scrollbars from the same geometry and text policy used for Qt.
+GTK 3 and GTK 4 apps receive equivalent dark/light selection and runtime data paths through generated `settings.ini` and `gtk.css` files. A shared native GTK settings bridge applies `GtkSettings` inside the running process and replaces the generated CSS provider at user priority. GTK 3 loads it as a normal GTK module and invalidates existing widget style contexts. GTK 4 preloads the same bridge, installs its provider for the default display, and updates libadwaita's color-scheme policy. The generated palette carries Material You semantic colors when enabled while Adwaita retains GTK widget behavior and metrics. The bridge keeps Wayland buffers at the native Android viewport size while scaling toolkit fonts, touch targets, and scrollbars from the same geometry and text policy used for Qt.
+
+The focused regressions capture raw Android screencaps and compare only the
+central Linux application surface, excluding system bars and outer edges. They
+also assert generated toolkit configuration, bridge diagnostics, and stable
+Android/Linux process IDs. Current-source x86_64 KCalc, Kate, Mousepad, and
+GNOME Text Editor pass Android-following light/dark changes, explicit manager
+light/dark overrides, and Material You palette changes. KCalc also passes the
+strict live system-mode test on the installed physical AArch64 fixture.
 
 ## Mobile metric calibration
 
@@ -49,13 +65,20 @@ popup decoration.
 
 ## Rebuild the Qt plugin
 
-The checked-in x86_64 and AArch64 plugins are reproducible in the pinned Linux container:
+Rebuild the checked-in x86_64 and AArch64 plugins in the pinned Linux container:
 
 ```bash
 ./scripts/build-qt-platform-theme-podman.sh --rebuild-image
 ```
 
-The script rejects a Qt private-ABI mismatch, cross-compiles the ARM plugins against the checksum-pinned official Arch Linux ARM Qt package, verifies both ELF architectures, and regenerates the exact-ABI manifests and shared checksum catalog. Runtime visual validation must cover light and dark palettes, menus, secondary windows, status labels, and portrait/landscape layouts.
+The script rejects a Qt private-ABI mismatch, cross-compiles the ARM plugins against the checksum-pinned official Arch Linux ARM Qt package, verifies both ELF architectures, and regenerates the exact-ABI manifests and shared checksum catalog. Runtime visual validation must cover light and dark palettes, menus, secondary windows, status labels, and portrait/landscape layouts. The current appearance change has been rebuilt and validated for x86_64; rebuilding its AArch64 Qt binary awaits restoration of the pinned ARM Qt development runtime and must pass before release.
+
+The GTK settings bridge is rebuilt with
+`scripts/build-gtk3-settings-podman.sh`. Its checked-in x86_64 and AArch64
+binaries contain the GTK 3/GTK 4 implementation. The configured clean build
+container currently lacks the GLib development headers, so restoring that
+declared container dependency and rerunning the clean build is an open
+reproducibility gate rather than a runtime support claim.
 
 KCalc is the Qt metric reference application. The x86_64 emulator and an AArch64 Samsung phone have both passed light/dark and portrait/landscape checks at the phone default of 150% geometry scale. Status indicators such as `NORM` retain font-relative frame padding instead of using KCalc's exact one-line fixed height, which prevents clipping with Android-sized text.
 
