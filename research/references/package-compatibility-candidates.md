@@ -6,6 +6,30 @@ Target: **arbitrary, well-behaved Arch desktop apps feel native on Android**, be
 
 Long-term suite covers native Wayland, X11/XWayland, GTK 3, GTK 4/libadwaita, Qt 6/KDE, SDL, Electron, browsers, OpenGL, Vulkan, multimedia, accessibility, portals, background work, and complex multiwindow apps. Package names were rechecked against official Arch repository metadata on July 19, 2026; this list remains non-normative research.
 
+## First execution wave (July 22, 2026)
+
+The useful order is breadth-first by runtime contract, not package size:
+
+1. Keep `kcalc` and `mousepad` as the known-good Qt 6 and GTK 3 controls.
+2. Exercise `gnome-text-editor`, `kate`, and `foot` as the first complete install/launch wave. They add GTK 4/libadwaita, a substantially larger KDE/Qt closure, and a toolkit-independent native-Wayland terminal without starting with browser-sized closures.
+3. Run `gtk4-demos`, `supertux`, and `vulkan-tools` as targeted widget, SDL, and GPU-frontier probes after the foundational failures are understood.
+4. Defer Firefox, Code, Krita, Blender, and LibreOffice until the smaller representatives pass; their larger closures make root-cause isolation and emulator storage management worse.
+
+The API 36 x86_64 emulator currently resolves all six first- and second-wave package names through libalpm and verifies their target archive signatures. Complete-closure execution produced these narrower results:
+
+| Candidate | Result | Next test that matters |
+|---|---|---|
+| `gnome-text-editor` | Partial: current-source x86_64 wrapper install/render, Android IME entry, popup composition, rotation, and warm background/resume pass without a Linux-process restart. A pre-existing physical AArch64 wrapper launches and cold-reopens an existing document. | Android document open/save/writeback, both clipboard directions, compose/non-Latin input, accessibility inspection, cold recreation, and current-source AArch64 parity. |
+| `kate` | Partial: current-source x86_64 full closure and wrapper installation pass. Accepting the manager-validated auxiliary shebang command reaches Wayland; the primary then exits `0` before mapping while child processes remain. A pre-existing physical AArch64 wrapper maps Kate and accepts Android IME text in a new document. | Reconcile the x86_64 process handoff and build/lane divergence, then test tabs, split views, large text, dialogs, sessions, secondary windows, and lifecycle. |
+| `foot` | Partial: current-source x86_64 native Wayland mapping/rendering passes, but the PTY child shell fails to link `libc.so.6`, with UTF-8 locale and monospace-font warnings. A pre-existing physical AArch64 wrapper provides a live `sh` PTY and executes a typed `echo` command. | Repair x86_64 child execution/runtime data, establish current-source AArch64 parity, then test Unicode, modifiers, repeat, scrolling, selection, clipboard, resize, and lifecycle. |
+| `gtk4-demos` | Resolution/signature probe passes. | Use only for GTK widget/rendering cases not already covered by Text Editor. |
+| `supertux` | Emulator resolution/signature probe passes. A pre-existing physical AArch64 wrapper maps and renders the title screen plus first-run network prompt, with candidate-PID-scoped log verification. | Establish current-source install parity, then test sustained rendering, audio focus, controls/pointer capture, pause/resume, and fullscreen. |
+| `vulkan-tools` | Resolution/signature probe passes. | Keep as a deliberate negative/frontier test until Android-backed ICD enumeration and presentation exist. |
+
+An install/launch smoke is not a compatibility pass. A package advances to **Validated** only after the package-specific workflows below pass on the documented device lanes.
+
+The physical wrappers in this wave were not rebuilt or replaced: the attached phone's manager and generated apps use a different development signing lineage from the current checkout. Those results are useful AArch64 controls, but they do not establish current-source parity. Replacing them requires the original signing key or the user's explicit approval to reset signer-bound app data.
+
 # Recommended Archphene compatibility matrix
 
 ## 1. Protocol and bridge diagnostics

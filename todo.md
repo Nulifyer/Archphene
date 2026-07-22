@@ -112,6 +112,12 @@ This is the prioritized completion queue for the Archphene Android application. 
   - Menus, popup borders/shadows, close targets, status labels, contrast, and full-window rendering are readable and bounded; tablet/docked density remains configurable in Appearance settings.
 - [ ] Execute the release-gate representatives in `docs/compatibility-matrix.md`.
   - [x] Promote the reviewed package matrix into maintained documentation and separate non-normative research candidates.
+  - [x] Run the first x86_64 candidate wave through official resolution/signature verification and complete-closure wrapper installation; capture GTK 4, complex Qt, and native-Wayland terminal results without promoting launch-only evidence to validated support.
+  - [ ] Complete `gnome-text-editor` document, clipboard, composition, accessibility, cold-lifecycle, and current-source physical AArch64 workflows; basic IME, popup, resize, and warm-resume pass on the emulator, while a differently signed physical build launches and cold-reopens an existing document.
+  - [x] Reconcile manager-validated auxiliary shebang commands with the wrapper materializer without weakening ELF-only validation for the program, loader, or libraries; the original Kate launch exception is gone.
+  - [ ] Preserve or adopt Kate's remaining GUI child after its primary process exits successfully on current-source x86_64, reconcile that failure with the differently signed physical build that maps and accepts IME input, then run the full interaction/lifecycle suite.
+  - [ ] Repair Foot child-shell linkage plus UTF-8 locale and monospace-font setup on current-source x86_64; a differently signed physical build already maps a live `sh` PTY and executes basic typed input, but Unicode, keyboard, scroll, selection, clipboard, lifecycle, and current-source AArch64 parity remain.
+  - [ ] Complete the SuperTux SDL suite; a differently signed physical build maps and renders its title screen and first-run modal, while sustained rendering, audio focus, controls/pointer capture, pause/resume, fullscreen, and current-source parity remain.
   - [ ] Test the remaining representative phone, tablet, docked, GPU, document, multimedia, accessibility, and failure cases.
 
 ## P2 - Documentation and repository readiness

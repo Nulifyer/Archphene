@@ -7,7 +7,6 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -207,7 +206,7 @@ public final class RuntimeFdLauncher {
                         || commandUriValues[index] == null) {
                     throw new SecurityException("Unsafe or duplicate runtime command name");
                 }
-                ParcelFileDescriptor command = materializeElf(resolver,
+                ParcelFileDescriptor command = materializeCommand(resolver,
                         Uri.parse(commandUriValues[index]),
                         new File(commandDirectory, name), execution);
                 descriptors.add(command);
@@ -342,7 +341,18 @@ public final class RuntimeFdLauncher {
     }
     private static ParcelFileDescriptor materializeElf(ContentResolver resolver, Uri uri,
             File temporary, Execution execution) throws Exception {
-        try (ParcelFileDescriptor source = openElf(resolver, uri);
+        return materializeExecutable(resolver, uri, temporary, execution, false);
+    }
+
+    private static ParcelFileDescriptor materializeCommand(ContentResolver resolver, Uri uri,
+            File temporary, Execution execution) throws Exception {
+        return materializeExecutable(resolver, uri, temporary, execution, true);
+    }
+
+    private static ParcelFileDescriptor materializeExecutable(ContentResolver resolver, Uri uri,
+            File temporary, Execution execution, boolean allowScript) throws Exception {
+        try (ParcelFileDescriptor source = allowScript
+                    ? openCommand(resolver, uri) : openElf(resolver, uri);
                 ParcelFileDescriptor duplicate = ParcelFileDescriptor.dup(
                         source.getFileDescriptor());
                 FileInputStream input = new FileInputStream(duplicate.getFileDescriptor());
@@ -371,16 +381,42 @@ public final class RuntimeFdLauncher {
 
     private static ParcelFileDescriptor openElf(ContentResolver resolver, Uri uri)
             throws Exception {
+        return openExecutable(resolver, uri, false);
+    }
+
+    private static ParcelFileDescriptor openCommand(ContentResolver resolver, Uri uri)
+            throws Exception {
+        return openExecutable(resolver, uri, true);
+    }
+
+    private static ParcelFileDescriptor openExecutable(ContentResolver resolver, Uri uri,
+            boolean allowScript) throws Exception {
         ParcelFileDescriptor descriptor = resolver.openFileDescriptor(uri, "r");
         if (descriptor == null) throw new IllegalStateException("Runtime provider returned no FD");
         try {
-            byte[] magic = new byte[4];
             try (ParcelFileDescriptor duplicate = ParcelFileDescriptor.dup(
                          descriptor.getFileDescriptor());
                  FileInputStream input = new FileInputStream(duplicate.getFileDescriptor())) {
-                if (input.read(magic) != magic.length
-                        || !Arrays.equals(magic, new byte[] {0x7f, 'E', 'L', 'F'})) {
-                    throw new SecurityException("Runtime module is not an ELF file");
+                int first = input.read();
+                int second = input.read();
+                boolean elf = first == 0x7f && second == 'E'
+                        && input.read() == 'L' && input.read() == 'F';
+                if (!elf && (!allowScript || first != '#' || second != '!')) {
+                    throw new SecurityException(allowScript
+                            ? "Runtime command is neither ELF nor a shebang script"
+                            : "Runtime module is not an ELF file");
+                }
+                if (!elf) {
+                    int length = 0;
+                    int value;
+                    while ((value = input.read()) >= 0 && value != '\n') {
+                        if (value == 0 || value == '\r' || ++length > 255) {
+                            throw new SecurityException("Runtime command has an unsafe shebang");
+                        }
+                    }
+                    if (value != '\n' || length == 0) {
+                        throw new SecurityException("Runtime command has an invalid shebang");
+                    }
                 }
             }
             android.system.Os.lseek(descriptor.getFileDescriptor(), 0,
