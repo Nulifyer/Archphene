@@ -109,11 +109,11 @@ Development builds use a persistent ignored debug key and remain debuggable for 
 The repository contains focused emulator and physical-device tests under `scripts/`. The broad entry points are:
 
 ```bash
-./scripts/test-emulator-regression.sh
+./scripts/test-emulator-regression.sh --provision
 ./scripts/test-arm64-physical-regression.sh --serial <adb-serial>
 ```
 
-The physical suite expects the curated ARM64 package/runtime workspace and a compatible attached device. Individual scripts cover manager workflows, package signatures, KCalc interactions, Mousepad documents, IME behavior, rotation, and update transactions.
+`--provision` installs the required KCalc and Mousepad fixtures through real manager package transactions on an emulator; omit it when those fixtures already exist. The physical suite expects the curated ARM64 package/runtime workspace and a compatible attached device. Use `--skip-install` for a non-destructive run against already-installed fixtures when signer-bound manager data must be preserved. Individual scripts cover manager workflows, package signatures, KCalc interactions, Mousepad documents, IME behavior, rotation, and update transactions.
 
 ## Current limitations
 

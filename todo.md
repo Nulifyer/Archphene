@@ -1,10 +1,19 @@
 # Archphene TODO
 
-Updated: 2026-07-19
+Updated: 2026-07-22
 
 This is the prioritized completion queue for the Archphene Android application. Check items only after implementation and device validation. Historical experiment notes belong in research/; current behavior belongs in docs/.
 
 ## P0 - Public release blockers
+
+- [ ] Complete post-migration Bash validation across every documented build and test entry point.
+  - [x] Pass Bash syntax, public-repository, release-workflow, AT-SPI source, and shared Android-test helper contracts.
+  - [x] Provision KCalc and Mousepad reproducibly through real on-device manager transactions on the x86_64 emulator.
+  - [x] Pass the complete current-source x86_64 emulator regression in sequence, including manager update/install, runtime-pack lifecycle, KCalc, native compositor, and Mousepad document/input/window/theme gates.
+  - [x] Pass the non-destructive ARM64 physical regression on the connected Samsung for bridge startup, KCalc calculation/rotation/resize, compositor completion, and FD/process cleanup.
+  - [x] Fix migration defects found by those gates: `set -u` initialization, SIGPIPE-sensitive comparisons, substring UI matches, warm-intent delivery, deterministic cold launches, real skip-install behavior, keyboard education handling, and Mousepad menu/window routing.
+  - [ ] Run the remaining standalone scripts not covered by the two broad regression entry points and confirm that each printed success claim is backed by an assertion. Hardware- and 16 KB-specific scripts remain tied to their named lanes.
+    - Restore or deliberately rescope the highest-risk conversions first: secrets, real-app accessibility, accessibility capability, generated camera, Terminal project trees/home documents, GUI document broker, and drag-and-drop. A mechanical comparison found 80 old PowerShell check signals versus 5 Bash check signals in the secrets test, 51 versus 8 in real-app accessibility, 64 versus 5 in the accessibility capability test, 39 versus 8 in generated camera, and 41 versus 4 in Terminal project trees. These counts are triage signals rather than one-to-one assertion equivalence.
 
 - [x] Complete general on-device package transactions for supported x86_64 desktop and CLI packages.
   - [x] Flow the selected desktop-entry display name/executable and detected runtime toolkit through generic wrapper assembly.
@@ -71,12 +80,12 @@ This is the prioritized completion queue for the Archphene Android application. 
   - [x] Keep the manager usable on 16 KB x86_64 without Android's generic page-size dialog; show an explicit in-app restriction and block package transactions before incompatible 4 KB Arch ELF execution. Rebuilding the upstream x86_64 runtime remains a broader package-compatibility task.
   - [x] Build patched x86_64 glibc with 64 KB ELF alignment and execute an aligned dynamic probe under the manager UID on a real 16 KB Android emulator.
   - [ ] Build and sign a separate no-mixing 16 KB x86_64 package repository, then validate a complete GUI closure including late-loaded modules before enabling package transactions.
-  - Remaining portal and broad toolkit/runtime validation.
-  - Broader Qt, GTK, SDL, Electron, Rust-native, XWayland, Vulkan, and zero-copy GPU validation.
+  - [ ] Complete remaining portal and broad toolkit/runtime validation.
+  - [ ] Broaden Qt, GTK, SDL, Electron, Rust-native, XWayland, Vulkan, and zero-copy GPU validation.
     - [x] Include runtime-loaded Vulkan loader aliases, compose a separately managed `vulkan-swrast` dependency pack, and validate unmodified Arch `vulkaninfo` through llvmpipe device discovery plus confirmed removal/reinstall on x86_64.
   - [x] Detect mid-session virgl helper loss and restart the payload once with llvmpipe while preserving the Android Activity; validate by same-UID fault injection against a manager-generated GLMark2 wrapper.
   - [x] Bound the shared xdg_toplevel registry, reject cyclic/cross-client parent chains, clear destroyed-parent references, and validate a real GTK child control/close/parent-restoration flow.
-  - General secondary-window policy for phone, tablet, freeform, and external displays.
+  - [ ] Complete the general secondary-window policy for phone, tablet, freeform, and external displays.
 - [x] Complete end-user release and update lifecycle.
   - [x] Configure a commit-pinned, reproducible Linux workflow that creates a draft, builds and verifies signed x86_64 and arm64-v8a manager/Terminal/runtime artifacts, uploads checksums, and publishes only after all assets exist.
   - [x] Require exact-ABI self-update assets; reject ABI-neutral and wrong-ABI releases on 4 KB x86_64, 16 KB x86_64, and physical AArch64.
@@ -85,6 +94,7 @@ This is the prioritized completion queue for the Archphene Android application. 
 - [ ] Pass the public release validation gate.
   - [x] Emulator phone/tablet/docked/freeform matrix with dark/light, rotation, IME, lifecycle, update, uninstall, and concurrent-failure tests.
   - [x] Samsung ARM64 control plane and sustained phone/freeform regression.
+  - [ ] Install and run the exact current-source ARM64 manager on the physical device. The attached Samsung's existing manager data is signer-bound to a different development certificate; replacing it requires either the original key or an explicit app-data reset.
   - [ ] Physical x86_64 Android target.
   - [ ] Supported GrapheneOS Pixel and sustained external-display desktop mode.
   - [x] Add reproducible Android storage measurement that separates APK, installed code, persistent app data, transient execution cache, shared runtime blobs, pack metadata, downloads, and staging.
@@ -102,7 +112,7 @@ This is the prioritized completion queue for the Archphene Android application. 
   - Menus, popup borders/shadows, close targets, status labels, contrast, and full-window rendering are readable and bounded; tablet/docked density remains configurable in Appearance settings.
 - [ ] Execute the release-gate representatives in `docs/compatibility-matrix.md`.
   - [x] Promote the reviewed package matrix into maintained documentation and separate non-normative research candidates.
-  - Test the remaining representative phone, tablet, docked, GPU, document, multimedia, accessibility, and failure cases.
+  - [ ] Test the remaining representative phone, tablet, docked, GPU, document, multimedia, accessibility, and failure cases.
 
 ## P2 - Documentation and repository readiness
 
@@ -110,7 +120,8 @@ This is the prioritized completion queue for the Archphene Android application. 
   - Exact package, executable ownership, prefix/token, and description matches are ranked; glmark2-es2-wayland resolves to glmark2.
 - [x] Document non-root Android Terminal limitations in docs/terminal-apps.md.
 - [x] Ignore repository-local generated tooling and external reference checkouts.
-- [ ] Review the remaining untracked package matrix, generated artifacts, licenses, and source provenance before tracking or deleting anything.
+- [x] Review the remaining untracked package matrix, generated artifacts, licenses, and source provenance before tracking or deleting anything.
+  - The pre-work tree had no untracked files, generated build outputs remain ignored, and the 2026-07-22 public-repository audit passed 575 tracked paths, prebuilt checksums, licensing/community-file policy, secret/size checks, and commit-pinned Actions.
 - [ ] Update README, focused user docs, roadmap, project status, changelog, and release notes after P0/P1 behavior is final.
 - [ ] Run a final public-repository audit after P0/P1 behavior is final.
   - [x] Add an automated source audit for required community files, stale licensing claims, generated/secret/release artifacts, oversized tracked files, private-key material, prebuilt manifests/checksums, and commit-pinned Actions.

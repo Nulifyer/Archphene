@@ -2,6 +2,8 @@
 
 Date: 2026-07-12
 
+> **Historical snapshot:** this audit predates the shared Rust compositor, on-device package transactions, runtime packs, capability brokers, and the July 2026 release regressions. Its statements describe the repository as it existed on the date above and must not be used as current project status. See `docs/project-status.md` and `todo.md` for the maintained state.
+
 ## Scope and current proof
 
 The prototype proves that an unmodified Arch Linux GUI executable can run under a glibc runtime inside a normal Android app UID, connect to an app-local Wayland socket, render through Android, and receive pointer, keyboard, IME, clipboard, popup, resize, and limited document-broker events. KCalc runs on an ARM64 Samsung device; Mousepad runs on the x86_64 emulator. This does not prove GrapheneOS compatibility, production isolation, generic package conversion, or equivalence to a mature Wayland compositor.

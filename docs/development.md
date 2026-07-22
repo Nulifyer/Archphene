@@ -117,6 +117,19 @@ Broad suites:
 ./scripts/test-arm64-physical-regression.sh --serial <adb-serial>
 ```
 
+For a clean debuggable emulator manager, provision the maintained KCalc and
+Mousepad fixtures through the real on-device package transaction before running
+the suite:
+
+```bash
+./scripts/test-emulator-regression.sh --serial emulator-5554 --provision
+```
+
+Provisioning is intentionally restricted to emulator serials. It grants the
+manager's `REQUEST_INSTALL_PACKAGES` app-op on that disposable target and still
+confirms every generated wrapper through Android's Package Installer. Physical
+device packages and app data are never cleared or replaced by this option.
+
 Focused scripts under `scripts/` cover manager workflows, package signatures, update transactions, KCalc input/clipboard/resize, Mousepad documents and IME, rotation, and file-descriptor lifecycle.
 
 Run the release display profiles independently with:

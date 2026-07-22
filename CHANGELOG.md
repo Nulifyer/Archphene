@@ -2,6 +2,18 @@
 
 Notable user-facing changes will be recorded here.
 
+## Unreleased
+
+### Fixed
+
+- Hardened the Bash regression harness after the host-script migration: deterministic emulator provisioning, exact UI matching, safe `set -u` initialization, SIGPIPE-safe image comparison, real non-installing physical runs, cold-launch synchronization, and robust keyboard/menu handling.
+- Delivered all debug test intents consistently on both cold and warm manager Activity launches, restoring the Android PackageInstaller update regression when an existing manager task is reused.
+- Corrected manager package-detail and Mousepad secondary-window regressions so their success messages are backed by the actual Android settings, popup, and child-window behavior they claim.
+
+### Validation
+
+- Passed the full current-source API 36 x86_64 emulator suite and the non-destructive Android 15 AArch64 Samsung suite on July 22, 2026.
+
 ## 1.0.1 - 2026-07-18
 
 ### Added

@@ -120,31 +120,30 @@ public final class MainActivity extends Activity {
         showPackageCompatibilityNotice();
         handleTerminalRequestIntent();
         if (ManagerStateStore.checkOnLaunch(this) && currentPage == 0) checkAll();
-        if (testHooksEnabled()) {
-            handleTestInstallIntent();
-            handleTestPackageRuntimeIntent();
-            handleTestWrapperSigningIntent();
-            handleTestWrapperAssemblyIntent();
-            handleTestGitHubReleaseIntent();
-            handleTestRuntimeModuleIntent();
-            handleTestGuiDocumentsIntent();
-            handleTestDocumentSessionIntent();
-            handleTestMicrophonePreferenceIntent();
-        }
+        handleTestIntents();
     }
 
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
-        if (testHooksEnabled()) {
-            handleTestRuntimeModuleIntent();
-            handleTestGuiDocumentsIntent();
-            handleTestDocumentSessionIntent();
-            handleTestMicrophonePreferenceIntent();
-        }
+        handleTestIntents();
         handleTerminalRequestIntent();
     }
+
+    private void handleTestIntents() {
+        if (!testHooksEnabled()) return;
+        handleTestInstallIntent();
+        handleTestPackageRuntimeIntent();
+        handleTestWrapperSigningIntent();
+        handleTestWrapperAssemblyIntent();
+        handleTestGitHubReleaseIntent();
+        handleTestRuntimeModuleIntent();
+        handleTestGuiDocumentsIntent();
+        handleTestDocumentSessionIntent();
+        handleTestMicrophonePreferenceIntent();
+    }
+
     private boolean testHooksEnabled() {
         return (getApplicationInfo().flags
                 & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0;

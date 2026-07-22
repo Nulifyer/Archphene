@@ -1,8 +1,16 @@
 # Project status
 
-Updated: 2026-07-19
+Updated: 2026-07-22
 
 This page separates validated behavior from planned platform work. Package search does not imply package compatibility.
+
+## Latest regression snapshot
+
+On July 22, 2026, a current-source x86_64 debug manager was built with the reproducible Podman toolchain, installed on the API 36 emulator, and passed the complete broad emulator regression in one sequence. The run covered package update and refresh, repository search and version selection, Android app-settings routing, authenticated runtime-pack execution and cleanup, KCalc launch/calculation/menu/rotation, native compositor input, Android PackageInstaller update, and Mousepad document, IME, touch, secondary-window, and live-theme behavior.
+
+The connected Samsung SM-S908U (Android 15, AArch64) passed the broad non-destructive physical regression against its installed Archphene fixtures: bridge startup, KCalc calculation and menu handling, native compositor completion, live rotation, six FD-lifecycle cycles, and freeform resizing. The exact current-source manager APK was not installed there because the existing manager and its private package state are signed by a different development certificate. Preserve that data until the original signer is recovered or an app-data reset is explicitly approved.
+
+The repository audit, release-workflow contract, AT-SPI source contract, Bash syntax sweep, and Android test-helper regression also pass. This validates the broad entry points, not every hardware-specific or standalone script in `scripts/`. A mechanical comparison against the removed PowerShell tests found several high-risk conversions with far fewer check signals, especially secrets, accessibility, camera, and Terminal project-tree coverage. Those scripts must be restored or have their claims deliberately narrowed; completing that assertion audit remains a P0 item in `todo.md`.
 
 ## Validated
 
@@ -49,9 +57,10 @@ Local debug builds can remain multi-ABI. Release builds emit independently signe
 - Rich notification actions, non-HTTP URI policies, and remaining desktop portals.
 - Broader Qt, GTK, SDL, Electron, and Rust-native compatibility.
 - GrapheneOS Pixel and sustained desktop-mode validation.
+- Exact-current-source ARM64 manager installation on the present Samsung is pending signer continuity or an explicitly approved app-data reset; the non-destructive installed-fixture regression passes.
 - Project trees and granted GUI documents currently use explicit synchronized mirrors; a live SAF path broker remains pending. Optional shells beyond managed Bash have not been selected.
 - Build a separately signed 16 KB x86_64 package universe. The Archphene-owned glibc loader now passes real 16 KB Android execution, but official Arch executables and shared objects remain 4 KB-aligned. The manager continues to block Add/install on 16 KB x86_64 until an entire no-mixing closure, including late-loaded modules, is rebuilt and validated.
-- Post-compositor Qt/GTK theme, density, font, focus, menu, and dialog consistency work.
+- Broaden the validated Qt/GTK theme, density, focus, menu, and dialog behavior beyond KCalc and Mousepad and across the remaining release representatives.
 
 ## Package-manager efficiency rules
 

@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 source "$(dirname "$0")/lib/common.sh"
-android_abi=x86_64; serial=emulator-5554
-while (($#)); do case "$1" in --android-abi) android_abi="${2:?}"; shift 2;; --serial) serial="${2:?}"; shift 2;; -h|--help) echo "usage: $0 [--android-abi x86_64|arm64-v8a] [--serial SERIAL]"; exit 0;; *) archphene_die "unknown argument: $1";; esac; done
+android_abi=x86_64; serial=emulator-5554; skip_install=false
+while (($#)); do case "$1" in --android-abi) android_abi="${2:?}"; shift 2;; --serial) serial="${2:?}"; shift 2;; --skip-install) skip_install=true; shift;; -h|--help) echo "usage: $0 [--android-abi x86_64|arm64-v8a] [--serial SERIAL] [--skip-install]"; exit 0;; *) archphene_die "unknown argument: $1";; esac; done
 apk="$ARCHPHENE_ROOT/prototypes/native-compositor-probe/out-$android_abi/archphene-compositor-probe.apk"; archphene_require_file "$apk"; archphene_init_adb "$serial"
 archphene_adb_run get-state >/dev/null; archphene_adb_run shell input keyevent KEYCODE_WAKEUP; archphene_adb_run shell wm dismiss-keyguard || true; archphene_adb_run logcat -c
-"$ARCHPHENE_SCRIPTS_DIR/install-apk.sh" --apk "$apk" --serial "$serial" --package org.archphene.compositorprobe
+if [[ "$skip_install" == false ]]; then
+  "$ARCHPHENE_SCRIPTS_DIR/install-apk.sh" --apk "$apk" --serial "$serial" --package org.archphene.compositorprobe
+else
+  archphene_adb_run shell pm path org.archphene.compositorprobe >/dev/null \
+    || archphene_die 'native compositor probe is not installed'
+fi
 archphene_adb_run shell am force-stop org.archphene.compositorprobe; archphene_adb_run logcat -c; archphene_adb_run shell am start -W -n org.archphene.compositorprobe/.MainActivity >/dev/null; archphene_adb_run shell wm dismiss-keyguard || true
 key_sent=false; tap_sent=false; scroll_sent=false; touch_sent=false; deadline=$((SECONDS + 60)); completion='registry, Android bitmap, xdg toplevel, keyboard input, damage-batched buffer scale/transform, viewporter/fractional scaling, Choreographer-paced frames, MotionEvent pointer/wheel/touch input, cursor surfaces, pointer gestures, nested popup grabs, synchronized subsurface trees, committed parent geometry, demand-driven clipboard, and Android InputConnection UTF-8 text-input v3 lifecycle complete'
 while ((SECONDS < deadline)); do
@@ -18,4 +23,3 @@ while ((SECONDS < deadline)); do
   if [[ "$output" == *"$completion"* ]]; then archphene_note "Native compositor Android MotionEvent probe passed on $serial ($android_abi)."; exit 0; fi
 done
 archphene_die "timed out waiting for native compositor result on $serial ($android_abi)"
-
