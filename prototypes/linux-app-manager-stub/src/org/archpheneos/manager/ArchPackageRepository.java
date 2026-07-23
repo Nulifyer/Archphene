@@ -68,6 +68,27 @@ public final class ArchPackageRepository {
 
     private ArchPackageRepository() {}
 
+    public static PackageResult latest(Context context, String repository, String packageName)
+            throws Exception {
+        if (repository == null || !repository.matches("(?:core|extra)")
+                || packageName == null
+                || !packageName.matches("[a-zA-Z0-9@._+:-]{1,128}")) {
+            throw new IllegalArgumentException("Invalid package source identity");
+        }
+        if (ArchRuntimePolicy.AARCH64.equals(ArchRuntimePolicy.current().architecture)) {
+            ArchPackageRuntime.refreshDatabasesIfStale(context, 15 * 60_000L);
+        }
+        for (PackageResult result : search(context, packageName)) {
+            if (repository.equals(result.repository) && packageName.equals(result.name)
+                    && (ArchRuntimePolicy.current().architecture.equals(result.architecture)
+                            || "any".equals(result.architecture))) {
+                return result;
+            }
+        }
+        throw new IllegalStateException("Package is unavailable from configured repository: "
+                + repository + "/" + packageName);
+    }
+
     public static List<PackageResult> search(Context context, String query) throws Exception {
         String normalized = query == null ? "" : query.trim();
         if (normalized.length() < 2) return new ArrayList<>();

@@ -52,7 +52,16 @@ public final class LinuxAppUpdateCoordinator {
         }
         try {
             ArchPackageUpdateChecker.Result result;
-            if (app.updateUrl.startsWith("archphene-github://")) {
+            if ("pacman".equalsIgnoreCase(app.sourceType)
+                    && app.sourceId.matches(
+                            "(?:core|extra)/[a-zA-Z0-9@._+:-]{1,128}")) {
+                int separator = app.sourceId.indexOf('/');
+                ArchPackageRepository.PackageResult latest = ArchPackageRepository.latest(
+                        context, app.sourceId.substring(0, separator),
+                        app.sourceId.substring(separator + 1));
+                result = new ArchPackageUpdateChecker.Result(latest.version,
+                        !latest.version.equals(app.sourceVersion));
+            } else if (app.updateUrl.startsWith("archphene-github://")) {
                 GitHubReleaseClient.Artifact latest = GitHubReleaseClient.latest(context);
                 result = new ArchPackageUpdateChecker.Result(latest.version,
                         GitHubReleaseClient.compareVersions(

@@ -157,6 +157,22 @@ public final class ArchPackageRuntime {
                 new File(sync, "extra.db"), 32 * 1024 * 1024L);
     }
 
+    public static synchronized void refreshDatabasesIfStale(Context context, long maxAgeMillis)
+            throws Exception {
+        if (maxAgeMillis < 0 || maxAgeMillis > 24L * 60 * 60_000L) {
+            throw new IllegalArgumentException("Invalid repository metadata age");
+        }
+        File sync = directory(directory(state(context), "db"), "sync");
+        File core = new File(sync, "core.db");
+        File extra = new File(sync, "extra.db");
+        long now = System.currentTimeMillis();
+        long oldest = Math.min(core.lastModified(), extra.lastModified());
+        if (!core.isFile() || !extra.isFile() || oldest <= 0 || oldest > now
+                || now - oldest > maxAgeMillis) {
+            refreshDatabases(context);
+        }
+    }
+
     public static synchronized List<PackageSearch> searchPackages(Context context, String query)
             throws Exception {
         String normalized = query == null ? "" : query.trim();
@@ -165,10 +181,7 @@ public final class ArchPackageRuntime {
         }
         File state = state(context);
         File database = directory(state, "db");
-        if (!new File(database, "sync/core.db").isFile()
-                || !new File(database, "sync/extra.db").isFile()) {
-            refreshDatabases(context);
-        }
+        refreshDatabasesIfStale(context, 15 * 60_000L);
         File root = directory(state, "root");
         File config = new File(state, "pacman.conf");
         writePacmanConfig(config);

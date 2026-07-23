@@ -146,8 +146,7 @@ public final class InstalledLinuxAppCatalog {
     }
 
     private static Entry fromManaged(PackageManager packages, ManagedPackageStore.Entry entry) {
-        String update = "https://archlinux.org/packages/" + entry.repository + "/"
-                + entry.architecture + "/" + entry.name + "/json/";
+        String update = packageMetadataUrl(entry.repository, entry.architecture, entry.name);
         Intent terminal = new Intent(Intent.ACTION_MAIN)
                 .setClassName("org.archpheneos.terminal",
                         "org.archpheneos.terminal.TerminalActivity")
@@ -174,8 +173,7 @@ public final class InstalledLinuxAppCatalog {
                 return new Entry(packageName, label, androidVersion, "pacman",
                         source.repository + "/" + source.name, source.version,
                         pack.executableName, "glibc-" + architecture,
-                        "https://archlinux.org/packages/" + source.repository + "/"
-                                + architecture + "/" + source.name + "/json/",
+                        packageMetadataUrl(source.repository, architecture, source.name),
                         launchIntent, true, "", Collections.emptyList());
             }
         } catch (Exception ignored) {
@@ -205,6 +203,11 @@ public final class InstalledLinuxAppCatalog {
         if (!expected.equals(normalizedUpdateUrl(metadata))) {
             throw new SecurityException("Pacman update metadata normalization mismatch");
         }
+        metadata.putString("org.archphene.runtime.abi", "glibc-aarch64");
+        expected = "https://archlinuxarm.org/packages/aarch64/mousepad";
+        if (!expected.equals(normalizedUpdateUrl(metadata))) {
+            throw new SecurityException("Arch Linux ARM update metadata normalization mismatch");
+        }
     }
 
     private static String normalizedUpdateUrl(Bundle metadata) {
@@ -214,13 +217,24 @@ public final class InstalledLinuxAppCatalog {
         }
         String sourceId = metadata.getString("org.archphene.source.id", "");
         String runtimeAbi = metadata.getString("org.archphene.runtime.abi", "");
-        if (!sourceId.matches("[a-z0-9-]{1,32}/[a-zA-Z0-9@._+:-]{1,128}")
-                || !"glibc-x86_64".equals(runtimeAbi)) {
+        if (!sourceId.matches("[a-z0-9-]{1,32}/[a-zA-Z0-9@._+:-]{1,128}")) {
             return configured;
         }
         int separator = sourceId.indexOf('/');
-        return "https://archlinux.org/packages/" + sourceId.substring(0, separator)
-                + "/x86_64/" + sourceId.substring(separator + 1) + "/json/";
+        return packageMetadataUrl(sourceId.substring(0, separator),
+                runtimeAbi.replaceFirst("^glibc-", ""), sourceId.substring(separator + 1));
+    }
+
+    private static String packageMetadataUrl(String repository, String architecture,
+            String packageName) {
+        if ("aarch64".equals(architecture)) {
+            return "https://archlinuxarm.org/packages/aarch64/" + packageName;
+        }
+        if ("x86_64".equals(architecture)) {
+            return "https://archlinux.org/packages/" + repository + "/x86_64/"
+                    + packageName + "/json/";
+        }
+        return "";
     }
 
     private static String normalize(String value) {
