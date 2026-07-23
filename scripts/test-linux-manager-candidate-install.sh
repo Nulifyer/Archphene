@@ -6,6 +6,8 @@ source "$(dirname "$0")/lib/android-test.sh"
 serial=emulator-5554
 package_name=
 expected_toolkit=
+executable=
+terminal_wayland=false
 timeout=900
 skip_install=false
 while (($#)); do
@@ -22,6 +24,14 @@ while (($#)); do
       expected_toolkit="${2:?}"
       shift 2
       ;;
+    --executable)
+      executable="${2:?}"
+      shift 2
+      ;;
+    --terminal-wayland)
+      terminal_wayland=true
+      shift
+      ;;
     --timeout-seconds)
       timeout="${2:?}"
       shift 2
@@ -31,7 +41,7 @@ while (($#)); do
       shift
       ;;
     -h|--help)
-      echo "usage: $0 --package-name NAME --expected-toolkit qt6|gtk3|gtk4|wayland [--serial SERIAL] [--skip-install] [--timeout-seconds N]"
+      echo "usage: $0 --package-name NAME --expected-toolkit qt6|gtk3|gtk4|wayland [--terminal-wayland --executable NAME] [--serial SERIAL] [--skip-install] [--timeout-seconds N]"
       exit 0
       ;;
     *)
@@ -42,9 +52,17 @@ done
 
 [[ "$package_name" =~ ^[a-z0-9@._+-]{1,96}$ ]] \
   || archphene_die '--package-name must be a safe Arch package name'
+[[ "$terminal_wayland" == true || -z "$executable" ]] \
+  || archphene_die '--executable is only valid with --terminal-wayland'
+executable="${executable:-$package_name}"
+[[ "$executable" =~ ^[A-Za-z0-9@._+-]{1,128}$ ]] \
+  || archphene_die '--executable must be a safe executable basename'
 archphene_validate_choice "$expected_toolkit" toolkit qt6 gtk3 gtk4 wayland
-[[ "$timeout" =~ ^[0-9]+$ ]] && ((timeout >= 60)) \
-  || archphene_die '--timeout-seconds must be an integer of at least 60'
+[[ "$terminal_wayland" == false || "$expected_toolkit" == wayland ]] \
+  || archphene_die '--terminal-wayland requires --expected-toolkit wayland'
+if [[ ! "$timeout" =~ ^[0-9]+$ ]] || ((timeout < 60)); then
+  archphene_die '--timeout-seconds must be an integer of at least 60'
+fi
 
 archphene_test_init "$serial"
 manager=org.archpheneos.manager
@@ -93,10 +111,10 @@ if [[ "$skip_install" == false ]]; then
     --ez archphene_test_stage_transaction true
     --ez archphene_test_install_assembled true
   )
-  if [[ "$expected_toolkit" == wayland ]]; then
+  if [[ "$terminal_wayland" == true ]]; then
     assembly_args+=(
       --ez archphene_test_wayland_candidate true
-      --es archphene_test_wayland_executable "$package_name"
+      --es archphene_test_wayland_executable "$executable"
     )
   fi
   archphene_adb_run shell am start -W -n "$manager/.MainActivity" \
@@ -153,7 +171,8 @@ done
 [[ -n "$pid" ]] || archphene_die "$package_name Android process is missing"
 
 wait_candidate_log() {
-  local pattern="$1" seconds="$2" deadline=$((SECONDS + $2)) log
+  local pattern="$1" seconds="$2" deadline log
+  deadline=$((SECONDS + seconds))
   while ((SECONDS < deadline)); do
     log="$(archphene_adb_run logcat -d -v brief --pid="$pid" \
       -s ArchpheneRuntime:V ArchpheneLinuxApp:V ArchpheneInput:V AndroidRuntime:E '*:S' \

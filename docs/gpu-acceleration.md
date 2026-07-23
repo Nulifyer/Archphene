@@ -17,7 +17,7 @@ glibc Linux application
 
 The generated wrapper includes a native helper built from pinned virglrenderer 1.3.0 and libepoxy 1.5.10 sources. The helper runs in the wrapper's ordinary Android app domain, creates its socket in the app-private cache directory, and gains no Android permissions. Other Android UIDs cannot reach the socket through the private parent directory.
 
-At launch the bridge waits for the helper socket. A ready helper selects Mesa `virpipe` through `GALLIUM_DRIVER` and `VTEST_SOCKET_NAME`; startup failure selects `llvmpipe`. If the helper exits unexpectedly during a session, the wrapper preserves its Android Activity and compositor, releases the failed helper, and restarts the Linux payload once with `llvmpipe`. Normal application exits and a second failure are never restarted.
+At launch the bridge waits for the helper socket. A ready helper selects Mesa `virpipe` through `GALLIUM_DRIVER` and `VTEST_SOCKET_NAME`; startup failure selects `llvmpipe`. If the helper exits unexpectedly during a session, the wrapper preserves its Android Activity and compositor, replaces the same-UID helper, and restarts the Linux payload once through `virpipe`. If that replacement cannot start or also fails, one final `llvmpipe` attempt remains available. Normal application exits never trigger recovery and the helper path cannot loop.
 
 ## Android compatibility patches
 
@@ -40,7 +40,7 @@ The Android 16 x86_64 emulator uses host GPU acceleration backed by an NVIDIA Ge
 - `Surface Size: 1080x2205 windowed`;
 - completion of every default GLMark2 scene with final score 12.
 
-The release helper remained alive through repeated scene transitions with no fence-export, context-loss, dispatch, or disconnect errors. A same-UID fault-injection test then killed the helper during GLMark2, observed the expected virpipe disconnect and payload exit, and verified one software-rendered reconnect without losing the Android Activity. On a Samsung Galaxy S22 Ultra, the AArch64 manager resolved, verified, wrapped, signed, installed, and launched GLMark2 through the same private helper path. Virgl used the Qualcomm Adreno 730 / OpenGL ES 3.2 system renderer; all 1080x2202 scenes completed with exit code 0 and final score 15.
+The release helper remained alive through repeated scene transitions with no fence-export, context-loss, dispatch, or disconnect errors. Same-UID fault injection then killed the helper during GLMark2, observed the expected virpipe disconnect and payload exit, and verified one replacement helper plus a rendered virpipe reconnect without losing the Android Activity. On a Samsung Galaxy S22 Ultra, the AArch64 manager resolved, verified, wrapped, signed, installed, and launched GLMark2 through the same private helper path. Virgl used the Qualcomm Adreno 730 / OpenGL ES 3.2 system renderer; all 1080x2202 scenes completed with exit code 0 and final score 15. The same replacement-helper recovery passes on the physical device; this avoids a Samsung-only `SIGILL` seen when GLMark2 was moved directly to llvmpipe after helper loss.
 
 ## Current limits
 

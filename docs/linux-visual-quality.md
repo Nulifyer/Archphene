@@ -87,7 +87,7 @@ The always-run sequence is deliberately layered:
 | Mousepad | GTK 3/CSD, Wayland | editor, long menu, Preferences tabs and fields, disabled rows, close target |
 | GNOME Text Editor | GTK 4/libadwaita | adaptive header, document menu, preferences/about, IME-visible layout |
 | Foot | direct Wayland/shm | shell text, Unicode, selection, scrollback, resize, clipboard, focus |
-| GLMark2 ES2 Wayland | EGL/GLES/virgl | sustained frames, resize, pause/resume, helper-loss fallback |
+| GLMark2 ES2 Wayland | EGL/GLES/virgl | sustained frames, resize, pause/resume, same-UID helper replacement, bounded software fallback |
 | Vulkan tools | Vulkan loader/WSI frontier | enumeration now; `vkcube-wayland` presentation before claiming Vulkan GUI support |
 | Kate | Qt/KDE complex desktop | menus, tabs, split views, project tree, dialogs, document lifecycle |
 | Code | Electron/Ozone Wayland | multiprocess startup, editor/tree/terminal, IME, GPU process, dialogs, lifecycle |

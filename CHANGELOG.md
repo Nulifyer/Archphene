@@ -6,6 +6,7 @@ Notable user-facing changes will be recorded here.
 
 ### Fixed
 
+- Reworked transient GPU-helper recovery to replace the same-UID virgl helper and restart the Linux runtime once through virpipe before considering software fallback. This preserves the Android host and acceleration on both x86_64 and AArch64 and avoids Samsung's physical-only llvmpipe `SIGILL`; current manager-generated GLMark2 wrappers pass sustained moving-frame and fault-injection gates on both devices.
 - Strengthened package ranking and KCalc FD-lifecycle regressions: ranking now proves result order and restores the user's list filter, while descriptor testing warms one-time rotation allocation before enforcing total, SHM, fence, and ashmem bounds with stable processes, rendered output, clean logs, and prior-state restoration.
 - Made the remaining repository search, KCalc version selector, physical freeform resize, and Terminal Vulkan standalone gates state-safe and assertion-complete. Catalog tests restore exact manager preferences, freeform no longer clears KCalc data, ADB command delivery is unambiguous, and Vulkan dependencies are provisioned through the verified manager pipeline.
 - Made the manager pre-release and pull-to-refresh regressions accessibility-driven and state-safe. Both gates now preserve the user's original manager preferences while validating restart persistence, gesture thresholds, whole-list update completion, and settled list position on x86_64 and physical AArch64.
@@ -38,6 +39,7 @@ Notable user-facing changes will be recorded here.
 
 ### Validation
 
+- Replaced the archived stale Samsung GLMark2 wrapper after preserving its 16 MiB private sandbox, then passed current manager-generated GLMark2 install/launch, sustained distinct virpipe frames, stable process/geometry checks, and rendered same-UID helper replacement on the API 36 emulator and Android 15 Samsung on July 23, 2026. Samsung remains on manager `1.0.2-gpu-recovery-debug`; the emulator's original manager APK was restored byte-for-byte.
 - Passed executable-owner repository ranking, multi-term installed-app filtering, warmed KCalc descriptor lifecycle, and Qt/GTK incomplete descriptor-library rejection plus healthy complete-cache launches on the API 36 emulator and Android 15 Samsung on July 23, 2026.
 - Passed official package search/add/remove and architecture-adaptive KCalc version pinning on x86_64 and AArch64, non-destructive KCalc physical freeform resize on Samsung, and manager-provisioned unmodified `vulkaninfo` llvmpipe enumeration on both devices on July 23, 2026.
 - Passed the state-preserving manager pre-release and pull-to-refresh gates on the API 36 emulator and Android 15 Samsung on July 23, 2026.
