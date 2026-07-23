@@ -134,6 +134,7 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
         final boolean editable;
         final boolean checkable;
         final boolean checked;
+        final boolean selected;
         final boolean password;
         final boolean scrollForward;
         final boolean scrollBackward;
@@ -160,6 +161,7 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
             editable = source.optBoolean("editable", false);
             checkable = source.optBoolean("checkable", false);
             checked = source.optBoolean("checked", false);
+            selected = source.optBoolean("selected", false);
             password = source.optBoolean("password", false);
             scrollForward = source.optBoolean("scrollForward", false);
             scrollBackward = source.optBoolean("scrollBackward", false);
@@ -784,6 +786,7 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
         info.setEditable(node.editable);
         info.setCheckable(node.checkable);
         info.setChecked(node.checked);
+        info.setSelected(node.selected);
         info.setPassword(node.password);
         info.setAccessibilityFocused(node.id == currentAccessibilityFocus);
         if (Build.VERSION.SDK_INT >= 28) info.setScreenReaderFocusable(true);

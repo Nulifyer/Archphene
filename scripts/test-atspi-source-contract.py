@@ -350,6 +350,9 @@ def main() -> None:
          "rejected menu-item pointer fallback"),
         (translator_source, "activate_menu_pointer(id, true)",
          "menu transition mode routing"),
+        (translator_source,
+         'strcmp(node.role, "list-item") == 0',
+         "generic list-item pointer routing"),
         (translator_source, "remove_transient_bus_locked(bus)", "transient disconnect cleanup"),
         (translator_source,
          "return ARCHPHENE_ATSPI_TREE_RETRY;",
@@ -399,6 +402,14 @@ def main() -> None:
          "atomic cached snapshot"),
         (translator_source, "retain_previous_geometry(*next_tree);",
          "transient sentinel geometry retention"),
+        (translator_source, "hydrate_cached_tree(connection, cached, &cached_count);",
+         "live cache geometry and state hydration"),
+        (translator_source, "ARCHPHENE_ATSPI_CHILD_MAX, &child_count",
+         "live cache child discovery"),
+        (client_source, "STATE_SELECTED = 23",
+         "AT-SPI selected-state mapping"),
+        (publish_source, '",\\"selected\\":"',
+         "selected-state publication"),
         (translator_source, "if (!found_node) return;", "action lookup lifetime"),
         (translator_source,
          "state.tree->nodes[index].node.reference.bus",
@@ -436,6 +447,7 @@ def main() -> None:
         "text.getBytes(StandardCharsets.UTF_8).length > MAX_TEXT",
         "manager == null || !manager.isEnabled()",
         "catch (IllegalStateException accessibilityDisabled)",
+        "info.setSelected(node.selected)",
     )
     for token in android_tokens:
         if token not in android_source:

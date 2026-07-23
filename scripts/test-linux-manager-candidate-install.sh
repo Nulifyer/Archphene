@@ -70,8 +70,15 @@ trap cleanup EXIT
 manager_dump="$(archphene_adb_run shell dumpsys package "$manager")"
 archphene_regex_contains "$manager_dump" '(?m)^\s*flags=\[[^]]*DEBUGGABLE' \
   || archphene_die 'candidate installation requires a debuggable manager'
-[[ "$(archphene_adb_run shell getconf PAGE_SIZE | tr -d '\r\n')" == 4096 ]] \
-  || archphene_die 'official Arch x86_64 candidates require the 4 KB lane'
+device_abi="$(archphene_adb_run shell getprop ro.product.cpu.abi | tr -d '\r\n')"
+case "$device_abi" in
+  x86_64)
+    [[ "$(archphene_adb_run shell getconf PAGE_SIZE | tr -d '\r\n')" == 4096 ]] \
+      || archphene_die 'official Arch x86_64 candidates require the 4 KB lane'
+    ;;
+  arm64-v8a) ;;
+  *) archphene_die "unsupported candidate device ABI: $device_abi" ;;
+esac
 
 if [[ "$skip_install" == false ]]; then
   archphene_adb_run shell appops set "$manager" REQUEST_INSTALL_PACKAGES allow
@@ -184,4 +191,4 @@ archphene_adb_run logcat -d -v threadtime \
   -s ArchpheneRuntime:V ArchpheneLinuxApp:V ArchpheneInput:V AndroidRuntime:E '*:S' \
   >"$artifact_prefix-logcat.txt"
 
-archphene_note "$package_name install/launch smoke passed on $serial: toolkit=$expected_toolkit, Android PID $pid, Linux PID $linux_pid, package $android_package. Package-specific compatibility tests are still required."
+archphene_note "$package_name install/launch smoke passed on $serial: ABI=$device_abi, toolkit=$expected_toolkit, Android PID $pid, Linux PID $linux_pid, package $android_package. Package-specific compatibility tests are still required."

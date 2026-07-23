@@ -30,6 +30,7 @@ typedef struct {
     dbus_bool_t editable;
     dbus_bool_t checkable;
     dbus_bool_t checked;
+    dbus_bool_t selected;
     dbus_bool_t showing;
     dbus_bool_t visible;
     dbus_bool_t password;

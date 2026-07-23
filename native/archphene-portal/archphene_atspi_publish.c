@@ -438,6 +438,8 @@ static int render_tree(const ArchpheneAtspiTree *tree,
             json_boolean(&output, node->checkable);
             json_raw(&output, ",\"checked\":", 11);
             json_boolean(&output, node->checked);
+            json_raw(&output, ",\"selected\":", 12);
+            json_boolean(&output, node->selected);
             json_raw(&output, ",\"password\":", 12);
             json_boolean(&output, node->password);
             json_raw(&output, ",\"scrollForward\":", 17);

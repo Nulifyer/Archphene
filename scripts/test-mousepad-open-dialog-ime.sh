@@ -32,6 +32,8 @@ probe=org.archphene.accessibilityprobe
 service="$probe/org.archphene.bridge.ProbeAccessibilityService"
 safe_package="${package//[^A-Za-z0-9_.-]/_}"
 tree_file="files/framework-accessibility-tree-$safe_package.txt"
+command_file=files/framework-accessibility-command.txt
+response_file=files/framework-accessibility-response.txt
 old_services="$(archphene_adb_run shell settings get secure \
   enabled_accessibility_services | tr -d '\r')"
 old_accessibility="$(archphene_adb_run shell settings get secure \
@@ -83,6 +85,111 @@ get_tree() {
     2>/dev/null | tr -d '\r' || true
 }
 
+base64url() {
+  printf '%s' "$1" | base64 -w0 | tr '+/' '-_' | tr -d '='
+}
+
+invoke_accessibility_action() {
+  local selector="$1" action="${2:-click}" value="${3:-}" required id payload
+  local response deadline tree
+  case "$action" in
+    click) required=16 ;;
+    focus) required=1 ;;
+    set-text) required=2097152 ;;
+    *) archphene_die "unsupported accessibility action: $action" ;;
+  esac
+  deadline=$((SECONDS + timeout))
+  while ((SECONDS < deadline)); do
+    tree="$(get_tree)"
+    if python3 -c '
+import sys
+selector, required = sys.argv[1], int(sys.argv[2])
+for line in sys.stdin:
+    fields = line.rstrip("\r\n").split("|")
+    if len(fields) < 12 or fields[0] != "NODE" or fields[6] != "true":
+        continue
+    if selector not in (fields[3], fields[4]):
+        continue
+    if int(fields[-1]) & required:
+        raise SystemExit(0)
+raise SystemExit(1)
+' "$selector" "$required" <<<"$tree"; then
+      break
+    fi
+    sleep .1
+  done
+  ((SECONDS < deadline)) \
+    || archphene_die "Mousepad node '$selector' lacks Android action $action"
+  id="open-$(printf '%012x' "$((RANDOM << 16 | RANDOM))")"
+  payload="$id"$'\t'"$package"$'\t'"$action"$'\t'"$(base64url "$selector")"$'\t'"$(base64url "$value")"
+  archphene_adb_run shell run-as "$probe" rm -f "$response_file"
+  printf '%s' "$payload" | "$ARCHPHENE_ADB" "${ARCHPHENE_ADB_ARGS[@]}" \
+    shell run-as "$probe" tee "$command_file" >/dev/null
+  deadline=$((SECONDS + timeout))
+  while ((SECONDS < deadline)); do
+    response="$(archphene_adb_run shell run-as "$probe" \
+      cat "$response_file" 2>/dev/null | tr -d '\r\n' || true)"
+    if [[ "$response" == "$id"$'\t'* ]]; then
+      [[ "$response" == "$id"$'\t'OK ]] \
+        || archphene_die "Mousepad Android action '$action $selector' was rejected"
+      return 0
+    fi
+    sleep .1
+  done
+  archphene_die "timed out waiting for Mousepad Android action '$action $selector'"
+}
+
+wait_result_state() {
+  local selected="$1" open_enabled="$2" deadline=$((SECONDS + timeout)) tree
+  while ((SECONDS < deadline)); do
+    tree="$(get_tree)"
+    if python3 -c '
+import sys
+fixture, selected, open_enabled = sys.argv[1:]
+dialog = open_button = None
+results = []
+def bounds(fields):
+    values = [int(value) for value in fields[5].split()]
+    if len(values) != 4:
+        raise SystemExit(1)
+    return values
+def area(fields):
+    left, top, right, bottom = bounds(fields)
+    return max(0, right - left) * max(0, bottom - top)
+for line in sys.stdin:
+    fields = line.rstrip("\r\n").split("|")
+    if len(fields) < 12 or fields[0] != "NODE":
+        continue
+    if "Open File" in (fields[3], fields[4]):
+        if dialog is None or area(fields) > area(dialog):
+            dialog = fields
+    if fixture in (fields[3], fields[4]) and fields[7] == "true":
+        results.append(fields)
+    if "Open" in (fields[3], fields[4]) and fields[2] == "android.widget.Button":
+        open_button = fields
+if dialog is None or not results or open_button is None:
+    raise SystemExit(1)
+if selected == "true":
+    matches = [result for result in results if result[10] == "true"]
+else:
+    matches = results if all(result[10] == "false" for result in results) else []
+if not matches or open_button[6] != open_enabled:
+    raise SystemExit(1)
+result = matches[0]
+dl, dt, dr, db = bounds(dialog)
+rl, rt, rr, rb = bounds(result)
+if not (dl <= rl < rr <= dr and dt <= rt < rb <= db):
+    raise SystemExit("result bounds escape the Open dialog")
+if (rl, rt, rr, rb) == (dl, dt, dr, db) or rr - rl < 20 or rb - rt < 20:
+    raise SystemExit(1)
+' "$fixture" "$selected" "$open_enabled" <<<"$tree" 2>/dev/null; then
+      return 0
+    fi
+    sleep .1
+  done
+  archphene_die "Mousepad result '$fixture' did not publish selected=$selected and Open enabled=$open_enabled"
+}
+
 wait_node() {
   local class_name="$1" selector="$2" clickable="$3"
   local deadline=$((SECONDS + timeout)) tree line
@@ -118,7 +225,8 @@ archphene_adb_run shell pm path "$probe" >/dev/null 2>&1 \
   || archphene_die 'the test AccessibilityService is not installed'
 archphene_adb_run shell am start -W -n \
   "$probe/org.archphene.bridge.AccessibilityProbeActivity" >/dev/null
-archphene_adb_run shell run-as "$probe" rm -f "$tree_file"
+archphene_adb_run shell run-as "$probe" rm -f \
+  "$tree_file" "$command_file" "$response_file"
 archphene_adb_run shell settings put secure enabled_accessibility_services "$service"
 archphene_adb_run shell settings put secure accessibility_enabled 1
 archphene_wait_log 'Accessibility service connected' 10 \
@@ -233,16 +341,9 @@ archphene_adb_run exec-out screencap >"$artifact_dir/result-unselected.raw"
 archphene_adb_run exec-out screencap -p >"$artifact_dir/result-unselected.png"
 
 archphene_adb_run logcat -c
-# The GTK file chooser does not export its transient result rows through
-# AT-SPI, so route the same real Android touch a user performs. The first exact
-# search result sits in the upper result band of the finalized child frame.
-result_x=$((frame_x + frame_width / 2))
-result_y=$((status_top + frame_y + frame_height * 22 / 100))
-archphene_adb_run shell input tap "$result_x" "$result_y"
-route_log="$(archphene_wait_log 'pointer button pressed=false result=1' 10 \
-  'ArchpheneInput:D AndroidRuntime:E *:S')"
-[[ "$route_log" != *'FATAL EXCEPTION'* ]] \
-  || archphene_die "Mousepad crashed while selecting its search result: $route_log"
+wait_result_state false false
+invoke_accessibility_action "$fixture"
+wait_result_state true true
 sleep .5
 archphene_adb_run exec-out screencap >"$artifact_dir/result-selected.raw"
 archphene_adb_run exec-out screencap -p >"$artifact_dir/result-selected.png"
@@ -251,6 +352,20 @@ python3 "$ARCHPHENE_SCRIPTS_DIR/lib/theme-frame-check.py" different \
   --left-percent 20 --right-percent 98 --top-percent 20 --bottom-percent 50 \
   --minimum-difference .2 --minimum-changed-ratio .002
 
+archphene_adb_run logcat -c
+invoke_accessibility_action Open
+fixture_pattern="$(python3 -c \
+  'import re,sys;print(re.escape(sys.argv[1]))' "$fixture")"
+archphene_wait_log "mapped=true.*title=.*$fixture_pattern.*Mousepad" 15 \
+  'ArchpheneInput:I AndroidRuntime:E *:S' >/dev/null
+deadline=$((SECONDS + 10))
+while ((SECONDS < deadline)); do
+  [[ "$(get_tree)" != *'|Open File|'* ]] && break
+  sleep .2
+done
+((SECONDS < deadline)) \
+  || archphene_die 'Mousepad Open dialog remained after its Android Open action'
+
 cleanup
 trap - EXIT
-archphene_note "Mousepad Open dialog IME passed on $serial: bounded geometry, retained keyboard, exact indexed InputConnection query, Back dismissal, accepted result touch, and rendered selection verified. Evidence: $artifact_dir"
+archphene_note "Mousepad Open dialog IME/accessibility passed on $serial: bounded live control geometry, retained keyboard, exact indexed InputConnection query, Back dismissal, semantic result selection, live selected/enabled state, rendered selection, and semantic Open verified. Evidence: $artifact_dir"

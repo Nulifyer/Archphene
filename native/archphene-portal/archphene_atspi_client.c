@@ -26,6 +26,7 @@ enum {
     STATE_EDITABLE = 7,
     STATE_ENABLED = 8,
     STATE_FOCUSABLE = 11,
+    STATE_SELECTED = 23,
     STATE_SHOWING = 25,
     STATE_VISIBLE = 30,
 };
@@ -726,6 +727,7 @@ int archphene_atspi_client_read_node(DBusConnection *connection,
         node->focusable = has_state(states, STATE_FOCUSABLE);
         node->editable = has_state(states, STATE_EDITABLE);
         node->checked = has_state(states, STATE_CHECKED);
+        node->selected = has_state(states, STATE_SELECTED);
         node->showing = has_state(states, STATE_SHOWING);
         node->visible = has_state(states, STATE_VISIBLE);
     }

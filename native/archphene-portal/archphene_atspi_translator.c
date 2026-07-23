@@ -244,6 +244,7 @@ static bool parse_cache_accessible_iter(
             description == NULL ? "" : description);
     node->enabled = cache_state(states, 8);
     node->checked = cache_state(states, 4);
+    node->selected = cache_state(states, 23);
     node->editable = cache_state(states, 7) || node->editable;
     node->focusable = cache_state(states, 11)
             || node->clickable || node->editable;
@@ -390,6 +391,9 @@ static bool update_cached_state_locked(
         if (!transient_reference_matches(&node->reference, bus, path)) continue;
         if (strcmp(state_name, "showing") == 0) node->showing = enabled;
         else if (strcmp(state_name, "visible") == 0) node->visible = enabled;
+        else if (strcmp(state_name, "enabled") == 0) node->enabled = enabled;
+        else if (strcmp(state_name, "checked") == 0) node->checked = enabled;
+        else if (strcmp(state_name, "selected") == 0) node->selected = enabled;
         else return false;
         wake_worker();
         return true;
@@ -729,13 +733,23 @@ static void process_action(DBusConnection *connection) {
     uint64_t transient_generation = 0;
     bool menu_bar_click = click && menu_bar_child;
     bool menu_click = click && (node.show_menu_action || menu_bar_child);
+    bool list_item_click = click && strcmp(node.role, "list-item") == 0;
     if (click) {
         if (menu_click && !menu_bar_click) {
             pthread_mutex_lock(&state.mutex);
             transient_generation = state.transient_generation;
             pthread_mutex_unlock(&state.mutex);
         }
-        if (menu_bar_click) {
+        if (list_item_click) {
+            /*
+             * GTK tree/table cells commonly advertise an Action that returns
+             * success without changing selection. With live Component bounds
+             * available, route the same generic center click Android users
+             * perform. This is role-based and applies to any toolkit list
+             * item; it does not depend on an application or label.
+             */
+            result = activate_menu_pointer(id, false);
+        } else if (menu_bar_click) {
             result = activate_menu_pointer(id, true);
         } else {
             result = archphene_atspi_client_click(connection, &node);
@@ -869,6 +883,63 @@ static bool cache_node_publishable(const CachedAccessible *cached) {
             && cached->node.showing && cached->node.visible;
 }
 
+static int cached_reference_index(const CachedAccessible *cached,
+        size_t count, const ArchpheneAtspiReference *reference) {
+    for (size_t index = 0; index < count; index++) {
+        if (transient_reference_matches(&cached[index].node.reference,
+                reference->bus, reference->path)) return (int)index;
+    }
+    return -1;
+}
+
+/*
+ * AT-SPI Cache items intentionally omit Component extents and exact Action
+ * metadata. Treat the cache as the authoritative hierarchy, not as a complete
+ * node snapshot: refresh every visible reference through the standard
+ * interfaces and discover children that arrived between cache signals. This
+ * retains GTK's reliable cache topology while publishing real control bounds,
+ * current states, and correct action indices.
+ */
+static void hydrate_cached_tree(DBusConnection *connection,
+        CachedAccessible *cached, size_t *count) {
+    if (connection == NULL || cached == NULL || count == NULL) return;
+    ArchpheneAtspiReference *children = calloc(
+            ARCHPHENE_ATSPI_CHILD_MAX, sizeof(*children));
+    if (children == NULL) return;
+    for (size_t index = 0; index < *count
+            && index < MAX_CACHED_ACCESSIBLES; index++) {
+        if (!cache_node_publishable(&cached[index])) continue;
+        ArchpheneAtspiNode refreshed;
+        size_t child_count = 0;
+        int result = archphene_atspi_client_read_node(
+                connection, &cached[index].node.reference, &refreshed,
+                children, ARCHPHENE_ATSPI_CHILD_MAX, &child_count);
+        if (result < 0) continue;
+        cached[index].node = refreshed;
+        for (size_t child_index = 0;
+                child_index < child_count
+                && *count < MAX_CACHED_ACCESSIBLES; child_index++) {
+            if (cached_reference_index(
+                    cached, *count, &children[child_index]) >= 0) continue;
+            CachedAccessible *child = &cached[(*count)++];
+            memset(child, 0, sizeof(*child));
+            child->node.reference = children[child_index];
+            child->node.width = 1;
+            child->node.height = 1;
+            child->node.enabled = true;
+            child->node.showing = true;
+            child->node.visible = true;
+            child->node.click_action = -1;
+            child->node.scroll_forward_action = -1;
+            child->node.scroll_backward_action = -1;
+            child->application = cached[index].application;
+            child->parent = cached[index].node.reference;
+            child->index = (int32_t)child_index;
+        }
+    }
+    free(children);
+}
+
 static int build_cached_tree(const CachedAccessible *cached, size_t count,
         ArchpheneAtspiTree *tree) {
     if (cached == NULL || tree == NULL || count == 0) return -1;
@@ -995,6 +1066,7 @@ static int rebuild_tree(DBusConnection *connection,
         if (cached[index].authoritative) authoritative_cache = true;
     }
     if (authoritative_cache) {
+        hydrate_cached_tree(connection, cached, &cached_count);
         int cached_result = build_cached_tree(
                 cached, cached_count, *next_tree);
         free(cached);
@@ -1430,7 +1502,10 @@ void archphene_atspi_translator_event(DBusMessage *message) {
                     transient_change = enabled != 0 ? 1 : -1;
                     cached_state_name = state_name;
                     cached_state_enabled = enabled != 0;
-                } else if (strcmp(state_name, "visible") == 0) {
+                } else if (strcmp(state_name, "visible") == 0
+                        || strcmp(state_name, "enabled") == 0
+                        || strcmp(state_name, "checked") == 0
+                        || strcmp(state_name, "selected") == 0) {
                     cached_state_name = state_name;
                     cached_state_enabled = enabled != 0;
                 }

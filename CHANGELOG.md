@@ -14,6 +14,7 @@ Notable user-facing changes will be recorded here.
 - Restored the Bash secrets regression's packaged desktop-client coverage with a rebuilt official Arch libsecret/KWallet fixture, direct KWallet D-Bus operations, `kwallet-query`, restart persistence, cleanup, and log-redaction assertions.
 - Restored the migrated Mousepad Android-document regression so it again proves the real SAF picker, edit/save writeback, cold reopen, and Archphene DocumentsUI provider on x86_64 and physical AArch64.
 - Restored the Mousepad Open-dialog regression with exact InputConnection search text, Android IME retention/dismissal, bounded child-window geometry, accepted result routing, and rendered selection evidence on x86_64 and physical AArch64.
+- Fixed GTK file-chooser accessibility by hydrating cache topology with live control geometry, actions, state, and transient children; carrying selected state into Android; and routing generic list-item activation through scaled component centers. Mousepad search results can now be selected and opened entirely through Android framework actions on x86_64 and AArch64.
 - Restored the direct camera bridge regression's exact JPEG, I420 stream, private Camera portal, invalid-input, grant, denial, and no-reprompt assertions on x86_64 and physical AArch64.
 - Fixed solid-magenta GTK4 camera previews on physical Android GPU drivers by selecting Cairo only for wrappers that declare camera capability. Unmodified Snapshot now passes timestamped PipeWire consumption and foreground pixel inspection on x86_64 and AArch64, and the destructive permission fixture preserves existing Linux homes, preferences, and camera grants.
 - Replaced the migrated printing startup smoke with a full XDG-to-Android regression covering PreparePrint, rendered PDF preview, Save as PDF discovery, cancellation cleanup, invalid documents, non-regular descriptors, and runtime-pack binding on x86_64 and AArch64.
@@ -22,6 +23,7 @@ Notable user-facing changes will be recorded here.
 
 - Passed the full current-source API 36 x86_64 emulator suite and the non-destructive Android 15 AArch64 Samsung suite on July 22, 2026.
 - Archived, deliberately migrated, and restored the Samsung KCalc and Mousepad sandboxes under the maintained manager signer. Current-source physical Qt/GTK appearance, interaction, lifecycle, and document-broker core gates pass on July 23, 2026.
+- Updated both installed managers and regenerated Mousepad and KCalc through normal manager transactions on x86_64 and AArch64. The focused Open-dialog/IME/accessibility workflow plus the broader Mousepad and KCalc semantic regressions pass on both devices on July 23, 2026.
 
 ## 1.0.1 - 2026-07-18
 
