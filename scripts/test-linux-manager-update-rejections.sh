@@ -4,6 +4,18 @@ source "$(dirname "$0")/lib/common.sh"
 serial=emulator-5554; candidate="$ARCHPHENE_ROOT/tooling/build/manager-self-update/manager-0.9.0.apk"
 while (($#)); do case "$1" in --serial) serial="${2:?}"; shift 2;; --candidate-apk) candidate="${2:?}"; shift 2;; -h|--help) echo "usage: $0 [--serial SERIAL] [--candidate-apk PATH]"; exit 0;; *) archphene_die "unknown argument: $1";; esac; done
 candidate="$(realpath "$candidate")"; archphene_init_adb "$serial"; package=org.archpheneos.manager; remote=/data/local/tmp/archphene-rejected-update.apk; private="/data/user/0/$package/cache/archphene-rejected-update.apk"
+was_running=false
+[[ -n "$(archphene_adb_run shell pidof "$package" 2>/dev/null | tr -d '\r')" ]] \
+  && was_running=true
+cleanup() {
+  archphene_adb_run shell run-as "$package" rm -f \
+    cache/archphene-rejected-update.apk >/dev/null 2>&1 || true
+  archphene_adb_run shell rm -f "$remote" >/dev/null 2>&1 || true
+  if [[ "$was_running" == false ]]; then
+    archphene_adb_run shell am force-stop "$package" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT
 package_version() { local dump code name; dump="$(archphene_adb_run shell dumpsys package "$package")"; code="$(sed -n 's/.*versionCode=\([0-9]*\).*/\1/p' <<<"$dump" | head -n1)"; name="$(sed -n 's/.*versionName=\([^[:space:]]*\).*/\1/p' <<<"$dump" | head -n1)"; [[ -n "$code" && -n "$name" ]] || archphene_die "manager not installed"; printf '%s|%s\n' "$code" "$name"; }
 wait_banner() { local expected="$1" deadline=$((SECONDS+15)) ui; while ((SECONDS<deadline)); do sleep 0.5; ui="$(archphene_capture_ui archphene-rejection 2>/dev/null || true)"; [[ "$ui" == *"$expected"* ]] && return; done; archphene_die "did not observe rejection: $expected"; }
 rejected_update() { local hash="$1" expected="$2" resumed; archphene_adb_run shell am force-stop "$package"; archphene_adb_run shell am start -W -n "$package/.MainActivity" --es archphene_test_apk_url "file://$private" --es archphene_test_apk_sha256 "$hash" --es archphene_test_apk_package "$package" >/dev/null; wait_banner "$expected"; resumed="$(archphene_adb_run shell dumpsys activity activities)"; ! archphene_regex_contains "$resumed" 'com\.android\.(packageinstaller|permissioncontroller)' || archphene_die "rejected update opened installer"; }

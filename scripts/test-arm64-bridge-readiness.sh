@@ -1,10 +1,46 @@
 #!/usr/bin/env bash
 set -euo pipefail
 source "$(dirname "$0")/lib/common.sh"
-sdk="$(archphene_android_sdk)"
+
+sdk=
+container_fallback=true
+while (($#)); do
+  case "$1" in
+    --android-sdk) sdk="${2:?missing value for --android-sdk}"; shift 2 ;;
+    --no-container-fallback) container_fallback=false; shift ;;
+    -h|--help)
+      echo "usage: $0 [--android-sdk PATH] [--no-container-fallback]"
+      exit 0
+      ;;
+    *) archphene_die "unknown argument: $1" ;;
+  esac
+done
+
+if [[ -z "$sdk" ]]; then
+  sdk="$(archphene_android_sdk 2>/dev/null || true)"
+fi
+sdk="${sdk:-/nonexistent/android-sdk}"
 ndk_bin="$sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/bin"
 clang="$ndk_bin/aarch64-linux-android35-clang"
 readelf="$ndk_bin/llvm-readelf"
+
+if [[ ! -f "$clang" || ! -f "$readelf" ]]; then
+  [[ "$container_fallback" == true ]] \
+    || archphene_die "Android NDK 29.0.14206865 is missing from $sdk"
+  archphene_require_command podman
+  image=localhost/archphene-android-native:ndk29-rust1.88
+  if ! archphene_podman_image_exists "$image"; then
+    podman build \
+      -f "$ARCHPHENE_ROOT/containers/android-native.Containerfile" \
+      -t "$image" "$ARCHPHENE_ROOT"
+  fi
+  podman run --rm \
+    -v "$ARCHPHENE_ROOT:/workspace" -w /workspace \
+    "$image" bash scripts/test-arm64-bridge-readiness.sh \
+      --android-sdk /opt/android-sdk-linux --no-container-fallback
+  exit
+fi
+
 archphene_require_file "$clang"
 archphene_require_file "$readelf"
 app="$ARCHPHENE_ROOT/prototypes/mousepad-android-app"
@@ -24,4 +60,3 @@ for file in "$jni" "$client" "$frame"; do
 done
 archphene_note "ARM64 bridge readiness passed for Android-owned native components."
 archphene_note "Run test-arm64-physical-regression.sh for the complete AArch64 application/device gate."
-

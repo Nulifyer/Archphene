@@ -28,14 +28,28 @@ done
   cat "$runtime/pipewire.log" >&2
   exit 1
 }
-"$producer" >"$runtime/camera.log" 2>&1 &
+ARCHPHENE_PIPEWIRE_TEST_PATTERN=1 \
+  "$producer" >"$runtime/camera.log" 2>&1 &
 producer_pid=$!
+registered=false
+dump=
 for _ in $(seq 1 100); do
-  pw-dump 2>/dev/null | grep -q "archphene.android.camera" && break
+  dump="$(pw-dump 2>/dev/null || true)"
+  if [[ "$dump" == *'"node.name": "archphene.android.camera"'* ]]; then
+    registered=true
+    break
+  fi
+  kill -0 "$producer_pid" 2>/dev/null || break
   sleep 0.05
 done
-pw-dump > "$runtime/dump.json"
+if [[ "$registered" != true ]]; then
+  cat "$runtime/camera.log" >&2
+  cat "$runtime/pipewire.log" >&2
+  echo "Camera producer did not register its PipeWire node" >&2
+  exit 1
+fi
+printf '%s\n' "$dump" > "$runtime/dump.json"
 grep -q '"media.class": "Video/Source"' "$runtime/dump.json"
 grep -q '"node.name": "archphene.android.camera"' "$runtime/dump.json"
-grep -q "Archphene camera node=" "$runtime/camera.log"
+grep -Eq '^Archphene camera node=[0-9]+$' "$runtime/camera.log"
 echo "PASS private PipeWire camera producer registered a standard Video/Source node"

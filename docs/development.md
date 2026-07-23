@@ -161,6 +161,14 @@ system-mode regressions with:
 ./scripts/test-kate-live-theme.sh --serial emulator-5554
 ```
 
+The AArch64 native readiness gate uses the configured host NDK when available
+and otherwise runs in the pinned Android-native Podman image, so it does not
+require a second host-side SDK installation:
+
+```bash
+./scripts/test-arm64-bridge-readiness.sh
+```
+
 The generic policy test verifies that an explicit manager choice overrides the
 opposite Android mode and that Material You changes both generated toolkit
 configuration and rendered Linux-app pixels:
