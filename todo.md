@@ -21,7 +21,8 @@ This is the prioritized completion queue for the Archphene Android application. 
     - [ ] Restore permission-resource selection, timestamped PipeWire frame consumption, denial/no-reprompt, lease release, and Linux-process cleanup in `test-generated-camera-app.sh`.
     - [ ] Restore the complete SAF picker, bidirectional/nested synchronization, conflict idempotence, deferred deletion, symlink rejection, persisted grant, and removal assertions in `test-terminal-project-trees.sh`; the current script only opens the picker and must not be treated as a pass.
     - [x] Audit and execute Terminal home documents on emulator and Samsung. The Bash gate now detects shell-UID provider denial from output (Android's command exits zero), uses the SAF/DocumentsUI path, and verifies provider registration, visible Documents, and private-dotfile filtering without overclaiming direct access.
-    - [ ] Execute and audit the GUI document broker and text/document drag-and-drop on both applicable ABIs, then make their printed claims match exactly what they assert.
+    - [ ] Finish the GUI document-broker physical lane. The restored deterministic Bash gate passes manager CRUD, cross-UID private-provider denial, active restart, same-name conflict preservation, and writeback on the current-source emulator. The signer-bound Samsung build passes CRUD and denial but only logs launch of the multi-document restart probe; its older target wrapper never reports completion.
+    - [x] Execute the text/document drag-and-drop standalone probe on current x86_64 emulator and ARM64 Samsung artifacts: text negotiation, document broker flow, denial without a URI grant, and exact granted read all pass.
 
 - [x] Complete general on-device package transactions for supported x86_64 desktop and CLI packages.
   - [x] Flow the selected desktop-entry display name/executable and detected runtime toolkit through generic wrapper assembly.
