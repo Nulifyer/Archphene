@@ -1,2 +1,206 @@
 #!/usr/bin/env bash
-set -euo pipefail;source "$(dirname "$0")/lib/android-test.sh";serial=emulator-5554;package=org.archphene.linux.p241d399e14343c53b8b766e9126776aa;name=archphene-android-workflow.txt;marker=archphenedocsync7419;while (($#));do case "$1" in --serial)serial="${2:?}";shift 2;;--package)package="${2:?}";shift 2;;--name)name="${2:?}";shift 2;;--marker)marker="${2:?}";shift 2;;*)archphene_die "unknown argument: $1";;esac;done;archphene_test_init "$serial";archphene_adb_run shell sh -c "'mkdir -p /sdcard/Download; printf initial > /sdcard/Download/$name'";activity="$(archphene_launcher "$package")";archphene_adb_run shell am start -W -n "$activity" >/dev/null;sleep 5;archphene_adb_run shell input keyevent 66 >/dev/null 2>&1 || true;archphene_note "Mousepad Android document workflow passed: picker, edit, save, write-back, cold reopen, and provider browse exercised for $name ($marker)."
+set -euo pipefail
+
+source "$(dirname "$0")/lib/android-test.sh"
+
+serial=emulator-5554
+package=org.archphene.linux.p241d399e14343c53b8b766e9126776aa
+name=
+marker=
+timeout=60
+while (($#)); do
+  case "$1" in
+    --serial) serial="${2:?}"; shift 2 ;;
+    --package) package="${2:?}"; shift 2 ;;
+    --name) name="${2:?}"; shift 2 ;;
+    --marker) marker="${2:?}"; shift 2 ;;
+    --timeout-seconds) timeout="${2:?}"; shift 2 ;;
+    *) archphene_die "unknown argument: $1" ;;
+  esac
+done
+archphene_test_init "$serial"
+
+suffix="$(date +%s)-$RANDOM"
+name="${name:-archphene-android-workflow-$suffix.txt}"
+marker="${marker:-archphenedocsync-$suffix}"
+[[ "$name" =~ ^[A-Za-z0-9._-]+$ && "$marker" =~ ^[A-Za-z0-9._-]+$ ]] \
+  || archphene_die 'fixture name and marker may contain only letters, digits, dot, underscore, and hyphen'
+[[ "$name" == *.txt ]] || archphene_die 'the document workflow fixture must use a .txt name'
+[[ "$timeout" =~ ^[0-9]+$ ]] && ((timeout >= 15 && timeout <= 180)) \
+  || archphene_die '--timeout-seconds must be 15..180'
+
+remote="/sdcard/Download/$name"
+imported="files/linux-home/Documents/Android/$name"
+second_name="${name%.txt} (2).txt"
+second_imported="files/linux-home/Documents/Android/$second_name"
+encoded_document="$(python3 -c \
+  'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' \
+  "raw:/storage/emulated/0/Download/$name")"
+source_uri="content://com.android.providers.downloads.documents/document/$encoded_document"
+artifact_dir="$ARCHPHENE_ROOT/tooling/artifacts/document-workflow"
+documents_ui=com.google.android.documentsui
+
+cleanup() {
+  archphene_adb_run shell am force-stop "$package" >/dev/null 2>&1 || true
+  archphene_adb_run shell am force-stop "$documents_ui" >/dev/null 2>&1 || true
+  archphene_adb_run shell rm -f "$remote" \
+    /sdcard/mousepad-android-document-workflow.png \
+    /sdcard/mousepad-document-picker-recent.xml \
+    /sdcard/mousepad-document-picker-roots.xml \
+    /sdcard/mousepad-document-picker-downloads.xml \
+    /sdcard/mousepad-document-picker-search.xml \
+    /sdcard/mousepad-provider-picker.xml \
+    /sdcard/mousepad-provider-roots.xml \
+    /sdcard/mousepad-provider-apps.xml \
+    /sdcard/mousepad-provider-home.xml \
+    /sdcard/mousepad-provider-documents.xml \
+    /sdcard/mousepad-provider-android.xml >/dev/null 2>&1 || true
+  archphene_adb_run shell run-as "$package" sh -c \
+    "'rm -f \"$imported\" \"$second_imported\"'" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+wait_private_contains() {
+  local path="$1" expected="$2" failure="$3" deadline content
+  deadline=$((SECONDS + timeout))
+  while ((SECONDS < deadline)); do
+    content="$(archphene_adb_run shell run-as "$package" sh -c "'cat \"$path\"'" \
+      2>/dev/null | tr -d '\r' || true)"
+    [[ "$content" == *"$expected"* ]] && return 0
+    sleep 0.4
+  done
+  archphene_die "$failure"
+}
+
+wait_remote_contains() {
+  local expected="$1" failure="$2" deadline content
+  deadline=$((SECONDS + timeout))
+  while ((SECONDS < deadline)); do
+    content="$(archphene_adb_run shell cat "$remote" 2>/dev/null \
+      | tr -d '\r' || true)"
+    [[ "$content" == *"$expected"* ]] && return 0
+    sleep 0.4
+  done
+  archphene_die "$failure"
+}
+
+open_roots() {
+  local name="$1" deadline ui
+  deadline=$((SECONDS + timeout))
+  while ((SECONDS < deadline)); do
+    ui="$(archphene_capture_ui "$name" 2>/dev/null || true)"
+    if [[ "$ui" == *'content-desc="Show roots"'* ]]; then
+      archphene_tap_ui_pattern "$ui" 'content-desc="Show roots"' \
+        'document roots'
+      sleep 0.7
+      return 0
+    fi
+    if [[ "$ui" == *'resource-id="com.google.android.documentsui:id/search_src_text"'* ]]; then
+      archphene_adb_run shell input keyevent KEYCODE_BACK
+    fi
+    sleep 0.5
+  done
+  archphene_die 'Android document picker did not expose its roots action'
+}
+
+archphene_adb_run shell pm path "$package" >/dev/null
+archphene_adb_run shell test ! -e "$remote" \
+  || archphene_die "refusing to overwrite existing Android document: $remote"
+if archphene_adb_run shell run-as "$package" test -e "$imported" 2>/dev/null; then
+  archphene_die "refusing to overwrite existing imported document: $imported"
+fi
+
+fixture_base64="$(printf 'Android workflow original\nsecond source line\n' | base64 -w0)"
+archphene_adb_run shell mkdir -p /sdcard/Download
+archphene_adb_run shell sh -c \
+  "'printf %s $fixture_base64 | base64 -d > $remote'"
+
+archphene_adb_run logcat -c
+archphene_adb_run shell am force-stop "$package"
+archphene_adb_run shell am force-stop "$documents_ui"
+archphene_adb_run shell am start -W \
+  -n "$package/org.archphene.bridge.DocumentOpenActivity" >/dev/null
+open_roots mousepad-document-picker-recent
+archphene_wait_ui 'text="Downloads"' mousepad-document-picker-roots "$timeout"
+archphene_tap_text "$ARCHPHENE_UI" Downloads
+archphene_wait_ui 'content-desc="Search"' mousepad-document-picker-downloads "$timeout"
+archphene_tap_ui_pattern "$ARCHPHENE_UI" 'content-desc="Search"' 'Downloads search'
+sleep 0.4
+archphene_adb_run shell input text "$name"
+archphene_wait_ui "text=\"$name\"[^>]*resource-id=\"android:id/title\"" \
+  mousepad-document-picker-search "$timeout"
+archphene_tap_ui_pattern "$ARCHPHENE_UI" \
+  "text=\"$name\"[^>]*resource-id=\"android:id/title\"" "$name result"
+
+wait_private_contains "$imported" 'Android workflow original' \
+  'Mousepad did not import the selected Android document'
+archphene_wait_log 'mapped=true.*primary=true' "$timeout" \
+  'ArchpheneInput:V ArchpheneLinuxApp:I AndroidRuntime:E *:S' >/dev/null
+
+read -r display_width display_height <<<"$(archphene_adb_run shell wm size \
+  | sed -n 's/.*: \([0-9]*\)x\([0-9]*\).*/\1 \2/p' | tail -n1)"
+[[ -n "${display_width:-}" && -n "${display_height:-}" ]] \
+  || archphene_die 'could not read the Android display size for editor focus'
+archphene_adb_run shell input tap \
+  "$((display_width / 4))" "$((display_height * 3 / 5))"
+sleep 0.5
+archphene_adb_run shell input keyboard keycombination \
+  KEYCODE_CTRL_LEFT KEYCODE_MOVE_END
+archphene_adb_run shell input keyevent KEYCODE_ENTER
+archphene_adb_run shell input text "$marker"
+archphene_adb_run shell input keyboard keycombination \
+  KEYCODE_CTRL_LEFT KEYCODE_S
+wait_remote_contains "$marker" \
+  'Mousepad save did not write the edited marker back to Downloads'
+
+archphene_adb_run logcat -c
+archphene_adb_run shell am force-stop "$package"
+archphene_adb_run shell am start -W -a android.intent.action.EDIT \
+  -c android.intent.category.DEFAULT -t text/plain -d "$source_uri" "$package" \
+  >/dev/null
+cold_log="$(archphene_wait_log 'Imported Android document uri=.* path=.* writable=' \
+  "$timeout" 'ArchpheneLinuxApp:I AndroidRuntime:E *:S')"
+[[ "$cold_log" == *"Documents/Android/$second_name writable="* ]] \
+  || archphene_die "cold reopen did not preserve the first import as $second_name: $cold_log"
+cold_map="$(archphene_wait_log 'mapped=true.*primary=true' "$timeout" \
+  'ArchpheneInput:V ArchpheneLinuxApp:I AndroidRuntime:E *:S')"
+[[ "$cold_map" == *"title=~/Documents/Android/$second_name - Mousepad"* ]] \
+  || archphene_die "cold reopen did not map the collision-safe document in Mousepad: $cold_map"
+wait_private_contains "$second_imported" "$marker" \
+  'cold-reopened Mousepad document did not retain the saved marker'
+
+archphene_adb_run shell am start -W -a android.intent.action.OPEN_DOCUMENT \
+  -c android.intent.category.OPENABLE -t text/plain >/dev/null
+open_roots mousepad-provider-picker
+archphene_wait_ui 'text="Archphene (Apps|Home)"' mousepad-provider-roots "$timeout"
+if [[ "$ARCHPHENE_UI" == *'text="Archphene Apps"'* ]]; then
+  archphene_tap_text "$ARCHPHENE_UI" 'Archphene Apps'
+else
+  archphene_tap_text "$ARCHPHENE_UI" 'Archphene Home'
+fi
+sleep 0.8
+provider_ui="$(archphene_capture_ui mousepad-provider-apps)"
+if [[ "$provider_ui" == *'text="Mousepad"'* ]]; then
+  archphene_tap_text "$provider_ui" Mousepad
+  archphene_wait_ui 'text="Documents"' mousepad-provider-home "$timeout"
+  provider_ui="$ARCHPHENE_UI"
+fi
+[[ "$provider_ui" == *'text="Documents"'* ]] \
+  || archphene_die 'Archphene document provider did not expose Documents'
+archphene_tap_text "$provider_ui" Documents
+archphene_wait_ui 'text="Android"' mousepad-provider-documents "$timeout"
+archphene_tap_text "$ARCHPHENE_UI" Android
+archphene_wait_ui "text=\"$name\"" mousepad-provider-android "$timeout"
+
+mkdir -p "$artifact_dir"
+archphene_adb_run shell screencap -p /sdcard/mousepad-android-document-workflow.png
+archphene_adb_run pull /sdcard/mousepad-android-document-workflow.png \
+  "$artifact_dir/$serial-$suffix.png" >/dev/null
+logs="$(archphene_adb_run logcat -d -v brief \
+  -s ArchpheneDocuments:I ArchpheneLinuxApp:I AndroidRuntime:E '*:S')"
+[[ "$logs" != *'FATAL EXCEPTION'* ]] \
+  || archphene_die "Mousepad document workflow crashed: $logs"
+
+cleanup
+trap - EXIT
+archphene_note "Mousepad Android document workflow passed on $serial: SAF picker, exact import, edit/save writeback, cold reopen, and DocumentsUI provider browse validated for $name."
