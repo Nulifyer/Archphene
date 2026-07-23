@@ -6,6 +6,7 @@ Notable user-facing changes will be recorded here.
 
 ### Fixed
 
+- Strengthened package ranking and KCalc FD-lifecycle regressions: ranking now proves result order and restores the user's list filter, while descriptor testing warms one-time rotation allocation before enforcing total, SHM, fence, and ashmem bounds with stable processes, rendered output, clean logs, and prior-state restoration.
 - Made the remaining repository search, KCalc version selector, physical freeform resize, and Terminal Vulkan standalone gates state-safe and assertion-complete. Catalog tests restore exact manager preferences, freeform no longer clears KCalc data, ADB command delivery is unambiguous, and Vulkan dependencies are provisioned through the verified manager pipeline.
 - Made the manager pre-release and pull-to-refresh regressions accessibility-driven and state-safe. Both gates now preserve the user's original manager preferences while validating restart persistence, gesture thresholds, whole-list update completion, and settled list position on x86_64 and physical AArch64.
 - Replaced KCalc's compressed-PNG byte comparison with exact semantic calculation and app-region pixel assertions, restored Terminal's nested prompt-collapse check with physical notification-permission preservation, and restored `wev`'s nonzero-runtime rejection. The generic candidate gate now selects the manager's existing direct-Wayland assembly mode; current manager-generated official `wev` wrappers pass the complete input protocol suite on x86_64 and AArch64.
@@ -37,6 +38,7 @@ Notable user-facing changes will be recorded here.
 
 ### Validation
 
+- Passed executable-owner repository ranking, multi-term installed-app filtering, warmed KCalc descriptor lifecycle, and Qt/GTK incomplete descriptor-library rejection plus healthy complete-cache launches on the API 36 emulator and Android 15 Samsung on July 23, 2026.
 - Passed official package search/add/remove and architecture-adaptive KCalc version pinning on x86_64 and AArch64, non-destructive KCalc physical freeform resize on Samsung, and manager-provisioned unmodified `vulkaninfo` llvmpipe enumeration on both devices on July 23, 2026.
 - Passed the state-preserving manager pre-release and pull-to-refresh gates on the API 36 emulator and Android 15 Samsung on July 23, 2026.
 - Passed the restored five-profile release display matrix on the API 36 emulator and the strengthened KCalc/Mousepad live-theme plus KCalc rotation gates on both the emulator and Android 15 Samsung on July 23, 2026.
