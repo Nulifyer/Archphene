@@ -11,6 +11,7 @@ Notable user-facing changes will be recorded here.
 - Corrected manager package-detail and Mousepad secondary-window regressions so their success messages are backed by the actual Android settings, popup, and child-window behavior they claim.
 - Applied Material You accents to complete semantic GTK selected states without overriding Adwaita base surfaces, and canceled stale delayed IME requests when a popup takes interaction ownership.
 - Split the GUI document restart probe into foreground-authorized stages so Android 15 background-activity-launch enforcement remains enabled during the regression.
+- Restored the Bash secrets regression's packaged desktop-client coverage with a rebuilt official Arch libsecret/KWallet fixture, direct KWallet D-Bus operations, `kwallet-query`, restart persistence, cleanup, and log-redaction assertions.
 
 ### Validation
 

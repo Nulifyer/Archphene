@@ -25,6 +25,13 @@ package=org.archphene.secretsprobe
 activity="$package/org.archphene.bridge.SecretsProbeActivity"
 secret=archphene-secret-value-284917
 updated_secret=archphene-updated-value-592641
+libsecret_value=archphene-real-libsecret-52941
+kwallet_direct_value=archphene-kwallet-direct-68413
+kwallet_query_value=archphene-kwallet-query-39752
+
+cleanup() {
+  archphene_adb_run shell am force-stop "$package" >/dev/null 2>&1 || true
+}
 
 start_probe() {
   local deadline socket
@@ -86,6 +93,7 @@ assert_ciphertext_omits() {
 }
 
 archphene_adb_run install -r "$apk" >/dev/null
+trap cleanup EXIT
 archphene_adb_run shell pm clear "$package" >/dev/null
 archphene_adb_run logcat -c
 socket="$(start_probe)"
@@ -182,10 +190,156 @@ set -e
 archphene_regex_contains "$service_output" '^PASS Secret Service:' \
   || archphene_die "Secret Service D-Bus adapter returned an invalid result: $service_output"
 
+page="$(archphene_adb_run shell getconf PAGESIZE | tr -d '\r')"
+libsecret_validated=false
+kwallet_validated=false
+fixture_status=0
+archphene_adb_run shell run-as "$package" test -f files/libsecret-runtime-root \
+  >/dev/null 2>&1 || fixture_status=$?
+((fixture_status == 0 || fixture_status == 1)) \
+  || archphene_die 'could not inspect the packaged libsecret fixture'
+if ((fixture_status == 0)) \
+    && [[ "$abi" == arm64-v8a || ("$abi" == x86_64 && "$page" == 4096) ]]; then
+  native_dir="$(dirname "$(native_path)")"
+  libsecret_root="$(read_private_file files/libsecret-runtime-root)"
+  libsecret_loader="$native_dir/libarchphene_libsecret_loader.so"
+  secret_tool="$libsecret_root/secret-tool"
+  client_status=0
+  client_output=
+
+  invoke_client() {
+    local allowed="$1" command="$2" remote
+    remote="export DBUS_SESSION_BUS_ADDRESS=$bus_address; "
+    remote+="export LD_LIBRARY_PATH=$libsecret_root/lib; $command"
+    set +e
+    client_output="$(archphene_adb_run shell run-as "$package" sh -c \
+      "'$remote'" 2>&1 | tr -d '\r')"
+    client_status=$?
+    set -e
+    [[ " $allowed " == *" $client_status "* ]] \
+      || archphene_die "packaged Arch secrets client failed with status $client_status: $client_output"
+  }
+
+  invoke_client '0' "echo $libsecret_value | $libsecret_loader "\
+"$secret_tool store --label=Archphene-libsecret-probe "\
+"application archphene-libsecret scope encrypted-dh"
+  invoke_client '0' "$libsecret_loader $secret_tool lookup "\
+"application archphene-libsecret scope encrypted-dh"
+  [[ "$client_output" == "$libsecret_value" ]] \
+    || archphene_die "packaged Arch libsecret lookup mismatch: $client_output"
+  invoke_client '0' "$libsecret_loader $secret_tool clear "\
+"application archphene-libsecret scope encrypted-dh"
+  invoke_client '1' "$libsecret_loader $secret_tool lookup "\
+"application archphene-libsecret scope encrypted-dh"
+  [[ -z "$client_output" ]] \
+    || archphene_die 'packaged Arch libsecret clear left output behind'
+  libsecret_validated=true
+
+  kwallet_fixture_status=0
+  archphene_adb_run shell run-as "$package" \
+    test -x files/libsecret-runtime/kwalletd6 >/dev/null 2>&1 \
+    || kwallet_fixture_status=$?
+  ((kwallet_fixture_status == 0 || kwallet_fixture_status == 1)) \
+    || archphene_die 'could not inspect the packaged KWallet fixture'
+  if ((kwallet_fixture_status == 0)); then
+    kwallet_home="$libsecret_root/kwallet-home"
+    kwallet_runtime="$libsecret_root/kwallet-runtime"
+    kwallet_config_base64="$(printf '[KSecretD]\nEnabled=false\n\n[Wallet]\nDefault Wallet=Login\n' \
+      | base64 -w0)"
+    invoke_client '0' "mkdir -p $kwallet_home/.config $kwallet_runtime; "\
+"printf %s $kwallet_config_base64 | base64 -d > $kwallet_home/.config/kwalletrc; "\
+"chmod 700 $libsecret_root/gdbus $libsecret_root/kwalletd6 $libsecret_root/kwallet-query"
+    kwallet_environment="export HOME=$kwallet_home; "
+    kwallet_environment+="export XDG_CONFIG_HOME=$kwallet_home/.config; "
+    kwallet_environment+="export XDG_DATA_HOME=$kwallet_home/.local/share; "
+    kwallet_environment+="export XDG_RUNTIME_DIR=$kwallet_runtime; "
+    kwallet_environment+="export QT_QPA_PLATFORM=minimal; "
+    kwallet_environment+="export QT_QPA_PLATFORM_PLUGIN_PATH=$libsecret_root/qt/plugins/platforms"
+    invoke_kwallet() {
+      local allowed="$1" command="$2"
+      invoke_client "$allowed" "$kwallet_environment; $command"
+    }
+
+    kwallet_pid=
+    invoke_kwallet '0' "nohup $libsecret_loader $libsecret_root/kwalletd6 "\
+"</dev/null >$kwallet_home/kwalletd.log 2>&1 & echo \$!"
+    kwallet_pid="$client_output"
+    [[ "$kwallet_pid" =~ ^[0-9]+$ ]] \
+      || archphene_die "KWallet daemon returned an invalid PID: $kwallet_pid"
+    sleep .75
+    gdbus="$libsecret_loader $libsecret_root/gdbus call --session "
+    gdbus+="--dest org.kde.kwalletd6 --object-path /modules/kwalletd6 "
+    gdbus+="--method org.kde.KWallet."
+    invoke_kwallet '0' "${gdbus}wallets"
+    [[ "$client_output" == *Login* ]] \
+      || archphene_die "KWallet daemon did not expose Login: $client_output"
+    invoke_kwallet '0' "${gdbus}open Login 0 archphene-probe"
+    handle="$(sed -n 's/[^-0-9]*\(-\{0,1\}[0-9][0-9]*\).*/\1/p' \
+      <<<"$client_output" | head -n1)"
+    [[ "$handle" =~ ^[0-9]+$ ]] && ((handle > 0)) \
+      || archphene_die "KWallet daemon returned an invalid handle: $client_output"
+    invoke_kwallet '0' "${gdbus}createFolder $handle Archphene archphene-probe"
+    [[ "$client_output" == '(true,)' ]] \
+      || archphene_die "KWallet folder creation failed: $client_output"
+    invoke_kwallet '0' "${gdbus}writePassword $handle Archphene bridge-entry "\
+"$kwallet_direct_value archphene-probe"
+    [[ "$client_output" == '(0,)' ]] \
+      || archphene_die "KWallet direct password write failed: $client_output"
+    invoke_kwallet '0' "${gdbus}readPassword $handle Archphene bridge-entry archphene-probe"
+    [[ "$client_output" == *"$kwallet_direct_value"* ]] \
+      || archphene_die "KWallet direct password read mismatch: $client_output"
+
+    invoke_kwallet '0' "echo $kwallet_query_value > $kwallet_home/query-value"
+    invoke_kwallet '0' "$libsecret_loader $libsecret_root/kwallet-query "\
+"--write-password bridge-entry --folder Archphene Login < $kwallet_home/query-value"
+    invoke_kwallet '0' "$libsecret_loader $libsecret_root/kwallet-query "\
+"--read-password bridge-entry --folder Archphene Login"
+    [[ "$client_output" == "$kwallet_query_value" ]] \
+      || archphene_die "packaged Arch kwallet-query read/write mismatch: $client_output"
+
+    invoke_kwallet '0 1' "kill $kwallet_pid"
+    kwallet_pid=
+    sleep .3
+    invoke_kwallet '0' "nohup $libsecret_loader $libsecret_root/kwalletd6 "\
+"</dev/null >>$kwallet_home/kwalletd.log 2>&1 & echo \$!"
+    kwallet_pid="$client_output"
+    [[ "$kwallet_pid" =~ ^[0-9]+$ ]] \
+      || archphene_die "restarted KWallet daemon returned an invalid PID: $kwallet_pid"
+    sleep .75
+    invoke_kwallet '0' "$libsecret_loader $libsecret_root/kwallet-query "\
+"--read-password bridge-entry --folder Archphene Login"
+    [[ "$client_output" == "$kwallet_query_value" ]] \
+      || archphene_die "KWallet secret did not persist across daemon restart: $client_output"
+    invoke_kwallet '0' "${gdbus}open Login 0 archphene-probe"
+    handle="$(sed -n 's/[^-0-9]*\(-\{0,1\}[0-9][0-9]*\).*/\1/p' \
+      <<<"$client_output" | head -n1)"
+    [[ "$handle" =~ ^[0-9]+$ ]] && ((handle > 0)) \
+      || archphene_die "KWallet daemon returned an invalid restart handle: $client_output"
+    invoke_kwallet '0' "${gdbus}removeEntry $handle Archphene bridge-entry archphene-probe"
+    [[ "$client_output" == '(0,)' ]] \
+      || archphene_die "KWallet cleanup failed: $client_output"
+    invoke_kwallet '0 1' "kill $kwallet_pid"
+    kwallet_pid=
+    kwallet_validated=true
+  fi
+fi
+
 logs="$(archphene_adb_run logcat -d -v brief \
   -s ArchpheneCapabilities:I AndroidRuntime:E '*:S')"
 [[ "$logs" != *'FATAL EXCEPTION'* ]] || archphene_die "secrets probe crashed: $logs"
-[[ "$logs" != *"$secret"* && "$logs" != *"$updated_secret"* ]] \
+[[ "$logs" != *"$secret"* && "$logs" != *"$updated_secret"* \
+    && "$logs" != *"$libsecret_value"* \
+    && "$logs" != *"$kwallet_direct_value"* \
+    && "$logs" != *"$kwallet_query_value"* ]] \
   || archphene_die 'secret plaintext was written to Android logs'
-page="$(archphene_adb_run shell getconf PAGESIZE | tr -d '\r')"
-archphene_note "Android secrets bridge passed on $serial ($abi, $page-byte pages): encrypted storage, metadata, overwrite, restart persistence, bounds, deletion, lifecycle, log redaction, and the Secret Service D-Bus wire contract validated."
+client_result=
+if [[ "$libsecret_validated" == true && "$kwallet_validated" == true ]]; then
+  client_result=', and packaged Arch libsecret and KWallet clients validated'
+elif [[ "$libsecret_validated" == true ]]; then
+  client_result=', and packaged Arch libsecret validated; KWallet was not included'
+elif [[ "$abi" == x86_64 ]]; then
+  client_result='; packaged Arch clients skipped on a non-4 KB lane'
+else
+  client_result='; packaged Arch clients were not included in this ABI probe'
+fi
+archphene_note "Android secrets bridge passed on $serial ($abi, $page-byte pages): encrypted storage, metadata, overwrite, restart persistence, bounds, deletion, lifecycle, log redaction, the Secret Service D-Bus wire contract$client_result."

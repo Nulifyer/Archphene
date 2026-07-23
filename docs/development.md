@@ -90,6 +90,25 @@ Then use ADB for installation and result collection:
 ./scripts/test-native-compositor-probe.sh --android-abi arm64-v8a --serial <adb-serial>
 ```
 
+### Secrets desktop-client fixture
+
+Rebuild the KWallet compatibility daemon and official Arch desktop-client
+closure before assembling the full x86_64 secrets probe:
+
+```bash
+./scripts/build-kwallet-compat-runtime-podman.sh
+./scripts/build-libsecret-probe-runtime-podman.sh
+./scripts/build-secrets-capability-probe-podman.sh --android-abi x86_64
+./scripts/test-android-secrets-bridge.sh \
+  --android-abi x86_64 --serial emulator-5554
+```
+
+The default full-client build fails closed if either fixture is absent. The
+official Arch binaries require a 4 KB-page x86_64 emulator. Use
+`--without-client-fixtures` only for the separately identified core encrypted
+store and private Secret Service wire-contract lane, such as the fixture-free
+AArch64 probe; it does not establish desktop-client compatibility.
+
 ## Install from Linux
 
 Transfer and exercise the resulting APK:
