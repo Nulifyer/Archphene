@@ -227,6 +227,10 @@ public final class RuntimeFdLauncher {
             }
             launchEnvironment.put("ARCHPHENE_RUNTIME_COMMAND_DIR",
                     commandDirectory.getAbsolutePath());
+            String existingPath = launchEnvironment.get("PATH");
+            launchEnvironment.put("PATH", commandDirectory.getAbsolutePath()
+                    + (existingPath == null || existingPath.isEmpty()
+                            ? "" : ":" + existingPath));
             if (runtimeCommands.contains("bash")) {
                 // Keep this as a command name so the exec bridge invokes the
                 // verified ELF through the managed glibc loader. Android app

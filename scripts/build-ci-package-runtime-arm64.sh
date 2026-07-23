@@ -214,6 +214,13 @@ if [[ "$SKIP_CHOWN" != "1" ]]; then
 fi
 '
 
+# Rootless Podman maps container UID 0 to the invoking host user. The in-
+# container HOST_UID chown used for rootful Docker instead maps to a subordinate
+# UID, so normalize the completed bind mount before host-side staging/cleanup.
+if [[ "$(basename "$container_cli")" == podman && "${SKIP_CHOWN:-0}" != 1 ]]; then
+  "$container_cli" unshare chown -R 0:0 "$container_out"
+fi
+
 rm -rf "$stage"
 pacman_stage="$stage/tooling/downloads/arch-runtime-pacman-aarch64"
 keyring_stage="$stage/tooling/downloads/arch-runtime-archlinuxarm-keyring-aarch64"

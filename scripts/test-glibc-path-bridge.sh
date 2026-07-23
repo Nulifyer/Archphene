@@ -32,6 +32,31 @@ exec_output="$(
   "$root/exec-probe"
 )"
 test "$exec_output" = "--library-path /lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu --argv0 cat $root/commands/cat bridge-arg"
+set +e
+ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+ARCHPHENE_RUNTIME_LOADER=/bin/echo \
+ARCHPHENE_RUNTIME_LIB=/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu \
+  "$root/exec-probe" sh >"$root/unknown-command.out" 2>&1
+unknown_status=$?
+set -e
+test "$unknown_status" -eq 2
+grep -qx 'execlp: No such file or directory' "$root/unknown-command.out"
+direct_output="$(
+  ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+  ARCHPHENE_RUNTIME_LOADER=/bin/echo \
+  ARCHPHENE_RUNTIME_LIB=/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu \
+  "$root/exec-probe" --direct "$root/commands/cat"
+)"
+test "$direct_output" = "--library-path /lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu --argv0 cat $root/commands/cat bridge-arg"
+set +e
+ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+ARCHPHENE_RUNTIME_LOADER=/bin/echo \
+ARCHPHENE_RUNTIME_LIB=/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu \
+  "$root/exec-probe" --direct /bin/sh >"$root/direct-host-command.out" 2>&1
+direct_status=$?
+set -e
+test "$direct_status" -eq 2
+grep -qx 'execlp: No such file or directory' "$root/direct-host-command.out"
 echo exec-bridge-tests-passed
 
 test "$(cat /usr/share/archphene-test/value)" = expected

@@ -135,18 +135,27 @@ static int launch_android_system_command(const char *name, char *const arguments
     return -1;
 }
 
+int execve(const char *path, char *const arguments[], char *const environment[]) {
+    const char *name = strrchr(path, '/');
+    name = name == NULL ? path : name + 1;
+    char command[PATH_MAX];
+    if (runtime_command(name, command) && strcmp(path, command) == 0) {
+        return launch_runtime_command(name, arguments, environment);
+    }
+    if (strcmp(path, "/system/bin/cat") == 0) {
+        return launch_android_system_command("cat", arguments, environment);
+    }
+    errno = ENOENT;
+    return -1;
+}
+
 int execvp(const char *file, char *const arguments[]) {
     int bridged = launch_runtime_command(file, arguments, environ);
     if (bridged <= 0) return -1;
     bridged = launch_android_system_command(file, arguments, environ);
     if (bridged <= 0) return -1;
-    typedef int (*function_type)(const char *, char *const[]);
-    function_type real = (function_type)dlsym(RTLD_NEXT, "execvp");
-    if (real == NULL) {
-        errno = ENOSYS;
-        return -1;
-    }
-    return real(file, arguments);
+    errno = ENOENT;
+    return -1;
 }
 
 int execvpe(const char *file, char *const arguments[], char *const environment[]) {
@@ -154,13 +163,8 @@ int execvpe(const char *file, char *const arguments[], char *const environment[]
     if (bridged <= 0) return -1;
     bridged = launch_android_system_command(file, arguments, environment);
     if (bridged <= 0) return -1;
-    typedef int (*function_type)(const char *, char *const[], char *const[]);
-    function_type real = (function_type)dlsym(RTLD_NEXT, "execvpe");
-    if (real == NULL) {
-        errno = ENOSYS;
-        return -1;
-    }
-    return real(file, arguments, environment);
+    errno = ENOENT;
+    return -1;
 }
 
 int execlp(const char *file, const char *argument, ...) {
@@ -183,13 +187,8 @@ int execlp(const char *file, const char *argument, ...) {
     if (bridged <= 0) return -1;
     bridged = launch_android_system_command(file, arguments, environ);
     if (bridged <= 0) return -1;
-    typedef int (*function_type)(const char *, char *const[]);
-    function_type real = (function_type)dlsym(RTLD_NEXT, "execvp");
-    if (real == NULL) {
-        errno = ENOSYS;
-        return -1;
-    }
-    return real(file, arguments);
+    errno = ENOENT;
+    return -1;
 }
 
 static const char *translate_path(const char *path, char output[PATH_MAX],
