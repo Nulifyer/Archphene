@@ -165,6 +165,15 @@ static bool cache_legacy_child_count(
     return true;
 }
 
+static bool cache_role_supports_default_click(
+        const ArchpheneAtspiNode *node) {
+    return node != NULL && (strcmp(node->role, "button") == 0
+            || strcmp(node->role, "checkbox") == 0
+            || strcmp(node->role, "radio") == 0
+            || strcmp(node->role, "list-item") == 0
+            || strcmp(node->role, "menu-item") == 0);
+}
+
 static bool parse_cache_accessible_iter(
         DBusMessageIter *outer, CachedAccessible *cached) {
     DBusMessageIter fields;
@@ -218,6 +227,10 @@ static bool parse_cache_accessible_iter(
     uint32_t role = 0;
     dbus_message_iter_get_basic(&fields, &role);
     archphene_atspi_client_apply_role_id(node, role);
+    if (node->clickable && !cache_role_supports_default_click(node)) {
+        node->clickable = false;
+        node->click_action = -1;
+    }
     if (!dbus_message_iter_next(&fields)
             || dbus_message_iter_get_arg_type(&fields) != DBUS_TYPE_STRING) {
         return false;
@@ -242,7 +255,8 @@ static bool parse_cache_accessible_iter(
     snprintf(node->description, sizeof(node->description), "%.*s",
             ARCHPHENE_ATSPI_TEXT_MAX,
             description == NULL ? "" : description);
-    node->enabled = cache_state(states, 8);
+    /* GTK 4 publishes usable controls as SENSITIVE without ENABLED. */
+    node->enabled = cache_state(states, 8) || cache_state(states, 24);
     node->checked = cache_state(states, 4);
     node->selected = cache_state(states, 23);
     node->editable = cache_state(states, 7) || node->editable;
@@ -391,10 +405,28 @@ static bool update_cached_state_locked(
         if (!transient_reference_matches(&node->reference, bus, path)) continue;
         if (strcmp(state_name, "showing") == 0) node->showing = enabled;
         else if (strcmp(state_name, "visible") == 0) node->visible = enabled;
-        else if (strcmp(state_name, "enabled") == 0) node->enabled = enabled;
+        else if (strcmp(state_name, "enabled") == 0
+                || strcmp(state_name, "sensitive") == 0) {
+            node->enabled = enabled;
+        }
         else if (strcmp(state_name, "checked") == 0) node->checked = enabled;
         else if (strcmp(state_name, "selected") == 0) node->selected = enabled;
         else return false;
+        wake_worker();
+        return true;
+    }
+    return false;
+}
+
+static bool update_cached_text_locked(const char *bus, const char *path,
+        bool description, const char *value) {
+    if (value == NULL) return false;
+    for (size_t index = 0; index < state.cached_accessible_count; index++) {
+        ArchpheneAtspiNode *node = &state.cached_accessibles[index].node;
+        if (!transient_reference_matches(&node->reference, bus, path)) continue;
+        char *target = description ? node->description : node->text;
+        snprintf(target, ARCHPHENE_ATSPI_TEXT_MAX + 1, "%.*s",
+                ARCHPHENE_ATSPI_TEXT_MAX, value);
         wake_worker();
         return true;
     }
@@ -528,6 +560,53 @@ static bool parent_is_menu_bar(const ArchpheneAtspiTree *tree, int id) {
         }
     }
     return false;
+}
+
+static bool published_descends_from(const ArchpheneAtspiTree *tree,
+        const ArchpheneAtspiPublishedNode *node, int ancestor_id) {
+    int parent = node == NULL ? 0 : node->parent;
+    for (size_t depth = 0; tree != NULL && parent > 0
+            && depth < tree->count; depth++) {
+        if (parent == ancestor_id) return true;
+        const ArchpheneAtspiPublishedNode *entry = NULL;
+        for (size_t index = 0; index < tree->count; index++) {
+            if (tree->nodes[index].id == parent) {
+                entry = &tree->nodes[index];
+                break;
+            }
+        }
+        if (entry == NULL) break;
+        parent = entry->parent;
+    }
+    return false;
+}
+
+/*
+ * GTK 4 can expose a presentation button and its focusable semantic control
+ * with the same label and exact bounds.  The presentation node may advertise
+ * a generic action muxer whose first action is not the visible control's
+ * activation.  Route an action on that non-focusable duplicate to its
+ * focusable descendant, matching the control Android users actually see.
+ */
+static const ArchpheneAtspiPublishedNode *preferred_action_node(
+        const ArchpheneAtspiTree *tree,
+        const ArchpheneAtspiPublishedNode *selected) {
+    if (tree == NULL || selected == NULL || selected->node.focusable
+            || selected->node.text[0] == '\0') return selected;
+    for (size_t index = 0; index < tree->count; index++) {
+        const ArchpheneAtspiPublishedNode *candidate = &tree->nodes[index];
+        if (!candidate->node.enabled || !candidate->node.clickable
+                || !candidate->node.focusable
+                || strcmp(candidate->node.text, selected->node.text) != 0
+                || candidate->node.x != selected->node.x
+                || candidate->node.y != selected->node.y
+                || candidate->node.width != selected->node.width
+                || candidate->node.height != selected->node.height
+                || !published_descends_from(
+                        tree, candidate, selected->id)) continue;
+        return candidate;
+    }
+    return selected;
 }
 
 static bool node_belongs_to_showing_transient_locked(
@@ -702,14 +781,28 @@ static void process_action(DBusConnection *connection) {
     bool menu_bar_child = false;
     bool showing_root_action = false;
     bool popup_state_retired = false;
+    bool duplicate_action_routed = false;
     bool click = strcmp(action, "click") == 0;
     ArchpheneAtspiReference captured_showing_roots[MAX_TRANSIENT_ROOTS];
     size_t captured_showing_root_count = 0;
     pthread_mutex_lock(&state.mutex);
-    const ArchpheneAtspiNode *found =
-            archphene_atspi_tree_find(state.tree, id);
+    const ArchpheneAtspiPublishedNode *found = NULL;
+    for (size_t index = 0; state.tree != NULL
+            && index < state.tree->count; index++) {
+        if (state.tree->nodes[index].id == id) {
+            found = &state.tree->nodes[index];
+            break;
+        }
+    }
     if (found != NULL) {
-        node = *found;
+        if (click) {
+            const ArchpheneAtspiPublishedNode *preferred =
+                    preferred_action_node(state.tree, found);
+            duplicate_action_routed = preferred->id != found->id;
+            found = preferred;
+        }
+        id = found->id;
+        node = found->node;
         found_node = true;
         menu_bar_child = parent_is_menu_bar(state.tree, id);
         showing_root_action =
@@ -740,13 +833,15 @@ static void process_action(DBusConnection *connection) {
             transient_generation = state.transient_generation;
             pthread_mutex_unlock(&state.mutex);
         }
-        if (list_item_click) {
+        if (list_item_click || duplicate_action_routed) {
             /*
              * GTK tree/table cells commonly advertise an Action that returns
-             * success without changing selection. With live Component bounds
-             * available, route the same generic center click Android users
-             * perform. This is role-based and applies to any toolkit list
-             * item; it does not depend on an application or label.
+             * success without changing selection. GTK 4 also nests a
+             * focusable semantic control under a same-bounds presentation
+             * control whose generic action muxer may not activate the visible
+             * widget. With live Component bounds available, route the same
+             * generic center click Android users perform. This is structural
+             * and role-based; it does not depend on an application or label.
              */
             result = activate_menu_pointer(id, false);
         } else if (menu_bar_click) {
@@ -914,7 +1009,40 @@ static void hydrate_cached_tree(DBusConnection *connection,
         int result = archphene_atspi_client_read_node(
                 connection, &cached[index].node.reference, &refreshed,
                 children, ARCHPHENE_ATSPI_CHILD_MAX, &child_count);
-        if (result < 0) continue;
+        if (result < 0) {
+            /*
+             * An authoritative cache entry can outlive a destroyed GTK
+             * popup/dialog briefly.  If the backing accessible is already
+             * defunct, retaining its last visible state leaves stale Android
+             * controls on screen-reader trees indefinitely.  A later cache
+             * add or state event will make a live object publishable again.
+             */
+            cached[index].node.showing = false;
+            cached[index].node.visible = false;
+            continue;
+        }
+        /*
+         * The cache is authoritative for interface availability.  Some
+         * toolkits transiently return no detail from Accessible properties or
+         * Action.GetActions while a popup is being realized.  Do not erase
+         * names, descriptions, or the standard default action discovered in
+         * the cache; a later refresh can still replace them with live values.
+         */
+        if (refreshed.text[0] == '\0'
+                && cached[index].node.text[0] != '\0') {
+            snprintf(refreshed.text, sizeof(refreshed.text), "%s",
+                    cached[index].node.text);
+        }
+        if (refreshed.description[0] == '\0'
+                && cached[index].node.description[0] != '\0') {
+            snprintf(refreshed.description, sizeof(refreshed.description), "%s",
+                    cached[index].node.description);
+        }
+        if (refreshed.click_action < 0
+                && cached[index].node.click_action >= 0) {
+            refreshed.clickable = cached[index].node.clickable;
+            refreshed.click_action = cached[index].node.click_action;
+        }
         cached[index].node = refreshed;
         for (size_t child_index = 0;
                 child_index < child_count
@@ -1435,6 +1563,8 @@ void archphene_atspi_translator_event(DBusMessage *message) {
     bool transient_window = false;
     const char *cached_state_name = NULL;
     bool cached_state_enabled = false;
+    const char *cached_text = NULL;
+    bool cached_description = false;
     ArchpheneAtspiNode event_window;
     ArchpheneAtspiReference child_reference;
     const char *detail = event_detail(message);
@@ -1477,6 +1607,14 @@ void archphene_atspi_translator_event(DBusMessage *message) {
             event_window.showing = true;
             event_window.visible = true;
         }
+    } else if (strcmp(member, "PropertyChange") == 0
+            && detail != NULL
+            && (strcmp(detail, "accessible-name") == 0
+                    || strcmp(detail, "accessible-description") == 0)
+            && event_variant_string(message, &cached_text)) {
+        cached_description = strcmp(
+                detail, "accessible-description") == 0;
+        type = "property";
     } else if (strcmp(member, "TextChanged") == 0
             || strcmp(member, "TextCaretMoved") == 0
             || strcmp(member, "TextSelectionChanged") == 0) {
@@ -1504,6 +1642,7 @@ void archphene_atspi_translator_event(DBusMessage *message) {
                     cached_state_enabled = enabled != 0;
                 } else if (strcmp(state_name, "visible") == 0
                         || strcmp(state_name, "enabled") == 0
+                        || strcmp(state_name, "sensitive") == 0
                         || strcmp(state_name, "checked") == 0
                         || strcmp(state_name, "selected") == 0) {
                     cached_state_name = state_name;
@@ -1539,6 +1678,10 @@ void archphene_atspi_translator_event(DBusMessage *message) {
     if (cached_state_name != NULL) {
         update_cached_state_locked(
                 bus, path, cached_state_name, cached_state_enabled);
+    }
+    if (cached_text != NULL) {
+        update_cached_text_locked(
+                bus, path, cached_description, cached_text);
     }
     bool priority_root = child_add;
     if (child_remove) {

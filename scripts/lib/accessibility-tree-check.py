@@ -7,6 +7,7 @@ from pathlib import Path
 
 
 BOUNDS = re.compile(r"(-?\d+)\s+(-?\d+)\s+(-?\d+)\s+(-?\d+)")
+INTERACTION_ACTIONS = 1 | 16 | 4096 | 8192 | 2097152
 
 
 def main() -> None:
@@ -23,7 +24,7 @@ def main() -> None:
         if not line.startswith("NODE|"):
             continue
         fields = line.split("|")
-        if len(fields) < 11:
+        if len(fields) < 12:
             raise SystemExit("accessibility node uses the obsolete incomplete schema")
         bounds = BOUNDS.fullmatch(fields[5].strip())
         if not bounds:
@@ -42,7 +43,9 @@ def main() -> None:
     if args.expected_text.casefold() not in folded:
         raise SystemExit(f"tree does not identify {args.expected_text!r}")
     interactive = sum(
-        fields[7] == "true" or fields[8] == "true" or fields[10] != "0"
+        fields[7] == "true"
+        or fields[8] == "true"
+        or (int(fields[11]) & INTERACTION_ACTIONS) != 0
         for fields in nodes
     )
     if interactive < 1:

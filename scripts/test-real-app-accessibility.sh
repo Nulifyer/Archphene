@@ -24,7 +24,9 @@ while (($#)); do
 done
 [[ -n "$serial" && -n "$target" ]] \
   || archphene_die '--serial and --target-package are required'
-archphene_validate_choice "$profile" profile KCalc Kate Mousepad
+archphene_validate_choice "$profile" profile KCalc Kate Mousepad TextEditor
+profile_label="$profile"
+[[ "$profile" != TextEditor ]] || profile_label='Text Editor'
 [[ -z "$adb_path" ]] || ARCHPHENE_ADB="$adb_path"
 archphene_test_init "$serial"
 
@@ -47,22 +49,61 @@ response_file=files/framework-accessibility-response.txt
 safe_serial="${serial//[^A-Za-z0-9._-]/_}"
 artifact_dir="${artifact_dir:-$ARCHPHENE_ROOT/tooling/artifacts/visual-audit/$safe_serial/${profile,,}-accessibility}"
 mkdir -p "$artifact_dir"
+text_editor_state=files/linux-home/.local/share/org.gnome.TextEditor
+text_editor_backup="files/archphene-accessibility-text-editor-state-$safe_serial"
+had_text_editor_state=false
 old_services="$(archphene_adb_run shell settings get secure enabled_accessibility_services | tr -d '\r')"
 old_enabled="$(archphene_adb_run shell settings get secure accessibility_enabled | tr -d '\r')"
 restore() {
+  local restore_failed=false
   archphene_adb_run shell am force-stop "$probe" >/dev/null 2>&1 || true
   if [[ "$old_services" == null || -z "$old_services" ]]; then
-    archphene_adb_run shell settings delete secure enabled_accessibility_services >/dev/null 2>&1 || true
+    archphene_adb_run shell settings delete secure enabled_accessibility_services \
+      >/dev/null 2>&1 || restore_failed=true
   else
-    archphene_adb_run shell settings put secure enabled_accessibility_services "$old_services" >/dev/null 2>&1 || true
+    archphene_adb_run shell settings put secure enabled_accessibility_services \
+      "$old_services" >/dev/null 2>&1 || restore_failed=true
   fi
   if [[ "$old_enabled" == null || -z "$old_enabled" ]]; then
-    archphene_adb_run shell settings delete secure accessibility_enabled >/dev/null 2>&1 || true
+    archphene_adb_run shell settings delete secure accessibility_enabled \
+      >/dev/null 2>&1 || restore_failed=true
   else
-    archphene_adb_run shell settings put secure accessibility_enabled "$old_enabled" >/dev/null 2>&1 || true
+    archphene_adb_run shell settings put secure accessibility_enabled \
+      "$old_enabled" >/dev/null 2>&1 || restore_failed=true
+  fi
+  if [[ "$profile" == TextEditor ]]; then
+    archphene_adb_run shell am force-stop "$target" >/dev/null 2>&1 \
+      || restore_failed=true
+    archphene_adb_run shell run-as "$target" rm -rf "$text_editor_state" \
+      >/dev/null 2>&1 || restore_failed=true
+    if [[ "$had_text_editor_state" == true ]]; then
+      archphene_adb_run shell run-as "$target" mkdir -p \
+        files/linux-home/.local/share >/dev/null 2>&1 || restore_failed=true
+      archphene_adb_run shell run-as "$target" cp -a \
+        "$text_editor_backup" "$text_editor_state" >/dev/null 2>&1 \
+        || restore_failed=true
+    fi
+    archphene_adb_run shell run-as "$target" rm -rf "$text_editor_backup" \
+      >/dev/null 2>&1 || restore_failed=true
+  fi
+  if [[ "$restore_failed" == true ]]; then
+    echo "error: could not restore $profile accessibility test state" >&2
+    return 1
   fi
 }
 trap restore EXIT
+if [[ "$profile" == TextEditor ]]; then
+  archphene_adb_run shell am force-stop "$target"
+  archphene_adb_run shell run-as "$target" rm -rf "$text_editor_backup"
+  if archphene_adb_run shell run-as "$target" test -e "$text_editor_state"; then
+    archphene_adb_run shell run-as "$target" cp -a \
+      "$text_editor_state" "$text_editor_backup"
+    had_text_editor_state=true
+  fi
+  # Start from one deterministic blank document. The exact prior session is
+  # restored by the EXIT trap, including when a semantic assertion fails.
+  archphene_adb_run shell run-as "$target" rm -rf "$text_editor_state"
+fi
 
 get_target_tree() {
   archphene_adb_run shell run-as "$probe" cat "$tree_file" 2>/dev/null \
@@ -86,6 +127,7 @@ wait_target_tree() {
     fi
     sleep 0.2
   done
+  printf '%s\n' "$tree" >"$artifact_dir/timeout-tree.txt"
   archphene_die "timed out waiting for $profile accessibility tree: $* (absent: $absent)"
 }
 
@@ -159,7 +201,7 @@ assert_current_bounds() {
   temporary="$artifact_dir/current-tree.txt"
   printf '%s\n' "$tree" >"$temporary"
   python3 "$ARCHPHENE_SCRIPTS_DIR/lib/accessibility-tree-check.py" \
-    "$temporary" --expected-text "$profile" \
+    "$temporary" --expected-text "$profile_label" \
     --display-width "$width" --display-height "$height" >/dev/null
 }
 
@@ -255,6 +297,30 @@ test_kate() {
   wait_target_tree '|Open File — Kate|' '|Welcome to Kate|' >/dev/null
 }
 
+test_text_editor() {
+  local tree new_documents
+  tree="$(wait_target_tree '' '|Text Editor|' '|Open|' '|New Tab|' '|Main Menu|')"
+  assert_current_bounds "$tree"
+  invoke_accessibility_action 'New Tab'
+  tree="$(wait_target_tree '' '|Text Editor|' '|New Document|')"
+  new_documents="$(grep -c '|New Document|' <<<"$tree" || true)"
+  ((new_documents >= 2)) \
+    || archphene_die "Text Editor New Tab did not expose a second document (nodes=$new_documents)"
+  assert_current_bounds "$tree"
+
+  invoke_accessibility_action 'Main Menu'
+  tree="$(wait_target_tree '' '|Preferences|' '|Keyboard Shortcuts|' '|About Text Editor|')"
+  assert_current_bounds "$tree"
+  invoke_accessibility_action 'Preferences'
+  tree="$(wait_target_tree '' '|Preferences|' '|Highlight Current Line|' '|Indentation|')"
+  assert_current_bounds "$tree"
+  archphene_adb_run shell input keyevent KEYCODE_ESCAPE
+  wait_target_tree '|Highlight Current Line|' '|Text Editor|' '|Main Menu|' >/dev/null
+  # The Open split button's recent-document popover and Android SAF handoff
+  # are covered by test-mousepad-android-document-workflow.sh. Keep this test
+  # focused on the target app's exported GTK semantics.
+}
+
 archphene_adb_run shell am start -W -n \
   "$probe/org.archphene.bridge.AccessibilityProbeActivity" >/dev/null
 archphene_adb_run shell run-as "$probe" rm -f \
@@ -273,6 +339,7 @@ case "$profile" in
   KCalc) test_kcalc ;;
   Kate) test_kate ;;
   Mousepad) test_mousepad ;;
+  TextEditor) test_text_editor ;;
 esac
 
 deadline=$((SECONDS + timeout))
@@ -281,16 +348,16 @@ node_count=0
 while ((SECONDS < deadline)); do
   tree="$(get_target_tree)"
   node_count="$(grep -c '^NODE|' <<<"$tree" || true)"
-  if ((node_count >= 6)) && [[ "$tree" == *"$profile"* ]]; then
+  if ((node_count >= 6)) && [[ "$tree" == *"$profile_label"* ]]; then
     break
   fi
   sleep .25
 done
-((node_count >= 6)) && [[ "$tree" == *"$profile"* ]] \
+((node_count >= 6)) && [[ "$tree" == *"$profile_label"* ]] \
   || archphene_die "real $profile semantic tree did not settle (nodes=$node_count)"
 printf '%s\n' "$tree" >"$artifact_dir/accessibility-tree.txt"
 python3 "$ARCHPHENE_SCRIPTS_DIR/lib/accessibility-tree-check.py" \
-  "$artifact_dir/accessibility-tree.txt" --expected-text "$profile" \
+  "$artifact_dir/accessibility-tree.txt" --expected-text "$profile_label" \
   --display-width "$width" --display-height "$height"
 
 log="$(archphene_adb_run logcat -d -s ArchpheneAccessibilityProbe:I ArchpheneInput:V AndroidRuntime:E '*:S')"

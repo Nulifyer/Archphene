@@ -20,6 +20,8 @@
 #define ROLE_CALL_TIMEOUT_MILLIS 250
 #define ACTION_SCAN_MAX 8
 #define INTERFACE_SCAN_MAX 64
+#define RELATION_SCAN_MAX 32
+#define RELATION_TARGET_SCAN_MAX 8
 
 enum {
     STATE_CHECKED = 4,
@@ -27,6 +29,7 @@ enum {
     STATE_ENABLED = 8,
     STATE_FOCUSABLE = 11,
     STATE_SELECTED = 23,
+    STATE_SENSITIVE = 24,
     STATE_SHOWING = 25,
     STATE_VISIBLE = 30,
 };
@@ -408,6 +411,82 @@ static void read_text(DBusConnection *connection,
     if (reply != NULL) dbus_message_unref(reply);
 }
 
+/*
+ * AT-SPI allows a control's visible name to live on a separate object through
+ * LABELLED_BY.  GTK model buttons use this for their internal GtkLabel, which
+ * is intentionally omitted from the presentable child hierarchy.  Some GTK
+ * releases consequently return an empty Accessible.Name for the button even
+ * though the standard relation contains its on-screen label.
+ */
+static void read_relation_label(DBusConnection *connection,
+        const ArchpheneAtspiReference *reference,
+        char *target, size_t capacity) {
+    DBusMessage *reply = send_call(connection,
+            new_call(reference, ACCESSIBLE, "GetRelationSet"));
+    DBusMessageIter output;
+    DBusMessageIter relations;
+    if (!exact_reply(reply, "a(ua(so))")
+            || !dbus_message_iter_init(reply, &output)) {
+        if (reply != NULL) dbus_message_unref(reply);
+        return;
+    }
+    dbus_message_iter_recurse(&output, &relations);
+    size_t relation_count = 0;
+    while (relation_count++ < RELATION_SCAN_MAX
+            && dbus_message_iter_get_arg_type(&relations) == DBUS_TYPE_STRUCT) {
+        DBusMessageIter fields;
+        dbus_message_iter_recurse(&relations, &fields);
+        uint32_t type = 0;
+        if (dbus_message_iter_get_arg_type(&fields) != DBUS_TYPE_UINT32) break;
+        dbus_message_iter_get_basic(&fields, &type);
+        if (!dbus_message_iter_next(&fields)
+                || dbus_message_iter_get_arg_type(&fields)
+                        != DBUS_TYPE_ARRAY) break;
+        if (type == 2) {
+            DBusMessageIter references;
+            dbus_message_iter_recurse(&fields, &references);
+            size_t reference_count = 0;
+            while (reference_count++ < RELATION_TARGET_SCAN_MAX
+                    && dbus_message_iter_get_arg_type(&references)
+                            == DBUS_TYPE_STRUCT) {
+                DBusMessageIter reference_fields;
+                dbus_message_iter_recurse(&references, &reference_fields);
+                const char *bus = NULL;
+                const char *path = NULL;
+                if (dbus_message_iter_get_arg_type(&reference_fields)
+                        == DBUS_TYPE_STRING) {
+                    dbus_message_iter_get_basic(&reference_fields, &bus);
+                }
+                if (dbus_message_iter_next(&reference_fields)
+                        && dbus_message_iter_get_arg_type(&reference_fields)
+                                == DBUS_TYPE_OBJECT_PATH) {
+                    dbus_message_iter_get_basic(&reference_fields, &path);
+                }
+                ArchpheneAtspiReference label = {0};
+                if (bus != NULL && path != NULL
+                        && strnlen(bus, sizeof(label.bus)) < sizeof(label.bus)
+                        && strnlen(path, sizeof(label.path))
+                                < sizeof(label.path)) {
+                    copy_text(label.bus, sizeof(label.bus), bus);
+                    copy_text(label.path, sizeof(label.path), path);
+                }
+                if (valid_reference(&label)) {
+                    read_string_property(connection, &label, "Name",
+                            target, capacity);
+                    if (target[0] == '\0') {
+                        read_text(connection, &label, target, capacity);
+                    }
+                    if (target[0] != '\0') break;
+                }
+                dbus_message_iter_next(&references);
+            }
+        }
+        if (target[0] != '\0') break;
+        dbus_message_iter_next(&relations);
+    }
+    dbus_message_unref(reply);
+}
+
 static void normalize_action(char *target, size_t capacity, const char *source) {
     if (capacity == 0) return;
     size_t output = 0;
@@ -419,6 +498,15 @@ static void normalize_action(char *target, size_t capacity, const char *source) 
     }
     while (output > 0 && target[output - 1] == '-') output--;
     target[output] = '\0';
+}
+
+static dbus_bool_t role_supports_default_click(
+        const ArchpheneAtspiNode *node) {
+    return node != NULL && (strcmp(node->role, "button") == 0
+            || strcmp(node->role, "checkbox") == 0
+            || strcmp(node->role, "radio") == 0
+            || strcmp(node->role, "list-item") == 0
+            || strcmp(node->role, "menu-item") == 0);
 }
 
 static dbus_bool_t read_action_name(DBusConnection *connection,
@@ -494,7 +582,10 @@ static void read_actions(DBusConnection *connection,
         index++;
         dbus_message_iter_next(&array);
     }
-    if (node->click_action < 0 && index == 1) node->click_action = 0;
+    if (node->click_action < 0 && index == 1
+            && role_supports_default_click(node)) {
+        node->click_action = 0;
+    }
     node->clickable = node->click_action >= 0;
     dbus_message_unref(reply);
 }
@@ -723,7 +814,14 @@ int archphene_atspi_client_read_node(DBusConnection *connection,
     read_interfaces(connection, reference, &interfaces);
     uint32_t states[2] = {0, 0};
     if (read_states(connection, reference, states)) {
-        node->enabled = has_state(states, STATE_ENABLED);
+        /*
+         * GTK 4 exposes SENSITIVE for controls that accept user input but no
+         * longer adds the older ENABLED state.  AT-SPI documents SENSITIVE as
+         * the state describing whether user interaction can affect a control,
+         * so either state maps to Android's enabled property.
+         */
+        node->enabled = has_state(states, STATE_ENABLED)
+                || has_state(states, STATE_SENSITIVE);
         node->focusable = has_state(states, STATE_FOCUSABLE);
         node->editable = has_state(states, STATE_EDITABLE);
         node->checked = has_state(states, STATE_CHECKED);
@@ -740,6 +838,11 @@ int archphene_atspi_client_read_node(DBusConnection *connection,
     node->focusable = node->focusable || node->clickable || node->editable;
     node->checkable = strcmp(node->role, "checkbox") == 0
             || strcmp(node->role, "radio") == 0;
+    if (node->text[0] == '\0'
+            && (node->clickable || node->focusable || node->menu_item)) {
+        read_relation_label(
+                connection, reference, node->text, sizeof(node->text));
+    }
     return read_children(connection, reference, children,
             children_capacity, children_count);
 }

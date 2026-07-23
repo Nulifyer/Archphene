@@ -156,7 +156,6 @@ archphene_adb_run shell input keyboard keycombination \
   KEYCODE_CTRL_LEFT KEYCODE_MOVE_END
 archphene_adb_run shell input keyevent KEYCODE_ENTER
 marker_base64="$(printf %s "$marker" | base64 -w0)"
-archphene_adb_run logcat -c
 archphene_adb_run shell am start -W -n "$activity" \
   --es archphene_test_ime_commit_base64 "$marker_base64" >/dev/null
 injected=false
