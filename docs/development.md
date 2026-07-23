@@ -136,6 +136,17 @@ Broad suites:
 ./scripts/test-arm64-physical-regression.sh --serial <adb-serial>
 ```
 
+The physical suite re-verifies every AArch64 runtime package against the
+staged keyring before touching the device. Prepare both the staged runtime and
+the read-only package cache volume with:
+
+```bash
+CONTAINER_CLI=podman SKIP_CHOWN=1 bash scripts/build-ci-package-runtime-arm64.sh
+```
+
+`--skip-signature-gate` exists for focused device iteration only; it is not a
+release-validation result.
+
 For a clean debuggable emulator manager, provision the maintained KCalc and
 Mousepad fixtures through the real on-device package transaction before running
 the suite:
