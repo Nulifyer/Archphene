@@ -6,6 +6,7 @@ Notable user-facing changes will be recorded here.
 
 ### Fixed
 
+- Restored the full Android capability-broker regression on current generated KCalc wrappers for x86_64 and physical AArch64 using disposable pinned-NDK probes: permission gating/retry, notification post/withdraw, HTTPS dispatch, unsafe-URI rejection, cross-UID denial, cleanup, and permission restoration now pass.
 - Restored the Terminal document-transfer regression on emulator and physical AArch64 with unique self-cleaning fixtures, exact SAF import/export content checks, hidden-home export denial, traversal import denial, and permission-state restoration.
 - Restored the Terminal companion isolation regression on emulator and physical AArch64: embedded artifact parity, installed-version parity, distinct UIDs, PTY ownership, signed package-search/result routing, forged-intent denial, and untrusted runtime-provider denial now have direct assertions.
 - Restored the package-runtime trust regression on x86_64 and physical AArch64: bundled pacman execution, libalpm closure resolution, live signed download, exact detached-signer continuity, and appended-byte/GPG `BADSIG` rejection now have direct assertions.
