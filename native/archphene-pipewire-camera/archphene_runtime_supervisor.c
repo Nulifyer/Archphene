@@ -195,6 +195,17 @@ int main(int argc, char **argv) {
     for (size_t index = 0; index < app_arguments; index++) {
         target[index + 6] = argv[index + 5];
     }
+    const char *target_preload = getenv("ARCHPHENE_TARGET_LD_PRELOAD");
+    if (target_preload != NULL && target_preload[0] != '\0') {
+        if (setenv("LD_PRELOAD", target_preload, 1) != 0
+                || unsetenv("ARCHPHENE_TARGET_LD_PRELOAD") != 0) {
+            stop_helper(camera_pid);
+            stop_helper(policy_pid);
+            stop_helper(daemon_pid);
+            free(target);
+            return 70;
+        }
+    }
     execv(argv[1], target);
     stop_helper(camera_pid);
     stop_helper(policy_pid);

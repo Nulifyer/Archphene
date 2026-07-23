@@ -17,6 +17,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /** Executes immutable runtime modules supplied by Android content descriptors. */
 public final class RuntimeFdLauncher {
+    private static final int MAX_ENVIRONMENT_ENTRIES = 96;
     private static final int MAX_LIBRARIES = 510;
     private static final AtomicBoolean STALE_VIEWS_PURGED = new AtomicBoolean();
     private static final AtomicLong NEXT_EXECUTION_ID = new AtomicLong(1);
@@ -244,6 +245,15 @@ public final class RuntimeFdLauncher {
                         + (existingPreload == null || existingPreload.isEmpty()
                                 ? "" : ":" + existingPreload));
             }
+            if (linkNames.contains("archphene-runtime-supervisor")) {
+                // The camera supervisor intentionally links only libc. Delay
+                // app/toolkit preloads until it execs the real GUI so modules
+                // with GLib symbols are never loaded into the supervisor.
+                String targetPreload = launchEnvironment.remove("LD_PRELOAD");
+                if (targetPreload != null && !targetPreload.isEmpty()) {
+                    launchEnvironment.put("ARCHPHENE_TARGET_LD_PRELOAD", targetPreload);
+                }
+            }
             boolean gstreamer = false;
             for (String name : linkNames) {
                 if (name.startsWith("libgst") && name.endsWith(".so")) {
@@ -326,7 +336,10 @@ public final class RuntimeFdLauncher {
     }
 
     private static byte[] encodeEnvironment(Map<String, String> environment) {
-        if (environment == null || environment.size() > 64) {
+        // Toolkit, appearance, GPU, and capability adapters deliberately add
+        // independent entries. Camera diagnostics add four more without
+        // increasing the separately enforced 32 KiB serialized-data bound.
+        if (environment == null || environment.size() > MAX_ENVIRONMENT_ENTRIES) {
             throw new IllegalArgumentException("Invalid runtime environment");
         }
         StringBuilder manifest = new StringBuilder();

@@ -9645,7 +9645,7 @@ const MAX_RUNTIME_LIBRARY_MANIFEST: usize = 128 * 1024;
 #[cfg(any(target_os = "android", test))]
 const MAX_RUNTIME_LINK_NAME: usize = 128;
 const MAX_RUNTIME_ENVIRONMENT_MANIFEST: usize = 32 * 1024;
-const MAX_RUNTIME_ENVIRONMENT_VARIABLES: usize = 64;
+const MAX_RUNTIME_ENVIRONMENT_VARIABLES: usize = 96;
 const MAX_RUNTIME_ARGUMENT_MANIFEST: usize = 32 * 1024;
 const MAX_RUNTIME_ARGUMENTS: usize = 32;
 
@@ -11503,6 +11503,21 @@ mod tests {
         assert_eq!(environment[0].0.to_bytes(), b"HOME");
         assert_eq!(environment[1].1.to_bytes(), b"wayland-0");
         assert_eq!(environment[2].0.to_bytes(), b"__EGL_VENDOR_LIBRARY_DIRS");
+
+        let at_limit = (0..MAX_RUNTIME_ENVIRONMENT_VARIABLES)
+            .map(|index| format!("ARCHPHENE_TEST_{index}=value\n"))
+            .collect::<String>();
+        assert_eq!(
+            parse_runtime_environment(at_limit.as_bytes())
+                .expect("environment entry limit should be accepted")
+                .len(),
+            MAX_RUNTIME_ENVIRONMENT_VARIABLES
+        );
+        let over_limit = format!("{at_limit}ARCHPHENE_TEST_OVER=value\n");
+        assert_eq!(
+            parse_runtime_environment(over_limit.as_bytes()),
+            Err(libc::EINVAL)
+        );
     }
 
     #[test]

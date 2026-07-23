@@ -111,4 +111,17 @@ done
 
 "$supervisor" /lib64/ld-linux-x86-64.so.2 "$out" \
   true /usr/bin/true
-echo "Private PipeWire camera runtime passed registry, frame, cleanup, and restart tests"
+
+target_preload="$out/libpipewire-0.3.so.0"
+ARCHPHENE_TARGET_LD_PRELOAD="$target_preload" \
+  "$supervisor" /lib64/ld-linux-x86-64.so.2 "$out" \
+    env /usr/bin/env >"$runtime/target-environment" 2>"$runtime/target-preload.log"
+grep -Fxq "LD_PRELOAD=$target_preload" "$runtime/target-environment"
+! grep -q '^ARCHPHENE_TARGET_LD_PRELOAD=' "$runtime/target-environment"
+[[ ! -s "$runtime/target-preload.log" ]] || {
+  cat "$runtime/target-preload.log" >&2
+  echo "Target preload was not loadable" >&2
+  exit 1
+}
+
+echo "Private PipeWire camera runtime passed registry, frame, cleanup, restart, and target-preload tests"
