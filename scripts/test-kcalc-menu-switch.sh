@@ -51,7 +51,7 @@ python3 "$ARCHPHENE_SCRIPTS_DIR/lib/wayland-geometry-check.py" \
 archphene_adb_run exec-out screencap >"$artifact_dir/settings-menu.raw"
 archphene_adb_run exec-out screencap -p >"$artifact_dir/settings-menu.png"
 python3 "$ARCHPHENE_SCRIPTS_DIR/lib/frame-health-check.py" \
-  "$artifact_dir/settings-menu.raw"
+  "$artifact_dir/settings-menu.raw" --luma-tail-percent 1
 config="$(archphene_adb_run shell run-as "$package" \
   cat files/linux-home/.config/kdeglobals)"
 printf '%s\n' "$config" >"$artifact_dir/kdeglobals"

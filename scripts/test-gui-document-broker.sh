@@ -40,6 +40,24 @@ fi
     && "$source_package" != "$target" ]] \
   || archphene_die 'a distinct generated GUI source wrapper is required'
 archphene_adb_run shell pm path "$source_package" >/dev/null
+probe_suffixes=()
+cleanup() {
+  archphene_adb_run shell am force-stop "$target" >/dev/null 2>&1 || true
+  local suffix base second
+  for suffix in "${probe_suffixes[@]}"; do
+    archphene_adb_run shell run-as "$source_package" rm -rf \
+      "files/linux-home/document-probe-a-$suffix" \
+      "files/linux-home/document-probe-b-$suffix" \
+      "files/linux-home/document-probe-c-$suffix" \
+      "files/linux-home/document-probe-d-$suffix" >/dev/null 2>&1 || true
+    base="archphene-document-probe-$suffix"
+    second="$base (2).txt"
+    archphene_adb_run shell run-as "$target" sh -c \
+      "'rm -f \"files/linux-home/Documents/Android/$base.txt\" \"files/linux-home/Documents/Android/$second\"'" \
+      >/dev/null 2>&1 || true
+  done
+}
+trap cleanup EXIT
 
 wait_document_log() {
   local expected="$1" failure="$2" deadline log
@@ -82,7 +100,33 @@ archphene_adb_run shell am force-stop "$manager"
 archphene_adb_run shell am start -n "$manager/.MainActivity" \
   --es archphene_test_document_session_source "$source_package" \
   --es archphene_test_document_session_target "$target" >/dev/null
+wait_document_log 'Launched initial document session probe' \
+  'initial multi-document session probe failed'
+initial_suffix="$(sed -n 's/.*Launched initial document session probe .* suffix=\([0-9a-f][0-9a-f]*\).*/\1/p' \
+  <<<"$DOCUMENT_LOG" | tail -n1)"
+[[ -n "$initial_suffix" ]] || archphene_die 'initial document probe suffix is missing'
+probe_suffixes+=("$initial_suffix")
+archphene_wait_log 'mapped=true.*primary=true' "$timeout" \
+  'ArchpheneInput:V ArchpheneLinuxApp:I AndroidRuntime:E *:S' >/dev/null
+# Android 15 correctly blocks the manager from launching a second Activity
+# after the first document intent has put it in the background. Bring the
+# debug manager back to the foreground before it sends the continuation; this
+# models a visible external app opening another document without weakening the
+# platform background-activity-launch policy.
+archphene_adb_run shell am start -W --activity-single-top \
+  -n "$manager/.MainActivity" \
+  --es archphene_test_document_session_source "$source_package" \
+  --es archphene_test_document_session_target "$target" \
+  --ez archphene_test_document_session_continue true >/dev/null
+wait_document_log 'Launched running document restart probe' \
+  'running multi-document restart launch failed'
+restart_suffix="$(sed -n 's/.*Launched running document restart probe .* suffix=\([0-9a-f][0-9a-f]*\).*/\1/p' \
+  <<<"$DOCUMENT_LOG" | tail -n1)"
+[[ -n "$restart_suffix" ]] || archphene_die 'restart document probe suffix is missing'
+probe_suffixes+=("$restart_suffix")
 wait_document_log 'Running document restart probe passed documents=2' \
   'running multi-document restart probe failed'
 
+cleanup
+trap - EXIT
 archphene_note "GUI document broker passed on $serial: manager CRUD, cross-UID private-provider denial, running-app restart, same-name import, conflict preservation, and writeback validated."

@@ -130,6 +130,7 @@ public final class MainActivity extends Activity {
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
+        applyTestAppearancePreferences();
         handleTestIntents();
         handleTerminalRequestIntent();
     }
@@ -2515,8 +2516,11 @@ public final class MainActivity extends Activity {
                 "archphene_test_document_session_source");
         String targetPackage = getIntent().getStringExtra(
                 "archphene_test_document_session_target");
+        boolean continueProbe = getIntent().getBooleanExtra(
+                "archphene_test_document_session_continue", false);
         getIntent().removeExtra("archphene_test_document_session_source");
         getIntent().removeExtra("archphene_test_document_session_target");
+        getIntent().removeExtra("archphene_test_document_session_continue");
         if (sourcePackage == null || targetPackage == null) return;
         new Thread(() -> {
             try {
@@ -2527,51 +2531,32 @@ public final class MainActivity extends Activity {
                 Uri firstDir = android.provider.DocumentsContract.createDocument(
                         getContentResolver(), home,
                         android.provider.DocumentsContract.Document.MIME_TYPE_DIR,
-                        "document-probe-a-" + suffix);
+                        "document-probe-" + (continueProbe ? "c-" : "a-") + suffix);
                 Uri secondDir = android.provider.DocumentsContract.createDocument(
                         getContentResolver(), home,
                         android.provider.DocumentsContract.Document.MIME_TYPE_DIR,
-                        "document-probe-b-" + suffix);
+                        "document-probe-" + (continueProbe ? "d-" : "b-") + suffix);
                 if (firstDir == null || secondDir == null) {
                     throw new IllegalStateException("Could not create probe directories");
                 }
                 Uri first = android.provider.DocumentsContract.createDocument(
-                        getContentResolver(), firstDir, "text/plain", "same-name.txt");
+                        getContentResolver(), firstDir, "text/plain",
+                        "archphene-document-probe-" + suffix + ".txt");
                 Uri second = android.provider.DocumentsContract.createDocument(
-                        getContentResolver(), secondDir, "text/plain", "same-name.txt");
+                        getContentResolver(), secondDir, "text/plain",
+                        "archphene-document-probe-" + suffix + ".txt");
                 if (first == null || second == null) {
                     throw new IllegalStateException("Could not create probe documents");
                 }
-                writeTestDocument(first, "first-source\n");
-                writeTestDocument(second, "second-source\n");
-                launchTestDocumentSession(targetPackage, first, second, false);
-                Thread.sleep(3000);
-                Uri thirdDir = android.provider.DocumentsContract.createDocument(
-                        getContentResolver(), home,
-                        android.provider.DocumentsContract.Document.MIME_TYPE_DIR,
-                        "document-probe-c-" + suffix);
-                Uri fourthDir = android.provider.DocumentsContract.createDocument(
-                        getContentResolver(), home,
-                        android.provider.DocumentsContract.Document.MIME_TYPE_DIR,
-                        "document-probe-d-" + suffix);
-                if (thirdDir == null || fourthDir == null) {
-                    throw new IllegalStateException(
-                            "Could not create running-restart probe directories");
-                }
-                Uri third = android.provider.DocumentsContract.createDocument(
-                        getContentResolver(), thirdDir, "text/plain", "same-name.txt");
-                Uri fourth = android.provider.DocumentsContract.createDocument(
-                        getContentResolver(), fourthDir, "text/plain", "same-name.txt");
-                if (third == null || fourth == null) {
-                    throw new IllegalStateException(
-                            "Could not create running-restart probe documents");
-                }
-                writeTestDocument(third, "third-source\n");
-                writeTestDocument(fourth, "fourth-source\n");
-                launchTestDocumentSession(targetPackage, third, fourth, true);
-                android.util.Log.i("ArchpheneDocuments",
-                        "Launched running document restart probe source=" + sourcePackage
-                                + " target=" + targetPackage);
+                writeTestDocument(first, continueProbe ? "third-source\n" : "first-source\n");
+                writeTestDocument(second,
+                        continueProbe ? "fourth-source\n" : "second-source\n");
+                launchTestDocumentSession(targetPackage, first, second, continueProbe);
+                android.util.Log.i("ArchpheneDocuments", continueProbe
+                        ? "Launched running document restart probe source=" + sourcePackage
+                                + " target=" + targetPackage + " suffix=" + suffix
+                        : "Launched initial document session probe source=" + sourcePackage
+                                + " target=" + targetPackage + " suffix=" + suffix);
             } catch (Exception error) {
                 android.util.Log.e("ArchpheneDocuments",
                         "Could not launch document conflict probe", error);

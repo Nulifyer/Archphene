@@ -26,6 +26,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /** One serialized native compositor runtime shared by every Linux wrapper. */
 public final class ArchpheneCompositorSession implements AutoCloseable {
@@ -134,6 +135,7 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
     private volatile boolean retainedIme;
     private volatile boolean accessibilityImeActive;
     private volatile boolean nativeImeActive;
+    private final AtomicInteger imeRequestGeneration = new AtomicInteger();
     private volatile boolean independentWindows;
     private volatile int activeSecondaryWindowId;
     private float gestureInitialSpan;
@@ -1096,10 +1098,12 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
 
     private void requestIme(ArchpheneInputView target,
             ArchpheneInputView.EditorState state, String source) {
+        int generation = imeRequestGeneration.incrementAndGet();
         activity.runOnUiThread(() -> {
             target.setEditorState(state);
             target.requestFocus();
             target.postDelayed(() -> {
+                if (generation != imeRequestGeneration.get()) return;
                 InputMethodManager input = (InputMethodManager)
                         activity.getSystemService(Activity.INPUT_METHOD_SERVICE);
                 input.restartInput(target);
@@ -1115,6 +1119,7 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
     }
 
     private void hideIme() {
+        imeRequestGeneration.incrementAndGet();
         activity.runOnUiThread(() -> {
             InputMethodManager input = (InputMethodManager)
                     activity.getSystemService(Activity.INPUT_METHOD_SERVICE);

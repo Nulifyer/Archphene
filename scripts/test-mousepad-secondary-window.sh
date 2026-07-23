@@ -73,6 +73,15 @@ fi
 menu_y=$((status_top + control_pixels * 3 / 2))
 archphene_adb_run shell input tap "$((width * 18 / 100))" "$menu_y"
 popup_log="$(archphene_wait_log 'popup registry=[0-9]' 10 'ArchpheneInput:V *:S')"
+sleep .5
+popup_settled_log="$(archphene_adb_run logcat -d -v brief \
+  -s ArchpheneInput:V ArchpheneRuntime:I AndroidRuntime:E '*:S')"
+ime_before="$(grep -c 'IME show source=' <<<"$input_log" || true)"
+ime_after="$(grep -c 'IME show source=' <<<"$popup_settled_log" || true)"
+((ime_after <= ime_before)) \
+  || archphene_die 'Mousepad menu reopened the editor IME over its popup'
+[[ "$popup_settled_log" != *'Protocol error'* ]] \
+  || archphene_die 'Mousepad menu triggered a Wayland protocol error'
 read -r popup_x popup_y popup_width popup_height <<<"$(sed -n \
   's/.*popup registry=[0-9]*:\([0-9][0-9]*\),\([0-9][0-9]*\),\([0-9][0-9]*\),\([0-9][0-9]*\).*/\1 \2 \3 \4/p' \
   <<<"$popup_log" | tail -n1)"
@@ -82,12 +91,29 @@ preferences_y=$((status_top + popup_y + popup_height - control_pixels / 2))
 archphene_adb_run shell input tap "$preferences_x" "$preferences_y"
 sleep .5
 archphene_adb_run shell input tap "$preferences_x" "$preferences_y"
-child_log="$(archphene_wait_log 'primary=false .*title=Mousepad Preferences' 15 'ArchpheneInput:V *:S')"
+child_log="$(archphene_wait_log \
+  'mapped=true active=true primary=false .*title=Mousepad Preferences' 15 \
+  'ArchpheneInput:V *:S')"
 child="$({
   python3 -c 'import re,sys;m=re.search(r"window id=(\d+).*primary=false.*title=Mousepad Preferences",sys.stdin.read());print(m.group(1) if m else "")' <<<"$child_log"
 })"
+read -r child_geometry_x child_geometry_y child_width child_height \
+  child_frame_x child_frame_y child_frame_width child_frame_height <<<"$({
+  python3 -c '
+import re, sys
+child, text = sys.argv[1], sys.stdin.read()
+matches = re.findall(
+    rf"window id={re.escape(child)} .*?mapped=true .*?"
+    r"geometry=(-?\d+),(-?\d+) (\d+)x(\d+).*?"
+    r"compositedFrame=(-?\d+),(-?\d+) (\d+)x(\d+)", text)
+print(" ".join(matches[-1]) if matches else "")
+' "$child" <<<"$child_log"
+})"
 
 [[ -n "$main" && -n "$child" && "$main" != "$child" ]] || archphene_die 'secondary preferences window not created'
+[[ -n "${child_frame_height:-}" && "$child_width" -gt "$control_pixels" \
+    && "$child_height" -gt "$control_pixels" ]] \
+  || archphene_die 'secondary preferences window geometry is incomplete'
 log="$(archphene_adb_run logcat -d -s ArchpheneInput:V ArchpheneLinuxApp:V '*:S')"
 printf '%s\n' "$log" >"$artifact_dir/logcat.txt"
 python3 "$ARCHPHENE_SCRIPTS_DIR/lib/wayland-geometry-check.py" \
@@ -96,6 +122,27 @@ archphene_adb_run exec-out screencap >"$artifact_dir/preferences.raw"
 archphene_adb_run exec-out screencap -p >"$artifact_dir/preferences.png"
 python3 "$ARCHPHENE_SCRIPTS_DIR/lib/frame-health-check.py" \
   "$artifact_dir/preferences.raw"
+
+# Exercise the first visible checkbox through the same Android pointer route a
+# user touches. The checkbox center is derived from the finalized child content
+# frame and density policy; no Mousepad-specific source or widget ID is used.
+checkbox_x=$((child_frame_x + child_geometry_x + control_pixels / 2))
+checkbox_y=$((status_top + child_frame_y + child_geometry_y \
+  + control_pixels * 5 / 2))
+archphene_adb_run logcat -c
+archphene_adb_run shell input tap "$checkbox_x" "$checkbox_y"
+archphene_wait_log 'pointer button pressed=false result=1' 10 \
+  'ArchpheneInput:D *:S' >/dev/null
+sleep .5
+archphene_adb_run exec-out screencap >"$artifact_dir/checkbox-toggled.raw"
+archphene_adb_run exec-out screencap -p >"$artifact_dir/checkbox-toggled.png"
+python3 "$ARCHPHENE_SCRIPTS_DIR/lib/theme-frame-check.py" different \
+  "$artifact_dir/preferences.raw" "$artifact_dir/checkbox-toggled.raw" \
+  --left-percent 14 --right-percent 25 --top-percent 13 --bottom-percent 23 \
+  --minimum-difference 1 --minimum-changed-ratio 0.01
+# Restore the original checkbox state so this visual regression is
+# non-destructive to the user's Mousepad preferences.
+archphene_adb_run shell input tap "$checkbox_x" "$checkbox_y"
 settings="$(archphene_adb_run shell run-as "$package" \
   cat files/linux-home/.config/gtk-3.0/settings.ini)"
 css="$(archphene_adb_run shell run-as "$package" \
@@ -108,8 +155,17 @@ grep -Fxq 'gtk-theme-name=Adwaita' <<<"$settings" \
   || archphene_die 'Mousepad does not use one complete Adwaita theme'
 grep -Eq '^gtk-application-prefer-dark-theme=(true|false)$' <<<"$settings" \
   || archphene_die 'Mousepad is missing explicit light/dark preference'
-[[ "$css" != *'background-color:'* ]] \
-  || archphene_die 'Mousepad GTK CSS still overrides partial surface colors'
+if [[ "$css" == *'@define-color accent_bg_color'* ]]; then
+  [[ "$css" == *'checkbutton check:checked, check:checked'* \
+      && "$css" == *'checkbutton check:checked:disabled'* \
+      && "$css" == *'background-image: none'* \
+      && "$css" == *'background-color: @accent_bg_color'* \
+      && "$css" == *'color: @accent_fg_color'* ]] \
+    || archphene_die 'Mousepad Material You CSS lacks complete selected-control states'
+else
+  [[ "$css" != *'background-color:'* ]] \
+    || archphene_die 'Mousepad non-Material GTK CSS overrides Adwaita surfaces'
+fi
 affordance_pixels=$(((affordance_dp * wm_density + 80) / 160))
 grep -Fq 'checkbutton check, check, radiobutton radio, radio' <<<"$css" \
   || archphene_die 'Mousepad GTK CSS does not scale check and radio indicators'
@@ -125,7 +181,50 @@ python3 "$ARCHPHENE_SCRIPTS_DIR/lib/visual-manifest.py" \
   --field "primaryWindow=$main" --field "secondaryWindow=$child" \
   --artifact "$artifact_dir/preferences.raw" \
   --artifact "$artifact_dir/preferences.png" \
+  --artifact "$artifact_dir/checkbox-toggled.raw" \
+  --artifact "$artifact_dir/checkbox-toggled.png" \
   --artifact "$artifact_dir/logcat.txt" --artifact "$artifact_dir/settings.ini" \
   --artifact "$artifact_dir/gtk.css"
-archphene_adb_run shell input keyevent KEYCODE_BACK
-archphene_note "Mousepad Preferences visual gate passed: child $child is bounded, Adwaita owns complete colors, and the rendered frame is nonblank. Evidence: $artifact_dir"
+
+# Close the secondary through its actual GTK title button and require only that
+# child to disappear. Then close the primary title button and require the Linux
+# runtime and Android host to finish instead of leaving a stale black frame.
+android_pid="$(archphene_android_pid "$package")"
+linux_pid="$(archphene_linux_loader_pid "$android_pid")"
+child_close_x=$((child_frame_x + child_geometry_x + child_width \
+  - control_pixels / 2))
+child_close_y=$((status_top + child_frame_y + child_geometry_y \
+  + control_pixels / 2))
+archphene_adb_run logcat -c
+archphene_adb_run shell input tap "$child_close_x" "$child_close_y"
+archphene_wait_log "window id=$main .*mapped=true active=true primary=true" 15 \
+  'ArchpheneInput:I AndroidRuntime:E *:S' >/dev/null
+post_child_log="$(archphene_adb_run logcat -d -v brief \
+  -s ArchpheneInput:I AndroidRuntime:E '*:S')"
+[[ "$post_child_log" != *"window id=$child "*"mapped=true"* ]] \
+  || archphene_die 'Mousepad Preferences remained in the settled window registry after close'
+[[ "$(archphene_android_pid "$package")" == "$android_pid" \
+    && "$(archphene_linux_loader_pid "$android_pid")" == "$linux_pid" ]] \
+  || archphene_die 'closing Mousepad Preferences restarted or stopped the primary app'
+
+primary_close_x=$((width - control_pixels / 2))
+primary_close_y=$((status_top + control_pixels / 2))
+archphene_adb_run logcat -c
+archphene_adb_run shell input tap "$primary_close_x" "$primary_close_y"
+archphene_wait_log 'Linux runtime exited; finishing Android host' 20 \
+  'ArchpheneLinuxApp:I ArchpheneRuntime:I AndroidRuntime:E *:S' >/dev/null
+deadline=$((SECONDS + 10))
+activity_state=
+while ((SECONDS < deadline)); do
+  activity_state="$(archphene_adb_run shell dumpsys activity activities)"
+  if [[ -z "$(archphene_linux_loader_pid "$android_pid" || true)" \
+      && "$activity_state" != *"$package"* ]]; then
+    break
+  fi
+  sleep .25
+done
+[[ -z "$(archphene_linux_loader_pid "$android_pid" || true)" ]] \
+  || archphene_die 'Mousepad primary close left the Linux runtime running'
+[[ "$activity_state" != *"$package"* ]] \
+  || archphene_die 'Mousepad primary close left a stale Android Activity'
+archphene_note "Mousepad Preferences visual/interaction gate passed: checkbox toggled/restored, child $child closed independently, primary close finished the host, and Adwaita-owned pixels remained bounded. Evidence: $artifact_dir"

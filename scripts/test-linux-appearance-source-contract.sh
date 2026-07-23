@@ -18,13 +18,18 @@ gtk_method="$(sed -n '/private void writeGtkTheme(/,/private void writeKdeTheme(
 [[ "$gtk_method" == *'gtk-theme-name=Adwaita'* \
     && "$gtk_method" == *'gtk-application-prefer-dark-theme='* ]] \
   || archphene_die 'GTK policy must let one complete Adwaita variant own light/dark colors'
-[[ "$gtk_method" != *'background-color:'* \
+[[ "$gtk_method" != *'window, dialog, popover, menu {\n"\n                + "  background-color:'* \
     && "$gtk_method" != *'\n                + "*:disabled'* ]] \
   || archphene_die 'GTK policy must not overlay partial base or disabled-state colors'
 [[ "$gtk_method" == *'@define-color accent_color'* \
     && "$gtk_method" == *'@define-color accent_bg_color'* \
-    && "$gtk_method" == *'@define-color accent_fg_color'* ]] \
-  || archphene_die 'GTK Material You must use semantic accent color names'
+    && "$gtk_method" == *'@define-color accent_fg_color'* \
+    && "$gtk_method" == *'checkbutton check:checked, check:checked'* \
+    && "$gtk_method" == *'checkbutton check:checked:disabled'* \
+    && "$gtk_method" == *'background-image: none'* \
+    && "$gtk_method" == *'background-color: @accent_bg_color'* \
+    && "$gtk_method" == *'color: @accent_fg_color'* ]] \
+  || archphene_die 'GTK Material You must apply complete semantic accent states'
 [[ "$gtk_method" == *'checkbutton check, check, radiobutton radio, radio'* \
     && "$gtk_method" == *'visibleAffordanceDp'* \
     && "$gtk_method" == *'visibleAffordanceSize / 16f'* ]] \
@@ -71,6 +76,8 @@ grep -Fq 'int[] fontValues = {0, 100, 125, 150, 175, 200}' "$manager" \
   || archphene_die 'Linux text slider must offer Auto and 100 through 200 percent'
 grep -Fq 'String[] controlLabels = {"Auto", "18 dp", "20 dp", "22 dp"}' "$manager" \
   || archphene_die 'Linux control slider must expose visible control dp values'
+[[ "$(grep -c 'applyTestAppearancePreferences();' "$manager")" -eq 2 ]] \
+  || archphene_die 'appearance test policy must apply on cold and warm manager intents'
 grep -Fq 'font == 175 || font == 200' "$bridge" \
   || archphene_die 'wrapper does not accept the upper text slider values'
 grep -Fq 'Math.min(48,' "$bridge" \

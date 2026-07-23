@@ -59,6 +59,12 @@ run_case() {
   read -r pid runtime_pid \
     <<<"$(archphene_wait_theme_runtime "$package")" \
     || archphene_die "$label $name runtime is missing"
+  # A physical compositor can expose the loader PID before the first complete
+  # Wayland buffer reaches Android. Capture only after the primary toplevel is
+  # mapped and has had time to settle; otherwise a launch transition or stale
+  # frame can make a correct dark configuration look light.
+  archphene_wait_log 'mapped=true.*primary=true' 30 \
+    'ArchpheneInput:V AndroidRuntime:E *:S' >/dev/null
   sleep 5
   archphene_wait_appearance_log "$pid" \
     "Appearance theme=$theme resolved=$theme.*materialYou=$material" 20

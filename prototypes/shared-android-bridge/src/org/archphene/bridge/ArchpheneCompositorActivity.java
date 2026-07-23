@@ -243,6 +243,12 @@ public abstract class ArchpheneCompositorActivity extends Activity {
 
                     @Override
                     public void onPopups(List<ArchpheneCompositorSession.PopupFrame> popups) {
+                        if (!popups.isEmpty() && session != null) {
+                            // AT-SPI focus can still describe the editor while a
+                            // GTK menu owns interaction. Cancel its queued IME
+                            // show before Android resizes the popup's viewport.
+                            session.setAccessibilityTextInput(compositorView, false);
+                        }
                         if (accessibilityBridge == null) return;
                         ArrayList<ArchpheneAccessibilityBridge.PopupFrame> frames =
                                 new ArrayList<>(popups.size());
@@ -1851,7 +1857,30 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                         + "@define-color theme_selected_fg_color rgb("
                         + selectionForeground + ");\n"
                 : "";
-        String css = materialColors
+        String materialStates = appearanceMaterialYou && Build.VERSION.SDK_INT >= 31
+                ? "checkbutton check:checked, check:checked,\n"
+                        + "radiobutton radio:checked, radio:checked, switch:checked {\n"
+                        + "  background-image: none;\n"
+                        + "  background-color: @accent_bg_color;\n"
+                        + "  color: @accent_fg_color;\n"
+                        + "  border-color: @accent_bg_color;\n"
+                        + "}\n"
+                        + "checkbutton check:checked:disabled, check:checked:disabled,\n"
+                        + "radiobutton radio:checked:disabled, radio:checked:disabled,\n"
+                        + "switch:checked:disabled {\n"
+                        + "  opacity: 0.5;\n"
+                        + "}\n"
+                        + "text selection, entry selection, label selection,\n"
+                        + "treeview:selected, row:selected {\n"
+                        + "  background-color: @accent_bg_color;\n"
+                        + "  color: @accent_fg_color;\n"
+                        + "}\n"
+                        + "progressbar progress, scale highlight {\n"
+                        + "  background-color: @accent_bg_color;\n"
+                        + "  border-color: @accent_bg_color;\n"
+                        + "}\n"
+                : "";
+        String css = materialColors + materialStates
                 + "window, dialog, popover, menu {\n"
                 + "  font-size: " + uiFontSize + "px;\n"
                 + "}\n"

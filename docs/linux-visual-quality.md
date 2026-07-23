@@ -107,7 +107,7 @@ and Foot cases on current-source x86_64 and AArch64 builds. Vulkan presentation,
 16 KB x86_64, physical x86_64, and supported GrapheneOS remain separate named
 release lanes and must not be inferred from the normal emulator.
 
-## Current audit result (July 22, 2026)
+## Current audit result (July 23, 2026)
 
 The current x86_64 emulator build passes the representative fail-closed gates:
 
@@ -125,6 +125,11 @@ The current x86_64 emulator build passes the representative fail-closed gates:
 - Kate survives tablet portrait/landscape and renders complete, readable editor
   UI on a real temporary 1920x1080 emulator display with targeted text input.
 
-Current-source physical AArch64 repetition remains blocked by development-signing
-continuity on the attached Samsung. Its installed control fixtures remain useful,
-but are not evidence for this checkout's wrapper bytes.
+The Samsung KCalc and Mousepad Linux homes were archived, deliberately migrated
+to the maintained manager signer, restored, and updated from the same shared
+bridge source. Current-source AArch64 core phone cases now pass: KCalc covers
+calculation, menu/contrast, rotation, live and manager-selected appearance, and
+descriptor lifecycle; Mousepad covers Preferences checkbox and close behavior,
+accessibility, IME/touch routing, live theme, Material You selected-state pixels,
+and complete host cleanup. Sustained physical tablet/external-display coverage
+remains a separate release lane.

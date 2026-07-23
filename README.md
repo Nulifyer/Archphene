@@ -34,8 +34,9 @@ Each wrapped Linux application receives a normal Android package identity, UID, 
 | Application | Toolkit | Architecture | Tested environment | Status |
 |---|---|---:|---|---|
 | KCalc | Qt 6 / KDE Frameworks | x86_64 | Android 16 emulator | GUI, menus, keyboard, clipboard, theme, resize |
-| KCalc | Qt 6 / KDE Frameworks | AArch64 | Samsung Galaxy S22 Ultra, Android 15 | GUI, menus, keyboard, clipboard, freeform resize |
+| KCalc | Qt 6 / KDE Frameworks | AArch64 | Samsung Galaxy S22 Ultra, Android 15 | Current-source GUI, menus, calculation, light/dark/Material policy, rotation, lifecycle |
 | Mousepad | GTK 3 | x86_64 | Android 16 emulator | Editing, dialogs, IME, document open/save/reopen |
+| Mousepad | GTK 3 | AArch64 | Samsung Galaxy S22 Ultra, Android 15 | Current-source Preferences, accessibility, IME, Material You, document restart/writeback, lifecycle |
 | Foot | Native Wayland | x86_64 | Android 16 emulator | UTF-8 IME, clipboard/selection, scrollback, live resize, lifecycle |
 | Foot | Native Wayland | AArch64 | Samsung Galaxy S22 Ultra, Android 15 | Dark-mode UI, UTF-8 IME, clipboard/selection, wheel scrollback, resize, lifecycle |
 | GLMark2 | Mesa / Wayland | x86_64 | Android 16 emulator | Full suite, virgl host renderer, 1080x2205, score 12 |
@@ -115,7 +116,7 @@ The repository contains focused emulator and physical-device tests under `script
 ./scripts/test-arm64-physical-regression.sh --serial <adb-serial>
 ```
 
-`--provision` installs the required KCalc and Mousepad fixtures through real manager package transactions on an emulator; omit it when those fixtures already exist. The physical suite expects the curated ARM64 package/runtime workspace and a compatible attached device. Use `--skip-install` for a non-destructive run against already-installed fixtures when signer-bound manager data must be preserved. Individual scripts cover manager workflows, package signatures, KCalc interactions, Mousepad documents, IME behavior, rotation, and update transactions.
+`--provision` installs the required KCalc and Mousepad fixtures through real manager package transactions on an emulator; omit it when those fixtures already exist. The physical suite expects the curated ARM64 package/runtime workspace and a compatible attached device. Use `--skip-install` for a non-destructive run against already-installed fixtures. Signer migration is a separate explicit backup-and-confirm workflow, never an implicit test step. Individual scripts cover manager workflows, package signatures, KCalc interactions, Mousepad documents, IME behavior, rotation, and update transactions.
 
 ## Current limitations
 

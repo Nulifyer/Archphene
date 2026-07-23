@@ -163,10 +163,11 @@ focused artifact-producing geometry/render checks with:
 ./scripts/test-linux-appearance-source-contract.sh
 ./scripts/test-kcalc-menu-switch.sh --serial emulator-5554
 ./scripts/test-mousepad-secondary-window.sh --serial emulator-5554
+./scripts/test-mousepad-material-you-visual.sh --serial emulator-5554
 ./scripts/test-foot-visual-quality.sh --serial emulator-5554
 ./scripts/test-foot-live-theme.sh --serial emulator-5554
 ./scripts/test-linux-control-density-matrix.sh \
-  --serial emulator-5554 --package PACKAGE --app-name NAME --toolkit qt6
+  --serial emulator-5554 --package PACKAGE --label NAME --toolkit qt6
 ./scripts/test-gpu-visual-quality.sh --serial emulator-5554 --package PACKAGE
 ./scripts/test-real-app-accessibility.sh \
   --serial emulator-5554 \
