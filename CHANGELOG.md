@@ -6,6 +6,7 @@ Notable user-facing changes will be recorded here.
 
 ### Fixed
 
+- Replaced KCalc's compressed-PNG byte comparison with exact semantic calculation and app-region pixel assertions, restored Terminal's nested prompt-collapse check with physical notification-permission preservation, and restored `wev`'s nonzero-runtime rejection. The generic candidate gate now selects the manager's existing direct-Wayland assembly mode; current manager-generated official `wev` wrappers pass the complete input protocol suite on x86_64 and AArch64.
 - Restored the local current-source manager self-update fixture with exact APK identity/signature checks, Android-owned confirmation, stable install identity, current app-list reconciliation, and fail-safe restoration of the emulator's original manager APK and install-source policy.
 - Restored the runtime-pack gate's catalog parser and unbound legacy-module rejection checks, alongside its existing cross-UID, descriptor-view, lease, and cleanup assertions. The complete trust-and-execution gate passes on x86_64 and physical AArch64.
 - Restored the display/theme regressions discarded by the Bash migration: the release matrix again validates bounded manager controls, KCalc viewport fill, process continuity, and compositor logs across phone, tablet, landscape, and docked profiles; the shared toolkit gate now proves stable rendered light/dark/light transitions and live/cold equivalence; and rotation again validates geometry plus visible calculation input. KCalc and Mousepad pass the strengthened gates on x86_64 and physical AArch64.

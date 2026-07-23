@@ -88,10 +88,19 @@ if [[ "$skip_install" == false ]]; then
   archphene_adb_run shell am force-stop com.google.android.packageinstaller
   archphene_adb_run logcat -c
   archphene_adb_run shell am force-stop "$manager"
+  assembly_args=(
+    --es archphene_test_assemble_qt "$package_name"
+    --ez archphene_test_stage_transaction true
+    --ez archphene_test_install_assembled true
+  )
+  if [[ "$expected_toolkit" == wayland ]]; then
+    assembly_args+=(
+      --ez archphene_test_wayland_candidate true
+      --es archphene_test_wayland_executable "$package_name"
+    )
+  fi
   archphene_adb_run shell am start -W -n "$manager/.MainActivity" \
-    --es archphene_test_assemble_qt "$package_name" \
-    --ez archphene_test_stage_transaction true \
-    --ez archphene_test_install_assembled true >/dev/null
+    "${assembly_args[@]}" >/dev/null
 
   package_pattern="$(python3 -c 'import re,sys;print(re.escape(sys.argv[1]))' "$package_name")"
   stage_log="$(archphene_wait_log \
