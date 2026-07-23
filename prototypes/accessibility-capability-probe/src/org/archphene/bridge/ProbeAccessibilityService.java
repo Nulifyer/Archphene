@@ -99,8 +99,8 @@ public final class ProbeAccessibilityService extends AccessibilityService {
         Rect bounds = new Rect();
         node.getBoundsInScreen(bounds);
         output.append("NODE|").append(path).append('|').append(node.getClassName())
-                .append('|').append(node.getText()).append('|')
-                .append(node.getContentDescription()).append('|')
+                .append('|').append(safeField(node.getText())).append('|')
+                .append(safeField(node.getContentDescription())).append('|')
                 .append(bounds.flattenToString()).append('|')
                 .append(node.isEnabled()).append('|').append(node.isClickable())
                 .append('|').append(node.isEditable())
@@ -245,12 +245,17 @@ public final class ProbeAccessibilityService extends AccessibilityService {
     private static String safePackage(String value) {
         return value.replaceAll("[^A-Za-z0-9._-]", "_");
     }
+    private static String safeField(CharSequence value) {
+        if (value == null) return "null";
+        return value.toString().replace('\r', ' ').replace('\n', ' ').replace('|', '/');
+    }
     private static void appendNode(AccessibilityNodeInfo node, StringBuilder output, int depth) {
         if (depth > 32 || output.length() > 128 * 1024) return;
         Rect bounds = new Rect();
         node.getBoundsInScreen(bounds);
         output.append(depth).append('|').append(node.getClassName()).append('|')
-                .append(node.getText()).append('|').append(node.getContentDescription())
+                .append(safeField(node.getText())).append('|')
+                .append(safeField(node.getContentDescription()))
                 .append('|').append(bounds.flattenToString()).append('\n');
         int children = Math.min(node.getChildCount(), 1024);
         for (int index = 0; index < children; index++) {

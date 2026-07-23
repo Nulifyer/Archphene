@@ -41,22 +41,198 @@ archphene_adb_run shell pm path "$target" >/dev/null
 
 safe_target="$(sed 's/[^A-Za-z0-9._-]/_/g' <<<"$target")"
 tree_name="framework-accessibility-tree-$safe_target.txt"
+tree_file="files/$tree_name"
+command_file=files/framework-accessibility-command.txt
+response_file=files/framework-accessibility-response.txt
 safe_serial="${serial//[^A-Za-z0-9._-]/_}"
 artifact_dir="${artifact_dir:-$ARCHPHENE_ROOT/tooling/artifacts/visual-audit/$safe_serial/${profile,,}-accessibility}"
 mkdir -p "$artifact_dir"
 old_services="$(archphene_adb_run shell settings get secure enabled_accessibility_services | tr -d '\r')"
 old_enabled="$(archphene_adb_run shell settings get secure accessibility_enabled | tr -d '\r')"
 restore() {
+  archphene_adb_run shell am force-stop "$probe" >/dev/null 2>&1 || true
   if [[ "$old_services" == null || -z "$old_services" ]]; then
     archphene_adb_run shell settings delete secure enabled_accessibility_services >/dev/null 2>&1 || true
   else
     archphene_adb_run shell settings put secure enabled_accessibility_services "$old_services" >/dev/null 2>&1 || true
   fi
-  archphene_adb_run shell settings put secure accessibility_enabled "$old_enabled" >/dev/null 2>&1 || true
+  if [[ "$old_enabled" == null || -z "$old_enabled" ]]; then
+    archphene_adb_run shell settings delete secure accessibility_enabled >/dev/null 2>&1 || true
+  else
+    archphene_adb_run shell settings put secure accessibility_enabled "$old_enabled" >/dev/null 2>&1 || true
+  fi
 }
 trap restore EXIT
 
-archphene_adb_run shell run-as "$probe" rm -f "files/$tree_name"
+get_target_tree() {
+  archphene_adb_run shell run-as "$probe" cat "$tree_file" 2>/dev/null \
+    | tr -d '\r' || true
+}
+
+wait_target_tree() {
+  local absent="$1"
+  shift
+  local deadline tree expected present
+  deadline=$((SECONDS + timeout))
+  while ((SECONDS < deadline)); do
+    tree="$(get_target_tree)"
+    present=true
+    for expected in "$@"; do
+      [[ "$tree" == *"$expected"* ]] || present=false
+    done
+    if [[ "$present" == true && ( -z "$absent" || "$tree" != *"$absent"* ) ]]; then
+      printf '%s' "$tree"
+      return 0
+    fi
+    sleep 0.2
+  done
+  archphene_die "timed out waiting for $profile accessibility tree: $* (absent: $absent)"
+}
+
+base64url() {
+  printf '%s' "$1" | base64 -w0 | tr '+/' '-_' | tr -d '='
+}
+
+wait_target_action() {
+  local selector="$1" required="$2" deadline tree
+  deadline=$((SECONDS + timeout))
+  while ((SECONDS < deadline)); do
+    tree="$(get_target_tree)"
+    if python3 -c '
+import sys
+selector, required = sys.argv[1], int(sys.argv[2])
+for line in sys.stdin:
+    if not line.startswith("NODE|"):
+        continue
+    fields = line.rstrip("\r\n").split("|")
+    if len(fields) < 11 or fields[6] != "true":
+        continue
+    if selector not in (fields[3], fields[4]):
+        continue
+    try:
+        actions = int(fields[-1])
+    except ValueError:
+        continue
+    if actions & required:
+        raise SystemExit(0)
+raise SystemExit(1)
+' "$selector" "$required" <<<"$tree"; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  archphene_die "timed out waiting for $profile accessibility action: $selector"
+}
+
+invoke_accessibility_action() {
+  local selector="$1" action="${2:-click}" value="${3:-}" required id payload response deadline
+  case "$action" in
+    click) required=16 ;;
+    focus) required=1 ;;
+    scroll-forward) required=4096 ;;
+    scroll-backward) required=8192 ;;
+    set-text) required=2097152 ;;
+    *) archphene_die "unsupported accessibility action: $action" ;;
+  esac
+  wait_target_action "$selector" "$required"
+  id="real-$(printf '%012x' "$((RANDOM << 16 | RANDOM))")"
+  payload="$id"$'\t'"$target"$'\t'"$action"$'\t'"$(base64url "$selector")"$'\t'"$(base64url "$value")"
+  archphene_adb_run shell run-as "$probe" rm -f "$response_file"
+  printf '%s' "$payload" | "$ARCHPHENE_ADB" "${ARCHPHENE_ADB_ARGS[@]}" \
+    shell run-as "$probe" tee "$command_file" >/dev/null
+  deadline=$((SECONDS + timeout))
+  while ((SECONDS < deadline)); do
+    response="$(archphene_adb_run shell run-as "$probe" \
+      cat "$response_file" 2>/dev/null | tr -d '\r\n' || true)"
+    if [[ "$response" == "$id"$'\t'* ]]; then
+      [[ "$response" == "$id"$'\t'OK ]] \
+        || archphene_die "accessibility action '$action $selector' was rejected: $response"
+      return 0
+    fi
+    sleep 0.1
+  done
+  archphene_die "timed out waiting for accessibility action '$action $selector'"
+}
+
+assert_current_bounds() {
+  local tree="$1" temporary
+  temporary="$artifact_dir/current-tree.txt"
+  printf '%s\n' "$tree" >"$temporary"
+  python3 "$ARCHPHENE_SCRIPTS_DIR/lib/accessibility-tree-check.py" \
+    "$temporary" --expected-text "$profile" \
+    --display-width "$width" --display-height "$height" >/dev/null
+}
+
+test_kcalc() {
+  local tree selector
+  tree="$(wait_target_tree '' '|KCalc|' '|Clear|' '|Equals|')"
+  if [[ "$tree" == *'|Close|'* ]]; then
+    invoke_accessibility_action Close
+    wait_target_tree '|Close|' '|KCalc|' >/dev/null
+  fi
+  invoke_accessibility_action Clear
+  tree="$(wait_target_tree '' '|KCalc|' '|Clear|' '|Equals|')"
+  assert_current_bounds "$tree"
+  for selector in Six Add Five Equals; do
+    invoke_accessibility_action "$selector"
+  done
+  tree="$(wait_target_tree '' '|11|')"
+  assert_current_bounds "$tree"
+  invoke_accessibility_action File
+  tree="$(wait_target_tree '' '|Quit|')"
+  assert_current_bounds "$tree"
+  invoke_accessibility_action Edit
+  tree="$(wait_target_tree '' '|Undo|' '|Redo|' '|Copy|' '|Paste|')"
+  assert_current_bounds "$tree"
+  invoke_accessibility_action Settings
+  tree="$(wait_target_tree '' '|Simple Mode|' '|Science Mode|' '|Configure KCalc')"
+  assert_current_bounds "$tree"
+  invoke_accessibility_action Help
+  tree="$(wait_target_tree '' '|KCalc Handbook|' '|Report Bug' '|About KCalc|')"
+  assert_current_bounds "$tree"
+  invoke_accessibility_action 'About KCalc'
+  tree="$(wait_target_tree '' '|About KCalc|' '|Close|')"
+  assert_current_bounds "$tree"
+  invoke_accessibility_action Close
+  wait_target_tree '|Close|' '|KCalc|' >/dev/null
+}
+
+test_mousepad() {
+  local tree
+  tree="$(wait_target_tree '' '|Mousepad|')"
+  if [[ "$tree" == *'previous session did not end normally'* ]]; then
+    invoke_accessibility_action No
+  fi
+  tree="$(wait_target_tree '' '|Untitled 1 - Mousepad|' '|File|File menu|' '|Edit|Edit menu|')"
+  assert_current_bounds "$tree"
+  invoke_accessibility_action File
+  tree="$(wait_target_tree '' '|Open a file|' '|Save current document as another file|')"
+  assert_current_bounds "$tree"
+  invoke_accessibility_action Edit
+  tree="$(wait_target_tree '|Open a file|' '|Paste the clipboard|' '|Show the preferences dialog|')"
+  assert_current_bounds "$tree"
+  invoke_accessibility_action 'Show the preferences dialog'
+  tree="$(wait_target_tree '' '|Mousepad Preferences|')"
+  assert_current_bounds "$tree"
+  archphene_adb_run shell input keyevent 4
+  wait_target_tree '|Mousepad Preferences|' '|Untitled 1 - Mousepad|' >/dev/null
+  invoke_accessibility_action File
+  wait_target_tree '' '|Open a file|' >/dev/null
+  invoke_accessibility_action 'Open a file'
+  tree="$(wait_target_tree '' '|Open File|')"
+  assert_current_bounds "$tree"
+  archphene_adb_run shell input keyevent 4
+  sleep 0.5
+  if [[ "$(get_target_tree)" == *'|Open File|'* ]]; then
+    archphene_adb_run shell input keyevent 4
+  fi
+  wait_target_tree '|Open File|' '|Untitled 1 - Mousepad|' >/dev/null
+}
+
+archphene_adb_run shell am start -W -n \
+  "$probe/org.archphene.bridge.AccessibilityProbeActivity" >/dev/null
+archphene_adb_run shell run-as "$probe" rm -f \
+  "$tree_file" "$command_file" "$response_file"
 archphene_adb_run shell settings put secure enabled_accessibility_services "$service"
 archphene_adb_run shell settings put secure accessibility_enabled 1
 archphene_adb_run logcat -c
@@ -65,11 +241,18 @@ archphene_adb_run shell am force-stop "$target"
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
 archphene_wait_log 'mapped=true' "$timeout" 'ArchpheneInput:V AndroidRuntime:E *:S' >/dev/null
 
+read -r width height <<<"$(archphene_adb_run shell wm size \
+  | sed -n 's/.*: \([0-9]*\)x\([0-9]*\).*/\1 \2/p' | tail -n1)"
+case "$profile" in
+  KCalc) test_kcalc ;;
+  Mousepad) test_mousepad ;;
+esac
+
 deadline=$((SECONDS + timeout))
 tree=
 node_count=0
 while ((SECONDS < deadline)); do
-  tree="$(archphene_adb_run shell run-as "$probe" cat "files/$tree_name" 2>/dev/null || true)"
+  tree="$(get_target_tree)"
   node_count="$(grep -c '^NODE|' <<<"$tree" || true)"
   if ((node_count >= 6)) && [[ "$tree" == *"$profile"* ]]; then
     break
@@ -79,8 +262,6 @@ done
 ((node_count >= 6)) && [[ "$tree" == *"$profile"* ]] \
   || archphene_die "real $profile semantic tree did not settle (nodes=$node_count)"
 printf '%s\n' "$tree" >"$artifact_dir/accessibility-tree.txt"
-read -r width height <<<"$(archphene_adb_run shell wm size \
-  | sed -n 's/.*: \([0-9]*\)x\([0-9]*\).*/\1 \2/p' | tail -n1)"
 python3 "$ARCHPHENE_SCRIPTS_DIR/lib/accessibility-tree-check.py" \
   "$artifact_dir/accessibility-tree.txt" --expected-text "$profile" \
   --display-width "$width" --display-height "$height"
