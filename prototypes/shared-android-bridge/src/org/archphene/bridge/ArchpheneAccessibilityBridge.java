@@ -698,19 +698,9 @@ final class ArchpheneAccessibilityBridge extends AccessibilityNodeProvider {
             }
         }
         if (closest != 0) return closest;
-        for (WindowDescriptor window : windows.values()) {
-            long difference = Math.abs((long)width - window.width)
-                    + Math.abs((long)height - window.height);
-            if (difference < closestDifference) {
-                closest = window.id;
-                closestDifference = difference;
-            }
-        }
-        if (closest != 0) return closest;
-        if (primary != 0 && !assignedWindows.contains(primary)) return primary;
-        for (int windowId : windows.keySet()) {
-            if (!assignedWindows.contains(windowId)) return windowId;
-        }
+        // Independent Android windows must remain one-to-one with semantic
+        // roots. Reusing an already assigned host makes a dismissed dialog's
+        // controls reappear at the edge of the primary window.
         return 0;
     }
     private ArchpheneAccessibilityBridge bridgeForNode(int nodeId) {

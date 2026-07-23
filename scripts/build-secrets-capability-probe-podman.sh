@@ -3,10 +3,14 @@ set -euo pipefail
 source "$(dirname "$0")/lib/common.sh"
 
 android_abi=x86_64
+include_client_fixtures=true
 while (($#)); do
   case "$1" in
     --android-abi) android_abi="${2:?missing value for --android-abi}"; shift 2 ;;
-    -h|--help) echo "usage: $0 [--android-abi x86_64|arm64-v8a]"; exit 0 ;;
+    --without-client-fixtures) include_client_fixtures=false; shift ;;
+    -h|--help)
+      echo "usage: $0 [--android-abi x86_64|arm64-v8a] [--without-client-fixtures]"
+      exit 0 ;;
     *) archphene_die "unknown argument: $1" ;;
   esac
 done
@@ -17,9 +21,10 @@ if ! archphene_podman_image_exists "$image"; then
   podman build -f "$ARCHPHENE_ROOT/containers/android-native.Containerfile" -t "$image" "$ARCHPHENE_ROOT"
 fi
 podman run --rm -v "$ARCHPHENE_ROOT:/workspace" -w /workspace \
-  -e "ANDROID_ABI=$android_abi" -e KEYSTORE_PATH -e KEYSTORE_PASSWORD -e KEY_ALIAS -e KEY_PASSWORD \
+  -e "ANDROID_ABI=$android_abi" \
+  -e "INCLUDE_SECRET_CLIENT_FIXTURES=$include_client_fixtures" \
+  -e KEYSTORE_PATH -e KEYSTORE_PASSWORD -e KEY_ALIAS -e KEY_PASSWORD \
   "$image" bash scripts/build-secrets-capability-probe.sh
 apk="$ARCHPHENE_ROOT/prototypes/secrets-capability-probe/out-$android_abi/archphene-secrets-probe.apk"
 archphene_require_file "$apk"
 archphene_note "Container-built secrets capability probe: $apk"
-

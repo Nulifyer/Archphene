@@ -36,6 +36,25 @@ for density in automatic compact comfortable touch; do
 done
 grep -Fq 'result.putString("control_density"' "$provider" \
   || archphene_die 'runtime provider does not publish control density'
+python3 - "$provider" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+branch = re.search(
+    r"if \(APPEARANCE_METHOD\.equals\(method\)\) \{(?P<body>.*?)\n\s*\}",
+    source,
+    re.DOTALL,
+)
+if branch is None:
+    raise SystemExit("appearance provider method is not a guarded block")
+body = branch.group("body")
+authorization = body.find("requireWrapperCaller();")
+response = body.find("return appearanceBundle();")
+if authorization < 0 or response < 0 or authorization > response:
+    raise SystemExit("appearance provider publishes policy before authenticating its caller")
+PY
 grep -Fq 'getString("linux-control-density", "automatic")' "$store" \
   || archphene_die 'automatic control sizing is not the fresh-install default'
 grep -Fq 'getInt("linux-font-percent", 0)' "$store" \

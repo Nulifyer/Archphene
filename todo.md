@@ -13,7 +13,14 @@ This is the prioritized completion queue for the Archphene Android application. 
   - [x] Pass the non-destructive ARM64 physical regression on the connected Samsung for bridge startup, KCalc calculation/rotation/resize, compositor completion, and FD/process cleanup.
   - [x] Fix migration defects found by those gates: `set -u` initialization, SIGPIPE-sensitive comparisons, substring UI matches, warm-intent delivery, deterministic cold launches, real skip-install behavior, keyboard education handling, and Mousepad menu/window routing.
   - [ ] Run the remaining standalone scripts not covered by the two broad regression entry points and confirm that each printed success claim is backed by an assertion. Hardware- and 16 KB-specific scripts remain tied to their named lanes.
-    - Restore or deliberately rescope the highest-risk conversions first: secrets, real-app accessibility, accessibility capability, generated camera, Terminal project trees/home documents, GUI document broker, and drag-and-drop. A mechanical comparison found 80 old PowerShell check signals versus 5 Bash check signals in the secrets test, 51 versus 8 in real-app accessibility, 64 versus 5 in the accessibility capability test, 39 versus 8 in generated camera, and 41 versus 4 in Terminal project trees. These counts are triage signals rather than one-to-one assertion equivalence.
+    - [x] Audit the highest-risk PowerShell-to-Bash conversions rather than treating syntax and a success message as behavioral evidence. The July 22 review confirmed material assertion loss in secrets, real-app accessibility, the accessibility capability probe, generated camera, and Terminal project trees; Terminal home documents, GUI document broker, and drag-and-drop retain meaningful assertions but still need standalone execution.
+    - [x] Restore and execute the core secrets regression on emulator and Samsung: ciphertext/metadata, overwrite, restart persistence, bounds, delete, stale-socket rejection, log redaction, and the private Secret Service D-Bus wire contract pass. A deliberate core-only probe build keeps this coverage runnable without weakening the default full-client build.
+    - [ ] Rebuild the absent Arch libsecret/KWallet fixture and restore the standard desktop-client assertions in the Bash secrets test; the default probe build continues to fail closed when the required x86_64 fixture is absent.
+    - [x] Restore semantic publication, secondary-window ownership, reverse action, invalid-tree, and lifecycle assertions in `test-android-accessibility-bridge.sh`, then execute it on emulator and Samsung. The restored gate found and fixed a generic orphan-root bug that re-exported a dismissed dialog's controls at the primary window edge.
+    - [ ] Restore KCalc/Mousepad menu, dialog, normalized-bound, semantic-input, and reverse-action workflows in `test-real-app-accessibility.sh`; its current generic tree-shape check is useful but insufficient for the success claim.
+    - [ ] Restore permission-resource selection, timestamped PipeWire frame consumption, denial/no-reprompt, lease release, and Linux-process cleanup in `test-generated-camera-app.sh`.
+    - [ ] Restore the complete SAF picker, bidirectional/nested synchronization, conflict idempotence, deferred deletion, symlink rejection, persisted grant, and removal assertions in `test-terminal-project-trees.sh`; the current script only opens the picker and must not be treated as a pass.
+    - [ ] Execute and audit Terminal home documents, GUI document broker, and text/document drag-and-drop on both applicable ABIs, then make their printed claims match exactly what they assert.
 
 - [x] Complete general on-device package transactions for supported x86_64 desktop and CLI packages.
   - [x] Flow the selected desktop-entry display name/executable and detected runtime toolkit through generic wrapper assembly.
@@ -29,13 +36,14 @@ This is the prioritized completion queue for the Archphene Android application. 
   - [x] Embed the verified AArch64 runtime and separate trust assets in the ARM manager, then prove package search, resolution, verification, staging, and Terminal publication on Samsung.
   - [x] Generate arm64-v8a desktop wrapper templates and prove a real Qt package through Android PackageInstaller and app-drawer launch.
   - [x] Publish separate x86_64 and arm64-v8a release assets; accept `any` data packages but require matching ABI for native ELF files.
-- [x] Complete runtime-pack lifecycle safety.
+- [x] Complete runtime-pack lifecycle and exported-provider boundary safety.
   - [x] Add authenticated runtime-pack leases backed by stable provider clients and Binder death tokens. Running wrappers survive unbinding/GC and release on exit/death; Terminal leases each pack until its private copy is hash-verified and committed.
   - [x] Reconcile external Android uninstalls and revoke grants per package without disrupting wrappers that share a pack.
   - [x] Reuse unchanged closures before copying runtime-pack modules.
   - [x] Store verified modules once as manager-owned content-addressed blobs, migrate legacy per-pack copies, preserve per-pack authorization, garbage-collect unreferenced blobs, and validate migration plus generated KCalc launch on physical AArch64.
   - [x] Validate 4 KB and 16 KB ELF page compatibility. Runtime executables and published modules now fail closed before execution when an ELF load segment is incompatible; the AArch64 runtime is 64 KB-aligned, while current upstream Arch x86_64 packages remain 4 KB-only and are explicitly unsupported on 16 KB x86_64 Android until rebuilt.
   - [x] Clean up the complete Linux process tree when a wrapper exits. Managed launches use a dedicated process group, parent-death signal, cancellable execution registry, and final dedicated-UID descendant sweep.
+  - [x] Validate the audited appearance-provider authorization fix on a rebuilt manager. A manager-signed generated wrapper still reads policy and launches normally, while the Android shell UID is denied; the source contract rejects publishing policy before `requireWrapperCaller()`.
 - [x] Finish the Terminal product.
   - [x] Add multiple sessions/tabs and a foreground-service lifecycle. PTYs survive Activity closure under a visible Android notification, close independently by process group, and die with the Terminal app process.
   - [x] Return manager progress and terminal results to the invoking command. Per-request files correlate exact search/install/remove/upgrade requests with durable manager jobs; the signed manager reports bounded phases and terminal outcomes through a signature-protected Terminal provider.
@@ -135,8 +143,9 @@ This is the prioritized completion queue for the Archphene Android application. 
   - [x] Prove on current-source x86_64 KCalc, Kate, Mousepad, and GNOME Text Editor that explicit manager light/dark choices override the opposite Android mode and Material You changes generated semantic colors and rendered app pixels.
   - [x] Keep the representative KCalc menus/status, Mousepad Preferences/popup/close controls, and Foot CSD/text readable and bounded on the current emulator build; tablet/docked density remains configurable in Appearance settings and the visual gates now reject chrome-only or screenshot-change false positives.
   - [x] Scale generic GTK check/radio indicators and title-button glyphs independently from their touch targets. Current-source Mousepad now renders legible checked/unchecked controls and close affordances in light/dark mode, preserves density-specific phone/tablet/docked metrics, and finishes its Android host when the primary Linux window exits instead of leaving a stale frame.
-  - [ ] Rebuild the current Qt platform-theme change for AArch64 from the pinned ARM Qt development runtime, then validate current-source physical manager overrides and Material You without replacing signer-bound user data.
-  - [ ] Restore the missing GLib development dependency in the GTK settings bridge's declared clean container and rerun its reproducible x86_64/AArch64 build.
+  - [x] Rebuild and checksum the current AArch64 Qt style and platform-theme plugins against the pinned Qt 6.11.1 package.
+  - [ ] Make the complete AArch64 Qt bridge rebuild self-contained by pinning the missing KConfig development sysroot for `libarchphene_kde_config.so`, then validate current-source physical manager overrides and Material You without replacing signer-bound user data.
+  - [ ] Finish the clean GTK settings bridge build. GLib is now an explicit dependency of the pinned container, but the AArch64 build still needs a pinned GLib development sysroot before the x86_64/AArch64 rebuild can be claimed.
 - [ ] Execute the release-gate representatives in `docs/compatibility-matrix.md`.
   - [x] Promote the reviewed package matrix into maintained documentation and separate non-normative research candidates.
   - [x] Run the first x86_64 candidate wave through official resolution/signature verification and complete-closure wrapper installation; capture GTK 4, complex Qt, and native-Wayland terminal results without promoting launch-only evidence to validated support.
@@ -156,7 +165,7 @@ This is the prioritized completion queue for the Archphene Android application. 
 - [x] Document non-root Android Terminal limitations in docs/terminal-apps.md.
 - [x] Ignore repository-local generated tooling and external reference checkouts.
 - [x] Review the remaining untracked package matrix, generated artifacts, licenses, and source provenance before tracking or deleting anything.
-  - The pre-work tree had no untracked files, generated build outputs remain ignored, and the 2026-07-22 public-repository audit passed 575 tracked paths, prebuilt checksums, licensing/community-file policy, secret/size checks, and commit-pinned Actions.
+  - The pre-work tree had no untracked files, generated build outputs remain ignored, and the 2026-07-22 public-repository audit passes 594 tracked paths, prebuilt checksums, licensing/community-file policy, secret/size checks, and commit-pinned Actions.
 - [ ] Update README, focused user docs, roadmap, project status, changelog, and release notes after P0/P1 behavior is final.
 - [ ] Run a final public-repository audit after P0/P1 behavior is final.
   - [x] Add an automated source audit for required community files, stale licensing claims, generated/secret/release artifacts, oversized tracked files, private-key material, prebuilt manifests/checksums, and commit-pinned Actions.

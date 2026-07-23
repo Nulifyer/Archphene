@@ -77,7 +77,10 @@ public final class RuntimeModuleProvider extends ContentProvider {
             throw new UnsupportedOperationException("Unsupported runtime provider method");
         }
         try {
-            if (APPEARANCE_METHOD.equals(method)) return appearanceBundle();
+            if (APPEARANCE_METHOD.equals(method)) {
+                requireWrapperCaller();
+                return appearanceBundle();
+            }
             if (TERMINAL_CATALOG_METHOD.equals(method)) return terminalCatalogBundle();
             if (RELEASE_LEASE_METHOD.equals(method)) {
                 String caller = isTerminalCaller() ? requireTerminalCaller()

@@ -21,7 +21,12 @@ esac
 rm -rf "$out"
 mkdir -p "$out"/{gen,classes,dex,package/lib/$abi}
 fixture="$root/tooling/build/libsecret-probe/$dbus_arch"
-if [[ -f "$fixture/secret-tool" ]]; then
+include_client_fixtures="${INCLUDE_SECRET_CLIENT_FIXTURES:-true}"
+case "$include_client_fixtures" in true|false) ;; *)
+  echo "INCLUDE_SECRET_CLIENT_FIXTURES must be true or false" >&2
+  exit 1
+esac
+if [[ "$include_client_fixtures" == true && -f "$fixture/secret-tool" ]]; then
   case "$dbus_arch" in
     x86_64) fixture_loader=ld-linux-x86-64.so.2 ;;
     aarch64) fixture_loader=ld-linux-aarch64.so.1 ;;
@@ -33,7 +38,7 @@ if [[ -f "$fixture/secret-tool" ]]; then
   cp -a "$fixture"/. "$out/package/assets/libsecret/"
   cp "$fixture/lib/$fixture_loader" \
     "$out/package/lib/$abi/libarchphene_libsecret_loader.so"
-elif [[ "$abi" == "x86_64" ]]; then
+elif [[ "$include_client_fixtures" == true && "$abi" == "x86_64" ]]; then
   echo "missing Arch libsecret probe runtime: $fixture" >&2
   exit 1
 fi
