@@ -6,6 +6,7 @@ Notable user-facing changes will be recorded here.
 
 ### Fixed
 
+- Restored the package-runtime trust regression on x86_64 and physical AArch64: bundled pacman execution, libalpm closure resolution, live signed download, exact detached-signer continuity, and appended-byte/GPG `BADSIG` rejection now have direct assertions.
 - Restored the full manager list/detail Bash regression, including persisted package checks, search clearing, update-only filtering, Android app-settings return, background JobScheduler registration, and state cleanup on emulator and physical AArch64. Pacman update checks now resolve current versions through the architecture-selected repository database, fixing Arch Linux ARM wrappers that previously queried Arch Linux's x86 metadata endpoint and returned HTTP 404.
 - Hardened the Bash regression harness after the host-script migration: deterministic emulator provisioning, exact UI matching, safe `set -u` initialization, SIGPIPE-safe image comparison, real non-installing physical runs, cold-launch synchronization, and robust keyboard/menu handling.
 - Delivered all debug test intents consistently on both cold and warm manager Activity launches, restoring the Android PackageInstaller update regression when an existing manager task is reused.
