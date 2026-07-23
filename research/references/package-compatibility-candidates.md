@@ -197,7 +197,7 @@ These should test:
 | `kdenlive`             | Audio/video preview and export                                  |
 | `celluloid`            | GTK frontend around mpv                                         |
 
-Snapshot combines GTK 4, GStreamer, and PipeWire media. Helvum diagnoses brokered Android audio routing through a GTK PipeWire patchbay. ([Arch Linux][6])
+Snapshot combines GTK 4, GStreamer, and PipeWire media. Current validation covers its real Android grant/deny paths, timestamped PipeWire frames, foreground preview pixels, and cleanup on x86_64 and physical AArch64. That run exposed a Samsung GSK GL/NGL planar-texture failure; camera-capable GTK4 wrappers now use the verified Cairo path without changing ordinary GTK4 rendering. Still capture, video recording, camera switching, and interruption recovery remain candidate work. Helvum diagnoses brokered Android audio routing through a GTK PipeWire patchbay. ([Arch Linux][6])
 
 ```bash
 sudo pacman -S \

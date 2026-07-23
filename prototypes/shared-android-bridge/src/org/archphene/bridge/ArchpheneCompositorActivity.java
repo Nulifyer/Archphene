@@ -1760,6 +1760,28 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 Log.i(logTag, "Graphics renderer=llvmpipe fallback");
             }
         }
+        if ("gtk4".equals(toolkit)
+                && capabilities.contains(BridgeCapabilities.CAMERA)) {
+            /*
+             * GSK's GL renderers can present planar GDK memory textures as a
+             * solid magenta surface on physical Android GPU drivers. Cairo
+             * consumes the same I420 texture correctly. Keep accelerated GSK
+             * rendering for ordinary GTK4 apps and use the compatible path
+             * only when a wrapper declares camera access.
+             */
+            env.put("GSK_RENDERER", "cairo");
+            Log.i(logTag, "GTK renderer=cairo for camera texture compatibility");
+        }
+        if ("gtk4".equals(toolkit)
+                && (getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+            String testRenderer = getIntent().getStringExtra(
+                    "archphene_test_gsk_renderer");
+            if ("cairo".equals(testRenderer) || "gl".equals(testRenderer)
+                    || "ngl".equals(testRenderer) || "vulkan".equals(testRenderer)) {
+                env.put("GSK_RENDERER", testRenderer);
+                Log.i(logTag, "GTK test renderer=" + testRenderer);
+            }
+        }
         if ("gtk3".equals(toolkit) || "gtk4".equals(toolkit)) {
             env.put("GDK_BACKEND", "wayland");
             env.put("GDK_SCALE", "1");

@@ -14,6 +14,8 @@
 #define HEADER_BYTES 36
 #define WIDTH 640
 #define HEIGHT 480
+#define LUMA_BYTES (WIDTH * HEIGHT)
+#define CHROMA_BYTES (LUMA_BYTES / 4)
 #define FRAME_BYTES (WIDTH * HEIGHT * 3 / 2)
 #define FRAME_COUNT 3
 
@@ -79,7 +81,12 @@ int main(int argc, char **argv) {
         return 70;
     }
     uint32_t previous_sequence = 0;
-    unsigned long different_bytes = 0;
+    unsigned long different_luma_bytes = 0;
+    uint8_t plane_min[3] = {UINT8_MAX, UINT8_MAX, UINT8_MAX};
+    uint8_t plane_max[3] = {0, 0, 0};
+    uint64_t plane_sum[3] = {0, 0, 0};
+    const size_t plane_offsets[3] = {0, LUMA_BYTES, LUMA_BYTES + CHROMA_BYTES};
+    const size_t plane_lengths[3] = {LUMA_BYTES, CHROMA_BYTES, CHROMA_BYTES};
     for (int index = 0; index < FRAME_COUNT; index++) {
         uint8_t header[HEADER_BYTES];
         if (read_full(sockets[0], header, sizeof(header)) != 0
@@ -105,8 +112,17 @@ int main(int argc, char **argv) {
             return 65;
         }
         previous_sequence = sequence;
-        for (int byte = 1; byte < FRAME_BYTES; byte++) {
-            if (frame[byte] != frame[0]) different_bytes++;
+        for (int byte = 1; byte < LUMA_BYTES; byte++) {
+            if (frame[byte] != frame[0]) different_luma_bytes++;
+        }
+        for (int plane = 0; plane < 3; plane++) {
+            size_t end = plane_offsets[plane] + plane_lengths[plane];
+            for (size_t byte = plane_offsets[plane]; byte < end; byte++) {
+                uint8_t value = frame[byte];
+                if (value < plane_min[plane]) plane_min[plane] = value;
+                if (value > plane_max[plane]) plane_max[plane] = value;
+                plane_sum[plane] += value;
+            }
         }
     }
     free(frame);
@@ -117,11 +133,24 @@ int main(int argc, char **argv) {
         fprintf(stderr, "stream request failed: %s\n", request.response);
         return 69;
     }
-    if (different_bytes == 0) {
-        fprintf(stderr, "camera frames contain no variation\n");
+    if (plane_min[0] == plane_max[0]
+            && plane_min[1] == plane_max[1]
+            && plane_min[2] == plane_max[2]
+            && plane_min[0] == plane_min[1]
+            && plane_min[1] == plane_min[2]) {
+        fprintf(stderr, "camera frame is uniform across all I420 planes: %u\n",
+                plane_min[0]);
         return 65;
     }
-    printf("PASS camera I420 stream frames=%d bytes=%d sequence=%u variation=%lu\n",
-            FRAME_COUNT, FRAME_BYTES, previous_sequence, different_bytes);
+    printf("PASS camera I420 stream frames=%d bytes=%d sequence=%u "
+            "luma-variation=%lu "
+            "Y=%u..%u/%llu U=%u..%u/%llu V=%u..%u/%llu\n",
+            FRAME_COUNT, FRAME_BYTES, previous_sequence, different_luma_bytes,
+            plane_min[0], plane_max[0],
+            (unsigned long long)(plane_sum[0] / (FRAME_COUNT * LUMA_BYTES)),
+            plane_min[1], plane_max[1],
+            (unsigned long long)(plane_sum[1] / (FRAME_COUNT * CHROMA_BYTES)),
+            plane_min[2], plane_max[2],
+            (unsigned long long)(plane_sum[2] / (FRAME_COUNT * CHROMA_BYTES)));
     return 0;
 }
