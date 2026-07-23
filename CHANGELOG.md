@@ -6,6 +6,7 @@ Notable user-facing changes will be recorded here.
 
 ### Fixed
 
+- Restored the display/theme regressions discarded by the Bash migration: the release matrix again validates bounded manager controls, KCalc viewport fill, process continuity, and compositor logs across phone, tablet, landscape, and docked profiles; the shared toolkit gate now proves stable rendered light/dark/light transitions and live/cold equivalence; and rotation again validates geometry plus visible calculation input. KCalc and Mousepad pass the strengthened gates on x86_64 and physical AArch64.
 - Restored the production GitHub self-update regression discarded by the Bash migration. The gate now installs and verifies its requested exact-ABI production baseline, validates published checksums and APK signatures, selects the requested release, requires Android-owned confirmation, proves installed version/signer/UID/first-install continuity, and checks restart reconciliation. The real published x86_64 `v1.0.0` to `v1.0.1` migration passes in an isolated temporary AVD.
 - Hardened the real microphone-capture regression and refreshed its current manager-generated `pavucontrol` fixtures on x86_64 and physical AArch64. The gate now checks permission declaration/grant, private Pulse and AAudio startup, bounded capture size, nonzero samples, crash absence, fixture cleanup, and privacy restoration; it also exposed and removed a stale pre-manager-signer Samsung wrapper after preserving its home.
 - Retired the obsolete hand-built KCalc update test path in favor of the supported manager-generated wrapper transaction. The replacement gate now verifies Android-owned confirmation, exact installed APK bytes and signer, stable version/UID/first-install identity, manager completion, and post-update KCalc execution on x86_64 and physical AArch64.
@@ -31,6 +32,7 @@ Notable user-facing changes will be recorded here.
 
 ### Validation
 
+- Passed the restored five-profile release display matrix on the API 36 emulator and the strengthened KCalc/Mousepad live-theme plus KCalc rotation gates on both the emulator and Android 15 Samsung on July 23, 2026.
 - Passed the full current-source API 36 x86_64 emulator suite and the non-destructive Android 15 AArch64 Samsung suite on July 22, 2026.
 - Archived, deliberately migrated, and restored the Samsung KCalc and Mousepad sandboxes under the maintained manager signer. Current-source physical Qt/GTK appearance, interaction, lifecycle, and document-broker core gates pass on July 23, 2026.
 - Updated both installed managers and regenerated Mousepad and KCalc through normal manager transactions on x86_64 and AArch64. The focused Open-dialog/IME/accessibility workflow plus the broader Mousepad and KCalc semantic regressions pass on both devices on July 23, 2026.

@@ -83,6 +83,54 @@ archphene_wait_appearance_log() {
   archphene_die "timed out waiting for appearance log: $pattern"
 }
 
+archphene_assert_foreground() {
+  local package="$1" label="$2" activities
+  activities="$(archphene_adb_run shell dumpsys activity activities)"
+  archphene_regex_contains "$activities" \
+    "topResumedActivity=.*${package//./\\.}/" \
+    || archphene_die "$label was not the foreground Android activity"
+}
+
+archphene_capture_stable_theme_frame() {
+  local package="$1" label="$2" destination="$3" toolkit="$4"
+  local previous="${destination}.previous" attempt
+  local inspect_args=()
+  case "$toolkit" in
+    gtk3|gtk4|wayland)
+      inspect_args=(--top-percent 4 --bottom-percent 20)
+      ;;
+  esac
+  archphene_assert_foreground "$package" "$label"
+  archphene_adb_run exec-out screencap >"$previous"
+  for attempt in {1..30}; do
+    sleep 1
+    archphene_adb_run exec-out screencap >"$destination"
+    if python3 "$ARCHPHENE_SCRIPTS_DIR/lib/theme-frame-check.py" similar \
+        "$previous" "$destination" >/dev/null 2>&1; then
+      python3 "$ARCHPHENE_SCRIPTS_DIR/lib/theme-frame-check.py" inspect \
+        "$destination" "${inspect_args[@]}" >/dev/null
+      return 0
+    fi
+    cp "$destination" "$previous"
+  done
+  archphene_die "$label render did not stabilize"
+}
+
+archphene_live_theme_cleanup() {
+  [[ -n "${ARCHPHENE_LIVE_THEME_PACKAGE:-}" ]] \
+    && archphene_adb_run shell am force-stop \
+      "$ARCHPHENE_LIVE_THEME_PACKAGE" >/dev/null 2>&1 || true
+  if [[ -n "${ARCHPHENE_LIVE_THEME_OLD_THEME:-}" \
+      && -n "${ARCHPHENE_LIVE_THEME_OLD_MATERIAL:-}" ]]; then
+    archphene_set_test_linux_appearance org.archpheneos.manager \
+      "$ARCHPHENE_LIVE_THEME_OLD_THEME" \
+      "$ARCHPHENE_LIVE_THEME_OLD_MATERIAL" >/dev/null 2>&1 || true
+  fi
+  [[ -n "${ARCHPHENE_LIVE_THEME_OLD_MODE:-}" ]] \
+    && archphene_adb_run shell cmd uimode night \
+      "$ARCHPHENE_LIVE_THEME_OLD_MODE" >/dev/null 2>&1 || true
+}
+
 archphene_assert_theme_config() {
   local package="$1" toolkit="$2" dark="$3" config
   case "$toolkit" in
@@ -137,19 +185,18 @@ archphene_test_live_theme() {
   archphene_test_init "$serial"
   local manager=org.archpheneos.manager activity old_mode old_theme old_material tmp
   local pid runtime_pid dark_pid dark_runtime_pid
+  local return_pid return_runtime_pid cold_pid cold_runtime_pid
   activity="$(archphene_launcher "$package")"
   old_mode="$(archphene_adb_run shell cmd uimode night \
     | sed -n 's/^Night mode: //p' | tr -d '\r')"
   read -r old_theme old_material \
     <<<"$(archphene_saved_linux_appearance "$manager")"
   tmp="$(archphene_mktemp_dir live-theme)"
-  cleanup() {
-    archphene_adb_run shell am force-stop "$package" >/dev/null 2>&1 || true
-    archphene_set_test_linux_appearance \
-      "$manager" "$old_theme" "$old_material" >/dev/null 2>&1 || true
-    archphene_adb_run shell cmd uimode night "$old_mode" >/dev/null 2>&1 || true
-  }
-  trap cleanup EXIT
+  ARCHPHENE_LIVE_THEME_PACKAGE="$package"
+  ARCHPHENE_LIVE_THEME_OLD_THEME="$old_theme"
+  ARCHPHENE_LIVE_THEME_OLD_MATERIAL="$old_material"
+  ARCHPHENE_LIVE_THEME_OLD_MODE="$old_mode"
+  trap archphene_live_theme_cleanup EXIT
 
   archphene_set_test_linux_appearance "$manager" system false
   archphene_adb_run shell cmd uimode night no >/dev/null
@@ -162,7 +209,8 @@ archphene_test_live_theme() {
   archphene_wait_appearance_log "$pid" \
     'Appearance theme=system resolved=light.*materialYou=false'
   archphene_assert_theme_config "$package" "$toolkit" false
-  archphene_adb_run exec-out screencap >"$tmp/light.raw"
+  archphene_capture_stable_theme_frame \
+    "$package" "$label light render" "$tmp/light.raw" "$toolkit"
 
   archphene_adb_run shell cmd uimode night yes >/dev/null
   if [[ "$toolkit" == wayland ]]; then
@@ -172,17 +220,53 @@ archphene_test_live_theme() {
     archphene_wait_appearance_log "$pid" \
       'Appearance configuration changed resolved=dark' 20
   fi
-  sleep 3
   dark_pid="$(archphene_android_pid "$package")"
   dark_runtime_pid="$(archphene_linux_loader_pid "$dark_pid")"
   [[ "$pid" == "$dark_pid" && "$runtime_pid" == "$dark_runtime_pid" ]] \
     || archphene_die "$label restarted during live theme change"
   archphene_assert_theme_config "$package" "$toolkit" true
-  archphene_adb_run exec-out screencap >"$tmp/dark.raw"
+  archphene_capture_stable_theme_frame \
+    "$package" "$label live dark render" "$tmp/dark.raw" "$toolkit"
   python3 "$ARCHPHENE_SCRIPTS_DIR/lib/theme-frame-check.py" light-dark \
     "$tmp/light.raw" "$tmp/dark.raw"
 
-  cleanup
+  archphene_adb_run shell cmd uimode night no >/dev/null
+  if [[ "$toolkit" == wayland ]]; then
+    archphene_wait_appearance_log "$pid" \
+      'Direct-Wayland appearance configuration changed resolved=light liveApplied=true' 20
+  else
+    archphene_wait_appearance_log "$pid" \
+      'Appearance configuration changed resolved=light' 20
+  fi
+  return_pid="$(archphene_android_pid "$package")"
+  return_runtime_pid="$(archphene_linux_loader_pid "$return_pid")"
+  [[ "$pid" == "$return_pid" && "$runtime_pid" == "$return_runtime_pid" ]] \
+    || archphene_die "$label restarted while returning to light theme"
+  archphene_assert_theme_config "$package" "$toolkit" false
+  archphene_capture_stable_theme_frame \
+    "$package" "$label returned light render" "$tmp/light-return.raw" "$toolkit"
+  python3 "$ARCHPHENE_SCRIPTS_DIR/lib/theme-frame-check.py" similar \
+    "$tmp/light.raw" "$tmp/light-return.raw" \
+    --maximum-difference 8 --maximum-changed-ratio .35
+
+  archphene_adb_run shell am force-stop "$package"
+  archphene_adb_run shell cmd uimode night yes >/dev/null
+  archphene_adb_run shell am start -W -n "$activity" >/dev/null
+  read -r cold_pid cold_runtime_pid \
+    <<<"$(archphene_wait_theme_runtime "$package")" \
+    || archphene_die "$label cold dark runtime is missing"
+  archphene_wait_appearance_log "$cold_pid" \
+    'Appearance theme=system resolved=dark.*materialYou=false'
+  archphene_assert_theme_config "$package" "$toolkit" true
+  archphene_capture_stable_theme_frame \
+    "$package" "$label cold dark render" "$tmp/cold-dark.raw" "$toolkit"
+  python3 "$ARCHPHENE_SCRIPTS_DIR/lib/theme-frame-check.py" similar \
+    "$tmp/dark.raw" "$tmp/cold-dark.raw" \
+    --maximum-difference 15 --maximum-changed-ratio .5
+
+  archphene_live_theme_cleanup
   trap - EXIT
-  archphene_note "$label live Android light/dark theme passed on $serial with Android PID $pid and Linux PID $runtime_pid."
+  unset ARCHPHENE_LIVE_THEME_PACKAGE ARCHPHENE_LIVE_THEME_OLD_THEME \
+    ARCHPHENE_LIVE_THEME_OLD_MATERIAL ARCHPHENE_LIVE_THEME_OLD_MODE
+  archphene_note "$label live Android light/dark/light theme passed on $serial with stable Android PID $pid and Linux PID $runtime_pid; cold dark matched PID $cold_pid/$cold_runtime_pid."
 }
