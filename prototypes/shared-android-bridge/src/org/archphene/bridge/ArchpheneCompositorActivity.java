@@ -20,6 +20,7 @@ import android.os.Build;
 import android.os.Binder;
 import android.os.Bundle;
 import android.os.Handler;
+import android.util.Base64;
 import android.util.Log;
 import android.view.DragAndDropPermissions;
 import android.view.DragEvent;
@@ -35,6 +36,9 @@ import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.window.OnBackInvokedCallback;
 import android.window.OnBackInvokedDispatcher;
+import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputConnection;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import java.io.BufferedReader;
@@ -78,6 +82,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
 
     private final AtomicBoolean launched = new AtomicBoolean();
     private final AtomicBoolean packagedRuntimeActive = new AtomicBoolean();
+    private final AtomicBoolean testImeInjectionScheduled = new AtomicBoolean();
     private ArchpheneInputView compositorView;
     private FrameLayout rootView;
     private ArchpheneCompositorSession session;
@@ -127,6 +132,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     private ArchpheneCompositorSession.WindowFrame primaryFrame;
     private final Object linuxDragToken = new Object();
     private boolean androidDragDropped;
+    private ClipData originalTestClipboard;
+    private boolean restoreTestClipboard;
     private final List<DragAndDropPermissions> retainedDragPermissions =
             new ArrayList<>();
 
@@ -320,6 +327,20 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         super.onNewIntent(intent);
         if (!AndroidDocumentSession.isDocumentIntent(intent)) {
             setIntent(intent);
+            boolean debuggable = (getApplicationInfo().flags
+                    & ApplicationInfo.FLAG_DEBUGGABLE) != 0;
+            if ((intent.hasExtra("archphene_test_ime_commit")
+                    || intent.hasExtra("archphene_test_ime_commit_base64"))
+                    && debuggable) {
+                testImeInjectionScheduled.set(false);
+                scheduleTestImeInjection();
+            }
+            if (debuggable && intent.getBooleanExtra("archphene_test_hide_ime", false)) {
+                InputMethodManager input = (InputMethodManager)
+                        getSystemService(INPUT_METHOD_SERVICE);
+                input.hideSoftInputFromWindow(compositorView.getWindowToken(), 0);
+                Log.i("ArchpheneInput", "Test IME hidden with Linux focus retained");
+            }
             return;
         }
         if (documentSession == null) {
@@ -905,6 +926,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             }
         }
         primaryFrame = nextPrimary;
+        if (nextPrimary != null && nextPrimary.window.mapped) scheduleTestImeInjection();
         if (!independentWindows) return;
         if (nextPrimary != null) {
             primaryFrame = nextPrimary;
@@ -1367,7 +1389,55 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         }
         ClipboardManager clipboard = (ClipboardManager)
                 getSystemService(CLIPBOARD_SERVICE);
+        if (getIntent().getBooleanExtra(
+                "archphene_test_restore_clipboard_on_destroy", false)) {
+            originalTestClipboard = clipboard.getPrimaryClip();
+            restoreTestClipboard = true;
+        }
         clipboard.setPrimaryClip(ClipData.newPlainText("Archphene test clipboard", text));
+    }
+
+    private void scheduleTestImeInjection() {
+        if ((getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) == 0
+                || (!getIntent().hasExtra("archphene_test_ime_commit")
+                    && !getIntent().hasExtra("archphene_test_ime_commit_base64"))
+                || !testImeInjectionScheduled.compareAndSet(false, true)) return;
+        String composing = decodeTestImeExtra(
+                "archphene_test_ime_composing", "archphene_test_ime_composing_base64");
+        String committed = decodeTestImeExtra(
+                "archphene_test_ime_commit", "archphene_test_ime_commit_base64");
+        boolean submit = getIntent().getBooleanExtra("archphene_test_ime_submit", false);
+        if (composing == null) composing = "";
+        if (committed == null || composing.length() > 4096 || committed.length() > 4096
+                || composing.indexOf('\0') >= 0 || committed.indexOf('\0') >= 0) {
+            throw new IllegalArgumentException("Invalid test IME text");
+        }
+        String preedit = composing;
+        compositorView.postDelayed(() -> {
+            EditorInfo editor = new EditorInfo();
+            InputConnection input = compositorView.onCreateInputConnection(editor);
+            if (!preedit.isEmpty()) input.setComposingText(preedit, 1);
+            compositorView.postDelayed(() -> {
+                input.commitText(committed, 1);
+                compositorView.postDelayed(() -> {
+                    if (submit) input.performEditorAction(EditorInfo.IME_ACTION_DONE);
+                    Log.i("ArchpheneInput", "Injected test IME preeditBytes="
+                            + preedit.getBytes(StandardCharsets.UTF_8).length
+                            + " commitBytes=" + committed.getBytes(StandardCharsets.UTF_8).length
+                            + " submit=" + submit);
+                }, 250);
+            }, preedit.isEmpty() ? 0 : 350);
+        }, 1000);
+    }
+
+    private String decodeTestImeExtra(String plainKey, String base64Key) {
+        String encoded = getIntent().getStringExtra(base64Key);
+        if (encoded == null) return getIntent().getStringExtra(plainKey);
+        try {
+            return new String(Base64.decode(encoded, Base64.NO_WRAP), StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException exception) {
+            throw new IllegalArgumentException("Invalid Base64 test IME text", exception);
+        }
     }
 
     private void appendTestRuntimeArguments(List<String> arguments) {
@@ -2394,6 +2464,20 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         gpuBridge.stop();
         if (session != null) session.close();
         releaseUnstartedRuntimeLease();
+        if (restoreTestClipboard) {
+            ClipboardManager clipboard = (ClipboardManager)
+                    getSystemService(CLIPBOARD_SERVICE);
+            if (originalTestClipboard != null) {
+                clipboard.setPrimaryClip(originalTestClipboard);
+            } else if (Build.VERSION.SDK_INT >= 28) {
+                clipboard.clearPrimaryClip();
+            }
+            restoreTestClipboard = false;
+            originalTestClipboard = null;
+        }
+        if ((getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+            Log.i(logTag, "Android host destroyed after runtime shutdown");
+        }
         super.onDestroy();
     }
 
