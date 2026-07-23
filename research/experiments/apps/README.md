@@ -6,6 +6,7 @@ Dated KCalc, Mousepad, manager, and ARM64 compatibility evidence.
 - [KCalc Android Launcher Emulator Results](kcalc-android-launcher-emulator-results.md)
 - [KCalc Arch Package Bridge Test](kcalc-arch-package-bridge-test.md)
 - [Real Arch KCalc Android GUI bridge results](kcalc-real-gui-bridge-emulator-results.md)
+- [Kate cross-device workflows](kate-cross-device-workflows.md)
 - [Linux app manager emulator results](linux-app-manager-emulator-results.md)
 - [Mousepad Android document workflow](mousepad-android-document-workflow.md)
 - [Mousepad Arch Package Bridge Test](mousepad-arch-package-bridge-test.md)

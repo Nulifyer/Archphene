@@ -5,6 +5,7 @@ source "$(dirname "$0")/lib/android-test.sh"
 
 serial=emulator-5554
 package=org.archphene.linux.p241d399e14343c53b8b766e9126776aa
+label=Mousepad
 name=
 marker=
 timeout=60
@@ -12,6 +13,7 @@ while (($#)); do
   case "$1" in
     --serial) serial="${2:?}"; shift 2 ;;
     --package) package="${2:?}"; shift 2 ;;
+    --label) label="${2:?}"; shift 2 ;;
     --name) name="${2:?}"; shift 2 ;;
     --marker) marker="${2:?}"; shift 2 ;;
     --timeout-seconds) timeout="${2:?}"; shift 2 ;;
@@ -25,8 +27,13 @@ name="${name:-archphene-android-workflow-$suffix.txt}"
 marker="${marker:-archphenedocsync-$suffix}"
 [[ "$name" =~ ^[A-Za-z0-9._-]+$ && "$marker" =~ ^[A-Za-z0-9._-]+$ ]] \
   || archphene_die 'fixture name and marker may contain only letters, digits, dot, underscore, and hyphen'
+label_pattern='^[A-Za-z0-9._+ -]{1,64}$'
+[[ "$label" =~ $label_pattern ]] \
+  || archphene_die 'application label contains unsupported characters'
 [[ "$name" == *.txt ]] || archphene_die 'the document workflow fixture must use a .txt name'
-[[ "$timeout" =~ ^[0-9]+$ ]] && ((timeout >= 15 && timeout <= 180)) \
+[[ "$timeout" =~ ^[0-9]+$ ]] \
+  || archphene_die '--timeout-seconds must be 15..180'
+((timeout >= 15 && timeout <= 180)) \
   || archphene_die '--timeout-seconds must be 15..180'
 
 remote="/sdcard/Download/$name"
@@ -81,7 +88,7 @@ wait_remote_contains() {
     [[ "$content" == *"$expected"* ]] && return 0
     sleep 0.4
   done
-  archphene_die "$failure"
+  archphene_die "$failure; remote content was $(printf '%q' "$content")"
 }
 
 open_roots() {
@@ -104,6 +111,7 @@ open_roots() {
 }
 
 archphene_adb_run shell pm path "$package" >/dev/null
+activity="$(archphene_launcher "$package")"
 archphene_adb_run shell test ! -e "$remote" \
   || archphene_die "refusing to overwrite existing Android document: $remote"
 if archphene_adb_run shell run-as "$package" test -e "$imported" 2>/dev/null; then
@@ -133,7 +141,7 @@ archphene_tap_ui_pattern "$ARCHPHENE_UI" \
   "text=\"$name\"[^>]*resource-id=\"android:id/title\"" "$name result"
 
 wait_private_contains "$imported" 'Android workflow original' \
-  'Mousepad did not import the selected Android document'
+  "$label did not import the selected Android document"
 archphene_wait_log 'mapped=true.*primary=true' "$timeout" \
   'ArchpheneInput:V ArchpheneLinuxApp:I AndroidRuntime:E *:S' >/dev/null
 
@@ -147,11 +155,33 @@ sleep 0.5
 archphene_adb_run shell input keyboard keycombination \
   KEYCODE_CTRL_LEFT KEYCODE_MOVE_END
 archphene_adb_run shell input keyevent KEYCODE_ENTER
-archphene_adb_run shell input text "$marker"
+marker_base64="$(printf %s "$marker" | base64 -w0)"
+archphene_adb_run logcat -c
+archphene_adb_run shell am start -W -n "$activity" \
+  --es archphene_test_ime_commit_base64 "$marker_base64" >/dev/null
+injected=false
+injection_deadline=$((SECONDS + 10))
+while ((SECONDS < injection_deadline)); do
+  injection_log="$(archphene_adb_run logcat -d -v brief \
+    -s ArchpheneInput:I AndroidRuntime:E '*:S')"
+  [[ "$injection_log" != *'FATAL EXCEPTION'* ]] \
+    || archphene_die "$label crashed during exact IME injection: $injection_log"
+  if [[ "$injection_log" == *"Injected test IME preeditBytes=0 commitBytes=${#marker} submit=false"* ]]; then
+    injected=true
+    break
+  fi
+  sleep .25
+done
+if [[ "$injected" == false ]]; then
+  # Older maintained debug wrappers may predate warm-intent IME injection.
+  # Keep this document gate runnable through Android's normal keyboard path;
+  # the focused IME suites independently require exact InputConnection bytes.
+  archphene_adb_run shell input text "$marker"
+fi
 archphene_adb_run shell input keyboard keycombination \
   KEYCODE_CTRL_LEFT KEYCODE_S
 wait_remote_contains "$marker" \
-  'Mousepad save did not write the edited marker back to Downloads'
+  "$label save did not write the edited marker back to Downloads"
 
 archphene_adb_run logcat -c
 archphene_adb_run shell am force-stop "$package"
@@ -164,10 +194,10 @@ cold_log="$(archphene_wait_log 'Imported Android document uri=.* path=.* writabl
   || archphene_die "cold reopen did not preserve the first import as $second_name: $cold_log"
 cold_map="$(archphene_wait_log 'mapped=true.*primary=true' "$timeout" \
   'ArchpheneInput:V ArchpheneLinuxApp:I AndroidRuntime:E *:S')"
-[[ "$cold_map" == *"title=~/Documents/Android/$second_name - Mousepad"* ]] \
-  || archphene_die "cold reopen did not map the collision-safe document in Mousepad: $cold_map"
+[[ "$cold_map" == *"Documents/Android/$second_name"* && "$cold_map" == *"$label"* ]] \
+  || archphene_die "cold reopen did not map the collision-safe document in $label: $cold_map"
 wait_private_contains "$second_imported" "$marker" \
-  'cold-reopened Mousepad document did not retain the saved marker'
+  "cold-reopened $label document did not retain the saved marker"
 
 archphene_adb_run shell am start -W -a android.intent.action.OPEN_DOCUMENT \
   -c android.intent.category.OPENABLE -t text/plain >/dev/null
@@ -180,8 +210,8 @@ else
 fi
 sleep 0.8
 provider_ui="$(archphene_capture_ui mousepad-provider-apps)"
-if [[ "$provider_ui" == *'text="Mousepad"'* ]]; then
-  archphene_tap_text "$provider_ui" Mousepad
+if [[ "$provider_ui" == *"text=\"$label\""* ]]; then
+  archphene_tap_text "$provider_ui" "$label"
   archphene_wait_ui 'text="Documents"' mousepad-provider-home "$timeout"
   provider_ui="$ARCHPHENE_UI"
 fi
@@ -199,8 +229,8 @@ archphene_adb_run pull /sdcard/mousepad-android-document-workflow.png \
 logs="$(archphene_adb_run logcat -d -v brief \
   -s ArchpheneDocuments:I ArchpheneLinuxApp:I AndroidRuntime:E '*:S')"
 [[ "$logs" != *'FATAL EXCEPTION'* ]] \
-  || archphene_die "Mousepad document workflow crashed: $logs"
+  || archphene_die "$label document workflow crashed: $logs"
 
 cleanup
 trap - EXIT
-archphene_note "Mousepad Android document workflow passed on $serial: SAF picker, exact import, edit/save writeback, cold reopen, and DocumentsUI provider browse validated for $name."
+archphene_note "$label Android document workflow passed on $serial: SAF picker, exact import, edit/save writeback, cold reopen, and DocumentsUI provider browse validated for $name."

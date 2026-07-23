@@ -211,13 +211,21 @@ focused artifact-producing geometry/render checks with:
   --serial emulator-5554 \
   --target-package org.archphene.linux.p0392be9c9f103a39d951c2f39c3644d2 \
   --profile KCalc
+./scripts/test-real-app-accessibility.sh \
+  --serial emulator-5554 \
+  --target-package org.archphene.linux.pb1623042aeee4267eb8c86dead4b2dd7 \
+  --profile Kate
+./scripts/test-kate-workflows.sh --serial emulator-5554
 ```
 
 The device checks do not install missing fixtures. The real-app accessibility
 test fails closed unless the current test-only AccessibilityService is already
 installed; pass `--probe-apk` only after installation has been explicitly
-approved. KCalc and Mousepad retain PNG/raw frames, scoped logs, generated theme
-files, and exported semantic trees under `tooling/artifacts/visual-audit/`.
+approved. KCalc, Kate, and Mousepad retain PNG/raw frames, scoped logs,
+generated theme files, and exported semantic trees under
+`tooling/artifacts/visual-audit/`. The Kate workflow snapshots and restores its
+existing `katerc`, session directory, and feedback state even when an assertion
+fails.
 Review the artifacts using [the visual-quality gate](linux-visual-quality.md).
 
 Run the release display profiles independently with:
@@ -236,6 +244,19 @@ with display-targeted input using:
 The focused test refuses to reuse an existing secondary display and restores
 the emulator's prior size/density overrides after removing the display it
 created.
+
+Run the generic Android document gate against Kate with:
+
+```bash
+./scripts/test-mousepad-android-document-workflow.sh \
+  --serial emulator-5554 \
+  --package org.archphene.linux.pb1623042aeee4267eb8c86dead4b2dd7 \
+  --label Kate
+```
+
+Despite its historical filename, the gate is wrapper-generic: it creates
+unique self-cleaning fixtures and proves SAF selection, private import, editor
+writeback, destructive cold reopen, and DocumentsUI provider browse.
 
 The script restores display size, density, Android font scale, and night mode on exit.
 

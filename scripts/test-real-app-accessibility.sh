@@ -24,7 +24,7 @@ while (($#)); do
 done
 [[ -n "$serial" && -n "$target" ]] \
   || archphene_die '--serial and --target-package are required'
-archphene_validate_choice "$profile" profile KCalc Mousepad
+archphene_validate_choice "$profile" profile KCalc Kate Mousepad
 [[ -z "$adb_path" ]] || ARCHPHENE_ADB="$adb_path"
 archphene_test_init "$serial"
 
@@ -39,7 +39,7 @@ else
 fi
 archphene_adb_run shell pm path "$target" >/dev/null
 
-safe_target="$(sed 's/[^A-Za-z0-9._-]/_/g' <<<"$target")"
+safe_target="${target//[^A-Za-z0-9._-]/_}"
 tree_name="framework-accessibility-tree-$safe_target.txt"
 tree_file="files/$tree_name"
 command_file=files/framework-accessibility-command.txt
@@ -229,6 +229,32 @@ test_mousepad() {
   wait_target_tree '|Open File|' '|Untitled 1 - Mousepad|' >/dev/null
 }
 
+test_kate() {
+  local tree
+  tree="$(wait_target_tree '' '|Welcome to Kate|' '|New File|' '|Open File...|')"
+  assert_current_bounds "$tree"
+  invoke_accessibility_action File
+  tree="$(wait_target_tree '' '|New|' '|Open…|' '|Quit|')"
+  assert_current_bounds "$tree"
+  invoke_accessibility_action View
+  tree="$(wait_target_tree '|Quit|' '|Split View|' '|Tool Views|')"
+  assert_current_bounds "$tree"
+  invoke_accessibility_action Sessions
+  tree="$(wait_target_tree '' '|New Session|' '|Manage Sessions...|')"
+  assert_current_bounds "$tree"
+  invoke_accessibility_action 'Manage Sessions...'
+  tree="$(wait_target_tree '' '|Manage Sessions — Kate|' '|Filter Sessions|')"
+  assert_current_bounds "$tree"
+  invoke_accessibility_action Close
+  wait_target_tree '|Manage Sessions — Kate|' '|Welcome to Kate|' >/dev/null
+  archphene_adb_run shell input keyboard keycombination \
+    KEYCODE_CTRL_LEFT KEYCODE_O
+  tree="$(wait_target_tree '' '|Open File — Kate|')"
+  assert_current_bounds "$tree"
+  invoke_accessibility_action Cancel
+  wait_target_tree '|Open File — Kate|' '|Welcome to Kate|' >/dev/null
+}
+
 archphene_adb_run shell am start -W -n \
   "$probe/org.archphene.bridge.AccessibilityProbeActivity" >/dev/null
 archphene_adb_run shell run-as "$probe" rm -f \
@@ -245,6 +271,7 @@ read -r width height <<<"$(archphene_adb_run shell wm size \
   | sed -n 's/.*: \([0-9]*\)x\([0-9]*\).*/\1 \2/p' | tail -n1)"
 case "$profile" in
   KCalc) test_kcalc ;;
+  Kate) test_kate ;;
   Mousepad) test_mousepad ;;
 esac
 
