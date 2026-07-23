@@ -6,6 +6,7 @@ Notable user-facing changes will be recorded here.
 
 ### Fixed
 
+- Made the remaining repository search, KCalc version selector, physical freeform resize, and Terminal Vulkan standalone gates state-safe and assertion-complete. Catalog tests restore exact manager preferences, freeform no longer clears KCalc data, ADB command delivery is unambiguous, and Vulkan dependencies are provisioned through the verified manager pipeline.
 - Made the manager pre-release and pull-to-refresh regressions accessibility-driven and state-safe. Both gates now preserve the user's original manager preferences while validating restart persistence, gesture thresholds, whole-list update completion, and settled list position on x86_64 and physical AArch64.
 - Replaced KCalc's compressed-PNG byte comparison with exact semantic calculation and app-region pixel assertions, restored Terminal's nested prompt-collapse check with physical notification-permission preservation, and restored `wev`'s nonzero-runtime rejection. The generic candidate gate now selects the manager's existing direct-Wayland assembly mode; current manager-generated official `wev` wrappers pass the complete input protocol suite on x86_64 and AArch64.
 - Restored the local current-source manager self-update fixture with exact APK identity/signature checks, Android-owned confirmation, stable install identity, current app-list reconciliation, and fail-safe restoration of the emulator's original manager APK and install-source policy.
@@ -36,6 +37,7 @@ Notable user-facing changes will be recorded here.
 
 ### Validation
 
+- Passed official package search/add/remove and architecture-adaptive KCalc version pinning on x86_64 and AArch64, non-destructive KCalc physical freeform resize on Samsung, and manager-provisioned unmodified `vulkaninfo` llvmpipe enumeration on both devices on July 23, 2026.
 - Passed the state-preserving manager pre-release and pull-to-refresh gates on the API 36 emulator and Android 15 Samsung on July 23, 2026.
 - Passed the restored five-profile release display matrix on the API 36 emulator and the strengthened KCalc/Mousepad live-theme plus KCalc rotation gates on both the emulator and Android 15 Samsung on July 23, 2026.
 - Passed the full current-source API 36 x86_64 emulator suite and the non-destructive Android 15 AArch64 Samsung suite on July 22, 2026.
