@@ -6,6 +6,7 @@ Notable user-facing changes will be recorded here.
 
 ### Fixed
 
+- Restored the complete Terminal managed-shell regression on x86_64 and physical AArch64 and fixed the defects it exposed: verified commands can safely re-enter through an immutable APK-owned loader, AArch64 preload entry points carry the `GLIBC_2.17` symbol versions imported by Bash, package queries use Bash-native matching, manager requests no longer depend on blocked Android `date`/`rm`/`mv`/`grep`, and only bounded `sleep` joins the existing internal `cat` bridge. GNU architecture, package inventory, writable/persistent Home, cold restart, signed manager routing, isolation, and SAF transfers now pass.
 - Restored the full Android capability-broker regression on current generated KCalc wrappers for x86_64 and physical AArch64 using disposable pinned-NDK probes: permission gating/retry, notification post/withdraw, HTTPS dispatch, unsafe-URI rejection, cross-UID denial, cleanup, and permission restoration now pass.
 - Restored the Terminal document-transfer regression on emulator and physical AArch64 with unique self-cleaning fixtures, exact SAF import/export content checks, hidden-home export denial, traversal import denial, and permission-state restoration.
 - Restored the Terminal companion isolation regression on emulator and physical AArch64: embedded artifact parity, installed-version parity, distinct UIDs, PTY ownership, signed package-search/result routing, forged-intent denial, and untrusted runtime-provider denial now have direct assertions.

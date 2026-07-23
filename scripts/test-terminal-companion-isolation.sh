@@ -119,7 +119,7 @@ status="$(archphene_adb_run shell run-as "$terminal" cat "/proc/$pty_pid/status"
 archphene_regex_contains "$status" "(?m)^Uid:\\s+$terminal_uid\\s" \
   || archphene_die "PTY shell is not owned by the isolated Terminal UID"
 
-archphene_wait_ui 'text="Add packages"' terminal-manager-search 60
+archphene_wait_ui 'text="btop  [^"]+"' terminal-manager-search 60
 search_ui="$ARCHPHENE_UI"
 archphene_regex_contains "$search_ui" 'text="btop  [^"]+"' \
   || archphene_die "signed Terminal pacman request did not reach manager search results"

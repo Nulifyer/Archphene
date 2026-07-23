@@ -199,10 +199,13 @@ for name in "${runtime_files[@]}"; do
 done
 mkdir -p /out/path-bridge
 aarch64-linux-gnu-gcc -shared -fPIC -O2 -Wall -Wextra -Werror \
+  -Wl,--version-script=/archphene-path-bridge/arm64.map \
   -o /out/path-bridge/libarchphene_path_bridge.so \
   /archphene-path-bridge/path_bridge.c -ldl
 [[ "$(readelf -h /out/path-bridge/libarchphene_path_bridge.so \
   | sed -n "s/.*Machine:[[:space:]]*//p")" == "AArch64" ]]
+readelf -Ws /out/path-bridge/libarchphene_path_bridge.so \
+  | grep -Eq "execve@@GLIBC_2\\.17"
 
 printf "glibc-%s+sha256.%s\n" "$GLIBC_VERSION" "$GLIBC_SHA256" \
   > /out/glibc/source-commit.txt

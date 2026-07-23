@@ -512,24 +512,30 @@ final class TerminalEnvironment {
     private static String managedInvocation(Command executable, File runtimeRoot,
             File script, File rc, boolean replaceProcess,
             List<String> dependencyLibraries) {
+        ArrayList<String> libraryPath = new ArrayList<>();
+        libraryPath.add(executable.libraries.getAbsolutePath());
+        for (String dependency : dependencyLibraries) {
+            if (!libraryPath.contains(dependency)) libraryPath.add(dependency);
+        }
+        String joinedLibraryPath = String.join(":", libraryPath);
         StringBuilder value = new StringBuilder();
         value.append("ARCHPHENE_RUNTIME_ROOT=").append(quote(runtimeRoot.getAbsolutePath()))
                 .append(" LOCPATH=").append(quote(new File(runtimeRoot,
                         "usr/lib/locale").getAbsolutePath()))
                 .append(" GLIBC_TUNABLES='glibc.pthread.rseq=0' LD_PRELOAD=")
                 .append(quote(new File(executable.libraries,
-                        "libarchphene_path_bridge.so").getAbsolutePath()));
+                        "libarchphene_path_bridge.so").getAbsolutePath()))
+                .append(" ARCHPHENE_RUNTIME_COMMAND_DIR=")
+                .append(quote(executable.program.getParentFile().getAbsolutePath()))
+                .append(" ARCHPHENE_RUNTIME_LOADER=")
+                .append(quote(executable.loader.getAbsolutePath()))
+                .append(" ARCHPHENE_RUNTIME_LIB=").append(quote(joinedLibraryPath));
         if (script != null && "bash".equals(executable.name)) {
             value.append(" BASH_ENV=").append(quote(rc.getAbsolutePath()));
         }
-        ArrayList<String> libraryPath = new ArrayList<>();
-        libraryPath.add(executable.libraries.getAbsolutePath());
-        for (String dependency : dependencyLibraries) {
-            if (!libraryPath.contains(dependency)) libraryPath.add(dependency);
-        }
         value.append(replaceProcess ? " exec " : " ")
                 .append(quote(executable.loader.getAbsolutePath()))
-                .append(" --library-path ").append(quote(String.join(":", libraryPath)))
+                .append(" --library-path ").append(quote(joinedLibraryPath))
                 .append(' ').append(quote(executable.program.getAbsolutePath()));
         if (script != null) value.append(' ').append(quote(script.getAbsolutePath()));
         return value.toString();
@@ -620,13 +626,10 @@ final class TerminalEnvironment {
                 .append("_archphene_manager_request() {\n")
                 .append("  _ap_action=\"$1\"; shift; _ap_query=\"$*\"\n")
                 .append("  _ap_request_sequence=$((_ap_request_sequence + 1))\n")
-                .append("  _ap_id=\"$$-$(date +%s)-$_ap_request_sequence\"\n")
-                .append("  _ap_tmp=\"$ARCHPHENE_MANAGER_REQUESTS/.$_ap_id.tmp\"\n")
+                .append("  _ap_id=\"$BASHPID-$_ap_request_sequence-$RANDOM\"\n")
                 .append("  _ap_request=\"$ARCHPHENE_MANAGER_REQUESTS/$_ap_id.request\"\n")
                 .append("  _ap_response=\"$ARCHPHENE_MANAGER_RESPONSES/$_ap_id.response\"\n")
-                .append("  rm -f \"$_ap_response\"\n")
-                .append("  printf 'v1\\t%s\\t%s\\t%s\\n' \"$_ap_id\" \"$_ap_action\" \"$_ap_query\" > \"$_ap_tmp\" || return 1\n")
-                .append("  mv \"$_ap_tmp\" \"$_ap_request\" || return 1\n")
+                .append("  printf 'v1\\t%s\\t%s\\t%s\\n' \"$_ap_id\" \"$_ap_action\" \"$_ap_query\" > \"$_ap_request\" || return 1\n")
                 .append("  _ap_last=0; _ap_elapsed=0\n")
                 .append("  while [ \"$_ap_elapsed\" -lt 1800 ]; do\n")
                 .append("    if [ -f \"$_ap_response\" ]; then\n")
@@ -634,13 +637,13 @@ final class TerminalEnvironment {
                 .append("      if [ \"$_ap_schema\" = v1 ] && [ \"$_ap_seq\" != \"$_ap_last\" ]; then\n")
                 .append("        _ap_last=\"$_ap_seq\"; printf '[%s%%] %s: %s\\n' \"$_ap_percent\" \"$_ap_phase\" \"$_ap_status\"\n")
                 .append("        if [ \"$_ap_terminal\" = 1 ]; then\n")
-                .append("          rm -f \"$_ap_response\"; case \"$_ap_outcome\" in success) return 0;; cancelled) return 130;; *) return 1;; esac\n")
+                .append("          : > \"$_ap_response\"; case \"$_ap_outcome\" in success) return 0;; cancelled) return 130;; *) return 1;; esac\n")
                 .append("        fi\n")
                 .append("      fi\n")
                 .append("    fi\n")
                 .append("    sleep 1; _ap_elapsed=$((_ap_elapsed + 1))\n")
                 .append("  done\n")
-                .append("  rm -f \"$_ap_request\" \"$_ap_response\"; echo 'archphene: manager request timed out' >&2; return 124\n")
+                .append("  : > \"$_ap_response\"; echo 'archphene: manager request timed out' >&2; return 124\n")
                 .append("}\n");
         rc.append("archphene-import() {\n")
                 .append("  _ap_target=\"$1\"\n")
@@ -656,10 +659,21 @@ final class TerminalEnvironment {
                 .append("    list) [ \"$#\" -eq 0 ] || { echo 'usage: archphene-project list' >&2; return 2; }; _archphene_manager_request project-list all ;;\n")
                 .append("    *) echo 'usage: archphene-project {add|sync|list|path|remove} [alias]' >&2; return 2 ;;\n")
                 .append("  esac\n}\n");
+        rc.append("_archphene_installed_match() {\n")
+                .append("  _ap_match=\"${1,,}\"; while IFS= read -r _ap_line; do\n")
+                .append("    [[ \"${_ap_line,,}\" == *\"$_ap_match\"* ]] && printf '%s\\n' \"$_ap_line\"\n")
+                .append("  done < ").append(quote(installed.getAbsolutePath())).append('\n')
+                .append("}\n")
+                .append("_archphene_installed_info() {\n")
+                .append("  while read -r _ap_name _ap_rest; do\n")
+                .append("    [ \"$_ap_name\" = \"$1\" ] && { printf '%s %s\\n' \"$_ap_name\" \"$_ap_rest\"; return 0; }\n")
+                .append("  done < ").append(quote(installed.getAbsolutePath())).append('\n')
+                .append("  return 1\n")
+                .append("}\n");
         rc.append("pacman() {\n  case \"$1\" in\n")
                 .append("    -Q) cat ").append(quote(installed.getAbsolutePath())).append(" ;;\n")
-                .append("    -Qs) shift; grep -i -- \"$*\" ").append(quote(installed.getAbsolutePath())).append(" || true ;;\n")
-                .append("    -Qi) shift; grep -i -- \"^$1[[:space:]]\" ").append(quote(installed.getAbsolutePath())).append(" || return 1 ;;\n")
+                .append("    -Qs) shift; _archphene_installed_match \"$*\" ;;\n")
+                .append("    -Qi) shift; [ \"$#\" -eq 1 ] || return 2; _archphene_installed_info \"$1\" ;;\n")
                 .append("    -Ss) shift; _archphene_manager_request search \"$*\" ;;\n")
                 .append("    -S) shift; [ \"$#\" -eq 1 ] || { echo 'pacman -S accepts one package per command' >&2; return 2; }; _archphene_manager_request install \"$1\" ;;\n")
                 .append("    -R|-Rs|-Rns) shift; [ \"$#\" -eq 1 ] || { echo 'pacman -R accepts one package per command' >&2; return 2; }; _archphene_manager_request remove \"$1\" ;;\n")

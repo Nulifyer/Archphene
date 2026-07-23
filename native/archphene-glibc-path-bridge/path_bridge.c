@@ -42,6 +42,28 @@ static bool has_parent_component(const char *path) {
 
 extern char **environ;
 
+static char trusted_loader[PATH_MAX];
+
+__attribute__((constructor))
+static void capture_trusted_loader(void) {
+    const char *candidate = getenv("ARCHPHENE_RUNTIME_LOADER");
+    if (candidate == NULL || candidate[0] != '/' || has_parent_component(candidate)
+            || strchr(candidate, '\n') != NULL) {
+        return;
+    }
+    char resolved[PATH_MAX];
+    if (realpath(candidate, resolved) == NULL) return;
+    struct stat metadata;
+    if (stat(resolved, &metadata) != 0 || !S_ISREG(metadata.st_mode)
+            || (metadata.st_mode & 0111) == 0
+            || (metadata.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+        return;
+    }
+    size_t length = strlen(candidate);
+    if (length >= sizeof(trusted_loader)) return;
+    memcpy(trusted_loader, candidate, length + 1);
+}
+
 static bool safe_command_name(const char *name) {
     if (name == NULL || name[0] == '\0' || strchr(name, '/') != NULL) return false;
     for (const unsigned char *cursor = (const unsigned char *)name; *cursor != '\0'; cursor++) {
@@ -62,18 +84,27 @@ static bool runtime_command(const char *name, char output[PATH_MAX]) {
     int length = snprintf(output, PATH_MAX, "%s/%s", directory, name);
     if (length <= 0 || length >= PATH_MAX) return false;
     struct stat metadata;
+    typedef int (*access_type)(const char *, int);
+    access_type real_access = (access_type)dlsym(RTLD_NEXT, "access");
     return lstat(output, &metadata) == 0 && S_ISREG(metadata.st_mode)
-            && access(output, R_OK) == 0;
+            && real_access != NULL && real_access(output, R_OK) == 0;
+}
+
+static bool exact_runtime_command(const char *path) {
+    if (path == NULL || path[0] != '/') return false;
+    const char *name = strrchr(path, '/');
+    name = name == NULL ? path : name + 1;
+    char command[PATH_MAX];
+    return runtime_command(name, command) && strcmp(path, command) == 0;
 }
 
 static int launch_runtime_command(const char *name, char *const arguments[],
         char *const environment[]) {
     char command[PATH_MAX];
     if (!runtime_command(name, command)) return 1;
-    const char *loader = getenv("ARCHPHENE_RUNTIME_LOADER");
     const char *library_path = getenv("ARCHPHENE_RUNTIME_LIB");
-    if (loader == NULL || loader[0] != '/' || library_path == NULL
-            || library_path[0] != '/' || strchr(loader, '\n') != NULL
+    if (trusted_loader[0] == '\0' || library_path == NULL
+            || library_path[0] != '/'
             || strchr(library_path, '\n') != NULL) {
         errno = EACCES;
         return -1;
@@ -86,7 +117,7 @@ static int launch_runtime_command(const char *name, char *const arguments[],
         }
     }
     char *loader_arguments[4096];
-    loader_arguments[0] = (char *)loader;
+    loader_arguments[0] = trusted_loader;
     loader_arguments[1] = "--library-path";
     loader_arguments[2] = (char *)library_path;
     loader_arguments[3] = "--argv0";
@@ -102,14 +133,21 @@ static int launch_runtime_command(const char *name, char *const arguments[],
         errno = ENOSYS;
         return -1;
     }
-    real(loader, loader_arguments, environment == NULL ? environ : environment);
+    real(trusted_loader, loader_arguments,
+            environment == NULL ? environ : environment);
     return -1;
 }
 
 static int launch_android_system_command(const char *name, char *const arguments[],
         char *const environment[]) {
-    if (strcmp(name, "cat") != 0) return 1;
-    const char *path = "/system/bin/cat";
+    const char *path;
+    if (strcmp(name, "cat") == 0) {
+        path = "/system/bin/cat";
+    } else if (strcmp(name, "sleep") == 0) {
+        path = "/system/bin/sleep";
+    } else {
+        return 1;
+    }
     if (access(path, X_OK) != 0) return -1;
     char *const *source = environment == NULL ? environ : environment;
     char *clean_environment[4096];
@@ -136,14 +174,24 @@ static int launch_android_system_command(const char *name, char *const arguments
 }
 
 int execve(const char *path, char *const arguments[], char *const environment[]) {
+    if (trusted_loader[0] != '\0' && strcmp(path, trusted_loader) == 0) {
+        typedef int (*function_type)(const char *, char *const[], char *const[]);
+        function_type real = (function_type)dlsym(RTLD_NEXT, "execve");
+        if (real == NULL) {
+            errno = ENOSYS;
+            return -1;
+        }
+        return real(path, arguments, environment == NULL ? environ : environment);
+    }
     const char *name = strrchr(path, '/');
     name = name == NULL ? path : name + 1;
     char command[PATH_MAX];
     if (runtime_command(name, command) && strcmp(path, command) == 0) {
         return launch_runtime_command(name, arguments, environment);
     }
-    if (strcmp(path, "/system/bin/cat") == 0) {
-        return launch_android_system_command("cat", arguments, environment);
+    if (strcmp(path, "/system/bin/cat") == 0
+            || strcmp(path, "/system/bin/sleep") == 0) {
+        return launch_android_system_command(name, arguments, environment);
     }
     errno = ENOENT;
     return -1;
@@ -444,6 +492,29 @@ XSTAT_CALL(__lxstat64, struct stat64)
 int access(const char *path, int mode) {
     typedef int (*function_type)(const char *, int);
     function_type real = RESOLVE(function_type, "access");
+    if ((mode & X_OK) != 0 && (mode & W_OK) == 0
+            && exact_runtime_command(path)) {
+        return 0;
+    }
+    bool translated;
+    char buffer[PATH_MAX];
+    const char *target = translate_path(path, buffer, &translated);
+    if (target == NULL) return -1;
+    REQUIRE_REAL(real);
+    if (translated && (mode & W_OK) != 0) {
+        errno = EROFS;
+        return -1;
+    }
+    return real(target, mode);
+}
+
+int eaccess(const char *path, int mode) {
+    typedef int (*function_type)(const char *, int);
+    function_type real = RESOLVE(function_type, "eaccess");
+    if ((mode & X_OK) != 0 && (mode & W_OK) == 0
+            && exact_runtime_command(path)) {
+        return 0;
+    }
     bool translated;
     char buffer[PATH_MAX];
     const char *target = translate_path(path, buffer, &translated);
@@ -459,6 +530,10 @@ int access(const char *path, int mode) {
 int faccessat(int directory, const char *path, int mode, int flags) {
     typedef int (*function_type)(int, const char *, int, int);
     function_type real = RESOLVE(function_type, "faccessat");
+    if ((mode & X_OK) != 0 && (mode & W_OK) == 0
+            && exact_runtime_command(path)) {
+        return 0;
+    }
     bool translated;
     char buffer[PATH_MAX];
     const char *target = translate_path(path, buffer, &translated);

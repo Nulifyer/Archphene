@@ -1,0 +1,10 @@
+GLIBC_2.17 {
+    global:
+        access;
+        eaccess;
+        faccessat;
+        execlp;
+        execve;
+        execvp;
+        execvpe;
+};

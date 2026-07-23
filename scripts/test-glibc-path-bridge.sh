@@ -3,6 +3,7 @@ set -euo pipefail
 
 root="${TMPDIR:-/tmp}/archphene-path-bridge-test"
 output="${1:-$root/libarchphene_path_bridge.so}"
+loader_path="$(readlink -f /bin/echo)"
 rm -rf "$root"
 mkdir -p "$root/usr/share/archphene-test"
 mkdir -p "$root/usr/lib/locale/C.utf8"
@@ -25,16 +26,27 @@ export XDG_RUNTIME_DIR="$root/runtime"
 mkdir -p "$XDG_RUNTIME_DIR"
 mkdir -p "$root/commands"
 printf command > "$root/commands/cat"
+test ! -x "$root/commands/cat"
+access_output="$(
+  ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+  "$root/exec-probe" --access "$root/commands/cat"
+)"
+test "$access_output" = runtime-command-accessible
+loader_output="$(
+  ARCHPHENE_RUNTIME_LOADER="$loader_path" \
+  "$root/exec-probe" --loader
+)"
+test "$loader_output" = trusted-loader-exec
 exec_output="$(
   ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
-  ARCHPHENE_RUNTIME_LOADER=/bin/echo \
+  ARCHPHENE_RUNTIME_LOADER="$loader_path" \
   ARCHPHENE_RUNTIME_LIB=/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu \
   "$root/exec-probe"
 )"
 test "$exec_output" = "--library-path /lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu --argv0 cat $root/commands/cat bridge-arg"
 set +e
 ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
-ARCHPHENE_RUNTIME_LOADER=/bin/echo \
+ARCHPHENE_RUNTIME_LOADER="$loader_path" \
 ARCHPHENE_RUNTIME_LIB=/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu \
   "$root/exec-probe" sh >"$root/unknown-command.out" 2>&1
 unknown_status=$?
@@ -43,14 +55,14 @@ test "$unknown_status" -eq 2
 grep -qx 'execlp: No such file or directory' "$root/unknown-command.out"
 direct_output="$(
   ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
-  ARCHPHENE_RUNTIME_LOADER=/bin/echo \
+  ARCHPHENE_RUNTIME_LOADER="$loader_path" \
   ARCHPHENE_RUNTIME_LIB=/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu \
   "$root/exec-probe" --direct "$root/commands/cat"
 )"
 test "$direct_output" = "--library-path /lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu --argv0 cat $root/commands/cat bridge-arg"
 set +e
 ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
-ARCHPHENE_RUNTIME_LOADER=/bin/echo \
+ARCHPHENE_RUNTIME_LOADER="$loader_path" \
 ARCHPHENE_RUNTIME_LIB=/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu \
   "$root/exec-probe" --direct /bin/sh >"$root/direct-host-command.out" 2>&1
 direct_status=$?
