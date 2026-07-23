@@ -13,6 +13,7 @@ Notable user-facing changes will be recorded here.
 - Split the GUI document restart probe into foreground-authorized stages so Android 15 background-activity-launch enforcement remains enabled during the regression.
 - Restored the Bash secrets regression's packaged desktop-client coverage with a rebuilt official Arch libsecret/KWallet fixture, direct KWallet D-Bus operations, `kwallet-query`, restart persistence, cleanup, and log-redaction assertions.
 - Restored the migrated Mousepad Android-document regression so it again proves the real SAF picker, edit/save writeback, cold reopen, and Archphene DocumentsUI provider on x86_64 and physical AArch64.
+- Restored the direct camera bridge regression's exact JPEG, I420 stream, private Camera portal, invalid-input, grant, denial, and no-reprompt assertions on x86_64 and physical AArch64.
 
 ### Validation
 
