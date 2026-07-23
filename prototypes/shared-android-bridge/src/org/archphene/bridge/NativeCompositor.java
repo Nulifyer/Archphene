@@ -70,6 +70,8 @@ public final class NativeCompositor implements AutoCloseable {
     private static final int LINUX_DRAG_FINISH = 62;
     private static final int LINUX_DRAG_MIME_LENGTH = 63;
     private static final int HOST_ACTIVE = 64;
+    private static final int KEYBOARD_COUNT = 65;
+    private static final int FOCUSED_KEYBOARD_COUNT = 66;
 
     static { System.loadLibrary("archphene_compositor"); }
 
@@ -212,6 +214,8 @@ public final class NativeCompositor implements AutoCloseable {
     public int setHostActive(boolean active) {
         return command(HOST_ACTIVE, active ? 1 : 0);
     }
+    public int keyboardCount() { return command(KEYBOARD_COUNT); }
+    public int focusedKeyboardCount() { return command(FOCUSED_KEYBOARD_COUNT); }
     public int textInputCount() { return command(TEXT_INPUT_COUNT); }
     public int pointerCount() { return command(POINTER_COUNT); }
     public int touchCount() { return command(TOUCH_COUNT); }

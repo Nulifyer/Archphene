@@ -20,10 +20,20 @@ gcc -O2 -Wall -Wextra -Werror \
   -o "$root/shm-probe" native/archphene-glibc-path-bridge/shm_probe.c
 gcc -O2 -Wall -Wextra -Werror \
   -o "$root/exec-probe" native/archphene-glibc-path-bridge/exec_probe.c
+gcc -O2 -Wall -Wextra -Werror \
+  -o "$root/readlink-probe" native/archphene-glibc-path-bridge/readlink_probe.c
 export LD_PRELOAD="$output"
 export ARCHPHENE_RUNTIME_ROOT="$root"
 export XDG_RUNTIME_DIR="$root/runtime"
 mkdir -p "$XDG_RUNTIME_DIR"
+mkdir -p "$root/usr/bin"
+printf program > "$root/usr/bin/test-program"
+chmod 500 "$root/usr/bin/test-program"
+program_path="$(
+  ARCHPHENE_RUNTIME_PROGRAM_PATH="$root/usr/bin/test-program" \
+    "$root/readlink-probe"
+)"
+test "$program_path" = "$root/usr/bin/test-program"
 mkdir -p "$root/commands"
 printf command > "$root/commands/cat"
 test ! -x "$root/commands/cat"

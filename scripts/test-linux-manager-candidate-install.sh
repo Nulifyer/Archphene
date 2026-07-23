@@ -8,6 +8,7 @@ package_name=
 expected_toolkit=
 executable=
 terminal_wayland=false
+sdl_debug=false
 timeout=900
 skip_install=false
 while (($#)); do
@@ -32,6 +33,10 @@ while (($#)); do
       terminal_wayland=true
       shift
       ;;
+    --sdl-debug)
+      sdl_debug=true
+      shift
+      ;;
     --timeout-seconds)
       timeout="${2:?}"
       shift 2
@@ -41,7 +46,7 @@ while (($#)); do
       shift
       ;;
     -h|--help)
-      echo "usage: $0 --package-name NAME --expected-toolkit qt6|gtk3|gtk4|wayland [--terminal-wayland --executable NAME] [--serial SERIAL] [--skip-install] [--timeout-seconds N]"
+      echo "usage: $0 --package-name NAME --expected-toolkit qt6|gtk3|gtk4|wayland [--terminal-wayland --executable NAME] [--sdl-debug] [--serial SERIAL] [--skip-install] [--timeout-seconds N]"
       exit 0
       ;;
     *)
@@ -157,8 +162,13 @@ package_dump="$(archphene_adb_run shell dumpsys package "$android_package")"
 activity="$(archphene_launcher "$android_package")"
 
 archphene_adb_run shell am force-stop "$android_package"
-archphene_adb_run logcat -c
-archphene_adb_run shell am start -W -n "$activity" >/dev/null
+# Runtime waits below are PID scoped, so preserving assembly diagnostics cannot
+# let stale wrapper output satisfy them.
+launch_args=()
+if [[ "$sdl_debug" == true ]]; then
+  launch_args+=(--ez archphene_test_sdl_debug true)
+fi
+archphene_adb_run shell am start -W -n "$activity" "${launch_args[@]}" >/dev/null
 archphene_wait_log "Acquired runtime pack lease [a-f0-9]{64} for $android_package" 60 \
   'ArchpheneRuntime:I ArchpheneLinuxApp:I AndroidRuntime:E *:S' >/dev/null
 pid=

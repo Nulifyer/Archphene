@@ -417,6 +417,13 @@ public final class ArchPackageRuntime {
                 && !containsPackage(packages, "libx11")) {
             bridgePackages.add("libx11");
         }
+        if (containsPackage(packages, "sdl3")) {
+            if (!containsPackage(packages, "wayland")) bridgePackages.add("wayland");
+            if (!containsPackage(packages, "libxkbcommon")) {
+                bridgePackages.add("libxkbcommon");
+            }
+            if (!containsPackage(packages, "libpulse")) bridgePackages.add("libpulse");
+        }
         if (!bridgePackages.isEmpty()) {
             packages = resolve(context, packageName,
                     bridgePackages.toArray(new String[0]));

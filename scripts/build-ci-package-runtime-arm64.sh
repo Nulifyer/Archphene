@@ -206,6 +206,10 @@ aarch64-linux-gnu-gcc -shared -fPIC -O2 -Wall -Wextra -Werror \
   | sed -n "s/.*Machine:[[:space:]]*//p")" == "AArch64" ]]
 readelf -Ws /out/path-bridge/libarchphene_path_bridge.so \
   | grep -Eq "execve@@GLIBC_2\\.17"
+readelf -Ws /out/path-bridge/libarchphene_path_bridge.so \
+  | grep -Eq "readlink@@GLIBC_2\\.17"
+readelf -Ws /out/path-bridge/libarchphene_path_bridge.so \
+  | grep -Eq "readlinkat@@GLIBC_2\\.17"
 
 printf "glibc-%s+sha256.%s\n" "$GLIBC_VERSION" "$GLIBC_SHA256" \
   > /out/glibc/source-commit.txt

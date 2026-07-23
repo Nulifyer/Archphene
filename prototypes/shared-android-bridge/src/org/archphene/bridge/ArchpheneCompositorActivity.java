@@ -110,6 +110,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
     private String[] runtimeCommandUris = new String[0];
     private String[] runtimeCommandNames = new String[0];
     private boolean runtimeGui;
+    private boolean suppressInitialLegacySdlIme;
     private boolean runtimeDescriptorLibraries;
     private boolean processTreeProbe;
     private final Binder runtimeLeaseToken = new Binder();
@@ -171,6 +172,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         loadManagerAppearance();
         observeManagerAppearance();
         if (runtimeProbeUri == null && !processTreeProbe) loadManagerRuntimePack();
+        suppressInitialLegacySdlIme = "wayland".equals(toolkit)
+                && containsLibraryPrefix(runtimeLibraryNames, "libSDL2-");
         independentWindows = shouldUseIndependentWindows();
         documentSession = capabilities.contains(BridgeCapabilities.DOCUMENTS)
                 ? new AndroidDocumentSession(this, logTag) : null;
@@ -276,6 +279,11 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                     }
                 });
         holder[0] = session;
+        session.setSuppressInitialNativeImeShow(suppressInitialLegacySdlIme);
+        session.setInputDiagnostics(
+                (getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0
+                        && getIntent().getBooleanExtra(
+                                "archphene_test_input_debug", false));
         if (accessibilityBridge != null) {
             accessibilityBridge.setMenuFallback(this::activateAccessibilityMenu);
         }
@@ -540,6 +548,14 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         }
     }
 
+    private static boolean containsLibraryPrefix(String[] names, String prefix) {
+        if (names == null) return false;
+        for (String name : names) {
+            if (name != null && name.startsWith(prefix)) return true;
+        }
+        return false;
+    }
+
     private void observeManagerAppearance() {
         managerAppearanceObserver = new ContentObserver(new Handler(getMainLooper())) {
             @Override
@@ -586,7 +602,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                 boolean menuTransition = session.hasPopups() && menuAt
                         && !session.isPopupAt(compositorView, event.getX(), event.getY());
                 boolean pointerTap = actionUp
-                        && (session.hasPopups() || menuAt || clickableAt);
+                        && ("wayland".equals(toolkit)
+                                || session.hasPopups() || menuAt || clickableAt);
                 boolean textInput = actionUp && !session.hasPopups()
                         && accessibilityBridge != null
                         && accessibilityBridge.isTextInputAt(view, event.getX(), event.getY());
@@ -1131,7 +1148,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                                     view, frameWidth, frameHeight,
                                     event.getX(), event.getY());
                     boolean pointerTap = actionUp
-                            && (session.hasPopups() || menuAt || clickableAt);
+                            && ("wayland".equals(toolkit)
+                                    || session.hasPopups() || menuAt || clickableAt);
                     boolean textInput = actionUp && !session.hasPopups()
                             && accessibilityBridge != null
                             && accessibilityBridge.isTextInputAt(
@@ -1282,6 +1300,13 @@ public abstract class ArchpheneCompositorActivity extends Activity {
                         && getIntent().getBooleanExtra("archphene.wayland_debug", false)) {
                     environment.put("WAYLAND_DEBUG", "client");
                     Log.i("ArchpheneLinuxApp", "Wayland client protocol trace enabled");
+                }
+                if ((getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0
+                        && getIntent().getBooleanExtra(
+                                "archphene_test_sdl_debug", false)) {
+                    environment.put("SDL_LOGGING", "render=verbose");
+                    environment.put("SDL2COMPAT_DEBUG_LOGGING", "1");
+                    Log.i("ArchpheneLinuxApp", "SDL renderer diagnostics enabled");
                 }
                 applyCapabilityEnvironment(environment);
                 environment.put("TMPDIR", tmp.getAbsolutePath());
@@ -1875,6 +1900,8 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             }
             env.put("GCONV_PATH", new File(root, "usr/lib/gconv").getAbsolutePath());
         } else if ("wayland".equals(toolkit)) {
+            env.put("SDL_VIDEODRIVER", "wayland");
+            env.put("SDL_AUDIODRIVER", "pulseaudio");
             writeDirectWaylandTheme(configDir, dark, fontPointSize, appScale,
                     configuration);
         } else if (!"wayland".equals(toolkit)) {

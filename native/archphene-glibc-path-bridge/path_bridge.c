@@ -43,6 +43,7 @@ static bool has_parent_component(const char *path) {
 extern char **environ;
 
 static char trusted_loader[PATH_MAX];
+static char trusted_program_path[PATH_MAX];
 
 __attribute__((constructor))
 static void capture_trusted_loader(void) {
@@ -62,6 +63,25 @@ static void capture_trusted_loader(void) {
     size_t length = strlen(candidate);
     if (length >= sizeof(trusted_loader)) return;
     memcpy(trusted_loader, candidate, length + 1);
+}
+
+__attribute__((constructor))
+static void capture_trusted_program_path(void) {
+    const char *candidate = getenv("ARCHPHENE_RUNTIME_PROGRAM_PATH");
+    if (candidate == NULL || candidate[0] != '/' || has_parent_component(candidate)
+            || strchr(candidate, '\n') != NULL) {
+        return;
+    }
+    char resolved[PATH_MAX];
+    if (realpath(candidate, resolved) == NULL) return;
+    struct stat metadata;
+    if (stat(resolved, &metadata) != 0 || !S_ISREG(metadata.st_mode)
+            || (metadata.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+        return;
+    }
+    size_t length = strlen(resolved);
+    if (length >= sizeof(trusted_program_path)) return;
+    memcpy(trusted_program_path, resolved, length + 1);
 }
 
 static bool safe_command_name(const char *name) {
@@ -571,6 +591,13 @@ int statx(int directory, const char *path, int flags, unsigned int mask,
 
 ssize_t readlink(const char *path, char *buffer, size_t size) {
     typedef ssize_t (*function_type)(const char *, char *, size_t);
+    if (strcmp(path, "/proc/self/exe") == 0
+            && trusted_program_path[0] != '\0') {
+        size_t length = strlen(trusted_program_path);
+        if (length > size) length = size;
+        if (length > 0) memcpy(buffer, trusted_program_path, length);
+        return (ssize_t)length;
+    }
     function_type real = RESOLVE(function_type, "readlink");
     bool translated;
     char translated_path[PATH_MAX];
@@ -581,6 +608,24 @@ ssize_t readlink(const char *path, char *buffer, size_t size) {
         return -1;
     }
     return real(target, buffer, size);
+}
+
+ssize_t readlinkat(int directory, const char *path, char *buffer, size_t size) {
+    typedef ssize_t (*function_type)(int, const char *, char *, size_t);
+    if (strcmp(path, "/proc/self/exe") == 0
+            && trusted_program_path[0] != '\0') {
+        size_t length = strlen(trusted_program_path);
+        if (length > size) length = size;
+        if (length > 0) memcpy(buffer, trusted_program_path, length);
+        return (ssize_t)length;
+    }
+    function_type real = RESOLVE(function_type, "readlinkat");
+    bool translated;
+    char translated_path[PATH_MAX];
+    const char *target = translate_path(path, translated_path, &translated);
+    if (target == NULL) return -1;
+    REQUIRE_REAL(real);
+    return real(directory, target, buffer, size);
 }
 int mkdir(const char *path, mode_t mode) {
     typedef int (*function_type)(int, const char *, mode_t);

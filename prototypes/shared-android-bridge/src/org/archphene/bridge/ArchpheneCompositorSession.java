@@ -107,6 +107,7 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
     private static final int ANDROID_DRAG_DROP_URI_LIST = 34;
     private static final int HOST_ACTIVE = 35;
     private static final long POINTER_CLICK_HOLD_MILLIS = 32;
+    private static final long RECOVERED_KEY_HOLD_MILLIS = 120;
     private static final long MENU_TRANSITION_DELAY_MILLIS = 120;
     private static final long TOUCH_CLICK_HOLD_MILLIS = 120;
 
@@ -119,6 +120,8 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
     private final LinkedBlockingQueue<Event> events = new LinkedBlockingQueue<>();
     private final Object pointerClickLock = new Object();
     private final Set<Integer> pointerFallbackTouches = new HashSet<>();
+    private final Set<Integer> androidPressedKeys = new HashSet<>();
+    private final Set<Integer> recoveredRepeatKeys = new HashSet<>();
     private final int touchSlopSquared;
     private final AtomicBoolean running = new AtomicBoolean();
     private final CountDownLatch ready = new CountDownLatch(1);
@@ -135,6 +138,8 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
     private volatile boolean retainedIme;
     private volatile boolean accessibilityImeActive;
     private volatile boolean nativeImeActive;
+    private volatile boolean suppressInitialNativeImeShow;
+    private volatile boolean inputDiagnostics;
     private final AtomicInteger imeRequestGeneration = new AtomicInteger();
     private volatile boolean independentWindows;
     private volatile int activeSecondaryWindowId;
@@ -204,6 +209,14 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
     public void setIndependentWindows(boolean enabled) {
         independentWindows = enabled;
         events.offer(new Event(WINDOW_MODE, enabled ? 1 : 0, 0, 0, 0, ""));
+    }
+
+    public void setSuppressInitialNativeImeShow(boolean suppress) {
+        suppressInitialNativeImeShow = suppress;
+    }
+
+    public void setInputDiagnostics(boolean enabled) {
+        inputDiagnostics = enabled;
     }
 
     public void activateWindow(int id, ArchpheneInputView target) {
@@ -688,12 +701,45 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
     }
     public boolean key(KeyEvent event) {
         int linuxKey = toLinuxKeyCode(event.getKeyCode());
-        if (linuxKey == 0 || event.getRepeatCount() != 0) return false;
+        if (inputDiagnostics) {
+            Log.d(INPUT_TAG, "Android key code=" + event.getKeyCode()
+                    + " linux=" + linuxKey + " action=" + event.getAction()
+                    + " repeat=" + event.getRepeatCount());
+        }
+        if (linuxKey == 0) return false;
         int action = event.getAction();
         if (action != KeyEvent.ACTION_DOWN && action != KeyEvent.ACTION_UP) return false;
-        events.offer(new Event(
-                KEY, linuxKey, action == KeyEvent.ACTION_DOWN ? 1 : 0,
-                (int) event.getEventTime(), 0, ""));
+        // Android can route the initial down through a focused View and expose
+        // only a repeated down to the Activity. Forward it and retain a short
+        // observable press interval before its release; otherwise both events
+        // can enter the client queue in one frame. Normal hardware down/up
+        // sequences remain untouched.
+        if (action == KeyEvent.ACTION_DOWN) {
+            synchronized (androidPressedKeys) {
+                if (event.getRepeatCount() != 0
+                        && !androidPressedKeys.contains(linuxKey)) {
+                    recoveredRepeatKeys.add(linuxKey);
+                }
+                androidPressedKeys.add(linuxKey);
+            }
+            events.offer(new Event(
+                    KEY, linuxKey, 1, (int) event.getEventTime(), 0, ""));
+        } else {
+            boolean recovered;
+            synchronized (androidPressedKeys) {
+                androidPressedKeys.remove(linuxKey);
+                recovered = recoveredRepeatKeys.remove(linuxKey);
+            }
+            Event release = new Event(
+                    KEY, linuxKey, 0, (int) event.getEventTime(), 0, "");
+            if (recovered) {
+                inputView.postDelayed(() -> {
+                    if (running.get()) events.offer(release);
+                }, RECOVERED_KEY_HOLD_MILLIS);
+            } else {
+                events.offer(release);
+            }
+        }
         return true;
     }
 
@@ -853,8 +899,14 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
                     lastShow = show;
                     lastImeViewGeneration = imeViewGeneration;
                     retainedIme = false;
-                    Log.d(INPUT_TAG, "Wayland IME show request=" + show);
-                    showIme(compositor);
+                    if (suppressInitialNativeImeShow) {
+                        suppressInitialNativeImeShow = false;
+                        Log.i(INPUT_TAG,
+                                "Suppressed implicit legacy SDL startup IME request");
+                    } else {
+                        Log.d(INPUT_TAG, "Wayland IME show request=" + show);
+                        showIme(compositor);
+                    }
                 } else if (nativeImeActive && imeViewGeneration != lastImeViewGeneration) {
                     lastImeViewGeneration = imeViewGeneration;
                     Log.d(INPUT_TAG, "Wayland IME retarget generation=" + imeViewGeneration);
@@ -910,7 +962,15 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
             }
             case POINTER_AXIS -> compositor.pointerAxis(event.a / 1000f, event.b / 1000f, event.c);
             case POINTER_LEAVE -> compositor.pointerLeave();
-            case KEY -> compositor.keyboardKey(event.a, event.b != 0, event.c);
+            case KEY -> {
+                int result = compositor.keyboardKey(event.a, event.b != 0, event.c);
+                if (inputDiagnostics) {
+                    Log.d(INPUT_TAG, "keyboard key=" + event.a
+                            + " pressed=" + (event.b != 0) + " result=" + result
+                            + " resources=" + compositor.keyboardCount()
+                            + " focused=" + compositor.focusedKeyboardCount());
+                }
+            }
             case TOUCH_DOWN -> {
                 int result = compositor.touchDown(event.a, event.b, event.c, event.d);
                 if (result == 0 && pointerFallbackTouches.isEmpty()) {
@@ -1296,6 +1356,10 @@ case KeyEvent.KEYCODE_PLUS, KeyEvent.KEYCODE_EQUALS -> 13;
     @Override
     public void close() {
         if (!running.getAndSet(false)) return;
+        synchronized (androidPressedKeys) {
+            androidPressedKeys.clear();
+            recoveredRepeatKeys.clear();
+        }
         clipboard.close();
         Thread current = thread;
         if (current != null) {

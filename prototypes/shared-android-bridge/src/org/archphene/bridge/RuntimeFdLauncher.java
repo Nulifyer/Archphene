@@ -185,11 +185,29 @@ public final class RuntimeFdLauncher {
         long executionId = 0;
         try {
             if (execution != null) executionId = execution.begin();
-            // Android procfs does not permit glibc to reopen the executable through
-            // /proc/self/fd. Keep only the main program as a private named file;
-            // Descriptor-library mode still avoids materializing the runtime closure.
+            // Android reports the managed glibc loader through /proc/self/exe.
+            // Keep the verified program at its conventional private prefix so
+            // relocatable Linux applications can derive ../share and ../lib.
+            File namedProgram = runtimeProgramFile(cacheRoot,
+                    environment.get("ARCHPHENE_RUNTIME_ROOT"), programName);
+            File temporaryProgram = namedProgram == null
+                    ? new File(links, ".program")
+                    : new File(namedProgram.getParentFile(), ".archphene-program-"
+                            + android.os.Process.myPid() + "-" + System.nanoTime());
             ParcelFileDescriptor program = materializeElf(resolver, programUri,
-                    new File(links, ".program"), execution);
+                    temporaryProgram, execution);
+            if (namedProgram != null) {
+                try {
+                    android.system.Os.rename(temporaryProgram.getAbsolutePath(),
+                            namedProgram.getAbsolutePath());
+                    android.system.Os.symlink(namedProgram.getAbsolutePath(),
+                            new File(links, ".program").getAbsolutePath());
+                } catch (Exception error) {
+                    program.close();
+                    temporaryProgram.delete();
+                    throw error;
+                }
+            }
             descriptors.add(program);
             ParcelFileDescriptor loader = openElf(resolver, loaderUri);
             descriptors.add(loader);
@@ -209,6 +227,10 @@ public final class RuntimeFdLauncher {
                         .append(libraryNames[index]).append('\n');
             }
             Map<String, String> launchEnvironment = new HashMap<>(environment);
+            if (namedProgram != null) {
+                launchEnvironment.put("ARCHPHENE_RUNTIME_PROGRAM_PATH",
+                        namedProgram.getAbsolutePath());
+            }
             File commandDirectory = new File(links, "commands");
             if (!commandDirectory.mkdir()) {
                 throw new java.io.IOException("Could not create runtime command view");
@@ -310,6 +332,32 @@ public final class RuntimeFdLauncher {
         File[] entries = cacheRoot.listFiles((directory, name) -> name.startsWith("runtime-fd-"));
         if (entries == null) return;
         for (File entry : entries) deleteRecursively(entry);
+    }
+
+    private static File runtimeProgramFile(File cacheRoot, String rootValue,
+            String programName) throws Exception {
+        if (rootValue == null || rootValue.isEmpty()) return null;
+        File privateRoot = cacheRoot.getCanonicalFile().getParentFile();
+        File runtimeRoot = new File(rootValue).getCanonicalFile();
+        String privatePrefix = privateRoot.getPath() + File.separator;
+        if (!runtimeRoot.getPath().startsWith(privatePrefix)
+                || !runtimeRoot.isDirectory()) {
+            throw new SecurityException("Runtime program prefix is outside app-private storage");
+        }
+        File directory = new File(runtimeRoot, "usr/bin");
+        if (!directory.isDirectory() && !directory.mkdirs()) {
+            throw new java.io.IOException("Could not create private runtime program directory");
+        }
+        directory = directory.getCanonicalFile();
+        String runtimePrefix = runtimeRoot.getPath() + File.separator;
+        if (!directory.getPath().startsWith(runtimePrefix)) {
+            throw new SecurityException("Runtime program directory escapes its private prefix");
+        }
+        File program = new File(directory, programName);
+        if (!program.getParentFile().equals(directory)) {
+            throw new SecurityException("Runtime program name escapes its private prefix");
+        }
+        return program;
     }
 
     private static void deleteRecursively(File path) {

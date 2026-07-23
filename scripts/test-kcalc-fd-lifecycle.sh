@@ -33,7 +33,7 @@ was_running=false
 if archphene_android_pid "$package" >/dev/null 2>&1; then
   was_running=true
 fi
-tmp="$(archphene_mktemp_dir kcalc-fd-lifecycle)"
+tmp="$(archphene_mktemp_dir linux-fd-lifecycle)"
 restore() {
   archphene_adb_run shell settings put system accelerometer_rotation \
     "$old_accelerometer" >/dev/null 2>&1 || true
@@ -66,11 +66,12 @@ archphene_adb_run shell settings put system user_rotation 0
 archphene_adb_run shell am force-stop "$package"
 archphene_adb_run logcat -c
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
-sleep 8
+archphene_wait_log 'mapped=true.*primary=true' 60 \
+  'ArchpheneInput:V ArchpheneLinuxApp:I AndroidRuntime:E *:S' >/dev/null
 android_pid="$(archphene_android_pid "$package")"
 linux_pid="$(archphene_linux_loader_pid "$android_pid")"
 [[ -n "$android_pid" && -n "$linux_pid" ]] \
-  || archphene_die 'KCalc process tree is not running'
+  || archphene_die 'Linux wrapper process tree is not running'
 # Rotation causes Android, Qt, and the compositor to allocate a small stable
 # set of configuration descriptors on first use. Establish the leak baseline
 # after that one-time path, not before it has ever run.
@@ -81,7 +82,7 @@ sleep 5
 warm_android="$(archphene_android_pid "$package")"
 warm_linux="$(archphene_linux_loader_pid "$warm_android")"
 [[ "$warm_android" == "$android_pid" && "$warm_linux" == "$linux_pid" ]] \
-  || archphene_die 'KCalc restarted during descriptor-baseline warmup'
+  || archphene_die 'Linux wrapper restarted during descriptor-baseline warmup'
 before="$(snapshot "$android_pid")"
 
 for ((cycle = 1; cycle <= cycles; cycle++)); do
@@ -95,7 +96,7 @@ sleep 15
 after_android="$(archphene_android_pid "$package")"
 after_linux="$(archphene_linux_loader_pid "$after_android")"
 [[ "$after_android" == "$android_pid" && "$after_linux" == "$linux_pid" ]] \
-  || archphene_die "KCalc restarted during rotation: Android $android_pid/$after_android, Linux $linux_pid/$after_linux"
+  || archphene_die "Linux wrapper restarted during rotation: Android $android_pid/$after_android, Linux $linux_pid/$after_linux"
 after="$(snapshot "$android_pid")"
 IFS='|' read -r before_total before_wayland before_sync before_ashmem \
   <<<"$before"
@@ -113,9 +114,9 @@ IFS='|' read -r after_total after_wayland after_sync after_ashmem \
 archphene_adb_run exec-out screencap >"$tmp/final.raw"
 python3 "$ARCHPHENE_SCRIPTS_DIR/lib/theme-frame-check.py" inspect \
   "$tmp/final.raw" >/dev/null
-ui="$(archphene_capture_ui kcalc-fd-lifecycle-final)"
+ui="$(archphene_capture_ui linux-fd-lifecycle-final)"
 [[ "$ui" == *'class="android.widget.ImageView"'* ]] \
-  || archphene_die 'KCalc viewport is missing after rotation cycles'
+  || archphene_die 'Linux wrapper viewport is missing after rotation cycles'
 log="$(archphene_adb_run logcat -d -v threadtime \
   -s ArchpheneInput:V ArchpheneLinuxApp:I AndroidRuntime:E '*:S')"
 ! archphene_regex_contains "$log" \
@@ -124,4 +125,4 @@ log="$(archphene_adb_run logcat -d -v threadtime \
 
 restore
 trap - EXIT
-archphene_note "KCalc FD lifecycle passed on $serial after $cycles cycles with stable Android PID $android_pid and Linux PID $linux_pid. Total $before_total->$after_total; Wayland SHM $before_wayland->$after_wayland; sync fences $before_sync->$after_sync; ashmem $before_ashmem->$after_ashmem; rendered viewport and prior running state restored."
+archphene_note "Linux wrapper FD lifecycle passed on $serial after $cycles cycles with stable Android PID $android_pid and Linux PID $linux_pid. Total $before_total->$after_total; Wayland SHM $before_wayland->$after_wayland; sync fences $before_sync->$after_sync; ashmem $before_ashmem->$after_ashmem; rendered viewport and prior running state restored."

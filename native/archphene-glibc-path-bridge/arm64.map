@@ -7,4 +7,6 @@ GLIBC_2.17 {
         execve;
         execvp;
         execvpe;
+        readlink;
+        readlinkat;
 };

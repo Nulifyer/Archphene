@@ -39,6 +39,8 @@ public final class ArchWrapperAssembler {
     private static final String QT_TEMPLATE = "package-runtime/qt-wrapper-template.apk";
     private static final String QT_MANIFEST_PREFIX = "package-runtime/qt-";
     private static final int MIME_SLOT_COUNT = 16;
+    private static final int RUNTIME_LOADED_LIBRARY_LIMIT = 128;
+    private static final int EMBEDDED_LIBRARY_REFERENCE_LIMIT = 512;
     private static final String PACKAGE_PLACEHOLDER =
             "org.archphene.linux.p00000000000000000000000000000000";
     private static final int ENTRY_LIMIT = 256 * 1024 * 1024;
@@ -532,18 +534,119 @@ public final class ArchWrapperAssembler {
             }
             resolveDependencies(result, candidates, pending, visited);
         }
+        resolveRuntimeLoadedDependencies(
+                canonicalRoot, result, candidates, pending, visited);
         if (result.containsKey("libEGL.so.1") || result.containsKey("libEGL.so")) {
             for (String providerName : new String[] {
                     "libEGL_mesa.so.0", "swrast_dri.so", "kms_swrast_dri.so",
                     "virtio_gpu_dri.so"}) {
                 File provider = candidates.get(providerName);
-                if (provider == null) continue;
+                if (provider == null) {
+                    android.util.Log.i("ArchphenePackages",
+                            "Graphics provider unavailable in staged closure "
+                                    + providerName + " known="
+                                    + candidates.containsKey(providerName));
+                    continue;
+                }
+                android.util.Log.i("ArchphenePackages",
+                        "Retained verified graphics provider " + providerName
+                                + " from " + provider.getName());
                 addNative(result, providerName, provider);
                 pending.add(provider);
             }
             resolveDependencies(result, candidates, pending, visited);
         }
+        resolveRuntimeLoadedDependencies(
+                canonicalRoot, result, candidates, pending, visited);
         return result;
+    }
+
+    /*
+     * DT_NEEDED is the primary ELF closure, but verified compatibility
+     * libraries and plugin loaders can open another soname at runtime. Discover
+     * only complete soname-shaped ASCII strings embedded in already selected
+     * staged ELFs, match them against the verified staged candidate set, and
+     * repeat after resolving each retained library.
+     */
+    private static void resolveRuntimeLoadedDependencies(File runtimeRoot,
+            Map<String, File> result, Map<String, File> candidates,
+            ArrayDeque<File> pending, Set<String> visited) throws Exception {
+        String stagedPrefix = runtimeRoot.getCanonicalPath() + File.separator;
+        HashSet<String> scanned = new HashSet<>();
+        int retained = 0;
+        while (true) {
+            resolveDependencies(result, candidates, pending, visited);
+            ArrayList<File> snapshot = new ArrayList<>(result.values());
+            boolean added = false;
+            for (File value : snapshot) {
+                File source = value.getCanonicalFile();
+                if (!source.getPath().startsWith(stagedPrefix)
+                        || !scanned.add(source.getPath())) continue;
+                for (String name : runtimeLibraryReferences(source)) {
+                    if (result.containsKey(name) || !candidates.containsKey(name)) continue;
+                    File candidate = candidates.get(name);
+                    if (candidate == null) {
+                        throw new SecurityException(
+                                "Ambiguous runtime-loaded ELF dependency " + name
+                                        + " required by " + source.getName());
+                    }
+                    if (++retained > RUNTIME_LOADED_LIBRARY_LIMIT) {
+                        throw new SecurityException(
+                                "Runtime-loaded ELF dependency limit exceeded");
+                    }
+                    addNative(result, name, candidate);
+                    pending.add(candidate);
+                    added = true;
+                    android.util.Log.i("ArchphenePackages",
+                            "Retained verified runtime-loaded library " + name
+                                    + " referenced by " + source.getName());
+                }
+            }
+            if (!added) return;
+        }
+    }
+
+    private static Set<String> runtimeLibraryReferences(File file) throws Exception {
+        HashSet<String> result = new HashSet<>();
+        StringBuilder token = new StringBuilder();
+        boolean overflow = false;
+        try (InputStream input = new FileInputStream(file)) {
+            byte[] buffer = new byte[64 * 1024];
+            int count;
+            while ((count = input.read(buffer)) != -1) {
+                for (int index = 0; index < count; index++) {
+                    int value = buffer[index] & 0xff;
+                    boolean safe = value >= 'a' && value <= 'z'
+                            || value >= 'A' && value <= 'Z'
+                            || value >= '0' && value <= '9'
+                            || value == '@' || value == '.' || value == '_'
+                            || value == '+' || value == '-';
+                    if (safe) {
+                        if (token.length() < 255) token.append((char) value);
+                        else overflow = true;
+                        continue;
+                    }
+                    addRuntimeLibraryReference(result, token, overflow);
+                    token.setLength(0);
+                    overflow = false;
+                }
+            }
+        }
+        addRuntimeLibraryReference(result, token, overflow);
+        return result;
+    }
+
+    private static void addRuntimeLibraryReference(Set<String> result,
+            StringBuilder token, boolean overflow) {
+        if (overflow || token.length() < 7) return;
+        String name = token.toString();
+        if (!name.matches("lib[a-zA-Z0-9@._+-]{1,240}\\.so"
+                + "(?:\\.[a-zA-Z0-9@._+-]+)*")) return;
+        if (!result.contains(name)
+                && result.size() >= EMBEDDED_LIBRARY_REFERENCE_LIMIT) {
+            throw new SecurityException("Embedded runtime library reference limit exceeded");
+        }
+        result.add(name);
     }
 
     static Map<String, File> collectNativeLibraryClosure(Context context, File runtimeRoot,

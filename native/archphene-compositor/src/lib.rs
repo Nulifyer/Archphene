@@ -10687,6 +10687,10 @@ pub unsafe extern "system" fn Java_org_archphene_bridge_NativeCompositor_nativeI
             });
         }
         64 => return i32::try_from(core.set_host_active(a != 0)).unwrap_or(i32::MAX),
+        65 => return i32::try_from(core.keyboard_count()).unwrap_or(i32::MAX),
+        66 => {
+            return i32::try_from(core.focused_keyboard_resources().len()).unwrap_or(i32::MAX);
+        }
         _ => return -3,
     };
     i32::try_from(value).unwrap_or(i32::MAX)
