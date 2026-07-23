@@ -169,6 +169,7 @@ system-mode regressions with:
 ./scripts/test-kcalc-live-theme.sh --serial emulator-5554
 ./scripts/test-mousepad-live-theme.sh --serial emulator-5554
 ./scripts/test-gnome-text-editor-live-theme.sh --serial emulator-5554
+./scripts/test-gnome-text-editor-input.sh --serial emulator-5554
 ./scripts/test-kate-live-theme.sh --serial emulator-5554
 ```
 
