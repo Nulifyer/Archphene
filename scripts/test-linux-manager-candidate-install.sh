@@ -169,16 +169,14 @@ done
 archphene_adb_run exec-out screencap -p \
   >"$artifact_prefix.png"
 ui="$(archphene_capture_ui "candidate-$package_name-running" 2>/dev/null || true)"
-if [[ -n "$ui" ]]; then
-  [[ "$ui" == *'class="android.widget.ImageView"'* ]] \
-    || archphene_die "$package_name did not expose a rendered compositor surface"
-else
-  # Continuously animating GTK/GPU surfaces can prevent uiautomator from
-  # reaching its idle state. In that case the mapped Wayland window plus a
-  # nontrivial Android screenshot provide the rendering evidence.
+if [[ "$ui" != *'class="android.widget.ImageView"'* ]]; then
+  # Continuously animating surfaces can prevent uiautomator from reaching its
+  # idle state, while an Android permission dialog can legitimately own the
+  # hierarchy after the Linux window maps. In either case, require independent
+  # compositor mapping plus a nontrivial full-device frame.
   screenshot_bytes="$(wc -c <"$artifact_prefix.png")"
   ((screenshot_bytes > 10000)) \
-    || archphene_die "$package_name produced neither a UI hierarchy nor a screenshot"
+    || archphene_die "$package_name produced no usable rendered screenshot"
   archphene_regex_contains "$mapped_log" 'mapped=true.*primary=true' \
     || archphene_die "$package_name did not map a primary Wayland window"
 fi
