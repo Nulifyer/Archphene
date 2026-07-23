@@ -35,7 +35,12 @@ linux_pid="$(archphene_linux_loader_pid "$pid")"
 
 archphene_adb_run exec-out screencap >"$artifact_dir/prompt.raw"
 archphene_adb_run exec-out screencap -p >"$artifact_dir/prompt.png"
-python3 "$ARCHPHENE_SCRIPTS_DIR/lib/frame-health-check.py" "$artifact_dir/prompt.raw"
+# A clean light terminal is intentionally almost all background. Its prompt and
+# CSD occupy less than five percent of the Linux surface, so use the one-percent
+# luma tails while retaining the independent color, mapped-window, command
+# difference, geometry, configuration, contrast, and process assertions below.
+python3 "$ARCHPHENE_SCRIPTS_DIR/lib/frame-health-check.py" \
+  "$artifact_dir/prompt.raw" --luma-tail-percent 1
 archphene_adb_run shell input text 'echo%sARCHPHENE_FOOT_VISUAL'
 archphene_adb_run shell input keyevent KEYCODE_ENTER
 sleep 2

@@ -27,10 +27,13 @@ def main() -> None:
     parser.add_argument("--top-percent", type=int, default=10)
     parser.add_argument("--right-percent", type=int, default=95)
     parser.add_argument("--bottom-percent", type=int, default=90)
+    parser.add_argument("--luma-tail-percent", type=int, default=5)
     args = parser.parse_args()
     if not (0 <= args.left_percent < args.right_percent <= 100
             and 0 <= args.top_percent < args.bottom_percent <= 100):
         raise SystemExit("invalid frame-health crop percentages")
+    if not 1 <= args.luma_tail_percent <= 49:
+        raise SystemExit("luma tail percent must be from 1 to 49")
     width, height, pixels = frame(args.frame)
     colors = set()
     lumas = []
@@ -46,11 +49,12 @@ def main() -> None:
             colors.add((red // 16, green // 16, blue // 16))
             lumas.append((299 * red + 587 * green + 114 * blue) // 1000)
     lumas.sort()
-    low = lumas[len(lumas) // 20]
-    high = lumas[len(lumas) * 19 // 20]
+    tail = args.luma_tail_percent
+    low = lumas[len(lumas) * tail // 100]
+    high = lumas[len(lumas) * (100 - tail) // 100]
     print(
         f"frame={width}x{height} quantized_colors={len(colors)} "
-        f"luma_5_95={low}..{high}"
+        f"luma_{tail}_{100 - tail}={low}..{high}"
     )
     if len(colors) < args.minimum_colors:
         raise SystemExit("Linux-app evidence is effectively uniform")

@@ -52,6 +52,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 public final class MainActivity extends Activity {
     private static final int REQUEST_UNINSTALL_LINUX_APP = 0x4150;
+    private static final int REQUEST_INSTALL_SOURCE_FOR_MIGRATION = 0x4151;
     private static int COLOR_BACKGROUND = Color.rgb(248, 250, 252);
     private static int COLOR_SURFACE = Color.rgb(240, 243, 245);
     private static int COLOR_SURFACE_ACTIVE = Color.rgb(216, 238, 248);
@@ -197,6 +198,23 @@ public final class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_INSTALL_SOURCE_FOR_MIGRATION) {
+            String packageName = ManagerStateStore.takePendingUninstallPackage(this);
+            ArchPackageRepository.PackageResult reinstall =
+                    ManagerStateStore.takePendingReinstall(this);
+            if (reinstall == null || packageName.isEmpty()) {
+                showBanner("Wrapper migration request expired; no app was removed", false);
+                return;
+            }
+            if (Build.VERSION.SDK_INT >= 26
+                    && !getPackageManager().canRequestPackageInstalls()) {
+                showBanner("Allow installs from Archphene before replacing the older wrapper. "
+                        + "No app was removed.", false);
+                return;
+            }
+            confirmWrapperSignerMigration(reinstall, packageName);
+            return;
+        }
         if (requestCode != REQUEST_UNINSTALL_LINUX_APP) return;
         String uninstalledPackage = ManagerStateStore.takePendingUninstallPackage(this);
         ArchPackageRepository.PackageResult reinstall =
@@ -1107,6 +1125,29 @@ public final class MainActivity extends Activity {
         renderAppList();
     }
     private void requestWrapperSignerMigration(ArchPackageRepository.PackageResult source,
+            String packageName) {
+        if (Build.VERSION.SDK_INT >= 26
+                && !getPackageManager().canRequestPackageInstalls()) {
+            new AlertDialog.Builder(this)
+                    .setTitle("Allow Archphene to install apps")
+                    .setMessage("Android must allow installs from Archphene before the older "
+                            + "wrapper can be safely removed. The existing app remains installed "
+                            + "until you return with this permission enabled.")
+                    .setNegativeButton("Cancel", null)
+                    .setPositiveButton("Open settings", (dialog, which) -> {
+                        ManagerStateStore.setPendingUninstallPackage(this, packageName);
+                        ManagerStateStore.setPendingReinstall(this, source);
+                        Intent settings = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                Uri.parse("package:" + getPackageName()));
+                        startActivityForResult(settings,
+                                REQUEST_INSTALL_SOURCE_FOR_MIGRATION);
+                    })
+                    .show();
+            return;
+        }
+        confirmWrapperSignerMigration(source, packageName);
+    }
+    private void confirmWrapperSignerMigration(ArchPackageRepository.PackageResult source,
             String packageName) {
         new AlertDialog.Builder(this)
                 .setTitle("Replace older wrapper?")
