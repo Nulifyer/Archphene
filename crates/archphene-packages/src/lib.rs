@@ -23,6 +23,11 @@ const PACMAN_CONFIG_TEMP_FILE: &str = "etc/pacman.conf.tmp";
 const CATALOG_DIRECTORY: &str = "var/lib/pacman/sync";
 const CORE_CATALOG_LIMIT: u64 = 8 * 1024 * 1024;
 const EXTRA_CATALOG_LIMIT: u64 = 64 * 1024 * 1024;
+const PACKAGE_ARCHIVE_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
+const PACKAGE_SIGNATURE_LIMIT: u64 = 1024 * 1024;
+const PACKAGE_CACHE_DIRECTORY: &str = "var/cache/pacman/pkg";
+const PACKAGE_TRUST_DIRECTORY: &str = "run/package-trust-v1";
+const AARCH64_BUILD_KEY: &str = "68B3537F39A313B3E574D06777193F152BDBE6A6";
 
 const X86_64_PACMAN_CONFIG: &[u8] = b"[options]\n\
 Architecture = x86_64\n\
@@ -84,6 +89,13 @@ impl RepositoryArchitecture {
                 Some("https://ca.us.mirror.archlinuxarm.org/aarch64/extra/")
             }
             _ => None,
+        }
+    }
+
+    const fn package_architecture(self) -> &'static str {
+        match self {
+            Self::X86_64 => "x86_64",
+            Self::Aarch64 => "aarch64",
         }
     }
 }
@@ -160,6 +172,8 @@ pub enum PackageRuntimeError {
     InvalidQuery,
     InvalidResolution,
     MissingTarget,
+    InvalidPayload,
+    InvalidSignature,
     ToolFailed(i32, ToolOutput),
     Io(io::Error),
 }
@@ -190,6 +204,8 @@ impl fmt::Display for PackageRuntimeError {
             Self::MissingTarget => {
                 formatter.write_str("resolved packages omit the requested target")
             }
+            Self::InvalidPayload => formatter.write_str("invalid package payload"),
+            Self::InvalidSignature => formatter.write_str("invalid package signature"),
             Self::ToolFailed(code, output) => {
                 write!(formatter, "package command failed with status {code}")?;
                 if let Ok(text) = output.as_str() {
@@ -221,6 +237,7 @@ pub struct PackageRuntime {
     pacman_config: PathBuf,
     architecture: RepositoryArchitecture,
     loader: PathBuf,
+    keyring: PathBuf,
     tools: [Option<PathBuf>; 4],
     library_path: OsString,
 }
@@ -281,6 +298,7 @@ impl PackageRuntime {
         let alias_root = arch_root.join(ALIAS_DIRECTORY);
 
         let mut loader = None;
+        let mut keyring = None;
         let mut tools: [Option<PathBuf>; 4] = std::array::from_fn(|_| None);
         let mut entry_count = 0_usize;
         for (index, line) in manifest.lines().skip(1).enumerate() {
@@ -300,6 +318,7 @@ impl PackageRuntime {
             let source = verified_source(&native_root, entry.packaged, entry.size)?;
             match entry.role {
                 "loader" if entry.logical == "@loader" => loader = Some(source),
+                "keyring" if entry.logical == "@keyring" => keyring = Some(source),
                 "tool" => {
                     let tool = tool_from_logical(entry.logical)
                         .ok_or(PackageRuntimeError::InvalidManifest)?;
@@ -313,6 +332,7 @@ impl PackageRuntime {
             return Err(PackageRuntimeError::InvalidManifest);
         }
         let loader = loader.ok_or(PackageRuntimeError::MissingEntry("@loader"))?;
+        let keyring = keyring.ok_or(PackageRuntimeError::MissingEntry("@keyring"))?;
         if tools[PackageTool::Pacman.index()].is_none() {
             return Err(PackageRuntimeError::MissingEntry("@pacman"));
         }
@@ -342,6 +362,7 @@ impl PackageRuntime {
             pacman_config,
             architecture,
             loader,
+            keyring,
             tools,
             library_path,
         })
@@ -475,6 +496,149 @@ impl PackageRuntime {
         parse_resolution_output(raw.as_str()?, package, self.architecture)
     }
 
+    pub fn begin_package_download(
+        &self,
+        filename: &str,
+        expected_size: u64,
+        signature: bool,
+    ) -> Result<PackagePayloadDownload, PackageRuntimeError> {
+        if !safe_package_filename(filename)
+            || expected_size == 0
+            || expected_size > PACKAGE_ARCHIVE_LIMIT
+        {
+            return Err(PackageRuntimeError::InvalidPayload);
+        }
+        let directory = self.arch_root.join(PACKAGE_CACHE_DIRECTORY);
+        let metadata = fs::symlink_metadata(&directory)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(PackageRuntimeError::UnsafeEntry(directory));
+        }
+        let destination_name = if signature {
+            format!("{filename}.sig")
+        } else {
+            filename.to_owned()
+        };
+        let temporary_name = format!("{destination_name}.part");
+        let destination = directory.join(destination_name);
+        let temporary = directory.join(temporary_name);
+        prepare_output_path(&temporary)?;
+        let file = OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&temporary)?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        Ok(PackagePayloadDownload {
+            file,
+            temporary,
+            destination,
+            expected_size,
+            signature,
+            active: true,
+        })
+    }
+
+    pub fn verify_package(
+        &self,
+        filename: &str,
+        expected_name: &str,
+        expected_version: &str,
+        expected_size: u64,
+    ) -> Result<ToolOutput, PackageRuntimeError> {
+        if !safe_package_filename(filename)
+            || !safe_logical_name(expected_name)
+            || expected_version.is_empty()
+            || expected_version.len() > 128
+            || expected_version
+                .bytes()
+                .any(|byte| byte.is_ascii_whitespace() || byte == 0)
+            || expected_size == 0
+            || expected_size > PACKAGE_ARCHIVE_LIMIT
+        {
+            return Err(PackageRuntimeError::InvalidPayload);
+        }
+        let package = self.arch_root.join(PACKAGE_CACHE_DIRECTORY).join(filename);
+        let signature = self
+            .arch_root
+            .join(PACKAGE_CACHE_DIRECTORY)
+            .join(format!("{filename}.sig"));
+        for (path, maximum) in [
+            (&package, expected_size),
+            (&signature, PACKAGE_SIGNATURE_LIMIT),
+        ] {
+            let metadata = fs::symlink_metadata(path)?;
+            if metadata.file_type().is_symlink()
+                || !metadata.is_file()
+                || metadata.len() == 0
+                || metadata.len() > maximum
+                || path == &package && metadata.len() != expected_size
+            {
+                return Err(PackageRuntimeError::InvalidPayload);
+            }
+        }
+        let keyring = self
+            .keyring
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let package = package.to_str().ok_or(PackageRuntimeError::InvalidPath)?;
+        let signature = signature.to_str().ok_or(PackageRuntimeError::InvalidPath)?;
+        let output = self.run(
+            PackageTool::Gpgv,
+            &["--keyring", keyring, "--status-fd", "1", signature, package],
+        )?;
+        validate_signature_status(output.as_str()?, self.architecture)?;
+        let package_info = self.run(PackageTool::Bsdtar, &["-xOf", package, ".PKGINFO"])?;
+        validate_package_info(
+            package_info.as_str()?,
+            expected_name,
+            expected_version,
+            self.architecture,
+        )?;
+        Ok(output)
+    }
+
+    pub fn prepare_verification_keyring(&mut self) -> Result<(), PackageRuntimeError> {
+        let trust_directory = self.arch_root.join(PACKAGE_TRUST_DIRECTORY);
+        match fs::symlink_metadata(&trust_directory) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(PackageRuntimeError::UnsafeEntry(trust_directory));
+            }
+            Ok(_) => fs::remove_dir_all(&trust_directory)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(PackageRuntimeError::Io(error)),
+        }
+        fs::create_dir(&trust_directory)?;
+        fs::set_permissions(&trust_directory, fs::Permissions::from_mode(0o700))?;
+        let trust = trust_directory
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let anchor = self
+            .keyring
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        self.run_with_timeout(
+            PackageTool::Gpg,
+            &[
+                "--homedir",
+                trust,
+                "--batch",
+                "--quiet",
+                "--no-autostart",
+                "--no-auto-check-trustdb",
+                "--import",
+                anchor,
+            ],
+            Duration::from_secs(60),
+        )?;
+        let keybox = trust_directory.join("pubring.kbx");
+        let metadata = fs::symlink_metadata(&keybox)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() == 0 {
+            return Err(PackageRuntimeError::InvalidSignature);
+        }
+        self.keyring = keybox;
+        Ok(())
+    }
+
     fn run_with_timeout(
         &self,
         tool: PackageTool,
@@ -550,6 +714,61 @@ pub struct CatalogDownload {
     temporary: PathBuf,
     destination: PathBuf,
     active: bool,
+}
+
+#[derive(Debug)]
+pub struct PackagePayloadDownload {
+    file: File,
+    temporary: PathBuf,
+    destination: PathBuf,
+    expected_size: u64,
+    signature: bool,
+    active: bool,
+}
+
+impl PackagePayloadDownload {
+    pub fn duplicate_file(&self) -> Result<File, PackageRuntimeError> {
+        Ok(self.file.try_clone()?)
+    }
+
+    pub fn finish(mut self) -> Result<u64, PackageRuntimeError> {
+        let metadata = self.file.metadata()?;
+        let length = metadata.len();
+        let valid_length = if self.signature {
+            length > 0 && length <= PACKAGE_SIGNATURE_LIMIT
+        } else {
+            length == self.expected_size
+        };
+        if !metadata.is_file() || !valid_length {
+            return Err(PackageRuntimeError::InvalidPayload);
+        }
+        self.file.sync_all()?;
+        match fs::symlink_metadata(&self.destination) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                return Err(PackageRuntimeError::UnsafeEntry(self.destination.clone()));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(PackageRuntimeError::Io(error)),
+        }
+        fs::rename(&self.temporary, &self.destination)?;
+        self.active = false;
+        File::open(
+            self.destination
+                .parent()
+                .ok_or(PackageRuntimeError::InvalidPath)?,
+        )?
+        .sync_all()?;
+        Ok(length)
+    }
+}
+
+impl Drop for PackagePayloadDownload {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = fs::remove_file(&self.temporary);
+        }
+    }
 }
 
 impl CatalogDownload {
@@ -642,7 +861,7 @@ fn parse_entry(line: &str) -> Result<ManifestEntry<'_>, PackageRuntimeError> {
         .parse::<u64>()
         .map_err(|_| PackageRuntimeError::InvalidManifest)?;
     if fields.next().is_some()
-        || !matches!(role, "loader" | "tool" | "library")
+        || !matches!(role, "loader" | "tool" | "library" | "keyring")
         || !safe_logical_name(logical)
         || !safe_packaged_name(packaged)
         || size == 0
@@ -958,11 +1177,78 @@ fn resolution_contains(output: &ToolOutput, package: &str) -> Result<bool, Packa
 
 fn safe_package_filename(value: &str) -> bool {
     !value.is_empty()
-        && value.len() <= 255
+        && value.len() <= 240
         && (value.ends_with(".pkg.tar.zst") || value.ends_with(".pkg.tar.xz"))
         && value.bytes().all(|byte| {
             byte.is_ascii_alphanumeric() || matches!(byte, b'@' | b'.' | b'_' | b'+' | b':' | b'-')
         })
+}
+
+fn validate_signature_status(
+    output: &str,
+    architecture: RepositoryArchitecture,
+) -> Result<(), PackageRuntimeError> {
+    if output.lines().any(|line| {
+        [
+            "[GNUPG:] BADSIG",
+            "[GNUPG:] ERRSIG",
+            "[GNUPG:] REVKEYSIG",
+            "[GNUPG:] EXPKEYSIG",
+            "[GNUPG:] KEYEXPIRED",
+            "[GNUPG:] SIGEXPIRED",
+        ]
+        .into_iter()
+        .any(|status| line.contains(status))
+    }) {
+        return Err(PackageRuntimeError::InvalidSignature);
+    }
+    let signer = output.lines().find_map(|line| {
+        line.split_once("[GNUPG:] VALIDSIG ")
+            .and_then(|(_, fields)| fields.split_ascii_whitespace().next())
+    });
+    let Some(signer) = signer else {
+        return Err(PackageRuntimeError::InvalidSignature);
+    };
+    if !matches!(signer.len(), 40 | 64)
+        || !signer
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_lowercase())
+        || architecture == RepositoryArchitecture::Aarch64 && signer != AARCH64_BUILD_KEY
+    {
+        return Err(PackageRuntimeError::InvalidSignature);
+    }
+    Ok(())
+}
+
+fn validate_package_info(
+    input: &str,
+    expected_name: &str,
+    expected_version: &str,
+    architecture: RepositoryArchitecture,
+) -> Result<(), PackageRuntimeError> {
+    let mut name = None;
+    let mut version = None;
+    let mut package_architecture = None;
+    for line in input.lines() {
+        let Some((key, value)) = line.split_once(" = ") else {
+            continue;
+        };
+        match key {
+            "pkgname" if name.replace(value).is_none() => {}
+            "pkgver" if version.replace(value).is_none() => {}
+            "arch" if package_architecture.replace(value).is_none() => {}
+            "pkgname" | "pkgver" | "arch" => {
+                return Err(PackageRuntimeError::InvalidPayload);
+            }
+            _ => {}
+        }
+    }
+    let valid_architecture = package_architecture == Some("any")
+        || package_architecture == Some(architecture.package_architecture());
+    if name != Some(expected_name) || version != Some(expected_version) || !valid_architecture {
+        return Err(PackageRuntimeError::InvalidPayload);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -988,6 +1274,7 @@ mod tests {
             fs::create_dir_all(root.join("run")).expect("run directory");
             fs::create_dir(root.join("etc")).expect("etc directory");
             fs::create_dir_all(root.join(CATALOG_DIRECTORY)).expect("catalog directory");
+            fs::create_dir_all(root.join(PACKAGE_CACHE_DIRECTORY)).expect("package cache");
             fs::create_dir(&native).expect("native directory");
             Self { root, native }
         }
@@ -1009,9 +1296,11 @@ mod tests {
         tree.file("libarchphene_pkg_111111111111111111111111.so", b"loader");
         tree.file("libarchphene_pkg_222222222222222222222222.so", b"pacman");
         tree.file("libarchphene_pkg_333333333333333333333333.so", b"library");
+        tree.file("libarchphene_pkg_444444444444444444444444.so", b"keyring");
         let manifest = b"# org.archphene.package-runtime.v1\n\
 loader\t@loader\tlibarchphene_pkg_111111111111111111111111.so\t6\n\
 tool\t@pacman\tlibarchphene_pkg_222222222222222222222222.so\t6\n\
+keyring\t@keyring\tlibarchphene_pkg_444444444444444444444444.so\t7\n\
 library\tlibalpm.so.16\tlibarchphene_pkg_333333333333333333333333.so\t7\n";
         let runtime = PackageRuntime::prepare(
             &tree.root,
@@ -1085,9 +1374,11 @@ loader\t@loader\tlibarchphene_pkg_111111111111111111111111.so\t5\n";
         fs::write(alias_root.join("untrusted"), b"content").expect("unsafe alias content");
         tree.file("libarchphene_pkg_111111111111111111111111.so", b"loader");
         tree.file("libarchphene_pkg_222222222222222222222222.so", b"pacman");
+        tree.file("libarchphene_pkg_444444444444444444444444.so", b"keyring");
         let manifest = b"# org.archphene.package-runtime.v1\n\
 loader\t@loader\tlibarchphene_pkg_111111111111111111111111.so\t6\n\
-tool\t@pacman\tlibarchphene_pkg_222222222222222222222222.so\t6\n";
+tool\t@pacman\tlibarchphene_pkg_222222222222222222222222.so\t6\n\
+keyring\t@keyring\tlibarchphene_pkg_444444444444444444444444.so\t7\n";
         assert!(matches!(
             PackageRuntime::prepare(
                 &tree.root,
@@ -1104,9 +1395,11 @@ tool\t@pacman\tlibarchphene_pkg_222222222222222222222222.so\t6\n";
         let tree = TestTree::new();
         tree.file("libarchphene_pkg_111111111111111111111111.so", b"loader");
         tree.file("libarchphene_pkg_222222222222222222222222.so", b"pacman");
+        tree.file("libarchphene_pkg_444444444444444444444444.so", b"keyring");
         let manifest = b"# org.archphene.package-runtime.v1\n\
 loader\t@loader\tlibarchphene_pkg_111111111111111111111111.so\t6\n\
-tool\t@pacman\tlibarchphene_pkg_222222222222222222222222.so\t6\n";
+tool\t@pacman\tlibarchphene_pkg_222222222222222222222222.so\t6\n\
+keyring\t@keyring\tlibarchphene_pkg_444444444444444444444444.so\t7\n";
         let runtime = PackageRuntime::prepare(
             &tree.root,
             &tree.native,
@@ -1183,5 +1476,129 @@ extra\tdotnet-sdk\t10.0.10.sdk110-1\tdotnet-sdk-10.0.10.sdk110-1-x86_64.pkg.tar.
             ),
             Err(PackageRuntimeError::InvalidResolution)
         ));
+    }
+
+    #[test]
+    fn package_payload_downloads_are_exact_and_atomic() {
+        let tree = TestTree::new();
+        tree.file("libarchphene_pkg_111111111111111111111111.so", b"loader");
+        tree.file("libarchphene_pkg_222222222222222222222222.so", b"pacman");
+        tree.file("libarchphene_pkg_444444444444444444444444.so", b"keyring");
+        let manifest = b"# org.archphene.package-runtime.v1\n\
+loader\t@loader\tlibarchphene_pkg_111111111111111111111111.so\t6\n\
+tool\t@pacman\tlibarchphene_pkg_222222222222222222222222.so\t6\n\
+keyring\t@keyring\tlibarchphene_pkg_444444444444444444444444.so\t7\n";
+        let runtime = PackageRuntime::prepare(
+            &tree.root,
+            &tree.native,
+            manifest,
+            RepositoryArchitecture::X86_64,
+        )
+        .expect("package runtime");
+        let filename = "btop-1.4.7-1-x86_64.pkg.tar.zst";
+        let download = runtime
+            .begin_package_download(filename, 7, false)
+            .expect("package download");
+        let mut writer = download.duplicate_file().expect("package descriptor");
+        writer.write_all(b"package").expect("package bytes");
+        drop(writer);
+        assert_eq!(download.finish().expect("publish package"), 7);
+        assert_eq!(
+            fs::read(tree.root.join(PACKAGE_CACHE_DIRECTORY).join(filename))
+                .expect("published package"),
+            b"package"
+        );
+
+        let short = runtime
+            .begin_package_download(filename, 8, false)
+            .expect("short package");
+        let mut writer = short.duplicate_file().expect("short descriptor");
+        writer.write_all(b"short").expect("short bytes");
+        drop(writer);
+        assert!(matches!(
+            short.finish(),
+            Err(PackageRuntimeError::InvalidPayload)
+        ));
+        assert!(
+            !tree
+                .root
+                .join(PACKAGE_CACHE_DIRECTORY)
+                .join(format!("{filename}.part"))
+                .exists()
+        );
+    }
+
+    #[test]
+    fn package_signature_status_requires_a_valid_allowed_signer() {
+        let x86_signer = "0123456789ABCDEF0123456789ABCDEF01234567";
+        assert!(
+            validate_signature_status(
+                &format!("[GNUPG:] VALIDSIG {x86_signer} 2026 0 0 0 0 0 0 0\n"),
+                RepositoryArchitecture::X86_64,
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            validate_signature_status(
+                "[GNUPG:] BADSIG 0123456789ABCDEF bad\n",
+                RepositoryArchitecture::X86_64,
+            ),
+            Err(PackageRuntimeError::InvalidSignature)
+        ));
+        assert!(matches!(
+            validate_signature_status(
+                &format!("[GNUPG:] VALIDSIG {x86_signer} 2026 0 0 0 0 0 0 0\n"),
+                RepositoryArchitecture::Aarch64,
+            ),
+            Err(PackageRuntimeError::InvalidSignature)
+        ));
+        assert!(
+            validate_signature_status(
+                &format!("[GNUPG:] VALIDSIG {AARCH64_BUILD_KEY} 2026 0 0 0 0 0 0 0\n"),
+                RepositoryArchitecture::Aarch64,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn signed_package_metadata_must_match_the_resolved_identity() {
+        let package_info = "pkgname = btop\npkgbase = btop\npkgver = 1.4.7-1\narch = x86_64\n";
+        assert!(
+            validate_package_info(
+                package_info,
+                "btop",
+                "1.4.7-1",
+                RepositoryArchitecture::X86_64,
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            validate_package_info(
+                package_info,
+                "htop",
+                "1.4.7-1",
+                RepositoryArchitecture::X86_64,
+            ),
+            Err(PackageRuntimeError::InvalidPayload)
+        ));
+        assert!(matches!(
+            validate_package_info(
+                package_info,
+                "btop",
+                "1.4.7-1",
+                RepositoryArchitecture::Aarch64,
+            ),
+            Err(PackageRuntimeError::InvalidPayload)
+        ));
+        assert!(
+            validate_package_info(
+                "pkgname = filesystem\npkgver = 2026.06.20-1\narch = any\n",
+                "filesystem",
+                "2026.06.20-1",
+                RepositoryArchitecture::Aarch64,
+            )
+            .is_ok()
+        );
     }
 }

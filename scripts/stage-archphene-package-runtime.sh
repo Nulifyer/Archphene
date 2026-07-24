@@ -12,19 +12,21 @@ mkdir -p "$staging/jniLibs" "$staging/assets"
 
 stage_architecture() {
   local architecture="$1" android_abi="$2" machine="$3"
-  local artifact runtime_root resolved glibc_root native_dir manifest
+  local artifact runtime_root resolved glibc_root keyring native_dir manifest
   case "$architecture" in
     x86_64)
       artifact="$ARCHPHENE_ROOT/tooling/build/ci-package-runtime"
       runtime_root="$artifact/tooling/downloads/arch-runtime-pacman-x86_64/runtime-root"
       resolved="$artifact/tooling/downloads/arch-runtime-pacman-x86_64/elf-needed-resolved.tsv"
       glibc_root="$artifact/tooling/build/glibc-archphene-runtime-x86_64"
+      keyring="$artifact/tooling/downloads/arch-runtime-archlinux-keyring-x86_64/runtime-root/usr/share/pacman/keyrings/archlinux.gpg"
       ;;
     aarch64)
       artifact="$ARCHPHENE_ROOT/tooling/build/ci-package-runtime-arm64"
       runtime_root="$artifact/tooling/downloads/arch-runtime-pacman-aarch64/runtime-root"
       resolved="$artifact/tooling/downloads/arch-runtime-pacman-aarch64/elf-needed-resolved.tsv"
       glibc_root="$artifact/tooling/build/glibc-archphene-runtime-aarch64"
+      keyring="$artifact/tooling/downloads/arch-runtime-archlinuxarm-keyring-aarch64/runtime-root/usr/share/pacman/keyrings/archlinuxarm.gpg"
       ;;
     *) archphene_die "unsupported package-runtime architecture: $architecture" ;;
   esac
@@ -54,6 +56,8 @@ stage_architecture() {
     sources["@loader"]="$glibc_root/ld-linux-aarch64.so.1"
   fi
   roles["@loader"]=loader
+  sources["@keyring"]="$keyring"
+  roles["@keyring"]=keyring
 
   while IFS=$'\t' read -r logical relative; do
     [[ -n "$logical" && -n "$relative" ]] ||
@@ -74,17 +78,23 @@ stage_architecture() {
   while IFS= read -r logical; do
     source_file="${sources[$logical]}"
     archphene_require_file "$source_file"
-    actual_machine="$(readelf -h "$source_file" |
-      sed -n 's/.*Machine:[[:space:]]*//p')"
-    [[ "$actual_machine" == "$machine" ]] ||
-      archphene_die "wrong ELF machine for $logical: $actual_machine"
+    if [[ "${roles[$logical]}" != keyring ]]; then
+      actual_machine="$(readelf -h "$source_file" |
+        sed -n 's/.*Machine:[[:space:]]*//p')"
+      [[ "$actual_machine" == "$machine" ]] ||
+        archphene_die "wrong ELF machine for $logical: $actual_machine"
+    fi
     identity="$(sha256sum "$source_file" | cut -d ' ' -f1)"
     packaged="libarchphene_pkg_${identity:0:24}.so"
     if [[ -v "packaged_hashes[$packaged]" ]]; then
       [[ "${packaged_hashes[$packaged]}" == "$identity" ]] ||
         archphene_die "package-runtime hash-prefix collision: $packaged"
     else
-      install -Dm755 "$source_file" "$native_dir/$packaged"
+      if [[ "${roles[$logical]}" == keyring ]]; then
+        install -Dm644 "$source_file" "$native_dir/$packaged"
+      else
+        install -Dm755 "$source_file" "$native_dir/$packaged"
+      fi
       packaged_hashes["$packaged"]="$identity"
     fi
     size="$(stat -c %s "$source_file")"

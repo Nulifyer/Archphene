@@ -53,7 +53,7 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
     - [x] Atomically publish journal updates, reject corruption/symlinks, recover interrupted work explicitly, and avoid warmed in-memory heap allocation.
     - [x] Bootstrap and reuse the empty journal on the emulator and Samsung; report readiness through the native snapshot.
     - [x] Package the verified pacman runtime as content-addressed exact-ABI native payloads, validate its signed-APK manifest, and execute the real pacman binary through its patched glibc loader.
-    - [x] Emit 37 MB x86_64 and 36 MB arm64-v8a compressed debug APKs instead of a 168 MB universal test artifact; Android extracts the executable runtime to device filesystem paths at installation.
+    - [x] Emit 38 MiB x86_64 and 36 MiB arm64-v8a compressed debug APKs instead of a 168 MB universal test artifact; Android extracts the executable runtime and signed repository keyring to device filesystem paths at installation.
     - [x] Pass clean/reused-root, lifecycle, input, log, and full-device visual gates with real pacman execution on the emulator and Samsung.
     - [x] Connect authoritative repository catalogs and expose real search results.
       - [x] Android's HTTPS stack transports bytes from Rust-selected, exact-ABI official endpoints through one bounded file descriptor; Rust owns temporary-file safety, size limits, sync, atomic publication, modes, and readiness.
@@ -62,8 +62,11 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
     - [x] Resolve an exact package and its real dependency closure without mutating the root.
       - [x] Pacman emits repository, package, version, archive, exact HTTPS URL, and download size through a fixed response; Rust rejects untrusted endpoints, unsafe fields, duplicates, missing targets, oversized closures, and malformed output.
       - [x] Kotlin renders the target, package count, bounded download size, and closure off the main thread. Process-death reuse, scoped logs, and full-device screenshots pass for the 33-package `dotnet-sdk` x86_64 closure and 9-package `btop` AArch64 closure.
-    - [ ] Queue real operations from the Kotlin UI and render every durable phase immediately.
-  - [ ] Pacman download, signature verification, install/update/remove
+    - [x] Queue real package-preparation operations from the Kotlin UI and render every durable phase immediately.
+      - [x] The UI persists Queued, Resolving, Downloading, Verifying, Publishing, Complete, and Failed transitions before rendering them; the latest result survives Activity and manager process death.
+      - [x] Android transports exact official archives and detached signatures through Rust-owned bounded descriptors. Rust enforces resolved sizes, atomic mode-0600 cache publication, signed name/version/architecture identity, the packaged Arch keyring, and the pinned Arch Linux ARM build signer.
+      - [x] Current `btop` closures prepare on the emulator and Samsung; deliberate cache tampering is rejected, redownloaded, and reverified on both, with scoped logs and full-device screenshots.
+  - [ ] Pacman install/update/remove
   - [ ] Terminal/PTY and shared command environment
   - [ ] Wayland compositor, presentation, and lifecycle
   - [ ] Pointer, touch, keyboard, IME, clipboard, and drag-and-drop

@@ -33,11 +33,11 @@ payloads. Rust validates a bounded signed-APK manifest and every packaged file
 before creating private symlink aliases, invokes tools directly through the
 patched loader with a cleared environment and bounded output/timeout, and
 proves the real pacman version before publishing readiness. Exact-ABI debug
-artifacts are 37 MB for x86_64 and 36 MB for arm64-v8a; executable native
-payloads are deliberately extracted because child processes cannot execute
-from mmap-only APK entries. Clean and reused-root gates pass on the emulator
-and Samsung with full-device screenshots, lifecycle/input checks, and scoped
-fatal logs.
+artifacts are 38 MiB for x86_64 and 36 MiB for arm64-v8a; executable native
+payloads and signed keyrings are deliberately extracted because child
+processes cannot consume them from mmap-only APK entries. Clean and reused-root
+gates pass on the emulator and Samsung with full-device screenshots,
+lifecycle/input checks, and scoped fatal logs.
 
 Official exact-ABI repository catalogs are now connected. Rust selects the
 fixed HTTPS endpoint and opens one bounded transfer file; Kotlin's Android TLS
@@ -62,9 +62,22 @@ Samsung resolves current AArch64 `btop` to nine packages and a 13 MiB
 download. Both pass process-death reuse, scoped-log, and full-device screenshot
 gates.
 
-Package payload download/verification and durable manager install actions are
-not connected yet, so the replacement still does not expose a nonfunctional
-install button.
+The Kotlin UI now exposes an honest **Prepare** action rather than a
+nonfunctional Install button. It persists and renders Queued, Resolving,
+Downloading, Verifying, Publishing, Complete, and Failed phases. Android
+transports exact official archives and detached signatures through Rust-owned
+bounded descriptors; Rust enforces the resolved byte size, atomically publishes
+mode-0600 cache files, imports the signed architecture-specific keyring into a
+fresh private keybox, verifies the detached signature, and checks the signed
+`.PKGINFO` name, version, and architecture. AArch64 additionally requires the
+pinned Arch Linux ARM build signer. Current nine-package `btop` closures pass
+on the emulator and Samsung. Both gates deliberately corrupt a cached archive,
+prove rejection, redownload and reverify it, then prove the durable Complete
+result survives manager process death with full-device screenshots and clean
+scoped logs.
+
+Pacman root mutation and durable install/update/remove actions are not
+connected yet, so the replacement still does not expose Install.
 
 The validated prototype below remains reference evidence until replacement
 vertical slices pass equivalent gates. Installed prototype state is no longer a

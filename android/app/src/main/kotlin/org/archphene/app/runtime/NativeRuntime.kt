@@ -18,6 +18,14 @@ internal object NativeRuntime {
     const val CATALOG_CORE = 1
     const val CATALOG_EXTRA = 2
     const val CATALOG_MESSAGE_SIZE = 512
+    const val JOB_QUEUED = 1
+    const val JOB_RESOLVING = 2
+    const val JOB_DOWNLOADING = 3
+    const val JOB_VERIFYING = 4
+    const val JOB_INSTALLING = 5
+    const val JOB_COMPLETE = 6
+    const val JOB_FAILED = 7
+    const val JOB_CANCELLED = 8
 
     init {
         System.loadLibrary("archphene_android")
@@ -63,6 +71,48 @@ internal object NativeRuntime {
         handle: Long,
         packageBuffer: ByteBuffer,
         packageLength: Int,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeQueuePackagePrepare(
+        handle: Long,
+        requestBuffer: ByteBuffer,
+        requestLength: Int,
+        nowMillis: Long,
+        outputBuffer: ByteBuffer,
+    ): Long
+    external fun nativeUpdatePackageJob(
+        handle: Long,
+        jobId: Long,
+        state: Int,
+        phase: Int,
+        progress: Int,
+        messageBuffer: ByteBuffer,
+        messageLength: Int,
+        nowMillis: Long,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeReadLatestPackageJob(
+        handle: Long,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeBeginPackageDownload(
+        handle: Long,
+        filenameBuffer: ByteBuffer,
+        filenameLength: Int,
+        expectedSize: Long,
+        signature: Boolean,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeFinishPackageDownload(
+        handle: Long,
+        success: Boolean,
+        outputBuffer: ByteBuffer,
+    ): Long
+    external fun nativeVerifyPackage(
+        handle: Long,
+        requestBuffer: ByteBuffer,
+        requestLength: Int,
+        expectedSize: Long,
         outputBuffer: ByteBuffer,
     ): Int
     external fun nativeSubmitEvents(handle: Long, buffer: ByteBuffer, byteCount: Int): Int

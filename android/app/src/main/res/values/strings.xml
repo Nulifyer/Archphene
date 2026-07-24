@@ -10,5 +10,8 @@
     <string name="package_name_hint">Package name</string>
     <string name="search">Search</string>
     <string name="details">Details</string>
+    <string name="prepare">Prepare</string>
+    <string name="package_job_empty">No prepared package transaction</string>
+    <string name="package_job_unavailable">Package operation unavailable</string>
     <string name="package_search_prompt">Search the official Arch repositories</string>
 </resources>

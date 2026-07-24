@@ -25,6 +25,7 @@ pub enum JobOperation {
     Install = 1,
     Update = 2,
     Remove = 3,
+    Prepare = 4,
 }
 
 impl JobOperation {
@@ -33,6 +34,7 @@ impl JobOperation {
             1 => Some(Self::Install),
             2 => Some(Self::Update),
             3 => Some(Self::Remove),
+            4 => Some(Self::Prepare),
             _ => None,
         }
     }
@@ -183,6 +185,7 @@ pub enum JobError {
     InvalidPackage,
     InvalidRepository,
     InvalidProgress,
+    InvalidMessage,
     InvalidTransition,
     DuplicateActiveJob,
     StoreFull,
@@ -198,6 +201,7 @@ impl fmt::Display for JobError {
             Self::InvalidPackage => formatter.write_str("invalid package name"),
             Self::InvalidRepository => formatter.write_str("invalid package repository"),
             Self::InvalidProgress => formatter.write_str("invalid package progress"),
+            Self::InvalidMessage => formatter.write_str("invalid package job message"),
             Self::InvalidTransition => formatter.write_str("invalid package job transition"),
             Self::DuplicateActiveJob => formatter.write_str("package operation is already active"),
             Self::StoreFull => formatter.write_str("package job store is full"),
@@ -294,6 +298,14 @@ impl PackageJobs {
         if progress > 100 {
             return Err(JobError::InvalidProgress);
         }
+        if message.is_empty()
+            || message.len() > MAX_MESSAGE_BYTES
+            || message
+                .bytes()
+                .any(|byte| matches!(byte, b'\0' | b'\t' | b'\r' | b'\n'))
+        {
+            return Err(JobError::InvalidMessage);
+        }
         let slot = self
             .slots
             .iter_mut()
@@ -322,6 +334,14 @@ impl PackageJobs {
             .iter()
             .filter(|slot| slot.occupied && slot.job.state.is_active())
             .count()
+    }
+
+    pub fn latest(&self) -> Option<PackageJob> {
+        self.slots
+            .iter()
+            .filter(|slot| slot.occupied)
+            .max_by_key(|slot| slot.job.id)
+            .map(|slot| slot.job)
     }
 
     fn recover_interrupted(&mut self, now_millis: u64) -> Result<u32, JobError> {
@@ -579,7 +599,15 @@ fn decode_slot(bytes: &[u8]) -> Result<JobSlot, JobError> {
     let operation = JobOperation::from_raw(bytes[1]).ok_or(JobError::CorruptStore)?;
     let state = JobState::from_raw(bytes[2]).ok_or(JobError::CorruptStore)?;
     let progress = bytes[4];
-    if progress > 100 {
+    let message_length = u16::from_le_bytes(bytes[28..30].try_into().expect("message length"));
+    let message = BoundedText::decode(&bytes[176..368], message_length)?;
+    if progress > 100
+        || message.as_str().is_empty()
+        || message
+            .as_str()
+            .bytes()
+            .any(|byte| matches!(byte, b'\0' | b'\t' | b'\r' | b'\n'))
+    {
         return Err(JobError::CorruptStore);
     }
     let id = u64::from_le_bytes(bytes[8..16].try_into().expect("job id bytes"));
@@ -603,10 +631,7 @@ fn decode_slot(bytes: &[u8]) -> Result<JobSlot, JobError> {
                 &bytes[48..176],
                 u16::from_le_bytes(bytes[26..28].try_into().expect("package length")),
             )?,
-            message: BoundedText::decode(
-                &bytes[176..368],
-                u16::from_le_bytes(bytes[28..30].try_into().expect("message length")),
-            )?,
+            message,
         },
     })
 }
@@ -768,6 +793,14 @@ mod tests {
         assert!(matches!(
             jobs.begin(JobOperation::Install, "extra", "../kate", 1),
             Err(JobError::InvalidPackage)
+        ));
+        let job = jobs
+            .begin(JobOperation::Install, "extra", "kate", 2)
+            .expect("valid job");
+        assert_eq!(jobs.latest().expect("latest job").id, job.id);
+        assert!(matches!(
+            jobs.update(job.id, JobState::Resolving, 1, 1, "unsafe\nmessage", 3,),
+            Err(JobError::InvalidMessage)
         ));
     }
 }

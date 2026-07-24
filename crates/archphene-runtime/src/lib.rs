@@ -5,10 +5,10 @@ use std::fs::File;
 use std::path::Path;
 
 use archphene_core::{Lifecycle, Runtime, RuntimeError};
-use archphene_jobs::{JobError, PackageJobStore};
+use archphene_jobs::{JobError, JobOperation, JobState, PackageJob, PackageJobStore};
 use archphene_packages::{
-    CatalogDownload, PackageRuntime, PackageRuntimeError, PackageTool, Repository,
-    RepositoryArchitecture, ToolOutput,
+    CatalogDownload, PackagePayloadDownload, PackageRuntime, PackageRuntimeError, PackageTool,
+    Repository, RepositoryArchitecture, ToolOutput,
 };
 use archphene_root::{ArchRoot, BootstrapReport, RootError};
 
@@ -23,6 +23,7 @@ pub struct RuntimeHost {
     package_jobs: Option<PackageJobStore>,
     package_runtime: Option<PackageRuntime>,
     catalog_download: Option<CatalogDownload>,
+    package_download: Option<PackagePayloadDownload>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -68,6 +69,7 @@ impl RuntimeHost {
             package_jobs: None,
             package_runtime: None,
             catalog_download: None,
+            package_download: None,
         }
     }
 
@@ -118,8 +120,9 @@ impl RuntimeHost {
             .arch_root
             .as_ref()
             .ok_or(PackageRuntimeError::InvalidPath)?;
-        let package_runtime =
+        let mut package_runtime =
             PackageRuntime::prepare(arch_root.path(), native_root, manifest, architecture)?;
+        package_runtime.prepare_verification_keyring()?;
         let version = package_runtime.run(PackageTool::Pacman, &["--version"])?;
         let catalogs_ready = package_runtime.catalogs_ready();
         self.package_runtime = Some(package_runtime);
@@ -178,6 +181,74 @@ impl RuntimeHost {
 
     pub fn package_runtime(&self) -> Option<&PackageRuntime> {
         self.package_runtime.as_ref()
+    }
+
+    pub fn begin_package_job(
+        &mut self,
+        operation: JobOperation,
+        repository: &str,
+        package: &str,
+        now_millis: u64,
+    ) -> Result<PackageJob, JobError> {
+        self.package_jobs
+            .as_mut()
+            .ok_or(JobError::CorruptStore)?
+            .begin(operation, repository, package, now_millis)
+    }
+
+    pub fn update_package_job(
+        &mut self,
+        id: u64,
+        state: JobState,
+        phase: u8,
+        progress: u8,
+        message: &str,
+        now_millis: u64,
+    ) -> Result<PackageJob, JobError> {
+        self.package_jobs
+            .as_mut()
+            .ok_or(JobError::CorruptStore)?
+            .update(id, state, phase, progress, message, now_millis)
+    }
+
+    pub fn latest_package_job(&self) -> Option<PackageJob> {
+        self.package_jobs
+            .as_ref()
+            .and_then(|store| store.jobs().latest())
+    }
+
+    pub fn begin_package_download(
+        &mut self,
+        filename: &str,
+        expected_size: u64,
+        signature: bool,
+    ) -> Result<File, PackageRuntimeError> {
+        if self.package_download.is_some() {
+            return Err(PackageRuntimeError::Busy);
+        }
+        let download = self
+            .package_runtime
+            .as_ref()
+            .ok_or(PackageRuntimeError::InvalidPath)?
+            .begin_package_download(filename, expected_size, signature)?;
+        let file = download.duplicate_file()?;
+        self.package_download = Some(download);
+        Ok(file)
+    }
+
+    pub fn finish_package_download(&mut self, success: bool) -> Result<u64, PackageRuntimeError> {
+        let download = self
+            .package_download
+            .take()
+            .ok_or(PackageRuntimeError::InvalidPayload)?;
+        if !success {
+            return Err(PackageRuntimeError::InvalidPayload);
+        }
+        download.finish()
+    }
+
+    pub fn cancel_package_download(&mut self) {
+        self.package_download = None;
     }
 }
 

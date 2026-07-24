@@ -29,6 +29,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private lateinit var statusView: TextView
     private lateinit var catalogStatusView: TextView
     private lateinit var searchStatusView: TextView
+    private lateinit var jobStatusView: TextView
     private lateinit var runtimeSurface: RuntimeSurfaceView
     private val snapshot = RuntimeSnapshot()
     private val statusText = StringBuilder(128)
@@ -52,6 +53,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 statusView.setText(R.string.runtime_unavailable)
                 catalogStatusView.setText(R.string.package_catalog_unavailable)
                 searchStatusView.setText(R.string.package_search_unavailable)
+                jobStatusView.setText(R.string.package_job_unavailable)
             }
         }
 
@@ -127,6 +129,14 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     runtimeBinder?.resolvePackage(searchInput.text.toString())
                 }
             }
+        val prepareButton =
+            Button(this).apply {
+                setText(R.string.prepare)
+                setOnClickListener {
+                    hideKeyboard(searchInput)
+                    runtimeBinder?.preparePackage(searchInput.text.toString())
+                }
+            }
         searchInput.setOnEditorActionListener { _, actionId, _ ->
             if (actionId == EditorInfo.IME_ACTION_SEARCH) {
                 hideKeyboard(searchInput)
@@ -161,6 +171,13 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                         ViewGroup.LayoutParams.MATCH_PARENT,
                     ),
                 )
+                addView(
+                    prepareButton,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                    ),
+                )
             }
         searchStatusView =
             TextView(this).apply {
@@ -181,6 +198,16 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                         ViewGroup.LayoutParams.WRAP_CONTENT,
                     ),
                 )
+            }
+        jobStatusView =
+            TextView(this).apply {
+                setTextColor(Color.WHITE)
+                textSize = 14f
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(16), dp(4), dp(16), dp(4))
+                setText(R.string.package_job_empty)
+                setBackgroundColor(Color.rgb(31, 35, 38))
+                maxLines = 2
             }
         val layout =
             LinearLayout(this).apply {
@@ -211,6 +238,13 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         dp(176),
+                    ),
+                )
+                addView(
+                    jobStatusView,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        dp(64),
                     ),
                 )
                 addView(
@@ -294,6 +328,10 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 searchStatusView,
                 runtimeBinder?.packageSearchStatus ?: "Package search unavailable",
             )
+            setTextIfChanged(
+                jobStatusView,
+                runtimeBinder?.packageJobStatus ?: "Package operation unavailable",
+            )
             return
         }
         statusText.setLength(0)
@@ -326,6 +364,10 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         setTextIfChanged(
             searchStatusView,
             runtimeBinder?.packageSearchStatus ?: "Package search unavailable",
+        )
+        setTextIfChanged(
+            jobStatusView,
+            runtimeBinder?.packageJobStatus ?: "Package operation unavailable",
         )
     }
 

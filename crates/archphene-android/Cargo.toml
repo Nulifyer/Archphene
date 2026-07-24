@@ -10,6 +10,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 archphene-core = { path = "../archphene-core" }
+archphene-jobs = { path = "../archphene-jobs" }
 archphene-packages = { path = "../archphene-packages" }
 archphene-runtime = { path = "../archphene-runtime" }
 
