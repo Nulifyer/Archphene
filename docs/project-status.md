@@ -1,6 +1,6 @@
 # Project status
 
-Updated: 2026-07-23
+Updated: 2026-07-24
 
 This page separates validated behavior from planned platform work. Package search does not imply package compatibility.
 
@@ -52,8 +52,18 @@ process-death reuse gates pass with current `dotnet-sdk` results on x86_64 and
 official Arch Linux ARM repositories currently return no `dotnet-sdk` match;
 the app shows that as an empty result rather than an error.
 
-Package payload transactions and durable manager install actions are not
-connected yet, so the replacement still does not expose a nonfunctional
+Read-only dependency resolution is also connected. Packaged pacman emits the
+repository, package, version, archive filename, exact HTTPS URL, and download
+size for the complete closure into the same fixed response. Rust rejects
+unknown endpoints, unsafe fields, duplicates, missing targets, oversized
+closures, and malformed output before Kotlin renders package details. The
+emulator resolves current `dotnet-sdk` to 33 packages and a 185 MiB download;
+Samsung resolves current AArch64 `btop` to nine packages and a 13 MiB
+download. Both pass process-death reuse, scoped-log, and full-device screenshot
+gates.
+
+Package payload download/verification and durable manager install actions are
+not connected yet, so the replacement still does not expose a nonfunctional
 install button.
 
 The validated prototype below remains reference evidence until replacement

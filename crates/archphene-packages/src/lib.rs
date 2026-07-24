@@ -74,6 +74,18 @@ impl RepositoryArchitecture {
             }
         }
     }
+
+    fn package_url_prefix(self, repository: &str) -> Option<&'static str> {
+        match (self, repository) {
+            (Self::X86_64, "core") => Some("https://geo.mirror.pkgbuild.com/core/os/x86_64/"),
+            (Self::X86_64, "extra") => Some("https://geo.mirror.pkgbuild.com/extra/os/x86_64/"),
+            (Self::Aarch64, "core") => Some("https://ca.us.mirror.archlinuxarm.org/aarch64/core/"),
+            (Self::Aarch64, "extra") => {
+                Some("https://ca.us.mirror.archlinuxarm.org/aarch64/extra/")
+            }
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -146,6 +158,8 @@ pub enum PackageRuntimeError {
     Busy,
     InvalidCatalog,
     InvalidQuery,
+    InvalidResolution,
+    MissingTarget,
     ToolFailed(i32, ToolOutput),
     Io(io::Error),
 }
@@ -172,6 +186,10 @@ impl fmt::Display for PackageRuntimeError {
             Self::Busy => formatter.write_str("another package catalog transfer is active"),
             Self::InvalidCatalog => formatter.write_str("invalid package repository catalog"),
             Self::InvalidQuery => formatter.write_str("invalid package search query"),
+            Self::InvalidResolution => formatter.write_str("invalid package dependency resolution"),
+            Self::MissingTarget => {
+                formatter.write_str("resolved packages omit the requested target")
+            }
             Self::ToolFailed(code, output) => {
                 write!(formatter, "package command failed with status {code}")?;
                 if let Ok(text) = output.as_str() {
@@ -416,6 +434,45 @@ impl PackageRuntime {
             Err(error) => return Err(error),
         };
         parse_search_output(raw.as_str()?)
+    }
+
+    pub fn resolve(&self, package: &str) -> Result<ToolOutput, PackageRuntimeError> {
+        if !safe_logical_name(package) || !self.catalogs_ready() {
+            return Err(if self.catalogs_ready() {
+                PackageRuntimeError::InvalidQuery
+            } else {
+                PackageRuntimeError::InvalidCatalog
+            });
+        }
+        let config = self
+            .pacman_config
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let root = self
+            .arch_root
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let database_path = self.arch_root.join("var/lib/pacman");
+        let database = database_path
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let raw = self.run(
+            PackageTool::Pacman,
+            &[
+                "--config",
+                config,
+                "--root",
+                root,
+                "--dbpath",
+                database,
+                "-S",
+                "--print",
+                "--print-format",
+                "%r\t%n\t%v\t%f\t%l\t%s",
+                package,
+            ],
+        )?;
+        parse_resolution_output(raw.as_str()?, package, self.architecture)
     }
 
     fn run_with_timeout(
@@ -818,6 +875,96 @@ fn append_search_result(
     Ok(())
 }
 
+fn parse_resolution_output(
+    input: &str,
+    target: &str,
+    architecture: RepositoryArchitecture,
+) -> Result<ToolOutput, PackageRuntimeError> {
+    let mut output = ToolOutput {
+        bytes: [0; MAX_TOOL_OUTPUT_BYTES],
+        length: 0,
+    };
+    let mut contains_target = false;
+    let mut count = 0_usize;
+    for line in input.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let mut fields = line.split('\t');
+        let repository = fields
+            .next()
+            .ok_or(PackageRuntimeError::InvalidResolution)?;
+        let name = fields
+            .next()
+            .ok_or(PackageRuntimeError::InvalidResolution)?;
+        let version = fields
+            .next()
+            .ok_or(PackageRuntimeError::InvalidResolution)?;
+        let filename = fields
+            .next()
+            .ok_or(PackageRuntimeError::InvalidResolution)?;
+        let url = fields
+            .next()
+            .ok_or(PackageRuntimeError::InvalidResolution)?;
+        let size = fields
+            .next()
+            .ok_or(PackageRuntimeError::InvalidResolution)?;
+        let Ok(size_bytes) = size.parse::<u64>() else {
+            return Err(PackageRuntimeError::InvalidResolution);
+        };
+        if fields.next().is_some()
+            || !matches!(repository, "core" | "extra")
+            || !safe_logical_name(name)
+            || version.is_empty()
+            || version.len() > 128
+            || version
+                .bytes()
+                .any(|byte| byte.is_ascii_whitespace() || byte == 0)
+            || !safe_package_filename(filename)
+            || architecture
+                .package_url_prefix(repository)
+                .is_none_or(|prefix| url.strip_prefix(prefix) != Some(filename))
+            || size_bytes == 0
+            || size_bytes > 4 * 1024 * 1024 * 1024
+            || resolution_contains(&output, name)?
+        {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        count += 1;
+        if count > 256 {
+            return Err(PackageRuntimeError::OutputLimit);
+        }
+        contains_target |= name == target;
+        for (index, field) in [repository, name, version, filename, url, size]
+            .into_iter()
+            .enumerate()
+        {
+            output.push(field.as_bytes())?;
+            output.push(if index == 5 { b"\n" } else { b"\t" })?;
+        }
+    }
+    if count == 0 || !contains_target {
+        return Err(PackageRuntimeError::MissingTarget);
+    }
+    Ok(output)
+}
+
+fn resolution_contains(output: &ToolOutput, package: &str) -> Result<bool, PackageRuntimeError> {
+    Ok(output.as_str()?.lines().any(|line| {
+        let mut fields = line.split('\t');
+        fields.next().is_some() && fields.next() == Some(package)
+    }))
+}
+
+fn safe_package_filename(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 255
+        && (value.ends_with(".pkg.tar.zst") || value.ends_with(".pkg.tar.xz"))
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'@' | b'.' | b'_' | b'+' | b':' | b'-')
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1014,5 +1161,27 @@ extra\tdotnet-sdk-8.0\t8.0.29.sdk129-1\tThe .NET Core SDK\n"
         assert!(valid_search_query("dotnet-sdk"));
         assert!(!valid_search_query("a"));
         assert!(!valid_search_query("../dotnet"));
+    }
+
+    #[test]
+    fn package_resolution_output_is_strict_and_contains_target() {
+        let input = "core\tglibc\t2.42+r33+gde5fe48316ed-1\tglibc-2.42+r33+gde5fe48316ed-1-x86_64.pkg.tar.zst\thttps://geo.mirror.pkgbuild.com/core/os/x86_64/glibc-2.42+r33+gde5fe48316ed-1-x86_64.pkg.tar.zst\t10158024\n\
+extra\tdotnet-sdk\t10.0.10.sdk110-1\tdotnet-sdk-10.0.10.sdk110-1-x86_64.pkg.tar.zst\thttps://geo.mirror.pkgbuild.com/extra/os/x86_64/dotnet-sdk-10.0.10.sdk110-1-x86_64.pkg.tar.zst\t123456789\n";
+        let parsed = parse_resolution_output(input, "dotnet-sdk", RepositoryArchitecture::X86_64)
+            .expect("valid resolution");
+        assert_eq!(parsed.as_str().expect("utf-8"), input);
+
+        assert!(matches!(
+            parse_resolution_output(input, "btop", RepositoryArchitecture::X86_64,),
+            Err(PackageRuntimeError::MissingTarget)
+        ));
+        assert!(matches!(
+            parse_resolution_output(
+                "extra\tbtop\t1.4.4-1\tbtop-1.4.4-1-aarch64.pkg.tar.xz\thttps://example.com/btop-1.4.4-1-aarch64.pkg.tar.xz\t123456\n",
+                "btop",
+                RepositoryArchitecture::Aarch64,
+            ),
+            Err(PackageRuntimeError::InvalidResolution)
+        ));
     }
 }

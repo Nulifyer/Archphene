@@ -119,6 +119,14 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     runtimeBinder?.searchPackages(searchInput.text.toString())
                 }
             }
+        val detailsButton =
+            Button(this).apply {
+                setText(R.string.details)
+                setOnClickListener {
+                    hideKeyboard(searchInput)
+                    runtimeBinder?.resolvePackage(searchInput.text.toString())
+                }
+            }
         searchInput.setOnEditorActionListener { _, actionId, _ ->
             if (actionId == EditorInfo.IME_ACTION_SEARCH) {
                 hideKeyboard(searchInput)
@@ -141,6 +149,13 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 )
                 addView(
                     searchButton,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                    ),
+                )
+                addView(
+                    detailsButton,
                     LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.WRAP_CONTENT,
                         ViewGroup.LayoutParams.MATCH_PARENT,

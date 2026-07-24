@@ -29,6 +29,9 @@ class ArchpheneRuntimeService : Service() {
         fun refreshPackageCatalogs(): Boolean = requestCatalogRefresh()
 
         fun searchPackages(query: String): Boolean = requestPackageSearch(query)
+
+        fun resolvePackage(packageName: String): Boolean =
+            requestPackageResolution(packageName)
     }
 
     private val binder = LocalBinder()
@@ -433,6 +436,108 @@ class ArchpheneRuntimeService : Service() {
                 }
             },
             "ArchpheneSearch",
+        ).start()
+        return true
+    }
+
+    @Synchronized
+    private fun requestPackageResolution(packageName: String): Boolean {
+        val normalized = packageName.trim()
+        val activeHandle = readyHandle
+        if (
+            activeHandle == 0L ||
+            catalogRefreshActive ||
+            searchActive ||
+            normalized.length !in 1..128 ||
+            normalized.any { character ->
+                character.code > 0x7f ||
+                    (!character.isLetterOrDigit() && character !in "@._+-")
+            }
+        ) {
+            searchStatus = "Enter one exact official package name"
+            return false
+        }
+        searchActive = true
+        searchStatus = "Resolving $normalized and its dependencies"
+        Thread(
+            {
+                try {
+                    val packageBytes = normalized.toByteArray(StandardCharsets.UTF_8)
+                    val packageBuffer = ByteBuffer.allocateDirect(packageBytes.size)
+                    packageBuffer.put(packageBytes)
+                    val outputBuffer =
+                        ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
+                    val outputLength =
+                        NativeRuntime.nativeResolvePackage(
+                            activeHandle,
+                            packageBuffer,
+                            packageBytes.size,
+                            outputBuffer,
+                        )
+                    if (outputLength <= 0) {
+                        throw IllegalStateException(
+                            readNativeMessage(outputBuffer, outputLength),
+                        )
+                    }
+                    val bytes = ByteArray(outputLength)
+                    outputBuffer.position(0)
+                    outputBuffer.get(bytes)
+                    val resolution = String(bytes, StandardCharsets.UTF_8)
+                    var packageCount = 0
+                    var totalBytes = 0L
+                    var targetIdentity: String? = null
+                    val packageNames = StringBuilder()
+                    resolution.lineSequence().filter(String::isNotEmpty).forEach { line ->
+                        val fields = line.split('\t', limit = 6)
+                        if (fields.size != 6) {
+                            throw IllegalStateException("Rust returned an invalid resolution")
+                        }
+                        val packageBytesCount =
+                            fields[5].toLongOrNull()
+                                ?: throw IllegalStateException(
+                                    "Rust returned an invalid package size",
+                                )
+                        totalBytes = Math.addExact(totalBytes, packageBytesCount)
+                        packageCount += 1
+                        if (fields[1] == normalized) {
+                            targetIdentity = "${fields[0]}/${fields[1]} ${fields[2]}"
+                        }
+                        if (packageNames.isNotEmpty()) {
+                            packageNames.append('\n')
+                        }
+                        packageNames.append("  ").append(fields[1])
+                    }
+                    val target =
+                        targetIdentity
+                            ?: throw IllegalStateException(
+                                "Resolved packages omit the requested target",
+                            )
+                    val mebibytes = (totalBytes + (1024 * 1024 - 1)) / (1024 * 1024)
+                    searchStatus =
+                        buildString {
+                            append(target)
+                            append('\n')
+                            append("Dependency closure: ")
+                            append(packageCount)
+                            append(" packages · ")
+                            append(mebibytes)
+                            append(" MiB download")
+                            append("\n\nPackages\n")
+                            append(packageNames)
+                        }
+                    Log.i(
+                        TAG,
+                        "Resolved $normalized: $packageCount packages, $totalBytes bytes",
+                    )
+                } catch (error: Exception) {
+                    searchStatus =
+                        "Package resolution failed: ${error.message ?: error.javaClass.simpleName}"
+                    Log.e(TAG, "Package resolution failed", error)
+                } finally {
+                    searchActive = false
+                }
+            },
+            "ArchpheneResolve",
         ).start()
         return true
     }

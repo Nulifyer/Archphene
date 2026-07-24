@@ -489,6 +489,64 @@ mod android {
     }
 
     #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeResolvePackage(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        package_buffer: JByteBuffer,
+        package_length: jint,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let (Ok(handle), Ok(package_length)) =
+            (u64::try_from(handle), usize::try_from(package_length))
+        else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let (Ok(package_capacity), Ok(output_capacity)) = (
+            environment.get_direct_buffer_capacity(&package_buffer),
+            environment.get_direct_buffer_capacity(&output_buffer),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if package_length == 0
+            || package_length > package_capacity
+            || package_length > 128
+            || output_capacity < MAX_TOOL_OUTPUT_BYTES
+        {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let (Ok(package_address), Ok(output_address)) = (
+            environment.get_direct_buffer_address(&package_buffer),
+            environment.get_direct_buffer_address(&output_buffer),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if package_address.is_null() || output_address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let package_bytes =
+            unsafe { slice::from_raw_parts(package_address.cast_const(), package_length) };
+        let Ok(package) = std::str::from_utf8(package_bytes) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let package_runtime = {
+            let Ok(mut registry) = registry().lock() else {
+                return ERROR_INTERNAL;
+            };
+            let Some(runtime) = registry.runtime_mut(handle) else {
+                return ERROR_INVALID_HANDLE;
+            };
+            let Some(package_runtime) = runtime.package_runtime() else {
+                return ERROR_INVALID_STATE;
+            };
+            package_runtime.clone()
+        };
+        let result = package_runtime.resolve(package);
+        let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
+        copy_tool_result(result, destination)
+    }
+
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeSubmitEvents(
         environment: JNIEnv,
         _class: JClass,

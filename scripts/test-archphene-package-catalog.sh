@@ -102,7 +102,16 @@ search_package() {
     "archphene-search-results-$suffix-$serial" 20
 }
 
+resolve_package() {
+  local suffix="$1"
+  archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="DETAILS"' 'package details'
+  archphene_wait_ui \
+    "text=\"[^\\\"]*/$search_query [^\\\"]+.*Dependency closure: [1-9][0-9]* packages" \
+    "archphene-resolution-$suffix-$serial" 20
+}
+
 search_package first
+resolve_package first
 archphene_adb_run exec-out screencap -p >"$output_dir/$serial-$search_query.png"
 
 archphene_adb_run shell am force-stop "$package" >/dev/null
@@ -112,6 +121,7 @@ archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 15 >/dev/null
 archphene_wait_ui 'text="Package catalog ready"' \
   "archphene-catalog-reused-$serial" 15
 search_package reused
+resolve_package reused
 
 fatal_log="$(archphene_adb_run logcat -d -v brief \
   -s AndroidRuntime:E libc:F '*:S' 2>/dev/null || true)"
@@ -120,5 +130,5 @@ fatal_log="$(archphene_adb_run logcat -d -v brief \
 
 archphene_note "Archphene official package catalog passed on $serial"
 archphene_note "  Catalogs were bounded, mode 600, atomic, and reusable after process death"
-archphene_note "  Real $search_query results came from packaged pacman"
+archphene_note "  Real $search_query results and dependency closure came from packaged pacman"
 archphene_note "  Full-device screenshot: $output_dir/$serial-$search_query.png"

@@ -1,6 +1,6 @@
 # Archphene TODO
 
-Updated: 2026-07-23
+Updated: 2026-07-24
 
 This file is the remaining prioritized work, not a history of completed tests. Validated behavior belongs in `docs/project-status.md`, `docs/compatibility-matrix.md`, and `research/experiments/`.
 
@@ -59,8 +59,11 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
       - [x] Android's HTTPS stack transports bytes from Rust-selected, exact-ABI official endpoints through one bounded file descriptor; Rust owns temporary-file safety, size limits, sync, atomic publication, modes, and readiness.
       - [x] Rust executes bounded read-only pacman searches off the UI thread, validates and normalizes result fields, caps output, and treats empty pacman exit 1 as a normal no-results state.
       - [x] Clean catalog refresh, package search, process-death reuse, scoped logs, and full-device screenshots pass with `dotnet-sdk` on x86_64 and `btop` on Samsung AArch64. The official ARM repositories currently have no `dotnet-sdk` result.
+    - [x] Resolve an exact package and its real dependency closure without mutating the root.
+      - [x] Pacman emits repository, package, version, archive, exact HTTPS URL, and download size through a fixed response; Rust rejects untrusted endpoints, unsafe fields, duplicates, missing targets, oversized closures, and malformed output.
+      - [x] Kotlin renders the target, package count, bounded download size, and closure off the main thread. Process-death reuse, scoped logs, and full-device screenshots pass for the 33-package `dotnet-sdk` x86_64 closure and 9-package `btop` AArch64 closure.
     - [ ] Queue real operations from the Kotlin UI and render every durable phase immediately.
-  - [ ] Pacman resolution, verification, install/update/remove
+  - [ ] Pacman download, signature verification, install/update/remove
   - [ ] Terminal/PTY and shared command environment
   - [ ] Wayland compositor, presentation, and lifecycle
   - [ ] Pointer, touch, keyboard, IME, clipboard, and drag-and-drop

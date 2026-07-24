@@ -9,5 +9,6 @@
     <string name="catalog_refresh_busy">Catalog refresh is unavailable or already active</string>
     <string name="package_name_hint">Package name</string>
     <string name="search">Search</string>
+    <string name="details">Details</string>
     <string name="package_search_prompt">Search the official Arch repositories</string>
 </resources>
