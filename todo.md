@@ -32,8 +32,9 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   tests/                       host contracts and cross-boundary fixtures
   ```
 
-- [ ] Pin reproducible Rust, Kotlin, Android Gradle Plugin, Gradle, JDK, SDK, and NDK versions; build offline from verified caches after initial provisioning.
+- [x] Pin reproducible Rust, Kotlin, Android Gradle Plugin, Gradle, JDK, SDK, and NDK versions; build offline from verified caches after initial provisioning.
   - [x] Start with Rust 1.88, Kotlin built into AGP 9.3, Gradle 9.6.1, the installed JDK 26, SDK/Build Tools 36, and NDK 29. Use JDK 17 only if a measured compatibility failure requires AGP's documented minimum/default JVM.
+  - [x] Commit the verified Gradle wrapper and dependency checksums, exact Rust toolchain and Android revisions, immutable native-container base, and a non-downloading local toolchain gate.
 - [x] Build the first vertical slice.
   - [x] Kotlin Activity binds to one Archphene runtime Service.
   - [x] The Service owns exactly one Rust runtime handle and survives Activity recreation.

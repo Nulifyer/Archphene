@@ -10,6 +10,7 @@ require(archpheneAbi == null || archpheneAbi in setOf("x86_64", "arm64-v8a")) {
 android {
     namespace = "org.archphene.app"
     compileSdk = 36
+    buildToolsVersion = "36.0.0"
     ndkVersion = "29.0.14206865"
 
     defaultConfig {

@@ -7,13 +7,28 @@ and input automation all run directly on Linux.
 ## Prerequisites
 
 - For the normal container build: Bash 5, Podman with a working rootless setup,
-  Git, JDK 17 or newer, Python 3, jq, curl, tar, and standard GNU utilities
+  Git, JDK 26.0.1, Python 3, jq, curl, tar, and standard GNU utilities
 - For local emulator and direct Android SDK scripts: Android command-line tools,
   platform-tools, build-tools 36.0.0, platform 36, emulator, NDK
   29.0.14206865, and the `system-images;android-36;google_apis;x86_64`
   system image
 - An ADB-enabled device or an AVD named `ArchpheneOS_x86_64_api36` for tests
 - A persistent signing key only when producing release builds
+
+The production base pins Gradle 9.6.1 through its wrapper and official
+distribution checksum, AGP 9.3.0 with its built-in Kotlin 2.2.10, JDK 26.0.1,
+SDK and Build Tools 36.0.0, NDK 29.0.14206865, and Rust/Cargo 1.88.0. Gradle
+dependencies are SHA-256 verified, Cargo uses its committed lockfile, and the
+native container starts from an immutable SDK image manifest. Run the
+non-downloading local contract before building:
+
+```bash
+./scripts/check-production-toolchain.sh
+```
+
+The standalone `kotlin` executable is not part of the Android build. Java
+source and bytecode remain targeted at Java 17 for Android compatibility even
+though Gradle itself is intentionally run on the pinned JDK 26.0.1.
 
 Build outputs, SDKs, downloaded packages, signing files, screenshots, and test artifacts are ignored.
 

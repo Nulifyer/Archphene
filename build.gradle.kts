@@ -2,6 +2,11 @@ plugins {
     id("com.android.application") version "9.3.0" apply false
 }
 
+val requiredJdk = "26.0.1"
+check(System.getProperty("java.version") == requiredJdk) {
+    "Archphene builds require JDK $requiredJdk; current runtime is ${System.getProperty("java.version")}"
+}
+
 tasks.register<Exec>("buildArchpheneRust") {
     workingDir(rootDir)
     commandLine("bash", "scripts/build-archphene-rust.sh")

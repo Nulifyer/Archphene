@@ -7,10 +7,14 @@ This page separates validated behavior from planned platform work. Package searc
 ## Greenfield Rust + Kotlin replacement
 
 The new `android/app` shell and root Rust workspace now build with Gradle 9.6.1,
-AGP 9.3, its built-in Kotlin plugin, JDK 26, SDK/Build Tools 36, NDK 29, and
-Rust 1.88. The APK contains one Kotlin Activity, one Service-owned native
-runtime, reusable direct buffers for batched input and status snapshots, and
-generation-checked bounded native handles.
+AGP 9.3, its built-in Kotlin 2.2.10 plugin, JDK 26.0.1, SDK/Build Tools 36.0.0,
+NDK 29.0.14206865, and Rust/Cargo 1.88.0. The committed Gradle wrapper and
+distribution have official SHA-256 checksums, resolved Gradle artifacts are
+hash-verified, Cargo is locked, and the native container base is immutable.
+The non-downloading toolchain contract, full offline Rust tests, Android lint,
+and both exact-ABI APK builds pass. The APK contains one Kotlin Activity, one
+Service-owned native runtime, reusable direct buffers for batched input and
+status snapshots, and generation-checked bounded native handles.
 
 Clean-data and reuse gates pass on the API 36 x86_64 emulator and Samsung
 SM-S908U. They prove cold launch, full-device insets and screenshots, touch

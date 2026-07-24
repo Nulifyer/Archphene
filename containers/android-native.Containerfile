@@ -1,4 +1,4 @@
-FROM ghcr.io/cirruslabs/android-sdk:36
+FROM ghcr.io/cirruslabs/android-sdk@sha256:d9c965f2373f9c8cc023b207cdcc7d21508f98e6a45ab66462fe41aa9f866dea
 
 ARG NDK_VERSION=29.0.14206865
 ARG RUST_VERSION=1.88.0
