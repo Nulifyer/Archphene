@@ -15,6 +15,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use archphene_terminal::{
+    MAX_COLUMNS, MAX_DAMAGE_BYTES, MAX_ROWS, MIN_COLUMNS, MIN_ROWS, Terminal,
+};
+
 pub const MAX_COMMAND_NAME_BYTES: usize = 128;
 pub const MAX_COMMAND_ARGUMENTS: usize = 32;
 pub const MAX_COMMAND_ARGUMENT_BYTES: usize = 4 * 1024;
@@ -22,8 +26,10 @@ pub const MAX_COMMAND_REQUEST_BYTES: usize = 16 * 1024;
 pub const MAX_COMMAND_OUTPUT_BYTES: usize = 15 * 1024;
 pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MAX_PTY_TRANSFER_BYTES: usize = 16 * 1024;
-pub const MAX_PTY_DIMENSION: u16 = 1000;
+pub const MAX_PTY_ROWS: u16 = MAX_ROWS;
+pub const MAX_PTY_COLUMNS: u16 = MAX_COLUMNS;
 pub const MAX_PTY_SESSIONS: usize = 4;
+pub const MAX_TERMINAL_DAMAGE_BYTES: usize = MAX_DAMAGE_BYTES;
 
 const MAX_SYMLINKS: usize = 16;
 const MAX_SHEBANG_BYTES: usize = 256;
@@ -195,6 +201,7 @@ impl CommandEnvironment {
         validate_pty_size(rows, columns)?;
         let command_path = resolve_installed_command(&self.arch_root, command)?;
         let launch = prepare_launch(&self.arch_root, command, command_path)?;
+        let terminal = Terminal::new(rows, columns).map_err(|_| ProcessError::InvalidPtySize)?;
         let (master, slave) = system::open_pty(rows, columns)?;
         let waiter = PtyWaiter::new(&master)?;
         let input = slave.try_clone()?;
@@ -213,6 +220,7 @@ impl CommandEnvironment {
             exit_status: None,
             rows,
             columns,
+            terminal,
         })
     }
 
@@ -322,6 +330,7 @@ pub struct PtySession {
     exit_status: Option<i32>,
     rows: u16,
     columns: u16,
+    terminal: Terminal,
 }
 
 impl PtySession {
@@ -334,7 +343,10 @@ impl PtySession {
                 self.finish();
                 Ok(0)
             }
-            Ok(length) => Ok(length),
+            Ok(length) => {
+                self.terminal.feed(&output[..length]);
+                Ok(length)
+            }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(0),
             Err(error) if error.raw_os_error() == Some(5) => {
                 self.finish();
@@ -358,6 +370,9 @@ impl PtySession {
     pub fn resize(&mut self, rows: u16, columns: u16) -> Result<(), ProcessError> {
         validate_pty_size(rows, columns)?;
         system::resize_pty(self.master.as_raw_fd(), rows, columns)?;
+        self.terminal
+            .resize(rows, columns)
+            .map_err(|_| ProcessError::InvalidPtySize)?;
         self.rows = rows;
         self.columns = columns;
         Ok(())
@@ -373,6 +388,12 @@ impl PtySession {
 
     pub fn waiter(&self) -> PtyWaiter {
         self.waiter.clone()
+    }
+
+    pub fn write_terminal_damage(&mut self, output: &mut [u8]) -> Result<usize, ProcessError> {
+        self.terminal
+            .write_damage(output)
+            .map_err(|_| ProcessError::InvalidArgument)
     }
 
     pub fn close(&mut self) {
@@ -520,6 +541,14 @@ impl PtyRegistry {
         self.session_mut(handle)?.resize(rows, columns)
     }
 
+    pub fn write_terminal_damage(
+        &mut self,
+        handle: u64,
+        output: &mut [u8],
+    ) -> Result<usize, ProcessError> {
+        self.session_mut(handle)?.write_terminal_damage(output)
+    }
+
     pub fn exit_status(&mut self, handle: u64) -> Result<Option<i32>, ProcessError> {
         Ok(self.session_mut(handle)?.exit_status())
     }
@@ -590,7 +619,7 @@ fn decode_pty_handle(handle: u64) -> Option<(usize, u32)> {
 }
 
 fn validate_pty_size(rows: u16, columns: u16) -> Result<(), ProcessError> {
-    if rows == 0 || columns == 0 || rows > MAX_PTY_DIMENSION || columns > MAX_PTY_DIMENSION {
+    if !(MIN_ROWS..=MAX_ROWS).contains(&rows) || !(MIN_COLUMNS..=MAX_COLUMNS).contains(&columns) {
         return Err(ProcessError::InvalidPtySize);
     }
     Ok(())
@@ -1177,7 +1206,11 @@ mod tests {
             Err(ProcessError::InvalidPtySize)
         ));
         assert!(matches!(
-            validate_pty_size(24, MAX_PTY_DIMENSION + 1),
+            validate_pty_size(24, MAX_PTY_COLUMNS + 1),
+            Err(ProcessError::InvalidPtySize)
+        ));
+        assert!(matches!(
+            validate_pty_size(MAX_PTY_ROWS + 1, 80),
             Err(ProcessError::InvalidPtySize)
         ));
         let (master, _slave) = system::open_pty(24, 80).expect("PTY pair");
@@ -1236,6 +1269,7 @@ mod tests {
             exit_status: None,
             rows: 24,
             columns: 80,
+            terminal: Terminal::new(24, 80).expect("terminal state"),
         };
         let deadline = Instant::now() + Duration::from_secs(2);
         let mut output = [0_u8; 64];
@@ -1244,5 +1278,44 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(session.exit_status(), Some(7));
+    }
+
+    #[test]
+    fn exact_pty_reads_feed_versioned_terminal_damage() {
+        let (master, mut slave) = system::open_pty(2, 4).expect("PTY pair");
+        let waiter = PtyWaiter::new(&master).expect("PTY waiter");
+        let mut session = PtySession {
+            master,
+            waiter,
+            child: None,
+            exit_status: None,
+            rows: 2,
+            columns: 4,
+            terminal: Terminal::new(2, 4).expect("terminal state"),
+        };
+        let mut damage = vec![0_u8; MAX_TERMINAL_DAMAGE_BYTES];
+        session
+            .write_terminal_damage(&mut damage)
+            .expect("initial damage");
+        slave.write_all(b"\x1b[32;1mOK").expect("terminal output");
+        let mut output = [0_u8; 64];
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            if session.read(&mut output).expect("PTY read") != 0 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        let length = session
+            .write_terminal_damage(&mut damage)
+            .expect("terminal damage");
+        assert_eq!(&damage[..4], b"ATRM");
+        assert_eq!(length, archphene_terminal::DAMAGE_HEADER_SIZE + 4 * 8);
+        assert_eq!(
+            u32::from_le_bytes(damage[32..36].try_into().expect("cell codepoint")),
+            u32::from(b'O')
+        );
+        assert_eq!(damage[36], 2);
+        assert_eq!(damage[38] & 1, 1);
     }
 }

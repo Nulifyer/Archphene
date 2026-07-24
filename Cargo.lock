@@ -32,6 +32,9 @@ dependencies = [
 [[package]]
 name = "archphene-process"
 version = "0.1.0"
+dependencies = [
+ "archphene-terminal",
+]
 
 [[package]]
 name = "archphene-root"

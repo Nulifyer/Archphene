@@ -327,6 +327,16 @@ impl RuntimeHost {
             .map_err(PackageRuntimeError::from)
     }
 
+    pub fn write_terminal_damage(
+        &mut self,
+        handle: u64,
+        output: &mut [u8],
+    ) -> Result<usize, PackageRuntimeError> {
+        self.pty_sessions
+            .write_terminal_damage(handle, output)
+            .map_err(PackageRuntimeError::from)
+    }
+
     pub fn resize_pty(
         &mut self,
         handle: u64,

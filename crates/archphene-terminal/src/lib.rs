@@ -4,6 +4,12 @@ pub const MIN_ROWS: u16 = 2;
 pub const MAX_ROWS: u16 = 200;
 pub const MIN_COLUMNS: u16 = 2;
 pub const MAX_COLUMNS: u16 = 400;
+pub const DAMAGE_PROTOCOL_VERSION: u32 = 1;
+pub const DAMAGE_HEADER_SIZE: usize = 32;
+pub const DAMAGE_CELL_SIZE: usize = 8;
+pub const MAX_DAMAGE_BYTES: usize =
+    DAMAGE_HEADER_SIZE + MAX_ROWS as usize * MAX_COLUMNS as usize * DAMAGE_CELL_SIZE;
+const DAMAGE_MAGIC: u32 = u32::from_le_bytes(*b"ATRM");
 const MAX_CSI_PARAMETERS: usize = 16;
 const MAX_STRING_BYTES: usize = 8 * 1024;
 const DEFAULT_FOREGROUND: u8 = 7;
@@ -31,6 +37,7 @@ impl Cell {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TerminalError {
     InvalidSize,
+    OutputTooSmall,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -42,6 +49,7 @@ enum ParserState {
     OscEscape,
 }
 
+#[derive(Debug)]
 pub struct Terminal {
     rows: u16,
     columns: u16,
@@ -68,6 +76,7 @@ pub struct Terminal {
     attributes: u8,
     dirty_start: u16,
     dirty_end: u16,
+    revision: u64,
 }
 
 impl Terminal {
@@ -99,6 +108,7 @@ impl Terminal {
             attributes: 0,
             dirty_start: 0,
             dirty_end: rows,
+            revision: 1,
         })
     }
 
@@ -132,6 +142,46 @@ impl Terminal {
         Some(dirty)
     }
 
+    pub fn required_damage_bytes(&self) -> usize {
+        DAMAGE_HEADER_SIZE
+            + usize::from(self.dirty_end.saturating_sub(self.dirty_start))
+                * usize::from(self.columns)
+                * DAMAGE_CELL_SIZE
+    }
+
+    pub fn write_damage(&mut self, output: &mut [u8]) -> Result<usize, TerminalError> {
+        let required = self.required_damage_bytes();
+        if output.len() < required {
+            return Err(TerminalError::OutputTooSmall);
+        }
+        output[..required].fill(0);
+        output[0..4].copy_from_slice(&DAMAGE_MAGIC.to_le_bytes());
+        output[4..8].copy_from_slice(&DAMAGE_PROTOCOL_VERSION.to_le_bytes());
+        output[8..10].copy_from_slice(&self.rows.to_le_bytes());
+        output[10..12].copy_from_slice(&self.columns.to_le_bytes());
+        output[12..14].copy_from_slice(&self.cursor_row.to_le_bytes());
+        output[14..16].copy_from_slice(&self.cursor_column.to_le_bytes());
+        output[16..18].copy_from_slice(&self.dirty_start.to_le_bytes());
+        output[18..20].copy_from_slice(&self.dirty_end.to_le_bytes());
+        output[20..24].copy_from_slice(&1_u32.to_le_bytes());
+        output[24..32].copy_from_slice(&self.revision.to_le_bytes());
+        let mut offset = DAMAGE_HEADER_SIZE;
+        for row in self.dirty_start..self.dirty_end {
+            for column in 0..self.columns {
+                let cell = self.cells[self.index(row, column)];
+                output[offset..offset + 4].copy_from_slice(&cell.codepoint.to_le_bytes());
+                output[offset + 4] = cell.foreground;
+                output[offset + 5] = cell.background;
+                output[offset + 6] = cell.attributes;
+                output[offset + 7] = 1;
+                offset += DAMAGE_CELL_SIZE;
+            }
+        }
+        self.dirty_start = self.rows;
+        self.dirty_end = 0;
+        Ok(required)
+    }
+
     pub fn feed(&mut self, bytes: &[u8]) {
         for &byte in bytes {
             self.feed_byte(byte);
@@ -162,6 +212,7 @@ impl Terminal {
         self.scroll_bottom = rows - 1;
         self.dirty_start = 0;
         self.dirty_end = rows;
+        self.revision = self.revision.saturating_add(1);
         Ok(())
     }
 
@@ -504,6 +555,7 @@ impl Terminal {
     fn mark_dirty_range(&mut self, start: u16, end: u16) {
         self.dirty_start = self.dirty_start.min(start);
         self.dirty_end = self.dirty_end.max(end);
+        self.revision = self.revision.saturating_add(1);
     }
 }
 
@@ -570,5 +622,40 @@ mod tests {
         terminal.feed(b"ok\x1b]0;secret\x07\x1bPignored\x1b\\!");
         assert_eq!(text(&terminal, 0), "ok!         ");
         assert_eq!(terminal.take_dirty_rows(), Some((0, 1)));
+    }
+
+    #[test]
+    fn damage_wire_format_is_versioned_bounded_and_consumed_atomically() {
+        let mut terminal = Terminal::new(2, 3).unwrap();
+        terminal.take_dirty_rows();
+        terminal.feed(b"A");
+        let required = terminal.required_damage_bytes();
+        assert_eq!(required, DAMAGE_HEADER_SIZE + 3 * DAMAGE_CELL_SIZE);
+        assert_eq!(
+            terminal.write_damage(&mut [0; DAMAGE_HEADER_SIZE]),
+            Err(TerminalError::OutputTooSmall)
+        );
+        assert_eq!(terminal.required_damage_bytes(), required);
+        let mut output = [0_u8; 128];
+        assert_eq!(terminal.write_damage(&mut output), Ok(required));
+        assert_eq!(&output[0..4], b"ATRM");
+        assert_eq!(
+            u32::from_le_bytes(output[4..8].try_into().unwrap()),
+            DAMAGE_PROTOCOL_VERSION
+        );
+        assert_eq!(u16::from_le_bytes(output[16..18].try_into().unwrap()), 0);
+        assert_eq!(u16::from_le_bytes(output[18..20].try_into().unwrap()), 1);
+        assert_eq!(
+            u32::from_le_bytes(output[32..36].try_into().unwrap()),
+            u32::from(b'A')
+        );
+        assert_eq!(terminal.required_damage_bytes(), DAMAGE_HEADER_SIZE);
+        let first_revision = u64::from_le_bytes(output[24..32].try_into().unwrap());
+        terminal.resize(3, 3).unwrap();
+        terminal.write_damage(&mut output).unwrap();
+        assert!(
+            u64::from_le_bytes(output[24..32].try_into().unwrap()) > first_revision,
+            "resize must publish a new revision"
+        );
     }
 }

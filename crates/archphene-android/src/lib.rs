@@ -95,7 +95,7 @@ mod android {
     };
     use archphene_process::{
         MAX_COMMAND_ARGUMENTS, MAX_COMMAND_OUTPUT_BYTES, MAX_COMMAND_REQUEST_BYTES,
-        MAX_PTY_TRANSFER_BYTES, ProcessError,
+        MAX_PTY_TRANSFER_BYTES, MAX_TERMINAL_DAMAGE_BYTES, ProcessError,
     };
     use jni::JNIEnv;
     use jni::objects::{JByteBuffer, JClass};
@@ -896,6 +896,44 @@ mod android {
             runtime.read_pty(pty_handle, output)
         };
         match result {
+            Ok(length) => i32::try_from(length).unwrap_or(i32::MAX),
+            Err(_) => ERROR_PROCESS,
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeReadTerminalDamage(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        pty_handle: jlong,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let (Ok(handle), Ok(pty_handle)) = (u64::try_from(handle), u64::try_from(pty_handle))
+        else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(output_capacity) = environment.get_direct_buffer_capacity(&output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if output_capacity < MAX_TERMINAL_DAMAGE_BYTES {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let Ok(output_address) = environment.get_direct_buffer_address(&output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if output_address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let destination =
+            unsafe { slice::from_raw_parts_mut(output_address, MAX_TERMINAL_DAMAGE_BYTES) };
+        let Ok(mut registry) = registry().lock() else {
+            return ERROR_INTERNAL;
+        };
+        let Some(runtime) = registry.runtime_mut(handle) else {
+            return ERROR_INVALID_HANDLE;
+        };
+        match runtime.write_terminal_damage(pty_handle, destination) {
             Ok(length) => i32::try_from(length).unwrap_or(i32::MAX),
             Err(_) => ERROR_PROCESS,
         }

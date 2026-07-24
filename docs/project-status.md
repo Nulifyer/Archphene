@@ -233,11 +233,23 @@ tracking. Host gates cover split multibyte input, malformed/control input,
 wrapping, scrolling, color state, resize bounds, and 1,000 warmed parser/grid
 updates with zero heap allocations.
 
-This core is intentionally not connected to Android rendering yet. Alternate
-screens, scrollback, Unicode width and combining behavior, extended color,
-remaining xterm controls, versioned dirty-cell transfer, selection, input
-modes, IME/hardware keyboard, clipboard, and accessibility remain required
-before it replaces the temporary diagnostic strip.
+Every PTY session now owns one of those terminal states. Each successful native
+PTY read feeds the exact returned bytes into it, and resize updates both the
+kernel PTY and grid. Android can drain changed rows through one direct-buffer
+JNI call using the bounded `ATRM` version-1 wire format: a fixed 32-byte header
+plus fixed eight-byte cells, capped at 640,032 bytes for the maximum grid.
+Undersized output fails without consuming damage. The caller owns and reuses
+the buffer, and the warmed parse-plus-transfer gate performs 1,000 updates
+without heap allocation.
+
+A real host PTY test proves that colored, bold process output reaches the wire
+as terminal cells rather than synthetic Kotlin text. The JNI entry point is
+exported by both exact Android ABIs, both ABI-specific APKs build, and Android
+lint passes. Android rendering is not connected yet. Alternate screens,
+scrollback, Unicode width and combining behavior, extended color, remaining
+xterm controls, selection, input modes, a frame-paced dirty-row renderer,
+IME/hardware keyboard, clipboard, and accessibility remain required before
+the temporary diagnostic strip can be replaced.
 
 The validated prototype below remains reference evidence until replacement
 vertical slices pass equivalent gates. Installed prototype state is no longer a

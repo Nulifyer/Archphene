@@ -1,7 +1,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use archphene_terminal::Terminal;
+use archphene_terminal::{MAX_DAMAGE_BYTES, Terminal};
 
 struct CountingAllocator;
 
@@ -24,14 +24,17 @@ static ALLOCATOR: CountingAllocator = CountingAllocator;
 #[test]
 fn warmed_parser_grid_and_damage_path_does_not_allocate() {
     let mut terminal = Terminal::new(24, 80).expect("terminal");
+    let mut damage = vec![0; MAX_DAMAGE_BYTES];
     let output = b"\rprogress \x1b[32;1mcomplete\x1b[0m \xe2\x98\x83\x1b[K";
     terminal.feed(output);
-    terminal.take_dirty_rows();
+    terminal
+        .write_damage(&mut damage)
+        .expect("initial terminal damage");
 
     let before = ALLOCATION_COUNT.load(Ordering::SeqCst);
     for _ in 0..1_000 {
         terminal.feed(output);
-        assert!(terminal.take_dirty_rows().is_some());
+        assert!(terminal.write_damage(&mut damage).expect("terminal damage") > 0);
     }
     let after = ALLOCATION_COUNT.load(Ordering::SeqCst);
     assert_eq!(after, before);
