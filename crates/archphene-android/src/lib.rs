@@ -94,7 +94,8 @@ mod android {
         RepositoryArchitecture, ToolOutput,
     };
     use archphene_process::{
-        MAX_COMMAND_ARGUMENTS, MAX_COMMAND_OUTPUT_BYTES, MAX_COMMAND_REQUEST_BYTES, ProcessError,
+        MAX_COMMAND_ARGUMENTS, MAX_COMMAND_OUTPUT_BYTES, MAX_COMMAND_REQUEST_BYTES,
+        MAX_PTY_TRANSFER_BYTES, ProcessError,
     };
     use jni::JNIEnv;
     use jni::objects::{JByteBuffer, JClass};
@@ -202,6 +203,26 @@ mod android {
             2 => Some(Repository::Extra),
             _ => None,
         }
+    }
+
+    fn decode_command_request<'a>(
+        request: &'a [u8],
+        arguments: &mut [&'a str; MAX_COMMAND_ARGUMENTS],
+    ) -> Result<(&'a str, usize), ()> {
+        let mut fields = request.split(|byte| *byte == 0);
+        let command = fields
+            .next()
+            .and_then(|field| str::from_utf8(field).ok())
+            .ok_or(())?;
+        let mut argument_count = 0_usize;
+        for field in fields {
+            if argument_count == arguments.len() {
+                return Err(());
+            }
+            arguments[argument_count] = str::from_utf8(field).map_err(|_| ())?;
+            argument_count += 1;
+        }
+        Ok((command, argument_count))
     }
 
     #[unsafe(no_mangle)]
@@ -693,25 +714,11 @@ mod android {
         }
         let request_bytes =
             unsafe { slice::from_raw_parts(request_address.cast_const(), request_length) };
-        let mut fields = request_bytes.split(|byte| *byte == 0);
-        let Some(command_bytes) = fields.next() else {
-            return ERROR_INVALID_ARGUMENT;
-        };
-        let Ok(command) = str::from_utf8(command_bytes) else {
-            return ERROR_INVALID_ARGUMENT;
-        };
         let mut arguments = [""; MAX_COMMAND_ARGUMENTS];
-        let mut argument_count = 0_usize;
-        for field in fields {
-            if argument_count == arguments.len() {
-                return ERROR_INVALID_ARGUMENT;
-            }
-            let Ok(argument) = str::from_utf8(field) else {
-                return ERROR_INVALID_ARGUMENT;
-            };
-            arguments[argument_count] = argument;
-            argument_count += 1;
-        }
+        let Ok((command, argument_count)) = decode_command_request(request_bytes, &mut arguments)
+        else {
+            return ERROR_INVALID_ARGUMENT;
+        };
         let command_environment = {
             let Ok(mut registry) = registry().lock() else {
                 return ERROR_INTERNAL;
@@ -744,6 +751,167 @@ mod android {
             return ERROR_INTERNAL;
         }
         i32::try_from(MAX_TOOL_OUTPUT_BYTES - writer.len()).unwrap_or(i32::MAX)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeOpenPty(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        request_buffer: JByteBuffer,
+        request_length: jint,
+        rows: jint,
+        columns: jint,
+        output_buffer: JByteBuffer,
+    ) -> jlong {
+        let (Ok(handle), Ok(request_length), Ok(rows), Ok(columns)) = (
+            u64::try_from(handle),
+            usize::try_from(request_length),
+            u16::try_from(rows),
+            u16::try_from(columns),
+        ) else {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        };
+        let (Ok(request_capacity), Ok(output_capacity)) = (
+            environment.get_direct_buffer_capacity(&request_buffer),
+            environment.get_direct_buffer_capacity(&output_buffer),
+        ) else {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        };
+        if request_length == 0
+            || request_length > request_capacity
+            || request_length > MAX_COMMAND_REQUEST_BYTES
+            || output_capacity < MAX_TOOL_OUTPUT_BYTES
+        {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        }
+        let (Ok(request_address), Ok(output_address)) = (
+            environment.get_direct_buffer_address(&request_buffer),
+            environment.get_direct_buffer_address(&output_buffer),
+        ) else {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        };
+        if request_address.is_null() || output_address.is_null() {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        }
+        let request_bytes =
+            unsafe { slice::from_raw_parts(request_address.cast_const(), request_length) };
+        let mut arguments = [""; MAX_COMMAND_ARGUMENTS];
+        let Ok((command, argument_count)) = decode_command_request(request_bytes, &mut arguments)
+        else {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        };
+        let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
+        let Ok(mut registry) = registry().lock() else {
+            return i64::from(ERROR_INTERNAL);
+        };
+        let Some(runtime) = registry.runtime_mut(handle) else {
+            return i64::from(ERROR_INVALID_HANDLE);
+        };
+        match runtime.open_pty(command, &arguments[..argument_count], rows, columns) {
+            Ok(pty_handle) => i64::try_from(pty_handle).unwrap_or(i64::from(ERROR_INTERNAL)),
+            Err(error) => i64::from(copy_package_error(&error, destination)),
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativePtyIo(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        pty_handle: jlong,
+        write_operation: jboolean,
+        buffer: JByteBuffer,
+        byte_count: jint,
+    ) -> jint {
+        let (Ok(handle), Ok(pty_handle), Ok(byte_count)) = (
+            u64::try_from(handle),
+            u64::try_from(pty_handle),
+            usize::try_from(byte_count),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(capacity) = environment.get_direct_buffer_capacity(&buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if byte_count == 0 || byte_count > capacity || byte_count > MAX_PTY_TRANSFER_BYTES {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let Ok(address) = environment.get_direct_buffer_address(&buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let Ok(mut registry) = registry().lock() else {
+            return ERROR_INTERNAL;
+        };
+        let Some(runtime) = registry.runtime_mut(handle) else {
+            return ERROR_INVALID_HANDLE;
+        };
+        let result = if write_operation != JNI_FALSE {
+            let input = unsafe { slice::from_raw_parts(address.cast_const(), byte_count) };
+            runtime.write_pty(pty_handle, input)
+        } else {
+            let output = unsafe { slice::from_raw_parts_mut(address, byte_count) };
+            runtime.read_pty(pty_handle, output)
+        };
+        match result {
+            Ok(length) => i32::try_from(length).unwrap_or(i32::MAX),
+            Err(_) => ERROR_PROCESS,
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeResizePty(
+        _environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        pty_handle: jlong,
+        rows: jint,
+        columns: jint,
+    ) -> jint {
+        let (Ok(handle), Ok(pty_handle), Ok(rows), Ok(columns)) = (
+            u64::try_from(handle),
+            u64::try_from(pty_handle),
+            u16::try_from(rows),
+            u16::try_from(columns),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(mut registry) = registry().lock() else {
+            return ERROR_INTERNAL;
+        };
+        let Some(runtime) = registry.runtime_mut(handle) else {
+            return ERROR_INVALID_HANDLE;
+        };
+        match runtime.resize_pty(pty_handle, rows, columns) {
+            Ok(()) => 0,
+            Err(_) => ERROR_PROCESS,
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeClosePty(
+        _environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        pty_handle: jlong,
+    ) -> jint {
+        let (Ok(handle), Ok(pty_handle)) = (u64::try_from(handle), u64::try_from(pty_handle))
+        else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(mut registry) = registry().lock() else {
+            return ERROR_INTERNAL;
+        };
+        let Some(runtime) = registry.runtime_mut(handle) else {
+            return ERROR_INVALID_HANDLE;
+        };
+        match runtime.close_pty(pty_handle) {
+            Ok(()) => 0,
+            Err(_) => ERROR_PROCESS,
+        }
     }
 
     #[unsafe(no_mangle)]

@@ -44,6 +44,7 @@ dependencies = [
  "archphene-core",
  "archphene-jobs",
  "archphene-packages",
+ "archphene-process",
  "archphene-root",
 ]
 

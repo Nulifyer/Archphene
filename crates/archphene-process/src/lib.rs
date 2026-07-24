@@ -3,7 +3,8 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Component, Path, PathBuf};
@@ -18,6 +19,9 @@ pub const MAX_COMMAND_ARGUMENT_BYTES: usize = 4 * 1024;
 pub const MAX_COMMAND_REQUEST_BYTES: usize = 16 * 1024;
 pub const MAX_COMMAND_OUTPUT_BYTES: usize = 15 * 1024;
 pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+pub const MAX_PTY_TRANSFER_BYTES: usize = 16 * 1024;
+pub const MAX_PTY_DIMENSION: u16 = 1000;
+pub const MAX_PTY_SESSIONS: usize = 4;
 
 const MAX_SYMLINKS: usize = 16;
 const MAX_SHEBANG_BYTES: usize = 256;
@@ -31,6 +35,9 @@ pub enum ProcessError {
     MissingCommand,
     UnsupportedProgram,
     InvalidInterpreter,
+    InvalidPtySize,
+    InvalidPtyHandle,
+    PtyLimit,
     UnsafeCommand(PathBuf),
     OutputLimit,
     Timeout,
@@ -50,6 +57,9 @@ impl fmt::Display for ProcessError {
             Self::InvalidInterpreter => {
                 formatter.write_str("Linux script has an invalid or unavailable interpreter")
             }
+            Self::InvalidPtySize => formatter.write_str("invalid terminal dimensions"),
+            Self::InvalidPtyHandle => formatter.write_str("invalid or closed terminal handle"),
+            Self::PtyLimit => formatter.write_str("terminal session limit reached"),
             Self::UnsafeCommand(path) => {
                 write!(formatter, "unsafe Linux command: {}", path.display())
             }
@@ -154,20 +164,64 @@ impl CommandEnvironment {
             .open(&output_path)?;
         let _output_guard = TemporaryOutput(output_path.clone());
         let error_file = output_file.try_clone()?;
-        let mut command_builder = Command::new(&self.loader);
-        command_builder
+        let child = self
+            .build_command(&launch, arguments, "dumb")
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(output_file))
+            .stderr(Stdio::from(error_file))
+            .process_group(0)
+            .spawn();
+        let result = match child {
+            Ok(mut child) => self.wait_for_output(&mut child, &output_path),
+            Err(error) => Err(ProcessError::Io(error)),
+        };
+        result
+    }
+
+    pub fn open_pty(
+        &self,
+        command: &str,
+        arguments: &[&str],
+        rows: u16,
+        columns: u16,
+    ) -> Result<PtySession, ProcessError> {
+        validate_request(command, arguments)?;
+        validate_pty_size(rows, columns)?;
+        let command_path = resolve_installed_command(&self.arch_root, command)?;
+        let launch = prepare_launch(&self.arch_root, command, command_path)?;
+        let (master, slave) = system::open_pty(rows, columns)?;
+        let input = slave.try_clone()?;
+        let output = slave.try_clone()?;
+        let mut command_builder = self.build_command(&launch, arguments, "xterm-256color");
+        system::configure_controlling_terminal(&mut command_builder);
+        let child = command_builder
+            .stdin(Stdio::from(input))
+            .stdout(Stdio::from(output))
+            .stderr(Stdio::from(slave))
+            .spawn()?;
+        Ok(PtySession {
+            master,
+            child: Some(child),
+            rows,
+            columns,
+        })
+    }
+
+    fn build_command(&self, launch: &LaunchPlan, arguments: &[&str], terminal: &str) -> Command {
+        let mut command = Command::new(&self.loader);
+        command
             .arg("--library-path")
             .arg(&self.library_path)
             .arg("--argv0")
             .arg(&launch.argv0)
             .arg(&launch.program);
         if let Some(interpreter_argument) = &launch.interpreter_argument {
-            command_builder.arg(interpreter_argument);
+            command.arg(interpreter_argument);
         }
         if let Some(script) = &launch.script {
-            command_builder.arg(script);
+            command.arg(script);
         }
-        let child = command_builder
+        command
             .args(arguments)
             .current_dir(self.arch_root.join("home/archphene"))
             .env_clear()
@@ -176,8 +230,11 @@ impl CommandEnvironment {
             .env("PATH", &self.executable_path)
             .env("LANG", "C")
             .env("LC_ALL", "C")
-            .env("TERM", "dumb")
-            .env("COLORTERM", "")
+            .env("TERM", terminal)
+            .env(
+                "COLORTERM",
+                if terminal == "dumb" { "" } else { "truecolor" },
+            )
             .env(
                 "XDG_CONFIG_HOME",
                 self.arch_root.join("home/archphene/.config"),
@@ -197,17 +254,8 @@ impl CommandEnvironment {
             .env("ARCHPHENE_RUNTIME_LIB", &self.library_path)
             .env("ARCHPHENE_RUNTIME_COMMAND_DIR", &self.command_directory)
             .env("ARCHPHENE_RUNTIME_ROOT", &self.arch_root)
-            .env("ARCHPHENE_FAKE_CHROOT", "1")
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(output_file))
-            .stderr(Stdio::from(error_file))
-            .process_group(0)
-            .spawn();
-        let result = match child {
-            Ok(mut child) => self.wait_for_output(&mut child, &output_path),
-            Err(error) => Err(ProcessError::Io(error)),
-        };
-        result
+            .env("ARCHPHENE_FAKE_CHROOT", "1");
+        command
     }
 
     fn wait_for_output(
@@ -264,6 +312,184 @@ impl CommandEnvironment {
             OUTPUT_ID.fetch_add(1, Ordering::Relaxed),
         ))
     }
+}
+
+#[derive(Debug)]
+pub struct PtySession {
+    master: File,
+    child: Option<std::process::Child>,
+    rows: u16,
+    columns: u16,
+}
+
+impl PtySession {
+    pub fn read(&mut self, output: &mut [u8]) -> Result<usize, ProcessError> {
+        if output.is_empty() || output.len() > MAX_PTY_TRANSFER_BYTES {
+            return Err(ProcessError::InvalidArgument);
+        }
+        match self.master.read(output) {
+            Ok(length) => Ok(length),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(0),
+            Err(error) if error.raw_os_error() == Some(5) && self.has_exited()? => Ok(0),
+            Err(error) => Err(ProcessError::Io(error)),
+        }
+    }
+
+    pub fn write(&mut self, input: &[u8]) -> Result<usize, ProcessError> {
+        if input.is_empty() || input.len() > MAX_PTY_TRANSFER_BYTES {
+            return Err(ProcessError::InvalidArgument);
+        }
+        match self.master.write(input) {
+            Ok(length) => Ok(length),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(0),
+            Err(error) => Err(ProcessError::Io(error)),
+        }
+    }
+
+    pub fn resize(&mut self, rows: u16, columns: u16) -> Result<(), ProcessError> {
+        validate_pty_size(rows, columns)?;
+        system::resize_pty(self.master.as_raw_fd(), rows, columns)?;
+        self.rows = rows;
+        self.columns = columns;
+        Ok(())
+    }
+
+    pub fn has_exited(&mut self) -> Result<bool, ProcessError> {
+        match self.child.as_mut() {
+            Some(child) => Ok(child.try_wait()?.is_some()),
+            None => Ok(true),
+        }
+    }
+
+    pub const fn size(&self) -> (u16, u16) {
+        (self.rows, self.columns)
+    }
+
+    pub fn close(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        if child.try_wait().ok().flatten().is_none() {
+            terminate_process_group(&mut child);
+        }
+        let _ = child.wait();
+    }
+}
+
+impl Drop for PtySession {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+pub struct PtyRegistry {
+    slots: [PtySlot; MAX_PTY_SESSIONS],
+}
+
+struct PtySlot {
+    generation: u32,
+    session: Option<PtySession>,
+}
+
+impl PtyRegistry {
+    pub fn new() -> Self {
+        Self {
+            slots: std::array::from_fn(|_| PtySlot {
+                generation: 0,
+                session: None,
+            }),
+        }
+    }
+
+    pub fn open(
+        &mut self,
+        environment: &CommandEnvironment,
+        command: &str,
+        arguments: &[&str],
+        rows: u16,
+        columns: u16,
+    ) -> Result<u64, ProcessError> {
+        let (index, slot) = self
+            .slots
+            .iter_mut()
+            .enumerate()
+            .find(|(_, slot)| slot.session.is_none())
+            .ok_or(ProcessError::PtyLimit)?;
+        let session = environment.open_pty(command, arguments, rows, columns)?;
+        slot.generation = slot.generation.wrapping_add(1).max(1);
+        let handle = encode_pty_handle(index, slot.generation)?;
+        slot.session = Some(session);
+        Ok(handle)
+    }
+
+    pub fn read(&mut self, handle: u64, output: &mut [u8]) -> Result<usize, ProcessError> {
+        self.session_mut(handle)?.read(output)
+    }
+
+    pub fn write(&mut self, handle: u64, input: &[u8]) -> Result<usize, ProcessError> {
+        self.session_mut(handle)?.write(input)
+    }
+
+    pub fn resize(&mut self, handle: u64, rows: u16, columns: u16) -> Result<(), ProcessError> {
+        self.session_mut(handle)?.resize(rows, columns)
+    }
+
+    pub fn has_exited(&mut self, handle: u64) -> Result<bool, ProcessError> {
+        self.session_mut(handle)?.has_exited()
+    }
+
+    pub fn close(&mut self, handle: u64) -> Result<(), ProcessError> {
+        let (index, generation) =
+            decode_pty_handle(handle).ok_or(ProcessError::InvalidPtyHandle)?;
+        let slot = self
+            .slots
+            .get_mut(index)
+            .filter(|slot| slot.generation == generation)
+            .ok_or(ProcessError::InvalidPtyHandle)?;
+        let mut session = slot.session.take().ok_or(ProcessError::InvalidPtyHandle)?;
+        session.close();
+        Ok(())
+    }
+
+    fn session_mut(&mut self, handle: u64) -> Result<&mut PtySession, ProcessError> {
+        let (index, generation) =
+            decode_pty_handle(handle).ok_or(ProcessError::InvalidPtyHandle)?;
+        self.slots
+            .get_mut(index)
+            .filter(|slot| slot.generation == generation)
+            .and_then(|slot| slot.session.as_mut())
+            .ok_or(ProcessError::InvalidPtyHandle)
+    }
+}
+
+impl Default for PtyRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn encode_pty_handle(index: usize, generation: u32) -> Result<u64, ProcessError> {
+    let index = u32::try_from(index)
+        .ok()
+        .and_then(|index| index.checked_add(1))
+        .ok_or(ProcessError::PtyLimit)?;
+    Ok((u64::from(generation) << 32) | u64::from(index))
+}
+
+fn decode_pty_handle(handle: u64) -> Option<(usize, u32)> {
+    let encoded_index = u32::try_from(handle & u64::from(u32::MAX)).ok()?;
+    let generation = u32::try_from(handle >> 32).ok()?;
+    if encoded_index == 0 || generation == 0 {
+        return None;
+    }
+    Some((usize::try_from(encoded_index - 1).ok()?, generation))
+}
+
+fn validate_pty_size(rows: u16, columns: u16) -> Result<(), ProcessError> {
+    if rows == 0 || columns == 0 || rows > MAX_PTY_DIMENSION || columns > MAX_PTY_DIMENSION {
+        return Err(ProcessError::InvalidPtySize);
+    }
+    Ok(())
 }
 
 fn validate_request(command: &str, arguments: &[&str]) -> Result<(), ProcessError> {
@@ -456,10 +682,36 @@ fn terminate_process_group(child: &mut std::process::Child) {
 
 #[allow(unsafe_code)]
 mod system {
+    use std::ffi::CStr;
+    use std::fs::{File, OpenOptions};
     use std::io;
+    use std::os::fd::AsRawFd;
+    use std::os::raw::{c_char, c_int, c_ulong};
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::process::CommandExt;
+    use std::process::Command;
+
+    const O_NOCTTY: c_int = 0x100;
+    const O_NONBLOCK: c_int = 0x800;
+    const O_CLOEXEC: c_int = 0x80000;
+    const TIOCSCTTY: c_ulong = 0x540e;
+    const TIOCSWINSZ: c_ulong = 0x5414;
+
+    #[repr(C)]
+    struct WindowSize {
+        rows: u16,
+        columns: u16,
+        pixel_width: u16,
+        pixel_height: u16,
+    }
 
     unsafe extern "C" {
         fn kill(process: i32, signal: i32) -> i32;
+        fn grantpt(descriptor: c_int) -> c_int;
+        fn unlockpt(descriptor: c_int) -> c_int;
+        fn ptsname_r(descriptor: c_int, output: *mut c_char, length: usize) -> c_int;
+        fn setsid() -> c_int;
+        fn ioctl(descriptor: c_int, request: c_ulong, ...) -> c_int;
     }
 
     pub fn kill_process_group(group: u32) -> io::Result<()> {
@@ -474,6 +726,77 @@ mod system {
             Ok(())
         } else {
             Err(io::Error::last_os_error())
+        }
+    }
+
+    pub fn open_pty(rows: u16, columns: u16) -> io::Result<(File, File)> {
+        let master = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(O_NOCTTY | O_NONBLOCK | O_CLOEXEC)
+            .open("/dev/ptmx")?;
+        let descriptor = master.as_raw_fd();
+        // SAFETY: `descriptor` owns an open PTY master. Both calls take only
+        // that integer descriptor and do not retain any Rust-owned memory.
+        if unsafe { grantpt(descriptor) } != 0 || unsafe { unlockpt(descriptor) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut name = [0 as c_char; 4096];
+        // SAFETY: `name` is writable for its complete reported length and the
+        // descriptor remains open for the duration of the call.
+        if unsafe { ptsname_r(descriptor, name.as_mut_ptr(), name.len()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: successful `ptsname_r` writes a NUL-terminated string into
+        // the fixed buffer.
+        let name = unsafe { CStr::from_ptr(name.as_ptr()) };
+        let name = name
+            .to_str()
+            .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+        if !name.starts_with("/dev/pts/")
+            || name.len() > 64
+            || !name[9..].bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return Err(io::Error::from(io::ErrorKind::InvalidData));
+        }
+        let slave = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(O_NOCTTY | O_CLOEXEC)
+            .open(name)?;
+        resize_pty(descriptor, rows, columns)?;
+        Ok((master, slave))
+    }
+
+    pub fn resize_pty(descriptor: c_int, rows: u16, columns: u16) -> io::Result<()> {
+        let size = WindowSize {
+            rows,
+            columns,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        // SAFETY: `size` has the kernel `winsize` layout and remains valid for
+        // this non-retaining ioctl call.
+        if unsafe { ioctl(descriptor, TIOCSWINSZ, &size) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    pub fn configure_controlling_terminal(command: &mut Command) {
+        // SAFETY: the closure uses only async-signal-safe syscalls after fork,
+        // does not allocate, and references no captured Rust state.
+        unsafe {
+            command.pre_exec(|| {
+                if setsid() < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                if ioctl(0, TIOCSCTTY, 0) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
         }
     }
 }
@@ -654,5 +977,20 @@ mod tests {
             prepare_launch(&root.0, "recursive", root.0.join("usr/bin/recursive"),),
             Err(ProcessError::InvalidInterpreter)
         ));
+    }
+
+    #[test]
+    fn pty_allocation_and_resize_are_bounded() {
+        assert!(validate_pty_size(24, 80).is_ok());
+        assert!(matches!(
+            validate_pty_size(0, 80),
+            Err(ProcessError::InvalidPtySize)
+        ));
+        assert!(matches!(
+            validate_pty_size(24, MAX_PTY_DIMENSION + 1),
+            Err(ProcessError::InvalidPtySize)
+        ));
+        let (master, _slave) = system::open_pty(24, 80).expect("PTY pair");
+        system::resize_pty(master.as_raw_fd(), 40, 120).expect("PTY resize");
     }
 }

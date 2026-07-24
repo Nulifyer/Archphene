@@ -81,7 +81,9 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
     - [x] Support package-owned scripts only through conventional `/usr/bin` or `/bin` shebang interpreters that resolve to installed ELF programs inside the same root; reject Android-host and recursive script interpreters.
     - [x] Install Bash through the normal signed package flow and pass a warning-free root-contained script/argument/output gate with full-device screenshots on both targets.
     - [ ] Build the conventional interactive shared shell environment, locale policy, startup files, and user-selected command/path behavior without escaping into Android's `/system/bin`.
-    - [ ] Add a bounded interactive PTY registry, resize, UTF-8 input/output queues, cancellation, process-tree supervision, and durable session lifecycle.
+    - [x] Add a four-slot generation-checked PTY registry with controlling-terminal setup, bounded nonblocking direct-buffer I/O, resize, deterministic close, and process-group kill/reap on runtime destruction.
+    - [x] Pass package-installed Bash PTY open, 24×80 to 40×120 resize, bidirectional marker, close/reap, scoped-log, and full-device UI gates on both targets.
+    - [ ] Add user-controlled long-lived session ownership, backpressure queues, cancellation, exit status, Activity/process-death policy, and reboot recovery.
     - [ ] Replace the diagnostic command panel with production terminal rendering, scrollback, selection, IME, hardware keyboard, clipboard, and accessibility.
   - [ ] Wayland compositor, presentation, and lifecycle
   - [ ] Pointer, touch, keyboard, IME, clipboard, and drag-and-drop

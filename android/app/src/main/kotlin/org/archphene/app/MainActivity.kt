@@ -36,6 +36,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private lateinit var installButton: Button
     private lateinit var removeButton: Button
     private lateinit var commandButton: Button
+    private lateinit var ptyButton: Button
     private val snapshot = RuntimeSnapshot()
     private val statusText = StringBuilder(128)
     private var runtimeBinder: ArchpheneRuntimeService.LocalBinder? = null
@@ -63,6 +64,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 installButton.isEnabled = false
                 removeButton.isEnabled = false
                 commandButton.isEnabled = false
+                ptyButton.isEnabled = false
             }
         }
 
@@ -270,6 +272,15 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     runtimeBinder?.runLinuxCommand(commandInput.text.toString())
                 }
             }
+        ptyButton =
+            Button(this).apply {
+                setText(R.string.test_pty)
+                isEnabled = false
+                setOnClickListener {
+                    hideKeyboard(commandInput)
+                    runtimeBinder?.runPtyProbe()
+                }
+            }
         commandInput.setOnEditorActionListener { _, actionId, _ ->
             if (actionId == EditorInfo.IME_ACTION_GO) {
                 hideKeyboard(commandInput)
@@ -292,6 +303,13 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 )
                 addView(
                     commandButton,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                    ),
+                )
+                addView(
+                    ptyButton,
                     LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.WRAP_CONTENT,
                         ViewGroup.LayoutParams.MATCH_PARENT,
@@ -508,12 +526,14 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             installButton.isEnabled = false
             removeButton.isEnabled = false
             commandButton.isEnabled = false
+            ptyButton.isEnabled = false
             return
         }
         setTextIfChanged(installButton, binder.packagePrimaryActionLabel)
         installButton.isEnabled = binder.packagePrimaryActionAvailable
         removeButton.isEnabled = binder.packageRemoveAvailable
         commandButton.isEnabled = binder.linuxCommandAvailable
+        ptyButton.isEnabled = binder.linuxCommandAvailable
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density + 0.5f).toInt()

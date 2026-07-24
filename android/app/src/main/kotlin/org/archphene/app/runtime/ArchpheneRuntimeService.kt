@@ -72,6 +72,8 @@ class ArchpheneRuntimeService : Service() {
 
         fun runLinuxCommand(commandLine: String): Boolean =
             requestLinuxCommand(commandLine)
+
+        fun runPtyProbe(): Boolean = requestPtyProbe()
     }
 
     private val binder = LocalBinder()
@@ -1435,6 +1437,131 @@ class ArchpheneRuntimeService : Service() {
             }
         }
         return sanitized.toString().trimEnd()
+    }
+
+    @Synchronized
+    private fun requestPtyProbe(): Boolean {
+        val activeHandle = readyHandle
+        if (
+            activeHandle == 0L ||
+            catalogRefreshActive ||
+            searchActive ||
+            packageOperationActive ||
+            commandActive
+        ) {
+            return false
+        }
+        commandActive = true
+        commandStatus = "Opening shared Bash PTY"
+        commandThread =
+            Thread(
+                {
+                    var ptyHandle = 0L
+                    try {
+                        val requestBytes =
+                            byteArrayOf(
+                                *"bash".toByteArray(StandardCharsets.UTF_8),
+                                0.toByte(),
+                                *"--noprofile".toByteArray(StandardCharsets.UTF_8),
+                                0.toByte(),
+                                *"--norc".toByteArray(StandardCharsets.UTF_8),
+                            )
+                        val requestBuffer = ByteBuffer.allocateDirect(requestBytes.size)
+                        requestBuffer.put(requestBytes)
+                        val outputBuffer =
+                            ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
+                        ptyHandle =
+                            NativeRuntime.nativeOpenPty(
+                                activeHandle,
+                                requestBuffer,
+                                requestBytes.size,
+                                24,
+                                80,
+                                outputBuffer,
+                            )
+                        if (ptyHandle <= 0) {
+                            throw IllegalStateException(
+                                readNativeMessage(outputBuffer, ptyHandle),
+                            )
+                        }
+                        if (NativeRuntime.nativeResizePty(activeHandle, ptyHandle, 40, 120) != 0) {
+                            throw IllegalStateException("Could not resize the Linux PTY")
+                        }
+                        val input =
+                            "printf 'archphene-pty-ok\\n'\nexit\n"
+                                .toByteArray(StandardCharsets.UTF_8)
+                        val ioBuffer = ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
+                        var written = 0
+                        while (written < input.size) {
+                            ioBuffer.clear()
+                            ioBuffer.put(input, written, input.size - written)
+                            val count =
+                                NativeRuntime.nativePtyIo(
+                                    activeHandle,
+                                    ptyHandle,
+                                    true,
+                                    ioBuffer,
+                                    input.size - written,
+                                )
+                            if (count < 0) {
+                                throw IllegalStateException("Could not write to the Linux PTY")
+                            }
+                            if (count == 0) {
+                                Thread.sleep(20)
+                            } else {
+                                written += count
+                            }
+                        }
+                        val received = StringBuilder(1024)
+                        val deadline = System.nanoTime() + 5_000_000_000L
+                        while (
+                            !received.contains("archphene-pty-ok") &&
+                            System.nanoTime() < deadline
+                        ) {
+                            ioBuffer.clear()
+                            val count =
+                                NativeRuntime.nativePtyIo(
+                                    activeHandle,
+                                    ptyHandle,
+                                    false,
+                                    ioBuffer,
+                                    NativeRuntime.PACKAGE_OUTPUT_SIZE,
+                                )
+                            if (count < 0) {
+                                throw IllegalStateException("Could not read from the Linux PTY")
+                            }
+                            if (count == 0) {
+                                Thread.sleep(20)
+                                continue
+                            }
+                            if (received.length + count > 4096) {
+                                throw IllegalStateException("Linux PTY probe output is too large")
+                            }
+                            val bytes = ByteArray(count)
+                            ioBuffer.position(0)
+                            ioBuffer.get(bytes)
+                            received.append(String(bytes, StandardCharsets.UTF_8))
+                        }
+                        if (!received.contains("archphene-pty-ok")) {
+                            throw IllegalStateException("Linux PTY probe timed out")
+                        }
+                        commandStatus = "PTY opened · resized · closed\narchphene-pty-ok"
+                        Log.i(TAG, "Shared Bash PTY opened, resized, exchanged data, and closed")
+                    } catch (error: Exception) {
+                        commandStatus =
+                            "PTY failed: ${error.message ?: error.javaClass.simpleName}"
+                        Log.e(TAG, "Linux PTY probe failed", error)
+                    } finally {
+                        if (ptyHandle > 0) {
+                            NativeRuntime.nativeClosePty(activeHandle, ptyHandle)
+                        }
+                        commandActive = false
+                        commandThread = null
+                    }
+                },
+                "ArchphenePty",
+            ).also(Thread::start)
+        return true
     }
 
     private fun readLatestPackageJob(activeHandle: Long): String {

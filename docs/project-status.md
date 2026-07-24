@@ -125,6 +125,24 @@ yet constitute a terminal: interactive PTYs, cancellation, locale
 provisioning, terminal emulation/scrollback, and durable session supervision
 remain open.
 
+The raw PTY foundation is now connected separately from terminal rendering.
+Rust owns a four-slot generation-checked registry. Each session opens
+`/dev/ptmx` nonblocking, grants and unlocks its exact slave, validates the
+bounded `/dev/pts/<number>` path, applies bounded window dimensions, creates a
+new session and controlling terminal immediately before exec, and transfers at
+most 16 KiB per JNI read or write. Resize uses the kernel window-size ioctl.
+Close, handle destruction, and runtime destruction kill and reap the entire
+session process group deterministically.
+
+A diagnostic Kotlin action opens package-installed Bash at 24×80, resizes it
+to 40×120, writes a command and `exit`, reads the marker through a reusable
+direct buffer, and closes the native handle. This exact path passes with
+visible `archphene-pty-ok` full-device screenshots and scoped fatal logs on the
+x86_64 emulator and AArch64 Samsung. The action is a lifecycle probe, not a
+terminal UI: long-lived session policy, backpressure, user input, exit status,
+terminal parsing/rendering, scrollback, selection, IME, clipboard,
+accessibility, and process-death behavior remain open.
+
 The validated prototype below remains reference evidence until replacement
 vertical slices pass equivalent gates. Installed prototype state is no longer a
 replacement requirement.

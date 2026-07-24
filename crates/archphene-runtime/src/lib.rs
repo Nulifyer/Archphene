@@ -10,6 +10,7 @@ use archphene_packages::{
     CatalogDownload, PackagePayloadDownload, PackageRuntime, PackageRuntimeError, PackageTool,
     Repository, RepositoryArchitecture, ToolOutput,
 };
+use archphene_process::PtyRegistry;
 use archphene_root::{ArchRoot, BootstrapReport, RootError};
 
 pub const STATUS_ARCH_ROOT_READY: u32 = 1 << 0;
@@ -24,6 +25,7 @@ pub struct RuntimeHost {
     package_runtime: Option<PackageRuntime>,
     catalog_download: Option<CatalogDownload>,
     package_download: Option<PackagePayloadDownload>,
+    pty_sessions: PtyRegistry,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -70,6 +72,7 @@ impl RuntimeHost {
             package_runtime: None,
             catalog_download: None,
             package_download: None,
+            pty_sessions: PtyRegistry::new(),
         }
     }
 
@@ -249,6 +252,56 @@ impl RuntimeHost {
 
     pub fn cancel_package_download(&mut self) {
         self.package_download = None;
+    }
+
+    pub fn open_pty(
+        &mut self,
+        command: &str,
+        arguments: &[&str],
+        rows: u16,
+        columns: u16,
+    ) -> Result<u64, PackageRuntimeError> {
+        let environment = self
+            .package_runtime
+            .as_ref()
+            .ok_or(PackageRuntimeError::InvalidPath)?
+            .command_environment()?;
+        self.pty_sessions
+            .open(&environment, command, arguments, rows, columns)
+            .map_err(PackageRuntimeError::from)
+    }
+
+    pub fn read_pty(
+        &mut self,
+        handle: u64,
+        output: &mut [u8],
+    ) -> Result<usize, PackageRuntimeError> {
+        self.pty_sessions
+            .read(handle, output)
+            .map_err(PackageRuntimeError::from)
+    }
+
+    pub fn write_pty(&mut self, handle: u64, input: &[u8]) -> Result<usize, PackageRuntimeError> {
+        self.pty_sessions
+            .write(handle, input)
+            .map_err(PackageRuntimeError::from)
+    }
+
+    pub fn resize_pty(
+        &mut self,
+        handle: u64,
+        rows: u16,
+        columns: u16,
+    ) -> Result<(), PackageRuntimeError> {
+        self.pty_sessions
+            .resize(handle, rows, columns)
+            .map_err(PackageRuntimeError::from)
+    }
+
+    pub fn close_pty(&mut self, handle: u64) -> Result<(), PackageRuntimeError> {
+        self.pty_sessions
+            .close(handle)
+            .map_err(PackageRuntimeError::from)
     }
 }
 

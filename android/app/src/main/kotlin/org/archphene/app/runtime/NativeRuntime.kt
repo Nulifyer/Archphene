@@ -93,6 +93,31 @@ internal object NativeRuntime {
         requestLength: Int,
         outputBuffer: ByteBuffer,
     ): Int
+    external fun nativeOpenPty(
+        handle: Long,
+        requestBuffer: ByteBuffer,
+        requestLength: Int,
+        rows: Int,
+        columns: Int,
+        outputBuffer: ByteBuffer,
+    ): Long
+    external fun nativePtyIo(
+        handle: Long,
+        ptyHandle: Long,
+        writeOperation: Boolean,
+        buffer: ByteBuffer,
+        byteCount: Int,
+    ): Int
+    external fun nativeResizePty(
+        handle: Long,
+        ptyHandle: Long,
+        rows: Int,
+        columns: Int,
+    ): Int
+    external fun nativeClosePty(
+        handle: Long,
+        ptyHandle: Long,
+    ): Int
     external fun nativeQueuePackageJob(
         handle: Long,
         operation: Int,
