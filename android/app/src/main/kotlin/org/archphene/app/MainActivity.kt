@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import android.text.TextUtils
+import android.util.Log
 import android.view.Choreographer
 import android.view.Gravity
 import android.view.ViewGroup
@@ -70,6 +71,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        activityGeneration++
+        Log.i(TAG, "Activity created generation=$activityGeneration")
         statusView =
             TextView(this).apply {
                 setText(R.string.runtime_starting)
@@ -269,22 +272,26 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 isEnabled = false
                 setOnClickListener {
                     hideKeyboard(commandInput)
-                    runtimeBinder?.runLinuxCommand(commandInput.text.toString())
+                    if (runtimeBinder?.submitLinuxInput(commandInput.text.toString()) == true) {
+                        commandInput.text.clear()
+                    }
                 }
             }
         ptyButton =
             Button(this).apply {
-                setText(R.string.test_pty)
+                setText(R.string.start_shell)
                 isEnabled = false
                 setOnClickListener {
                     hideKeyboard(commandInput)
-                    runtimeBinder?.runPtyProbe()
+                    runtimeBinder?.toggleSharedShell()
                 }
             }
         commandInput.setOnEditorActionListener { _, actionId, _ ->
             if (actionId == EditorInfo.IME_ACTION_GO) {
                 hideKeyboard(commandInput)
-                runtimeBinder?.runLinuxCommand(commandInput.text.toString())
+                if (runtimeBinder?.submitLinuxInput(commandInput.text.toString()) == true) {
+                    commandInput.text.clear()
+                }
                 true
             } else {
                 false
@@ -532,8 +539,10 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         setTextIfChanged(installButton, binder.packagePrimaryActionLabel)
         installButton.isEnabled = binder.packagePrimaryActionAvailable
         removeButton.isEnabled = binder.packageRemoveAvailable
+        setTextIfChanged(commandButton, binder.linuxInputActionLabel)
         commandButton.isEnabled = binder.linuxCommandAvailable
-        ptyButton.isEnabled = binder.linuxCommandAvailable
+        setTextIfChanged(ptyButton, binder.sharedShellActionLabel)
+        ptyButton.isEnabled = binder.sharedShellActionAvailable
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density + 0.5f).toInt()
@@ -579,6 +588,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     }
 
     companion object {
+        private const val TAG = "ArchpheneActivity"
         private const val STATUS_FRAME_INTERVAL = 30
+        private var activityGeneration = 0
     }
 }

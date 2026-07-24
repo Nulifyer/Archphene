@@ -202,6 +202,7 @@ impl CommandEnvironment {
         Ok(PtySession {
             master,
             child: Some(child),
+            exit_status: None,
             rows,
             columns,
         })
@@ -294,10 +295,7 @@ impl CommandEnvironment {
         if file.read(&mut extra)? != 0 {
             return Err(ProcessError::OutputLimit);
         }
-        let exit_code = status
-            .code()
-            .or_else(|| status.signal().map(|signal| -signal))
-            .unwrap_or(-1);
+        let exit_code = exit_code(status);
         Ok(CommandOutput {
             bytes,
             length,
@@ -318,6 +316,7 @@ impl CommandEnvironment {
 pub struct PtySession {
     master: File,
     child: Option<std::process::Child>,
+    exit_status: Option<i32>,
     rows: u16,
     columns: u16,
 }
@@ -328,9 +327,16 @@ impl PtySession {
             return Err(ProcessError::InvalidArgument);
         }
         match self.master.read(output) {
+            Ok(0) => {
+                self.finish();
+                Ok(0)
+            }
             Ok(length) => Ok(length),
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(0),
-            Err(error) if error.raw_os_error() == Some(5) && self.has_exited()? => Ok(0),
+            Err(error) if error.raw_os_error() == Some(5) => {
+                self.finish();
+                Ok(0)
+            }
             Err(error) => Err(ProcessError::Io(error)),
         }
     }
@@ -354,11 +360,8 @@ impl PtySession {
         Ok(())
     }
 
-    pub fn has_exited(&mut self) -> Result<bool, ProcessError> {
-        match self.child.as_mut() {
-            Some(child) => Ok(child.try_wait()?.is_some()),
-            None => Ok(true),
-        }
+    pub const fn exit_status(&self) -> Option<i32> {
+        self.exit_status
     }
 
     pub const fn size(&self) -> (u16, u16) {
@@ -366,13 +369,17 @@ impl PtySession {
     }
 
     pub fn close(&mut self) {
+        self.finish();
+    }
+
+    fn finish(&mut self) {
         let Some(mut child) = self.child.take() else {
             return;
         };
         // Signal the group before reaping its leader. This keeps the leader
         // pid reserved while addressing descendants that may still be alive.
         terminate_process_group(&mut child);
-        let _ = child.wait();
+        self.exit_status = child.wait().ok().map(exit_code);
     }
 }
 
@@ -434,8 +441,8 @@ impl PtyRegistry {
         self.session_mut(handle)?.resize(rows, columns)
     }
 
-    pub fn has_exited(&mut self, handle: u64) -> Result<bool, ProcessError> {
-        self.session_mut(handle)?.has_exited()
+    pub fn exit_status(&mut self, handle: u64) -> Result<Option<i32>, ProcessError> {
+        Ok(self.session_mut(handle)?.exit_status())
     }
 
     pub fn close(&mut self, handle: u64) -> Result<(), ProcessError> {
@@ -678,6 +685,13 @@ fn terminate_process_group(child: &mut std::process::Child) {
     if system::kill_process_group(child.id()).is_err() {
         let _ = child.kill();
     }
+}
+
+fn exit_code(status: std::process::ExitStatus) -> i32 {
+    status
+        .code()
+        .or_else(|| status.signal().map(|signal| -signal))
+        .unwrap_or(-1)
 }
 
 #[allow(unsafe_code)]
@@ -992,5 +1006,37 @@ mod tests {
         ));
         let (master, _slave) = system::open_pty(24, 80).expect("PTY pair");
         system::resize_pty(master.as_raw_fd(), 40, 120).expect("PTY resize");
+    }
+
+    #[test]
+    fn pty_preserves_exit_status_after_terminal_eof() {
+        let (master, slave) = system::open_pty(24, 80).expect("PTY pair");
+        let input = slave.try_clone().expect("PTY input");
+        let output = slave.try_clone().expect("PTY output");
+        let mut command = Command::new("/bin/sh");
+        system::configure_controlling_terminal(&mut command);
+        let child = command
+            .arg("-c")
+            .arg("exit 7")
+            .stdin(Stdio::from(input))
+            .stdout(Stdio::from(output))
+            .stderr(Stdio::from(slave))
+            .spawn()
+            .expect("PTY child");
+        drop(command);
+        let mut session = PtySession {
+            master,
+            child: Some(child),
+            exit_status: None,
+            rows: 24,
+            columns: 80,
+        };
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut output = [0_u8; 64];
+        while session.exit_status().is_none() && Instant::now() < deadline {
+            session.read(&mut output).expect("PTY read");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(session.exit_status(), Some(7));
     }
 }

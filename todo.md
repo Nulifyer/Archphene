@@ -81,10 +81,17 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
     - [x] Support package-owned scripts only through conventional `/usr/bin` or `/bin` shebang interpreters that resolve to installed ELF programs inside the same root; reject Android-host and recursive script interpreters.
     - [x] Install Bash through the normal signed package flow and pass a warning-free root-contained script/argument/output gate with full-device screenshots on both targets.
     - [ ] Build the conventional interactive shared shell environment, locale policy, startup files, and user-selected command/path behavior without escaping into Android's `/system/bin`.
+      - [x] Keep package-installed Bash interactive in a controlling PTY while Archphene owns line editing; disable Bash's redundant Readline path, which Android app seccomp kills while idle.
+      - [ ] Provision a useful UTF-8 locale, reviewed startup files, prompts, shell discovery/selection, and documented PATH behavior for terminal and graphical children.
     - [x] Add a four-slot generation-checked PTY registry with controlling-terminal setup, bounded nonblocking direct-buffer I/O, resize, deterministic close, and process-group kill/reap on runtime destruction.
     - [x] Pass package-installed Bash PTY open, 24×80 to 40×120 resize, bidirectional marker, close/reap, scoped-log, and full-device UI gates on both targets.
     - [ ] Add user-controlled long-lived session ownership, backpressure queues, cancellation, exit status, Activity/process-death policy, and reboot recovery.
+      - [x] Make the Service own a user-started package-installed Bash session across Activity recreation, with bounded fixed input/output rings, reusable direct I/O buffers, explicit stop, process-group reap, and preserved signed exit status.
+      - [x] Pass two-command, rotation/rebind, retained-output, `exit 7`, restart/stop, child-reap, scoped-log, and full-device screenshot gates on the x86_64 emulator and AArch64 Samsung.
+      - [ ] Replace the 100 ms Kotlin polling loop with a Rust-owned blocking/event-driven pump and coarse batched JNI notifications.
+      - [ ] Define explicit HOME/Back/background behavior, durable session metadata, manager process-death recovery, and reboot recovery.
     - [ ] Replace the diagnostic command panel with production terminal rendering, scrollback, selection, IME, hardware keyboard, clipboard, and accessibility.
+      - [ ] Fix the temporary manager panel's landscape clipping only as part of that replacement; current full-device rotation screenshots prove the status strip is not a usable terminal surface.
   - [ ] Wayland compositor, presentation, and lifecycle
   - [ ] Pointer, touch, keyboard, IME, clipboard, and drag-and-drop
   - [ ] Android file integration and `/mnt/android`

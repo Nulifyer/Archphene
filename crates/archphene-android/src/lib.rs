@@ -892,6 +892,30 @@ mod android {
     }
 
     #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativePtyExitStatus(
+        _environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        pty_handle: jlong,
+    ) -> jlong {
+        let (Ok(handle), Ok(pty_handle)) = (u64::try_from(handle), u64::try_from(pty_handle))
+        else {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        };
+        let Ok(mut registry) = registry().lock() else {
+            return i64::from(ERROR_INTERNAL);
+        };
+        let Some(runtime) = registry.runtime_mut(handle) else {
+            return i64::from(ERROR_INVALID_HANDLE);
+        };
+        match runtime.pty_exit_status(pty_handle) {
+            Ok(None) => 0,
+            Ok(Some(status)) => (i64::from(u32::from_ne_bytes(status.to_ne_bytes())) << 1) | 1,
+            Err(_) => i64::from(ERROR_PROCESS),
+        }
+    }
+
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeClosePty(
         _environment: JNIEnv,
         _class: JClass,

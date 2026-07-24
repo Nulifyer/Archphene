@@ -114,6 +114,10 @@ internal object NativeRuntime {
         rows: Int,
         columns: Int,
     ): Int
+    external fun nativePtyExitStatus(
+        handle: Long,
+        ptyHandle: Long,
+    ): Long
     external fun nativeClosePty(
         handle: Long,
         ptyHandle: Long,

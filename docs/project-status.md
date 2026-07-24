@@ -131,17 +131,29 @@ Rust owns a four-slot generation-checked registry. Each session opens
 bounded `/dev/pts/<number>` path, applies bounded window dimensions, creates a
 new session and controlling terminal immediately before exec, and transfers at
 most 16 KiB per JNI read or write. Resize uses the kernel window-size ioctl.
-Close, handle destruction, and runtime destruction kill and reap the entire
-session process group deterministically.
+EOF finalization terminates descendants before reaping the session leader and
+preserves either its signed exit code or negative terminating signal. Close,
+handle destruction, and runtime destruction reap the entire process group
+deterministically.
 
-A diagnostic Kotlin action opens package-installed Bash at 24×80, resizes it
-to 40×120, writes a command and `exit`, reads the marker through a reusable
-direct buffer, and closes the native handle. This exact path passes with
-visible `archphene-pty-ok` full-device screenshots and scoped fatal logs on the
-x86_64 emulator and AArch64 Samsung. The action is a lifecycle probe, not a
-terminal UI: long-lived session policy, backpressure, user input, exit status,
-terminal parsing/rendering, scrollback, selection, IME, clipboard,
-accessibility, and process-death behavior remain open.
+The Android Service now owns one user-controlled package-installed Bash
+session across Activity recreation. It uses fixed 8 KiB input and 16 KiB
+output rings, reusable 4 KiB direct JNI buffers, partial-write backpressure,
+explicit stop, and encoded exit-status polling. Bash runs with
+`--noediting`: Archphene's Android terminal layer must own line editing, and
+the redundant GNU Readline idle path is killed by the inherited Android app
+seccomp profile. This is a generic shared-shell policy, not a patch to Bash.
+
+Two-command lifecycle gates now pass on the x86_64 emulator and AArch64
+Samsung. Each starts the shell, sends and observes two markers, forces an
+Activity recreation by changing device rotation, proves the Service retains
+the session and output, observes `exit 7`, restarts and explicitly stops the
+shell, proves no loader child survives, checks scoped fatal logs, restores
+rotation, and captures full-device screenshots. The images also honestly show
+that the temporary two-line diagnostic strip clips in landscape. A Rust-owned
+event-driven I/O pump, explicit background/process-death/reboot policy, real
+terminal parser and renderer, scrollback, selection, IME/hardware-keyboard
+handling, clipboard, and accessibility remain open.
 
 The validated prototype below remains reference evidence until replacement
 vertical slices pass equivalent gates. Installed prototype state is no longer a

@@ -47,15 +47,42 @@ class ArchpheneRuntimeService : Service() {
                     !commandActive
 
         val linuxCommandStatus: String
-            get() = commandStatus
+            get() =
+                if (shellActive || shellWasStarted) {
+                    sharedShellDisplayStatus()
+                } else {
+                    commandStatus
+                }
 
         val linuxCommandAvailable: Boolean
             get() =
-                readyHandle != 0L &&
-                    !catalogRefreshActive &&
-                    !searchActive &&
-                    !packageOperationActive &&
-                    !commandActive
+                if (shellActive) {
+                    shellHandle != 0L && !shellStopRequested
+                } else {
+                    readyHandle != 0L &&
+                        !catalogRefreshActive &&
+                        !searchActive &&
+                        !packageOperationActive &&
+                        !commandActive
+                }
+
+        val linuxInputActionLabel: String
+            get() = if (shellActive) "Send" else "Run"
+
+        val sharedShellActionLabel: String
+            get() = if (shellActive) "Stop shell" else "Start shell"
+
+        val sharedShellActionAvailable: Boolean
+            get() =
+                if (shellActive) {
+                    true
+                } else {
+                    readyHandle != 0L &&
+                        !catalogRefreshActive &&
+                        !searchActive &&
+                        !packageOperationActive &&
+                        !commandActive
+                }
 
         fun refreshPackageCatalogs(): Boolean = requestCatalogRefresh()
 
@@ -70,10 +97,14 @@ class ArchpheneRuntimeService : Service() {
         fun removePackage(packageName: String): Boolean =
             requestPackageRemoval(packageName)
 
-        fun runLinuxCommand(commandLine: String): Boolean =
-            requestLinuxCommand(commandLine)
+        fun submitLinuxInput(commandLine: String): Boolean =
+            if (shellActive) {
+                requestShellInput(commandLine)
+            } else {
+                requestLinuxCommand(commandLine)
+            }
 
-        fun runPtyProbe(): Boolean = requestPtyProbe()
+        fun toggleSharedShell(): Boolean = requestSharedShellToggle()
     }
 
     private val binder = LocalBinder()
@@ -84,12 +115,18 @@ class ArchpheneRuntimeService : Service() {
     private var catalogThread: Thread? = null
     private var packageThread: Thread? = null
     private var commandThread: Thread? = null
+    private var shellThread: Thread? = null
     @Volatile private var catalogRefreshActive = false
     @Volatile private var catalogStatus = "Package catalog not downloaded"
     @Volatile private var searchActive = false
     @Volatile private var searchStatus = "Search the official Arch repositories"
     @Volatile private var packageOperationActive = false
     @Volatile private var commandActive = false
+    @Volatile private var shellActive = false
+    @Volatile private var shellWasStarted = false
+    @Volatile private var shellStopRequested = false
+    @Volatile private var shellHandle = 0L
+    @Volatile private var shellPhase = "Shared shell stopped"
     @Volatile private var jobStatus = "No package transaction"
     @Volatile private var lastResolvedPackage = ""
     @Volatile private var lastResolvedRepository = ""
@@ -98,6 +135,8 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var primaryActionLabel = "Install"
     @Volatile private var removeAvailable = false
     @Volatile private var commandStatus = "Run an installed Linux command"
+    private val shellOutput = BoundedByteRing(SHELL_SCROLLBACK_BYTES)
+    private val shellInput = FixedByteQueue(SHELL_INPUT_BYTES)
 
     private data class ResolvedPayload(
         val repository: String,
@@ -114,6 +153,130 @@ class ArchpheneRuntimeService : Service() {
         val outputBuffer: ByteBuffer =
             ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
         val transferBuffer = ByteArray(64 * 1024)
+    }
+
+    private class BoundedByteRing(capacity: Int) {
+        private val bytes = ByteArray(capacity)
+        private var start = 0
+        private var size = 0
+
+        @Synchronized
+        fun clear() {
+            start = 0
+            size = 0
+        }
+
+        @Synchronized
+        fun append(
+            source: ByteArray,
+            length: Int,
+        ) {
+            if (length <= 0) {
+                return
+            }
+            val sourceStart =
+                if (length >= bytes.size) {
+                    length - bytes.size
+                } else {
+                    0
+                }
+            val retained = length - sourceStart
+            if (retained >= bytes.size) {
+                System.arraycopy(source, sourceStart, bytes, 0, bytes.size)
+                start = 0
+                size = bytes.size
+                return
+            }
+            val overflow = (size + retained - bytes.size).coerceAtLeast(0)
+            if (overflow != 0) {
+                start = (start + overflow) % bytes.size
+                size -= overflow
+            }
+            var destination = (start + size) % bytes.size
+            var copied = 0
+            while (copied < retained) {
+                val count = minOf(retained - copied, bytes.size - destination)
+                System.arraycopy(source, sourceStart + copied, bytes, destination, count)
+                copied += count
+                destination = 0
+            }
+            size += retained
+        }
+
+        @Synchronized
+        fun snapshotTail(maximum: Int): String {
+            val length = minOf(size, maximum)
+            if (length == 0) {
+                return ""
+            }
+            val result = ByteArray(length)
+            var source = (start + size - length) % bytes.size
+            var copied = 0
+            while (copied < length) {
+                val count = minOf(length - copied, bytes.size - source)
+                System.arraycopy(bytes, source, result, copied, count)
+                copied += count
+                source = 0
+            }
+            return String(result, StandardCharsets.UTF_8)
+        }
+    }
+
+    private class FixedByteQueue(capacity: Int) {
+        private val bytes = ByteArray(capacity)
+        private var start = 0
+        private var size = 0
+
+        @Synchronized
+        fun clear() {
+            start = 0
+            size = 0
+        }
+
+        @Synchronized
+        fun offerLine(source: ByteArray): Boolean {
+            val required = source.size + 1
+            if (required > bytes.size - size) {
+                return false
+            }
+            append(source)
+            bytes[(start + size) % bytes.size] = '\n'.code.toByte()
+            size++
+            return true
+        }
+
+        @Synchronized
+        fun peek(destination: ByteArray): Int {
+            val length = minOf(size, destination.size)
+            var source = start
+            var copied = 0
+            while (copied < length) {
+                val count = minOf(length - copied, bytes.size - source)
+                System.arraycopy(bytes, source, destination, copied, count)
+                copied += count
+                source = 0
+            }
+            return length
+        }
+
+        @Synchronized
+        fun discard(length: Int) {
+            check(length in 0..size)
+            start = (start + length) % bytes.size
+            size -= length
+        }
+
+        private fun append(source: ByteArray) {
+            var destination = (start + size) % bytes.size
+            var copied = 0
+            while (copied < source.size) {
+                val count = minOf(source.size - copied, bytes.size - destination)
+                System.arraycopy(source, copied, bytes, destination, count)
+                copied += count
+                destination = 0
+            }
+            size += source.size
+        }
     }
 
     override fun onCreate() {
@@ -135,6 +298,7 @@ class ArchpheneRuntimeService : Service() {
     override fun onBind(intent: Intent): IBinder = binder
 
     override fun onDestroy() {
+        stopSharedShell(waitForWorker = true)
         val activeHandle = handle
         handle = 0L
         readyHandle = 0L
@@ -159,6 +323,12 @@ class ArchpheneRuntimeService : Service() {
 
     companion object {
         private const val TAG = "ArchpheneRuntime"
+        private const val SHELL_SCROLLBACK_BYTES = 16 * 1024
+        private const val SHELL_DISPLAY_BYTES = 4 * 1024
+        private const val SHELL_INPUT_BYTES = 8 * 1024
+        private const val SHELL_INPUT_CHARACTERS = 2 * 1024
+        private const val SHELL_IO_BYTES = 4 * 1024
+        private const val SHELL_POLL_MILLIS = 100L
     }
 
     private fun startBootstrap(activeHandle: Long) {
@@ -1306,6 +1476,7 @@ class ArchpheneRuntimeService : Service() {
             searchActive ||
             packageOperationActive ||
             commandActive ||
+            shellActive ||
             tokens.isEmpty()
         ) {
             if (tokens.isEmpty()) {
@@ -1328,6 +1499,7 @@ class ArchpheneRuntimeService : Service() {
             requestBuffer.put(bytes)
         }
         commandActive = true
+        shellWasStarted = false
         commandStatus = "Running ${tokens.first()}"
         commandThread =
             Thread(
@@ -1440,7 +1612,11 @@ class ArchpheneRuntimeService : Service() {
     }
 
     @Synchronized
-    private fun requestPtyProbe(): Boolean {
+    private fun requestSharedShellToggle(): Boolean {
+        if (shellActive) {
+            stopSharedShell(waitForWorker = false)
+            return true
+        }
         val activeHandle = readyHandle
         if (
             activeHandle == 0L ||
@@ -1451,117 +1627,196 @@ class ArchpheneRuntimeService : Service() {
         ) {
             return false
         }
-        commandActive = true
-        commandStatus = "Opening shared Bash PTY"
-        commandThread =
+        shellOutput.clear()
+        shellInput.clear()
+        shellStopRequested = false
+        shellWasStarted = true
+        shellActive = true
+        shellPhase = "Starting shared shell"
+        shellThread =
             Thread(
-                {
-                    var ptyHandle = 0L
-                    try {
-                        val requestBytes =
-                            byteArrayOf(
-                                *"bash".toByteArray(StandardCharsets.UTF_8),
-                                0.toByte(),
-                                *"--noprofile".toByteArray(StandardCharsets.UTF_8),
-                                0.toByte(),
-                                *"--norc".toByteArray(StandardCharsets.UTF_8),
-                            )
-                        val requestBuffer = ByteBuffer.allocateDirect(requestBytes.size)
-                        requestBuffer.put(requestBytes)
-                        val outputBuffer =
-                            ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
-                        ptyHandle =
-                            NativeRuntime.nativeOpenPty(
-                                activeHandle,
-                                requestBuffer,
-                                requestBytes.size,
-                                24,
-                                80,
-                                outputBuffer,
-                            )
-                        if (ptyHandle <= 0) {
-                            throw IllegalStateException(
-                                readNativeMessage(outputBuffer, ptyHandle),
-                            )
-                        }
-                        if (NativeRuntime.nativeResizePty(activeHandle, ptyHandle, 40, 120) != 0) {
-                            throw IllegalStateException("Could not resize the Linux PTY")
-                        }
-                        val input =
-                            "printf 'archphene-pty-ok\\n'\nexit\n"
-                                .toByteArray(StandardCharsets.UTF_8)
-                        val ioBuffer = ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
-                        var written = 0
-                        while (written < input.size) {
-                            ioBuffer.clear()
-                            ioBuffer.put(input, written, input.size - written)
-                            val count =
-                                NativeRuntime.nativePtyIo(
-                                    activeHandle,
-                                    ptyHandle,
-                                    true,
-                                    ioBuffer,
-                                    input.size - written,
-                                )
-                            if (count < 0) {
-                                throw IllegalStateException("Could not write to the Linux PTY")
-                            }
-                            if (count == 0) {
-                                Thread.sleep(20)
-                            } else {
-                                written += count
-                            }
-                        }
-                        val received = StringBuilder(1024)
-                        val deadline = System.nanoTime() + 5_000_000_000L
-                        while (
-                            !received.contains("archphene-pty-ok") &&
-                            System.nanoTime() < deadline
-                        ) {
-                            ioBuffer.clear()
-                            val count =
-                                NativeRuntime.nativePtyIo(
-                                    activeHandle,
-                                    ptyHandle,
-                                    false,
-                                    ioBuffer,
-                                    NativeRuntime.PACKAGE_OUTPUT_SIZE,
-                                )
-                            if (count < 0) {
-                                throw IllegalStateException("Could not read from the Linux PTY")
-                            }
-                            if (count == 0) {
-                                Thread.sleep(20)
-                                continue
-                            }
-                            if (received.length + count > 4096) {
-                                throw IllegalStateException("Linux PTY probe output is too large")
-                            }
-                            val bytes = ByteArray(count)
-                            ioBuffer.position(0)
-                            ioBuffer.get(bytes)
-                            received.append(String(bytes, StandardCharsets.UTF_8))
-                        }
-                        if (!received.contains("archphene-pty-ok")) {
-                            throw IllegalStateException("Linux PTY probe timed out")
-                        }
-                        commandStatus = "PTY opened · resized · closed\narchphene-pty-ok"
-                        Log.i(TAG, "Shared Bash PTY opened, resized, exchanged data, and closed")
-                    } catch (error: Exception) {
-                        commandStatus =
-                            "PTY failed: ${error.message ?: error.javaClass.simpleName}"
-                        Log.e(TAG, "Linux PTY probe failed", error)
-                    } finally {
-                        if (ptyHandle > 0) {
-                            NativeRuntime.nativeClosePty(activeHandle, ptyHandle)
-                        }
-                        commandActive = false
-                        commandThread = null
-                    }
-                },
-                "ArchphenePty",
+                { runSharedShell(activeHandle) },
+                "ArchpheneShell",
             ).also(Thread::start)
         return true
+    }
+
+    private fun requestShellInput(commandLine: String): Boolean {
+        if (
+            !shellActive ||
+            shellHandle == 0L ||
+            shellStopRequested ||
+            commandLine.isEmpty() ||
+            commandLine.length > SHELL_INPUT_CHARACTERS ||
+            commandLine.indexOf('\u0000') >= 0
+        ) {
+            return false
+        }
+        val bytes = commandLine.toByteArray(StandardCharsets.UTF_8)
+        if (bytes.size + 1 > SHELL_INPUT_BYTES || !shellInput.offerLine(bytes)) {
+            shellPhase = "Shared shell input queue is full"
+            return false
+        }
+        shellThread?.interrupt()
+        return true
+    }
+
+    private fun runSharedShell(activeHandle: Long) {
+        var ptyHandle = 0L
+        var exitStatus: Int? = null
+        var failure: Exception? = null
+        val readBuffer = ByteBuffer.allocateDirect(SHELL_IO_BYTES)
+        val writeBuffer = ByteBuffer.allocateDirect(SHELL_IO_BYTES)
+        val readBytes = ByteArray(SHELL_IO_BYTES)
+        val writeBytes = ByteArray(SHELL_IO_BYTES)
+        try {
+            val requestBytes =
+                byteArrayOf(
+                    *"bash".toByteArray(StandardCharsets.UTF_8),
+                    0.toByte(),
+                    *"--noprofile".toByteArray(StandardCharsets.UTF_8),
+                    0.toByte(),
+                    *"--norc".toByteArray(StandardCharsets.UTF_8),
+                    0.toByte(),
+                    *"--noediting".toByteArray(StandardCharsets.UTF_8),
+                )
+            val requestBuffer = ByteBuffer.allocateDirect(requestBytes.size)
+            requestBuffer.put(requestBytes)
+            val outputBuffer = ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
+            ptyHandle =
+                NativeRuntime.nativeOpenPty(
+                    activeHandle,
+                    requestBuffer,
+                    requestBytes.size,
+                    24,
+                    80,
+                    outputBuffer,
+                )
+            if (ptyHandle <= 0) {
+                throw IllegalStateException(readNativeMessage(outputBuffer, ptyHandle))
+            }
+            synchronized(this) {
+                if (shellStopRequested || readyHandle != activeHandle) {
+                    throw InterruptedException("Shared shell start cancelled")
+                }
+                shellHandle = ptyHandle
+                shellPhase = "Shared shell ready"
+            }
+            Log.i(TAG, "Shared Bash session started")
+            while (!shellStopRequested) {
+                val queued = shellInput.peek(writeBytes)
+                if (queued != 0) {
+                    writeBuffer.clear()
+                    writeBuffer.put(writeBytes, 0, queued)
+                    val written =
+                        NativeRuntime.nativePtyIo(
+                            activeHandle,
+                            ptyHandle,
+                            true,
+                            writeBuffer,
+                            queued,
+                        )
+                    if (written < 0) {
+                        throw IllegalStateException("Could not write to the shared shell")
+                    }
+                    if (written != 0) {
+                        shellInput.discard(written)
+                    }
+                }
+
+                readBuffer.clear()
+                val read =
+                    NativeRuntime.nativePtyIo(
+                        activeHandle,
+                        ptyHandle,
+                        false,
+                        readBuffer,
+                        SHELL_IO_BYTES,
+                    )
+                if (read < 0) {
+                    throw IllegalStateException("Could not read from the shared shell")
+                }
+                if (read != 0) {
+                    readBuffer.position(0)
+                    readBuffer.get(readBytes, 0, read)
+                    shellOutput.append(readBytes, read)
+                }
+                val encodedStatus =
+                    NativeRuntime.nativePtyExitStatus(activeHandle, ptyHandle)
+                if (encodedStatus < 0) {
+                    throw IllegalStateException("Could not read the shared shell exit status")
+                }
+                if (encodedStatus and 1L != 0L) {
+                    exitStatus = (encodedStatus ushr 1).toInt()
+                    break
+                }
+                try {
+                    Thread.sleep(SHELL_POLL_MILLIS)
+                } catch (_: InterruptedException) {
+                    // Input and stop requests wake the bounded I/O loop.
+                }
+            }
+        } catch (error: InterruptedException) {
+            if (!shellStopRequested) {
+                failure = error
+            }
+        } catch (error: Exception) {
+            if (!shellStopRequested) {
+                failure = error
+            }
+        } finally {
+            if (ptyHandle > 0) {
+                NativeRuntime.nativeClosePty(activeHandle, ptyHandle)
+            }
+            synchronized(this) {
+                shellHandle = 0L
+                shellInput.clear()
+                shellActive = false
+                shellStopRequested = false
+                shellThread = null
+                shellPhase =
+                    when {
+                        failure != null ->
+                            "Shared shell failed: ${failure.message ?: failure.javaClass.simpleName}"
+                        exitStatus != null -> "Shared shell exited $exitStatus"
+                        else -> "Shared shell stopped"
+                    }
+            }
+            if (failure != null) {
+                Log.e(TAG, "Shared Bash session failed", failure)
+            } else {
+                Log.i(TAG, "Shared Bash session finished with status ${exitStatus ?: "stopped"}")
+            }
+        }
+    }
+
+    private fun stopSharedShell(waitForWorker: Boolean) {
+        val worker: Thread?
+        synchronized(this) {
+            if (!shellActive) {
+                return
+            }
+            shellStopRequested = true
+            shellPhase = "Stopping shared shell"
+            worker = shellThread
+        }
+        worker?.interrupt()
+        if (waitForWorker && worker !== Thread.currentThread()) {
+            try {
+                worker?.join(1_000)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+        }
+    }
+
+    private fun sharedShellDisplayStatus(): String {
+        val output = sanitizeCommandOutput(shellOutput.snapshotTail(SHELL_DISPLAY_BYTES))
+        return if (output.isEmpty()) {
+            shellPhase
+        } else {
+            "$shellPhase\n$output"
+        }
     }
 
     private fun readLatestPackageJob(activeHandle: Long): String {

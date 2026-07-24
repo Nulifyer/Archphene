@@ -298,6 +298,12 @@ impl RuntimeHost {
             .map_err(PackageRuntimeError::from)
     }
 
+    pub fn pty_exit_status(&mut self, handle: u64) -> Result<Option<i32>, PackageRuntimeError> {
+        self.pty_sessions
+            .exit_status(handle)
+            .map_err(PackageRuntimeError::from)
+    }
+
     pub fn close_pty(&mut self, handle: u64) -> Result<(), PackageRuntimeError> {
         self.pty_sessions
             .close(handle)
