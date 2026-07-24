@@ -87,7 +87,7 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
       - [ ] Add shell discovery/selection, per-shell startup adapters, user-editing UI/document access, and a documented PATH extension policy.
     - [x] Add a four-slot generation-checked PTY registry with controlling-terminal setup, bounded nonblocking direct-buffer I/O, resize, deterministic close, and process-group kill/reap on runtime destruction.
     - [x] Pass package-installed Bash PTY open, 24×80 to 40×120 resize, bidirectional marker, close/reap, scoped-log, and full-device UI gates on both targets.
-    - [ ] Add user-controlled long-lived session ownership, backpressure queues, cancellation, exit status, Activity/process-death policy, and reboot recovery.
+    - [x] Add user-controlled long-lived session ownership, backpressure queues, cancellation, exit status, Activity/process-death policy, and reboot recovery.
       - [x] Make the Service own a user-started package-installed Bash session across Activity recreation, with bounded fixed input/output rings, reusable direct I/O buffers, explicit stop, process-group reap, and preserved signed exit status.
       - [x] Pass two-command, rotation/rebind, retained-output, `exit 7`, restart/stop, child-reap, scoped-log, and full-device screenshot gates on the x86_64 emulator and AArch64 Samsung.
       - [x] Replace the 100 ms Kotlin polling loop with a Rust-owned `poll(2)` pump, fixed per-session wake channel, write-readiness backpressure, and coarse 16 KiB read batches; pass the full lifecycle gate on both targets.
@@ -95,7 +95,7 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
       - [x] Prove identical manager/Linux process ownership, retained output, foreground state, notification title/Stop route, cleanup, and full-device visuals across Home and Back on both targets.
       - [x] Atomically publish a bounded Rust-owned active-session marker, remove it on clean close, surface abrupt manager death as an interrupted session, and require explicit restart rather than pretending a lost PTY was resumed.
       - [x] Pass same-UID `SIGKILL`, interrupted-state, retained-Home restart, clean-marker removal, and full-device screenshot gates on both targets.
-      - [ ] Validate the same interruption/restart policy across a real emulator and physical-device reboot.
+      - [x] Validate the same interruption/restart policy across a real emulator and physical-device reboot, including durable marker retention, full-device visuals, explicit restart, and clean-marker removal.
     - [ ] Replace the diagnostic command panel with production terminal rendering, scrollback, selection, IME, hardware keyboard, clipboard, and accessibility.
       - [ ] Fix the temporary manager panel's landscape clipping only as part of that replacement; current full-device rotation screenshots prove the status strip is not a usable terminal surface.
   - [ ] Wayland compositor, presentation, and lifecycle

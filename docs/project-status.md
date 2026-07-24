@@ -163,7 +163,9 @@ If manager death or reboot leaves it behind, the next bootstrap sets a durable
 snapshot flag and the UI says the previous session was interrupted, retaining
 the same Home but requiring an explicit fresh shell. Same-UID `SIGKILL`,
 interrupted-state rendering, restart, clean marker removal, and full-device
-screenshots pass on both maintained targets. A real reboot gate remains open.
+screenshots pass on both maintained targets. The same marker retention,
+interrupted-state rendering, explicit restart, and clean-marker removal also
+pass after real reboots of the emulator and physical Samsung.
 
 User-visible processes now receive Linux-facing `HOME=/home/archphene`,
 `TMPDIR=/tmp`, conventional XDG locations, and
