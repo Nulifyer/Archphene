@@ -29,6 +29,18 @@ class ArchpheneRuntimeService : Service() {
         val packageJobStatus: String
             get() = jobStatus
 
+        val packagePrimaryActionLabel: String
+            get() = primaryActionLabel
+
+        val packagePrimaryActionAvailable: Boolean
+            get() =
+                lastResolvedPackage.isNotEmpty() &&
+                    !searchActive &&
+                    !packageOperationActive
+
+        val packageRemoveAvailable: Boolean
+            get() = removeAvailable && !searchActive && !packageOperationActive
+
         fun refreshPackageCatalogs(): Boolean = requestCatalogRefresh()
 
         fun searchPackages(query: String): Boolean = requestPackageSearch(query)
@@ -38,6 +50,9 @@ class ArchpheneRuntimeService : Service() {
 
         fun installPackage(packageName: String): Boolean =
             requestPackageInstall(packageName)
+
+        fun removePackage(packageName: String): Boolean =
+            requestPackageRemoval(packageName)
     }
 
     private val binder = LocalBinder()
@@ -55,6 +70,10 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var jobStatus = "No package transaction"
     @Volatile private var lastResolvedPackage = ""
     @Volatile private var lastResolvedRepository = ""
+    @Volatile private var lastResolvedInstalledVersion = ""
+    @Volatile private var lastResolvedAvailableVersion = ""
+    @Volatile private var primaryActionLabel = "Install"
+    @Volatile private var removeAvailable = false
 
     private data class ResolvedPayload(
         val repository: String,
@@ -501,6 +520,12 @@ class ArchpheneRuntimeService : Service() {
             return false
         }
         searchActive = true
+        lastResolvedPackage = ""
+        lastResolvedRepository = ""
+        lastResolvedInstalledVersion = ""
+        lastResolvedAvailableVersion = ""
+        primaryActionLabel = "Install"
+        removeAvailable = false
         searchStatus = "Resolving $normalized and its dependencies"
         Thread(
             {
@@ -524,8 +549,18 @@ class ArchpheneRuntimeService : Service() {
                             ?: throw IllegalStateException(
                                 "Resolved packages omit the requested target",
                             )
+                    val installedVersion = installedPackageVersion(activeHandle, normalized)
                     lastResolvedPackage = normalized
                     lastResolvedRepository = resolvedTarget.repository
+                    lastResolvedInstalledVersion = installedVersion
+                    lastResolvedAvailableVersion = resolvedTarget.version
+                    primaryActionLabel =
+                        when {
+                            installedVersion.isEmpty() -> "Install"
+                            installedVersion == resolvedTarget.version -> "Verify"
+                            else -> "Update"
+                        }
+                    removeAvailable = installedVersion.isNotEmpty()
                     val mebibytes = (totalBytes + (1024 * 1024 - 1)) / (1024 * 1024)
                     searchStatus =
                         buildString {
@@ -534,6 +569,14 @@ class ArchpheneRuntimeService : Service() {
                             append(resolvedTarget.name)
                             append(' ')
                             append(resolvedTarget.version)
+                            append('\n')
+                            append(
+                                if (installedVersion.isEmpty()) {
+                                    "Not installed"
+                                } else {
+                                    "Installed: $installedVersion"
+                                },
+                            )
                             append('\n')
                             append("Dependency closure: ")
                             append(packages.size)
@@ -611,10 +654,37 @@ class ArchpheneRuntimeService : Service() {
         return packages
     }
 
+    private fun installedPackageVersion(
+        activeHandle: Long,
+        packageName: String,
+    ): String {
+        val packageBytes = packageName.toByteArray(StandardCharsets.UTF_8)
+        val packageBuffer = ByteBuffer.allocateDirect(packageBytes.size)
+        packageBuffer.put(packageBytes)
+        val outputBuffer = ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
+        val outputLength =
+            NativeRuntime.nativePackageCommand(
+                activeHandle,
+                NativeRuntime.PACKAGE_COMMAND_INSTALLED_VERSION,
+                packageBuffer,
+                packageBytes.size,
+                outputBuffer,
+            )
+        if (outputLength < 0) {
+            throw IllegalStateException(readNativeMessage(outputBuffer, outputLength))
+        }
+        val bytes = ByteArray(outputLength)
+        outputBuffer.position(0)
+        outputBuffer.get(bytes)
+        return String(bytes, StandardCharsets.UTF_8)
+    }
+
     @Synchronized
     private fun requestPackageInstall(packageName: String): Boolean {
         val normalized = packageName.trim()
         val repository = lastResolvedRepository
+        val installedVersion = lastResolvedInstalledVersion
+        val availableVersion = lastResolvedAvailableVersion
         val activeHandle = readyHandle
         if (
             activeHandle == 0L ||
@@ -622,6 +692,7 @@ class ArchpheneRuntimeService : Service() {
             searchActive ||
             packageOperationActive ||
             normalized != lastResolvedPackage ||
+            availableVersion.isEmpty() ||
             (repository != "core" && repository != "extra")
         ) {
             jobStatus = "Open Details for one exact package before installing it"
@@ -632,8 +703,13 @@ class ArchpheneRuntimeService : Service() {
         val requestBuffer = ByteBuffer.allocateDirect(requestBytes.size)
         requestBuffer.put(requestBytes)
         val jobId =
-            NativeRuntime.nativeQueuePackagePrepare(
+            NativeRuntime.nativeQueuePackageJob(
                 activeHandle,
+                if (installedVersion.isEmpty()) {
+                    NativeRuntime.JOB_OPERATION_INSTALL
+                } else {
+                    NativeRuntime.JOB_OPERATION_UPDATE
+                },
                 requestBuffer,
                 requestBytes.size,
                 System.currentTimeMillis(),
@@ -686,6 +762,11 @@ class ArchpheneRuntimeService : Service() {
                         if (target.repository != repository) {
                             throw SecurityException("Target repository changed during install")
                         }
+                        if (target.version != availableVersion) {
+                            throw SecurityException(
+                                "Target version changed; open Details again",
+                            )
+                        }
                         packages.forEachIndexed { index, payload ->
                             if (Thread.currentThread().isInterrupted) {
                                 throw InterruptedException("Package install interrupted")
@@ -722,16 +803,38 @@ class ArchpheneRuntimeService : Service() {
                             97,
                             "Installing verified packages",
                         )
-                        installPreparedPackage(activeHandle, normalized, scratch)
+                        runPackageCommand(
+                            activeHandle,
+                            NativeRuntime.PACKAGE_COMMAND_INSTALL,
+                            normalized,
+                            scratch,
+                        )
                         record(
                             NativeRuntime.JOB_COMPLETE,
                             5,
                             100,
-                            "Installed ${target.name} ${target.version}",
+                            when {
+                                installedVersion.isEmpty() ->
+                                    "Installed ${target.name} ${target.version}"
+                                installedVersion == target.version ->
+                                    "Verified ${target.name} ${target.version}"
+                                else -> "Updated ${target.name} to ${target.version}"
+                            },
                         )
+                        lastResolvedInstalledVersion = target.version
+                        lastResolvedAvailableVersion = target.version
+                        primaryActionLabel = "Verify"
+                        removeAvailable = true
+                        searchStatus = withInstalledStatus(searchStatus, target.version)
                         Log.i(
                             TAG,
-                            "Installed $normalized: ${packages.size} signed packages",
+                            when {
+                                installedVersion.isEmpty() ->
+                                    "Installed $normalized: ${packages.size} signed packages"
+                                installedVersion == target.version ->
+                                    "Verified $normalized: ${packages.size} signed packages"
+                                else -> "Updated $normalized: ${packages.size} signed packages"
+                            },
                         )
                     } catch (error: Exception) {
                         try {
@@ -763,8 +866,9 @@ class ArchpheneRuntimeService : Service() {
         return true
     }
 
-    private fun installPreparedPackage(
+    private fun runPackageCommand(
         activeHandle: Long,
+        action: Int,
         packageName: String,
         scratch: PackageIoScratch,
     ) {
@@ -773,8 +877,9 @@ class ArchpheneRuntimeService : Service() {
         scratch.requestBuffer.put(packageBytes)
         scratch.outputBuffer.clear()
         val outputLength =
-            NativeRuntime.nativeInstallPackage(
+            NativeRuntime.nativePackageCommand(
                 activeHandle,
+                action,
                 scratch.requestBuffer,
                 packageBytes.size,
                 scratch.outputBuffer,
@@ -782,6 +887,157 @@ class ArchpheneRuntimeService : Service() {
         if (outputLength < 0) {
             throw IllegalStateException(readNativeMessage(scratch.outputBuffer, outputLength))
         }
+    }
+
+    @Synchronized
+    private fun requestPackageRemoval(packageName: String): Boolean {
+        val normalized = packageName.trim()
+        val repository = lastResolvedRepository
+        val installedVersion = lastResolvedInstalledVersion
+        val activeHandle = readyHandle
+        if (
+            activeHandle == 0L ||
+            catalogRefreshActive ||
+            searchActive ||
+            packageOperationActive ||
+            normalized != lastResolvedPackage ||
+            installedVersion.isEmpty() ||
+            (repository != "core" && repository != "extra")
+        ) {
+            jobStatus = "Open Details for an installed package before removing it"
+            return false
+        }
+        val outputBuffer = ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
+        val requestBytes = "$repository\t$normalized".toByteArray(StandardCharsets.UTF_8)
+        val requestBuffer = ByteBuffer.allocateDirect(requestBytes.size)
+        requestBuffer.put(requestBytes)
+        val jobId =
+            NativeRuntime.nativeQueuePackageJob(
+                activeHandle,
+                NativeRuntime.JOB_OPERATION_REMOVE,
+                requestBuffer,
+                requestBytes.size,
+                System.currentTimeMillis(),
+                outputBuffer,
+            )
+        if (jobId <= 0) {
+            jobStatus = "Could not queue removal: ${readNativeMessage(outputBuffer, jobId)}"
+            return false
+        }
+        packageOperationActive = true
+        jobStatus = "$normalized · Queued · 0%\nQueued"
+        packageThread =
+            Thread(
+                {
+                    val scratch = PackageIoScratch()
+                    var recordedPhase = 0
+                    var recordedProgress = 0
+                    fun record(
+                        state: Int,
+                        phase: Int,
+                        progress: Int,
+                        message: String,
+                    ) {
+                        updatePackageJob(
+                            activeHandle,
+                            jobId,
+                            state,
+                            phase,
+                            progress,
+                            message,
+                            normalized,
+                            scratch,
+                        )
+                        recordedPhase = phase
+                        recordedProgress = progress
+                    }
+                    try {
+                        record(
+                            NativeRuntime.JOB_RESOLVING,
+                            1,
+                            20,
+                            "Checking installed package and dependents",
+                        )
+                        val currentVersion = installedPackageVersion(activeHandle, normalized)
+                        if (currentVersion != installedVersion) {
+                            throw IllegalStateException(
+                                "Installed version changed; open Details again",
+                            )
+                        }
+                        record(
+                            NativeRuntime.JOB_VERIFYING,
+                            2,
+                            60,
+                            "Validating conservative removal plan",
+                        )
+                        record(
+                            NativeRuntime.JOB_INSTALLING,
+                            3,
+                            80,
+                            "Removing $normalized $installedVersion",
+                        )
+                        runPackageCommand(
+                            activeHandle,
+                            NativeRuntime.PACKAGE_COMMAND_REMOVE,
+                            normalized,
+                            scratch,
+                        )
+                        lastResolvedInstalledVersion = ""
+                        primaryActionLabel = "Install"
+                        removeAvailable = false
+                        searchStatus = withInstalledStatus(searchStatus, "")
+                        record(
+                            NativeRuntime.JOB_COMPLETE,
+                            4,
+                            100,
+                            "Removed $normalized $installedVersion",
+                        )
+                        Log.i(TAG, "Removed $normalized $installedVersion")
+                    } catch (error: Exception) {
+                        try {
+                            updatePackageJob(
+                                activeHandle,
+                                jobId,
+                                NativeRuntime.JOB_FAILED,
+                                recordedPhase,
+                                recordedProgress,
+                                boundedJobMessage(
+                                    "Removal failed: ${error.message ?: error.javaClass.simpleName}",
+                                ),
+                                normalized,
+                                scratch,
+                            )
+                        } catch (updateError: Exception) {
+                            jobStatus =
+                                "Removal failed and journal update failed: " +
+                                    (updateError.message ?: updateError.javaClass.simpleName)
+                        }
+                        Log.e(TAG, "Package removal failed", error)
+                    } finally {
+                        packageOperationActive = false
+                        packageThread = null
+                    }
+                },
+                "ArchpheneRemove",
+            ).also(Thread::start)
+        return true
+    }
+
+    private fun withInstalledStatus(
+        details: String,
+        installedVersion: String,
+    ): String {
+        val lines = details.lineSequence().toMutableList()
+        if (lines.size < 2) {
+            return details
+        }
+        lines[1] =
+            if (installedVersion.isEmpty()) {
+                "Not installed"
+            } else {
+                "Installed: $installedVersion"
+            }
+        return lines.joinToString("\n")
     }
 
     private fun updatePackageJob(
@@ -840,7 +1096,7 @@ class ArchpheneRuntimeService : Service() {
             NativeRuntime.JOB_RESOLVING -> "Resolving"
             NativeRuntime.JOB_DOWNLOADING -> "Downloading"
             NativeRuntime.JOB_VERIFYING -> "Verifying"
-            NativeRuntime.JOB_INSTALLING -> "Publishing"
+            NativeRuntime.JOB_INSTALLING -> "Installing"
             NativeRuntime.JOB_COMPLETE -> "Complete"
             NativeRuntime.JOB_FAILED -> "Failed"
             NativeRuntime.JOB_CANCELLED -> "Cancelled"

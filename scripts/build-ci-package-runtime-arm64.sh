@@ -215,6 +215,9 @@ grep -Eq "geteuid@@GLIBC_2\\.17" /tmp/path-bridge-symbols.txt
 grep -Eq "fchmodat@@GLIBC_2\\.17" /tmp/path-bridge-symbols.txt
 grep -Eq "fchownat@@GLIBC_2\\.17" /tmp/path-bridge-symbols.txt
 grep -Eq "linkat@@GLIBC_2\\.17" /tmp/path-bridge-symbols.txt
+grep -Eq "renameat@@GLIBC_2\\.17" /tmp/path-bridge-symbols.txt
+grep -Eq "symlinkat@@GLIBC_2\\.17" /tmp/path-bridge-symbols.txt
+grep -Eq "unlinkat@@GLIBC_2\\.17" /tmp/path-bridge-symbols.txt
 grep -Eq "readlink@@GLIBC_2\\.17" /tmp/path-bridge-symbols.txt
 grep -Eq "readlinkat@@GLIBC_2\\.17" /tmp/path-bridge-symbols.txt
 

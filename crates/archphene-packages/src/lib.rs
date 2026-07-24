@@ -29,6 +29,8 @@ const PACKAGE_ARCHIVE_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
 const PACKAGE_SIGNATURE_LIMIT: u64 = 1024 * 1024;
 const PACKAGE_CACHE_DIRECTORY: &str = "var/cache/pacman/pkg";
 const PACKAGE_TRUST_DIRECTORY: &str = "run/package-trust-v1";
+const LOCAL_DATABASE_ENTRY_LIMIT: usize = 4096;
+const LOCAL_DESCRIPTION_LIMIT: u64 = 64 * 1024;
 const PATH_BRIDGE_NAME: &str = "libarchphene_path_bridge.so";
 const AARCH64_BUILD_KEY: &str = "68B3537F39A313B3E574D06777193F152BDBE6A6";
 
@@ -178,6 +180,7 @@ pub enum PackageRuntimeError {
     InvalidQuery,
     InvalidResolution,
     MissingTarget,
+    NotInstalled,
     InvalidPayload,
     InvalidSignature,
     ToolFailed(i32, ToolOutput),
@@ -210,6 +213,7 @@ impl fmt::Display for PackageRuntimeError {
             Self::MissingTarget => {
                 formatter.write_str("resolved packages omit the requested target")
             }
+            Self::NotInstalled => formatter.write_str("package is not installed"),
             Self::InvalidPayload => formatter.write_str("invalid package payload"),
             Self::InvalidSignature => formatter.write_str("invalid package signature"),
             Self::ToolFailed(code, output) => {
@@ -532,6 +536,39 @@ impl PackageRuntime {
         parse_resolution_output(raw.as_str()?, package, self.architecture)
     }
 
+    pub fn installed_version(&self, package: &str) -> Result<ToolOutput, PackageRuntimeError> {
+        if !safe_logical_name(package) {
+            return Err(PackageRuntimeError::InvalidQuery);
+        }
+        let config = self
+            .pacman_config
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let root = self
+            .arch_root
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let database_path = self.arch_root.join("var/lib/pacman");
+        let database = database_path
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        match self.run_with_timeout(
+            PackageTool::Pacman,
+            &[
+                "--config", config, "--root", root, "--dbpath", database, "-Q", package,
+            ],
+            COMMAND_TIMEOUT,
+        ) {
+            Ok(output) => parse_installed_version(output.as_str()?, package),
+            Err(PackageRuntimeError::ToolFailed(1, output))
+                if missing_package_query(output.as_str()?, package) =>
+            {
+                Ok(empty_tool_output())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     pub fn install(&self, package: &str) -> Result<ToolOutput, PackageRuntimeError> {
         let resolution = self.resolve(package)?;
         let package_count = resolution.as_str()?.lines().count();
@@ -555,11 +592,13 @@ impl PackageRuntime {
                     .to_owned(),
                 name: payload.name.to_owned(),
                 version: payload.version.to_owned(),
+                explicitly_installed: payload.name == package,
             });
         }
         if archives.is_empty() || archives.len() > 256 {
             return Err(PackageRuntimeError::InvalidResolution);
         }
+        self.preserve_explicit_install_reasons(&mut archives)?;
 
         let config = self
             .pacman_config
@@ -583,6 +622,11 @@ impl PackageRuntime {
             .to_str()
             .ok_or(PackageRuntimeError::InvalidPath)?;
         for archive in &archives {
+            let install_reason = if archive.explicitly_installed {
+                "--asexplicit"
+            } else {
+                "--asdeps"
+            };
             let result = self.run_with_timeout(
                 PackageTool::Pacman,
                 &[
@@ -601,6 +645,7 @@ impl PackageRuntime {
                     "--noscriptlet",
                     "--needed",
                     "--nodeps",
+                    install_reason,
                     "--overwrite=*",
                     "-U",
                     archive.path.as_str(),
@@ -612,13 +657,215 @@ impl PackageRuntime {
                 return Err(error);
             }
         }
+        self.mark_explicitly_installed(package)?;
+        self.validate_local_database()?;
+        let installed = self.installed_version(package)?;
+        let expected = archives
+            .iter()
+            .find(|archive| archive.name == package)
+            .ok_or(PackageRuntimeError::MissingTarget)?;
+        if installed.as_str()? != expected.version {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        Ok(installed)
+    }
+
+    pub fn remove(&self, package: &str) -> Result<ToolOutput, PackageRuntimeError> {
+        if self.installed_version(package)?.as_bytes().is_empty() {
+            return Err(PackageRuntimeError::NotInstalled);
+        }
+        let config = self
+            .pacman_config
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let root = self
+            .arch_root
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let database_path = self.arch_root.join("var/lib/pacman");
+        let database = database_path
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let plan = self.run_with_timeout(
+            PackageTool::Pacman,
+            &[
+                "--config",
+                config,
+                "--root",
+                root,
+                "--dbpath",
+                database,
+                "--print",
+                "--print-format",
+                "%n",
+                "-R",
+                package,
+            ],
+            COMMAND_TIMEOUT,
+        )?;
+        if plan.as_str()?.trim() != package {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        let result = self.run_with_timeout(
+            PackageTool::Pacman,
+            &[
+                "--config",
+                config,
+                "--root",
+                root,
+                "--dbpath",
+                database,
+                "--noconfirm",
+                "--noprogressbar",
+                "--noscriptlet",
+                "-R",
+                package,
+            ],
+            TRANSACTION_TIMEOUT,
+        );
+        if let Err(error) = result {
+            self.recover_database_lock()?;
+            return Err(error);
+        }
+        self.validate_local_database()?;
+        if !self.installed_version(package)?.as_bytes().is_empty() {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        Ok(empty_tool_output())
+    }
+
+    fn validate_local_database(&self) -> Result<(), PackageRuntimeError> {
+        let config = self
+            .pacman_config
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let root = self
+            .arch_root
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let database_path = self.arch_root.join("var/lib/pacman");
+        let database = database_path
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
         self.run_with_timeout(
             PackageTool::Pacman,
             &[
-                "--config", config, "--root", root, "--dbpath", database, "-Q", package,
+                "--config", config, "--root", root, "--dbpath", database, "-Dk",
             ],
             COMMAND_TIMEOUT,
-        )
+        )?;
+        Ok(())
+    }
+
+    fn mark_explicitly_installed(&self, package: &str) -> Result<(), PackageRuntimeError> {
+        let config = self
+            .pacman_config
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let root = self
+            .arch_root
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let database_path = self.arch_root.join("var/lib/pacman");
+        let database = database_path
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        self.run_with_timeout(
+            PackageTool::Pacman,
+            &[
+                "--config",
+                config,
+                "--root",
+                root,
+                "--dbpath",
+                database,
+                "-D",
+                "--asexplicit",
+                package,
+            ],
+            COMMAND_TIMEOUT,
+        )?;
+        Ok(())
+    }
+
+    fn recover_database_lock(&self) -> Result<(), PackageRuntimeError> {
+        let lock = self.arch_root.join("var/lib/pacman/db.lck");
+        match fs::remove_file(lock) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(PackageRuntimeError::Io(error)),
+        }
+    }
+
+    fn preserve_explicit_install_reasons(
+        &self,
+        archives: &mut [InstallArchive],
+    ) -> Result<(), PackageRuntimeError> {
+        let local = self.arch_root.join("var/lib/pacman/local");
+        let metadata = match fs::symlink_metadata(&local) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(PackageRuntimeError::Io(error)),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(PackageRuntimeError::UnsafeEntry(local));
+        }
+        let mut count = 0_usize;
+        let mut contents = String::with_capacity(4096);
+        for entry in fs::read_dir(&local)? {
+            count = count.saturating_add(1);
+            if count > LOCAL_DATABASE_ENTRY_LIMIT {
+                return Err(PackageRuntimeError::OutputLimit);
+            }
+            let entry = entry?;
+            let entry_path = entry.path();
+            let metadata = fs::symlink_metadata(&entry_path)?;
+            if entry.file_name() == "ALPM_DB_VERSION"
+                && metadata.is_file()
+                && !metadata.file_type().is_symlink()
+                && metadata.len() > 0
+                && metadata.len() <= 64
+            {
+                continue;
+            }
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(PackageRuntimeError::UnsafeEntry(entry_path));
+            }
+            let description = entry_path.join("desc");
+            let metadata = match fs::symlink_metadata(&description) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(PackageRuntimeError::Io(error)),
+            };
+            if metadata.file_type().is_symlink()
+                || !metadata.is_file()
+                || metadata.len() == 0
+                || metadata.len() > LOCAL_DESCRIPTION_LIMIT
+            {
+                return Err(PackageRuntimeError::UnsafeEntry(description));
+            }
+            contents.clear();
+            File::open(&description)?
+                .take(LOCAL_DESCRIPTION_LIMIT + 1)
+                .read_to_string(&mut contents)?;
+            if u64::try_from(contents.len()).map_err(|_| PackageRuntimeError::OutputLimit)?
+                != metadata.len()
+            {
+                return Err(PackageRuntimeError::SizeMismatch);
+            }
+            let Some(name) = local_description_field(&contents, "%NAME%")? else {
+                return Err(PackageRuntimeError::InvalidResolution);
+            };
+            let Some(archive) = archives.iter_mut().find(|archive| archive.name == name) else {
+                continue;
+            };
+            match local_description_field(&contents, "%REASON%")? {
+                None | Some("0") => archive.explicitly_installed = true,
+                Some("1") => {}
+                Some(_) => return Err(PackageRuntimeError::InvalidResolution),
+            }
+        }
+        Ok(())
     }
 
     fn recover_interrupted_transaction(
@@ -626,11 +873,7 @@ impl PackageRuntime {
         archive: &InstallArchive,
     ) -> Result<(), PackageRuntimeError> {
         let database = self.arch_root.join("var/lib/pacman");
-        match fs::remove_file(database.join("db.lck")) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(PackageRuntimeError::Io(error)),
-        }
+        self.recover_database_lock()?;
         let entry = database
             .join("local")
             .join(format!("{}-{}", archive.name, archive.version));
@@ -1266,6 +1509,66 @@ fn parse_search_output(input: &str) -> Result<ToolOutput, PackageRuntimeError> {
     Ok(output)
 }
 
+fn empty_tool_output() -> ToolOutput {
+    ToolOutput {
+        bytes: [0; MAX_TOOL_OUTPUT_BYTES],
+        length: 0,
+    }
+}
+
+fn missing_package_query(output: &str, package: &str) -> bool {
+    let mut lines = output.lines();
+    let Some(line) = lines.next() else {
+        return false;
+    };
+    lines.next().is_none() && line == format!("error: package '{package}' was not found")
+}
+
+fn parse_installed_version(
+    input: &str,
+    expected_package: &str,
+) -> Result<ToolOutput, PackageRuntimeError> {
+    let mut lines = input.lines();
+    let line = lines.next().ok_or(PackageRuntimeError::InvalidResolution)?;
+    if lines.next().is_some() {
+        return Err(PackageRuntimeError::InvalidResolution);
+    }
+    let (package, version) = line
+        .split_once(' ')
+        .ok_or(PackageRuntimeError::InvalidResolution)?;
+    if package != expected_package
+        || version.is_empty()
+        || version.len() > 128
+        || version.bytes().any(|byte| byte.is_ascii_whitespace())
+    {
+        return Err(PackageRuntimeError::InvalidResolution);
+    }
+    let mut output = empty_tool_output();
+    output.push(version.as_bytes())?;
+    Ok(output)
+}
+
+fn local_description_field<'a>(
+    input: &'a str,
+    field: &str,
+) -> Result<Option<&'a str>, PackageRuntimeError> {
+    let mut lines = input.lines();
+    let mut result = None;
+    while let Some(line) = lines.next() {
+        if line != field {
+            continue;
+        }
+        let value = lines
+            .next()
+            .filter(|value| !value.is_empty())
+            .ok_or(PackageRuntimeError::InvalidResolution)?;
+        if result.replace(value).is_some() {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+    }
+    Ok(result)
+}
+
 fn append_search_result(
     output: &mut ToolOutput,
     repository: &str,
@@ -1375,6 +1678,7 @@ struct InstallArchive {
     path: String,
     name: String,
     version: String,
+    explicitly_installed: bool,
 }
 
 fn parse_resolved_payload(line: &str) -> Result<ResolvedPayload<'_>, PackageRuntimeError> {
@@ -1716,6 +2020,46 @@ extra\tdotnet-sdk-8.0\t8.0.29.sdk129-1\tThe .NET Core SDK\n"
         assert!(valid_search_query("dotnet-sdk"));
         assert!(!valid_search_query("a"));
         assert!(!valid_search_query("../dotnet"));
+    }
+
+    #[test]
+    fn installed_package_queries_are_exact_and_bounded() {
+        let version = parse_installed_version("btop 1.4.7-1\n", "btop").expect("installed version");
+        assert_eq!(version.as_str().expect("UTF-8"), "1.4.7-1");
+        assert!(missing_package_query(
+            "error: package 'btop' was not found\n",
+            "btop",
+        ));
+        assert!(!missing_package_query(
+            "error: failed to read the package database\n",
+            "btop",
+        ));
+        assert!(matches!(
+            parse_installed_version("other 1.4.7-1\n", "btop"),
+            Err(PackageRuntimeError::InvalidResolution)
+        ));
+        assert!(matches!(
+            parse_installed_version("btop 1.4.7-1\nextra output\n", "btop"),
+            Err(PackageRuntimeError::InvalidResolution)
+        ));
+        let explicit = "%NAME%\nbtop\n\n%VERSION%\n1.4.7-1\n";
+        assert_eq!(
+            local_description_field(explicit, "%NAME%").expect("name"),
+            Some("btop"),
+        );
+        assert_eq!(
+            local_description_field(explicit, "%REASON%").expect("explicit reason"),
+            None,
+        );
+        let dependency = "%NAME%\nglibc\n\n%REASON%\n1\n";
+        assert_eq!(
+            local_description_field(dependency, "%REASON%").expect("dependency reason"),
+            Some("1"),
+        );
+        assert!(matches!(
+            local_description_field("%REASON%\n1\n%REASON%\n0\n", "%REASON%"),
+            Err(PackageRuntimeError::InvalidResolution)
+        ));
     }
 
     #[test]

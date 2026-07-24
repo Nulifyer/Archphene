@@ -71,7 +71,9 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
     - [x] Adapt the generic runtime to Android app-UID ownership, SELinux hard-link denial, app seccomp's blocked `fchmodat2`, and the explicit-loader environment without modifying individual packages.
     - [x] Commit dependency-ordered package transactions durably, recover a stale database lock or incomplete current package entry after interruption, and prove the requested package through pacman's local database.
     - [x] Pass clean full-device `btop` install, cache-tamper, process-death, executable, and package-database gates on the x86_64 emulator and AArch64 Samsung.
-    - [ ] Add safe package update and removal operations.
+    - [x] Query exact installed versions, preserve explicit/dependency install reasons, reconcile a current signed package, and conservatively remove only when pacman accepts the non-cascading plan.
+    - [x] Pass clean full-device install, verify/tamper recovery, remove, absence, verified-cache reinstall, database-validity, and process-death gates on both targets.
+    - [ ] Prove a real older-to-newer repository update, including changed dependencies and replacements, on both targets.
     - [ ] Complete hooks/scriptlets, replacements, dependency consistency checks, closure-wide rollback, orphan cleanup, cancellation, and low-storage recovery.
   - [ ] Terminal/PTY and shared command environment
   - [ ] Wayland compositor, presentation, and lifecycle
@@ -139,6 +141,7 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
 - [ ] Complete pacman transaction semantics against the shared Arch root.
   - [x] Re-verify signed archives immediately before mutation and make each dependency-ordered package commit durable and resumable.
   - [x] Recover the bounded stale-lock and incomplete-current-entry cases proven by the current install flow.
+  - [x] Preserve pacman install reasons, validate the local database after mutation, and support conservative non-cascading removal with exact postcondition checks.
   - [ ] Add hooks/scriptlets, upgrades, replacements, full dependency validation, closure-wide rollback, orphan cleanup, cancellation, and storage-failure recovery.
 - [ ] Add a bounded AUR workflow suitable for packages such as `visual-studio-code-bin`.
   - [ ] Show source, PKGBUILD, maintainer, signatures/checksums, build steps, permissions, and disk impact before installation.
@@ -159,7 +162,7 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [ ] Show queued, resolving, downloading, verifying, building, installing, awaiting Android confirmation, completed, failed, and cancelled states.
   - [ ] Keep state correct across rotation, backgrounding, process death, reboot, and manager restart.
   - [ ] Provide actionable diagnostics, retry/cancel controls, and package-scoped failure isolation.
-- [ ] Make package details and operation content responsive and scrollable; the full-device emulator audit found the current dependency list clipped on shorter content regions.
+- [x] Make the current package details and operation content responsive and scrollable; full-device emulator and Samsung audits show the complete `btop` closure with state-driven Install/Update/Verify and Remove actions.
 - [ ] Profile and fix slow first launch after boot; display useful loading/synchronization state instead of a frozen or empty UI.
 - [ ] Perform a complete UX pass over discovery, package details, installation, launcher creation, updates, storage, permissions, setup, settings, and recovery.
 - [ ] Review Obtainium's source, license, screenshots, app-list structure, and update progress UI. Adapt suitable open-source patterns to Archphene's compact list, spinner, and richer phase strings without copying blindly.
@@ -210,6 +213,7 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
 
 - [ ] Finish the remaining standalone Bash-script assertion audit and run each applicable entry point.
 - [ ] Keep tests state-preserving by default and require explicit flags for destructive device changes.
+  - [x] The signed package regression preserves state by default and requires `--clean-data` for uninstall/data reset.
 - [ ] Require emulator and physical-device coverage for runtime, storage, package, input, visual, permission, and lifecycle changes.
 - [ ] Capture device screenshots rather than app-only frames whenever asserting what the user sees or where touch lands.
 - [ ] Add long-running upgrade, package churn, process-death, reboot, storage-pressure, network-failure, and recovery tests.

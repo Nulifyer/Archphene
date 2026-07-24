@@ -3,6 +3,7 @@ GLIBC_2.17 {
         access;
         chdir;
         chroot;
+        chmod;
         eaccess;
         faccessat;
         fchmodat;
@@ -14,6 +15,14 @@ GLIBC_2.17 {
         lchown;
         link;
         linkat;
+        mkdirat;
+        remove;
+        renameat;
+        rmdir;
+        symlink;
+        symlinkat;
+        unlink;
+        unlinkat;
         execlp;
         execv;
         execve;

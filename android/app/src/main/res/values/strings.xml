@@ -11,6 +11,8 @@
     <string name="search">Search</string>
     <string name="details">Details</string>
     <string name="install">Install</string>
+    <string name="remove">Remove</string>
+    <string name="linux_session_display">Linux session display</string>
     <string name="package_job_empty">No package transaction</string>
     <string name="package_job_unavailable">Package operation unavailable</string>
     <string name="package_search_prompt">Search the official Arch repositories</string>

@@ -18,6 +18,12 @@ internal object NativeRuntime {
     const val CATALOG_CORE = 1
     const val CATALOG_EXTRA = 2
     const val CATALOG_MESSAGE_SIZE = 512
+    const val JOB_OPERATION_INSTALL = 1
+    const val JOB_OPERATION_UPDATE = 2
+    const val JOB_OPERATION_REMOVE = 3
+    const val PACKAGE_COMMAND_INSTALLED_VERSION = 1
+    const val PACKAGE_COMMAND_INSTALL = 2
+    const val PACKAGE_COMMAND_REMOVE = 3
     const val JOB_QUEUED = 1
     const val JOB_RESOLVING = 2
     const val JOB_DOWNLOADING = 3
@@ -73,14 +79,16 @@ internal object NativeRuntime {
         packageLength: Int,
         outputBuffer: ByteBuffer,
     ): Int
-    external fun nativeInstallPackage(
+    external fun nativePackageCommand(
         handle: Long,
+        action: Int,
         packageBuffer: ByteBuffer,
         packageLength: Int,
         outputBuffer: ByteBuffer,
     ): Int
-    external fun nativeQueuePackagePrepare(
+    external fun nativeQueuePackageJob(
         handle: Long,
+        operation: Int,
         requestBuffer: ByteBuffer,
         requestLength: Int,
         nowMillis: Long,

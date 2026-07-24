@@ -161,6 +161,15 @@ mod android {
         ERROR_PACKAGE_RUNTIME
     }
 
+    fn decode_job_operation(value: jint) -> Option<JobOperation> {
+        match value {
+            1 => Some(JobOperation::Install),
+            2 => Some(JobOperation::Update),
+            3 => Some(JobOperation::Remove),
+            _ => None,
+        }
+    }
+
     fn decode_job_state(value: jint) -> Option<JobState> {
         match value {
             1 => Some(JobState::Queued),
@@ -571,10 +580,11 @@ mod android {
     }
 
     #[unsafe(no_mangle)]
-    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeInstallPackage(
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativePackageCommand(
         environment: JNIEnv,
         _class: JClass,
         handle: jlong,
+        action: jint,
         package_buffer: JByteBuffer,
         package_length: jint,
         output_buffer: JByteBuffer,
@@ -623,23 +633,30 @@ mod android {
             };
             package_runtime.clone()
         };
-        let result = package_runtime.install(package);
+        let result = match action {
+            1 => package_runtime.installed_version(package),
+            2 => package_runtime.install(package),
+            3 => package_runtime.remove(package),
+            _ => return ERROR_INVALID_ARGUMENT,
+        };
         let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
         copy_tool_result(result, destination)
     }
 
     #[unsafe(no_mangle)]
-    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeQueuePackagePrepare(
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeQueuePackageJob(
         environment: JNIEnv,
         _class: JClass,
         handle: jlong,
+        operation: jint,
         request_buffer: JByteBuffer,
         request_length: jint,
         now_millis: jlong,
         output_buffer: JByteBuffer,
     ) -> jlong {
-        let (Ok(handle), Ok(request_length), Ok(now_millis)) = (
+        let (Ok(handle), Some(operation), Ok(request_length), Ok(now_millis)) = (
             u64::try_from(handle),
+            decode_job_operation(operation),
             usize::try_from(request_length),
             u64::try_from(now_millis),
         ) else {
@@ -685,7 +702,7 @@ mod android {
         let Some(runtime) = registry.runtime_mut(handle) else {
             return i64::from(ERROR_INVALID_HANDLE);
         };
-        match runtime.begin_package_job(JobOperation::Prepare, repository, package, now_millis) {
+        match runtime.begin_package_job(operation, repository, package, now_millis) {
             Ok(job) => i64::try_from(job.id).unwrap_or(i64::from(ERROR_INTERNAL)),
             Err(error) => i64::from(copy_job_error(&error, destination)),
         }

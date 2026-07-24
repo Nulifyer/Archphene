@@ -497,6 +497,10 @@ static const char *translate_path(const char *path, char output[PATH_MAX],
     static const char *const resource_prefixes[] = {"/usr/share", "/usr/lib/locale"};
     *translated = false;
     if (path == NULL) return path;
+    if ((fake_chroot_active || path[0] == '/') && has_parent_component(path)) {
+        errno = EACCES;
+        return NULL;
+    }
     if (trusted_root[0] != '\0') {
         size_t root_length = strlen(trusted_root);
         if (strncmp(path, trusted_root, root_length) == 0
@@ -521,10 +525,6 @@ static const char *translate_path(const char *path, char output[PATH_MAX],
         }
     }
     if (!allowed) return path;
-    if (has_parent_component(path)) {
-        errno = EACCES;
-        return NULL;
-    }
     if (trusted_root[0] == '\0') return path;
     size_t root_length = strlen(trusted_root);
     size_t path_length = strlen(path);
@@ -940,4 +940,101 @@ int rename(const char *old_path, const char *new_path) {
         return -1;
     }
     return real(AT_FDCWD, old_target, AT_FDCWD, new_target);
+}
+
+int mkdirat(int directory, const char *path, mode_t mode) {
+    typedef int (*function_type)(int, const char *, mode_t);
+    function_type real = RESOLVE(function_type, "mkdirat");
+    bool translated;
+    char buffer[PATH_MAX];
+    const char *target = translate_path(path, buffer, &translated);
+    if (target == NULL) return -1;
+    REQUIRE_REAL(real);
+    if (translated && !fake_chroot_active) {
+        errno = EROFS;
+        return -1;
+    }
+    return real(directory, target, mode);
+}
+
+int chmod(const char *path, mode_t mode) {
+    typedef int (*function_type)(int, const char *, mode_t, int);
+    function_type real = RESOLVE(function_type, "fchmodat");
+    bool translated;
+    char buffer[PATH_MAX];
+    const char *target = translate_path(path, buffer, &translated);
+    if (target == NULL) return -1;
+    REQUIRE_REAL(real);
+    if (translated && !fake_chroot_active) {
+        errno = EROFS;
+        return -1;
+    }
+    return real(AT_FDCWD, target, mode, 0);
+}
+
+int unlinkat(int directory, const char *path, int flags) {
+    typedef int (*function_type)(int, const char *, int);
+    function_type real = RESOLVE(function_type, "unlinkat");
+    bool translated;
+    char buffer[PATH_MAX];
+    const char *target = translate_path(path, buffer, &translated);
+    if (target == NULL) return -1;
+    REQUIRE_REAL(real);
+    if (translated && !fake_chroot_active) {
+        errno = EROFS;
+        return -1;
+    }
+    return real(directory, target, flags);
+}
+
+int unlink(const char *path) {
+    return unlinkat(AT_FDCWD, path, 0);
+}
+
+int rmdir(const char *path) {
+    return unlinkat(AT_FDCWD, path, AT_REMOVEDIR);
+}
+
+int remove(const char *path) {
+    if (unlinkat(AT_FDCWD, path, 0) == 0) return 0;
+    if (errno != EISDIR && errno != EPERM) return -1;
+    return unlinkat(AT_FDCWD, path, AT_REMOVEDIR);
+}
+
+int renameat(int old_directory, const char *old_path, int new_directory,
+        const char *new_path) {
+    typedef int (*function_type)(int, const char *, int, const char *);
+    function_type real = RESOLVE(function_type, "renameat");
+    bool old_translated;
+    bool new_translated;
+    char old_buffer[PATH_MAX];
+    char new_buffer[PATH_MAX];
+    const char *old_target = translate_path(old_path, old_buffer, &old_translated);
+    const char *new_target = translate_path(new_path, new_buffer, &new_translated);
+    if (old_target == NULL || new_target == NULL) return -1;
+    REQUIRE_REAL(real);
+    if (!fake_chroot_active && (old_translated || new_translated)) {
+        errno = EROFS;
+        return -1;
+    }
+    return real(old_directory, old_target, new_directory, new_target);
+}
+
+int symlinkat(const char *target, int directory, const char *link_path) {
+    typedef int (*function_type)(const char *, int, const char *);
+    function_type real = RESOLVE(function_type, "symlinkat");
+    bool translated;
+    char buffer[PATH_MAX];
+    const char *destination = translate_path(link_path, buffer, &translated);
+    if (destination == NULL) return -1;
+    REQUIRE_REAL(real);
+    if (translated && !fake_chroot_active) {
+        errno = EROFS;
+        return -1;
+    }
+    return real(target, directory, destination);
+}
+
+int symlink(const char *target, const char *link_path) {
+    return symlinkat(target, AT_FDCWD, link_path);
 }

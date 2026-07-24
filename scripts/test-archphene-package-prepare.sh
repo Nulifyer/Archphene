@@ -5,13 +5,15 @@ source "$(dirname "$0")/lib/android-test.sh"
 serial=
 apk=
 skip_install=false
+clean_data=false
 while (($#)); do
   case "$1" in
     --serial) serial="${2:?missing value for --serial}"; shift 2 ;;
     --apk) apk="${2:?missing value for --apk}"; shift 2 ;;
     --skip-install) skip_install=true; shift ;;
+    --clean-data) clean_data=true; shift ;;
     -h|--help)
-      echo "usage: $0 --serial SERIAL [--apk PATH] [--skip-install]"
+      echo "usage: $0 --serial SERIAL [--apk PATH] [--skip-install] [--clean-data]"
       exit 0 ;;
     *) archphene_die "unknown argument: $1" ;;
   esac
@@ -35,7 +37,13 @@ trap cleanup EXIT
 
 if [[ "$skip_install" == false ]]; then
   archphene_require_file "$apk"
+  if [[ "$clean_data" == true ]]; then
+    archphene_adb_run uninstall "$package" >/dev/null 2>&1 || true
+  fi
   archphene_adb_run install -r "$apk" >/dev/null
+fi
+if [[ "$clean_data" == true && "$skip_install" == true ]]; then
+  archphene_adb_run shell pm clear "$package" >/dev/null
 fi
 
 archphene_adb_run logcat -c
@@ -79,6 +87,21 @@ local_btop="$(archphene_adb_run exec-out run-as "$package" find \
   files/arch-root/var/lib/pacman/local -maxdepth 1 -type d -name 'btop-*' |
   tr -d '\r')"
 [[ -n "$local_btop" ]] || archphene_die "pacman did not record the btop installation"
+btop_description="$(archphene_adb_run exec-out run-as "$package" \
+  cat "$local_btop/desc" | tr -d '\r')"
+btop_reason="$(awk '/^%REASON%$/{getline; print; exit}' <<<"$btop_description")"
+[[ -z "$btop_reason" ]] ||
+  archphene_die "requested package was unexpectedly recorded as a dependency"
+dependency_entry="$(archphene_adb_run exec-out run-as "$package" find \
+  files/arch-root/var/lib/pacman/local -maxdepth 1 -type d -name 'glibc-*' |
+  tr -d '\r' | head -n1)"
+[[ -n "$dependency_entry" ]] || archphene_die "installed dependency entry is missing"
+dependency_description="$(archphene_adb_run exec-out run-as "$package" \
+  cat "$dependency_entry/desc" | tr -d '\r')"
+dependency_reason="$(awk '/^%REASON%$/{getline; print; exit}' \
+  <<<"$dependency_description")"
+[[ "$dependency_reason" == 1 ]] ||
+  archphene_die "dependency package was not recorded with dependency reason"
 
 cache=files/arch-root/var/cache/pacman/pkg
 cache_listing="$(archphene_adb_run exec-out run-as "$package" find "$cache" \
@@ -101,11 +124,32 @@ tampered_package="$(grep '/btop-[^/]*\.pkg\.tar\.' <<<"$cache_listing" |
 archphene_adb_run logcat -c
 archphene_adb_run shell run-as "$package" dd if=/dev/zero of="$tampered_package" \
   bs=1 count=1 conv=notrunc >/dev/null 2>&1
-archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="INSTALL"' 'reinstall tampered cache'
+archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="VERIFY"' 'verify tampered cache'
 archphene_wait_log 'Rejected invalid cached package .*package command failed with status' \
   30 >/dev/null
-archphene_wait_ui 'text="btop · Complete · 100%.*Installed btop [^"]+"' \
+archphene_wait_ui 'text="btop · Complete · 100%.*Verified btop [^"]+"' \
   "archphene-prepare-tamper-recovered-$serial" 90
+
+archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="REMOVE"' 'remove package'
+archphene_wait_ui 'text="btop · Complete · 100%.*Removed btop [^"]+"' \
+  "archphene-remove-complete-$serial" 90
+archphene_wait_log 'Removed btop [^ ]+' 15 >/dev/null
+if archphene_adb_run shell run-as "$package" test -e files/arch-root/usr/bin/btop; then
+  archphene_die "removed btop executable remains present"
+fi
+removed_btop="$(archphene_adb_run exec-out run-as "$package" find \
+  files/arch-root/var/lib/pacman/local -maxdepth 1 -type d -name 'btop-*' |
+  tr -d '\r')"
+[[ -z "$removed_btop" ]] || archphene_die "removed btop remains in pacman's database"
+archphene_adb_run shell run-as "$package" test -f "$dependency_entry/desc" ||
+  archphene_die "conservative removal unexpectedly removed a dependency"
+
+archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="INSTALL"' 'reinstall removed package'
+archphene_wait_ui 'text="btop · Complete · 100%.*Installed btop [^"]+"' \
+  "archphene-reinstall-complete-$serial" 120
+archphene_wait_log 'Installed btop: [1-9][0-9]* signed packages' 15 >/dev/null
+archphene_adb_run shell run-as "$package" test -x files/arch-root/usr/bin/btop ||
+  archphene_die "reinstalled btop executable is missing"
 
 archphene_adb_run exec-out screencap -p >"$output_dir/$serial-btop.png"
 
@@ -123,5 +167,6 @@ fatal_log="$(archphene_adb_run logcat -d -v brief \
 archphene_note "Archphene signed package install passed on $serial"
 archphene_note "  $closure_count archives and signatures were atomically cached, verified, and installed"
 archphene_note "  Tampered cache was rejected, redownloaded, and reverified"
+archphene_note "  Conservative removal and verified-cache reinstall passed"
 archphene_note "  Durable Complete state survived process death"
 archphene_note "  Full-device screenshot: $output_dir/$serial-btop.png"

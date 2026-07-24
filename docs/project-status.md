@@ -75,20 +75,28 @@ Linux ARM build signer.
 
 Immediately before mutation, Rust re-resolves and re-verifies the full bounded
 closure. Pacman then commits it in dependency order to the shared private root,
-using the generic compatibility layer to map Linux root ownership to the
-Android app UID, copy when SELinux rejects hard links, and avoid Android app
-seccomp's blocked `fchmodat2`. The current path recovers its bounded stale-lock
-and incomplete-entry cases and proves the requested package through pacman's
-local database.
+preserving explicit and dependency install reasons. The generic compatibility
+layer maps Linux root ownership to the Android app UID, copies when SELinux
+rejects hard links, avoids Android app seccomp's blocked `fchmodat2`, and maps
+generic root-relative mutation calls without package-specific changes. The
+current path recovers its bounded stale-lock and incomplete-entry cases,
+validates pacman's local database, and proves the requested package and version.
 
-Clean nine-package `btop` installs pass on the x86_64 emulator and AArch64
-Samsung. Both gates deliberately corrupt the target archive, prove rejection,
-redownload and reverify it, check the installed executable and database entry,
-then prove the durable Complete result survives manager process death with
-full-device screenshots and clean scoped logs. Package update/removal,
-hooks/scriptlets, closure-wide rollback, full dependency validation,
-cancellation, and low-storage recovery remain open, so this is not yet a
-complete production transaction engine.
+Exact installed-version queries now drive state-specific Install, Update,
+Verify, and Remove actions. Removal first asks pacman for a non-cascading plan,
+fails if dependents make that unsafe, removes only the requested target, then
+proves both its executable and local database record are absent. Dependencies
+remain installed for the pending orphan-cleanup policy.
+
+Clean nine-package `btop` transaction cycles pass on the x86_64 emulator and
+AArch64 Samsung. Both gates deliberately corrupt the target archive, prove
+rejection, redownload and reverify it, remove the package conservatively, prove
+its executable and database entry are gone, reinstall from the verified cache,
+and prove the durable Complete result survives manager process death. Full-
+device screenshots also verify the responsive closure view and state-driven
+actions. A real older-to-newer repository upgrade, hooks/scriptlets,
+closure-wide rollback, cancellation, orphan cleanup, and low-storage recovery
+remain open, so this is not yet a complete production transaction engine.
 
 The validated prototype below remains reference evidence until replacement
 vertical slices pass equivalent gates. Installed prototype state is no longer a

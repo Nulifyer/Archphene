@@ -87,6 +87,9 @@ grep -Eq " geteuid$" /tmp/path-bridge-symbols.txt
 grep -Eq " fchmodat$" /tmp/path-bridge-symbols.txt
 grep -Eq " fchownat$" /tmp/path-bridge-symbols.txt
 grep -Eq " linkat$" /tmp/path-bridge-symbols.txt
+grep -Eq " renameat$" /tmp/path-bridge-symbols.txt
+grep -Eq " symlinkat$" /tmp/path-bridge-symbols.txt
+grep -Eq " unlinkat$" /tmp/path-bridge-symbols.txt
 grep -Eq " readlink$" /tmp/path-bridge-symbols.txt
 grep -Eq " readlinkat$" /tmp/path-bridge-symbols.txt
 

@@ -159,8 +159,10 @@ rotation_changed=false
 archphene_wait_ui 'Rust runtime [0-9]+.*state 2.*Root ready.*jobs ready.*Pacman ready.*events [0-9]+' \
   "archphene-base-rotation-restored-$serial" 15
 
-archphene_adb_run shell input tap 600 1200 >/dev/null
-archphene_adb_run shell input swipe 300 1200 600 1700 300 >/dev/null
+archphene_wait_ui 'text="Linux session display"' \
+  "archphene-base-input-surface-$serial" 15
+archphene_tap_ui_pattern \
+  "$ARCHPHENE_UI" 'text="Linux session display"' 'runtime input surface'
 archphene_wait_ui 'Rust runtime [0-9]+.*state 2.*Root ready.*jobs ready.*Pacman ready.*events [1-9][0-9]*' \
   "archphene-base-input-$serial" 15
 

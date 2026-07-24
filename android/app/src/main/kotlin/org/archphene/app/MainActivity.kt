@@ -18,6 +18,7 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.Button
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -31,6 +32,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private lateinit var searchStatusView: TextView
     private lateinit var jobStatusView: TextView
     private lateinit var runtimeSurface: RuntimeSurfaceView
+    private lateinit var installButton: Button
+    private lateinit var removeButton: Button
     private val snapshot = RuntimeSnapshot()
     private val statusText = StringBuilder(128)
     private var runtimeBinder: ArchpheneRuntimeService.LocalBinder? = null
@@ -54,6 +57,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 catalogStatusView.setText(R.string.package_catalog_unavailable)
                 searchStatusView.setText(R.string.package_search_unavailable)
                 jobStatusView.setText(R.string.package_job_unavailable)
+                installButton.isEnabled = false
+                removeButton.isEnabled = false
             }
         }
 
@@ -70,6 +75,30 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 maxLines = 3
             }
         runtimeSurface = RuntimeSurfaceView(this)
+        val runtimePanel =
+            FrameLayout(this).apply {
+                addView(
+                    runtimeSurface,
+                    FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                    ),
+                )
+                addView(
+                    TextView(this@MainActivity).apply {
+                        setText(R.string.linux_session_display)
+                        setTextColor(Color.LTGRAY)
+                        textSize = 12f
+                        gravity = Gravity.CENTER
+                        isClickable = false
+                        isFocusable = false
+                    },
+                    FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                    ),
+                )
+            }
         catalogStatusView =
             TextView(this).apply {
                 setTextColor(Color.WHITE)
@@ -129,12 +158,22 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     runtimeBinder?.resolvePackage(searchInput.text.toString())
                 }
             }
-        val installButton =
+        installButton =
             Button(this).apply {
                 setText(R.string.install)
+                isEnabled = false
                 setOnClickListener {
                     hideKeyboard(searchInput)
                     runtimeBinder?.installPackage(searchInput.text.toString())
+                }
+            }
+        removeButton =
+            Button(this).apply {
+                setText(R.string.remove)
+                isEnabled = false
+                setOnClickListener {
+                    hideKeyboard(searchInput)
+                    runtimeBinder?.removePackage(searchInput.text.toString())
                 }
             }
         searchInput.setOnEditorActionListener { _, actionId, _ ->
@@ -146,11 +185,11 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 false
             }
         }
-        val searchRow =
+        val actionRow =
             LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 addView(
-                    searchInput,
+                    searchButton,
                     LinearLayout.LayoutParams(
                         0,
                         ViewGroup.LayoutParams.MATCH_PARENT,
@@ -158,24 +197,27 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     ),
                 )
                 addView(
-                    searchButton,
-                    LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.WRAP_CONTENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                    ),
-                )
-                addView(
                     detailsButton,
                     LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        0,
                         ViewGroup.LayoutParams.MATCH_PARENT,
+                        1f,
                     ),
                 )
                 addView(
                     installButton,
                     LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        0,
                         ViewGroup.LayoutParams.MATCH_PARENT,
+                        1f,
+                    ),
+                )
+                addView(
+                    removeButton,
+                    LinearLayout.LayoutParams(
+                        0,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        1f,
                     ),
                 )
             }
@@ -216,28 +258,36 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     statusView,
                     LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
-                        dp(96),
+                        dp(72),
                     ),
                 )
                 addView(
                     catalogRow,
                     LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
-                        dp(56),
+                        dp(48),
                     ),
                 )
                 addView(
-                    searchRow,
+                    searchInput,
                     LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
-                        dp(56),
+                        dp(52),
+                    ),
+                )
+                addView(
+                    actionRow,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        dp(48),
                     ),
                 )
                 addView(
                     searchResults,
                     LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
-                        dp(176),
+                        0,
+                        1f,
                     ),
                 )
                 addView(
@@ -248,11 +298,10 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     ),
                 )
                 addView(
-                    runtimeSurface,
+                    runtimePanel,
                     LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
-                        0,
-                        1f,
+                        dp(64),
                     ),
                 )
             }
@@ -332,6 +381,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 jobStatusView,
                 runtimeBinder?.packageJobStatus ?: "Package operation unavailable",
             )
+            updatePackageActions()
             return
         }
         statusText.setLength(0)
@@ -369,6 +419,19 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             jobStatusView,
             runtimeBinder?.packageJobStatus ?: "Package operation unavailable",
         )
+        updatePackageActions()
+    }
+
+    private fun updatePackageActions() {
+        val binder = runtimeBinder
+        if (binder == null) {
+            installButton.isEnabled = false
+            removeButton.isEnabled = false
+            return
+        }
+        setTextIfChanged(installButton, binder.packagePrimaryActionLabel)
+        installButton.isEnabled = binder.packagePrimaryActionAvailable
+        removeButton.isEnabled = binder.packageRemoveAvailable
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density + 0.5f).toInt()
