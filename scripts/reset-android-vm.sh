@@ -53,9 +53,8 @@ set_config firstboot.saveToLocalSnapshot no
 set_config hw.cpu.ncore 6
 set_config hw.gpu.enabled yes
 set_config hw.gpu.mode host
-set_config hw.keyboard no
+set_config hw.keyboard yes
 set_config hw.ramSize 8192
 set_config showDeviceFrame yes
 archphene_note "Recreated AVD at $avd_dir"
 [[ "$no_launch" == true ]] || "$ARCHPHENE_SCRIPTS_DIR/start-android-vm.sh" --avd-name "$avd_name"
-
