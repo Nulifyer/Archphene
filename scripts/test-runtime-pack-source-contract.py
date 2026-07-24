@@ -101,12 +101,26 @@ def main() -> None:
     if ('containsLibraryPrefix(runtimeLibraryNames, "libSDL2-")' not in compositor
             or "setSuppressInitialNativeImeShow" not in compositor):
         raise SystemExit("legacy SDL wrappers must suppress only their implicit startup IME")
+    for token in (
+            "applyRuntimeOrientationPolicy()",
+            "ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE",
+            'containsLibraryPrefix(runtimeLibraryNames, "libSDL3")',
+            "display.getDisplayId() != Display.DEFAULT_DISPLAY"):
+        if token not in compositor:
+            raise SystemExit(
+                "direct-Wayland SDL wrappers must apply the generic default-display "
+                f"orientation policy: missing {token}")
     session = COMPOSITOR_SESSION.read_text()
     for token, description in {
         "RECOVERED_KEY_HOLD_MILLIS": "minimum recovered-key press interval",
         "event.getRepeatCount() != 0": "missing initial key-down detection",
         "recoveredRepeatKeys": "repeat-recovery state",
         "if (inputDiagnostics)": "privacy-gated detailed input diagnostics",
+        "KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_DPAD_CENTER -> 28":
+            "keyboard and D-pad activation mapping",
+        "POINTER_HOVER_SETTLE_MILLIS": "pointer hover-settle interval",
+        "press = hover + POINTER_HOVER_SETTLE_MILLIS":
+            "pointer positioning before synthesized click",
     }.items():
         if token not in session:
             raise SystemExit(f"Wayland input bridge missing {description}")

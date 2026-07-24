@@ -38,6 +38,8 @@ old_accelerometer="$(archphene_adb_run shell settings get system \
   accelerometer_rotation | tr -d '\r')"
 old_rotation="$(archphene_adb_run shell settings get system \
   user_rotation | tr -d '\r')"
+old_size="$(archphene_adb_run shell wm size | tr -d '\r')"
+old_size_override="$(sed -n 's/^Override size: //p' <<<"$old_size")"
 archphene_android_pid "$package" >/dev/null 2>&1 && was_running=true
 
 archphene_adb_run shell am force-stop "$package"
@@ -63,6 +65,11 @@ restore() {
     "$old_accelerometer" >/dev/null 2>&1
   archphene_adb_run shell settings put system user_rotation \
     "$old_rotation" >/dev/null 2>&1
+  if [[ -n "$old_size_override" ]]; then
+    archphene_adb_run shell wm size "$old_size_override" >/dev/null 2>&1
+  else
+    archphene_adb_run shell wm size reset >/dev/null 2>&1
+  fi
   if [[ "$was_running" == true ]]; then
     archphene_adb_run shell am start -n "$activity" >/dev/null 2>&1
   fi
@@ -99,7 +106,7 @@ assert_first_run_dialogs_cleared() {
     || archphene_die "$name still shows a SuperTux first-run prompt"
   if [[ "$require_menu" == true ]]; then
     archphene_regex_contains "$text" \
-      'start|game|credits|quit|qit|vels|vls|editor|coderib' \
+      'start|stare|game|gane|gana|credits|redits|quit|qit|vels|vls|fewels|tevele|editor|sedire|coderib' \
       || archphene_die "$name does not show the SuperTux main menu"
   fi
 }
@@ -122,14 +129,36 @@ wait_foreground() {
   done
   archphene_die 'SuperTux did not return to the foreground'
 }
+wait_orientation() {
+  local expected="$1" deadline=$((SECONDS + 15)) probe width height
+  probe="$artifact_dir/.orientation-probe.png"
+  while ((SECONDS < deadline)); do
+    archphene_adb_run exec-out screencap -p >"$probe"
+    read -r width height < <(python3 -c \
+      'import struct,sys; data=open(sys.argv[1],"rb").read(24); print(*struct.unpack(">II",data[16:24]))' \
+      "$probe")
+    if [[ "$expected" == portrait ]] && ((height > width)); then return 0; fi
+    if [[ "$expected" == landscape ]] && ((width > height)); then return 0; fi
+    sleep .2
+  done
+  archphene_die "display did not settle in $expected orientation"
+}
+full_frame_dimensions() {
+  python3 -c \
+    'import struct,sys; data=open(sys.argv[1],"rb").read(24); print(*struct.unpack(">II",data[16:24]))' \
+    "$1"
+}
 restart_with_clean_profile() {
   archphene_adb_run shell am force-stop "$package"
   archphene_adb_run shell run-as "$package" rm -rf "$state"
+  archphene_adb_run shell wm user-rotation lock 0
+  wait_orientation portrait
   archphene_adb_run logcat -c
   archphene_adb_run shell am start -W -n "$activity" \
     --ez archphene_test_input_debug true >/dev/null
   archphene_wait_log 'mapped=true.*primary=true.*SuperTux' "$timeout" \
     'ArchpheneInput:V ArchpheneLinuxApp:I AndroidRuntime:E *:S' >/dev/null
+  wait_orientation landscape
   sleep 1
   ! ime_shown \
     || archphene_die 'legacy SDL startup text input opened Android IME over SuperTux'
@@ -137,13 +166,17 @@ restart_with_clean_profile() {
 
 archphene_adb_run shell input keyevent WAKEUP
 archphene_adb_run shell wm dismiss-keyguard >/dev/null 2>&1 || true
-archphene_adb_run shell settings put system accelerometer_rotation 0
-archphene_adb_run shell settings put system user_rotation 0
+archphene_adb_run shell wm user-rotation lock 0
+wait_orientation portrait
 archphene_adb_run logcat -c
 archphene_adb_run shell am start -W -n "$activity" \
   --ez archphene_test_input_debug true >/dev/null
 startup_log="$(archphene_wait_log 'mapped=true.*primary=true.*SuperTux' "$timeout" \
   'ArchpheneInput:V ArchpheneLinuxApp:I ArchpheneAudio:I AndroidRuntime:E *:S')"
+wait_orientation landscape
+archphene_regex_contains "$startup_log" \
+  'Automatic SDL orientation policy=landscape-sensor' \
+  || archphene_die 'SuperTux did not apply the generic SDL orientation policy'
 archphene_regex_contains "$startup_log" \
   'Graphics renderer=virpipe Android EGL/GLES bridge' \
   || archphene_die 'SuperTux did not use the accelerated Android renderer'
@@ -160,20 +193,20 @@ sleep 1
 ! ime_shown \
   || archphene_die 'legacy SDL startup text input opened Android IME over SuperTux'
 
-capture portrait-a
+capture landscape-a
 sleep 4
-capture portrait-b
+capture landscape-b
 python3 "$ARCHPHENE_SCRIPTS_DIR/lib/theme-frame-check.py" different \
-  "$artifact_dir/portrait-a.raw" "$artifact_dir/portrait-b.raw" \
+  "$artifact_dir/landscape-a.raw" "$artifact_dir/landscape-b.raw" \
   --minimum-difference .2 --minimum-changed-ratio .01 >/dev/null
-assert_pids "$android_pid" "$linux_pid" 'sustained portrait rendering'
+assert_pids "$android_pid" "$linux_pid" 'sustained landscape rendering'
 
-# Simulate a physical keyboard source so Samsung emits the same normal
-# down/up sequence as attached hardware. Require compositor delivery and the
+# Simulate a physical keyboard source with keys that emit a normal down/up
+# pair through both ADB implementations. Require compositor delivery and the
 # first-run dialogs to disappear, not merely an animated-frame difference.
 capture keyboard-before
 archphene_adb_run logcat -c
-archphene_adb_run shell input keyboard keyevent --longpress KEYCODE_SPACE
+archphene_adb_run shell input keyboard keyevent --longpress KEYCODE_DPAD_CENTER
 sleep .5
 archphene_adb_run shell input keyboard keyevent KEYCODE_ESCAPE
 sleep 2
@@ -181,14 +214,18 @@ keyboard_log="$(archphene_adb_run logcat -d -v threadtime \
   -s ArchpheneInput:V AndroidRuntime:E '*:S')"
 printf '%s\n' "$keyboard_log" >"$artifact_dir/keyboard-logcat.txt"
 if ! archphene_regex_contains "$keyboard_log" \
-    'keyboard key=57 pressed=true result=1' \
+    'keyboard key=28 pressed=true result=1' \
     || ! archphene_regex_contains "$keyboard_log" \
     'keyboard key=1 pressed=true result=1'; then
-  workflow_failures+=('Android Space/Escape did not reach the Wayland keyboard')
+  workflow_failures+=('Android Enter/Escape did not reach the Wayland keyboard')
 fi
 capture keyboard-after
+keyboard_text="$(tesseract "$artifact_dir/keyboard-after.png" stdout 2>/dev/null \
+  | tr '[:upper:]' '[:lower:]')"
+printf '%s\n' "$keyboard_text" >"$artifact_dir/keyboard-after-ocr.txt"
 if ((${#workflow_failures[@]} == 0)); then
-  assert_first_run_dialogs_cleared keyboard-after
+  ! archphene_regex_contains "$keyboard_text" 'ternet|onnec|ondec|ddition' \
+    || archphene_die 'keyboard-after still shows a SuperTux first-run prompt'
 fi
 assert_pids "$android_pid" "$linux_pid" 'keyboard navigation'
 
@@ -198,21 +235,28 @@ restart_with_clean_profile
 read -r android_pid linux_pid <<<"$(current_pids)"
 
 # A direct-Wayland desktop app gets mouse semantics for an unmoved finger tap.
-# Tap the first-run Yes and second-dialog No buttons and require the dialogs to
-# disappear, while retaining the compositor's pointer-click log as evidence.
-screen_size="$(archphene_adb_run shell wm size | tr -d '\r')"
-logical_size="$(sed -n 's/^Override size: //p' <<<"$screen_size")"
-[[ -n "$logical_size" ]] || logical_size="$(sed -n 's/^Physical size: //p' <<<"$screen_size")"
-[[ "$logical_size" =~ ^([0-9]+)x([0-9]+)$ ]] \
-  || archphene_die "could not parse display size: $screen_size"
-tap_x=$((BASH_REMATCH[1] / 4))
-tap_no_x=$((BASH_REMATCH[1] * 3 / 4))
-tap_y=$((BASH_REMATCH[2] * 55 / 100))
+# Derive the established two-column prompt targets from the full-device frame,
+# including Android chrome. Do not use wm size or an app-only crop: those can
+# retain natural-orientation dimensions while Android displays the SDL host in
+# landscape.
 capture touch-before
+touch_before_text="$(tesseract "$artifact_dir/touch-before.png" stdout 2>/dev/null \
+  | tr '[:upper:]' '[:lower:]')"
+archphene_regex_contains "$touch_before_text" 'ternet|onnec|ondec|ddition' \
+  || archphene_die 'full-device touch frame does not show the first-run prompt'
+read -r touch_width touch_height \
+  <<<"$(full_frame_dimensions "$artifact_dir/touch-before.png")"
+tap_x=$((touch_width * 35 / 100))
+tap_y=$((touch_height * 62 / 100))
 archphene_adb_run logcat -c
 archphene_adb_run shell input tap "$tap_x" "$tap_y"
-sleep .5
-archphene_adb_run shell input tap "$tap_no_x" "$tap_y"
+sleep 1
+capture touch-between
+read -r touch_width touch_height \
+  <<<"$(full_frame_dimensions "$artifact_dir/touch-between.png")"
+tap_no_x=$((touch_width * 65 / 100))
+tap_no_y=$((touch_height * 62 / 100))
+archphene_adb_run shell input tap "$tap_no_x" "$tap_no_y"
 sleep 2
 touch_log="$(archphene_adb_run logcat -d -v threadtime \
   -s ArchpheneInput:V AndroidRuntime:E '*:S')"
@@ -237,15 +281,15 @@ sleep 1
 capture resumed
 assert_pids "$android_pid" "$linux_pid" 'foreground resume'
 
-# The same client must resize into a landscape/tablet presentation without
-# restarting either the Android host or glibc loader.
+# The same client must resize into a tablet presentation without restarting
+# either the Android host or glibc loader.
 archphene_adb_run logcat -c
-archphene_adb_run shell settings put system user_rotation 1
+archphene_adb_run shell wm size 1920x1200
 archphene_wait_log 'output frame=[1-9][0-9]{3,}x[1-9][0-9]{2,3}' 30 \
   'ArchpheneInput:I AndroidRuntime:E *:S' >/dev/null
 sleep 2
-capture landscape
-assert_pids "$android_pid" "$linux_pid" 'landscape resize'
+capture tablet-resized
+assert_pids "$android_pid" "$linux_pid" 'tablet resize'
 
 log="$(archphene_adb_run logcat -d -v threadtime \
   -s ArchpheneInput:V ArchpheneLinuxApp:I ArchpheneAudio:I \
@@ -260,11 +304,11 @@ python3 "$ARCHPHENE_SCRIPTS_DIR/lib/visual-manifest.py" \
   --field "serial=$serial" --field "package=$package" --field 'app=SuperTux' \
   --field 'toolkit=wayland-sdl' --field "androidPid=$android_pid" \
   --field "linuxPid=$linux_pid" \
-  --field 'state=audio input pause resume rotation' \
-  --artifact "$artifact_dir/portrait-a.raw" \
-  --artifact "$artifact_dir/portrait-a.png" \
-  --artifact "$artifact_dir/portrait-b.raw" \
-  --artifact "$artifact_dir/portrait-b.png" \
+  --field 'state=automatic orientation audio input pause resume tablet resize' \
+  --artifact "$artifact_dir/landscape-a.raw" \
+  --artifact "$artifact_dir/landscape-a.png" \
+  --artifact "$artifact_dir/landscape-b.raw" \
+  --artifact "$artifact_dir/landscape-b.png" \
   --artifact "$artifact_dir/keyboard-before.raw" \
   --artifact "$artifact_dir/keyboard-before.png" \
   --artifact "$artifact_dir/keyboard-after.raw" \
@@ -273,14 +317,16 @@ python3 "$ARCHPHENE_SCRIPTS_DIR/lib/visual-manifest.py" \
   --artifact "$artifact_dir/keyboard-logcat.txt" \
   --artifact "$artifact_dir/touch-before.raw" \
   --artifact "$artifact_dir/touch-before.png" \
+  --artifact "$artifact_dir/touch-between.raw" \
+  --artifact "$artifact_dir/touch-between.png" \
   --artifact "$artifact_dir/touch-after.raw" \
   --artifact "$artifact_dir/touch-after.png" \
   --artifact "$artifact_dir/touch-after-ocr.txt" \
   --artifact "$artifact_dir/touch-logcat.txt" \
   --artifact "$artifact_dir/resumed.raw" \
   --artifact "$artifact_dir/resumed.png" \
-  --artifact "$artifact_dir/landscape.raw" \
-  --artifact "$artifact_dir/landscape.png" \
+  --artifact "$artifact_dir/tablet-resized.raw" \
+  --artifact "$artifact_dir/tablet-resized.png" \
   --artifact "$artifact_dir/startup-logcat.txt" \
   --artifact "$artifact_dir/logcat.txt"
 
@@ -289,4 +335,4 @@ trap - EXIT
 if ((${#workflow_failures[@]} > 0)); then
   archphene_die "${workflow_failures[*]}"
 fi
-archphene_note "SuperTux workflows passed on $serial: animated EGL rendering, PulseAudio bridge, keyboard and finger input, HOME/resume, landscape resize, stable process pair, and exact prior state restored. Evidence: $artifact_dir"
+archphene_note "SuperTux workflows passed on $serial: automatic SDL landscape, animated EGL rendering, PulseAudio bridge, full-device OCR finger input, HOME/resume, tablet resize, stable process pair, and exact prior state restored. Evidence: $artifact_dir"

@@ -106,6 +106,7 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
     private static final int LINUX_DRAG_FINISH = 33;
     private static final int ANDROID_DRAG_DROP_URI_LIST = 34;
     private static final int HOST_ACTIVE = 35;
+    private static final long POINTER_HOVER_SETTLE_MILLIS = 48;
     private static final long POINTER_CLICK_HOLD_MILLIS = 32;
     private static final long RECOVERED_KEY_HOLD_MILLIS = 120;
     private static final long MENU_TRANSITION_DELAY_MILLIS = 120;
@@ -589,31 +590,45 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
         Log.d("ArchpheneInput", "queue pointer click x=" + mappedX + " y=" + mappedY
                 + " source=" + source.getWidth() + "x" + source.getHeight());
         long now = SystemClock.uptimeMillis();
-        long start;
+        long hover;
+        long press;
         synchronized (pointerClickLock) {
-            start = Math.max(now, nextPointerClickUptime);
-            nextPointerClickUptime = start + POINTER_CLICK_HOLD_MILLIS + 1;
+            hover = Math.max(now, nextPointerClickUptime);
+            press = hover + POINTER_HOVER_SETTLE_MILLIS;
+            nextPointerClickUptime = press + POINTER_CLICK_HOLD_MILLIS + 1;
         }
-        long startDelay = start - now;
-        Runnable press = () -> {
-            int eventTime = (int) SystemClock.uptimeMillis();
+        long hoverDelay = hover - now;
+        Runnable position = () -> {
             events.offer(new Event(
-                    POINTER_MOTION, mappedX, mappedY, eventTime, 0, ""));
-            events.offer(new Event(
-                    POINTER_BUTTON, 1, eventTime, 0, 0, ""));
+                    POINTER_MOTION,
+                    mappedX,
+                    mappedY,
+                    (int) SystemClock.uptimeMillis(),
+                    0,
+                    ""));
+            source.postDelayed(() -> {
+                int eventTime = (int) SystemClock.uptimeMillis();
+                events.offer(new Event(
+                        POINTER_BUTTON,
+                        1,
+                        eventTime,
+                        0,
+                        0,
+                        ""));
+                source.postDelayed(() -> events.offer(new Event(
+                        POINTER_BUTTON,
+                        0,
+                        (int) SystemClock.uptimeMillis(),
+                        0,
+                        0,
+                        "")), POINTER_CLICK_HOLD_MILLIS);
+            }, POINTER_HOVER_SETTLE_MILLIS);
         };
-        if (startDelay == 0) {
-            press.run();
+        if (hoverDelay == 0) {
+            position.run();
         } else {
-            source.postDelayed(press, startDelay);
+            source.postDelayed(position, hoverDelay);
         }
-        source.postDelayed(() -> events.offer(new Event(
-                POINTER_BUTTON,
-                0,
-                (int) SystemClock.uptimeMillis(),
-                0,
-                0,
-                "")), startDelay + POINTER_CLICK_HOLD_MILLIS);
     }
     private void beginTouchSequence() {
         if (forwardingTouch) return;
@@ -1305,7 +1320,7 @@ public final class ArchpheneCompositorSession implements AutoCloseable {
             return linuxDigits[androidKeyCode - KeyEvent.KEYCODE_0];
         }
         return switch (androidKeyCode) {
-            case KeyEvent.KEYCODE_ENTER -> 28;
+            case KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_DPAD_CENTER -> 28;
             case KeyEvent.KEYCODE_DEL -> 14;
             case KeyEvent.KEYCODE_FORWARD_DEL -> 111;
             case KeyEvent.KEYCODE_SPACE -> 57;

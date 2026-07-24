@@ -7,6 +7,7 @@ import android.content.ClipboardManager;
 import android.content.ClipDescription;
 import android.content.ContentProviderClient;
 import android.content.Intent;
+import android.content.pm.ActivityInfo;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
@@ -172,6 +173,7 @@ public abstract class ArchpheneCompositorActivity extends Activity {
         loadManagerAppearance();
         observeManagerAppearance();
         if (runtimeProbeUri == null && !processTreeProbe) loadManagerRuntimePack();
+        applyRuntimeOrientationPolicy();
         suppressInitialLegacySdlIme = "wayland".equals(toolkit)
                 && containsLibraryPrefix(runtimeLibraryNames, "libSDL2-");
         independentWindows = shouldUseIndependentWindows();
@@ -554,6 +556,25 @@ public abstract class ArchpheneCompositorActivity extends Activity {
             if (name != null && name.startsWith(prefix)) return true;
         }
         return false;
+    }
+
+    private void applyRuntimeOrientationPolicy() {
+        if (!"wayland".equals(toolkit)
+                || !(containsLibraryPrefix(runtimeLibraryNames, "libSDL2-")
+                        || containsLibraryPrefix(runtimeLibraryNames, "libSDL3"))) {
+            return;
+        }
+        Display display = getDisplay();
+        if (display != null && display.getDisplayId() != Display.DEFAULT_DISPLAY) return;
+        /*
+         * Linux SDL cannot apply SDL_HINT_ORIENTATIONS through its Wayland
+         * backend. Use the Android behavior expected by phone/tablet SDL
+         * applications while retaining both physical landscape rotations.
+         * Large-screen Android may ignore this request according to its own
+         * compatibility policy, and external displays remain unrestricted.
+         */
+        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+        Log.i(logTag, "Automatic SDL orientation policy=landscape-sensor");
     }
 
     private void observeManagerAppearance() {
