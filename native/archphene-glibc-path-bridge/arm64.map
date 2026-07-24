@@ -10,7 +10,9 @@ GLIBC_2.17 {
         chown;
         fchown;
         fchownat;
+        getegid;
         geteuid;
+        getgid;
         get_current_dir_name;
         getcwd;
         getuid;
@@ -32,4 +34,6 @@ GLIBC_2.17 {
         execvpe;
         readlink;
         readlinkat;
+        setfsgid;
+        setfsuid;
 };

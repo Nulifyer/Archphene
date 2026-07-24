@@ -22,6 +22,8 @@ gcc -O2 -Wall -Wextra -Werror \
   -o "$root/exec-probe" native/archphene-glibc-path-bridge/exec_probe.c
 gcc -O2 -Wall -Wextra -Werror \
   -o "$root/readlink-probe" native/archphene-glibc-path-bridge/readlink_probe.c
+gcc -O2 -Wall -Wextra -Werror \
+  -o "$root/identity-probe" native/archphene-glibc-path-bridge/identity_probe.c
 export LD_PRELOAD="$output"
 export ARCHPHENE_RUNTIME_ROOT="$root"
 export XDG_RUNTIME_DIR="$root/runtime"
@@ -108,4 +110,5 @@ test "$(cat "$root/rename-target")" = rename-compatible
 "$root/mkdir-probe" "$root/mkdir-target"
 test -d "$root/mkdir-target"
 "$root/shm-probe"
+"$root/identity-probe"
 printf 'path-bridge-tests-passed\n'

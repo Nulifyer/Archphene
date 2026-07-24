@@ -92,6 +92,8 @@ grep -Eq " symlinkat$" /tmp/path-bridge-symbols.txt
 grep -Eq " unlinkat$" /tmp/path-bridge-symbols.txt
 grep -Eq " readlink$" /tmp/path-bridge-symbols.txt
 grep -Eq " readlinkat$" /tmp/path-bridge-symbols.txt
+grep -Eq " setfsgid$" /tmp/path-bridge-symbols.txt
+grep -Eq " setfsuid$" /tmp/path-bridge-symbols.txt
 
 if [[ "$SKIP_CHOWN" != "1" ]]; then
   chown -R "$HOST_UID:$HOST_GID" /out

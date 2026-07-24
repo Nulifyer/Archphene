@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/fsuid.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -88,6 +89,16 @@ static void install_sigsys_diagnostic(void) {
  */
 uid_t getuid(void) { return 0; }
 uid_t geteuid(void) { return 0; }
+gid_t getgid(void) { return 0; }
+gid_t getegid(void) { return 0; }
+int setfsuid(uid_t user) {
+    (void)user;
+    return 0;
+}
+int setfsgid(gid_t group) {
+    (void)group;
+    return 0;
+}
 int chown(const char *path, uid_t owner, gid_t group) {
     (void)path;
     (void)owner;

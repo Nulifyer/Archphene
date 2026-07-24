@@ -52,7 +52,8 @@ podman run --rm --network=none \
   archphene_die "refreshed AArch64 bridge has the wrong machine"
 readelf -Ws "$work/libarchphene_path_bridge-x86_64.so" >"$work/x86-symbols.txt"
 readelf -Ws "$work/libarchphene_path_bridge-aarch64.so" >"$work/arm-symbols.txt"
-for symbol in chroot execve fchmodat getcwd linkat renameat symlinkat unlinkat; do
+for symbol in chroot execve fchmodat getcwd linkat renameat setfsgid setfsuid \
+    symlinkat unlinkat; do
   grep -Eq " $symbol$" "$work/x86-symbols.txt" ||
     archphene_die "refreshed x86_64 bridge is missing $symbol"
   grep -Eq "$symbol@@GLIBC_2\\.17" "$work/arm-symbols.txt" ||

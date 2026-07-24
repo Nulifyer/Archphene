@@ -84,7 +84,7 @@ def main() -> None:
     if "supertux" in combined.casefold():
         raise SystemExit("runtime relocation support must remain package-generic")
     arm64_map = ARM64_PATH_BRIDGE_MAP.read_text()
-    for symbol in ("readlink;", "readlinkat;"):
+    for symbol in ("readlink;", "readlinkat;", "setfsgid;", "setfsuid;"):
         if symbol not in arm64_map:
             raise SystemExit(
                 f"AArch64 path bridge must version {symbol[:-1]} for glibc interposition")
