@@ -12,6 +12,17 @@ const VERSION_CONTENT: &[u8] = b"archphene-root-v1\n";
 const VERSION_FILE: &str = ".archphene-root-version";
 const VERSION_TEMP_FILE: &str = ".archphene-root-version.tmp";
 const MAX_ROOT_PATH_BYTES: usize = 1024;
+const DEFAULT_BASHRC: &[u8] = b"# Created once by Archphene; this file belongs to the user.\n\
+case $- in\n\
+  *i*) ;;\n\
+  *) return ;;\n\
+esac\n\
+PS1='archphene:\\w$ '\n";
+const DEFAULT_BASH_PROFILE: &[u8] =
+    b"# Created once by Archphene; this file belongs to the user.\n\
+if [[ -r ~/.bashrc ]]; then\n\
+  . ~/.bashrc\n\
+fi\n";
 
 const DIRECTORIES: &[(&str, u32)] = &[
     ("usr", 0o755),
@@ -87,6 +98,11 @@ impl ArchRoot {
         for (relative, mode) in DIRECTORIES {
             ensure_directory(&path.join(relative), *mode, &mut created_directories)?;
         }
+        ensure_user_file(&path.join("home/archphene/.bashrc"), DEFAULT_BASHRC)?;
+        ensure_user_file(
+            &path.join("home/archphene/.bash_profile"),
+            DEFAULT_BASH_PROFILE,
+        )?;
         ensure_version(path)?;
         Ok((
             Self {
@@ -190,6 +206,24 @@ fn ensure_version(root: &Path) -> Result<(), RootError> {
     Ok(())
 }
 
+fn ensure_user_file(path: &Path, content: &[u8]) -> Result<(), RootError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(RootError::InvalidEntry(path.to_path_buf()));
+            }
+            return Ok(());
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(RootError::Io(error)),
+    }
+    let mut file = OpenOptions::new().create_new(true).write(true).open(path)?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    file.write_all(content)?;
+    file.sync_all()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,6 +259,10 @@ mod tests {
         assert!(temporary.0.join("var/lib/pacman/sync").is_dir());
         assert!(temporary.0.join("home/archphene").is_dir());
         assert!(temporary.0.join("mnt/android").is_dir());
+        assert_eq!(
+            fs::read(temporary.0.join("home/archphene/.bashrc")).expect("default bashrc"),
+            DEFAULT_BASHRC,
+        );
 
         let (_, second) = ArchRoot::bootstrap(&temporary.0).expect("second bootstrap");
         assert!(second.reused_existing_root);
@@ -257,6 +295,16 @@ mod tests {
                 & 0o7777,
             0o700
         );
+        fs::write(
+            temporary.0.join("home/archphene/.bashrc"),
+            b"# user customization\n",
+        )
+        .expect("custom bashrc");
+        ArchRoot::bootstrap(&temporary.0).expect("preserve user file");
+        assert_eq!(
+            fs::read(temporary.0.join("home/archphene/.bashrc")).expect("custom bashrc"),
+            b"# user customization\n",
+        );
     }
 
     #[test]
@@ -264,6 +312,22 @@ mod tests {
         let temporary = TestDirectory::new();
         fs::create_dir(&temporary.0).expect("test root");
         std::os::unix::fs::symlink("/tmp", temporary.0.join("usr")).expect("test symlink");
+        assert!(matches!(
+            ArchRoot::bootstrap(&temporary.0),
+            Err(RootError::InvalidEntry(_))
+        ));
+    }
+
+    #[test]
+    fn bootstrap_rejects_a_symlinked_user_startup_file() {
+        let temporary = TestDirectory::new();
+        ArchRoot::bootstrap(&temporary.0).expect("initial bootstrap");
+        fs::remove_file(temporary.0.join("home/archphene/.bashrc")).expect("remove bashrc");
+        std::os::unix::fs::symlink(
+            "/tmp/host-bashrc",
+            temporary.0.join("home/archphene/.bashrc"),
+        )
+        .expect("bashrc symlink");
         assert!(matches!(
             ArchRoot::bootstrap(&temporary.0),
             Err(RootError::InvalidEntry(_))

@@ -1,2 +1,5 @@
 #!/usr/bin/bash
 printf 'archphene-script-ok:%s\n' "$1"
+value='é'
+printf 'archphene-env:%s|%s|%s|%s|%s\n' \
+  "$HOME" "$PWD" "$PATH" "$(locale charmap)" "${#value}"

@@ -11,6 +11,8 @@ GLIBC_2.17 {
         fchown;
         fchownat;
         geteuid;
+        get_current_dir_name;
+        getcwd;
         getuid;
         lchown;
         link;

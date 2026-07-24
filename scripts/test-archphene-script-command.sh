@@ -91,6 +91,9 @@ archphene_wait_ui 'text="RUN"' "archphene-script-keyboard-dismissed-$serial" 10
 archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="RUN"' 'run Linux script'
 archphene_wait_ui 'text="Exited 0[^"]*archphene-script-ok:verified' \
   "archphene-script-complete-$serial" 45
+archphene_wait_ui \
+  'archphene-env:/home/archphene\|/home/archphene\|/usr/local/sbin:/usr/local/bin:/usr/bin\|UTF-8\|1' \
+  "archphene-script-environment-$serial" 15
 [[ "$ARCHPHENE_UI" != *"cannot change locale"* ]] ||
   archphene_die "script command exposed an unavailable locale warning"
 archphene_wait_log 'Linux command archphene-command-test exited 0' 15 >/dev/null
@@ -102,5 +105,5 @@ fatal_log="$(archphene_adb_run logcat -d -v brief \
   archphene_die "script command emitted a fatal runtime error: $fatal_log"
 
 archphene_note "Archphene shared script command regression passed on $serial"
-archphene_note "  The package-installed Bash interpreter ran a root-contained script"
+archphene_note "  Root-contained Bash script, conventional paths, and C.UTF-8 passed"
 archphene_note "  Full-device screenshot: $output_dir/$serial.png"

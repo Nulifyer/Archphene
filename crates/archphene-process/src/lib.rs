@@ -102,7 +102,6 @@ pub struct CommandEnvironment {
     library_path: OsString,
     path_bridge: PathBuf,
     command_directory: PathBuf,
-    executable_path: OsString,
 }
 
 impl CommandEnvironment {
@@ -112,18 +111,13 @@ impl CommandEnvironment {
         library_path: &OsStr,
         path_bridge: &Path,
         command_directory: &Path,
-        executable_path: &OsStr,
     ) -> Result<Self, ProcessError> {
         for path in [arch_root, loader, path_bridge, command_directory] {
             if !valid_absolute_path(path) {
                 return Err(ProcessError::InvalidEnvironment);
             }
         }
-        if library_path.is_empty()
-            || executable_path.is_empty()
-            || library_path.as_encoded_bytes().contains(&0)
-            || executable_path.as_encoded_bytes().contains(&0)
-        {
+        if library_path.is_empty() || library_path.as_encoded_bytes().contains(&0) {
             return Err(ProcessError::InvalidEnvironment);
         }
         let root_metadata = fs::symlink_metadata(arch_root)?;
@@ -148,7 +142,6 @@ impl CommandEnvironment {
             library_path: library_path.to_os_string(),
             path_bridge: resolved_bridge,
             command_directory: command_directory.to_path_buf(),
-            executable_path: executable_path.to_os_string(),
         })
     }
 
@@ -226,29 +219,23 @@ impl CommandEnvironment {
             .args(arguments)
             .current_dir(self.arch_root.join("home/archphene"))
             .env_clear()
-            .env("HOME", self.arch_root.join("home/archphene"))
-            .env("TMPDIR", self.arch_root.join("tmp"))
-            .env("PATH", &self.executable_path)
-            .env("LANG", "C")
-            .env("LC_ALL", "C")
+            .env("HOME", "/home/archphene")
+            .env("TMPDIR", "/tmp")
+            .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/bin")
+            .env("LANG", "C.UTF-8")
+            .env("LC_ALL", "C.UTF-8")
+            .env("LOCPATH", self.arch_root.join("usr/lib/locale"))
+            .env("USER", "archphene")
+            .env("LOGNAME", "archphene")
             .env("TERM", terminal)
             .env(
                 "COLORTERM",
                 if terminal == "dumb" { "" } else { "truecolor" },
             )
-            .env(
-                "XDG_CONFIG_HOME",
-                self.arch_root.join("home/archphene/.config"),
-            )
-            .env(
-                "XDG_CACHE_HOME",
-                self.arch_root.join("home/archphene/.cache"),
-            )
-            .env(
-                "XDG_DATA_HOME",
-                self.arch_root.join("home/archphene/.local/share"),
-            )
-            .env("XDG_RUNTIME_DIR", self.arch_root.join("run"))
+            .env("XDG_CONFIG_HOME", "/home/archphene/.config")
+            .env("XDG_CACHE_HOME", "/home/archphene/.cache")
+            .env("XDG_DATA_HOME", "/home/archphene/.local/share")
+            .env("XDG_RUNTIME_DIR", "/run")
             .env("GLIBC_TUNABLES", "glibc.pthread.rseq=0")
             .env("LD_PRELOAD", &self.path_bridge)
             .env("ARCHPHENE_RUNTIME_LOADER", &self.loader)
@@ -936,10 +923,30 @@ mod tests {
             aliases.as_os_str(),
             &bridge_alias,
             &aliases,
-            root.0.join("usr/bin").as_os_str(),
         )
         .expect("command environment");
         assert_eq!(environment.path_bridge, bridge);
+        let launch = LaunchPlan {
+            program: root.0.join("usr/bin/loader"),
+            argv0: "loader".to_owned(),
+            interpreter_argument: None,
+            script: None,
+        };
+        let command = environment.build_command(&launch, &[], "xterm-256color");
+        let value = |name: &str| {
+            command
+                .get_envs()
+                .find_map(|(key, value)| (key == name).then_some(value).flatten())
+        };
+        assert_eq!(value("HOME"), Some(OsStr::new("/home/archphene")));
+        assert_eq!(
+            value("PATH"),
+            Some(OsStr::new("/usr/local/sbin:/usr/local/bin:/usr/bin")),
+        );
+        assert_eq!(value("LANG"), Some(OsStr::new("C.UTF-8")));
+        assert_eq!(value("LC_ALL"), Some(OsStr::new("C.UTF-8")));
+        let expected_locale_path = root.0.join("usr/lib/locale");
+        assert_eq!(value("LOCPATH"), Some(expected_locale_path.as_os_str()),);
     }
 
     #[test]

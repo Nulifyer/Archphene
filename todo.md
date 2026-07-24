@@ -82,7 +82,9 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
     - [x] Install Bash through the normal signed package flow and pass a warning-free root-contained script/argument/output gate with full-device screenshots on both targets.
     - [ ] Build the conventional interactive shared shell environment, locale policy, startup files, and user-selected command/path behavior without escaping into Android's `/system/bin`.
       - [x] Keep package-installed Bash interactive in a controlling PTY while Archphene owns line editing; disable Bash's redundant Readline path, which Android app seccomp kills while idle.
-      - [ ] Provision a useful UTF-8 locale, reviewed startup files, prompts, shell discovery/selection, and documented PATH behavior for terminal and graphical children.
+      - [x] Publish conventional `/home/archphene`, `/tmp`, XDG, and `/usr` PATH values; map `getcwd` back into the Linux root; activate the installed `C.utf8` data; and create user-owned `.bashrc`/`.bash_profile` defaults once without overwriting edits.
+      - [x] Pass root-contained multibyte script plus interactive prompt, HOME, PWD, PATH, UTF-8 charmap, Activity recreation, scoped-log, and full-device gates on both targets.
+      - [ ] Add shell discovery/selection, per-shell startup adapters, user-editing UI/document access, and a documented PATH extension policy.
     - [x] Add a four-slot generation-checked PTY registry with controlling-terminal setup, bounded nonblocking direct-buffer I/O, resize, deterministic close, and process-group kill/reap on runtime destruction.
     - [x] Pass package-installed Bash PTY open, 24×80 to 40×120 resize, bidirectional marker, close/reap, scoped-log, and full-device UI gates on both targets.
     - [ ] Add user-controlled long-lived session ownership, backpressure queues, cancellation, exit status, Activity/process-death policy, and reboot recovery.

@@ -98,6 +98,10 @@ if cat /usr/share/../etc/passwd >/dev/null 2>&1; then
   exit 21
 fi
 test "$(cat "$root/usr/share/archphene-test/value")" = expected
+test "$(
+  cd "$root/usr/share/archphene-test"
+  ARCHPHENE_FAKE_CHROOT=1 /bin/pwd -P
+)" = /usr/share/archphene-test
 printf rename-compatible > "$root/rename-source"
 "$root/rename-probe" "$root/rename-source" "$root/rename-target"
 test "$(cat "$root/rename-target")" = rename-compatible

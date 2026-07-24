@@ -77,8 +77,18 @@ archphene_wait_log 'Activity created generation=1' 15 'ArchpheneActivity:V *:S' 
 archphene_wait_ui 'text="START SHELL"' "archphene-shell-action-$serial" 15
 archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="START SHELL"' 'start shell'
 archphene_wait_ui 'text="Shared shell ready' "archphene-shell-ready-$serial" 20
+archphene_wait_ui 'archphene:~\$' "archphene-shell-startup-$serial" 15
 archphene_wait_log 'Shared Bash session started' 15 >/dev/null
 
+enter_shell_line "pwd" "archphene-shell-pwd-$serial"
+archphene_wait_ui '/home/archphene' "archphene-shell-pwd-output-$serial" 15
+enter_shell_line "declare -p HOME" "archphene-shell-home-$serial"
+archphene_wait_ui 'HOME=.*/home/archphene' "archphene-shell-home-output-$serial" 15
+enter_shell_line "declare -p PATH" "archphene-shell-path-$serial"
+archphene_wait_ui '/usr/local/sbin:/usr/local/bin:/usr/bin' \
+  "archphene-shell-path-output-$serial" 15
+enter_shell_line "locale charmap" "archphene-shell-locale-$serial"
+archphene_wait_ui 'UTF-8' "archphene-shell-locale-output-$serial" 15
 enter_shell_line "echo archphene-session-one" "archphene-shell-one-$serial"
 archphene_wait_ui 'archphene-session-one' "archphene-shell-one-output-$serial" 15
 
@@ -127,6 +137,6 @@ fatal_log="$(archphene_adb_run logcat -d -v brief \
   archphene_die "shared-shell regression emitted a fatal runtime error: $fatal_log"
 
 archphene_note "Archphene shared-shell lifecycle regression passed on $serial"
-archphene_note "  Input, bounded output, exit status, stop/reap, and Activity recreation passed"
+archphene_note "  Startup, C.UTF-8, paths, lifecycle, exit status, and stop/reap passed"
 archphene_note "  Full-device screenshots: $output_dir/$serial-running.png"
 archphene_note "                           $output_dir/$serial-exited.png"

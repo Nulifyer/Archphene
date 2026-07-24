@@ -574,6 +574,43 @@ int chdir(const char *path) {
     return real(target);
 }
 
+static char *linux_cwd(char *path) {
+    if (path == NULL || trusted_root[0] == '\0' || !fake_chroot_active) return path;
+    size_t root_length = strlen(trusted_root);
+    if (strncmp(path, trusted_root, root_length) != 0
+            || (path[root_length] != '\0' && path[root_length] != '/')) {
+        return path;
+    }
+    const char *relative = path + root_length;
+    if (relative[0] == '\0') {
+        path[0] = '/';
+        path[1] = '\0';
+    } else {
+        memmove(path, relative, strlen(relative) + 1);
+    }
+    return path;
+}
+
+char *getcwd(char *buffer, size_t size) {
+    typedef char *(*function_type)(char *, size_t);
+    function_type real = (function_type)dlsym(RTLD_NEXT, "getcwd");
+    if (real == NULL) {
+        errno = ENOSYS;
+        return NULL;
+    }
+    return linux_cwd(real(buffer, size));
+}
+
+char *get_current_dir_name(void) {
+    typedef char *(*function_type)(void);
+    function_type real = (function_type)dlsym(RTLD_NEXT, "get_current_dir_name");
+    if (real == NULL) {
+        errno = ENOSYS;
+        return NULL;
+    }
+    return linux_cwd(real());
+}
+
 static bool write_flags(int flags) {
     return (flags & O_ACCMODE) != O_RDONLY
             || (flags & (O_CREAT | O_TRUNC | O_APPEND | O_TMPFILE)) != 0;

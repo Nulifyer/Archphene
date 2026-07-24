@@ -106,8 +106,8 @@ the verified loader and generic path bridge. ELF programs run directly.
 Scripts must name a conventional `/usr/bin` or `/bin` shebang interpreter that
 resolves to an installed ELF program inside the same root; Android-host,
 missing, malformed, and recursive script interpreters fail closed. The process
-receives a cleared, conventional shared-home/XDG environment, guaranteed `C`
-locale, a fixed argument budget, 15 KiB combined-output limit, 30-second
+receives a cleared, conventional shared-home/XDG environment, installed
+`C.UTF-8` locale data, a fixed argument budget, 15 KiB combined-output limit, 30-second
 deadline, and its own process group; temporary output is mode 0600 and removed
 on every return path. Kotlin crosses JNI once per command on a worker thread
 and exposes a deliberately small diagnostic command panel.
@@ -144,8 +144,20 @@ explicit stop, and encoded exit-status polling. Bash runs with
 the redundant GNU Readline idle path is killed by the inherited Android app
 seccomp profile. This is a generic shared-shell policy, not a patch to Bash.
 
-Two-command lifecycle gates now pass on the x86_64 emulator and AArch64
-Samsung. Each starts the shell, sends and observes two markers, forces an
+User-visible processes now receive Linux-facing `HOME=/home/archphene`,
+`TMPDIR=/tmp`, conventional XDG locations, and
+`PATH=/usr/local/sbin:/usr/local/bin:/usr/bin`; bridge-private host paths remain
+only in the explicit loader variables. The path bridge maps `getcwd` and
+`get_current_dir_name` back into the shared root, so both `PWD` and `pwd`
+report `/home/archphene` instead of Android's private data path. `LOCPATH`
+points directly at the verified locale data installed by the architecture's
+official glibc package, enabling `C.UTF-8` without generating or bundling a
+second locale. Root bootstrap creates `.bashrc` and `.bash_profile` defaults
+once, rejects symlink substitution, and never overwrites user edits.
+
+Interactive lifecycle gates now pass on the x86_64 emulator and AArch64
+Samsung. Each proves the Archphene prompt, HOME, PWD, conventional PATH, and
+UTF-8 charmap, sends and observes two markers, forces an
 Activity recreation by changing device rotation, proves the Service retains
 the session and output, observes `exit 7`, restarts and explicitly stops the
 shell, proves no loader child survives, checks scoped fatal logs, restores

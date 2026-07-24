@@ -1158,7 +1158,6 @@ impl PackageRuntime {
             &self.library_path,
             &self.path_bridge,
             &self.alias_root,
-            &self.executable_path,
         )
         .map_err(PackageRuntimeError::from)
     }

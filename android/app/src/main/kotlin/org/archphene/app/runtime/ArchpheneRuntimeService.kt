@@ -1593,12 +1593,31 @@ class ArchpheneRuntimeService : Service() {
         while (index < output.length && sanitized.length < 4096) {
             val character = output[index++]
             if (character == '\u001b') {
-                if (index < output.length && output[index] == '[') {
-                    index++
-                    while (index < output.length) {
-                        val value = output[index++]
-                        if (value.code in 0x40..0x7e) {
-                            break
+                if (index < output.length) {
+                    when (output[index++]) {
+                        '[' -> {
+                            while (index < output.length) {
+                                val value = output[index++]
+                                if (value.code in 0x40..0x7e) {
+                                    break
+                                }
+                            }
+                        }
+                        ']' -> {
+                            while (index < output.length) {
+                                val value = output[index++]
+                                if (value == '\u0007') {
+                                    break
+                                }
+                                if (
+                                    value == '\u001b' &&
+                                    index < output.length &&
+                                    output[index] == '\\'
+                                ) {
+                                    index++
+                                    break
+                                }
+                            }
                         }
                     }
                 }
@@ -1675,8 +1694,6 @@ class ArchpheneRuntimeService : Service() {
                     *"bash".toByteArray(StandardCharsets.UTF_8),
                     0.toByte(),
                     *"--noprofile".toByteArray(StandardCharsets.UTF_8),
-                    0.toByte(),
-                    *"--norc".toByteArray(StandardCharsets.UTF_8),
                     0.toByte(),
                     *"--noediting".toByteArray(StandardCharsets.UTF_8),
                 )
