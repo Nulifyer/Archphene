@@ -124,7 +124,10 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
       - [x] Pin `unicode-width` and `unicode-segmentation`, retain at most 16 Unicode scalar values per grapheme, and keep streaming width/segmentation plus protocol publication allocation-free after warm-up.
       - [x] Version terminal damage to bounded grapheme cells; render combining text, CJK, flags, emoji modifiers, and ZWJ families through reusable primitive/scratch storage while preserving one/two-column geometry and normalizing wide cells across edits and resize.
       - [x] Implement DEC origin and autowrap modes, then prove Unicode, exact last-column placement, margin-relative cursor positioning, accessibility, scoped logs, and full-device visuals on both exact-ABI targets.
-      - [ ] Complete remaining xterm controls/modes, scrollback/reflow, selection/copy, bounded grapheme-overflow policy, non-Latin/composing IME coverage, and richer accessibility before calling the surface production-ready.
+      - [x] Add a preallocated 4 MiB/4,096-line primary-screen scrollback ring with bounded compact grapheme cells; exclude alternate-screen and partial-margin scrolling and preserve warmed zero-allocation output.
+      - [x] Version damage with bounded history/viewport state, hide the cursor outside the live viewport, retain the viewed position while new rows arrive, and expose history through touch, mouse wheel, Shift+PageUp/PageDown, and Android accessibility actions.
+      - [x] Prove visible history, return to live output, touch, wheel, hardware-page, accessibility, scoped-log, and full-device behavior on the exact-ABI emulator and Samsung builds; rerun broad PTY, color, editing, and Unicode gates on both.
+      - [ ] Complete remaining xterm controls/modes, logical soft-wrap joining and resize reflow across screen/history, selection/copy, bounded grapheme-overflow policy, non-Latin/composing IME coverage, and richer accessibility before calling the surface production-ready.
       - [x] Replace the clipped temporary diagnostic strip during active sessions with the measured full-height terminal surface; retain emulator and Samsung full-device portrait/landscape/rebind evidence.
   - [ ] Wayland compositor, presentation, and lifecycle
   - [ ] Pointer, touch, keyboard, IME, clipboard, and drag-and-drop

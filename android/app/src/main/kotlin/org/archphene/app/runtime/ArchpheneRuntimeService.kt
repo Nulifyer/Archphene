@@ -149,7 +149,10 @@ class ArchpheneRuntimeService : Service() {
             columns: Int,
         ): Boolean = requestShellResize(rows, columns)
 
-        fun readSharedShellTerminalDamage(fullSnapshot: Boolean): Int {
+        fun readSharedShellTerminalDamage(
+            fullSnapshot: Boolean,
+            viewportOffset: Int,
+        ): Int {
             val activeHandle = readyHandle
             val activePty = shellHandle
             if (activeHandle == 0L || activePty == 0L) {
@@ -160,6 +163,7 @@ class ArchpheneRuntimeService : Service() {
                 activeHandle,
                 activePty,
                 fullSnapshot,
+                viewportOffset,
                 shellTerminalDamageBuffer,
             )
         }

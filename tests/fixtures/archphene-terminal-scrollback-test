@@ -1,0 +1,9 @@
+#!/usr/bin/bash
+set -euo pipefail
+
+tput clear
+for ((line = 1; line <= 120; line++)); do
+  printf 'SCROLL-%03d\r\n' "$line"
+done
+printf 'SCROLL-LIVE-READY'
+IFS= read -r -n 1

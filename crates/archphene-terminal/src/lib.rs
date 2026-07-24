@@ -8,11 +8,13 @@ pub const MAX_ROWS: u16 = 200;
 pub const MIN_COLUMNS: u16 = 2;
 pub const MAX_COLUMNS: u16 = 400;
 pub const MAX_GRAPHEME_CODEPOINTS: usize = 16;
-pub const DAMAGE_PROTOCOL_VERSION: u32 = 3;
-pub const DAMAGE_HEADER_SIZE: usize = 32;
+pub const DAMAGE_PROTOCOL_VERSION: u32 = 4;
+pub const DAMAGE_HEADER_SIZE: usize = 40;
 pub const DAMAGE_CELL_SIZE: usize = 76;
 pub const MAX_DAMAGE_BYTES: usize =
     DAMAGE_HEADER_SIZE + MAX_ROWS as usize * MAX_COLUMNS as usize * DAMAGE_CELL_SIZE;
+pub const SCROLLBACK_BYTE_LIMIT: usize = 4 * 1024 * 1024;
+pub const SCROLLBACK_LINE_LIMIT: usize = 4 * 1024;
 const DAMAGE_MAGIC: u32 = u32::from_le_bytes(*b"ATRM");
 const MAX_CSI_PARAMETERS: usize = 16;
 const MAX_STRING_BYTES: usize = 8 * 1024;
@@ -85,6 +87,194 @@ pub enum TerminalError {
     OutputTooSmall,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct StoredLine {
+    start: u32,
+    byte_length: u32,
+    cells: u16,
+    _soft_wrapped: bool,
+}
+
+#[derive(Debug)]
+struct Scrollback {
+    bytes: Vec<u8>,
+    lines: Vec<StoredLine>,
+    first_line: usize,
+    line_count: usize,
+    write_offset: usize,
+    bytes_used: usize,
+}
+
+impl Scrollback {
+    fn new() -> Self {
+        Self {
+            bytes: vec![0; SCROLLBACK_BYTE_LIMIT],
+            lines: vec![StoredLine::default(); SCROLLBACK_LINE_LIMIT],
+            first_line: 0,
+            line_count: 0,
+            write_offset: 0,
+            bytes_used: 0,
+        }
+    }
+
+    fn append_line(&mut self, cells: &[Cell], soft_wrapped: bool) {
+        let stored_cells = if soft_wrapped {
+            cells
+        } else {
+            let meaningful = cells
+                .iter()
+                .rposition(|cell| *cell != Cell::blank())
+                .map_or(1, |index| index + 1);
+            &cells[..meaningful.min(cells.len())]
+        };
+        let byte_length = stored_cells.iter().fold(0_usize, |length, cell| {
+            length + 12 + usize::from(cell.grapheme_len) * 4
+        });
+        if stored_cells.is_empty()
+            || stored_cells.len() > usize::from(MAX_COLUMNS)
+            || byte_length > self.bytes.len()
+        {
+            return;
+        }
+        while self.line_count == self.lines.len()
+            || self.bytes.len() - self.bytes_used < byte_length
+        {
+            self.evict_oldest();
+        }
+        let line_index = (self.first_line + self.line_count) % self.lines.len();
+        self.lines[line_index] = StoredLine {
+            start: self.write_offset as u32,
+            byte_length: byte_length as u32,
+            cells: stored_cells.len() as u16,
+            _soft_wrapped: soft_wrapped,
+        };
+        for cell in stored_cells {
+            self.write_byte(cell.grapheme_len);
+            self.write_byte(cell.width);
+            self.write_byte(cell.attributes);
+            self.write_byte(0);
+            self.write_u32(cell.foreground);
+            self.write_u32(cell.background);
+            for index in 0..usize::from(cell.grapheme_len) {
+                self.write_u32(cell.codepoint(index));
+            }
+        }
+        self.line_count += 1;
+        self.bytes_used += byte_length;
+    }
+
+    fn visual_rows(&self, columns: u16) -> u32 {
+        self.line_iter().fold(0_u32, |rows, line| {
+            rows.saturating_add(
+                u32::from(line.cells).saturating_add(u32::from(columns) - 1) / u32::from(columns),
+            )
+        })
+    }
+
+    fn fill_visual_row(&self, visual_row: u32, columns: u16, output: &mut [Cell]) -> bool {
+        if output.len() < usize::from(columns) {
+            return false;
+        }
+        output[..usize::from(columns)].fill(Cell::blank());
+        let mut first_visual_row = 0_u32;
+        for line in self.line_iter() {
+            let line_rows =
+                u32::from(line.cells).saturating_add(u32::from(columns) - 1) / u32::from(columns);
+            if visual_row < first_visual_row.saturating_add(line_rows) {
+                let chunk = visual_row - first_visual_row;
+                let first_cell = chunk * u32::from(columns);
+                self.decode_line_chunk(line, first_cell as u16, columns, output);
+                normalize_cell_row(output, columns, 0);
+                return true;
+            }
+            first_visual_row = first_visual_row.saturating_add(line_rows);
+        }
+        false
+    }
+
+    fn line_iter(&self) -> impl Iterator<Item = StoredLine> + '_ {
+        (0..self.line_count).map(|offset| self.lines[(self.first_line + offset) % self.lines.len()])
+    }
+
+    fn decode_line_chunk(
+        &self,
+        line: StoredLine,
+        first_cell: u16,
+        columns: u16,
+        output: &mut [Cell],
+    ) {
+        let mut source = line.start as usize;
+        let mut consumed = 0_usize;
+        for cell_index in 0..line.cells {
+            let grapheme_len = self.read_byte(source);
+            let width = self.read_byte(source + 1);
+            let attributes = self.read_byte(source + 2);
+            let foreground = self.read_u32(source + 4);
+            let background = self.read_u32(source + 8);
+            let stored_length = 12 + usize::from(grapheme_len) * 4;
+            if cell_index >= first_cell && cell_index < first_cell.saturating_add(columns) {
+                let destination = usize::from(cell_index - first_cell);
+                let mut cell = Cell {
+                    codepoint: 0,
+                    trailing_codepoints: [0; MAX_GRAPHEME_CODEPOINTS - 1],
+                    foreground,
+                    background,
+                    attributes,
+                    grapheme_len: grapheme_len.min(MAX_GRAPHEME_CODEPOINTS as u8),
+                    width: width.min(2),
+                };
+                for codepoint_index in 0..usize::from(cell.grapheme_len) {
+                    cell.set_codepoint(
+                        codepoint_index,
+                        self.read_u32(source + 12 + codepoint_index * 4),
+                    );
+                }
+                output[destination] = cell;
+            }
+            source = (source + stored_length) % self.bytes.len();
+            consumed += stored_length;
+            if consumed >= line.byte_length as usize {
+                break;
+            }
+        }
+    }
+
+    fn evict_oldest(&mut self) {
+        if self.line_count == 0 {
+            return;
+        }
+        let line = self.lines[self.first_line];
+        self.bytes_used = self.bytes_used.saturating_sub(line.byte_length as usize);
+        self.lines[self.first_line] = StoredLine::default();
+        self.first_line = (self.first_line + 1) % self.lines.len();
+        self.line_count -= 1;
+    }
+
+    fn write_byte(&mut self, value: u8) {
+        self.bytes[self.write_offset] = value;
+        self.write_offset = (self.write_offset + 1) % self.bytes.len();
+    }
+
+    fn write_u32(&mut self, value: u32) {
+        for byte in value.to_le_bytes() {
+            self.write_byte(byte);
+        }
+    }
+
+    fn read_byte(&self, offset: usize) -> u8 {
+        self.bytes[offset % self.bytes.len()]
+    }
+
+    fn read_u32(&self, offset: usize) -> u32 {
+        u32::from_le_bytes([
+            self.read_byte(offset),
+            self.read_byte(offset + 1),
+            self.read_byte(offset + 2),
+            self.read_byte(offset + 3),
+        ])
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ParserState {
     Ground,
@@ -123,6 +313,10 @@ pub struct Terminal {
     inactive_saved_column: u16,
     inactive_scroll_top: u16,
     inactive_scroll_bottom: u16,
+    row_soft_wrapped: Vec<bool>,
+    inactive_row_soft_wrapped: Vec<bool>,
+    scrollback: Scrollback,
+    view_row_scratch: Vec<Cell>,
     alternate_active: bool,
     cursor_visible: bool,
     application_cursor: bool,
@@ -182,6 +376,10 @@ impl Terminal {
             inactive_saved_column: 0,
             inactive_scroll_top: 0,
             inactive_scroll_bottom: rows - 1,
+            row_soft_wrapped: vec![false; usize::from(rows)],
+            inactive_row_soft_wrapped: vec![false; usize::from(rows)],
+            scrollback: Scrollback::new(),
+            view_row_scratch: vec![Cell::blank(); usize::from(MAX_COLUMNS)],
             alternate_active: false,
             cursor_visible: true,
             application_cursor: false,
@@ -261,6 +459,53 @@ impl Terminal {
         self.write_damage_range(output, 0, self.rows)
     }
 
+    pub fn history_rows(&self) -> u32 {
+        self.scrollback.visual_rows(self.columns)
+    }
+
+    pub fn write_view_damage(
+        &mut self,
+        output: &mut [u8],
+        viewport_offset: u32,
+    ) -> Result<usize, TerminalError> {
+        let history_rows = self.history_rows();
+        let viewport_offset = viewport_offset.min(history_rows);
+        if viewport_offset == 0 {
+            return self.write_full_damage(output);
+        }
+        let required = DAMAGE_HEADER_SIZE
+            + usize::from(self.rows) * usize::from(self.columns) * DAMAGE_CELL_SIZE;
+        if output.len() < required {
+            return Err(TerminalError::OutputTooSmall);
+        }
+        output[..required].fill(0);
+        self.write_damage_header(output, 0, 0, 0, self.rows, history_rows, viewport_offset);
+        let first_visual_row = history_rows - viewport_offset;
+        let mut offset = DAMAGE_HEADER_SIZE;
+        for viewport_row in 0..self.rows {
+            let visual_row = first_visual_row + u32::from(viewport_row);
+            if visual_row < history_rows {
+                let (scrollback, scratch) = (&self.scrollback, &mut self.view_row_scratch);
+                if !scrollback.fill_visual_row(visual_row, self.columns, scratch) {
+                    scratch[..usize::from(self.columns)].fill(Cell::blank());
+                }
+                for cell in &scratch[..usize::from(self.columns)] {
+                    write_wire_cell(output, offset, *cell);
+                    offset += DAMAGE_CELL_SIZE;
+                }
+            } else {
+                let screen_row = (visual_row - history_rows) as u16;
+                for column in 0..self.columns {
+                    write_wire_cell(output, offset, self.cells[self.index(screen_row, column)]);
+                    offset += DAMAGE_CELL_SIZE;
+                }
+            }
+        }
+        self.dirty_start = self.rows;
+        self.dirty_end = 0;
+        Ok(required)
+    }
+
     fn write_damage_range(
         &mut self,
         output: &mut [u8],
@@ -275,15 +520,46 @@ impl Terminal {
             return Err(TerminalError::OutputTooSmall);
         }
         output[..required].fill(0);
+        self.write_damage_header(
+            output,
+            self.cursor_row,
+            self.cursor_column,
+            dirty_start,
+            dirty_end,
+            self.history_rows(),
+            0,
+        );
+        let mut offset = DAMAGE_HEADER_SIZE;
+        for row in dirty_start..dirty_end {
+            for column in 0..self.columns {
+                write_wire_cell(output, offset, self.cells[self.index(row, column)]);
+                offset += DAMAGE_CELL_SIZE;
+            }
+        }
+        self.dirty_start = self.rows;
+        self.dirty_end = 0;
+        Ok(required)
+    }
+
+    fn write_damage_header(
+        &self,
+        output: &mut [u8],
+        cursor_row: u16,
+        cursor_column: u16,
+        dirty_start: u16,
+        dirty_end: u16,
+        history_rows: u32,
+        viewport_offset: u32,
+    ) {
         output[0..4].copy_from_slice(&DAMAGE_MAGIC.to_le_bytes());
         output[4..8].copy_from_slice(&DAMAGE_PROTOCOL_VERSION.to_le_bytes());
         output[8..10].copy_from_slice(&self.rows.to_le_bytes());
         output[10..12].copy_from_slice(&self.columns.to_le_bytes());
-        output[12..14].copy_from_slice(&self.cursor_row.to_le_bytes());
-        output[14..16].copy_from_slice(&self.cursor_column.to_le_bytes());
+        output[12..14].copy_from_slice(&cursor_row.to_le_bytes());
+        output[14..16].copy_from_slice(&cursor_column.to_le_bytes());
         output[16..18].copy_from_slice(&dirty_start.to_le_bytes());
         output[18..20].copy_from_slice(&dirty_end.to_le_bytes());
-        let flags = if self.cursor_visible {
+        let flags = if self.cursor_visible && viewport_offset == 0 {
             FLAG_CURSOR_VISIBLE
         } else {
             0
@@ -310,26 +586,8 @@ impl Terminal {
         };
         output[20..24].copy_from_slice(&flags.to_le_bytes());
         output[24..32].copy_from_slice(&self.revision.to_le_bytes());
-        let mut offset = DAMAGE_HEADER_SIZE;
-        for row in dirty_start..dirty_end {
-            for column in 0..self.columns {
-                let cell = self.cells[self.index(row, column)];
-                for codepoint_index in 0..MAX_GRAPHEME_CODEPOINTS {
-                    let start = offset + codepoint_index * 4;
-                    output[start..start + 4]
-                        .copy_from_slice(&cell.codepoint(codepoint_index).to_le_bytes());
-                }
-                output[offset + 64..offset + 68].copy_from_slice(&cell.foreground.to_le_bytes());
-                output[offset + 68..offset + 72].copy_from_slice(&cell.background.to_le_bytes());
-                output[offset + 72] = cell.attributes;
-                output[offset + 73] = cell.width;
-                output[offset + 74] = cell.grapheme_len;
-                offset += DAMAGE_CELL_SIZE;
-            }
-        }
-        self.dirty_start = self.rows;
-        self.dirty_end = 0;
-        Ok(required)
+        output[32..36].copy_from_slice(&history_rows.to_le_bytes());
+        output[36..40].copy_from_slice(&viewport_offset.to_le_bytes());
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
@@ -359,8 +617,13 @@ impl Terminal {
             columns,
             self.inactive_cursor_row,
         );
+        let row_soft_wrapped = resize_row_flags(&self.row_soft_wrapped, rows, source_row);
+        let inactive_row_soft_wrapped =
+            resize_row_flags(&self.inactive_row_soft_wrapped, rows, inactive_source_row);
         self.cells = cells;
         self.inactive_cells = inactive_cells;
+        self.row_soft_wrapped = row_soft_wrapped;
+        self.inactive_row_soft_wrapped = inactive_row_soft_wrapped;
         self.rows = rows;
         self.columns = columns;
         self.cursor_row = self.cursor_row.saturating_sub(source_row).min(rows - 1);
@@ -785,6 +1048,10 @@ impl Terminal {
         std::mem::swap(&mut self.saved_column, &mut self.inactive_saved_column);
         std::mem::swap(&mut self.scroll_top, &mut self.inactive_scroll_top);
         std::mem::swap(&mut self.scroll_bottom, &mut self.inactive_scroll_bottom);
+        std::mem::swap(
+            &mut self.row_soft_wrapped,
+            &mut self.inactive_row_soft_wrapped,
+        );
         self.alternate_active = enabled;
         if enabled && clear_on_entry {
             self.cells.fill(Cell::blank());
@@ -795,6 +1062,7 @@ impl Terminal {
             self.saved_column = 0;
             self.scroll_top = 0;
             self.scroll_bottom = self.rows - 1;
+            self.row_soft_wrapped.fill(false);
         }
         self.mark_dirty_range(0, self.rows);
     }
@@ -804,6 +1072,7 @@ impl Terminal {
             return;
         }
         if self.auto_wrap && self.wrap_pending {
+            self.row_soft_wrapped[usize::from(self.cursor_row)] = true;
             self.cursor_column = 0;
             self.line_feed();
             self.wrap_pending = false;
@@ -811,6 +1080,7 @@ impl Terminal {
         let mut width = codepoint_width(codepoint).clamp(1, 2);
         if width == 2 && self.cursor_column + 1 >= self.columns {
             if self.auto_wrap {
+                self.row_soft_wrapped[usize::from(self.cursor_row)] = true;
                 self.cursor_column = 0;
                 self.line_feed();
             } else {
@@ -991,6 +1261,12 @@ impl Terminal {
         let offset = usize::from(count) * columns;
         self.cells.copy_within(start..end - offset, start + offset);
         self.cells[start..start + offset].fill(Cell::blank());
+        let row_start = usize::from(self.cursor_row);
+        let row_end = usize::from(self.scroll_bottom) + 1;
+        let row_count = usize::from(count);
+        self.row_soft_wrapped
+            .copy_within(row_start..row_end - row_count, row_start + row_count);
+        self.row_soft_wrapped[row_start..row_start + row_count].fill(false);
         self.mark_dirty_range(self.cursor_row, self.scroll_bottom + 1);
     }
 
@@ -1005,17 +1281,38 @@ impl Terminal {
         let offset = usize::from(count) * columns;
         self.cells.copy_within(start + offset..end, start);
         self.cells[end - offset..end].fill(Cell::blank());
+        let row_start = usize::from(self.cursor_row);
+        let row_end = usize::from(self.scroll_bottom) + 1;
+        let row_count = usize::from(count);
+        self.row_soft_wrapped
+            .copy_within(row_start + row_count..row_end, row_start);
+        self.row_soft_wrapped[row_end - row_count..row_end].fill(false);
         self.mark_dirty_range(self.cursor_row, self.scroll_bottom + 1);
     }
 
     fn scroll_up_by(&mut self, count: u16) {
         let count = count.min(self.scroll_bottom - self.scroll_top + 1);
         let columns = usize::from(self.columns);
+        if !self.alternate_active && self.scroll_top == 0 && self.scroll_bottom + 1 == self.rows {
+            for row in 0..count {
+                let start = self.index(row, 0);
+                self.scrollback.append_line(
+                    &self.cells[start..start + columns],
+                    self.row_soft_wrapped[usize::from(row)],
+                );
+            }
+        }
         let top = self.index(self.scroll_top, 0);
         let end = self.index(self.scroll_bottom + 1, 0);
         let offset = usize::from(count) * columns;
         self.cells.copy_within(top + offset..end, top);
         self.cells[end - offset..end].fill(Cell::blank());
+        let row_start = usize::from(self.scroll_top);
+        let row_end = usize::from(self.scroll_bottom) + 1;
+        let row_count = usize::from(count);
+        self.row_soft_wrapped
+            .copy_within(row_start + row_count..row_end, row_start);
+        self.row_soft_wrapped[row_end - row_count..row_end].fill(false);
         self.mark_dirty_range(self.scroll_top, self.scroll_bottom + 1);
     }
 
@@ -1027,6 +1324,12 @@ impl Terminal {
         let offset = usize::from(count) * columns;
         self.cells.copy_within(top..end - offset, top + offset);
         self.cells[top..top + offset].fill(Cell::blank());
+        let row_start = usize::from(self.scroll_top);
+        let row_end = usize::from(self.scroll_bottom) + 1;
+        let row_count = usize::from(count);
+        self.row_soft_wrapped
+            .copy_within(row_start..row_end - row_count, row_start + row_count);
+        self.row_soft_wrapped[row_start..row_start + row_count].fill(false);
         self.mark_dirty_range(self.scroll_top, self.scroll_bottom + 1);
     }
 
@@ -1081,6 +1384,7 @@ impl Terminal {
                 for row in self.cursor_row..self.rows {
                     normalize_cell_row(&mut self.cells, self.columns, row);
                 }
+                self.row_soft_wrapped[usize::from(self.cursor_row)..].fill(false);
                 self.mark_dirty_range(self.cursor_row, self.rows);
             }
             1 => {
@@ -1090,10 +1394,12 @@ impl Terminal {
                 for row in 0..=self.cursor_row {
                     normalize_cell_row(&mut self.cells, self.columns, row);
                 }
+                self.row_soft_wrapped[..=usize::from(self.cursor_row)].fill(false);
                 self.mark_dirty_range(0, self.cursor_row + 1);
             }
             2 | 3 => {
                 self.cells.fill(Cell::blank());
+                self.row_soft_wrapped.fill(false);
                 self.mark_dirty_range(0, self.rows);
             }
             _ => {}
@@ -1117,7 +1423,10 @@ impl Terminal {
                 self.clear_wide_intersections(self.cursor_row, 0, self.cursor_column + 1);
                 self.cells[start..=start + column].fill(Cell::blank());
             }
-            2 => self.cells[start..end].fill(Cell::blank()),
+            2 => {
+                self.cells[start..end].fill(Cell::blank());
+                self.row_soft_wrapped[usize::from(self.cursor_row)] = false;
+            }
             _ => return,
         }
         normalize_cell_row(&mut self.cells, self.columns, self.cursor_row);
@@ -1201,6 +1510,8 @@ impl Terminal {
         self.inactive_saved_column = 0;
         self.inactive_scroll_top = 0;
         self.inactive_scroll_bottom = self.rows - 1;
+        self.row_soft_wrapped.fill(false);
+        self.inactive_row_soft_wrapped.fill(false);
         self.cursor_visible = true;
         self.application_cursor = false;
         self.application_keypad = false;
@@ -1302,6 +1613,15 @@ fn resize_cells(
     (replacement, source_row)
 }
 
+fn resize_row_flags(source: &[bool], rows: u16, source_row: u16) -> Vec<bool> {
+    let mut replacement = vec![false; usize::from(rows)];
+    let available = source.len().saturating_sub(usize::from(source_row));
+    let copied = replacement.len().min(available);
+    replacement[..copied]
+        .copy_from_slice(&source[usize::from(source_row)..usize::from(source_row) + copied]);
+    replacement
+}
+
 fn normalize_cell_row(cells: &mut [Cell], columns: u16, row: u16) {
     let row_start = usize::from(row) * usize::from(columns);
     let mut column = 0;
@@ -1330,6 +1650,18 @@ fn normalize_cell_row(cells: &mut [Cell], columns: u16, row: u16) {
             }
         }
     }
+}
+
+fn write_wire_cell(output: &mut [u8], offset: usize, cell: Cell) {
+    for codepoint_index in 0..MAX_GRAPHEME_CODEPOINTS {
+        let start = offset + codepoint_index * 4;
+        output[start..start + 4].copy_from_slice(&cell.codepoint(codepoint_index).to_le_bytes());
+    }
+    output[offset + 64..offset + 68].copy_from_slice(&cell.foreground.to_le_bytes());
+    output[offset + 68..offset + 72].copy_from_slice(&cell.background.to_le_bytes());
+    output[offset + 72] = cell.attributes;
+    output[offset + 73] = cell.width;
+    output[offset + 74] = cell.grapheme_len;
 }
 
 fn validate_size(rows: u16, columns: u16) -> Result<(), TerminalError> {
@@ -1434,6 +1766,25 @@ mod tests {
             .collect()
     }
 
+    fn damage_text(damage: &[u8], row: u16, columns: u16) -> String {
+        (0..columns)
+            .map(|column| {
+                let offset = DAMAGE_HEADER_SIZE
+                    + (usize::from(row) * usize::from(columns) + usize::from(column))
+                        * DAMAGE_CELL_SIZE;
+                let grapheme_len = damage[offset + 74];
+                if grapheme_len == 0 {
+                    ' '
+                } else {
+                    char::from_u32(u32::from_le_bytes(
+                        damage[offset..offset + 4].try_into().unwrap(),
+                    ))
+                    .unwrap_or('\u{fffd}')
+                }
+            })
+            .collect()
+    }
+
     #[test]
     fn printable_utf8_controls_and_wrapping_are_streaming() {
         let mut terminal = Terminal::new(3, 8).unwrap();
@@ -1502,6 +1853,88 @@ mod tests {
                 .iter()
                 .all(|cell| cell.width != 0 || cell.grapheme_len == 0)
         );
+    }
+
+    #[test]
+    fn fullscreen_scrolls_publish_bounded_history_viewports() {
+        let mut terminal = Terminal::new(3, 8).unwrap();
+        terminal.feed(b"one\r\ntwo\r\nthree\r\nfour");
+        assert_eq!(terminal.history_rows(), 1);
+        assert_eq!(text(&terminal, 0), "two     ");
+        assert_eq!(text(&terminal, 1), "three   ");
+        assert_eq!(text(&terminal, 2), "four    ");
+
+        let mut damage = vec![0_u8; MAX_DAMAGE_BYTES];
+        let length = terminal.write_view_damage(&mut damage, 1).unwrap();
+        assert_eq!(length, DAMAGE_HEADER_SIZE + 3 * 8 * DAMAGE_CELL_SIZE);
+        assert_eq!(u32::from_le_bytes(damage[32..36].try_into().unwrap()), 1);
+        assert_eq!(u32::from_le_bytes(damage[36..40].try_into().unwrap()), 1);
+        assert_eq!(
+            u32::from_le_bytes(damage[20..24].try_into().unwrap()) & FLAG_CURSOR_VISIBLE,
+            0
+        );
+        assert_eq!(damage_text(&damage, 0, 8), "one     ");
+        assert_eq!(damage_text(&damage, 1, 8), "two     ");
+        assert_eq!(damage_text(&damage, 2, 8), "three   ");
+    }
+
+    #[test]
+    fn stored_physical_rows_rewrap_when_the_viewport_narrows() {
+        let mut terminal = Terminal::new(2, 6).unwrap();
+        terminal.feed(b"abcdef\x1b[S");
+        assert_eq!(terminal.history_rows(), 1);
+        terminal.resize(2, 3).unwrap();
+        assert_eq!(terminal.history_rows(), 2);
+
+        let mut damage = vec![0_u8; MAX_DAMAGE_BYTES];
+        terminal.write_view_damage(&mut damage, 2).unwrap();
+        assert_eq!(damage_text(&damage, 0, 3), "abc");
+        assert_eq!(damage_text(&damage, 1, 3), "def");
+    }
+
+    #[test]
+    fn hard_newline_history_does_not_reflow_default_trailing_blanks() {
+        let mut terminal = Terminal::new(2, 6).unwrap();
+        terminal.feed(b"abc\r\ndef\r\n");
+        assert_eq!(terminal.history_rows(), 1);
+        terminal.resize(2, 2).unwrap();
+        assert_eq!(terminal.history_rows(), 2);
+
+        let mut damage = vec![0_u8; MAX_DAMAGE_BYTES];
+        terminal.write_view_damage(&mut damage, 2).unwrap();
+        assert_eq!(damage_text(&damage, 0, 2), "ab");
+        assert_eq!(damage_text(&damage, 1, 2), "c ");
+    }
+
+    #[test]
+    fn scrollback_ring_evicts_and_wraps_without_losing_newest_cells() {
+        let mut scrollback = Scrollback::new();
+        let mut line = vec![Cell::blank(); usize::from(MAX_COLUMNS)];
+        for sequence in 0..700_u32 {
+            line[0].codepoint = 0x1000 + sequence;
+            scrollback.append_line(&line, true);
+        }
+        assert!(scrollback.line_count < 700);
+        assert!(scrollback.bytes_used <= SCROLLBACK_BYTE_LIMIT);
+
+        let mut output = vec![Cell::blank(); usize::from(MAX_COLUMNS)];
+        assert!(scrollback.fill_visual_row(
+            scrollback.visual_rows(MAX_COLUMNS) - 1,
+            MAX_COLUMNS,
+            &mut output,
+        ));
+        assert_eq!(output[0].codepoint, 0x1000 + 699);
+        assert!(scrollback.fill_visual_row(0, MAX_COLUMNS, &mut output));
+        assert_ne!(output[0].codepoint, 0x1000);
+    }
+
+    #[test]
+    fn alternate_and_partial_region_scrolls_do_not_enter_primary_history() {
+        let mut terminal = Terminal::new(4, 6).unwrap();
+        terminal.feed(b"\x1b[2;3r\x1b[S");
+        assert_eq!(terminal.history_rows(), 0);
+        terminal.feed(b"\x1b[r\x1b[?1049h\x1b[S\x1b[?1049l");
+        assert_eq!(terminal.history_rows(), 0);
     }
 
     #[test]
@@ -1805,9 +2238,15 @@ mod tests {
         assert_eq!(u16::from_le_bytes(output[16..18].try_into().unwrap()), 0);
         assert_eq!(u16::from_le_bytes(output[18..20].try_into().unwrap()), 1);
         assert_eq!(
-            u32::from_le_bytes(output[32..36].try_into().unwrap()),
+            u32::from_le_bytes(
+                output[DAMAGE_HEADER_SIZE..DAMAGE_HEADER_SIZE + 4]
+                    .try_into()
+                    .unwrap()
+            ),
             u32::from(b'A')
         );
+        assert_eq!(u32::from_le_bytes(output[32..36].try_into().unwrap()), 0);
+        assert_eq!(u32::from_le_bytes(output[36..40].try_into().unwrap()), 0);
         assert_eq!(terminal.required_damage_bytes(), DAMAGE_HEADER_SIZE);
         assert_eq!(
             terminal.write_full_damage(&mut output),

@@ -375,9 +375,10 @@ on the emulator and Samsung. The broad PTY/input/lifecycle gate and
 clipboard/bracketed-paste gate still pass on both targets after the gesture and
 menu changes. Offline Android lint also passes.
 
-The terminal damage protocol is now version 3 with fixed 76-byte cells. Each
-cell carries up to 16 Unicode scalar values, one/two-column width or continuation
-state, independently encoded foreground/background, and compact attributes.
+The terminal damage protocol is now version 4 with a 40-byte header and fixed
+76-byte cells. Each cell carries up to 16 Unicode scalar values, one/two-column
+width or continuation state, independently encoded foreground/background, and
+compact attributes.
 The exact dependency lock pins `unicode-width` 0.2.2 and
 `unicode-segmentation` 1.13.3; both are available to the established offline
 Cargo cache. Streaming grapheme assembly, width calculation, grid mutation,
@@ -394,9 +395,24 @@ whitespace drift.
 
 Palette colors remain integer indexes; direct SGR `38;2`/`48;2` colors carry
 exact 24-bit RGB. Android stores attributes in unused high bits of its
-foreground integer, so protocol v3 still uses the same single coarse JNI read.
-The maximum reusable direct buffer is explicitly bounded at 6,080,032 bytes,
+foreground integer, so protocol v4 still uses the same single coarse JNI read.
+The maximum reusable direct buffer is explicitly bounded at 6,080,040 bytes,
 and normal dirty updates publish only the affected rows.
+
+The primary screen now owns a preallocated compact scrollback ring bounded to
+4 MiB and 4,096 stored physical rows. Full-screen primary scrolling appends
+cells without warmed heap allocation; alternate-screen output and
+application-defined partial scroll regions never enter history. Stored rows
+are chunked to the current width when a narrower viewport reads them, while
+full logical-line joining across soft wraps remains pending.
+
+Protocol v4 publishes the available visual-history rows and the applied
+viewport offset. Android requests one full bounded viewport when scrolled,
+hides the live cursor, keeps a viewed position anchored as new history arrives,
+and returns to live output when the user types. Touch drags, pointer wheels,
+hardware Shift+PageUp/PageDown, and framework accessibility scroll actions use
+the same clamped offset. The accessibility snapshot reads the visible history
+rather than the hidden live cursor row.
 
 The entire Rust workspace, damage-format contracts, and warmed zero-allocation
 gate pass. Exact-ABI builds render installed `tput` 256-color output, exact
@@ -406,7 +422,10 @@ Samsung. Installed Bash/terminfo gates additionally prove DEC autowrap disable
 and origin-relative cursor positioning, decomposed accents, CJK, flags,
 modifiers, ZWJ emoji, accessibility text, and exact last-column rendering on
 both targets. The broad PTY/render/input/lifecycle, color, and editing gates
-also pass on both targets with protocol v3.
+also pass on both targets with protocol v4. A dedicated exact-ABI gate proves
+visible retained history, touch, mouse wheel, hardware page navigation,
+accessibility, return to live output, scoped logs, and visually inspected
+full-device screenshots on the emulator and physical Samsung.
 
 That device gate also exposed an incomplete generic root-identity bridge:
 glibc's filesystem-ID query reached Android's blocked x86_64 syscall 122.
@@ -423,13 +442,14 @@ sandbox-scoped `/proc`, `/sys`, and `/dev` view that represents its Linux
 environment without leaking Android-wide processes or pretending unavailable
 kernel metrics are reliable.
 
-This is not yet the production terminal promised by the milestone. Resizing
-preserves the current cursor window but does not reflow or retain discarded
-rows because scrollback is not implemented. Remaining xterm controls,
-scrollback/reflow, selection/copy, an explicit overlong-grapheme user-visible
-policy, broader non-Latin composing IME behavior, and richer accessibility
-remain required. The temporary command field remains as a fallback above the
-renderer; direct terminal input no longer depends on it.
+This is not yet the production terminal promised by the milestone. Bounded
+physical-row scrollback is implemented, but resizing still preserves the
+current cursor window rather than joining soft-wrapped logical lines and
+reflowing them consistently across the screen/history boundary. Remaining
+xterm controls, logical reflow, selection/copy, an explicit overlong-grapheme
+user-visible policy, broader non-Latin composing IME behavior, and richer
+accessibility remain required. The temporary command field remains as a
+fallback above the renderer; direct terminal input no longer depends on it.
 
 The validated prototype below remains reference evidence until replacement
 vertical slices pass equivalent gates. Installed prototype state is no longer a

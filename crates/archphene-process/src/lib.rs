@@ -394,8 +394,11 @@ impl PtySession {
         &mut self,
         output: &mut [u8],
         full_snapshot: bool,
+        viewport_offset: u32,
     ) -> Result<usize, ProcessError> {
-        if full_snapshot {
+        if viewport_offset != 0 {
+            self.terminal.write_view_damage(output, viewport_offset)
+        } else if full_snapshot {
             self.terminal.write_full_damage(output)
         } else {
             self.terminal.write_damage(output)
@@ -553,9 +556,10 @@ impl PtyRegistry {
         handle: u64,
         output: &mut [u8],
         full_snapshot: bool,
+        viewport_offset: u32,
     ) -> Result<usize, ProcessError> {
         self.session_mut(handle)?
-            .write_terminal_damage(output, full_snapshot)
+            .write_terminal_damage(output, full_snapshot, viewport_offset)
     }
 
     pub fn exit_status(&mut self, handle: u64) -> Result<Option<i32>, ProcessError> {
@@ -1304,7 +1308,7 @@ mod tests {
         };
         let mut damage = vec![0_u8; MAX_TERMINAL_DAMAGE_BYTES];
         session
-            .write_terminal_damage(&mut damage, false)
+            .write_terminal_damage(&mut damage, false, 0)
             .expect("initial damage");
         slave.write_all(b"\x1b[32;1mOK").expect("terminal output");
         let mut output = [0_u8; 64];
@@ -1316,7 +1320,7 @@ mod tests {
             thread::sleep(Duration::from_millis(5));
         }
         let length = session
-            .write_terminal_damage(&mut damage, false)
+            .write_terminal_damage(&mut damage, false, 0)
             .expect("terminal damage");
         assert_eq!(&damage[..4], b"ATRM");
         assert_eq!(
@@ -1324,13 +1328,23 @@ mod tests {
             archphene_terminal::DAMAGE_HEADER_SIZE + 4 * archphene_terminal::DAMAGE_CELL_SIZE
         );
         assert_eq!(
-            u32::from_le_bytes(damage[32..36].try_into().expect("cell codepoint")),
+            u32::from_le_bytes(
+                damage[archphene_terminal::DAMAGE_HEADER_SIZE
+                    ..archphene_terminal::DAMAGE_HEADER_SIZE + 4]
+                    .try_into()
+                    .expect("cell codepoint")
+            ),
             u32::from(b'O')
         );
+        let first_cell = archphene_terminal::DAMAGE_HEADER_SIZE;
         assert_eq!(
-            u32::from_le_bytes(damage[96..100].try_into().expect("foreground")),
+            u32::from_le_bytes(
+                damage[first_cell + 64..first_cell + 68]
+                    .try_into()
+                    .expect("foreground")
+            ),
             2
         );
-        assert_eq!(damage[104] & 1, 1);
+        assert_eq!(damage[first_cell + 72] & 1, 1);
     }
 }

@@ -11,6 +11,7 @@ import android.os.Bundle
 import android.text.InputType
 import android.util.TypedValue
 import android.view.GestureDetector
+import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MenuItem
 import android.view.MotionEvent
@@ -59,6 +60,25 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
             context,
             object : GestureDetector.SimpleOnGestureListener() {
                 override fun onDown(event: MotionEvent): Boolean = true
+
+                override fun onScroll(
+                    first: MotionEvent?,
+                    current: MotionEvent,
+                    distanceX: Float,
+                    distanceY: Float,
+                ): Boolean {
+                    if (scaleGestureDetector.isInProgress || historyRows == 0) {
+                        return false
+                    }
+                    scrollRowRemainder += distanceY / cellHeight
+                    val rowsToScroll = scrollRowRemainder.toInt()
+                    if (rowsToScroll == 0) {
+                        return true
+                    }
+                    scrollRowRemainder -= rowsToScroll
+                    setViewportOffset(viewportOffset + rowsToScroll)
+                    return true
+                }
 
                 override fun onSingleTapUp(event: MotionEvent): Boolean {
                     performClick()
@@ -117,6 +137,9 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
     private var terminalFlags = 0
     private var terminalRevision = Long.MIN_VALUE
     private var sourceRevision = Long.MIN_VALUE
+    private var historyRows = 0
+    private var viewportOffset = 0
+    private var scrollRowRemainder = 0f
     private var needsFullSnapshot = true
     private var composingText = ""
     private var pastePopup: PopupMenu? = null
@@ -194,6 +217,9 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+            scrollRowRemainder = 0f
+        }
         scaleGestureDetector.onTouchEvent(event)
         gestureDetector.onTouchEvent(event)
         val kind =
@@ -214,6 +240,22 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
             argument1 = event.getY(pointerIndex).toRawBits(),
         )
         return true
+    }
+
+    override fun onGenericMotionEvent(event: MotionEvent): Boolean {
+        if (
+            event.action == MotionEvent.ACTION_SCROLL &&
+            event.isFromSource(InputDevice.SOURCE_CLASS_POINTER)
+        ) {
+            val vertical = event.getAxisValue(MotionEvent.AXIS_VSCROLL)
+            if (vertical != 0f && historyRows != 0) {
+                setViewportOffset(
+                    viewportOffset + (vertical * SCROLL_WHEEL_ROWS).roundToInt(),
+                )
+                return true
+            }
+        }
+        return super.onGenericMotionEvent(event)
     }
 
     override fun performClick(): Boolean {
@@ -290,16 +332,25 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         ) {
             info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_PASTE)
         }
+        if (viewportOffset < historyRows) {
+            info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_BACKWARD)
+        }
+        if (viewportOffset > 0) {
+            info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_FORWARD)
+        }
     }
 
     override fun performAccessibilityAction(
         action: Int,
         arguments: Bundle?,
     ): Boolean =
-        if (action == AccessibilityNodeInfo.ACTION_PASTE) {
-            pasteClipboard()
-        } else {
-            super.performAccessibilityAction(action, arguments)
+        when (action) {
+            AccessibilityNodeInfo.ACTION_PASTE -> pasteClipboard()
+            AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD ->
+                setViewportOffset(viewportOffset + rows.coerceAtLeast(1))
+            AccessibilityNodeInfo.ACTION_SCROLL_FORWARD ->
+                setViewportOffset(viewportOffset - rows.coerceAtLeast(1))
+            else -> super.performAccessibilityAction(action, arguments)
         }
 
     override fun onCheckIsTextEditor(): Boolean = true
@@ -327,6 +378,14 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
             TEXT_SIZE_SMALLER -> return setTerminalTextSize(terminalTextSp - 1, false)
             TEXT_SIZE_RESET -> return setTerminalTextSize(AUTOMATIC_TERMINAL_TEXT_SP, true)
             TEXT_SIZE_LARGER -> return setTerminalTextSize(terminalTextSp + 1, false)
+        }
+        if (event.isShiftPressed && !event.isCtrlPressed && !event.isAltPressed) {
+            when (keyCode) {
+                KeyEvent.KEYCODE_PAGE_UP ->
+                    return setViewportOffset(viewportOffset + rows.coerceAtLeast(1))
+                KeyEvent.KEYCODE_PAGE_DOWN ->
+                    return setViewportOffset(viewportOffset - rows.coerceAtLeast(1))
+            }
         }
         if (isPasteShortcut(keyCode, event)) {
             return pasteClipboard()
@@ -387,16 +446,21 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         if (!needsFullSnapshot && nextSourceRevision == sourceRevision) {
             return
         }
-        val length = binder.readSharedShellTerminalDamage(needsFullSnapshot)
+        val length =
+            binder.readSharedShellTerminalDamage(
+                needsFullSnapshot,
+                viewportOffset,
+            )
+        needsFullSnapshot = false
         if (
             length < DAMAGE_HEADER_SIZE ||
             !applyDamage(binder.sharedShellTerminalDamageBuffer, length)
         ) {
+            needsFullSnapshot = true
             sourceRevision = nextSourceRevision
             return
         }
         sourceRevision = nextSourceRevision
-        needsFullSnapshot = false
     }
 
     fun synchronizeTerminalSize(binder: ArchpheneRuntimeService.LocalBinder?) {
@@ -422,13 +486,17 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         val nextCursorColumn = damageBuffer.getShort(14).toInt() and 0xffff
         val dirtyStart = damageBuffer.getShort(16).toInt() and 0xffff
         val dirtyEnd = damageBuffer.getShort(18).toInt() and 0xffff
+        val nextHistoryRows = damageBuffer.getInt(32)
+        val nextViewportOffset = damageBuffer.getInt(36)
         if (
             nextRows !in MIN_ROWS..MAX_ROWS ||
             nextColumns !in MIN_COLUMNS..MAX_COLUMNS ||
             nextCursorRow !in 0 until nextRows ||
             nextCursorColumn !in 0 until nextColumns ||
             dirtyStart !in 0..nextRows ||
-            dirtyEnd !in dirtyStart..nextRows
+            dirtyEnd !in dirtyStart..nextRows ||
+            nextHistoryRows < 0 ||
+            nextViewportOffset !in 0..nextHistoryRows
         ) {
             return false
         }
@@ -441,6 +509,18 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         val nextTerminalRevision = damageBuffer.getLong(24)
         if (terminalRevision != Long.MIN_VALUE && nextTerminalRevision < terminalRevision) {
             return false
+        }
+        if (viewportOffset > 0 && nextHistoryRows > historyRows) {
+            val anchoredOffset =
+                (nextViewportOffset.toLong() + nextHistoryRows - historyRows)
+                    .coerceAtMost(nextHistoryRows.toLong())
+                    .toInt()
+            if (anchoredOffset != nextViewportOffset) {
+                historyRows = nextHistoryRows
+                viewportOffset = anchoredOffset
+                needsFullSnapshot = true
+                return true
+            }
         }
         if (nextRows != rows || nextColumns != columns) {
             rows = nextRows
@@ -467,6 +547,8 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         terminalFlags = damageBuffer.getInt(20)
         cursorVisible = terminalFlags and CURSOR_VISIBLE_FLAG != 0
         terminalRevision = nextTerminalRevision
+        historyRows = nextHistoryRows
+        viewportOffset = nextViewportOffset
         var offset = DAMAGE_HEADER_SIZE
         for (row in dirtyStart until dirtyEnd) {
             val rowStart = row * columns
@@ -829,11 +911,15 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         return output
     }
 
-    private fun submitTerminalInput(length: Int): Boolean =
-        runtimeBinder?.submitTerminalInput(terminalInputBytes, length) == true
+    private fun submitTerminalInput(length: Int): Boolean {
+        returnToLiveView()
+        return runtimeBinder?.submitTerminalInput(terminalInputBytes, length) == true
+    }
 
-    private fun sendSequence(sequence: ByteArray): Boolean =
-        runtimeBinder?.submitTerminalInput(sequence, sequence.size) == true
+    private fun sendSequence(sequence: ByteArray): Boolean {
+        returnToLiveView()
+        return runtimeBinder?.submitTerminalInput(sequence, sequence.size) == true
+    }
 
     private fun encodedLength(codepoint: Int): Int =
         when (codepoint) {
@@ -1149,6 +1235,9 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         terminalFlags = 0
         terminalRevision = Long.MIN_VALUE
         sourceRevision = Long.MIN_VALUE
+        historyRows = 0
+        viewportOffset = 0
+        scrollRowRemainder = 0f
         needsFullSnapshot = true
         composingText = ""
         glyphCodepoints = IntArray(0)
@@ -1164,13 +1253,19 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
     private fun accessibilitySnapshot(): String {
         val rowsPerSnapshot =
             (ACCESSIBILITY_CHARACTER_LIMIT / (columns + 1)).coerceAtLeast(1)
-        val firstRow = (cursorRow - rowsPerSnapshot + 1).coerceAtLeast(0)
+        val lastRow =
+            if (viewportOffset > 0) {
+                rows - 1
+            } else {
+                cursorRow.coerceAtMost(rows - 1)
+            }
+        val firstRow = (lastRow - rowsPerSnapshot + 1).coerceAtLeast(0)
         val builder =
             StringBuilder(
-                ((cursorRow - firstRow + 1) * (columns + 1))
+                ((lastRow - firstRow + 1) * (columns + 1))
                     .coerceAtMost(ACCESSIBILITY_CHARACTER_LIMIT),
             )
-        for (row in firstRow..cursorRow.coerceAtMost(rows - 1)) {
+        for (row in firstRow..lastRow) {
             val start = row * columns
             var end = columns
             while (end > 0 && isBlankGlyph(start + end - 1)) {
@@ -1193,7 +1288,7 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
                     builder.appendCodePoint(codepoint)
                 }
             }
-            if (row != cursorRow) {
+            if (row != lastRow) {
                 if (builder.length >= ACCESSIBILITY_CHARACTER_LIMIT) {
                     return builder.toString()
                 }
@@ -1207,6 +1302,24 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         glyphWidths[cell].toInt() == 1 &&
             glyphLengths[cell].toInt() == 1 &&
             glyphCodepoints[cell * MAX_GRAPHEME_CODEPOINTS] == ' '.code
+
+    private fun setViewportOffset(requestedOffset: Int): Boolean {
+        val nextOffset = requestedOffset.coerceIn(0, historyRows)
+        if (nextOffset == viewportOffset) {
+            return true
+        }
+        viewportOffset = nextOffset
+        needsFullSnapshot = true
+        invalidate()
+        return true
+    }
+
+    private fun returnToLiveView() {
+        if (viewportOffset != 0) {
+            viewportOffset = 0
+            needsFullSnapshot = true
+        }
+    }
 
     private fun resolveTerminalColor(color: Int): Int =
         if (color and DIRECT_COLOR_FLAG != 0) {
@@ -1234,8 +1347,8 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         private const val CURSOR_HEIGHT = 2f
         private const val UNDERLINE_HEIGHT = 1f
         private const val DAMAGE_MAGIC = 0x4d525441
-        private const val DAMAGE_VERSION = 3
-        private const val DAMAGE_HEADER_SIZE = 32
+        private const val DAMAGE_VERSION = 4
+        private const val DAMAGE_HEADER_SIZE = 40
         private const val DAMAGE_CELL_SIZE = 76
         private const val MAX_GRAPHEME_CODEPOINTS = 16
         private const val MAX_GRAPHEME_UTF16_UNITS = MAX_GRAPHEME_CODEPOINTS * 2
@@ -1250,6 +1363,7 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         private const val MAX_COMPOSING_CHARACTERS = 2 * 1024
         private const val MAX_CLIPBOARD_CHARACTERS = 2 * 1024
         private const val MAX_IME_DELETE = 64
+        private const val SCROLL_WHEEL_ROWS = 3f
         private const val CURSOR_VISIBLE_FLAG = 1
         private const val APPLICATION_CURSOR_FLAG = 1 shl 1
         private const val APPLICATION_KEYPAD_FLAG = 1 shl 2

@@ -908,10 +908,14 @@ mod android {
         handle: jlong,
         pty_handle: jlong,
         full_snapshot: jboolean,
+        viewport_offset: jint,
         output_buffer: JByteBuffer,
     ) -> jint {
-        let (Ok(handle), Ok(pty_handle)) = (u64::try_from(handle), u64::try_from(pty_handle))
-        else {
+        let (Ok(handle), Ok(pty_handle), Ok(viewport_offset)) = (
+            u64::try_from(handle),
+            u64::try_from(pty_handle),
+            u32::try_from(viewport_offset),
+        ) else {
             return ERROR_INVALID_ARGUMENT;
         };
         let Ok(output_capacity) = environment.get_direct_buffer_capacity(&output_buffer) else {
@@ -934,7 +938,12 @@ mod android {
         let Some(runtime) = registry.runtime_mut(handle) else {
             return ERROR_INVALID_HANDLE;
         };
-        match runtime.write_terminal_damage(pty_handle, destination, full_snapshot != JNI_FALSE) {
+        match runtime.write_terminal_damage(
+            pty_handle,
+            destination,
+            full_snapshot != JNI_FALSE,
+            viewport_offset,
+        ) {
             Ok(length) => i32::try_from(length).unwrap_or(i32::MAX),
             Err(_) => ERROR_PROCESS,
         }

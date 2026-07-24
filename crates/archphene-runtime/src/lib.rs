@@ -332,9 +332,10 @@ impl RuntimeHost {
         handle: u64,
         output: &mut [u8],
         full_snapshot: bool,
+        viewport_offset: u32,
     ) -> Result<usize, PackageRuntimeError> {
         self.pty_sessions
-            .write_terminal_damage(handle, output, full_snapshot)
+            .write_terminal_damage(handle, output, full_snapshot, viewport_offset)
             .map_err(PackageRuntimeError::from)
     }
 
