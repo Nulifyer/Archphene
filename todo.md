@@ -113,13 +113,15 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
       - [x] Prove exact normal `ESC [ A` and application `ESC O A` hardware Up sequences through installed `tput`, Bash byte capture, accessibility, scoped logs, and full-device screenshots on both ABIs.
       - [x] Implement bounded insert/delete/erase character and line operations, region scroll/reverse-index, repeat, insert mode, extended cursor movement/save/restore, and fixed-capacity programmable tab stops.
       - [x] Exercise the editing controls in the warmed zero-allocation gate, then prove installed `tput` ICH/DCH/IL/DL behavior through exact-ABI PTYs, accessibility, scoped logs, and visually inspected full-device screenshots on both targets.
-      - [x] Preserve full-byte foreground/background indexes in Android styles, render the fixed 256-color palette, parse indexed SGR plus bounded RGB fallback, and keep the existing 8-byte damage cell/JNI path.
+      - [x] Preserve full-byte foreground/background indexes, render the fixed 256-color palette, and parse indexed SGR through the coarse damage/JNI path.
       - [x] Consume G0/G1 character-set designation correctly, render DEC special-graphics line drawing, and prove installed `tput` colors, background reset, line drawing, accessibility, scoped logs, and full-device visuals on both exact-ABI targets.
+      - [x] Version the coarse damage protocol to 16-byte cells, preserve indexed colors or exact 24-bit RGB without palette quantization, and keep attributes compacted into the Android foreground array rather than adding another maximum-grid allocation.
+      - [x] Prove distinct indexed/direct-RGB wire values, warmed zero allocation, exact `#123456` on `#abcdef`, unchanged 256-color/DEC rendering, broad PTY behavior, scoped logs, and visually inspected full-device screenshots on both ABIs.
       - [x] Add bounded Android clipboard paste through a long-press touch menu, `Ctrl+Shift+V`, InputConnection context action, and accessibility action; preserve literal UTF-8/newlines and wrap it only when the terminal publishes bracketed-paste mode.
       - [x] Prove normal and exact `ESC [ 200 ~`/`ESC [ 201 ~` bracketed bytes through Android clipboard, touch/hardware input, Bash capture, accessibility, scoped logs, and full-device screenshots on both ABIs.
       - [x] Follow Android's scaled 16sp baseline by default and add persistent bounded 10–32sp terminal sizing through pinch, long-press controls, and hardware `Ctrl+-`/`Ctrl++`/`Ctrl+0`; defer metric re-recording and PTY resize until pinch completion.
       - [x] Prove Auto, explicit 20sp, hardware/touch controls, process-restart persistence, reset, scoped logs, and visually inspected full-device screenshots on both exact-ABI targets.
-      - [ ] Complete Unicode width/combining, exact direct RGB color, remaining xterm controls/modes, scrollback/reflow, selection/copy, non-Latin/composing IME coverage, and richer accessibility before calling the surface production-ready.
+      - [ ] Complete Unicode width/combining, remaining xterm controls/modes, scrollback/reflow, selection/copy, non-Latin/composing IME coverage, and richer accessibility before calling the surface production-ready.
       - [x] Replace the clipped temporary diagnostic strip during active sessions with the measured full-height terminal surface; retain emulator and Samsung full-device portrait/landscape/rebind evidence.
   - [ ] Wayland compositor, presentation, and lifecycle
   - [ ] Pointer, touch, keyboard, IME, clipboard, and drag-and-drop

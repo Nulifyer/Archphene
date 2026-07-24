@@ -1319,12 +1319,18 @@ mod tests {
             .write_terminal_damage(&mut damage, false)
             .expect("terminal damage");
         assert_eq!(&damage[..4], b"ATRM");
-        assert_eq!(length, archphene_terminal::DAMAGE_HEADER_SIZE + 4 * 8);
+        assert_eq!(
+            length,
+            archphene_terminal::DAMAGE_HEADER_SIZE + 4 * archphene_terminal::DAMAGE_CELL_SIZE
+        );
         assert_eq!(
             u32::from_le_bytes(damage[32..36].try_into().expect("cell codepoint")),
             u32::from(b'O')
         );
-        assert_eq!(damage[36], 2);
-        assert_eq!(damage[38] & 1, 1);
+        assert_eq!(
+            u32::from_le_bytes(damage[36..40].try_into().expect("foreground")),
+            2
+        );
+        assert_eq!(damage[44] & 1, 1);
     }
 }

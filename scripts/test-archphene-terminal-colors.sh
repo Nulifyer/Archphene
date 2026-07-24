@@ -73,7 +73,7 @@ archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="SEND"' 'send shell input'
 
 archphene_wait_ui 'terminal-color-ready' "terminal-color-ready-$serial" 20
 for marker in RED196 GREEN46 BLUE21 MAGENTA201 YELLOW226 CYAN51 GRAY244 \
-  WHITE231-ON-BLUE25 DEC-LINE; do
+  WHITE231-ON-BLUE25 RGB-123456-ABCDEF DEC-LINE; do
   archphene_regex_contains "$ARCHPHENE_UI" "$marker" ||
     archphene_die "terminal color output did not render marker: $marker"
 done
@@ -92,5 +92,5 @@ fatal_log="$(archphene_adb_run logcat -d -v brief \
   archphene_die "terminal color regression emitted a fatal runtime error: $fatal_log"
 
 archphene_note "Archphene terminal color regression passed on $serial"
-archphene_note "  Installed tput 256-color foreground/background rendering passed"
+archphene_note "  Installed tput 256-color and exact direct-RGB rendering passed"
 archphene_note "  Full-device screenshot: $output_dir/$serial.png"

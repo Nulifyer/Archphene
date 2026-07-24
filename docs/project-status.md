@@ -375,6 +375,21 @@ on the emulator and Samsung. The broad PTY/input/lifecycle gate and
 clipboard/bracketed-paste gate still pass on both targets after the gesture and
 menu changes. Offline Android lint also passes.
 
+The terminal damage protocol is now version 2 with fixed 16-byte cells. Each
+cell carries a codepoint, independently encoded foreground/background, compact
+attributes, and reserved width metadata. Palette colors remain integer indexes;
+direct SGR `38;2`/`48;2` colors carry exact 24-bit RGB instead of being reduced
+to the nearest 256-color entry. Android stores attributes in unused high bits
+of its foreground integer, so the larger wire format does not require a third
+maximum-grid primitive array or change the single coarse JNI read.
+
+The entire Rust workspace, damage-format contracts, and warmed zero-allocation
+gate pass. Exact-ABI builds render installed `tput` 256-color output, exact
+`#123456` on `#abcdef`, reset, DEC line drawing, accessibility markers, scoped
+logs, and visually inspected full-device screenshots on the emulator and
+Samsung. The broad PTY/render/input/lifecycle gate also passes on both targets
+with protocol v2.
+
 That device gate also exposed an incomplete generic root-identity bridge:
 glibc's filesystem-ID query reached Android's blocked x86_64 syscall 122.
 The path bridge now consistently virtualizes uid, gid, effective uid/gid, and
@@ -393,10 +408,10 @@ kernel metrics are reliable.
 This is not yet the production terminal promised by the milestone. Resizing
 preserves the current cursor window but does not reflow or retain discarded
 rows because scrollback is not implemented. Unicode width and combining
-behavior, exact direct RGB color, remaining xterm controls, scrollback,
-selection/copy, remaining terminal modes, broader composing IME behavior,
-richer accessibility remain required. The temporary command field remains as
-a fallback above the renderer; direct terminal input no longer depends on it.
+behavior, remaining xterm controls, scrollback, selection/copy, remaining
+terminal modes, broader composing IME behavior, and richer accessibility remain
+required. The temporary command field remains as a fallback above the renderer;
+direct terminal input no longer depends on it.
 
 The validated prototype below remains reference evidence until replacement
 vertical slices pass equivalent gates. Installed prototype state is no longer a

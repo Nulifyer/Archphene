@@ -103,7 +103,8 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
             },
         )
     private var glyphs = CharArray(0)
-    private var styles = IntArray(0)
+    private var styledForegroundColors = IntArray(0)
+    private var backgroundColors = IntArray(0)
     private var rowNodes = emptyArray<RenderNode>()
     private var rows = 0
     private var columns = 0
@@ -448,7 +449,8 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
                     rows,
                 )
             glyphs = CharArray(rows * columns) { ' ' }
-            styles = IntArray(rows * columns) { DEFAULT_STYLE }
+            styledForegroundColors = IntArray(rows * columns) { DEFAULT_FOREGROUND }
+            backgroundColors = IntArray(rows * columns) { DEFAULT_BACKGROUND }
             rowNodes = Array(rows) { row -> RenderNode("terminal-row-$row") }
             positionRowNodes()
         }
@@ -468,12 +470,10 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
                     } else {
                         REPLACEMENT_CHARACTER
                     }
-                styles[rowStart + column] =
-                    packStyle(
-                        damageBuffer.get(offset + 4).toInt() and 0xff,
-                        damageBuffer.get(offset + 5).toInt() and 0xff,
-                        damageBuffer.get(offset + 6).toInt() and 0xff,
-                    )
+                styledForegroundColors[rowStart + column] =
+                    damageBuffer.getInt(offset + 4) or
+                        ((damageBuffer.get(offset + 12).toInt() and 0x7f) shl ATTRIBUTE_SHIFT)
+                backgroundColors[rowStart + column] = damageBuffer.getInt(offset + 8)
                 offset += DAMAGE_CELL_SIZE
             }
         }
@@ -497,25 +497,29 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         val baseline = -textPaint.fontMetrics.ascent
         var runStart = 0
         while (runStart < columns) {
-            val style = styles[start + runStart]
+            val styledForeground = styledForegroundColors[start + runStart]
+            val backgroundColor = backgroundColors[start + runStart]
+            val attributes = styledForeground ushr ATTRIBUTE_SHIFT
             var runEnd = runStart + 1
-            while (runEnd < columns && styles[start + runEnd] == style) {
+            while (
+                runEnd < columns &&
+                styledForegroundColors[start + runEnd] == styledForeground &&
+                backgroundColors[start + runEnd] == backgroundColor
+            ) {
                 runEnd++
             }
-            val foregroundIndex = style and COLOR_MASK
-            val backgroundIndex = style ushr BACKGROUND_SHIFT and COLOR_MASK
-            val attributes = style ushr ATTRIBUTE_SHIFT
+            val foregroundColor = styledForeground and COLOR_VALUE_MASK
             val foreground =
                 if (attributes and ATTRIBUTE_INVERSE != 0) {
-                    ANSI_COLORS[backgroundIndex.coerceIn(0, ANSI_COLORS.lastIndex)]
+                    resolveTerminalColor(backgroundColor)
                 } else {
-                    ANSI_COLORS[foregroundIndex.coerceIn(0, ANSI_COLORS.lastIndex)]
+                    resolveTerminalColor(foregroundColor)
                 }
             val background =
                 if (attributes and ATTRIBUTE_INVERSE != 0) {
-                    ANSI_COLORS[foregroundIndex.coerceIn(0, ANSI_COLORS.lastIndex)]
+                    resolveTerminalColor(foregroundColor)
                 } else {
-                    ANSI_COLORS[backgroundIndex.coerceIn(0, ANSI_COLORS.lastIndex)]
+                    resolveTerminalColor(backgroundColor)
                 }
             if (background != TERMINAL_BACKGROUND) {
                 backgroundPaint.color = background
@@ -1085,7 +1089,8 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         needsFullSnapshot = true
         composingText = ""
         glyphs = CharArray(0)
-        styles = IntArray(0)
+        styledForegroundColors = IntArray(0)
+        backgroundColors = IntArray(0)
         rowNodes = emptyArray()
         contentDescription = context.getString(R.string.linux_session_display)
         invalidate()
@@ -1116,14 +1121,12 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         return builder.toString()
     }
 
-    private fun packStyle(
-        foreground: Int,
-        background: Int,
-        attributes: Int,
-    ): Int =
-        (foreground and COLOR_MASK) or
-            ((background and COLOR_MASK) shl BACKGROUND_SHIFT) or
-            (attributes shl ATTRIBUTE_SHIFT)
+    private fun resolveTerminalColor(color: Int): Int =
+        if (color and DIRECT_COLOR_FLAG != 0) {
+            0xff000000.toInt() or (color and RGB_MASK)
+        } else {
+            ANSI_COLORS[color.coerceIn(0, ANSI_COLORS.lastIndex)]
+        }
 
     companion object {
         private const val NANOS_PER_MILLISECOND = 1_000_000L
@@ -1144,9 +1147,9 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         private const val CURSOR_HEIGHT = 2f
         private const val UNDERLINE_HEIGHT = 1f
         private const val DAMAGE_MAGIC = 0x4d525441
-        private const val DAMAGE_VERSION = 1
+        private const val DAMAGE_VERSION = 2
         private const val DAMAGE_HEADER_SIZE = 32
-        private const val DAMAGE_CELL_SIZE = 8
+        private const val DAMAGE_CELL_SIZE = 16
         private const val MIN_ROWS = 2
         private const val MAX_ROWS = 200
         private const val MIN_COLUMNS = 2
@@ -1162,9 +1165,10 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         private const val BRACKETED_PASTE_FLAG = 1 shl 3
         private const val NEW_LINE_MODE_FLAG = 1 shl 4
         private const val BACKARROW_KEY_FLAG = 1 shl 5
-        private const val COLOR_MASK = 0xff
-        private const val BACKGROUND_SHIFT = 8
-        private const val ATTRIBUTE_SHIFT = 16
+        private const val DIRECT_COLOR_FLAG = 1 shl 24
+        private const val RGB_MASK = 0x00ffffff
+        private const val COLOR_VALUE_MASK = 0x01ffffff
+        private const val ATTRIBUTE_SHIFT = 25
         private const val ATTRIBUTE_BOLD = 1
         private const val ATTRIBUTE_UNDERLINE = 2
         private const val ATTRIBUTE_INVERSE = 4
@@ -1268,7 +1272,8 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
                     this[index] = Color.rgb(level, level, level)
                 }
             }
-        private val DEFAULT_STYLE = 7
+        private const val DEFAULT_FOREGROUND = 7
+        private const val DEFAULT_BACKGROUND = 0
 
         private fun ansiCubeComponent(index: Int): Int =
             when (index) {

@@ -4,16 +4,17 @@ pub const MIN_ROWS: u16 = 2;
 pub const MAX_ROWS: u16 = 200;
 pub const MIN_COLUMNS: u16 = 2;
 pub const MAX_COLUMNS: u16 = 400;
-pub const DAMAGE_PROTOCOL_VERSION: u32 = 1;
+pub const DAMAGE_PROTOCOL_VERSION: u32 = 2;
 pub const DAMAGE_HEADER_SIZE: usize = 32;
-pub const DAMAGE_CELL_SIZE: usize = 8;
+pub const DAMAGE_CELL_SIZE: usize = 16;
 pub const MAX_DAMAGE_BYTES: usize =
     DAMAGE_HEADER_SIZE + MAX_ROWS as usize * MAX_COLUMNS as usize * DAMAGE_CELL_SIZE;
 const DAMAGE_MAGIC: u32 = u32::from_le_bytes(*b"ATRM");
 const MAX_CSI_PARAMETERS: usize = 16;
 const MAX_STRING_BYTES: usize = 8 * 1024;
-const DEFAULT_FOREGROUND: u8 = 7;
-const DEFAULT_BACKGROUND: u8 = 0;
+const DEFAULT_FOREGROUND: u32 = 7;
+const DEFAULT_BACKGROUND: u32 = 0;
+const DIRECT_COLOR_FLAG: u32 = 1 << 24;
 const FLAG_CURSOR_VISIBLE: u32 = 1;
 const FLAG_APPLICATION_CURSOR: u32 = 1 << 1;
 const FLAG_APPLICATION_KEYPAD: u32 = 1 << 2;
@@ -24,8 +25,8 @@ const FLAG_BACKARROW_KEY: u32 = 1 << 5;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Cell {
     pub codepoint: u32,
-    pub foreground: u8,
-    pub background: u8,
+    pub foreground: u32,
+    pub background: u32,
     pub attributes: u8,
 }
 
@@ -107,8 +108,8 @@ pub struct Terminal {
     utf8_codepoint: u32,
     utf8_minimum: u32,
     utf8_remaining: u8,
-    foreground: u8,
-    background: u8,
+    foreground: u32,
+    background: u32,
     attributes: u8,
     dirty_start: u16,
     dirty_end: u16,
@@ -272,10 +273,10 @@ impl Terminal {
             for column in 0..self.columns {
                 let cell = self.cells[self.index(row, column)];
                 output[offset..offset + 4].copy_from_slice(&cell.codepoint.to_le_bytes());
-                output[offset + 4] = cell.foreground;
-                output[offset + 5] = cell.background;
-                output[offset + 6] = cell.attributes;
-                output[offset + 7] = 1;
+                output[offset + 4..offset + 8].copy_from_slice(&cell.foreground.to_le_bytes());
+                output[offset + 8..offset + 12].copy_from_slice(&cell.background.to_le_bytes());
+                output[offset + 12] = cell.attributes;
+                output[offset + 13] = 1;
                 offset += DAMAGE_CELL_SIZE;
             }
         }
@@ -936,9 +937,9 @@ impl Terminal {
                 22 => self.attributes &= !1,
                 24 => self.attributes &= !2,
                 27 => self.attributes &= !4,
-                30..=37 => self.foreground = self.csi_parameters[index] as u8 - 30,
+                30..=37 => self.foreground = u32::from(self.csi_parameters[index] - 30),
                 39 => self.foreground = DEFAULT_FOREGROUND,
-                40..=47 => self.background = self.csi_parameters[index] as u8 - 40,
+                40..=47 => self.background = u32::from(self.csi_parameters[index] - 40),
                 49 => self.background = DEFAULT_BACKGROUND,
                 38 | 48 => {
                     let target_foreground = self.csi_parameters[index] == 38;
@@ -946,13 +947,18 @@ impl Terminal {
                         && self.csi_parameters[index + 1] == 5
                     {
                         index += 2;
-                        Some(self.csi_parameters[index].min(255) as u8)
+                        Some(u32::from(self.csi_parameters[index].min(255)))
                     } else if index + 4 < parameter_count && self.csi_parameters[index + 1] == 2 {
                         let red = self.csi_parameters[index + 2].min(255) as u8;
                         let green = self.csi_parameters[index + 3].min(255) as u8;
                         let blue = self.csi_parameters[index + 4].min(255) as u8;
                         index += 4;
-                        Some(nearest_ansi_color(red, green, blue))
+                        Some(
+                            DIRECT_COLOR_FLAG
+                                | (u32::from(red) << 16)
+                                | (u32::from(green) << 8)
+                                | u32::from(blue),
+                        )
                     } else {
                         None
                     };
@@ -964,8 +970,8 @@ impl Terminal {
                         }
                     }
                 }
-                90..=97 => self.foreground = self.csi_parameters[index] as u8 - 82,
-                100..=107 => self.background = self.csi_parameters[index] as u8 - 92,
+                90..=97 => self.foreground = u32::from(self.csi_parameters[index] - 82),
+                100..=107 => self.background = u32::from(self.csi_parameters[index] - 92),
                 _ => {}
             }
             index += 1;
@@ -1061,17 +1067,6 @@ fn validate_size(rows: u16, columns: u16) -> Result<(), TerminalError> {
     Ok(())
 }
 
-fn nearest_ansi_color(red: u8, green: u8, blue: u8) -> u8 {
-    if red == green && green == blue {
-        return match red {
-            0..=7 => 16,
-            8..=242 => 232 + ((red - 8 + 5) / 10).min(23),
-            _ => 231,
-        };
-    }
-    16 + 36 * ansi_cube_level(red) + 6 * ansi_cube_level(green) + ansi_cube_level(blue)
-}
-
 const fn charset_designation(byte: u8) -> Charset {
     if byte == b'0' {
         Charset::DecSpecial
@@ -1120,17 +1115,6 @@ const fn map_charset(charset: Charset, byte: u8) -> u32 {
     }
 }
 
-const fn ansi_cube_level(value: u8) -> u8 {
-    match value {
-        0..=47 => 0,
-        48..=115 => 1,
-        116..=155 => 2,
-        156..=195 => 3,
-        196..=235 => 4,
-        _ => 5,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1169,20 +1153,52 @@ mod tests {
     }
 
     #[test]
-    fn indexed_and_rgb_sgr_colors_use_the_existing_byte_wire_fields() {
+    fn indexed_and_rgb_sgr_colors_are_distinct_on_the_wire() {
         let mut terminal = Terminal::new(2, 6).unwrap();
         terminal.feed(b"\x1b[38;5;196;48;5;25mA\x1b[38;2;255;0;0;48;2;0;95;175mB");
         let indexed = terminal.cell(0, 0).unwrap();
         assert_eq!(indexed.foreground, 196);
         assert_eq!(indexed.background, 25);
         let rgb = terminal.cell(0, 1).unwrap();
-        assert_eq!(rgb.foreground, 196);
-        assert_eq!(rgb.background, 25);
+        assert_eq!(rgb.foreground, DIRECT_COLOR_FLAG | 0xff0000);
+        assert_eq!(rgb.background, DIRECT_COLOR_FLAG | 0x005faf);
 
         let mut damage = [0_u8; 256];
         terminal.write_full_damage(&mut damage).unwrap();
-        assert_eq!(damage[DAMAGE_HEADER_SIZE + 4], 196);
-        assert_eq!(damage[DAMAGE_HEADER_SIZE + 5], 25);
+        assert_eq!(
+            u32::from_le_bytes(
+                damage[DAMAGE_HEADER_SIZE + 4..DAMAGE_HEADER_SIZE + 8]
+                    .try_into()
+                    .unwrap()
+            ),
+            196
+        );
+        assert_eq!(
+            u32::from_le_bytes(
+                damage[DAMAGE_HEADER_SIZE + 8..DAMAGE_HEADER_SIZE + 12]
+                    .try_into()
+                    .unwrap()
+            ),
+            25
+        );
+        assert_eq!(
+            u32::from_le_bytes(
+                damage[DAMAGE_HEADER_SIZE + DAMAGE_CELL_SIZE + 4
+                    ..DAMAGE_HEADER_SIZE + DAMAGE_CELL_SIZE + 8]
+                    .try_into()
+                    .unwrap()
+            ),
+            DIRECT_COLOR_FLAG | 0xff0000
+        );
+        assert_eq!(
+            u32::from_le_bytes(
+                damage[DAMAGE_HEADER_SIZE + DAMAGE_CELL_SIZE + 8
+                    ..DAMAGE_HEADER_SIZE + DAMAGE_CELL_SIZE + 12]
+                    .try_into()
+                    .unwrap()
+            ),
+            DIRECT_COLOR_FLAG | 0x005faf
+        );
     }
 
     #[test]
@@ -1368,7 +1384,7 @@ mod tests {
             Err(TerminalError::OutputTooSmall)
         );
         assert_eq!(terminal.required_damage_bytes(), required);
-        let mut output = [0_u8; 128];
+        let mut output = [0_u8; 256];
         assert_eq!(terminal.write_damage(&mut output), Ok(required));
         assert_eq!(&output[0..4], b"ATRM");
         assert_eq!(

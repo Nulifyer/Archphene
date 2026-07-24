@@ -23,6 +23,8 @@ tput setaf 231
 printf ' WHITE231-ON-BLUE25 '
 tput sgr0
 printf '\r\n'
+printf '\033[38;2;18;52;86;48;2;171;205;239m RGB-123456-ABCDEF \033[0m'
+printf '\r\n'
 tput smacs
 printf 'lqqqqk'
 tput rmacs
