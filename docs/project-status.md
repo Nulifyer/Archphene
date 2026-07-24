@@ -224,6 +224,21 @@ x86_64 emulator and AArch64 Samsung. Bash is restored as the selected default
 after each gate. Additional shell-specific startup adapters, editable startup
 files, and the production terminal surface remain pending.
 
+The production terminal replacement now has a separate dependency-free Rust
+state-core foundation. It bounds grids to 200 by 400 cells, parses strict
+streaming UTF-8 without per-feed allocation, implements delayed VT autowrap,
+cursor movement, erase operations, scroll regions, basic SGR attributes,
+bounded OSC/DCS/APC suppression, resize preservation, and coarse dirty-row
+tracking. Host gates cover split multibyte input, malformed/control input,
+wrapping, scrolling, color state, resize bounds, and 1,000 warmed parser/grid
+updates with zero heap allocations.
+
+This core is intentionally not connected to Android rendering yet. Alternate
+screens, scrollback, Unicode width and combining behavior, extended color,
+remaining xterm controls, versioned dirty-cell transfer, selection, input
+modes, IME/hardware keyboard, clipboard, and accessibility remain required
+before it replaces the temporary diagnostic strip.
+
 The validated prototype below remains reference evidence until replacement
 vertical slices pass equivalent gates. Installed prototype state is no longer a
 replacement requirement.

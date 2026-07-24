@@ -99,6 +99,9 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
       - [x] Pass same-UID `SIGKILL`, interrupted-state, retained-Home restart, clean-marker removal, and full-device screenshot gates on both targets.
       - [x] Validate the same interruption/restart policy across a real emulator and physical-device reboot, including durable marker retention, full-device visuals, explicit restart, and clean-marker removal.
     - [ ] Replace the diagnostic command panel with production terminal rendering, scrollback, selection, IME, hardware keyboard, clipboard, and accessibility.
+      - [x] Establish a dependency-free Rust terminal-state core with bounded grids, strict streaming UTF-8, delayed VT autowrap, cursor/erase/scroll-region/basic SGR handling, bounded control strings, resize preservation, dirty-row tracking, and a warmed zero-allocation gate.
+      - [ ] Connect PTY output to the Rust terminal state and expose versioned, coarse dirty-cell snapshots to Android without per-cell JNI calls.
+      - [ ] Complete alternate-screen, Unicode width/combining, extended color, remaining xterm control, scrollback, selection, input-mode, renderer, clipboard, IME, hardware-keyboard, and accessibility behavior before calling the surface production-ready.
       - [ ] Fix the temporary manager panel's landscape clipping only as part of that replacement; current full-device rotation screenshots prove the status strip is not a usable terminal surface.
   - [ ] Wayland compositor, presentation, and lifecycle
   - [ ] Pointer, touch, keyboard, IME, clipboard, and drag-and-drop
