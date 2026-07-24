@@ -156,6 +156,15 @@ longer terminate an active session. Once the shell exits or is stopped, the
 notification is removed, the Linux process group is reaped, and an unbound
 Service stops itself.
 
+Rust also owns a fixed `active\n` session marker under the private Arch root.
+It is published atomically with mode 0600 after PTY creation, rejects
+symlink/non-file substitution, and is removed after the last clean PTY close.
+If manager death or reboot leaves it behind, the next bootstrap sets a durable
+snapshot flag and the UI says the previous session was interrupted, retaining
+the same Home but requiring an explicit fresh shell. Same-UID `SIGKILL`,
+interrupted-state rendering, restart, clean marker removal, and full-device
+screenshots pass on both maintained targets. A real reboot gate remains open.
+
 User-visible processes now receive Linux-facing `HOME=/home/archphene`,
 `TMPDIR=/tmp`, conventional XDG locations, and
 `PATH=/usr/local/sbin:/usr/local/bin:/usr/bin`; bridge-private host paths remain

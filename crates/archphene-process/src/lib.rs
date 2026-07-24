@@ -517,6 +517,10 @@ impl PtyRegistry {
         Ok(self.session(handle)?.waiter())
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.slots.iter().all(|slot| slot.session.is_none())
+    }
+
     pub fn close(&mut self, handle: u64) -> Result<(), ProcessError> {
         let (index, generation) =
             decode_pty_handle(handle).ok_or(ProcessError::InvalidPtyHandle)?;

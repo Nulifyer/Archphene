@@ -529,7 +529,14 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         )
         setTextIfChanged(
             commandStatusView,
-            runtimeBinder?.linuxCommandStatus ?: "Linux command environment unavailable",
+            if (
+                snapshot.sessionInterrupted &&
+                runtimeBinder?.sharedShellRunning != true
+            ) {
+                getString(R.string.session_interrupted)
+            } else {
+                runtimeBinder?.linuxCommandStatus ?: "Linux command environment unavailable"
+            },
         )
         updatePackageActions()
     }

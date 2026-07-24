@@ -201,6 +201,10 @@ impl Runtime {
         self.status_flags |= status_flags;
     }
 
+    pub fn remove_status_flags(&mut self, status_flags: u32) {
+        self.status_flags &= !status_flags;
+    }
+
     pub fn write_snapshot(&self, output: &mut [u8]) -> Result<usize, RuntimeError> {
         if output.len() < SNAPSHOT_SIZE {
             return Err(RuntimeError::SnapshotTooSmall);

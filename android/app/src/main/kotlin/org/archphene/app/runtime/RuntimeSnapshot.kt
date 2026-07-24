@@ -31,6 +31,9 @@ internal class RuntimeSnapshot {
     val packageCatalogReady: Boolean
         get() = statusFlags and STATUS_PACKAGE_CATALOG_READY != 0
 
+    val sessionInterrupted: Boolean
+        get() = statusFlags and STATUS_SESSION_INTERRUPTED != 0
+
     private val buffer =
         ByteBuffer.allocateDirect(NativeRuntime.SNAPSHOT_SIZE).order(ByteOrder.LITTLE_ENDIAN)
 
@@ -63,5 +66,6 @@ internal class RuntimeSnapshot {
         const val STATUS_JOB_STORE_READY = 1 shl 1
         const val STATUS_PACKAGE_RUNTIME_READY = 1 shl 2
         const val STATUS_PACKAGE_CATALOG_READY = 1 shl 3
+        const val STATUS_SESSION_INTERRUPTED = 1 shl 4
     }
 }
