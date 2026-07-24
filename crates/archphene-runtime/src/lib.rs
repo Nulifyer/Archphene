@@ -331,9 +331,10 @@ impl RuntimeHost {
         &mut self,
         handle: u64,
         output: &mut [u8],
+        full_snapshot: bool,
     ) -> Result<usize, PackageRuntimeError> {
         self.pty_sessions
-            .write_terminal_damage(handle, output)
+            .write_terminal_damage(handle, output, full_snapshot)
             .map_err(PackageRuntimeError::from)
     }
 

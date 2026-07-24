@@ -390,10 +390,17 @@ impl PtySession {
         self.waiter.clone()
     }
 
-    pub fn write_terminal_damage(&mut self, output: &mut [u8]) -> Result<usize, ProcessError> {
-        self.terminal
-            .write_damage(output)
-            .map_err(|_| ProcessError::InvalidArgument)
+    pub fn write_terminal_damage(
+        &mut self,
+        output: &mut [u8],
+        full_snapshot: bool,
+    ) -> Result<usize, ProcessError> {
+        if full_snapshot {
+            self.terminal.write_full_damage(output)
+        } else {
+            self.terminal.write_damage(output)
+        }
+        .map_err(|_| ProcessError::InvalidArgument)
     }
 
     pub fn close(&mut self) {
@@ -545,8 +552,10 @@ impl PtyRegistry {
         &mut self,
         handle: u64,
         output: &mut [u8],
+        full_snapshot: bool,
     ) -> Result<usize, ProcessError> {
-        self.session_mut(handle)?.write_terminal_damage(output)
+        self.session_mut(handle)?
+            .write_terminal_damage(output, full_snapshot)
     }
 
     pub fn exit_status(&mut self, handle: u64) -> Result<Option<i32>, ProcessError> {
@@ -1295,7 +1304,7 @@ mod tests {
         };
         let mut damage = vec![0_u8; MAX_TERMINAL_DAMAGE_BYTES];
         session
-            .write_terminal_damage(&mut damage)
+            .write_terminal_damage(&mut damage, false)
             .expect("initial damage");
         slave.write_all(b"\x1b[32;1mOK").expect("terminal output");
         let mut output = [0_u8; 64];
@@ -1307,7 +1316,7 @@ mod tests {
             thread::sleep(Duration::from_millis(5));
         }
         let length = session
-            .write_terminal_damage(&mut damage)
+            .write_terminal_damage(&mut damage, false)
             .expect("terminal damage");
         assert_eq!(&damage[..4], b"ATRM");
         assert_eq!(length, archphene_terminal::DAMAGE_HEADER_SIZE + 4 * 8);

@@ -16,8 +16,10 @@ import android.os.ParcelFileDescriptor
 import android.util.Log
 import java.io.File
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.nio.charset.StandardCharsets
 import java.net.URL
+import java.util.concurrent.atomic.AtomicLong
 import javax.net.ssl.HttpsURLConnection
 import org.archphene.app.MainActivity
 import org.archphene.app.R
@@ -55,7 +57,9 @@ class ArchpheneRuntimeService : Service() {
 
         val linuxCommandStatus: String
             get() =
-                if (shellActive || shellWasStarted) {
+                if (shellActive) {
+                    shellPhase
+                } else if (shellWasStarted) {
                     sharedShellDisplayStatus()
                 } else {
                     commandStatus
@@ -95,6 +99,12 @@ class ArchpheneRuntimeService : Service() {
         val sharedShellRunning: Boolean
             get() = shellActive
 
+        val sharedShellTerminalRevision: Long
+            get() = shellTerminalRevision.get()
+
+        val sharedShellTerminalDamageBuffer: ByteBuffer
+            get() = shellTerminalDamageBuffer
+
         val shellCatalogRevision: Int
             get() = shellChoicesRevision
 
@@ -129,6 +139,26 @@ class ArchpheneRuntimeService : Service() {
 
         fun selectSharedShell(index: Int): Boolean = requestShellSelection(index)
 
+        fun resizeSharedShell(
+            rows: Int,
+            columns: Int,
+        ): Boolean = requestShellResize(rows, columns)
+
+        fun readSharedShellTerminalDamage(fullSnapshot: Boolean): Int {
+            val activeHandle = readyHandle
+            val activePty = shellHandle
+            if (activeHandle == 0L || activePty == 0L) {
+                return 0
+            }
+            shellTerminalDamageBuffer.clear()
+            return NativeRuntime.nativeReadTerminalDamage(
+                activeHandle,
+                activePty,
+                fullSnapshot,
+                shellTerminalDamageBuffer,
+            )
+        }
+
         fun toggleSharedShell(): Boolean = requestSharedShellToggle()
     }
 
@@ -152,6 +182,9 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var shellWasStarted = false
     @Volatile private var shellStopRequested = false
     @Volatile private var shellHandle = 0L
+    private val shellTerminalRevision = AtomicLong()
+    @Volatile private var shellRows = DEFAULT_SHELL_ROWS
+    @Volatile private var shellColumns = DEFAULT_SHELL_COLUMNS
     @Volatile private var shellPhase = "Shared shell stopped"
     @Volatile private var shellChoices: List<ShellChoice> = emptyList()
     @Volatile private var shellChoicesRevision = 0
@@ -166,6 +199,11 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var commandStatus = "Run an installed Linux command"
     private val shellOutput = BoundedByteRing(SHELL_SCROLLBACK_BYTES)
     private val shellInput = FixedByteQueue(SHELL_INPUT_BYTES)
+    private val shellTerminalDamageBuffer: ByteBuffer by lazy(LazyThreadSafetyMode.NONE) {
+        ByteBuffer
+            .allocateDirect(NativeRuntime.TERMINAL_DAMAGE_SIZE)
+            .order(ByteOrder.LITTLE_ENDIAN)
+    }
 
     private data class ResolvedPayload(
         val repository: String,
@@ -392,6 +430,12 @@ class ArchpheneRuntimeService : Service() {
         private const val SHELL_INPUT_CHARACTERS = 2 * 1024
         private const val SHELL_IO_BYTES = 4 * 1024
         private const val SHELL_READ_BATCHES = 4
+        private const val DEFAULT_SHELL_ROWS = 24
+        private const val DEFAULT_SHELL_COLUMNS = 48
+        private const val MIN_SHELL_ROWS = 2
+        private const val MAX_SHELL_ROWS = 200
+        private const val MIN_SHELL_COLUMNS = 2
+        private const val MAX_SHELL_COLUMNS = 400
         private const val SHELL_CHOICE_LIMIT = 8
         private const val SHELL_FIELD_LIMIT = 64
         private const val SHELL_PREFERENCES = "terminal"
@@ -1963,6 +2007,43 @@ class ArchpheneRuntimeService : Service() {
         return result == 0
     }
 
+    private fun requestShellResize(
+        rows: Int,
+        columns: Int,
+    ): Boolean {
+        if (
+            rows !in MIN_SHELL_ROWS..MAX_SHELL_ROWS ||
+            columns !in MIN_SHELL_COLUMNS..MAX_SHELL_COLUMNS
+        ) {
+            return false
+        }
+        val activeHandle: Long
+        val activePty: Long
+        synchronized(this) {
+            if (rows == shellRows && columns == shellColumns) {
+                return true
+            }
+            shellRows = rows
+            shellColumns = columns
+            activeHandle = readyHandle
+            activePty = shellHandle
+        }
+        if (activeHandle == 0L || activePty == 0L) {
+            return true
+        }
+        val result =
+            NativeRuntime.nativeResizePty(
+                activeHandle,
+                activePty,
+                rows,
+                columns,
+            )
+        if (result == 0) {
+            shellTerminalRevision.incrementAndGet()
+        }
+        return result == 0
+    }
+
     private fun runSharedShell(
         activeHandle: Long,
         selectedShell: ShellChoice,
@@ -1975,6 +2056,8 @@ class ArchpheneRuntimeService : Service() {
         val readBytes = ByteArray(SHELL_IO_BYTES)
         val writeBytes = ByteArray(SHELL_IO_BYTES)
         try {
+            val initialRows = shellRows
+            val initialColumns = shellColumns
             val requestBytes = selectedShell.requestBytes
             val requestBuffer = ByteBuffer.allocateDirect(requestBytes.size)
             requestBuffer.put(requestBytes)
@@ -1984,8 +2067,8 @@ class ArchpheneRuntimeService : Service() {
                     activeHandle,
                     requestBuffer,
                     requestBytes.size,
-                    24,
-                    80,
+                    initialRows,
+                    initialColumns,
                     outputBuffer,
                 )
             if (ptyHandle <= 0) {
@@ -1997,6 +2080,7 @@ class ArchpheneRuntimeService : Service() {
                 }
                 shellHandle = ptyHandle
                 shellPhase = "Shared shell ready"
+                shellTerminalRevision.incrementAndGet()
             }
             mainHandler.post(::updateSessionNotification)
             Log.i(TAG, "Shared ${selectedShell.label} session started")
@@ -2042,6 +2126,7 @@ class ArchpheneRuntimeService : Service() {
                     readBuffer.position(0)
                     readBuffer.get(readBytes, 0, read)
                     shellOutput.append(readBytes, read)
+                    shellTerminalRevision.incrementAndGet()
                 }
                 val encodedStatus =
                     NativeRuntime.nativePtyExitStatus(activeHandle, ptyHandle)
@@ -2084,6 +2169,7 @@ class ArchpheneRuntimeService : Service() {
             }
             synchronized(this) {
                 shellHandle = 0L
+                shellTerminalRevision.incrementAndGet()
                 shellInput.clear()
                 shellActive = false
                 shellStopRequested = false

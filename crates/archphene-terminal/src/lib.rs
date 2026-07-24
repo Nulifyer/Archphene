@@ -150,7 +150,23 @@ impl Terminal {
     }
 
     pub fn write_damage(&mut self, output: &mut [u8]) -> Result<usize, TerminalError> {
-        let required = self.required_damage_bytes();
+        self.write_damage_range(output, self.dirty_start, self.dirty_end)
+    }
+
+    pub fn write_full_damage(&mut self, output: &mut [u8]) -> Result<usize, TerminalError> {
+        self.write_damage_range(output, 0, self.rows)
+    }
+
+    fn write_damage_range(
+        &mut self,
+        output: &mut [u8],
+        dirty_start: u16,
+        dirty_end: u16,
+    ) -> Result<usize, TerminalError> {
+        let required = DAMAGE_HEADER_SIZE
+            + usize::from(dirty_end.saturating_sub(dirty_start))
+                * usize::from(self.columns)
+                * DAMAGE_CELL_SIZE;
         if output.len() < required {
             return Err(TerminalError::OutputTooSmall);
         }
@@ -161,12 +177,12 @@ impl Terminal {
         output[10..12].copy_from_slice(&self.columns.to_le_bytes());
         output[12..14].copy_from_slice(&self.cursor_row.to_le_bytes());
         output[14..16].copy_from_slice(&self.cursor_column.to_le_bytes());
-        output[16..18].copy_from_slice(&self.dirty_start.to_le_bytes());
-        output[18..20].copy_from_slice(&self.dirty_end.to_le_bytes());
+        output[16..18].copy_from_slice(&dirty_start.to_le_bytes());
+        output[18..20].copy_from_slice(&dirty_end.to_le_bytes());
         output[20..24].copy_from_slice(&1_u32.to_le_bytes());
         output[24..32].copy_from_slice(&self.revision.to_le_bytes());
         let mut offset = DAMAGE_HEADER_SIZE;
-        for row in self.dirty_start..self.dirty_end {
+        for row in dirty_start..dirty_end {
             for column in 0..self.columns {
                 let cell = self.cells[self.index(row, column)];
                 output[offset..offset + 4].copy_from_slice(&cell.codepoint.to_le_bytes());
@@ -194,10 +210,15 @@ impl Terminal {
             return Ok(());
         }
         let mut replacement = vec![Cell::blank(); usize::from(rows) * usize::from(columns)];
-        let copied_rows = rows.min(self.rows);
+        let source_row = if rows < self.rows {
+            self.cursor_row.saturating_sub(rows - 1)
+        } else {
+            0
+        };
+        let copied_rows = rows.min(self.rows - source_row);
         let copied_columns = columns.min(self.columns);
         for row in 0..copied_rows {
-            let old = self.index(row, 0);
+            let old = self.index(source_row + row, 0);
             let new = usize::from(row) * usize::from(columns);
             replacement[new..new + usize::from(copied_columns)]
                 .copy_from_slice(&self.cells[old..old + usize::from(copied_columns)]);
@@ -205,7 +226,7 @@ impl Terminal {
         self.cells = replacement;
         self.rows = rows;
         self.columns = columns;
-        self.cursor_row = self.cursor_row.min(rows - 1);
+        self.cursor_row = self.cursor_row.saturating_sub(source_row).min(rows - 1);
         self.cursor_column = self.cursor_column.min(columns - 1);
         self.wrap_pending = false;
         self.scroll_top = 0;
@@ -613,6 +634,13 @@ mod tests {
             terminal.resize(MAX_ROWS + 1, 80),
             Err(TerminalError::InvalidSize)
         );
+
+        let mut shrinking = Terminal::new(4, 2).unwrap();
+        shrinking.feed(b"a\r\nb\r\nc\r\nd");
+        shrinking.resize(2, 2).unwrap();
+        assert_eq!(text(&shrinking, 0), "c ");
+        assert_eq!(text(&shrinking, 1), "d ");
+        assert_eq!(shrinking.cursor(), (1, 1));
     }
 
     #[test]
@@ -650,6 +678,12 @@ mod tests {
             u32::from(b'A')
         );
         assert_eq!(terminal.required_damage_bytes(), DAMAGE_HEADER_SIZE);
+        assert_eq!(
+            terminal.write_full_damage(&mut output),
+            Ok(DAMAGE_HEADER_SIZE + 2 * 3 * DAMAGE_CELL_SIZE)
+        );
+        assert_eq!(u16::from_le_bytes(output[16..18].try_into().unwrap()), 0);
+        assert_eq!(u16::from_le_bytes(output[18..20].try_into().unwrap()), 2);
         let first_revision = u64::from_le_bytes(output[24..32].try_into().unwrap());
         terminal.resize(3, 3).unwrap();
         terminal.write_damage(&mut output).unwrap();

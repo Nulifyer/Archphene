@@ -40,6 +40,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private lateinit var jobStatusView: TextView
     private lateinit var commandStatusView: TextView
     private lateinit var runtimeSurface: RuntimeSurfaceView
+    private lateinit var managerPanel: LinearLayout
+    private lateinit var runtimePanel: FrameLayout
     private lateinit var installButton: Button
     private lateinit var removeButton: Button
     private lateinit var commandButton: Button
@@ -62,6 +64,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 if (frameCallbackActive) {
                     transitionRuntime(NativeRuntime.LIFECYCLE_RUNNING)
                 }
+                runtimeSurface.synchronizeTerminalSize(runtimeBinder)
                 updateStatus()
             }
 
@@ -77,6 +80,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 commandButton.isEnabled = false
                 ptyButton.isEnabled = false
                 shellSpinner.isEnabled = false
+                updateShellPresentation(false)
             }
         }
 
@@ -95,24 +99,14 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 maxLines = 3
             }
         runtimeSurface = RuntimeSurfaceView(this)
-        val runtimePanel =
+        runtimeSurface.onTerminalSizeChanged = { rows, columns ->
+            runtimeBinder?.resizeSharedShell(rows, columns)
+        }
+        runtimePanel =
             FrameLayout(this).apply {
+                visibility = View.GONE
                 addView(
                     runtimeSurface,
-                    FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                    ),
-                )
-                addView(
-                    TextView(this@MainActivity).apply {
-                        setText(R.string.linux_session_display)
-                        setTextColor(Color.LTGRAY)
-                        textSize = 12f
-                        gravity = Gravity.CENTER
-                        isClickable = false
-                        isFocusable = false
-                    },
                     FrameLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.MATCH_PARENT,
@@ -402,16 +396,9 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 maxLines = 2
                 setTextIsSelectable(true)
             }
-        val layout =
+        managerPanel =
             LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
-                addView(
-                    statusView,
-                    LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        dp(72),
-                    ),
-                )
                 addView(
                     catalogRow,
                     LinearLayout.LayoutParams(
@@ -448,6 +435,25 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                         dp(64),
                     ),
                 )
+            }
+        val layout =
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(
+                    statusView,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        dp(72),
+                    ),
+                )
+                addView(
+                    managerPanel,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        0,
+                        1f,
+                    ),
+                )
                 addView(
                     shellRow,
                     LinearLayout.LayoutParams(
@@ -473,7 +479,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     runtimePanel,
                     LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
-                        dp(64),
+                        0,
+                        1f,
                     ),
                 )
             }
@@ -529,6 +536,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         }
         val handle = runtimeBinder?.runtimeHandle ?: 0L
         runtimeSurface.flushInput(handle)
+        runtimeSurface.renderFrame(runtimeBinder)
         if (statusFrameCountdown <= 0) {
             updateStatus()
             statusFrameCountdown = STATUS_FRAME_INTERVAL
@@ -618,8 +626,10 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             commandButton.isEnabled = false
             ptyButton.isEnabled = false
             shellSpinner.isEnabled = false
+            updateShellPresentation(false)
             return
         }
+        updateShellPresentation(binder.sharedShellRunning)
         updateShellSelector(binder)
         setTextIfChanged(installButton, binder.packagePrimaryActionLabel)
         installButton.isEnabled = binder.packagePrimaryActionAvailable
@@ -647,6 +657,23 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             }
         }
         shellSpinner.isEnabled = binder.sharedShellSelectionAvailable
+    }
+
+    private fun updateShellPresentation(shellRunning: Boolean) {
+        val managerVisibility = if (shellRunning) View.GONE else View.VISIBLE
+        val terminalVisibility = if (shellRunning) View.VISIBLE else View.GONE
+        if (managerPanel.visibility != managerVisibility) {
+            managerPanel.visibility = managerVisibility
+        }
+        if (runtimePanel.visibility != terminalVisibility) {
+            runtimePanel.visibility = terminalVisibility
+            if (shellRunning) {
+                runtimePanel.post {
+                    runtimeSurface.synchronizeTerminalSize(runtimeBinder)
+                    runtimeSurface.requestFocus()
+                }
+            }
+        }
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density + 0.5f).toInt()

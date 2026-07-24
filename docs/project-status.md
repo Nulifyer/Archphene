@@ -245,11 +245,42 @@ without heap allocation.
 A real host PTY test proves that colored, bold process output reaches the wire
 as terminal cells rather than synthetic Kotlin text. The JNI entry point is
 exported by both exact Android ABIs, both ABI-specific APKs build, and Android
-lint passes. Android rendering is not connected yet. Alternate screens,
-scrollback, Unicode width and combining behavior, extended color, remaining
-xterm controls, selection, input modes, a frame-paced dirty-row renderer,
-IME/hardware keyboard, clipboard, and accessibility remain required before
-the temporary diagnostic strip can be replaced.
+lint passes.
+
+Android rendering is now connected as a bounded first production slice.
+Starting a shared shell replaces the package workspace with the available
+full-height terminal surface instead of a clipped 64 dp diagnostic strip. The
+view measures 14sp monospace cells, resizes the real PTY to the resulting
+rows and columns, stores only the current dimensioned primitive cell arrays,
+and draws Android `RenderNode` rows. A Service-owned 640,032-byte direct buffer
+is allocated lazily once and survives Activity recreation. The Choreographer
+path checks a monotonic Service revision before JNI, drains all accumulated
+native damage in one call, and re-records only changed row nodes.
+
+Rotation testing exposed that preserving the top-left grid discarded recent
+output when 36 portrait rows became seven landscape rows. Shrink now anchors
+the copied window at the cursor. Home/Back testing then exposed that a fresh
+Activity could not reconstruct rows already consumed by its predecessor; the
+same wire call now supports an explicit bounded full snapshot used once by a
+new view, while steady state remains dirty-only. On-demand accessibility node
+queries synthesize at most 8 KiB of visible text; normal frames no longer build
+diagnostic terminal strings.
+
+The complete shared-shell lifecycle and installed-shell selection gates pass
+with exact-ABI APKs on the API 36 x86_64 emulator and physical AArch64 Samsung.
+They cover Bash and POSIX-shell prompts, conventional Home/PATH/UTF-8 output,
+phone-width wrapping, portrait/landscape PTY resize, Activity recreation,
+Home/Back process retention and full reconstruction, foreground notification,
+exit status, restart, stop/reap, unsafe-shell-catalog recovery, scoped fatal
+logs, accessibility trees, and visually inspected full-device screenshots.
+
+This is not yet the production terminal promised by the milestone. Resizing
+preserves the current cursor window but does not reflow or retain discarded
+rows because scrollback is not implemented. Alternate screens, Unicode width
+and combining behavior, extended color, remaining xterm controls, scrollback,
+selection, direct IME/hardware-keyboard input, clipboard, richer accessibility,
+and user-controlled terminal text sizing remain required. The current shell
+input still uses the temporary command field above the renderer.
 
 The validated prototype below remains reference evidence until replacement
 vertical slices pass equivalent gates. Installed prototype state is no longer a

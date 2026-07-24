@@ -101,9 +101,11 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
     - [ ] Replace the diagnostic command panel with production terminal rendering, scrollback, selection, IME, hardware keyboard, clipboard, and accessibility.
       - [x] Establish a dependency-free Rust terminal-state core with bounded grids, strict streaming UTF-8, delayed VT autowrap, cursor/erase/scroll-region/basic SGR handling, bounded control strings, resize preservation, dirty-row tracking, and a warmed zero-allocation gate.
       - [x] Connect every exact PTY read and resize to session-owned Rust terminal state, then expose bounded, versioned coarse dirty-row snapshots through one direct-buffer JNI call without per-cell JNI traffic or warmed heap allocation.
-      - [ ] Consume terminal snapshots in a frame-paced Android renderer with fixed reusable storage; do not poll or redraw unchanged rows.
+      - [x] Consume terminal snapshots in a frame-paced Android renderer with one Service-owned reusable direct buffer, dimension-bound primitive cell storage, revision-gated JNI reads, and cached RenderNode rows that are re-recorded only when damaged.
+      - [x] Size the PTY from measured 14sp monospace cells, give active sessions the available phone/tablet viewport, preserve cursor-adjacent rows when shrinking, and reconstruct a fresh Activity from one explicit full snapshot after rotation, Home, or Back.
+      - [x] Expose a bounded terminal accessibility snapshot only when Android queries the node, keeping the normal frame path free of synthesized terminal strings.
       - [ ] Complete alternate-screen, Unicode width/combining, extended color, remaining xterm control, scrollback, selection, input-mode, renderer, clipboard, IME, hardware-keyboard, and accessibility behavior before calling the surface production-ready.
-      - [ ] Fix the temporary manager panel's landscape clipping only as part of that replacement; current full-device rotation screenshots prove the status strip is not a usable terminal surface.
+      - [x] Replace the clipped temporary diagnostic strip during active sessions with the measured full-height terminal surface; retain emulator and Samsung full-device portrait/landscape/rebind evidence.
   - [ ] Wayland compositor, presentation, and lifecycle
   - [ ] Pointer, touch, keyboard, IME, clipboard, and drag-and-drop
   - [ ] Android file integration and `/mnt/android`

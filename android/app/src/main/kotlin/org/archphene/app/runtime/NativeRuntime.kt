@@ -120,6 +120,7 @@ internal object NativeRuntime {
     external fun nativeReadTerminalDamage(
         handle: Long,
         ptyHandle: Long,
+        fullSnapshot: Boolean,
         outputBuffer: ByteBuffer,
     ): Int
     external fun nativeWaitPty(

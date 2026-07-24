@@ -65,6 +65,25 @@ archphene_wait_ui_exact_text() {
   archphene_wait_ui "text=\"$escaped\"" "$name" "$seconds"
 }
 
+archphene_wait_ui_unwrapped() {
+  local pattern="$1"
+  local name="$2"
+  local seconds="${3:-20}"
+  local deadline=$((SECONDS + seconds))
+  local ui normalized
+
+  while ((SECONDS < deadline)); do
+    ui="$(archphene_capture_ui "$name" 2>/dev/null || true)"
+    normalized="${ui//&#10;/}"
+    if archphene_regex_contains "$normalized" "$pattern"; then
+      ARCHPHENE_UI="$ui"
+      return 0
+    fi
+    sleep 0.5
+  done
+  archphene_die "timed out waiting for unwrapped UI pattern: $pattern"
+}
+
 archphene_tap_text() {
   local escaped
   escaped="$(python3 -c 'import re,sys;print(re.escape(sys.argv[1]))' "$2")"

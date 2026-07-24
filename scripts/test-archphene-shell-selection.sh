@@ -93,8 +93,10 @@ assert_selected_shell "POSIX shell" "archphene-posix-restart-$serial"
 archphene_wait_ui 'text="START SHELL"' "archphene-posix-start-$serial" 15
 archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="START SHELL"' 'start POSIX shell'
 archphene_wait_log 'Shared POSIX shell session started' 20 >/dev/null
-archphene_wait_ui 'Shared shell ready[^"]*sh-[0-9][^"]*\$' \
-  "archphene-posix-ready-$serial" 20
+archphene_wait_ui 'text="Shared shell ready"' "archphene-posix-ready-$serial" 20
+archphene_wait_ui 'content-desc="Linux terminal, [0-9]+ columns by [0-9]+ rows"' \
+  "archphene-posix-terminal-$serial" 20
+archphene_wait_ui 'sh-[0-9][^"]*\$' "archphene-posix-prompt-$serial" 20
 archphene_wait_ui \
   'class="android.widget.Spinner"[^>]*enabled="false"[^>]*>.*text="POSIX shell"' \
   "archphene-posix-locked-$serial" 10
@@ -110,8 +112,10 @@ assert_selected_shell "Bash" "archphene-bash-restart-$serial"
 archphene_wait_ui 'text="START SHELL"' "archphene-bash-start-$serial" 15
 archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="START SHELL"' 'start Bash'
 archphene_wait_log 'Shared Bash session started' 20 >/dev/null
-archphene_wait_ui 'Shared shell ready[^"]*archphene:~\$' \
-  "archphene-bash-ready-$serial" 20
+archphene_wait_ui 'text="Shared shell ready"' "archphene-bash-ready-$serial" 20
+archphene_wait_ui 'content-desc="Linux terminal, [0-9]+ columns by [0-9]+ rows"' \
+  "archphene-bash-terminal-$serial" 20
+archphene_wait_ui 'archphene:~\$' "archphene-bash-prompt-$serial" 20
 archphene_adb_run exec-out screencap -p >"$output_dir/$serial-bash.png"
 archphene_wait_ui 'text="STOP SHELL"' "archphene-bash-stop-$serial" 10
 archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="STOP SHELL"' 'stop Bash'

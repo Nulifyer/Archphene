@@ -13,6 +13,7 @@
     <string name="install">Install</string>
     <string name="remove">Remove</string>
     <string name="linux_session_display">Linux session display</string>
+    <string name="terminal_accessibility_dimensions">Linux terminal, %1$d columns by %2$d rows</string>
     <string name="linux_command_hint">Linux command, for example btop --version</string>
     <string name="run_command">Run</string>
     <string name="start_shell">Start shell</string>
