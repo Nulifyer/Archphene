@@ -20,6 +20,7 @@ pub const MAX_COMMAND_OUTPUT_BYTES: usize = 15 * 1024;
 pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
 const MAX_SYMLINKS: usize = 16;
+const MAX_SHEBANG_BYTES: usize = 256;
 static OUTPUT_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
@@ -28,6 +29,8 @@ pub enum ProcessError {
     InvalidCommand,
     InvalidArgument,
     MissingCommand,
+    UnsupportedProgram,
+    InvalidInterpreter,
     UnsafeCommand(PathBuf),
     OutputLimit,
     Timeout,
@@ -41,6 +44,12 @@ impl fmt::Display for ProcessError {
             Self::InvalidCommand => formatter.write_str("invalid Linux command name"),
             Self::InvalidArgument => formatter.write_str("invalid Linux command arguments"),
             Self::MissingCommand => formatter.write_str("Linux command is not installed"),
+            Self::UnsupportedProgram => {
+                formatter.write_str("Linux command is neither ELF nor a supported script")
+            }
+            Self::InvalidInterpreter => {
+                formatter.write_str("Linux script has an invalid or unavailable interpreter")
+            }
             Self::UnsafeCommand(path) => {
                 write!(formatter, "unsafe Linux command: {}", path.display())
             }
@@ -135,7 +144,8 @@ impl CommandEnvironment {
 
     pub fn run(&self, command: &str, arguments: &[&str]) -> Result<CommandOutput, ProcessError> {
         validate_request(command, arguments)?;
-        let program = resolve_installed_command(&self.arch_root, command)?;
+        let command_path = resolve_installed_command(&self.arch_root, command)?;
+        let launch = prepare_launch(&self.arch_root, command, command_path)?;
         let output_path = self.output_path();
         let output_file = OpenOptions::new()
             .create_new(true)
@@ -144,20 +154,28 @@ impl CommandEnvironment {
             .open(&output_path)?;
         let _output_guard = TemporaryOutput(output_path.clone());
         let error_file = output_file.try_clone()?;
-        let child = Command::new(&self.loader)
+        let mut command_builder = Command::new(&self.loader);
+        command_builder
             .arg("--library-path")
             .arg(&self.library_path)
             .arg("--argv0")
-            .arg(command)
-            .arg(program)
+            .arg(&launch.argv0)
+            .arg(&launch.program);
+        if let Some(interpreter_argument) = &launch.interpreter_argument {
+            command_builder.arg(interpreter_argument);
+        }
+        if let Some(script) = &launch.script {
+            command_builder.arg(script);
+        }
+        let child = command_builder
             .args(arguments)
             .current_dir(self.arch_root.join("home/archphene"))
             .env_clear()
             .env("HOME", self.arch_root.join("home/archphene"))
             .env("TMPDIR", self.arch_root.join("tmp"))
             .env("PATH", &self.executable_path)
-            .env("LANG", "C.UTF-8")
-            .env("LC_ALL", "C.UTF-8")
+            .env("LANG", "C")
+            .env("LC_ALL", "C")
             .env("TERM", "dumb")
             .env("COLORTERM", "")
             .env(
@@ -309,6 +327,84 @@ fn resolve_installed_command(root: &Path, command: &str) -> Result<PathBuf, Proc
     Err(ProcessError::UnsafeCommand(path))
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct LaunchPlan {
+    program: PathBuf,
+    argv0: String,
+    interpreter_argument: Option<String>,
+    script: Option<PathBuf>,
+}
+
+fn prepare_launch(
+    root: &Path,
+    command: &str,
+    command_path: PathBuf,
+) -> Result<LaunchPlan, ProcessError> {
+    let mut file = File::open(&command_path)?;
+    let mut header = [0_u8; MAX_SHEBANG_BYTES];
+    let length = file.read(&mut header)?;
+    if header[..length].starts_with(b"\x7fELF") {
+        return Ok(LaunchPlan {
+            program: command_path,
+            argv0: command.to_owned(),
+            interpreter_argument: None,
+            script: None,
+        });
+    }
+    if !header[..length].starts_with(b"#!") {
+        return Err(ProcessError::UnsupportedProgram);
+    }
+    let line_end = match header[..length].iter().position(|byte| *byte == b'\n') {
+        Some(line_end) => line_end,
+        None if length < header.len() => length,
+        None => return Err(ProcessError::InvalidInterpreter),
+    };
+    let shebang = std::str::from_utf8(&header[2..line_end])
+        .map_err(|_| ProcessError::InvalidInterpreter)?
+        .trim_end_matches('\r')
+        .trim();
+    let (interpreter_path, interpreter_argument) = match shebang.split_once(char::is_whitespace) {
+        Some((path, argument)) => {
+            let argument = argument.trim();
+            if argument.is_empty() {
+                (path, None)
+            } else {
+                if argument.len() > MAX_COMMAND_ARGUMENT_BYTES || argument.as_bytes().contains(&0) {
+                    return Err(ProcessError::InvalidInterpreter);
+                }
+                (path, Some(argument.to_owned()))
+            }
+        }
+        None => (shebang, None),
+    };
+    let interpreter_name =
+        conventional_command_name(interpreter_path).ok_or(ProcessError::InvalidInterpreter)?;
+    let interpreter = resolve_installed_command(root, interpreter_name)
+        .map_err(|_| ProcessError::InvalidInterpreter)?;
+    let mut interpreter_file = File::open(&interpreter)?;
+    let mut magic = [0_u8; 4];
+    if interpreter_file.read_exact(&mut magic).is_err() || magic != *b"\x7fELF" {
+        return Err(ProcessError::InvalidInterpreter);
+    }
+    Ok(LaunchPlan {
+        program: interpreter,
+        argv0: interpreter_name.to_owned(),
+        interpreter_argument,
+        script: Some(command_path),
+    })
+}
+
+fn conventional_command_name(path: &str) -> Option<&str> {
+    let name = path
+        .strip_prefix("/usr/bin/")
+        .or_else(|| path.strip_prefix("/bin/"))?;
+    if name.is_empty() || name.contains('/') {
+        return None;
+    }
+    validate_request(name, &[]).ok()?;
+    Some(name)
+}
+
 fn normalize_under_root(root: &Path, path: &Path) -> Result<PathBuf, ProcessError> {
     let root_depth = root.components().count();
     let mut normalized = PathBuf::new();
@@ -412,6 +508,14 @@ mod tests {
             file.set_permissions(fs::Permissions::from_mode(0o755))
                 .expect("command mode");
         }
+
+        fn program(&self, name: &str, content: &[u8]) {
+            let path = self.0.join("usr/bin").join(name);
+            let mut file = File::create(&path).expect("program");
+            file.write_all(content).expect("write program");
+            file.set_permissions(fs::Permissions::from_mode(0o755))
+                .expect("program mode");
+        }
     }
 
     impl Drop for TestRoot {
@@ -499,5 +603,56 @@ mod tests {
         )
         .expect("command environment");
         assert_eq!(environment.path_bridge, bridge);
+    }
+
+    #[test]
+    fn launch_plans_use_only_installed_elf_interpreters() {
+        let root = TestRoot::new();
+        root.program("bash", b"\x7fELF interpreter");
+        root.program("env", b"\x7fELF env");
+        root.program("direct", b"\x7fELF direct");
+        root.program("script", b"#!/usr/bin/bash -e\nprintf ok\n");
+        root.program("env-script", b"#!/usr/bin/env bash\nprintf ok\n");
+
+        assert_eq!(
+            prepare_launch(&root.0, "direct", root.0.join("usr/bin/direct"),).expect("direct plan"),
+            LaunchPlan {
+                program: root.0.join("usr/bin/direct"),
+                argv0: "direct".to_owned(),
+                interpreter_argument: None,
+                script: None,
+            }
+        );
+        assert_eq!(
+            prepare_launch(&root.0, "script", root.0.join("usr/bin/script"),).expect("script plan"),
+            LaunchPlan {
+                program: root.0.join("usr/bin/bash"),
+                argv0: "bash".to_owned(),
+                interpreter_argument: Some("-e".to_owned()),
+                script: Some(root.0.join("usr/bin/script")),
+            }
+        );
+        assert_eq!(
+            prepare_launch(&root.0, "env-script", root.0.join("usr/bin/env-script"),)
+                .expect("env script plan")
+                .program,
+            root.0.join("usr/bin/env")
+        );
+    }
+
+    #[test]
+    fn launch_plans_reject_android_and_recursive_script_interpreters() {
+        let root = TestRoot::new();
+        root.program("android", b"#!/system/bin/sh\nexit 0\n");
+        root.program("recursive", b"#!/usr/bin/other\nexit 0\n");
+        root.program("other", b"#!/usr/bin/recursive\nexit 0\n");
+        assert!(matches!(
+            prepare_launch(&root.0, "android", root.0.join("usr/bin/android"),),
+            Err(ProcessError::InvalidInterpreter)
+        ));
+        assert!(matches!(
+            prepare_launch(&root.0, "recursive", root.0.join("usr/bin/recursive"),),
+            Err(ProcessError::InvalidInterpreter)
+        ));
     }
 }

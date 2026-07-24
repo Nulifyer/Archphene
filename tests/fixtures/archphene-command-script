@@ -1,0 +1,2 @@
+#!/usr/bin/bash
+printf 'archphene-script-ok:%s\n' "$1"

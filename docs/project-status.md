@@ -99,24 +99,31 @@ closure-wide rollback, cancellation, orphan cleanup, and low-storage recovery
 remain open, so this is not yet a complete production transaction engine.
 
 A first shared-command slice is also connected. A separate Rust process crate
-resolves one exact installed ELF command under `/usr/bin`, follows at most 16
+resolves one exact installed command under `/usr/bin`, follows at most 16
 relative or Linux-root absolute symlinks without leaving the private root,
 rejects writable programs and shell syntax, and launches it directly through
-the verified loader and generic path bridge. The process receives a cleared,
-conventional shared-home/XDG environment, a fixed argument budget, 15 KiB
-combined-output limit, 30-second deadline, and its own process group; temporary
-output is mode 0600 and removed on every return path. Kotlin crosses JNI once
-per command on a worker thread and exposes a deliberately small diagnostic
-command panel.
+the verified loader and generic path bridge. ELF programs run directly.
+Scripts must name a conventional `/usr/bin` or `/bin` shebang interpreter that
+resolves to an installed ELF program inside the same root; Android-host,
+missing, malformed, and recursive script interpreters fail closed. The process
+receives a cleared, conventional shared-home/XDG environment, guaranteed `C`
+locale, a fixed argument budget, 15 KiB combined-output limit, 30-second
+deadline, and its own process group; temporary output is mode 0600 and removed
+on every return path. Kotlin crosses JNI once per command on a worker thread
+and exposes a deliberately small diagnostic command panel.
 
 Clean signed install/remove/reinstall cycles execute `btop --version` and show
 exit 0 plus the real installed version in full-device screenshots on both the
 x86_64 emulator and AArch64 Samsung. The Samsung gate additionally dismisses
 the software IME before locating the on-screen Run action, avoiding the
 emulator-only assumption that a hardware keyboard leaves the lower controls
-visible. This does not yet constitute a terminal: script interpreters,
-interactive PTYs, cancellation, terminal emulation/scrollback, and durable
-session supervision remain open.
+visible. Bash is also installed through the normal signed package flow on both
+targets, then runs a temporary root-contained `#!/usr/bin/bash` script with an
+argument. The fixture is removed after the warning-free result is visible in a
+full-device screenshot; Bash remains a normal shared package. This does not
+yet constitute a terminal: interactive PTYs, cancellation, locale
+provisioning, terminal emulation/scrollback, and durable session supervision
+remain open.
 
 The validated prototype below remains reference evidence until replacement
 vertical slices pass equivalent gates. Installed prototype state is no longer a
