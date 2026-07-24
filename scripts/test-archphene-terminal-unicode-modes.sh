@@ -77,7 +77,7 @@ decoded_ui="$(
     <<<"$ARCHPHENE_UI"
 )"
 for marker in 'café' '日本語' '🇺🇸' '👨‍👩‍👧‍👦' '👍🏽' \
-  'AUTOWRAP-OFF:' 'ORIGIN-TOP' 'ORIGIN-BOTTOM'; do
+  'OVERFLOW:' '�Z' 'AUTOWRAP-OFF:' 'ORIGIN-TOP' 'ORIGIN-BOTTOM'; do
   [[ "$decoded_ui" == *"$marker"* ]] ||
     archphene_die "terminal Unicode/mode output did not expose marker: $marker"
 done
@@ -97,5 +97,5 @@ fatal_log="$(archphene_adb_run logcat -d -v brief \
   archphene_die "terminal Unicode regression emitted a fatal runtime error: $fatal_log"
 
 archphene_note "Archphene terminal Unicode/mode regression passed on $serial"
-archphene_note "  Combining, CJK, emoji, autowrap, and origin-mode rendering passed"
+archphene_note "  Combining, CJK, emoji, bounded overflow, autowrap, and origin mode passed"
 archphene_note "  Full-device screenshot: $output_dir/$serial.png"

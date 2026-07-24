@@ -6,6 +6,7 @@ printf 'COMBINING: cafe\u0301\r\n'
 printf 'CJK: 日本語\r\n'
 printf 'FLAG: 🇺🇸\r\n'
 printf 'EMOJI: 👨‍👩‍👧‍👦 👍🏽\r\n'
+printf 'OVERFLOW: a\u0301\u0301\u0301\u0301\u0301\u0301\u0301\u0301\u0301\u0301\u0301\u0301\u0301\u0301\u0301\u0301\u0301\u0301\u0301\u0301Z\r\n'
 
 columns="$(tput cols)"
 printf 'AUTOWRAP-OFF:'

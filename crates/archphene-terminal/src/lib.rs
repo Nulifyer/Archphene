@@ -27,6 +27,7 @@ const FLAG_APPLICATION_KEYPAD: u32 = 1 << 2;
 const FLAG_BRACKETED_PASTE: u32 = 1 << 3;
 const FLAG_NEW_LINE_MODE: u32 = 1 << 4;
 const FLAG_BACKARROW_KEY: u32 = 1 << 5;
+const ATTRIBUTE_GRAPHEME_TRUNCATED: u8 = 1 << 7;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Cell {
@@ -1126,6 +1127,9 @@ impl Terminal {
         if cell.grapheme_len == 0 {
             return false;
         }
+        if cell.attributes & ATTRIBUTE_GRAPHEME_TRUNCATED != 0 && codepoint_width(codepoint) == 0 {
+            return true;
+        }
         let length = usize::from(cell.grapheme_len);
         let mut candidate = [0_u32; MAX_GRAPHEME_CODEPOINTS + 1];
         for (candidate_codepoint, source_index) in candidate[..length].iter_mut().zip(0..length) {
@@ -1137,7 +1141,9 @@ impl Terminal {
         }
         if length >= MAX_GRAPHEME_CODEPOINTS {
             cell.set_codepoint(MAX_GRAPHEME_CODEPOINTS - 1, 0xfffd);
+            cell.attributes |= ATTRIBUTE_GRAPHEME_TRUNCATED;
             self.cells[index] = cell;
+            self.last_printed = Some(cell);
             self.mark_dirty(row);
             return true;
         }
@@ -1834,6 +1840,27 @@ mod tests {
         let flag = first + DAMAGE_CELL_SIZE;
         assert_eq!(damage[flag + 73], 2);
         assert_eq!(damage[flag + 74], 2);
+    }
+
+    #[test]
+    fn overlong_graphemes_are_visibly_truncated_without_unbounded_growth() {
+        let mut terminal = Terminal::new(2, 8).unwrap();
+        let mut input = String::from("a");
+        for _ in 0..32 {
+            input.push('\u{301}');
+        }
+        input.push('Z');
+        terminal.feed(input.as_bytes());
+
+        let cell = terminal.cell(0, 0).unwrap();
+        assert_eq!(usize::from(cell.grapheme_len), MAX_GRAPHEME_CODEPOINTS);
+        assert_eq!(
+            cell.codepoint(MAX_GRAPHEME_CODEPOINTS - 1),
+            u32::from('\u{fffd}')
+        );
+        assert_ne!(cell.attributes & ATTRIBUTE_GRAPHEME_TRUNCATED, 0);
+        assert_eq!(terminal.cell(0, 1).unwrap().codepoint, u32::from('Z'));
+        assert_eq!(terminal.cursor(), (0, 2));
     }
 
     #[test]

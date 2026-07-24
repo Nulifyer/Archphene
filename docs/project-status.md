@@ -458,6 +458,14 @@ pastes the clipboard back through the PTY for an exact string assertion.
 Existing touch-menu/bracketed Paste and scrollback gesture gates still pass on
 both targets.
 
+Overlong Unicode clusters now have an explicit bounded policy. A cell retains
+at most 16 scalars, replaces its truncated tail with U+FFFD, discards further
+zero-width extenders, and resumes at the next printable cell; one internal
+attribute bit prevents repeated growth without changing Android's rendered
+style. The warmed allocation gate and exact-ABI full-device Unicode workflows
+prove the visible replacement boundary alongside combining text, CJK, flags,
+emoji, autowrap, and origin mode on both devices.
+
 That device gate also exposed an incomplete generic root-identity bridge:
 glibc's filesystem-ID query reached Android's blocked x86_64 syscall 122.
 The path bridge now consistently virtualizes uid, gid, effective uid/gid, and

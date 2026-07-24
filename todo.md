@@ -131,7 +131,8 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
       - [x] Prove visible history, return to live output, touch, wheel, hardware-page, accessibility, scoped-log, and full-device behavior on the exact-ABI emulator and Samsung builds; rerun broad PTY, color, editing, and Unicode gates on both.
       - [x] Add bounded visible-viewport word selection with touch-drag extension, exact cell highlighting, 2 KiB grapheme/newline copy, long-press Copy, `Ctrl+Shift+C`, InputConnection Copy, and accessibility Copy; clear stale selection on output, resize, scroll, or input.
       - [x] Prove long-press word selection, visible highlighting, Android Copy, exact clipboard paste-back, existing Paste, scroll gestures, scoped logs, and full-device visuals on both exact-ABI targets.
-      - [ ] Complete remaining xterm controls/modes, logical soft-wrap joining and resize reflow across screen/history, selection handles/autoscroll and history-stable ranges, bounded grapheme-overflow policy, non-Latin/composing IME coverage, and richer accessibility before calling the surface production-ready.
+      - [x] Make overlong grapheme behavior explicit and bounded: retain at most 16 scalars, replace the truncated tail visibly, discard subsequent zero-width extenders, and resume at the next printable cell.
+      - [ ] Complete remaining xterm controls/modes, logical soft-wrap joining and resize reflow across screen/history, selection handles/autoscroll and history-stable ranges, non-Latin/composing IME coverage, and richer accessibility before calling the surface production-ready.
       - [x] Replace the clipped temporary diagnostic strip during active sessions with the measured full-height terminal surface; retain emulator and Samsung full-device portrait/landscape/rebind evidence.
   - [ ] Wayland compositor, presentation, and lifecycle
   - [ ] Pointer, touch, keyboard, IME, clipboard, and drag-and-drop
