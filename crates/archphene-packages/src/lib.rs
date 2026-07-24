@@ -22,6 +22,10 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const TRANSACTION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const ALIAS_DIRECTORY: &str = "run/package-runtime-v1";
 const OUTPUT_FILE: &str = "run/package-command-output.tmp";
+const INSTALL_REASON_INTENT_FILE: &str = "run/package-install-reasons-v1";
+const INSTALL_REASON_INTENT_TEMP_FILE: &str = "run/package-install-reasons-v1.tmp";
+const INSTALL_REASON_INTENT_HEADER: &str = "org.archphene.package-install-reasons.v1";
+const INSTALL_REASON_INTENT_LIMIT: u64 = 64 * 1024;
 const PACMAN_CONFIG_FILE: &str = "etc/pacman.conf";
 const PACMAN_CONFIG_TEMP_FILE: &str = "etc/pacman.conf.tmp";
 const CATALOG_DIRECTORY: &str = "var/lib/pacman/sync";
@@ -408,7 +412,7 @@ impl PackageRuntime {
         executable_path.push(":");
         executable_path.push(arch_root.join("usr/bin").as_os_str());
         let path_bridge = alias_root.join(PATH_BRIDGE_NAME);
-        Ok(Self {
+        let runtime = Self {
             arch_root: arch_root.to_path_buf(),
             native_root,
             alias_root,
@@ -421,7 +425,9 @@ impl PackageRuntime {
             tools,
             library_path,
             executable_path,
-        })
+        };
+        runtime.recover_pending_install_reasons()?;
+        Ok(runtime)
     }
 
     pub fn run(
@@ -707,44 +713,36 @@ impl PackageRuntime {
             self.run_with_timeout(PackageTool::Pacman, &plan_arguments, TRANSACTION_TIMEOUT)?;
         validate_install_plan(plan.as_str()?, &archives)?;
 
-        for archive in &archives {
-            let install_reason = if archive.explicitly_installed {
-                "--asexplicit"
-            } else {
-                "--asdeps"
-            };
-            let result = self.run_with_timeout(
-                PackageTool::Pacman,
-                &[
-                    "--config",
-                    config,
-                    "--root",
-                    root,
-                    "--dbpath",
-                    database,
-                    "--gpgdir",
-                    trust_directory,
-                    "--cachedir",
-                    cache,
-                    "--noconfirm",
-                    "--noprogressbar",
-                    "--noscriptlet",
-                    "--needed",
-                    "--nodeps",
-                    install_reason,
-                    "--overwrite=*",
-                    "-U",
-                    archive.path.as_str(),
-                ],
-                TRANSACTION_TIMEOUT,
-            );
-            if let Err(error) = result {
-                self.recover_interrupted_transaction(archive)?;
-                return Err(error);
-            }
+        self.publish_install_reason_intent(&archives)?;
+        let mut transaction_arguments = vec![
+            "--config",
+            config,
+            "--root",
+            root,
+            "--dbpath",
+            database,
+            "--gpgdir",
+            trust_directory,
+            "--cachedir",
+            cache,
+            "--noconfirm",
+            "--noprogressbar",
+            "--noscriptlet",
+            "--needed",
+            "--asdeps",
+            "-U",
+        ];
+        transaction_arguments.extend(archives.iter().map(|archive| archive.path.as_str()));
+        if let Err(error) = self.run_with_timeout(
+            PackageTool::Pacman,
+            &transaction_arguments,
+            TRANSACTION_TIMEOUT,
+        ) {
+            self.recover_database_lock()?;
+            self.recover_pending_install_reasons()?;
+            return Err(error);
         }
-        self.mark_explicitly_installed(package)?;
-        self.validate_local_database()?;
+        self.recover_pending_install_reasons()?;
         let installed = self.installed_version(package)?;
         let expected = archives
             .iter()
@@ -874,6 +872,74 @@ impl PackageRuntime {
         Ok(())
     }
 
+    fn publish_install_reason_intent(
+        &self,
+        archives: &[InstallArchive],
+    ) -> Result<(), PackageRuntimeError> {
+        let mut content = String::with_capacity(archives.len().saturating_mul(32));
+        content.push_str(INSTALL_REASON_INTENT_HEADER);
+        content.push('\n');
+        let mut explicit_count = 0_usize;
+        for archive in archives {
+            if archive.explicitly_installed {
+                explicit_count = explicit_count.saturating_add(1);
+                content.push_str(&archive.name);
+                content.push('\n');
+            }
+        }
+        parse_install_reason_intent(&content)?;
+        if explicit_count == 0 || content.len() as u64 > INSTALL_REASON_INTENT_LIMIT {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        let destination = self.arch_root.join(INSTALL_REASON_INTENT_FILE);
+        publish_regular_file(
+            &destination,
+            &self.arch_root.join(INSTALL_REASON_INTENT_TEMP_FILE),
+            content.as_bytes(),
+        )?;
+        File::open(
+            destination
+                .parent()
+                .ok_or(PackageRuntimeError::InvalidPath)?,
+        )?
+        .sync_all()?;
+        Ok(())
+    }
+
+    fn recover_pending_install_reasons(&self) -> Result<(), PackageRuntimeError> {
+        let path = self.arch_root.join(INSTALL_REASON_INTENT_FILE);
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(PackageRuntimeError::Io(error)),
+        };
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || metadata.permissions().mode() & 0o077 != 0
+            || metadata.len() == 0
+            || metadata.len() > INSTALL_REASON_INTENT_LIMIT
+        {
+            return Err(PackageRuntimeError::UnsafeEntry(path));
+        }
+        let content = fs::read(&path)?;
+        if content.len() as u64 != metadata.len() {
+            return Err(PackageRuntimeError::SizeMismatch);
+        }
+        let content =
+            std::str::from_utf8(&content).map_err(|_| PackageRuntimeError::InvalidResolution)?;
+        let packages = parse_install_reason_intent(content)?;
+        self.recover_database_lock()?;
+        for package in packages {
+            if !self.installed_version(package)?.as_bytes().is_empty() {
+                self.mark_explicitly_installed(package)?;
+            }
+        }
+        self.validate_local_database()?;
+        fs::remove_file(&path)?;
+        File::open(path.parent().ok_or(PackageRuntimeError::InvalidPath)?)?.sync_all()?;
+        Ok(())
+    }
+
     fn recover_database_lock(&self) -> Result<(), PackageRuntimeError> {
         let lock = self.arch_root.join("var/lib/pacman/db.lck");
         match fs::remove_file(lock) {
@@ -950,27 +1016,6 @@ impl PackageRuntime {
                 Some("1") => {}
                 Some(_) => return Err(PackageRuntimeError::InvalidResolution),
             }
-        }
-        Ok(())
-    }
-
-    fn recover_interrupted_transaction(
-        &self,
-        archive: &InstallArchive,
-    ) -> Result<(), PackageRuntimeError> {
-        let database = self.arch_root.join("var/lib/pacman");
-        self.recover_database_lock()?;
-        let entry = database
-            .join("local")
-            .join(format!("{}-{}", archive.name, archive.version));
-        match fs::symlink_metadata(&entry) {
-            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-                return Err(PackageRuntimeError::UnsafeEntry(entry));
-            }
-            Ok(_) if !entry.join("desc").is_file() => fs::remove_dir_all(entry)?,
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(PackageRuntimeError::Io(error)),
         }
         Ok(())
     }
@@ -1925,6 +1970,27 @@ struct InstallArchive {
     explicitly_installed: bool,
 }
 
+fn parse_install_reason_intent(input: &str) -> Result<Vec<&str>, PackageRuntimeError> {
+    if input.len() as u64 > INSTALL_REASON_INTENT_LIMIT {
+        return Err(PackageRuntimeError::InvalidResolution);
+    }
+    let mut lines = input.lines();
+    if lines.next() != Some(INSTALL_REASON_INTENT_HEADER) {
+        return Err(PackageRuntimeError::InvalidResolution);
+    }
+    let mut packages = Vec::with_capacity(8);
+    for package in lines {
+        if !safe_logical_name(package) || packages.len() >= 256 || packages.contains(&package) {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        packages.push(package);
+    }
+    if packages.is_empty() || !input.ends_with('\n') {
+        return Err(PackageRuntimeError::InvalidResolution);
+    }
+    Ok(packages)
+}
+
 fn validate_install_plan(
     input: &str,
     archives: &[InstallArchive],
@@ -2538,6 +2604,28 @@ extra\tdotnet-sdk\t10.0.10.sdk110-1\tdotnet-sdk-10.0.10.sdk110-1-x86_64.pkg.tar.
             validate_install_plan("btop 1.4.7-1\n", &archives),
             Err(PackageRuntimeError::InvalidResolution)
         ));
+    }
+
+    #[test]
+    fn install_reason_intents_are_bounded_and_exact() {
+        assert_eq!(
+            parse_install_reason_intent("org.archphene.package-install-reasons.v1\nbtop\nbash\n",)
+                .expect("valid install-reason intent"),
+            ["btop", "bash"],
+        );
+        for invalid in [
+            "",
+            "org.archphene.package-install-reasons.v1\n",
+            "org.archphene.package-install-reasons.v1\nbtop",
+            "org.archphene.package-install-reasons.v1\nbtop\nbtop\n",
+            "org.archphene.package-install-reasons.v1\n../btop\n",
+            "different\nbtop\n",
+        ] {
+            assert!(matches!(
+                parse_install_reason_intent(invalid),
+                Err(PackageRuntimeError::InvalidResolution)
+            ));
+        }
     }
 
     #[test]

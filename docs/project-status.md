@@ -94,15 +94,24 @@ dependency, conflict, and replacement checks, then requires every planned
 name/version to match the already verified resolution exactly before allowing
 mutation. A cache-only gate verifies installed `btop` through that real
 preflight without rewriting or downloading package payloads on the x86_64
-emulator and AArch64 Samsung. Pacman then commits packages in dependency order
-to the shared private root, preserving explicit and dependency install reasons.
+emulator and AArch64 Samsung. Pacman now commits the complete prepared archive
+set through one normal dependency-checking transaction; the former per-package
+`--nodeps` and blanket-overwrite mutations are gone. New packages enter as
+dependencies, while a bounded mode-0600 intent preserves every existing
+explicit package plus the requested target and restores those reasons
+idempotently after manager death. Startup rejects malformed, oversized,
+symlinked, or broadly writable intents, removes a stale database lock, validates
+the local database, and only then deletes the recovered intent. Cache-only
+verify/remove/reinstall and forced restart-recovery gates pass on both devices
+without rewriting package payloads.
+
 The generic compatibility layer maps Linux root ownership to the Android app
 UID, copies when SELinux rejects hard links, avoids Android app seccomp's
 blocked `fchmodat2`, and maps generic root-relative mutation calls without
-package-specific changes. The current path recovers its bounded stale-lock and
-incomplete-entry cases, validates pacman's local database, and proves the
-requested package and version. The commit path is still one package at a time;
-one closure-wide commit and rollback boundary remains open.
+package-specific changes. The current path validates pacman's local database
+and proves the requested package and version. Scriptlets/hooks remain disabled,
+and real upgrade/replacement, failure injection, rollback/recovery, cancellation,
+orphan cleanup, and low-storage behavior remain open.
 
 Exact installed-version queries now drive state-specific Install, Update,
 Verify, and Remove actions. Removal first asks pacman for a non-cascading plan,

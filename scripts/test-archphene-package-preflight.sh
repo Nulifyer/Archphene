@@ -23,6 +23,8 @@ archphene_require_file "$apk"
 package=org.archphene.app.debug
 activity="$package/org.archphene.app.MainActivity"
 cache=files/arch-root/var/cache/pacman/pkg
+reason_intent=files/arch-root/run/package-install-reasons-v1
+reason_intent_temp=files/arch-root/run/package-install-reasons-v1.tmp
 output_dir="$ARCHPHENE_ROOT/tooling/build/package-preflight"
 mkdir -p "$output_dir"
 
@@ -75,6 +77,10 @@ archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="VERIFY"' 'verify package'
 archphene_wait_ui 'text="btop · Complete · 100%.*Verified btop [^"]+"' \
   "package-preflight-complete-$serial" 120
 archphene_wait_log 'Verified btop: [1-9][0-9]* signed packages' 15 >/dev/null
+archphene_adb_run shell run-as "$package" test ! -e "$reason_intent" ||
+  archphene_die "completed package preflight left an install-reason intent"
+archphene_adb_run shell run-as "$package" test ! -e "$reason_intent_temp" ||
+  archphene_die "completed package preflight left a temporary install-reason intent"
 
 [[ "$(archphene_adb_run shell run-as "$package" stat -c '%s:%Y' "$archive" |
   tr -d '\r')" == "$archive_state" ]] ||
@@ -87,12 +93,52 @@ temporary="$(archphene_adb_run exec-out run-as "$package" find "$cache" \
 [[ -z "$temporary" ]] ||
   archphene_die "package preflight left a temporary cache entry"
 
+archphene_adb_run logcat -c
+archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="REMOVE"' 'remove package'
+archphene_wait_ui 'text="btop · Complete · 100%.*Removed btop [^"]+"' \
+  "package-preflight-remove-$serial" 90
+archphene_adb_run shell run-as "$package" test ! -e files/arch-root/usr/bin/btop ||
+  archphene_die "cache-only transaction gate did not remove btop"
+archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="INSTALL"' 'reinstall package'
+archphene_wait_ui 'text="btop · Complete · 100%.*Installed btop [^"]+"' \
+  "package-preflight-reinstall-$serial" 120
+archphene_wait_log 'Installed btop: [1-9][0-9]* signed packages' 15 >/dev/null
+archphene_adb_run shell run-as "$package" test -x files/arch-root/usr/bin/btop ||
+  archphene_die "cache-only transaction gate did not reinstall btop"
+[[ "$(archphene_adb_run shell run-as "$package" stat -c '%s:%Y' "$archive" |
+  tr -d '\r')" == "$archive_state" ]] ||
+  archphene_die "cache-only reinstall unexpectedly rewrote the cached archive"
+[[ "$(archphene_adb_run shell run-as "$package" stat -c '%s:%Y' "$signature" |
+  tr -d '\r')" == "$signature_state" ]] ||
+  archphene_die "cache-only reinstall unexpectedly rewrote the cached signature"
+
 archphene_adb_run exec-out screencap -p >"$output_dir/$serial.png"
+
+printf 'org.archphene.package-install-reasons.v1\nbtop\n' |
+  archphene_adb_run shell run-as "$package" tee "$reason_intent" >/dev/null
+archphene_adb_run shell run-as "$package" chmod 600 "$reason_intent"
+archphene_adb_run logcat -c
+archphene_adb_run shell am force-stop "$package" >/dev/null
+archphene_adb_run shell am start -W -n "$activity" >/dev/null
+archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 15 >/dev/null
+archphene_adb_run shell run-as "$package" test ! -e "$reason_intent" ||
+  archphene_die "startup did not recover the durable install-reason intent"
+local_btop="$(archphene_adb_run exec-out run-as "$package" find \
+  files/arch-root/var/lib/pacman/local -maxdepth 1 -type d -name 'btop-*' |
+  tr -d '\r' | head -n1)"
+[[ -n "$local_btop" ]] || archphene_die "startup recovery lost the btop database entry"
+btop_description="$(archphene_adb_run exec-out run-as "$package" \
+  cat "$local_btop/desc" | tr -d '\r')"
+btop_reason="$(awk '/^%REASON%$/{getline; print; exit}' <<<"$btop_description")"
+[[ -z "$btop_reason" ]] ||
+  archphene_die "startup recovery did not restore btop's explicit install reason"
+
 fatal_log="$(archphene_adb_run logcat -d -v brief \
   -s AndroidRuntime:E libc:F '*:S' 2>/dev/null || true)"
 [[ "$fatal_log" != *"FATAL EXCEPTION"* && "$fatal_log" != *"Fatal signal"* ]] ||
   archphene_die "package preflight emitted a fatal runtime error: $fatal_log"
 
 archphene_note "Archphene package closure preflight passed on $serial"
-archphene_note "  Verified installed btop without rewriting cached signed payloads"
+archphene_note "  Verified, removed, and reinstalled btop without rewriting cached payloads"
+archphene_note "  Durable explicit-install reason recovery passed after process restart"
 archphene_note "  Full-device screenshot: $output_dir/$serial.png"
