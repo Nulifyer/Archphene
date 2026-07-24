@@ -684,6 +684,29 @@ impl PackageRuntime {
         let cache = cache_path
             .to_str()
             .ok_or(PackageRuntimeError::InvalidPath)?;
+        let mut plan_arguments = vec![
+            "--config",
+            config,
+            "--root",
+            root,
+            "--dbpath",
+            database,
+            "--gpgdir",
+            trust_directory,
+            "--cachedir",
+            cache,
+            "--noconfirm",
+            "--noprogressbar",
+            "-U",
+            "--print",
+            "--print-format",
+            "%n\t%v",
+        ];
+        plan_arguments.extend(archives.iter().map(|archive| archive.path.as_str()));
+        let plan =
+            self.run_with_timeout(PackageTool::Pacman, &plan_arguments, TRANSACTION_TIMEOUT)?;
+        validate_install_plan(plan.as_str()?, &archives)?;
+
         for archive in &archives {
             let install_reason = if archive.explicitly_installed {
                 "--asexplicit"
@@ -1902,6 +1925,52 @@ struct InstallArchive {
     explicitly_installed: bool,
 }
 
+fn validate_install_plan(
+    input: &str,
+    archives: &[InstallArchive],
+) -> Result<(), PackageRuntimeError> {
+    if archives.is_empty() || archives.len() > 256 {
+        return Err(PackageRuntimeError::InvalidResolution);
+    }
+    let mut planned = [false; 256];
+    let mut count = 0_usize;
+    for line in input.lines() {
+        // Pacman writes stable C-locale reinstall notices to stderr. The bounded
+        // command runner deliberately captures both streams so failures retain
+        // their diagnostics; ignore only that narrowly identified diagnostic
+        // class while still requiring every resolved archive below.
+        if line.starts_with("warning: ") {
+            continue;
+        }
+        let (name, version) = line
+            .split_once('\t')
+            .ok_or(PackageRuntimeError::InvalidResolution)?;
+        if name.is_empty()
+            || version.is_empty()
+            || version.bytes().any(|byte| byte.is_ascii_whitespace())
+        {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        let index = archives
+            .iter()
+            .position(|archive| archive.name == name && archive.version == version)
+            .ok_or(PackageRuntimeError::InvalidResolution)?;
+        if planned[index] {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        planned[index] = true;
+        count = count.saturating_add(1);
+        if count > archives.len() {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+    }
+    if count == archives.len() {
+        Ok(())
+    } else {
+        Err(PackageRuntimeError::InvalidResolution)
+    }
+}
+
 fn parse_resolved_payload(line: &str) -> Result<ResolvedPayload<'_>, PackageRuntimeError> {
     let mut fields = line.split('\t');
     let repository = fields
@@ -2416,6 +2485,57 @@ extra\tdotnet-sdk\t10.0.10.sdk110-1\tdotnet-sdk-10.0.10.sdk110-1-x86_64.pkg.tar.
                 "btop",
                 RepositoryArchitecture::Aarch64,
             ),
+            Err(PackageRuntimeError::InvalidResolution)
+        ));
+    }
+
+    #[test]
+    fn install_preflight_accepts_only_resolved_name_version_pairs() {
+        let archives = [
+            InstallArchive {
+                path: "/cache/glibc.pkg.tar.zst".to_owned(),
+                name: "glibc".to_owned(),
+                version: "2.42-1".to_owned(),
+                explicitly_installed: false,
+            },
+            InstallArchive {
+                path: "/cache/btop.pkg.tar.zst".to_owned(),
+                name: "btop".to_owned(),
+                version: "1.4.7-1".to_owned(),
+                explicitly_installed: true,
+            },
+        ];
+        assert!(validate_install_plan("glibc\t2.42-1\nbtop\t1.4.7-1\n", &archives).is_ok());
+        assert!(
+            validate_install_plan(
+                "warning: btop-1.4.7-1 is up to date -- reinstalling\n\
+                 glibc\t2.42-1\nbtop\t1.4.7-1\n",
+                &archives,
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            validate_install_plan("", &archives),
+            Err(PackageRuntimeError::InvalidResolution)
+        ));
+        assert!(matches!(
+            validate_install_plan("btop\t1.4.7-1\n", &archives),
+            Err(PackageRuntimeError::InvalidResolution)
+        ));
+        assert!(matches!(
+            validate_install_plan("other\t1.0-1\n", &archives),
+            Err(PackageRuntimeError::InvalidResolution)
+        ));
+        assert!(matches!(
+            validate_install_plan("btop\t1.4.6-1\n", &archives),
+            Err(PackageRuntimeError::InvalidResolution)
+        ));
+        assert!(matches!(
+            validate_install_plan("btop\t1.4.7-1\nbtop\t1.4.7-1\n", &archives),
+            Err(PackageRuntimeError::InvalidResolution)
+        ));
+        assert!(matches!(
+            validate_install_plan("btop 1.4.7-1\n", &archives),
             Err(PackageRuntimeError::InvalidResolution)
         ));
     }

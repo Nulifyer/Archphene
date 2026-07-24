@@ -89,13 +89,20 @@ measures 442 ms and 1,222 ms respectively. Both targets remain under the
 reverify its signed closure through the reused keybox.
 
 Immediately before mutation, Rust re-resolves and re-verifies the full bounded
-closure. Pacman then commits it in dependency order to the shared private root,
-preserving explicit and dependency install reasons. The generic compatibility
-layer maps Linux root ownership to the Android app UID, copies when SELinux
-rejects hard links, avoids Android app seccomp's blocked `fchmodat2`, and maps
-generic root-relative mutation calls without package-specific changes. The
-current path recovers its bounded stale-lock and incomplete-entry cases,
-validates pacman's local database, and proves the requested package and version.
+closure. It now asks pacman to prepare the complete archive set with normal
+dependency, conflict, and replacement checks, then requires every planned
+name/version to match the already verified resolution exactly before allowing
+mutation. A cache-only gate verifies installed `btop` through that real
+preflight without rewriting or downloading package payloads on the x86_64
+emulator and AArch64 Samsung. Pacman then commits packages in dependency order
+to the shared private root, preserving explicit and dependency install reasons.
+The generic compatibility layer maps Linux root ownership to the Android app
+UID, copies when SELinux rejects hard links, avoids Android app seccomp's
+blocked `fchmodat2`, and maps generic root-relative mutation calls without
+package-specific changes. The current path recovers its bounded stale-lock and
+incomplete-entry cases, validates pacman's local database, and proves the
+requested package and version. The commit path is still one package at a time;
+one closure-wide commit and rollback boundary remains open.
 
 Exact installed-version queries now drive state-specific Install, Update,
 Verify, and Remove actions. Removal first asks pacman for a non-cascading plan,

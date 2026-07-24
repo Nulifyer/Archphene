@@ -74,6 +74,7 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
     - [x] Pass clean full-device `btop` install, cache-tamper, process-death, executable, and package-database gates on the x86_64 emulator and AArch64 Samsung.
     - [x] Query exact installed versions, preserve explicit/dependency install reasons, reconcile a current signed package, and conservatively remove only when pacman accepts the non-cascading plan.
     - [x] Pass clean full-device install, verify/tamper recovery, remove, absence, verified-cache reinstall, database-validity, and process-death gates on both targets.
+    - [x] Preflight the entire re-verified closure through pacman's normal dependency, conflict, and replacement preparation; reject missing, duplicate, changed-version, or unknown plan entries before mutation. Cache-only full-device gates pass on both targets.
     - [ ] Prove a real older-to-newer repository update, including changed dependencies and replacements, on both targets.
     - [ ] Complete hooks/scriptlets, replacements, dependency consistency checks, closure-wide rollback, orphan cleanup, cancellation, and low-storage recovery.
   - [ ] Terminal/PTY and shared command environment
@@ -195,6 +196,7 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
 
 - [ ] Complete pacman transaction semantics against the shared Arch root.
   - [x] Re-verify signed archives immediately before mutation and make each dependency-ordered package commit durable and resumable.
+  - [x] Preflight the complete verified closure with normal pacman dependency/conflict/replacement checks and require an exact name/version plan before mutation.
   - [x] Recover the bounded stale-lock and incomplete-current-entry cases proven by the current install flow.
   - [x] Preserve pacman install reasons, validate the local database after mutation, and support conservative non-cascading removal with exact postcondition checks.
   - [ ] Add hooks/scriptlets, upgrades, replacements, full dependency validation, closure-wide rollback, orphan cleanup, cancellation, and storage-failure recovery.
