@@ -1,0 +1,21 @@
+#!/usr/bin/bash
+set -euo pipefail
+
+tput clear
+printf 'OUTSIDE-TOP\r\nDELETE-ME\r\nROW-THREE\r\n'
+tput cup 1 0
+tput il1
+printf 'INSERTED'
+tput cup 2 0
+tput dl1
+tput cup 3 0
+printf '1234567'
+tput cub 5
+tput ich 1
+printf 'X'
+tput dch 1
+printf 'Y'
+tput cup 5 0
+printf 'terminal-editing-ready'
+IFS= read -r -n 1
+tput clear

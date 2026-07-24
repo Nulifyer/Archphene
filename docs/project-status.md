@@ -318,6 +318,16 @@ real terminal modes and the same key is captured as application `ESC O A`;
 accessibility, scoped logs, and visually inspected full-device screenshots
 pass on the emulator and Samsung.
 
+The terminal core also handles the common in-place operations used by editors
+and full-screen tools: ICH/DCH/ECH, IL/DL, SU/SD, reverse index, repeat,
+insert mode, CNL/CPL/VPA/HPA, ANSI cursor save/restore, and programmable
+forward/backward tab stops. Tab state is a fixed 400-column array and all edit
+operations mutate the preallocated grid with bounded `copy_within` calls.
+These paths are included in the warmed zero-allocation gate. A device fixture
+uses installed Bash and `tput` to produce ICH/DCH/IL/DL sequences through the
+real PTY; exact content, accessibility, scoped logs, and visually inspected
+full-device screenshots pass on both exact-ABI targets.
+
 That device gate also exposed an incomplete generic root-identity bridge:
 glibc's filesystem-ID query reached Android's blocked x86_64 syscall 122.
 The path bridge now consistently virtualizes uid, gid, effective uid/gid, and

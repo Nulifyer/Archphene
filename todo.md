@@ -111,6 +111,8 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
       - [x] Prove installed `tput` alternate-screen clearing, content, discard, exact primary restoration, scoped logs, and full-device visuals on both exact-ABI targets.
       - [x] Publish application cursor/keypad, bracketed-paste, newline, and backarrow modes through the existing damage flags; select static mode-correct Android hardware and IME sequences without extra JNI or per-key allocation.
       - [x] Prove exact normal `ESC [ A` and application `ESC O A` hardware Up sequences through installed `tput`, Bash byte capture, accessibility, scoped logs, and full-device screenshots on both ABIs.
+      - [x] Implement bounded insert/delete/erase character and line operations, region scroll/reverse-index, repeat, insert mode, extended cursor movement/save/restore, and fixed-capacity programmable tab stops.
+      - [x] Exercise the editing controls in the warmed zero-allocation gate, then prove installed `tput` ICH/DCH/IL/DL behavior through exact-ABI PTYs, accessibility, scoped logs, and visually inspected full-device screenshots on both targets.
       - [ ] Complete Unicode width/combining, extended color, remaining xterm controls/modes, scrollback/reflow, selection, bracketed clipboard paste, non-Latin/composing IME coverage, richer accessibility, and user-controlled text sizing before calling the surface production-ready.
       - [x] Replace the clipped temporary diagnostic strip during active sessions with the measured full-height terminal surface; retain emulator and Samsung full-device portrait/landscape/rebind evidence.
   - [ ] Wayland compositor, presentation, and lifecycle

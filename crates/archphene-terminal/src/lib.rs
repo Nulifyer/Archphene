@@ -82,6 +82,9 @@ pub struct Terminal {
     bracketed_paste: bool,
     new_line_mode: bool,
     backarrow_key: bool,
+    insert_mode: bool,
+    tab_stops: [bool; MAX_COLUMNS as usize],
+    last_printed: Option<u32>,
     parser_state: ParserState,
     csi_parameters: [u16; MAX_CSI_PARAMETERS],
     csi_count: usize,
@@ -103,6 +106,10 @@ pub struct Terminal {
 impl Terminal {
     pub fn new(rows: u16, columns: u16) -> Result<Self, TerminalError> {
         validate_size(rows, columns)?;
+        let mut tab_stops = [false; MAX_COLUMNS as usize];
+        for column in (8..MAX_COLUMNS as usize).step_by(8) {
+            tab_stops[column] = true;
+        }
         Ok(Self {
             rows,
             columns,
@@ -129,6 +136,9 @@ impl Terminal {
             bracketed_paste: false,
             new_line_mode: false,
             backarrow_key: false,
+            insert_mode: false,
+            tab_stops,
+            last_printed: None,
             parser_state: ParserState::Ground,
             csi_parameters: [0; MAX_CSI_PARAMETERS],
             csi_count: 0,
@@ -375,7 +385,7 @@ impl Terminal {
             }
             b'\t' => {
                 self.wrap_pending = false;
-                self.cursor_column = ((self.cursor_column / 8 + 1) * 8).min(self.columns - 1);
+                self.tab_forward(1);
             }
             0x20..=0x7e => self.put_codepoint(u32::from(byte)),
             0xc2..=0xdf => {
@@ -424,6 +434,10 @@ impl Terminal {
                 self.cursor_column = 0;
                 self.line_feed();
             }
+            b'H' => {
+                self.tab_stops[usize::from(self.cursor_column)] = true;
+            }
+            b'M' => self.reverse_index(),
             b'c' => self.reset(),
             _ => {}
         }
@@ -487,6 +501,7 @@ impl Terminal {
         }
         self.wrap_pending = false;
         match final_byte {
+            b'@' => self.insert_characters(self.parameter(0, 1)),
             b'A' => self.cursor_row = self.cursor_row.saturating_sub(self.parameter(0, 1)),
             b'B' => {
                 self.cursor_row = self
@@ -503,6 +518,17 @@ impl Terminal {
             b'D' => {
                 self.cursor_column = self.cursor_column.saturating_sub(self.parameter(0, 1));
             }
+            b'E' => {
+                self.cursor_row = self
+                    .cursor_row
+                    .saturating_add(self.parameter(0, 1))
+                    .min(self.rows - 1);
+                self.cursor_column = 0;
+            }
+            b'F' => {
+                self.cursor_row = self.cursor_row.saturating_sub(self.parameter(0, 1));
+                self.cursor_column = 0;
+            }
             b'G' => {
                 self.cursor_column = self.parameter(0, 1).saturating_sub(1).min(self.columns - 1)
             }
@@ -510,8 +536,22 @@ impl Terminal {
                 self.cursor_row = self.parameter(0, 1).saturating_sub(1).min(self.rows - 1);
                 self.cursor_column = self.parameter(1, 1).saturating_sub(1).min(self.columns - 1);
             }
+            b'I' => self.tab_forward(self.parameter(0, 1)),
             b'J' => self.erase_display(self.csi_parameters[0]),
             b'K' => self.erase_line(self.csi_parameters[0]),
+            b'L' => self.insert_lines(self.parameter(0, 1)),
+            b'M' => self.delete_lines(self.parameter(0, 1)),
+            b'P' => self.delete_characters(self.parameter(0, 1)),
+            b'S' => self.scroll_up_by(self.parameter(0, 1)),
+            b'T' => self.scroll_down_by(self.parameter(0, 1)),
+            b'X' => self.erase_characters(self.parameter(0, 1)),
+            b'Z' => self.tab_backward(self.parameter(0, 1)),
+            b'`' => {
+                self.cursor_column = self.parameter(0, 1).saturating_sub(1).min(self.columns - 1)
+            }
+            b'b' => self.repeat_last(self.parameter(0, 1)),
+            b'd' => self.cursor_row = self.parameter(0, 1).saturating_sub(1).min(self.rows - 1),
+            b'g' => self.clear_tab_stops(self.csi_parameters[0]),
             b'm' => self.select_graphics(),
             b'h' | b'l' => self.execute_ansi_mode(final_byte == b'h'),
             b'r' => {
@@ -526,6 +566,14 @@ impl Terminal {
                     self.cursor_row = top;
                     self.cursor_column = 0;
                 }
+            }
+            b's' => {
+                self.saved_row = self.cursor_row;
+                self.saved_column = self.cursor_column;
+            }
+            b'u' => {
+                self.cursor_row = self.saved_row.min(self.rows - 1);
+                self.cursor_column = self.saved_column.min(self.columns - 1);
             }
             _ => {}
         }
@@ -566,9 +614,16 @@ impl Terminal {
 
     fn execute_ansi_mode(&mut self, enabled: bool) {
         for index in 0..self.csi_count {
-            if self.csi_parameters[index] == 20 && self.new_line_mode != enabled {
-                self.new_line_mode = enabled;
-                self.mark_dirty(self.cursor_row);
+            match self.csi_parameters[index] {
+                4 if self.insert_mode != enabled => {
+                    self.insert_mode = enabled;
+                    self.mark_dirty(self.cursor_row);
+                }
+                20 if self.new_line_mode != enabled => {
+                    self.new_line_mode = enabled;
+                    self.mark_dirty(self.cursor_row);
+                }
+                _ => {}
             }
         }
     }
@@ -633,6 +688,9 @@ impl Terminal {
             self.line_feed();
             self.wrap_pending = false;
         }
+        if self.insert_mode {
+            self.insert_characters(1);
+        }
         let index = self.index(self.cursor_row, self.cursor_column);
         self.cells[index] = Cell {
             codepoint,
@@ -640,6 +698,7 @@ impl Terminal {
             background: self.background,
             attributes: self.attributes,
         };
+        self.last_printed = Some(codepoint);
         self.mark_dirty(self.cursor_row);
         if self.cursor_column + 1 >= self.columns {
             self.wrap_pending = true;
@@ -657,12 +716,137 @@ impl Terminal {
     }
 
     fn scroll_up(&mut self) {
+        self.scroll_up_by(1);
+    }
+
+    fn reverse_index(&mut self) {
+        if self.cursor_row == self.scroll_top {
+            self.scroll_down_by(1);
+        } else {
+            self.cursor_row = self.cursor_row.saturating_sub(1);
+        }
+    }
+
+    fn insert_characters(&mut self, count: u16) {
+        let row_start = self.index(self.cursor_row, 0);
+        let start = row_start + usize::from(self.cursor_column);
+        let end = row_start + usize::from(self.columns);
+        let count = usize::from(count).min(end - start);
+        if count == 0 {
+            return;
+        }
+        self.cells.copy_within(start..end - count, start + count);
+        self.cells[start..start + count].fill(Cell::blank());
+        self.mark_dirty(self.cursor_row);
+    }
+
+    fn delete_characters(&mut self, count: u16) {
+        let row_start = self.index(self.cursor_row, 0);
+        let start = row_start + usize::from(self.cursor_column);
+        let end = row_start + usize::from(self.columns);
+        let count = usize::from(count).min(end - start);
+        if count == 0 {
+            return;
+        }
+        self.cells.copy_within(start + count..end, start);
+        self.cells[end - count..end].fill(Cell::blank());
+        self.mark_dirty(self.cursor_row);
+    }
+
+    fn erase_characters(&mut self, count: u16) {
+        let start = self.index(self.cursor_row, self.cursor_column);
+        let count = usize::from(count).min(usize::from(self.columns - self.cursor_column));
+        if count == 0 {
+            return;
+        }
+        self.cells[start..start + count].fill(Cell::blank());
+        self.mark_dirty(self.cursor_row);
+    }
+
+    fn insert_lines(&mut self, count: u16) {
+        if !(self.scroll_top..=self.scroll_bottom).contains(&self.cursor_row) {
+            return;
+        }
+        let count = count.min(self.scroll_bottom - self.cursor_row + 1);
+        let columns = usize::from(self.columns);
+        let start = self.index(self.cursor_row, 0);
+        let end = self.index(self.scroll_bottom + 1, 0);
+        let offset = usize::from(count) * columns;
+        self.cells.copy_within(start..end - offset, start + offset);
+        self.cells[start..start + offset].fill(Cell::blank());
+        self.mark_dirty_range(self.cursor_row, self.scroll_bottom + 1);
+    }
+
+    fn delete_lines(&mut self, count: u16) {
+        if !(self.scroll_top..=self.scroll_bottom).contains(&self.cursor_row) {
+            return;
+        }
+        let count = count.min(self.scroll_bottom - self.cursor_row + 1);
+        let columns = usize::from(self.columns);
+        let start = self.index(self.cursor_row, 0);
+        let end = self.index(self.scroll_bottom + 1, 0);
+        let offset = usize::from(count) * columns;
+        self.cells.copy_within(start + offset..end, start);
+        self.cells[end - offset..end].fill(Cell::blank());
+        self.mark_dirty_range(self.cursor_row, self.scroll_bottom + 1);
+    }
+
+    fn scroll_up_by(&mut self, count: u16) {
+        let count = count.min(self.scroll_bottom - self.scroll_top + 1);
         let columns = usize::from(self.columns);
         let top = self.index(self.scroll_top, 0);
-        let bottom = self.index(self.scroll_bottom, 0);
-        self.cells.copy_within(top + columns..bottom + columns, top);
-        self.cells[bottom..bottom + columns].fill(Cell::blank());
+        let end = self.index(self.scroll_bottom + 1, 0);
+        let offset = usize::from(count) * columns;
+        self.cells.copy_within(top + offset..end, top);
+        self.cells[end - offset..end].fill(Cell::blank());
         self.mark_dirty_range(self.scroll_top, self.scroll_bottom + 1);
+    }
+
+    fn scroll_down_by(&mut self, count: u16) {
+        let count = count.min(self.scroll_bottom - self.scroll_top + 1);
+        let columns = usize::from(self.columns);
+        let top = self.index(self.scroll_top, 0);
+        let end = self.index(self.scroll_bottom + 1, 0);
+        let offset = usize::from(count) * columns;
+        self.cells.copy_within(top..end - offset, top + offset);
+        self.cells[top..top + offset].fill(Cell::blank());
+        self.mark_dirty_range(self.scroll_top, self.scroll_bottom + 1);
+    }
+
+    fn tab_forward(&mut self, count: u16) {
+        for _ in 0..count.min(self.columns) {
+            let mut next = self.cursor_column + 1;
+            while next < self.columns && !self.tab_stops[usize::from(next)] {
+                next += 1;
+            }
+            self.cursor_column = next.min(self.columns - 1);
+        }
+    }
+
+    fn tab_backward(&mut self, count: u16) {
+        for _ in 0..count.min(self.columns) {
+            let mut previous = self.cursor_column.saturating_sub(1);
+            while previous > 0 && !self.tab_stops[usize::from(previous)] {
+                previous -= 1;
+            }
+            self.cursor_column = previous;
+        }
+    }
+
+    fn clear_tab_stops(&mut self, mode: u16) {
+        match mode {
+            0 => self.tab_stops[usize::from(self.cursor_column)] = false,
+            3 => self.tab_stops.fill(false),
+            _ => {}
+        }
+    }
+
+    fn repeat_last(&mut self, count: u16) {
+        if let Some(codepoint) = self.last_printed {
+            for _ in 0..count {
+                self.put_codepoint(codepoint);
+            }
+        }
     }
 
     fn erase_display(&mut self, mode: u16) {
@@ -749,6 +933,12 @@ impl Terminal {
         self.bracketed_paste = false;
         self.new_line_mode = false;
         self.backarrow_key = false;
+        self.insert_mode = false;
+        self.tab_stops.fill(false);
+        for column in (8..MAX_COLUMNS as usize).step_by(8) {
+            self.tab_stops[column] = true;
+        }
+        self.last_printed = None;
         self.foreground = DEFAULT_FOREGROUND;
         self.background = DEFAULT_BACKGROUND;
         self.attributes = 0;
@@ -926,6 +1116,70 @@ mod tests {
             u32::from_le_bytes(output[20..24].try_into().unwrap()),
             FLAG_CURSOR_VISIBLE
         );
+    }
+
+    #[test]
+    fn editing_controls_shift_erase_repeat_and_insert_without_growth() {
+        let mut terminal = Terminal::new(2, 8).unwrap();
+        terminal.feed(b"abcdef\x1b[3D\x1b[2@XY\x1b[2P\x1b[2X");
+        assert_eq!(text(&terminal, 0), "abcXY   ");
+
+        terminal.feed(b"A\x1b[3b");
+        assert_eq!(text(&terminal, 0), "abcXYAAA");
+        assert_eq!(text(&terminal, 1), "A       ");
+
+        let mut insert = Terminal::new(2, 6).unwrap();
+        insert.feed(b"abcd\x1b[1;2H\x1b[4hX\x1b[4lY");
+        assert_eq!(text(&insert, 0), "aXYcd ");
+    }
+
+    #[test]
+    fn line_and_region_controls_preserve_rows_outside_the_margin() {
+        let mut terminal = Terminal::new(5, 4).unwrap();
+        terminal.feed(
+            b"\x1b[1;1H1111\x1b[2;1H2222\x1b[3;1H3333\
+              \x1b[4;1H4444\x1b[5;1H5555\x1b[2;4r",
+        );
+
+        terminal.feed(b"\x1b[3;1H\x1b[LIIII\x1b[M");
+        assert_eq!(text(&terminal, 0), "1111");
+        assert_eq!(text(&terminal, 1), "2222");
+        assert_eq!(text(&terminal, 2), "3333");
+        assert_eq!(text(&terminal, 3), "    ");
+        assert_eq!(text(&terminal, 4), "5555");
+
+        terminal.feed(b"\x1b[S\x1b[T");
+        assert_eq!(text(&terminal, 0), "1111");
+        assert_eq!(text(&terminal, 1), "    ");
+        assert_eq!(text(&terminal, 2), "3333");
+        assert_eq!(text(&terminal, 3), "    ");
+        assert_eq!(text(&terminal, 4), "5555");
+
+        terminal.feed(b"\x1b[2;1H\x1bM");
+        assert_eq!(text(&terminal, 0), "1111");
+        assert_eq!(text(&terminal, 1), "    ");
+        assert_eq!(text(&terminal, 2), "    ");
+        assert_eq!(text(&terminal, 3), "3333");
+        assert_eq!(text(&terminal, 4), "5555");
+    }
+
+    #[test]
+    fn cursor_tab_and_save_restore_controls_are_bounded() {
+        let mut terminal = Terminal::new(3, 20).unwrap();
+        terminal.feed(b"\t");
+        assert_eq!(terminal.cursor(), (0, 8));
+
+        terminal.feed(b"\x1b[3g\x1b[1;6H\x1bH\x1b[1;1H\x1b[I");
+        assert_eq!(terminal.cursor(), (0, 5));
+        terminal.feed(b"\x1b[Z");
+        assert_eq!(terminal.cursor(), (0, 0));
+        terminal.feed(b"\x1b[1;6H\x1b[g\x1b[1;1H\t");
+        assert_eq!(terminal.cursor(), (0, 19));
+
+        terminal.feed(b"\x1b[2;4H\x1b[s\x1b[3E\x1b[2F\x1b[9G\x1b[u");
+        assert_eq!(terminal.cursor(), (1, 3));
+        terminal.feed(b"\x1b[3d\x1b[7`");
+        assert_eq!(terminal.cursor(), (2, 6));
     }
 
     #[test]
