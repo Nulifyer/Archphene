@@ -54,6 +54,7 @@ pub struct Terminal {
     rows: u16,
     columns: u16,
     cells: Vec<Cell>,
+    inactive_cells: Vec<Cell>,
     cursor_row: u16,
     cursor_column: u16,
     wrap_pending: bool,
@@ -61,6 +62,15 @@ pub struct Terminal {
     saved_column: u16,
     scroll_top: u16,
     scroll_bottom: u16,
+    inactive_cursor_row: u16,
+    inactive_cursor_column: u16,
+    inactive_wrap_pending: bool,
+    inactive_saved_row: u16,
+    inactive_saved_column: u16,
+    inactive_scroll_top: u16,
+    inactive_scroll_bottom: u16,
+    alternate_active: bool,
+    cursor_visible: bool,
     parser_state: ParserState,
     csi_parameters: [u16; MAX_CSI_PARAMETERS],
     csi_count: usize,
@@ -86,6 +96,7 @@ impl Terminal {
             rows,
             columns,
             cells: vec![Cell::blank(); usize::from(rows) * usize::from(columns)],
+            inactive_cells: vec![Cell::blank(); usize::from(rows) * usize::from(columns)],
             cursor_row: 0,
             cursor_column: 0,
             wrap_pending: false,
@@ -93,6 +104,15 @@ impl Terminal {
             saved_column: 0,
             scroll_top: 0,
             scroll_bottom: rows - 1,
+            inactive_cursor_row: 0,
+            inactive_cursor_column: 0,
+            inactive_wrap_pending: false,
+            inactive_saved_row: 0,
+            inactive_saved_column: 0,
+            inactive_scroll_top: 0,
+            inactive_scroll_bottom: rows - 1,
+            alternate_active: false,
+            cursor_visible: true,
             parser_state: ParserState::Ground,
             csi_parameters: [0; MAX_CSI_PARAMETERS],
             csi_count: 0,
@@ -179,7 +199,8 @@ impl Terminal {
         output[14..16].copy_from_slice(&self.cursor_column.to_le_bytes());
         output[16..18].copy_from_slice(&dirty_start.to_le_bytes());
         output[18..20].copy_from_slice(&dirty_end.to_le_bytes());
-        output[20..24].copy_from_slice(&1_u32.to_le_bytes());
+        let flags = u32::from(self.cursor_visible);
+        output[20..24].copy_from_slice(&flags.to_le_bytes());
         output[24..32].copy_from_slice(&self.revision.to_le_bytes());
         let mut offset = DAMAGE_HEADER_SIZE;
         for row in dirty_start..dirty_end {
@@ -209,21 +230,24 @@ impl Terminal {
         if rows == self.rows && columns == self.columns {
             return Ok(());
         }
-        let mut replacement = vec![Cell::blank(); usize::from(rows) * usize::from(columns)];
-        let source_row = if rows < self.rows {
-            self.cursor_row.saturating_sub(rows - 1)
-        } else {
-            0
-        };
-        let copied_rows = rows.min(self.rows - source_row);
-        let copied_columns = columns.min(self.columns);
-        for row in 0..copied_rows {
-            let old = self.index(source_row + row, 0);
-            let new = usize::from(row) * usize::from(columns);
-            replacement[new..new + usize::from(copied_columns)]
-                .copy_from_slice(&self.cells[old..old + usize::from(copied_columns)]);
-        }
-        self.cells = replacement;
+        let (cells, source_row) = resize_cells(
+            &self.cells,
+            self.rows,
+            self.columns,
+            rows,
+            columns,
+            self.cursor_row,
+        );
+        let (inactive_cells, inactive_source_row) = resize_cells(
+            &self.inactive_cells,
+            self.rows,
+            self.columns,
+            rows,
+            columns,
+            self.inactive_cursor_row,
+        );
+        self.cells = cells;
+        self.inactive_cells = inactive_cells;
         self.rows = rows;
         self.columns = columns;
         self.cursor_row = self.cursor_row.saturating_sub(source_row).min(rows - 1);
@@ -231,6 +255,14 @@ impl Terminal {
         self.wrap_pending = false;
         self.scroll_top = 0;
         self.scroll_bottom = rows - 1;
+        self.inactive_cursor_row = self
+            .inactive_cursor_row
+            .saturating_sub(inactive_source_row)
+            .min(rows - 1);
+        self.inactive_cursor_column = self.inactive_cursor_column.min(columns - 1);
+        self.inactive_wrap_pending = false;
+        self.inactive_scroll_top = 0;
+        self.inactive_scroll_bottom = rows - 1;
         self.dirty_start = 0;
         self.dirty_end = rows;
         self.revision = self.revision.saturating_add(1);
@@ -408,6 +440,7 @@ impl Terminal {
 
     fn execute_csi(&mut self, final_byte: u8) {
         if self.csi_private {
+            self.execute_private_csi(final_byte);
             return;
         }
         self.wrap_pending = false;
@@ -453,6 +486,61 @@ impl Terminal {
             }
             _ => {}
         }
+    }
+
+    fn execute_private_csi(&mut self, final_byte: u8) {
+        if final_byte != b'h' && final_byte != b'l' {
+            return;
+        }
+        self.wrap_pending = false;
+        let enabled = final_byte == b'h';
+        for index in 0..self.csi_count {
+            match self.csi_parameters[index] {
+                25 => {
+                    if self.cursor_visible != enabled {
+                        self.cursor_visible = enabled;
+                        self.mark_dirty(self.cursor_row);
+                    }
+                }
+                47 => self.set_alternate_screen(enabled, false),
+                1047 | 1049 => self.set_alternate_screen(enabled, enabled),
+                1048 if enabled => {
+                    self.saved_row = self.cursor_row;
+                    self.saved_column = self.cursor_column;
+                }
+                1048 => {
+                    self.cursor_row = self.saved_row.min(self.rows - 1);
+                    self.cursor_column = self.saved_column.min(self.columns - 1);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn set_alternate_screen(&mut self, enabled: bool, clear_on_entry: bool) {
+        if enabled == self.alternate_active {
+            return;
+        }
+        std::mem::swap(&mut self.cells, &mut self.inactive_cells);
+        std::mem::swap(&mut self.cursor_row, &mut self.inactive_cursor_row);
+        std::mem::swap(&mut self.cursor_column, &mut self.inactive_cursor_column);
+        std::mem::swap(&mut self.wrap_pending, &mut self.inactive_wrap_pending);
+        std::mem::swap(&mut self.saved_row, &mut self.inactive_saved_row);
+        std::mem::swap(&mut self.saved_column, &mut self.inactive_saved_column);
+        std::mem::swap(&mut self.scroll_top, &mut self.inactive_scroll_top);
+        std::mem::swap(&mut self.scroll_bottom, &mut self.inactive_scroll_bottom);
+        self.alternate_active = enabled;
+        if enabled && clear_on_entry {
+            self.cells.fill(Cell::blank());
+            self.cursor_row = 0;
+            self.cursor_column = 0;
+            self.wrap_pending = false;
+            self.saved_row = 0;
+            self.saved_column = 0;
+            self.scroll_top = 0;
+            self.scroll_bottom = self.rows - 1;
+        }
+        self.mark_dirty_range(0, self.rows);
     }
 
     fn put_codepoint(&mut self, codepoint: u32) {
@@ -552,12 +640,26 @@ impl Terminal {
     }
 
     fn reset(&mut self) {
+        if self.alternate_active {
+            self.set_alternate_screen(false, false);
+        }
         self.cells.fill(Cell::blank());
+        self.inactive_cells.fill(Cell::blank());
         self.cursor_row = 0;
         self.cursor_column = 0;
         self.wrap_pending = false;
+        self.saved_row = 0;
+        self.saved_column = 0;
         self.scroll_top = 0;
         self.scroll_bottom = self.rows - 1;
+        self.inactive_cursor_row = 0;
+        self.inactive_cursor_column = 0;
+        self.inactive_wrap_pending = false;
+        self.inactive_saved_row = 0;
+        self.inactive_saved_column = 0;
+        self.inactive_scroll_top = 0;
+        self.inactive_scroll_bottom = self.rows - 1;
+        self.cursor_visible = true;
         self.foreground = DEFAULT_FOREGROUND;
         self.background = DEFAULT_BACKGROUND;
         self.attributes = 0;
@@ -578,6 +680,31 @@ impl Terminal {
         self.dirty_end = self.dirty_end.max(end);
         self.revision = self.revision.saturating_add(1);
     }
+}
+
+fn resize_cells(
+    source: &[Cell],
+    old_rows: u16,
+    old_columns: u16,
+    rows: u16,
+    columns: u16,
+    cursor_row: u16,
+) -> (Vec<Cell>, u16) {
+    let mut replacement = vec![Cell::blank(); usize::from(rows) * usize::from(columns)];
+    let source_row = if rows < old_rows {
+        cursor_row.saturating_sub(rows - 1)
+    } else {
+        0
+    };
+    let copied_rows = rows.min(old_rows - source_row);
+    let copied_columns = columns.min(old_columns);
+    for row in 0..copied_rows {
+        let old = usize::from(source_row + row) * usize::from(old_columns);
+        let new = usize::from(row) * usize::from(columns);
+        replacement[new..new + usize::from(copied_columns)]
+            .copy_from_slice(&source[old..old + usize::from(copied_columns)]);
+    }
+    (replacement, source_row)
 }
 
 fn validate_size(rows: u16, columns: u16) -> Result<(), TerminalError> {
@@ -641,6 +768,49 @@ mod tests {
         assert_eq!(text(&shrinking, 0), "c ");
         assert_eq!(text(&shrinking, 1), "d ");
         assert_eq!(shrinking.cursor(), (1, 1));
+    }
+
+    #[test]
+    fn alternate_screen_is_preallocated_restored_and_resized() {
+        let mut terminal = Terminal::new(3, 8).unwrap();
+        terminal.feed(b"primary");
+        let primary_cursor = terminal.cursor();
+
+        terminal.feed(b"\x1b[?1049h");
+        assert_eq!(text(&terminal, 0), "        ");
+        assert_eq!(terminal.cursor(), (0, 0));
+        terminal.feed(b"alternate\r\nsecond");
+        assert_eq!(text(&terminal, 0), "alternat");
+        assert_eq!(text(&terminal, 1), "e       ");
+        assert_eq!(text(&terminal, 2), "second  ");
+
+        terminal.resize(2, 10).unwrap();
+        assert_eq!(text(&terminal, 0), "e         ");
+        assert_eq!(text(&terminal, 1), "second    ");
+        terminal.feed(b"\x1b[?1049l");
+        assert_eq!(text(&terminal, 0), "primary   ");
+        assert_eq!(terminal.cursor(), primary_cursor);
+    }
+
+    #[test]
+    fn dec_private_screen_and_cursor_modes_publish_full_damage() {
+        let mut terminal = Terminal::new(2, 5).unwrap();
+        let mut output = [0_u8; 256];
+        terminal.write_damage(&mut output).unwrap();
+
+        terminal.feed(b"main\x1b[?47halt\x1b[?25l");
+        assert_eq!(text(&terminal, 0), "alt  ");
+        let length = terminal.write_damage(&mut output).unwrap();
+        assert_eq!(length, DAMAGE_HEADER_SIZE + 2 * 5 * DAMAGE_CELL_SIZE);
+        assert_eq!(u32::from_le_bytes(output[20..24].try_into().unwrap()), 0);
+
+        terminal.feed(b"\x1b[?47l");
+        assert_eq!(text(&terminal, 0), "main ");
+        terminal.feed(b"\x1b[?47h");
+        assert_eq!(text(&terminal, 0), "alt  ");
+        terminal.feed(b"\x1b[?25h");
+        terminal.write_damage(&mut output).unwrap();
+        assert_eq!(u32::from_le_bytes(output[20..24].try_into().unwrap()), 1);
     }
 
     #[test]

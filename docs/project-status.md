@@ -294,14 +294,38 @@ inspected full-device IME screenshots. This automated injection validates the
 hardware-style Android key route; broader OEM/non-Latin composing and commit
 behavior still needs dedicated coverage.
 
+The terminal core now owns preallocated primary and alternate grids of the
+current bounded dimensions. DEC private modes `47`, `1047`, and `1049` switch
+or clear them with complete damage publication; cursor visibility and
+save/restore modes are retained, and resize preserves both screens around
+their respective cursors. Repeated `1049` entry, rendering, and exit remain
+allocation-free after construction. Installed `tput` gates prove primary
+preservation, alternate clearing/content, discarded alternate output, and
+exact primary restoration with full-device screenshots on both ABIs.
+
+That device gate also exposed an incomplete generic root-identity bridge:
+glibc's filesystem-ID query reached Android's blocked x86_64 syscall 122.
+The path bridge now consistently virtualizes uid, gid, effective uid/gid, and
+filesystem uid/gid as root while Android's kernel continues enforcing the real
+app UID. The source contract, host identity probe, sealed exact-ABI bridges,
+installed `tput`, scoped logs, and device gates pass.
+
+Trying the installed full-screen `btop` then exposed the next independent
+compatibility boundary. Stock Android SELinux denies the app access to
+`/proc/stat`; btop now gets beyond terminal/identity initialization but exits
+when it cannot parse CPU statistics. Archphene still needs a bounded
+sandbox-scoped `/proc`, `/sys`, and `/dev` view that represents its Linux
+environment without leaking Android-wide processes or pretending unavailable
+kernel metrics are reliable.
+
 This is not yet the production terminal promised by the milestone. Resizing
 preserves the current cursor window but does not reflow or retain discarded
-rows because scrollback is not implemented. Alternate screens, Unicode width
-and combining behavior, extended color, remaining xterm controls, scrollback,
-selection, mode-dependent keys, clipboard, broader composing IME behavior,
-richer accessibility, and user-controlled terminal text sizing remain
-required. The temporary command field remains as a fallback above the
-renderer; direct terminal input no longer depends on it.
+rows because scrollback is not implemented. Unicode width and combining
+behavior, extended color, remaining xterm controls, scrollback, selection,
+mode-dependent keys, clipboard, broader composing IME behavior, richer
+accessibility, and user-controlled terminal text sizing remain required. The
+temporary command field remains as a fallback above the renderer; direct
+terminal input no longer depends on it.
 
 The validated prototype below remains reference evidence until replacement
 vertical slices pass equivalent gates. Installed prototype state is no longer a

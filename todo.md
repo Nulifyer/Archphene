@@ -87,6 +87,7 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
       - [x] Pass root-contained multibyte script plus interactive prompt, HOME, PWD, PATH, UTF-8 charmap, Activity recreation, scoped-log, and full-device gates on both targets.
       - [x] Discover declared, safely installed Bash/POSIX-shell adapters in Rust; expose a bounded Kotlin selector; persist the stable choice; refresh it after package mutation; lock it during a session; and pass exact-ABI process-restart, PTY, scoped-log, and full-device gates on both targets.
       - [ ] Add reviewed startup adapters for additional installed shells, user-editing UI/document access for shell startup files, and a documented PATH extension policy.
+      - [ ] Provide a bounded, sandbox-scoped Linux `/proc`, `/sys`, and `/dev` compatibility view where Android SELinux hides host pseudo-files; do not expose Android-wide processes or fabricate unsupported monitoring guarantees.
     - [x] Add a four-slot generation-checked PTY registry with controlling-terminal setup, bounded nonblocking direct-buffer I/O, resize, deterministic close, and process-group kill/reap on runtime destruction.
     - [x] Pass package-installed Bash PTY open, 24×80 to 40×120 resize, bidirectional marker, close/reap, scoped-log, and full-device UI gates on both targets.
     - [x] Add user-controlled long-lived session ownership, backpressure queues, cancellation, exit status, Activity/process-death policy, and reboot recovery.
@@ -106,7 +107,9 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
       - [x] Expose a bounded terminal accessibility snapshot only when Android queries the node, keeping the normal frame path free of synthesized terminal strings.
       - [x] Route terminal focus through a full-editor Android `InputConnection` with local preedit display, bounded UTF-8 commit/delete delivery, and direct hardware Enter/Backspace/Tab/Escape/navigation/function/Ctrl/Alt handling without per-keystroke byte-array allocation.
       - [x] Prove direct text, Backspace correction, Enter execution, PTY delivery, rendering, accessibility, IME attachment, lifecycle, and full-device visuals with exact-ABI APKs on the emulator and Samsung.
-      - [ ] Complete alternate-screen, Unicode width/combining, extended color, remaining xterm controls and mode-dependent keys, scrollback/reflow, selection, clipboard, non-Latin/composing IME coverage, richer accessibility, and user-controlled text sizing before calling the surface production-ready.
+      - [x] Preallocate bounded primary and alternate grids, implement DEC `47`/`1047`/`1049` screen switching plus cursor visibility/save/restore, resize both grids, and preserve warmed zero-allocation screen changes.
+      - [x] Prove installed `tput` alternate-screen clearing, content, discard, exact primary restoration, scoped logs, and full-device visuals on both exact-ABI targets.
+      - [ ] Complete Unicode width/combining, extended color, remaining xterm controls and mode-dependent keys, scrollback/reflow, selection, clipboard, non-Latin/composing IME coverage, richer accessibility, and user-controlled text sizing before calling the surface production-ready.
       - [x] Replace the clipped temporary diagnostic strip during active sessions with the measured full-height terminal surface; retain emulator and Samsung full-device portrait/landscape/rebind evidence.
   - [ ] Wayland compositor, presentation, and lifecycle
   - [ ] Pointer, touch, keyboard, IME, clipboard, and drag-and-drop
