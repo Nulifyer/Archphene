@@ -4,6 +4,62 @@ Updated: 2026-07-23
 
 This page separates validated behavior from planned platform work. Package search does not imply package compatibility.
 
+## Greenfield Rust + Kotlin replacement
+
+The new `android/app` shell and root Rust workspace now build with Gradle 9.6.1,
+AGP 9.3, its built-in Kotlin plugin, JDK 26, SDK/Build Tools 36, NDK 29, and
+Rust 1.88. The APK contains one Kotlin Activity, one Service-owned native
+runtime, reusable direct buffers for batched input and status snapshots, and
+generation-checked bounded native handles.
+
+Clean-data and reuse gates pass on the API 36 x86_64 emulator and Samsung
+SM-S908U. They prove cold launch, full-device insets and screenshots, touch
+batching, Activity recreation, HOME/resume continuity, Back shutdown, private
+root creation and required modes, version validation, and idempotent service
+restart. The private root currently establishes conventional `/usr`, `/etc`,
+`/var`, `/opt`, `/home`, `/tmp`, and `/mnt/android` layout locations; it does
+not yet contain a bootstrapped Arch userspace.
+
+The replacement also owns a fixed 11,808-byte package-operation journal. It
+holds at most 32 bounded jobs, enforces legal transitions, publishes updates
+atomically, detects corruption, rejects symlink substitution, converts
+interrupted active work into an explicit retryable failure, and reuses terminal
+slots deterministically. Host tests prove the warmed in-memory input and job
+paths allocate no heap objects.
+
+The verified pacman, bsdtar, GnuPG, patched glibc loader, and complete ELF
+closures are now staged into content-addressed exact-ABI Android native
+payloads. Rust validates a bounded signed-APK manifest and every packaged file
+before creating private symlink aliases, invokes tools directly through the
+patched loader with a cleared environment and bounded output/timeout, and
+proves the real pacman version before publishing readiness. Exact-ABI debug
+artifacts are 37 MB for x86_64 and 36 MB for arm64-v8a; executable native
+payloads are deliberately extracted because child processes cannot execute
+from mmap-only APK entries. Clean and reused-root gates pass on the emulator
+and Samsung with full-device screenshots, lifecycle/input checks, and scoped
+fatal logs.
+
+Official exact-ABI repository catalogs are now connected. Rust selects the
+fixed HTTPS endpoint and opens one bounded transfer file; Kotlin's Android TLS
+stack writes through the duplicated descriptor; Rust validates the completed
+size and file type, syncs it, and atomically publishes mode-0600 `core.db` and
+`extra.db`. No fake-root pacman mutation or unbounded in-memory database copy
+is used. Rust then runs read-only pacman search off the UI thread, validates
+and normalizes at most 100 results into a fixed 16 KiB response, and treats
+pacman's empty exit-1 no-match result normally. Clean refresh, search, and
+process-death reuse gates pass with current `dotnet-sdk` results on x86_64 and
+`btop` on Samsung AArch64, using full-device screenshots and scoped logs. The
+official Arch Linux ARM repositories currently return no `dotnet-sdk` match;
+the app shows that as an empty result rather than an error.
+
+Package payload transactions and durable manager install actions are not
+connected yet, so the replacement still does not expose a nonfunctional
+install button.
+
+The validated prototype below remains reference evidence until replacement
+vertical slices pass equivalent gates. Installed prototype state is no longer a
+replacement requirement.
+
 ## Latest regression snapshot
 
 On July 22, 2026, a current-source x86_64 debug manager was built with the reproducible Podman toolchain, installed on the API 36 emulator, and passed the complete broad emulator regression in one sequence. The run covered package update and refresh, repository search and version selection, Android app-settings routing, authenticated runtime-pack execution and cleanup, KCalc launch/calculation/menu/rotation, native compositor input, Android PackageInstaller update, and Mousepad document, IME, touch, secondary-window, and live-theme behavior.

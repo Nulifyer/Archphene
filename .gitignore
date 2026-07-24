@@ -85,6 +85,7 @@ out-linux/
 *.qcow2
 *.img
 *.lock
+!/Cargo.lock
 *.snapshot
 snapshots/
 hardware-qemu.ini
@@ -106,6 +107,9 @@ netsim.ini
 # Go caches / generated binaries
 **/*.test
 coverage.out
+
+# Rust build outputs
+/target/
 
 # Zig caches
 .zig-cache/

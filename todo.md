@@ -2,224 +2,213 @@
 
 Updated: 2026-07-23
 
-This is the prioritized completion queue for the Archphene Android application. Check items only after implementation and device validation. Historical experiment notes belong in research/; current behavior belongs in docs/.
+This file is the remaining prioritized work, not a history of completed tests. Validated behavior belongs in `docs/project-status.md`, `docs/compatibility-matrix.md`, and `research/experiments/`.
 
-## P0 - Public release blockers
+## Product target
 
-- [ ] Complete post-migration Bash validation across every documented build and test entry point.
-  - [x] Pass Bash syntax, public-repository, release-workflow, AT-SPI source, and shared Android-test helper contracts.
-  - [x] Provision KCalc and Mousepad reproducibly through real on-device manager transactions on the x86_64 emulator.
-  - [x] Pass the complete current-source x86_64 emulator regression in sequence, including manager update/install, runtime-pack lifecycle, KCalc, native compositor, and Mousepad document/input/window/theme gates.
-  - [x] Pass the non-destructive ARM64 physical regression on the connected Samsung for bridge startup, KCalc calculation/rotation/resize, compositor completion, and FD/process cleanup.
-  - [x] Fix migration defects found by those gates: `set -u` initialization, SIGPIPE-sensitive comparisons, substring UI matches, warm-intent delivery, deterministic cold launches, real skip-install behavior, keyboard education handling, and Mousepad menu/window routing.
-  - [ ] Run the remaining standalone scripts not covered by the two broad regression entry points and confirm that each printed success claim is backed by an assertion. Hardware- and 16 KB-specific scripts remain tied to their named lanes.
-    - [x] Audit the highest-risk PowerShell-to-Bash conversions rather than treating syntax and a success message as behavioral evidence. The July 22 review confirmed material assertion loss in secrets, real-app accessibility, the accessibility capability probe, generated camera, and Terminal project trees; Terminal home documents, GUI document broker, and drag-and-drop retain meaningful assertions but still need standalone execution.
-    - [x] Restore and execute the core secrets regression on emulator and Samsung: ciphertext/metadata, overwrite, restart persistence, bounds, delete, stale-socket rejection, log redaction, and the private Secret Service D-Bus wire contract pass. A deliberate core-only probe build keeps this coverage runnable without weakening the default full-client build.
-    - [x] Rebuild the Arch libsecret/KWallet fixture and restore the standard desktop-client assertions in the Bash secrets test. The 4 KB x86_64 emulator now passes official Arch `secret-tool`, direct KWallet D-Bus operations, official `kwallet-query`, daemon-restart persistence, cleanup, and plaintext-log rejection; fixture-free ARM probes retain the core encrypted-store/wire-contract lane.
-    - [x] Restore semantic publication, secondary-window ownership, reverse action, invalid-tree, and lifecycle assertions in `test-android-accessibility-bridge.sh`, then execute it on emulator and Samsung. The restored gate found and fixed a generic orphan-root bug that re-exported a dismissed dialog's controls at the primary window edge.
-    - [x] Restore KCalc/Mousepad menu, dialog, normalized-bound, semantic-input, and reverse-action workflows in `test-real-app-accessibility.sh`. Current-source emulator and Samsung KCalc/Mousepad wrappers pass; replacing the old physical Mousepad wrapper removed the stale reverse-action route to Linux coordinate `1,1`.
-    - [x] Restore permission-resource selection, timestamped PipeWire frame consumption, denial/no-reprompt, lease release, Linux-process cleanup, foreground ownership, and presented-pixel assertions in `test-generated-camera-app.sh`. The restored gate passes an official unmodified Snapshot wrapper on the current-source x86_64 emulator and AArch64 Samsung, automatically preserving their Linux homes, preferences, and original camera grants. It found and fixed mismatched Java/native environment-entry bounds, GTK4 preload leakage into the libc-only camera supervisor, and a physical-GPU GSK GL/NGL regression that rendered valid planar camera textures as solid magenta. Camera-capable GTK4 wrappers now use the verified Cairo presentation path while ordinary GTK4 apps retain acceleration.
-    - [x] Restore the direct Camera2/portal assertions in `test-android-camera-bridge.sh`. Rebuilt current-source probes pass exact 1280x720 JPEG metadata, byte count and header, three-frame I420 streaming with per-plane diagnostics, private Camera portal access/remote transfer, invalid dimensions, grant, denial, and no-reprompt on emulator and Samsung. The disposable physical probe's old signer was archived before its 45 KiB sandbox was replaced.
-    - [x] Replace the standalone printing smoke's startup-only claim with a real private XDG portal regression. An unmodified generated wrapper passes PreparePrint, regular-PDF descriptor transfer, rendered one-page Android preview, Save as PDF discovery, cancellation cleanup, invalid-PDF failure, non-regular-FD rejection, and runtime-pack binding on emulator and Samsung.
-    - [x] Restore the complete SAF picker, bidirectional/nested synchronization, conflict idempotence, deferred deletion, symlink rejection, persisted grant, and removal assertions in `test-terminal-project-trees.sh`. The full gate passes the current-source emulator and the installed Samsung Terminal; the physical run preserves existing app data and verifies its unique grant and fixture are removed afterward.
-    - [x] Audit and execute Terminal home documents on emulator and Samsung. The Bash gate now detects shell-UID provider denial from output (Android's command exits zero), uses the SAF/DocumentsUI path, and verifies provider registration, visible Documents, and private-dotfile filtering without overclaiming direct access.
-    - [x] Finish the GUI document-broker physical lane. The deterministic Bash gate passes manager CRUD, cross-UID private-provider denial, active restart, same-name conflict preservation, and writeback on the current-source emulator and Samsung. The physical rerun also corrected the test's Android 15 background-activity-launch violation by returning the debug manager to the foreground before delivering the second document intent.
-    - [x] Execute the text/document drag-and-drop standalone probe on current x86_64 emulator and ARM64 Samsung artifacts: text negotiation, document broker flow, denial without a URI grant, and exact granted read all pass.
-    - [x] Restore the standalone Mousepad Android-document workflow lost in the Bash migration. Unique, self-cleaning fixtures now prove the real SAF picker, exact import, focused edit/save writeback, cold document reopen, and DocumentsUI provider browse on the current emulator and Samsung without clearing either wrapper sandbox.
-    - [x] Restore the standalone Mousepad Open-dialog/IME workflow lost in the Bash migration. The current emulator and Samsung now prove bounded child geometry, a real indexed filename committed through Android's InputConnection, retained and dismissed IME state, accepted result touch routing, and a rendered selection change.
-    - [x] Complete GTK file-chooser semantic export. Cache topology is now hydrated with live component extents, actions, state, and newly discovered children; selected state reaches Android; and generic list items use scaled pointer-center activation when GTK's acknowledged Action does not change selection. Exact Mousepad result selection and Open actions pass on emulator and Samsung without coordinate fallback in the test.
-    - [x] Restore the complete manager list/detail workflow lost in the Bash migration: exact search and clearing, update-only filtering, persisted package checks, version/source/runtime/detail actions, Android app-settings return, background JobScheduler registration, and cleanup now pass on emulator and Samsung. The physical lane found and fixed AArch64 updates incorrectly using Arch Linux's x86 package endpoint; pacman apps now compare against the current architecture's bounded repository database.
-    - [x] Restore the standalone package-runtime trust gate lost in the Bash migration. The current managers on emulator and Samsung execute their ABI-specific pacman, resolve a nonempty KCalc closure through libalpm, download and verify the repository artifact, reproduce the exact detached signer from the manager-owned cache, and reject an appended-byte copy with GPG `BADSIG`; the test no longer claims these properties from generic UI substrings.
-    - [x] Restore the Terminal companion isolation gate lost in the Bash migration. Manager-embedded/build-output APK parity, matching installed versions, distinct Android UIDs, same-UID PTY ownership, signature-protected pacman search and correlated result delivery, forged Terminal intent denial, and untrusted runtime-provider denial pass on emulator and Samsung. The physical test temporarily grants the foreground-service notification permission when needed and restores its original state.
-    - [x] Restore the Terminal document-transfer boundary checks lost in the Bash migration. Unique self-cleaning fixtures now prove exact SAF import into visible Home, exact export to Android Downloads, hidden-home export rejection, and traversal import rejection on emulator and Samsung; the physical lane restores its original notification permission.
-    - [x] Restore the complete Android capability-broker gate lost in the Bash migration without replacing generated wrappers. An ABI-matched disposable probe built in the pinned NDK container now proves the notification permission gate/retry, actual Android notification post/withdraw, HTTPS dispatch, unsafe file-URI rejection, and shell cross-UID denial through the current generated KCalc wrapper on emulator and Samsung; wrapper permission state and probe files are restored.
-    - [x] Restore the complete Terminal managed-shell gate lost in the Bash migration. It now provisions or explicitly refreshes signed Bash runtimes and proves the real GNU architecture, package inventory/search/info, writable persistent Home, cold restart, bounded internal polling, and absence of linker/seccomp failures on emulator and Samsung. The stronger lane found and fixed generic managed-command re-entry through the verified loader, missing `GLIBC_2.17` symbol versions on AArch64, and request plumbing that incorrectly depended on blocked Android `date`, `rm`, `mv`, and `grep`; companion isolation and SAF document-transfer gates pass afterward on both devices.
-    - [x] Restore the complete `wl-clipboard` gate lost in the Bash migration. Official manager-generated `wl-paste` and `wl-copy` wrappers now prove exact Android-to-Linux and Linux-to-Android text, live selection ownership, focused `wl_data_device`/`wl_data_source` transfer, demand-driven Android reads, and clean runtime output on emulator and Samsung.
-    - [x] Retire the obsolete hand-built KCalc update path and make its legacy test entry point exercise the supported manager-generated wrapper transaction. The strengthened gate proves Android-owned confirmation, exact candidate bytes and signer, stable version/UID/first-install identity, manager completion, and post-update KCalc execution on emulator and Samsung.
-    - [x] Audit and harden the real microphone-capture gate. Current manager-generated `pavucontrol` wrappers now prove declared/granted Android permission, private Pulse connection, AAudio capture startup, bounded duration and byte count, nonzero samples, crash rejection, fixture cleanup, and privacy-switch restoration on emulator and Samsung. The physical lane migrated a stale pre-manager-signer wrapper after archiving its home.
-    - [x] Restore the production GitHub self-update gate lost in the Bash migration. The real published x86_64 `v1.0.0` baseline and checksum now drive live `v1.0.1` discovery, exact-ABI selection, production-signer continuity, Android-owned confirmation, stable UID/first-install identity, installed-version verification, and restart reconciliation. The destructive lane passes in an isolated temporary AVD clone without touching either maintained device.
-    - [x] Restore the display, live-theme, and rotation assertions lost in the Bash migration. The release matrix again proves bounded manager controls, viewport fill, process continuity, and clean compositor logs across phone, landscape, tablet, and docked emulator profiles. KCalc and Mousepad now prove stable rendered light/dark/light transitions plus live/cold equivalence on emulator and Samsung; KCalc rotation additionally proves exact portrait/landscape geometry and visible calculation input on both devices.
-    - [x] Restore the runtime-pack trust assertions lost in the Bash migration. The maintained gate again proves catalog parsing, unbound legacy-module rejection, distinct manager/wrapper UIDs, bounded program/library descriptor views, authenticated lease release, and cache cleanup on the x86_64 emulator and AArch64 Samsung.
-    - [x] Restore the local manager self-update fixture lost in the Bash migration without erasing the maintained emulator state. Two current-source signed versions now prove in-place downgrade/update, exact APK bytes and signer, Android confirmation, stable UID/first-install identity, restart reconciliation, and restoration of the original installed APK and install-source app-op.
-    - [x] Restore exact KCalc calculation pixels/semantics, Terminal nested-prompt collapse, and `wev` runtime-error rejection. KCalc and Terminal pass on emulator and Samsung. Correct the candidate installer to select the manager's generic direct-Wayland assembly path; freshly manager-generated official `wev` wrappers pass pointer, wheel, touch, keyboard, modifier, repeat, focus, and close protocols on both devices after archiving/removing the stale physical fixture.
-    - [x] Make the manager pre-release and pull-to-refresh gates independent of device geometry and user-selected list state. Accessibility-driven controls now prove setting persistence, refresh thresholds, whole-list completion, and settled position on emulator and Samsung while restoring the exact original manager preferences.
-    - [x] Make repository search and version-selection gates preserve exact manager state and adapt to architecture-specific catalogs. Official `bc` search/add/remove passes on both devices; x86_64 archived-version and AArch64 current-only KCalc pinning pass without changing the user's filters, tracked packages, update state, or pins.
-    - [x] Remove the destructive KCalc data clear from the physical freeform gate and add bounded rendered-frame, stable Android/Linux process, growth, and compositor-log assertions. The strengthened gate passes Samsung freeform resize while restoring whether KCalc was previously running; the maintained emulator does not expose freeform windowing and remains covered by the five-profile display matrix.
-    - [x] Repair the Terminal Vulkan gate's unsafe ADB command delivery and make manager provisioning explicit. Current managers resolve, verify, and publish unmodified `vulkan-tools` plus `vulkan-swrast`; `vulkaninfo --summary` enumerates llvmpipe on x86_64 and AArch64 while preserving the physical notification permission.
-    - [x] Make package search-ranking evidence and KCalc descriptor lifecycle claims direct and state-safe. Both architectures prove `glmark2` is the actual first executable-owner result, exact matched-file evidence, multi-term app filtering, stable Android/Linux PIDs, warmed bounded FD classes, rendered output, clean logs, and restoration of manager/device state.
-    - [x] Execute the existing Qt/GTK descriptor-library fail-closed gate on emulator and Samsung. KCalc and Mousepad reject incomplete named-library views without materializing large closures, then launch normally through their complete bounded runtime caches on x86_64 and AArch64.
-    - [x] Execute the standalone glibc path/exec, manager-native catalog, runtime-provider authorization, unpublished-command, audio output/input, Foot legacy-config, Terminal prompt, manager rejection, and host PipeWire gates. Both device architectures pass with state restoration. Repair the PipeWire producer's missing synthetic source/diagnostics, make rejection staging self-cleaning, and let AArch64 native readiness use the pinned Podman NDK when the host SDK lacks it.
-    - [x] Harden and execute persistent Android Keystore wrapper signing on both devices. The gate now requires byte-identical same-build manager input, verifies v2/v3 output and stable signer/version/app-ID/first-install identity across reinstall, removes all large fixtures, and retains the emulator's original `1.0.0` plus Samsung's current debug manager exactly.
-    - [x] Restore the stale AArch64 signature entry point against the current staged runtime and read-only Podman cache. All 109 manifest archives reverify against the pinned Arch Linux ARM fingerprint, the full non-installing Samsung suite passes without skipping signatures, and official `wev` target resolution/signature verification passes through both manager repository architectures.
-    - [x] Generalize the Android document workflow beyond Mousepad and add assertion-complete Kate semantic/workflow coverage. Current Kate passes SAF import/edit/writeback/cold reopen, menus, file/session dialogs, actionable tabs, bounded vertical splits, named-session discovery, a separately closable Linux top-level, live light/dark changes, and stable tablet/external-display operation on x86_64 and current-source physical AArch64. The physical gate restores exact pre-test Kate config/session/feedback hashes.
-    - [x] Extend the generic GTK accessibility path to GTK 4/libadwaita and execute GNOME Text Editor on both maintained architectures. Sensitive-only controls now map to Android enabled state, standard `LABELLED_BY` relations recover model-button labels, default actions are role-scoped, same-bounds semantic descendants receive activation, defunct dialogs leave the tree, and the state-preserving gate proves New Tab, Main Menu, Preferences, bounded nodes, and exact pre-test session restoration on x86_64 and AArch64.
+Archphene should feel like one normal, user-owned Arch Linux installation inside the Archphene Android app:
 
-- [x] Complete general on-device package transactions for supported x86_64 desktop and CLI packages.
-  - [x] Flow the selected desktop-entry display name/executable and detected runtime toolkit through generic wrapper assembly.
-  - [x] Preserve the selected desktop-entry icon through generic wrapper assembly.
-  - [x] Generate exact Android document intents from up to 16 MIME types declared by the selected desktop entry; wrappers without MIME types advertise no file intents.
-  - [x] Record the validated package architecture and detected runtime toolkit in generated wrapper metadata; reject unsupported ABI/template combinations.
-  - [x] Generate and validate a required bridge-capability contract; gate incoming-document brokers on package-declared MIME support.
-  - [x] Generate package-specific Android labels, icons, source/runtime metadata, capabilities, and exact document intent resources.
-  - [x] Persist and display bounded structured phase diagnostics, including legacy-job migration.
-  - [x] Prove on the emulator with concurrent real package transactions that one resolution failure does not block an unrelated CLI package install.
-- [x] Complete AArch64 package runtime support.
-  - [x] Build a reproducible, checksum-cataloged AArch64 pacman/GnuPG/libarchive closure from official Arch Linux ARM repositories; verify every package against the pinned build-system key and cross-build matching patched glibc.
-  - [x] Embed the verified AArch64 runtime and separate trust assets in the ARM manager, then prove package search, resolution, verification, staging, and Terminal publication on Samsung.
-  - [x] Generate arm64-v8a desktop wrapper templates and prove a real Qt package through Android PackageInstaller and app-drawer launch.
-  - [x] Publish separate x86_64 and arm64-v8a release assets; accept `any` data packages but require matching ABI for native ELF files.
-- [x] Complete runtime-pack lifecycle and exported-provider boundary safety.
-  - [x] Add authenticated runtime-pack leases backed by stable provider clients and Binder death tokens. Running wrappers survive unbinding/GC and release on exit/death; Terminal leases each pack until its private copy is hash-verified and committed.
-  - [x] Reconcile external Android uninstalls and revoke grants per package without disrupting wrappers that share a pack.
-  - [x] Reuse unchanged closures before copying runtime-pack modules.
-  - [x] Store verified modules once as manager-owned content-addressed blobs, migrate legacy per-pack copies, preserve per-pack authorization, garbage-collect unreferenced blobs, and validate migration plus generated KCalc launch on physical AArch64.
-  - [x] Validate 4 KB and 16 KB ELF page compatibility. Runtime executables and published modules now fail closed before execution when an ELF load segment is incompatible; the AArch64 runtime is 64 KB-aligned, while current upstream Arch x86_64 packages remain 4 KB-only and are explicitly unsupported on 16 KB x86_64 Android until rebuilt.
-  - [x] Clean up the complete Linux process tree when a wrapper exits. Managed launches use a dedicated process group, parent-death signal, cancellable execution registry, and final dedicated-UID descendant sweep.
-  - [x] Validate the audited appearance-provider authorization fix on a rebuilt manager. A manager-signed generated wrapper still reads policy and launches normally, while the Android shell UID is denied; the source contract rejects publishing policy before `requireWrapperCaller()`.
-- [x] Finish the Terminal product.
-  - [x] Add multiple sessions/tabs and a foreground-service lifecycle. PTYs survive Activity closure under a visible Android notification, close independently by process group, and die with the Terminal app process.
-  - [x] Return manager progress and terminal results to the invoking command. Per-request files correlate exact search/install/remove/upgrade requests with durable manager jobs; the signed manager reports bounded phases and terminal outcomes through a signature-protected Terminal provider.
-  - [x] Add persisted project-tree mappings. User-selected SAF trees retain scoped read/write grants and synchronize through stable `$HOME/Projects/<alias>` POSIX mirrors with bounded traversal, conflict copies, deferred deletions, symlink rejection, grant release, and restart persistence.
-  - [x] Select and package the user shell. Terminal boots with Bionic sh until a verified Arch Bash closure is installed, then selects managed Bash on restart; x86_64 emulator and physical ARM64 device tests cover PTY startup, locale data, package queries, and home writes.
-  - [x] Keep the native Termux terminal renderer unless image protocols or other modern terminal features justify a compatible extension.
-- [x] Complete Android capability and document brokers.
-  - [x] Expose visible per-app Linux homes through one manager-owned DocumentsProvider while hiding dotfiles and private runtime state behind a signature-protected wrapper endpoint.
-  - [x] Import up to 32 granted Android documents with collision-safe Linux names and preserve concurrent Android edits as bounded conflict copies before writeback.
-  - [x] Validate manager CRUD, direct-provider denial, active-app restart, same-name import, conflict preservation, writeback, and DocumentsUI browse on the x86_64 emulator and physical AArch64.
-  - [x] Deliver a document sent to an already-running `singleTask` wrapper through a shared safe-restart policy with an explicit unsaved-work warning, Cancel action, and debug-only automated regression.
-  - [x] Add a bounded same-UID Android capability broker and ABI-specific glibc client for HTTP(S) URL handling and notification permission/post/withdraw; validate unsafe-URI and cross-UID rejection and dynamic runtime-pack publication on the emulator.
-  - [x] Add a private session bus and standard XDG portal adapters so unmodified applications can reach the validated URL and notification primitives.
-  - [x] Generate capability-specific wrapper manifests so camera and microphone permissions are declared only when their matching bridge capability is enabled; verify all eight document/permission variants and a manager-signed first install on the emulator.
-  - [x] Add capability-scoped Linux audio playback through a wrapper-private Pulse native-protocol server backed by Android AAudio, with OpenSL ES fallback.
-  - [x] Add XDG printing through the Android system print UI with bounded same-UID PDF transfer, private staging, cancellation cleanup, and invalid-document rejection.
-  - [x] Add microphone capture with an explicit `RECORD_AUDIO` request and separate input capability; validate grant, denial/no-reprompt, privacy-switch silence, process cleanup, and real nonzero capture on x86_64 emulator and physical AArch64.
-  - [x] Add capability-scoped bidirectional plain-text drag-and-drop between Android and standard Wayland data devices; validate copy negotiation, bounded payload transfer, completion, cancellation, and resource cleanup on x86_64 emulator and physical AArch64.
-  - [x] Complete URI/file drag-and-drop through the SAF/document broker without exposing raw `content://` URIs to Linux applications; validate protocol negotiation, import/writeback, visible-home export, exact URI grants, denial without grants, and cleanup on x86_64 emulator and physical AArch64.
-  - [x] Complete camera, accessibility, and secrets/keyrings integration.
-    - [x] Add a capability-scoped Camera2 permission/state and bounded one-shot JPEG descriptor API; validate the real Android grant and denial/no-reprompt paths plus 1280x720 capture on x86_64 emulator and physical AArch64.
-    - [x] Add the private PipeWire producer and XDG Camera portal adapter required by unmodified Linux camera consumers.
-      - [x] Validate an official unmodified Arch Snapshot package on the x86_64 emulator through Android grant and denial paths, timestamped PipeWire frames, visible non-magenta preview pixels, and process/lease cleanup.
-      - [x] Repeat the generated unmodified-consumer validation with the AArch64 runtime on a physical ARM device, including the vendor-GPU GTK4 camera-texture presentation path.
-    - [x] Add a bounded virtual-node accessibility tree, Android framework events/focus, and reverse click/edit/scroll action queue; validate through a test-only AccessibilityService on 4 KB and 16 KB x86_64 emulators and physical AArch64.
-    - [x] Add the private AT-SPI2 D-Bus adapter and secondary-window semantic ownership required by unmodified Qt/GTK applications.
-      - [x] Implement and source-validate the private bus/status, socket/embed, registry/event, bounded traversal/publication, cross-process child, reverse-action, password-redaction, and transient-snapshot contracts.
-      - [x] Validate Android semantic queue retention, sticky multi-window ownership, cross-window action rejection, offset-root bounds, and lifecycle on 4 KB and 16 KB x86_64 emulators and physical AArch64.
-      - [x] Build and link the adapter in the reproducible Linux toolchain, then validate real unmodified Qt and GTK controls, focus, edits, menus, dialogs, and secondary windows on x86_64 and AArch64.
-    - [x] Add a per-wrapper Android Keystore-backed encrypted secret store with bounded descriptor APIs for store/read/list/delete; validate ciphertext, metadata, overwrite, process-restart persistence, limits, deletion, lifecycle, and no log exposure on x86_64 emulator and physical AArch64.
-    - [x] Add a capability-gated private Secret Service D-Bus adapter with sender-bound sessions, login collection/search/properties, create/get/set/replace/delete, zero-length values, and disconnect cleanup; validate its wire contract on 4 KB and 16 KB x86_64 emulators and physical AArch64.
-    - [x] Validate packaged Arch libsecret and KWallet clients against the private Secret Service adapter before claiming broad unmodified-toolkit compatibility.
-      - [x] Validate official Arch x86_64 libsecret and KWallet clients on a 4 KB emulator, including encrypted sessions, write/read/clear, restart persistence, and no plaintext logs.
-      - [x] Build and validate the official Arch Linux ARM libsecret client closure on physical AArch64; encrypted store/lookup/clear passes through the private Secret Service adapter.
-      - [x] Build the patched AArch64 KWallet compatibility daemon and validate official `kwallet-query` on physical ARM; upstream Arch x86_64 clients remain unusable on 16 KB Android because their ELF files are 4 KB-aligned.
-  - [x] Reject broad all-files access as the default. Use user-selected Storage Access Framework documents and trees; reconsider an optional advanced flow only with a concrete compatibility requirement.
-- [x] Validate core raw Wayland interoperability with official unmodified diagnostic packages.
-  - [x] Run official `wev` packages on x86_64 emulator and physical AArch64 through generated wrappers; validate pointer, horizontal/vertical wheel, touch, keyboard, modifiers, repeat, focus loss/restoration, and graceful close.
-  - [x] Run official `wl-clipboard` packages on both devices; validate exact bidirectional plain-text transfer, focused selection ownership, demand-driven Android reads, Linux-to-Android source delivery, and no unsolicited clipboard reads.
-  - [x] Route verified package subprocess commands through the trusted glibc loader and provide Android-compatible POSIX shared-memory names without making wrapper-private runtime files executable.
-- [ ] Complete platform compatibility.
-  - [x] Keep the manager usable on 16 KB x86_64 without Android's generic page-size dialog; show an explicit in-app restriction and block package transactions before incompatible 4 KB Arch ELF execution. Rebuilding the upstream x86_64 runtime remains a broader package-compatibility task.
-  - [x] Build patched x86_64 glibc with 64 KB ELF alignment and execute an aligned dynamic probe under the manager UID on a real 16 KB Android emulator.
-  - [ ] Build and sign a separate no-mixing 16 KB x86_64 package repository, then validate a complete GUI closure including late-loaded modules before enabling package transactions.
-  - [ ] Complete remaining portal and broad toolkit/runtime validation.
-  - [ ] Broaden Qt, GTK, SDL, Electron, Rust-native, XWayland, Vulkan, and zero-copy GPU validation.
-    - [x] Include runtime-loaded Vulkan loader aliases, compose a separately managed `vulkan-swrast` dependency pack, and validate unmodified Arch `vulkaninfo` through llvmpipe device discovery plus confirmed removal/reinstall on x86_64.
-    - [ ] Extend the generic runtime-pack model beyond shared libraries, source commands, and `/usr/share`: the real `code` transaction resolves, verifies, extracts, and classifies its 36-package closure, then fails closed because Electron requires package-owned `/usr/lib/<app>` data and dependency executables such as `electron42`. Preserve verified symlink semantics without adding a Code-specific bypass, then continue into Chromium sandbox and Ozone/Wayland validation.
-  - [x] Detect mid-session virgl helper loss, replace the same-UID helper, and restart the payload once through virpipe while preserving the Android Activity; retain llvmpipe only when the replacement helper cannot start or also fails. Same-UID fault injection now passes rendered recovery on manager-generated x86_64 and AArch64 GLMark2 wrappers instead of taking Samsung's physical-only llvmpipe `SIGILL` path.
-  - [x] Bound the shared xdg_toplevel registry, reject cyclic/cross-client parent chains, clear destroyed-parent references, and validate a real GTK child control/close/parent-restoration flow.
-  - [ ] Complete the general secondary-window policy for phone, tablet, freeform, and external displays.
-- [x] Complete end-user release and update lifecycle.
-  - [x] Configure a commit-pinned, reproducible Linux workflow that creates a draft, builds and verifies signed x86_64 and arm64-v8a manager/Terminal/runtime artifacts, uploads checksums, and publishes only after all assets exist.
-  - [x] Require exact-ABI self-update assets; reject ABI-neutral and wrong-ABI releases on 4 KB x86_64, 16 KB x86_64, and physical AArch64.
-  - [x] Validate local Android update confirmation, restart reconciliation, signed downgrade rejection, checksum rejection, and retention of the installed version after failures.
-  - [x] Publish `v1.0.1`, verify both ABI artifacts and embedded companions, then run the exact-ABI live update and the real published `v1.0.0` x86 migration regression.
-- [ ] Pass the public release validation gate.
-  - [x] Emulator phone/tablet/docked/freeform matrix with dark/light, rotation, IME, lifecycle, update, uninstall, and concurrent-failure tests.
-  - [x] Samsung ARM64 control plane and sustained phone/freeform regression.
-  - [x] Install and run the exact current-source ARM64 manager on the physical device. The original development key was unavailable, so the explicitly authorized signer reset was preceded by verified archives of the exact installed manager/Terminal APKs and about 1.65 GiB of private state. The current ARM64 manager and Terminal now share the maintained signer, restored package/runtime and Terminal-home state pass startup plus managed-Bash validation, and independently installed wrapper sandboxes were retained.
-  - [ ] Physical x86_64 Android target.
-  - [ ] Supported GrapheneOS Pixel and sustained external-display desktop mode.
-  - [x] Add reproducible Android storage measurement that separates APK, installed code, persistent app data, transient execution cache, shared runtime blobs, pack metadata, downloads, and staging.
-  - [x] Publish clean-install manager, Terminal, generated-wrapper, shared-runtime, and per-application storage costs; distinguish steady-state data from transient loader cache and clearable archives.
-  - [x] Validate descriptor-library runtime paths with unmodified Qt and GTK applications. Stock glibc cannot resolve sonames through Android `/proc/self/fd` links, so retain the bounded transient named-module cache; normal KCalc and Mousepad launches remain healthy after the fail-closed probes.
+- Pacman and AUR packages share one filesystem, home, package database, toolchain, and process environment.
+- Graphical Linux packages appear individually in Android's app drawer through thin launcher wrappers, but run inside the shared Arch environment.
+- CLI tools installed by one package are immediately available to every terminal and graphical application.
+- Android remains responsible for app installation confirmation, permissions, lifecycle, display/input, and access to Android files.
+- Archphene generically adapts Wayland, Qt, GTK, SDL, Electron, and terminal applications; it does not ship application-specific source patches.
 
-## P1 - Product and UX
+The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MVC project in the integrated terminal, debug it with breakpoints, run it, and open the local web application in Android's browser.
 
-- [x] Refresh the manager UI against current Obtainium while retaining the user-selected bottom Apps/Settings navigation and centered Add action.
-  - Compact rows use one stateful action, full-width phase progress, bounded version labels, accessible controls, and enough bottom padding on phone and tablet layouts.
-- [x] Refine search controls and empty/loading/error states using the same compact visual language.
-- [ ] Finish Qt and GTK appearance consistency.
-  - [x] Reproduce and document the July visual regressions: KCalc menu/status metrics are not phone-touch sized, while Mousepad combines dark foregrounds with light GTK surfaces and makes Preferences unreadable. Audit the current Qt, GTK, compositor, and test ownership boundaries against upstream Qt, GTK, KDE, Hyprland, niri, and Wayland contracts.
-  - [x] Remove the partial high-priority GTK recoloring that mixed Adwaita surfaces and Archphene foregrounds. Keep Adwaita responsible for complete light/dark widget states, restrict generated CSS to sizing/popup decoration, and expose Material You through semantic accent color names.
-  - [x] Add display-aware Auto plus explicit 18, 20, and 22 dp visible-control policy independently from geometry, text scaling, and the larger 32/40/48 dp interaction targets; feed both metrics into GTK and the Qt style.
-  - [x] Replace the appearance cycle-buttons with described, accessible discrete sliders for geometry, text, and control density; make all three fresh-install defaults Auto, expose 18/20/22 dp visible controls with 20 dp phone Auto, and retain explicit 100-200% text sizing.
-  - [x] Publish Manager appearance changes to running wrappers and prove that Mousepad applies scale, text, and control CSS live without changing its Android or Linux PID. Keep reopen guidance explicit for toolkits that cannot fully relayout launch-time scale state.
-  - [x] Validate the public slider endpoints on current-source emulator wrappers: Mousepad changes live from 100%/18 dp visible controls to 200%/22 dp with stable Android and Linux PIDs while retaining 32/48 dp interaction targets, and KCalc launches with the rebuilt 42 pt Qt policy. Rebuild and checksum the Qt plugins for x86_64 and AArch64.
-  - [x] Build and install the current wrapper/manager artifacts through real manager package transactions; visually validate the GTK ownership fix, Qt target/status metrics, and direct-Wayland adapter on the emulator.
-  - [ ] Replace the global `QT_SCALE_FACTOR` compatibility shim with compositor-advertised logical size/fractional output scale, including live moves between phone, tablet, freeform, and external displays.
-  - [x] Add fail-closed visual artifacts and semantic assertions for contrast, enabled/disabled state, control targets, clipping, overlap, popup constraints, focus, and safe secondary-window geometry. The gates combine scoped logs, actual Wayland content geometry, accessibility trees, toolkit configuration, raw/PNG frames, and manifests.
-  - [ ] Pass KCalc and Mousepad in light/dark and Auto/18/20/22 dp visible-control modes across phone, tablet, and docked layouts; repeat current-source core cases on physical AArch64.
-    - [x] Current-source x86_64 emulator matrices pass for both apps, including live system light/dark, phone/tablet/docked automatic density, all explicit phone density modes, real accessibility trees, KCalc menus/calculation, and Mousepad Preferences/IME/document/touch flows.
-    - [x] Repeat current-source core cases on physical AArch64. Verified persistent-state archives preceded deliberate KCalc and Mousepad signer replacement; both restored Linux homes are now manager-owned current-source wrappers. KCalc passes calculation, menus/contrast, live theme, rotation, manager light/dark/Material You policy, and descriptor lifecycle. Mousepad passes Preferences checkbox/close interaction, accessibility, IME, touch, live theme, Material You pixels, primary-host cleanup, and GUI document restart/conflict/writeback. Its live 100%/18 dp through 200%/22 dp endpoints retain stable Android/Linux PIDs while 32/48 dp interaction targets remain independent.
-      - Signer replacement checks Android's install-source consent before uninstalling an old wrapper, persists the pending migration across Settings, and asks for final destructive confirmation only after permission is granted. Repeated same-signer updates preserve each migrated wrapper sandbox.
-    - [ ] Define a generic overflow/panning policy for fixed desktop layouts at the explicit 200% phone endpoint. Toolkit metrics are correct, but Mousepad's menubar exceeds the phone width and KCalc's status text can clip; keep the maximum available for accessibility and do not add app-specific patches.
-  - [x] Reproduce Foot's direct-Wayland phone regression: the existing launch smoke accepted an approximately 8 pt terminal font and 26 px client-decoration buttons. Add a stable Foot configuration adapter with Android-sized text, theme/accent colors, padding, and density-specific CSD targets while preserving a user override file.
-  - [x] Validate the rebuilt Foot adapter across phone/tablet/docked layouts, then complete Unicode/compose, selection, clipboard, scrollback, hardware keyboard, and lifecycle cases.
-    - [x] Current-source emulator density matrices and the focused PTY gate pass with a 42 px phone font, 126 px touch CSD controls, bounded frames, readable dark/light palettes, stable processes, and visible command output. Android system light/dark now updates a running Foot process through its supported signals without restarting Foot or its shell; the supervisor records and signals only the exact target PID.
-    - [x] Replace Foot with the current-source AArch64 wrapper on the Samsung through a real manager transaction, preserve its Linux home/history across the signer change, and pass the 34 px/126 px visual, contrast, command, geometry, runtime-pack, and stable-process gate. Exact legacy Archphene-generated Foot configs migrate to the managed include on both devices, while byte-different user-edited configs remain untouched.
-    - [x] Complete Foot-specific Unicode/compose, selection, clipboard, scrollback, resize, graceful close, force-stop, and cold-relaunch flows on the x86_64 emulator and current-source AArch64 Samsung wrapper. The physical lane uses real mouse-wheel scrollback because One UI ignores adb's synthetic Shift+PageUp chord; the generic physical `wev` suite independently covers hardware keys, modifiers, and repeat.
-  - [ ] Pass Foot direct-Wayland, GLMark2 accelerated, and Vulkan-frontier regressions before expanding the daily-use acceptance run to complete Kate and Code workflows.
-    - [x] Foot visual/live-theme gates pass on x86_64 and AArch64. Current manager-generated GLMark2 wrappers pass distinct sustained virpipe frames, bounded geometry, stable Android/Linux processes, and one-shot same-UID helper replacement with rendered recovery on both devices.
-    - [ ] Keep Vulkan presentation unclaimed: unmodified `vulkaninfo` enumerates llvmpipe, but no Android-backed ICD/Venus path or `vkcube-wayland` presentation exists.
-    - [ ] Continue Code after the generic `/usr/lib/<app>` data/dependency-command pack model is implemented; the current transaction fails closed before wrapper creation with the exact unsupported symlink path.
-  - [x] Physical AArch64 dark/light validation covers KCalc and Mousepad at the automatic 150% phone geometry scale and 17 pt toolkit text.
-  - [x] Qt 6/KDE, GTK 3, and GTK 4/libadwaita system-theme changes repalette running widgets without restarting the Linux process; raw screenshot-pixel regressions inspect the Linux surface and reject Android-chrome-only false positives.
-  - [x] Prove on current-source x86_64 KCalc, Kate, Mousepad, and GNOME Text Editor that explicit manager light/dark choices override the opposite Android mode and Material You changes generated semantic colors and rendered app pixels.
-  - [x] Keep the representative KCalc menus/status, Mousepad Preferences/popup/close controls, and Foot CSD/text readable and bounded on the current emulator build; tablet/docked density remains configurable in Appearance settings and the visual gates now reject chrome-only or screenshot-change false positives.
-  - [x] Scale generic GTK check/radio indicators and title-button glyphs independently from their touch targets. Current-source Mousepad now renders legible checked/unchecked controls and close affordances in light/dark mode, preserves density-specific phone/tablet/docked metrics, and finishes its Android host when the primary Linux window exits instead of leaving a stale frame.
-  - [x] Rebuild and checksum the current AArch64 Qt style and platform-theme plugins against the pinned Qt 6.11.1 package.
-  - [ ] Make the complete AArch64 Qt bridge rebuild self-contained by pinning the missing KConfig development sysroot for `libarchphene_kde_config.so`.
-  - [x] Validate current-source physical manager overrides and Material You after preserving and deliberately migrating signer-bound KCalc/Mousepad state. Qt light/dark/Material policy and GTK semantic checked-state pixels pass on Samsung; the focused Mousepad gate also verifies checkbox restoration and both child/primary close paths on Samsung and emulator.
-  - [ ] Finish the clean GTK settings bridge build. GLib is now an explicit dependency of the pinned container, but the AArch64 build still needs a pinned GLib development sysroot before the x86_64/AArch64 rebuild can be claimed.
-- [ ] Execute the release-gate representatives in `docs/compatibility-matrix.md`.
-  - [x] Promote the reviewed package matrix into maintained documentation and separate non-normative research candidates.
-  - [x] Run the first x86_64 candidate wave through official resolution/signature verification and complete-closure wrapper installation; capture GTK 4, complex Qt, and native-Wayland terminal results without promoting launch-only evidence to validated support.
-  - [x] Complete the remaining `gnome-text-editor` clipboard and complex-composition workflows.
-    - [x] Current-source x86_64 and manager-owned AArch64 wrappers pass generic SAF import/edit/writeback/cold reopen and DocumentsUI provider discovery, stable-process live light/dark plus cold dark launch, and state-preserving GTK 4 accessibility for tabs, the main menu, Preferences, labels, actions, bounds, and dismissed-dialog removal.
-    - [x] Prove Android-to-Linux paste, non-Latin/emoji composing and committed InputConnection text, Linux selection/copy, and exact Android clipboard readback in a focused GTK 4 workflow. The gate closes normally to restore the captured Android clipboard and restores the exact prior Text Editor session on both devices.
-  - [x] Reconcile manager-validated auxiliary shebang commands with the wrapper materializer without weakening ELF-only validation for the program, loader, or libraries; the original Kate launch exception is gone.
-  - [x] Adopt daemonized Linux GUI descendants beneath an Activity-tied subreaper supervisor. Current-source x86_64 Kate now maps its full UI, retains stable Android/Linux processes through tablet portrait/landscape changes, and renders on a temporary 1920x1080 emulator display where targeted pointer and keyboard input create text.
-  - [x] Complete Kate tabs, split views, large documents, dialogs, sessions, secondary Linux windows, save/reopen, destructive lifecycle, and current-source physical AArch64 workflows. The manager migrated Samsung Kate 26.04.3-1 through its normal signer-replacement flow after archiving the old APK/private state, then restored the exact `katerc` and large-document bytes. Both devices pass the generic SAF edit/writeback/cold-reopen gate, bounded real File/View/Sessions semantics, two actionable tabs, a non-overlapping vertical split, named-session discovery, independent secondary-window close with stable processes, and live light/dark changes. The emulator additionally passes stable tablet rotation plus a real 1920x1080 secondary Android display.
-  - [x] Repair Foot child-shell linkage and runtime data on current-source x86_64 by publishing verified Bash, staging X11 locale data, selecting `C.UTF-8`, and supplying a monospace fallback. A live Bash PTY maps without the former linkage/locale/font warnings and executes typed input without process churn.
-  - [x] Complete Foot Unicode/compose, hardware keyboard, modifiers/repeat, scrolling, selection, clipboard, resize, destructive lifecycle, and current-source physical AArch64 workflows. The focused workflow gate passes on both devices and the generic `wev`/`wl-clipboard` gates provide the protocol-level hardware and clipboard coverage.
-  - [x] Fail closed when a generated wrapper requests an unpublished Android `PATH` command. The bridge now prepends the verified command view, redirects exact verified paths through the managed loader, permits only the existing explicit Android `cat` bridge, and rejects `clear` with status 127 instead of leaking the glibc preload into Android's linker namespace. Host and x86_64/AArch64 wrapper regressions cover `execve` plus `exec*p` paths.
-  - [ ] Decide whether terminal-style wrappers should publish selected dependency commands beyond their verified primary/source commands and managed Bash. `clear` is now safely unavailable rather than accidentally executing Android's binary; add commands only through a bounded package-generic policy, not a Foot exception.
-  - [ ] Complete the SuperTux SDL suite across both maintained architectures.
-    - [x] Drive the current x86_64 closure through resolution, signature verification, bounded staging, runtime-pack publication, Android installation, and launch. The first extraction failure was confirmed as emulator cache pressure and passed after Android trimmed only clearable caches.
-    - [x] Publish verified dependency libraries loaded only through `dlopen` without adding a SuperTux exception. The manager now scans only already-selected verified staged ELFs for complete soname-shaped references, resolves exact unambiguous candidates to a bounded fixpoint, and retains their normal ELF dependencies. Source contracts cover ambiguity and size bounds; current AArch64 assembly retains SDL3 plus its Wayland, input, audio, and Mesa providers in the immutable pack.
-    - [x] Replace the differently signed Samsung fixture with the current manager-generated AArch64 wrapper and pass the state-preserving SDL workflow: animated accelerated virpipe frames, active PulseAudio playback, suppressed implicit SDL2 startup IME, hardware-key and finger-to-pointer first-run activation with OCR evidence, HOME/resume, portrait/landscape resize, stable Android/Linux processes, normal-launch input-log privacy, a separate 10-second GPU quality gate, and three warmed rotation/FD cycles with no growth. The test restores the exact prior SuperTux profile, rotation, and running state.
-    - [x] Replay the complete current-source workflow on x86_64 and the same universal manager build on physical AArch64. Manager-generated SuperTux now passes animated EGL rendering, PulseAudio playback, ordinary keyboard and D-pad activation, finger-to-pointer first-run activation, HOME/resume, portrait/landscape resize, sustained GPU quality, and three warmed lifecycle cycles on both devices. The generic bridge positions and settles synthesized pointer taps before activation, maps D-pad center to Linux Enter, and the state-preserving gate verifies its orientation from captured pixels instead of assuming `wm size` is rotated.
-    - [x] Close the physical-device SDL presentation/input regression found by full-device screenshot review. Portrait SuperTux rendered its OpenGL viewport and software cursor below the corresponding Android touch, while landscape aligned; the shared bridge now restores SDL's automatic landscape-sensor behavior for direct-Wayland SDL2/SDL3 apps on the default Android display without a package-specific offset. Universal manager 1.0.9 regenerated both wrappers and the strengthened state-preserving workflow passes on Samsung and emulator using only full-device screencaps: the Samsung cursor hotspots land at the actual `(810,669)` and `(1505,669)` taps, both controls activate, the emulator matches, and live `1920x1200` tablet resize preserves both processes.
-    - [ ] Extend both lanes into real level/gameplay controls, pointer capture, audio focus/interruption, and fullscreen/window-mode transitions before checking the SDL suite complete.
-    - [ ] Cache verified staged-closure analysis and unchanged wrapper inputs so same-package bridge rebuilds do not rescan the full SuperTux data/ELF tree before producing an otherwise identical runtime pack.
-  - [ ] Test the remaining representative phone, tablet, docked, GPU, document, multimedia, accessibility, and failure cases.
+## P0 - Greenfield Rust + Kotlin implementation
 
-## P2 - Documentation and repository readiness
+- [x] Choose the production language boundary.
+  - Rust owns the shared Arch runtime, package engine, process supervision, storage synchronization, compositor, input state, rendering, and persistent operation state.
+  - Kotlin owns the Android application shell: activities, services, lifecycle, permissions, PackageInstaller, SAF/DocumentsProvider, IME, accessibility, notifications, and system UI.
+  - Legacy Java/C/Rust prototypes remain as reference until replacements pass their gates; preserving installed prototype state is not required.
+- [x] Establish the production source tree without adding new features to `prototypes/`:
 
-- [x] Add deterministic package and installed-app search ranking.
-  - Exact package, executable ownership, prefix/token, and description matches are ranked; glmark2-es2-wayland resolves to glmark2.
-- [x] Document non-root Android Terminal limitations in docs/terminal-apps.md.
-- [x] Ignore repository-local generated tooling and external reference checkouts.
-- [x] Review the remaining untracked package matrix, generated artifacts, licenses, and source provenance before tracking or deleting anything.
-  - The pre-work tree had no untracked files, generated build outputs remain ignored, and the 2026-07-22 public-repository audit passes 595 tracked paths, prebuilt checksums, licensing/community-file policy, secret/size checks, and commit-pinned Actions.
-- [ ] Update README, focused user docs, roadmap, project status, changelog, and release notes after P0/P1 behavior is final.
-- [ ] Run a final public-repository audit after P0/P1 behavior is final.
-  - [x] Add an automated source audit for required community files, stale licensing claims, generated/secret/release artifacts, oversized tracked files, private-key material, prebuilt manifests/checksums, and commit-pinned Actions.
-  - [ ] Recheck stale experiment claims, duplicate docs, source provenance, release notes, and CI results immediately before publication.
+  ```text
+  android/app/                 Kotlin Android shell
+  crates/archphene-core/       platform-independent Rust domain/runtime core
+  crates/archphene-android/    small Android/JNI adapter
+  crates/archphene-*/          bounded feature crates added only as needed
+  tests/                       host contracts and cross-boundary fixtures
+  ```
 
-## Next project - ArchpheneOS
+- [ ] Pin reproducible Rust, Kotlin, Android Gradle Plugin, Gradle, JDK, SDK, and NDK versions; build offline from verified caches after initial provisioning.
+  - [x] Start with Rust 1.88, Kotlin built into AGP 9.3, Gradle 9.6.1, the installed JDK 26, SDK/Build Tools 36, and NDK 29. Use JDK 17 only if a measured compatibility failure requires AGP's documented minimum/default JVM.
+- [x] Build the first vertical slice.
+  - [x] Kotlin Activity binds to one Archphene runtime Service.
+  - [x] The Service owns exactly one Rust runtime handle and survives Activity recreation.
+  - [x] Rust exposes a versioned ABI and fixed-format status snapshot.
+  - [x] Kotlin reuses direct buffers for batched commands/events and never transfers rendered frames as Java arrays or Bitmaps.
+  - [x] Clean shutdown is idempotent and releases every native handle; the base owns no descriptors, worker threads, or child processes yet.
+  - [x] Host unit tests, allocation gate, Rust Android cross-builds, Kotlin compilation, APK packaging/alignment, emulator installation, and Samsung installation pass.
+  - [x] Full-device emulator and Samsung gates prove bounded touch batching, visible insets, Activity recreation, HOME/resume continuity, and normal Back shutdown while restoring screen and rotation state.
+- [ ] Add capabilities in test-gated vertical slices; do not port code merely because it existed before.
+  - [x] Shared private Arch root and bootstrap
+    - [x] Create and version a conventional private root under Android app storage with bounded paths and required modes.
+    - [x] Reject unsafe layout entries and unknown versions; repair known directory modes on reuse.
+    - [x] Bootstrap off Android's main thread and publish readiness through the fixed native snapshot.
+    - [x] Host safety tests plus clean/reused-root gates pass on the emulator and Samsung using full-device screenshots.
+  - [ ] Package catalog/search and persistent job state
+    - [x] Add a Rust-owned, fixed-size persistent operation journal with bounded fields and legal state transitions.
+    - [x] Atomically publish journal updates, reject corruption/symlinks, recover interrupted work explicitly, and avoid warmed in-memory heap allocation.
+    - [x] Bootstrap and reuse the empty journal on the emulator and Samsung; report readiness through the native snapshot.
+    - [x] Package the verified pacman runtime as content-addressed exact-ABI native payloads, validate its signed-APK manifest, and execute the real pacman binary through its patched glibc loader.
+    - [x] Emit 37 MB x86_64 and 36 MB arm64-v8a compressed debug APKs instead of a 168 MB universal test artifact; Android extracts the executable runtime to device filesystem paths at installation.
+    - [x] Pass clean/reused-root, lifecycle, input, log, and full-device visual gates with real pacman execution on the emulator and Samsung.
+    - [x] Connect authoritative repository catalogs and expose real search results.
+      - [x] Android's HTTPS stack transports bytes from Rust-selected, exact-ABI official endpoints through one bounded file descriptor; Rust owns temporary-file safety, size limits, sync, atomic publication, modes, and readiness.
+      - [x] Rust executes bounded read-only pacman searches off the UI thread, validates and normalizes result fields, caps output, and treats empty pacman exit 1 as a normal no-results state.
+      - [x] Clean catalog refresh, package search, process-death reuse, scoped logs, and full-device screenshots pass with `dotnet-sdk` on x86_64 and `btop` on Samsung AArch64. The official ARM repositories currently have no `dotnet-sdk` result.
+    - [ ] Queue real operations from the Kotlin UI and render every durable phase immediately.
+  - [ ] Pacman resolution, verification, install/update/remove
+  - [ ] Terminal/PTY and shared command environment
+  - [ ] Wayland compositor, presentation, and lifecycle
+  - [ ] Pointer, touch, keyboard, IME, clipboard, and drag-and-drop
+  - [ ] Android file integration and `/mnt/android`
+  - [ ] Launcher wrapper generation and runtime-service binding
+  - [ ] Qt, GTK, native Wayland, SDL, Electron, and XWayland adaptation
+  - [ ] Audio, camera, printing, notifications, URLs, secrets, and accessibility
+  - [ ] GPU acceleration, external displays, and secondary windows
+  - [ ] AUR builds and the VS Code + .NET acceptance workflow
+- [ ] Delete legacy implementation source only after every retained capability has equivalent tests and the user approves removal.
 
-Start only after the Android application is complete and the end user confirms the release.
+### Performance and safety rules
 
-- [ ] Boot an x86_64 VM into an AOSP/GrapheneOS-derived laptop image and validate the security model before attempting Arch package integration.
-- [ ] Define which GrapheneOS guarantees are device-specific and cannot be carried to generic x86 hardware without additional work.
-- [ ] Design a laptop privilege model where Android applications remain sandboxed and Linux administration requires explicit escalation.
+- [ ] Keep JNI narrow, versioned, and coarse-grained; no per-pixel, per-object, or avoidable per-input-event JNI chatter.
+- [ ] Pass file descriptors, direct buffers, shared memory, `ANativeWindow`, and HardwareBuffer handles instead of copying payloads.
+- [ ] Preallocate bounded queues and reusable scratch buffers for input, frame metadata, logs, package progress, and bridge messages.
+- [ ] Do not allocate or free heap objects in frame, pointer-motion, touch-motion, audio-callback, or compositor dispatch hot paths after warm-up.
+- [ ] Put explicit limits on queues, strings, paths, manifests, documents, windows, processes, descriptors, and package operations; apply backpressure rather than unbounded growth.
+- [ ] Confine Rust `unsafe` to reviewed FFI/syscall modules with safe wrappers, ownership documentation, null/alignment/length validation, and targeted tests.
+- [ ] Keep the only global JNI state to a bounded synchronized handle registry; capability state stays in its owned runtime. Handles have generation checks, deterministic destruction, and use-after-close rejection.
+- [ ] Keep blocking I/O, package work, and filesystem synchronization off Android's main thread and compositor/render threads.
+- [ ] Measure cold/warm startup, RSS/PSS, Java/Kotlin allocations and GC, native allocations, JNI calls, copied bytes, frame time, input latency, descriptors, threads, and child processes.
+- [ ] Add allocation-count and steady-state soak gates; performance regressions fail CI rather than becoming documentation notes.
+- [ ] Use release builds, R8, baseline profiles, stripped native libraries, panic-abort, and LTO only after debug diagnostics and tests remain adequate.
+
+### Architecture gates
+
+- [x] Define one Archphene-owned private Arch root with conventional `/usr`, `/etc`, `/var`, `/opt`, `/home`, and `/tmp` semantics.
+- [ ] Define how thin launcher APKs bind to the shared runtime service while Linux processes, packages, and files remain in that environment.
+- [ ] Preserve Android launcher entries, icons, intents, windows, notifications, and lifecycle without duplicating Linux roots.
+- [ ] Define supervision, background execution, daemons, resource limits, crash recovery, and shutdown.
+- [ ] Define trust for pacman, AUR builds, hooks, arbitrary executables, runtime content, and launcher signing.
+- [ ] Document that packages inside the shared Arch environment intentionally share one Linux trust domain.
+- [ ] Wipe the emulator and Samsung prototype installations only when the new base APK is ready; retain source and any explicitly requested evidence.
+
+## P0 - Android and Linux file integration
+
+- [ ] Present Android-accessible storage inside Linux under:
+
+  ```text
+  /mnt/android/downloads
+  /mnt/android/documents
+  /mnt/android/pictures
+  /mnt/android/media
+  /mnt/android/shared
+  ```
+
+  - [ ] Use Android's Storage Access Framework for user-selected folders and persist grants across restarts.
+  - [ ] Add familiar home links such as `~/Downloads` and `~/Documents`.
+  - [ ] Clearly show unavailable, revoked, read-only, syncing, conflict, and error states instead of silently failing.
+  - [ ] Decide and document where a synchronized POSIX mirror is required because SAF is not a mountable POSIX filesystem.
+  - [ ] Keep package databases, builds, symlinks, executables, sockets, and other POSIX-dependent data in private Arch storage.
+- [ ] Add a first-run storage flow: explain the model, let the user grant a folder, and allow skipping or changing it later.
+- [ ] Expose appropriate Archphene files through a `DocumentsProvider` so Android Files, pickers, share sheets, browsers, and other apps can open and save them.
+- [ ] Support Android-to-Archphene import through Open With, Share, drag-and-drop, and file-picker flows.
+- [ ] Support Archphene-to-Android open, save, export, and share flows.
+- [ ] Avoid `MANAGE_EXTERNAL_STORAGE` as the default; evaluate an optional advanced/sideloaded mode only if SAF cannot satisfy a demonstrated workflow.
+- [ ] Test grant creation, persistence, revocation, rename, deletion, conflicts, large trees, offline providers, uninstall behavior, and malicious paths.
+
+## P0 - Package system and shared Arch behavior
+
+- [ ] Make pacman transactions operate atomically against the shared Arch root.
+- [ ] Add a bounded AUR workflow suitable for packages such as `visual-studio-code-bin`.
+  - [ ] Show source, PKGBUILD, maintainer, signatures/checksums, build steps, permissions, and disk impact before installation.
+  - [ ] Run builds as an unprivileged Linux user and clearly communicate that installed Arch/AUR packages share one trust domain.
+- [ ] Make installed commands, libraries, desktop files, MIME handlers, fonts, themes, and services immediately discoverable across all Linux apps.
+- [ ] Generate, update, and remove Android launcher wrappers from desktop entries without deleting shared package or user state incorrectly.
+- [ ] Define ownership when several packages provide desktop entries or depend on the same files.
+- [ ] Handle package upgrades, downgrades, replacements, hooks, interrupted transactions, rollback, orphan cleanup, and low-storage failures.
+- [ ] Decide the bounded policy for publishing dependency commands to app processes; do not add package-specific exceptions.
+- [ ] Extend the verified runtime model to package-owned `/usr/lib/<app>` trees, data, executables, and valid symlinks. This currently blocks Code/Electron.
+- [ ] Cache unchanged closure analysis and wrapper inputs so repeat installs do not rescan large package trees.
+- [ ] Complete and validate the separate 16 KB-aligned x86_64 package/runtime strategy before enabling transactions there.
+
+## P0 - Manager UX and reliability
+
+- [ ] Make every install/update/remove operation appear in the app list immediately with persistent state and progress.
+  - [ ] Show queued, resolving, downloading, verifying, building, installing, awaiting Android confirmation, completed, failed, and cancelled states.
+  - [ ] Keep state correct across rotation, backgrounding, process death, reboot, and manager restart.
+  - [ ] Provide actionable diagnostics, retry/cancel controls, and package-scoped failure isolation.
+- [ ] Profile and fix slow first launch after boot; display useful loading/synchronization state instead of a frozen or empty UI.
+- [ ] Perform a complete UX pass over discovery, package details, installation, launcher creation, updates, storage, permissions, setup, settings, and recovery.
+- [ ] Review Obtainium's source, license, screenshots, app-list structure, and update progress UI. Adapt suitable open-source patterns to Archphene's compact list, spinner, and richer phase strings without copying blindly.
+- [ ] Ensure search results distinguish graphical apps, CLI tools, libraries, installed packages, available updates, AUR results, unsupported packages, and compatibility status.
+- [ ] Add clear disk-use estimates and controls for package archives, shared runtime data, build caches, and user files.
+
+## P0 - VS Code and .NET daily-use milestone
+
+- [ ] Install Code through the generic package/AUR pipeline with no Code-specific bridge exceptions.
+- [ ] Validate Electron/Chromium multiprocess startup, Ozone Wayland, sandbox behavior, rendering, IME, clipboard, dialogs, file watching, extensions, and lifecycle.
+- [ ] Install `dotnet-sdk` through the same shared package system and make `dotnet` available in Code's integrated terminal.
+- [ ] Create a new ASP.NET Core MVC project in shared Arch storage.
+- [ ] Open the project in Code and validate editing, search, Git, terminal PTY, language services, restore/build, and extension-host subprocesses.
+- [ ] Run the project under the debugger, stop at breakpoints, inspect state, continue, and restart.
+- [ ] Open the served localhost URL in Android's browser and validate routing back to the running Linux process.
+- [ ] Validate the workflow with touch/IME on a phone and keyboard/mouse on tablet or external display.
+- [ ] Repeat the complete milestone on the x86_64 emulator and physical AArch64 Samsung using full-device screenshots and scoped logs.
+
+## P1 - Generic desktop integration quality
+
+- [ ] Replace global `QT_SCALE_FACTOR` compatibility behavior with compositor-advertised logical size and fractional output scale, including live display moves.
+- [ ] Define a generic overflow/panning policy for fixed desktop layouts at 200% phone text scaling without app-specific patches.
+- [ ] Finish reproducible AArch64 Qt/KDE and GTK settings bridge builds by pinning the required KConfig and GLib development sysroots.
+- [ ] Complete secondary-window behavior for phone, tablet, freeform, and external displays.
+- [ ] Validate automatic and explicit appearance settings across:
+  - [ ] Qt 6/KDE
+  - [ ] GTK 3
+  - [ ] GTK 4/libadwaita
+  - [ ] native Wayland/Foot
+  - [ ] SDL
+  - [ ] Electron/Chromium
+  - [ ] XWayland
+- [ ] Keep geometry scale, text scale, visible control size, and touch target size distinct, documented, live where supported, and predictable after relaunch.
+- [ ] Validate Android light/dark, explicit Archphene override, Material You accents, font settings, phone/tablet/docked auto policy, and runtime display changes.
+- [ ] Continue using full-device screenshots, rendered-pixel checks, accessibility trees, content geometry, input traces, and logs for visual claims.
+
+## P1 - Compatibility and performance
+
+- [ ] Complete the release representatives in `docs/compatibility-matrix.md`; package search or launch alone is not a support claim.
+- [ ] Finish SuperTux gameplay, pointer capture, audio focus/interruption, and fullscreen/window transitions on emulator and Samsung.
+- [ ] Validate XWayland with a representative unmodified X11 application.
+- [ ] Validate an Android-backed Vulkan presentation path; keep Vulkan presentation unclaimed until `vkcube-wayland` renders.
+- [ ] Add a low/zero-copy Android HardwareBuffer or dmabuf presentation path while retaining SHM fallback.
+- [ ] Broaden testing to Rust-native, browser, office, creative, multimedia, accessibility, USB, and multiwindow applications.
+- [ ] Validate sustained external-display use with keyboard/mouse, display hotplug, density changes, audio routing, sleep/resume, and thermal/memory pressure.
+
+## P1 - Test and release gates
+
+- [ ] Finish the remaining standalone Bash-script assertion audit and run each applicable entry point.
+- [ ] Keep tests state-preserving by default and require explicit flags for destructive device changes.
+- [ ] Require emulator and physical-device coverage for runtime, storage, package, input, visual, permission, and lifecycle changes.
+- [ ] Capture device screenshots rather than app-only frames whenever asserting what the user sees or where touch lands.
+- [ ] Add long-running upgrade, package churn, process-death, reboot, storage-pressure, network-failure, and recovery tests.
+- [ ] Validate on a supported GrapheneOS Pixel and a physical x86_64 Android target before a public support claim.
+- [ ] Pass the full phone, tablet, docked, GPU, document, multimedia, accessibility, failure, and release-signing matrix.
+
+## P2 - Documentation and publication
+
+- [ ] Update architecture and storage documentation to the approved shared-environment model; clearly mark older per-wrapper research as historical.
+- [ ] Document the Android/Linux filesystem boundary, `/mnt/android`, backup/export, permissions, revocation, and uninstall consequences.
+- [ ] Document normal-Arch compatibility limits imposed by Android's kernel, SELinux, seccomp, background execution, and lack of root/systemd assumptions.
+- [ ] Update README, roadmap, project status, compatibility matrix, security model, changelog, and release notes after behavior is implemented.
+- [ ] Run the final public-repository, provenance, licensing, secret, reproducibility, CI, and release-artifact audit.
+
+## Later - ArchpheneOS
+
+Start only after the Android application reaches its release gate and the user approves the next project.
+
+- [ ] Boot an x86_64 VM into an AOSP/GrapheneOS-derived laptop image and validate its security model.
+- [ ] Define which GrapheneOS guarantees depend on supported Pixel hardware and cannot transfer directly to generic x86 systems.
+- [ ] Design explicit Linux administration and escalation while Android applications remain sandboxed.
