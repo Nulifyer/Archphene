@@ -14,6 +14,12 @@ const MAX_CSI_PARAMETERS: usize = 16;
 const MAX_STRING_BYTES: usize = 8 * 1024;
 const DEFAULT_FOREGROUND: u8 = 7;
 const DEFAULT_BACKGROUND: u8 = 0;
+const FLAG_CURSOR_VISIBLE: u32 = 1;
+const FLAG_APPLICATION_CURSOR: u32 = 1 << 1;
+const FLAG_APPLICATION_KEYPAD: u32 = 1 << 2;
+const FLAG_BRACKETED_PASTE: u32 = 1 << 3;
+const FLAG_NEW_LINE_MODE: u32 = 1 << 4;
+const FLAG_BACKARROW_KEY: u32 = 1 << 5;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Cell {
@@ -71,6 +77,11 @@ pub struct Terminal {
     inactive_scroll_bottom: u16,
     alternate_active: bool,
     cursor_visible: bool,
+    application_cursor: bool,
+    application_keypad: bool,
+    bracketed_paste: bool,
+    new_line_mode: bool,
+    backarrow_key: bool,
     parser_state: ParserState,
     csi_parameters: [u16; MAX_CSI_PARAMETERS],
     csi_count: usize,
@@ -113,6 +124,11 @@ impl Terminal {
             inactive_scroll_bottom: rows - 1,
             alternate_active: false,
             cursor_visible: true,
+            application_cursor: false,
+            application_keypad: false,
+            bracketed_paste: false,
+            new_line_mode: false,
+            backarrow_key: false,
             parser_state: ParserState::Ground,
             csi_parameters: [0; MAX_CSI_PARAMETERS],
             csi_count: 0,
@@ -199,7 +215,31 @@ impl Terminal {
         output[14..16].copy_from_slice(&self.cursor_column.to_le_bytes());
         output[16..18].copy_from_slice(&dirty_start.to_le_bytes());
         output[18..20].copy_from_slice(&dirty_end.to_le_bytes());
-        let flags = u32::from(self.cursor_visible);
+        let flags = if self.cursor_visible {
+            FLAG_CURSOR_VISIBLE
+        } else {
+            0
+        } | if self.application_cursor {
+            FLAG_APPLICATION_CURSOR
+        } else {
+            0
+        } | if self.application_keypad {
+            FLAG_APPLICATION_KEYPAD
+        } else {
+            0
+        } | if self.bracketed_paste {
+            FLAG_BRACKETED_PASTE
+        } else {
+            0
+        } | if self.new_line_mode {
+            FLAG_NEW_LINE_MODE
+        } else {
+            0
+        } | if self.backarrow_key {
+            FLAG_BACKARROW_KEY
+        } else {
+            0
+        };
         output[20..24].copy_from_slice(&flags.to_le_bytes());
         output[24..32].copy_from_slice(&self.revision.to_le_bytes());
         let mut offset = DAMAGE_HEADER_SIZE;
@@ -377,6 +417,8 @@ impl Terminal {
                 self.cursor_row = self.saved_row.min(self.rows - 1);
                 self.cursor_column = self.saved_column.min(self.columns - 1);
             }
+            b'=' => self.set_application_keypad(true),
+            b'>' => self.set_application_keypad(false),
             b'D' => self.line_feed(),
             b'E' => {
                 self.cursor_column = 0;
@@ -471,6 +513,7 @@ impl Terminal {
             b'J' => self.erase_display(self.csi_parameters[0]),
             b'K' => self.erase_line(self.csi_parameters[0]),
             b'm' => self.select_graphics(),
+            b'h' | b'l' => self.execute_ansi_mode(final_byte == b'h'),
             b'r' => {
                 let top = self.parameter(0, 1).saturating_sub(1).min(self.rows - 1);
                 let bottom = self
@@ -496,6 +539,7 @@ impl Terminal {
         let enabled = final_byte == b'h';
         for index in 0..self.csi_count {
             match self.csi_parameters[index] {
+                1 => self.set_application_cursor(enabled),
                 25 => {
                     if self.cursor_visible != enabled {
                         self.cursor_visible = enabled;
@@ -503,6 +547,8 @@ impl Terminal {
                     }
                 }
                 47 => self.set_alternate_screen(enabled, false),
+                66 => self.set_application_keypad(enabled),
+                67 => self.set_backarrow_key(enabled),
                 1047 | 1049 => self.set_alternate_screen(enabled, enabled),
                 1048 if enabled => {
                     self.saved_row = self.cursor_row;
@@ -512,8 +558,46 @@ impl Terminal {
                     self.cursor_row = self.saved_row.min(self.rows - 1);
                     self.cursor_column = self.saved_column.min(self.columns - 1);
                 }
+                2004 => self.set_bracketed_paste(enabled),
                 _ => {}
             }
+        }
+    }
+
+    fn execute_ansi_mode(&mut self, enabled: bool) {
+        for index in 0..self.csi_count {
+            if self.csi_parameters[index] == 20 && self.new_line_mode != enabled {
+                self.new_line_mode = enabled;
+                self.mark_dirty(self.cursor_row);
+            }
+        }
+    }
+
+    fn set_application_cursor(&mut self, enabled: bool) {
+        if self.application_cursor != enabled {
+            self.application_cursor = enabled;
+            self.mark_dirty(self.cursor_row);
+        }
+    }
+
+    fn set_application_keypad(&mut self, enabled: bool) {
+        if self.application_keypad != enabled {
+            self.application_keypad = enabled;
+            self.mark_dirty(self.cursor_row);
+        }
+    }
+
+    fn set_bracketed_paste(&mut self, enabled: bool) {
+        if self.bracketed_paste != enabled {
+            self.bracketed_paste = enabled;
+            self.mark_dirty(self.cursor_row);
+        }
+    }
+
+    fn set_backarrow_key(&mut self, enabled: bool) {
+        if self.backarrow_key != enabled {
+            self.backarrow_key = enabled;
+            self.mark_dirty(self.cursor_row);
         }
     }
 
@@ -660,6 +744,11 @@ impl Terminal {
         self.inactive_scroll_top = 0;
         self.inactive_scroll_bottom = self.rows - 1;
         self.cursor_visible = true;
+        self.application_cursor = false;
+        self.application_keypad = false;
+        self.bracketed_paste = false;
+        self.new_line_mode = false;
+        self.backarrow_key = false;
         self.foreground = DEFAULT_FOREGROUND;
         self.background = DEFAULT_BACKGROUND;
         self.attributes = 0;
@@ -811,6 +900,32 @@ mod tests {
         terminal.feed(b"\x1b[?25h");
         terminal.write_damage(&mut output).unwrap();
         assert_eq!(u32::from_le_bytes(output[20..24].try_into().unwrap()), 1);
+    }
+
+    #[test]
+    fn input_modes_are_versioned_in_damage_flags() {
+        let mut terminal = Terminal::new(2, 5).unwrap();
+        let mut output = [0_u8; 256];
+        terminal.write_damage(&mut output).unwrap();
+
+        terminal.feed(b"\x1b[?1;66;67;2004h\x1b=\x1b[20h");
+        terminal.write_damage(&mut output).unwrap();
+        assert_eq!(
+            u32::from_le_bytes(output[20..24].try_into().unwrap()),
+            FLAG_CURSOR_VISIBLE
+                | FLAG_APPLICATION_CURSOR
+                | FLAG_APPLICATION_KEYPAD
+                | FLAG_BRACKETED_PASTE
+                | FLAG_NEW_LINE_MODE
+                | FLAG_BACKARROW_KEY
+        );
+
+        terminal.feed(b"\x1b[?1;66;67;2004l\x1b>\x1b[20l");
+        terminal.write_damage(&mut output).unwrap();
+        assert_eq!(
+            u32::from_le_bytes(output[20..24].try_into().unwrap()),
+            FLAG_CURSOR_VISIBLE
+        );
     }
 
     #[test]

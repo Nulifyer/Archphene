@@ -303,6 +303,21 @@ allocation-free after construction. Installed `tput` gates prove primary
 preservation, alternate clearing/content, discarded alternate output, and
 exact primary restoration with full-device screenshots on both ABIs.
 
+Input modes now travel in reserved flags of the same versioned terminal-damage
+header, so mode changes add no JNI call. Rust tracks application cursor/keypad,
+bracketed paste, ANSI newline, and DEC backarrow state. Android uses static
+normal/application cursor, keypad, Enter, and Backspace sequences; IME newline
+commit/action and surrounding deletion follow the same newline/backarrow
+modes. The reusable text buffer still provides the only dynamic key payload.
+The warmed parser/damage gate repeatedly changes all modes without allocation.
+
+An exact device gate runs Bash `read -n 3`, sends Android hardware Up, and
+captures the bytes as normal `ESC [ A`. Installed `tput smkx` then changes the
+real terminal modes and the same key is captured as application `ESC O A`;
+`tput rmkx` restores normal mode. Exact-ABI builds, Bash byte assertions,
+accessibility, scoped logs, and visually inspected full-device screenshots
+pass on the emulator and Samsung.
+
 That device gate also exposed an incomplete generic root-identity bridge:
 glibc's filesystem-ID query reached Android's blocked x86_64 syscall 122.
 The path bridge now consistently virtualizes uid, gid, effective uid/gid, and
@@ -322,10 +337,10 @@ This is not yet the production terminal promised by the milestone. Resizing
 preserves the current cursor window but does not reflow or retain discarded
 rows because scrollback is not implemented. Unicode width and combining
 behavior, extended color, remaining xterm controls, scrollback, selection,
-mode-dependent keys, clipboard, broader composing IME behavior, richer
-accessibility, and user-controlled terminal text sizing remain required. The
-temporary command field remains as a fallback above the renderer; direct
-terminal input no longer depends on it.
+remaining terminal modes, clipboard/bracketed paste, broader composing IME
+behavior, richer accessibility, and user-controlled terminal text sizing
+remain required. The temporary command field remains as a fallback above the
+renderer; direct terminal input no longer depends on it.
 
 The validated prototype below remains reference evidence until replacement
 vertical slices pass equivalent gates. Installed prototype state is no longer a

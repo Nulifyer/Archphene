@@ -44,6 +44,7 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
     private var cursorRow = 0
     private var cursorColumn = 0
     private var cursorVisible = false
+    private var terminalFlags = 0
     private var terminalRevision = Long.MIN_VALUE
     private var sourceRevision = Long.MIN_VALUE
     private var needsFullSnapshot = true
@@ -292,7 +293,8 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         }
         cursorRow = nextCursorRow
         cursorColumn = nextCursorColumn
-        cursorVisible = damageBuffer.getInt(20) and CURSOR_VISIBLE_FLAG != 0
+        terminalFlags = damageBuffer.getInt(20)
+        cursorVisible = terminalFlags and CURSOR_VISIBLE_FLAG != 0
         terminalRevision = nextTerminalRevision
         var offset = DAMAGE_HEADER_SIZE
         for (row in dirtyStart until dirtyEnd) {
@@ -436,6 +438,18 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         var output = 0
         while (input < text.length) {
             val first = text[input++]
+            if (first == '\n') {
+                val required =
+                    if (terminalFlags and NEW_LINE_MODE_FLAG != 0) 2 else 1
+                if (output + required > terminalInputBytes.size) {
+                    return false
+                }
+                terminalInputBytes[output++] = CARRIAGE_RETURN_BYTE
+                if (required == 2) {
+                    terminalInputBytes[output++] = LINE_FEED_BYTE
+                }
+                continue
+            }
             val codepoint =
                 if (first.isHighSurrogate()) {
                     if (input < text.length && text[input].isLowSurrogate()) {
@@ -445,8 +459,6 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
                     }
                 } else if (first.isLowSurrogate()) {
                     REPLACEMENT_CHARACTER.code
-                } else if (first == '\n') {
-                    '\r'.code
                 } else {
                     first.code
                 }
@@ -464,6 +476,13 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         var output = 0
         while (input < text.length) {
             val first = text[input++]
+            if (first == '\n') {
+                output += if (terminalFlags and NEW_LINE_MODE_FLAG != 0) 2 else 1
+                if (output > terminalInputBytes.size) {
+                    return -1
+                }
+                continue
+            }
             val codepoint =
                 if (first.isHighSurrogate()) {
                     if (input < text.length && text[input].isLowSurrogate()) {
@@ -562,19 +581,58 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
     private fun terminalSequence(
         keyCode: Int,
         shift: Boolean = false,
-    ): ByteArray? =
-        when (keyCode) {
-            KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> CARRIAGE_RETURN
-            KeyEvent.KEYCODE_DEL -> BACKSPACE
+    ): ByteArray? {
+        if (terminalFlags and APPLICATION_KEYPAD_FLAG != 0) {
+            applicationKeypadSequence(keyCode)?.let { return it }
+        }
+        return when (keyCode) {
+            KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER ->
+                if (terminalFlags and NEW_LINE_MODE_FLAG != 0) {
+                    CARRIAGE_RETURN_LINE_FEED
+                } else {
+                    CARRIAGE_RETURN
+                }
+            KeyEvent.KEYCODE_DEL ->
+                if (terminalFlags and BACKARROW_KEY_FLAG != 0) ERASE_BACKSPACE else BACKSPACE
             KeyEvent.KEYCODE_FORWARD_DEL -> DELETE
             KeyEvent.KEYCODE_TAB -> if (shift) BACK_TAB else TAB
             KeyEvent.KEYCODE_ESCAPE -> ESCAPE
-            KeyEvent.KEYCODE_DPAD_UP -> CURSOR_UP
-            KeyEvent.KEYCODE_DPAD_DOWN -> CURSOR_DOWN
-            KeyEvent.KEYCODE_DPAD_RIGHT -> CURSOR_RIGHT
-            KeyEvent.KEYCODE_DPAD_LEFT -> CURSOR_LEFT
-            KeyEvent.KEYCODE_MOVE_HOME -> CURSOR_HOME
-            KeyEvent.KEYCODE_MOVE_END -> CURSOR_END
+            KeyEvent.KEYCODE_DPAD_UP ->
+                if (terminalFlags and APPLICATION_CURSOR_FLAG != 0) {
+                    APPLICATION_CURSOR_UP
+                } else {
+                    CURSOR_UP
+                }
+            KeyEvent.KEYCODE_DPAD_DOWN ->
+                if (terminalFlags and APPLICATION_CURSOR_FLAG != 0) {
+                    APPLICATION_CURSOR_DOWN
+                } else {
+                    CURSOR_DOWN
+                }
+            KeyEvent.KEYCODE_DPAD_RIGHT ->
+                if (terminalFlags and APPLICATION_CURSOR_FLAG != 0) {
+                    APPLICATION_CURSOR_RIGHT
+                } else {
+                    CURSOR_RIGHT
+                }
+            KeyEvent.KEYCODE_DPAD_LEFT ->
+                if (terminalFlags and APPLICATION_CURSOR_FLAG != 0) {
+                    APPLICATION_CURSOR_LEFT
+                } else {
+                    CURSOR_LEFT
+                }
+            KeyEvent.KEYCODE_MOVE_HOME ->
+                if (terminalFlags and APPLICATION_CURSOR_FLAG != 0) {
+                    APPLICATION_CURSOR_HOME
+                } else {
+                    CURSOR_HOME
+                }
+            KeyEvent.KEYCODE_MOVE_END ->
+                if (terminalFlags and APPLICATION_CURSOR_FLAG != 0) {
+                    APPLICATION_CURSOR_END
+                } else {
+                    CURSOR_END
+                }
             KeyEvent.KEYCODE_PAGE_UP -> PAGE_UP
             KeyEvent.KEYCODE_PAGE_DOWN -> PAGE_DOWN
             KeyEvent.KEYCODE_INSERT -> INSERT
@@ -590,6 +648,30 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
             KeyEvent.KEYCODE_F10 -> FUNCTION_10
             KeyEvent.KEYCODE_F11 -> FUNCTION_11
             KeyEvent.KEYCODE_F12 -> FUNCTION_12
+            else -> null
+        }
+    }
+
+    private fun applicationKeypadSequence(keyCode: Int): ByteArray? =
+        when (keyCode) {
+            KeyEvent.KEYCODE_NUMPAD_0 -> KEYPAD_0
+            KeyEvent.KEYCODE_NUMPAD_1 -> KEYPAD_1
+            KeyEvent.KEYCODE_NUMPAD_2 -> KEYPAD_2
+            KeyEvent.KEYCODE_NUMPAD_3 -> KEYPAD_3
+            KeyEvent.KEYCODE_NUMPAD_4 -> KEYPAD_4
+            KeyEvent.KEYCODE_NUMPAD_5 -> KEYPAD_5
+            KeyEvent.KEYCODE_NUMPAD_6 -> KEYPAD_6
+            KeyEvent.KEYCODE_NUMPAD_7 -> KEYPAD_7
+            KeyEvent.KEYCODE_NUMPAD_8 -> KEYPAD_8
+            KeyEvent.KEYCODE_NUMPAD_9 -> KEYPAD_9
+            KeyEvent.KEYCODE_NUMPAD_DOT -> KEYPAD_DOT
+            KeyEvent.KEYCODE_NUMPAD_COMMA -> KEYPAD_COMMA
+            KeyEvent.KEYCODE_NUMPAD_DIVIDE -> KEYPAD_DIVIDE
+            KeyEvent.KEYCODE_NUMPAD_MULTIPLY -> KEYPAD_MULTIPLY
+            KeyEvent.KEYCODE_NUMPAD_SUBTRACT -> KEYPAD_SUBTRACT
+            KeyEvent.KEYCODE_NUMPAD_ADD -> KEYPAD_ADD
+            KeyEvent.KEYCODE_NUMPAD_EQUALS -> KEYPAD_EQUALS
+            KeyEvent.KEYCODE_NUMPAD_ENTER -> KEYPAD_ENTER
             else -> null
         }
 
@@ -650,7 +732,13 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
                 return super.deleteSurroundingText(beforeLength, afterLength)
             }
             var output = 0
-            terminalInputBytes.fill(BACKSPACE_BYTE, output, beforeLength)
+            val backwardByte =
+                if (terminalFlags and BACKARROW_KEY_FLAG != 0) {
+                    ERASE_BACKSPACE_BYTE
+                } else {
+                    BACKSPACE_BYTE
+                }
+            terminalInputBytes.fill(backwardByte, output, beforeLength)
             output += beforeLength
             repeat(afterLength) {
                 System.arraycopy(DELETE, 0, terminalInputBytes, output, DELETE.size)
@@ -661,7 +749,13 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         }
 
         override fun performEditorAction(actionCode: Int): Boolean =
-            sendSequence(CARRIAGE_RETURN)
+            sendSequence(
+                if (terminalFlags and NEW_LINE_MODE_FLAG != 0) {
+                    CARRIAGE_RETURN_LINE_FEED
+                } else {
+                    CARRIAGE_RETURN
+                },
+            )
 
         override fun sendKeyEvent(event: KeyEvent): Boolean =
             this@RuntimeSurfaceView.dispatchKeyEvent(event)
@@ -695,6 +789,7 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         rows = 0
         columns = 0
         cursorVisible = false
+        terminalFlags = 0
         terminalRevision = Long.MIN_VALUE
         sourceRevision = Long.MIN_VALUE
         needsFullSnapshot = true
@@ -759,6 +854,10 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         private const val MAX_COMPOSING_CHARACTERS = 2 * 1024
         private const val MAX_IME_DELETE = 64
         private const val CURSOR_VISIBLE_FLAG = 1
+        private const val APPLICATION_CURSOR_FLAG = 1 shl 1
+        private const val APPLICATION_KEYPAD_FLAG = 1 shl 2
+        private const val NEW_LINE_MODE_FLAG = 1 shl 4
+        private const val BACKARROW_KEY_FLAG = 1 shl 5
         private const val COLOR_MASK = 0x0f
         private const val BACKGROUND_SHIFT = 4
         private const val ATTRIBUTE_SHIFT = 8
@@ -770,9 +869,14 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         private const val COMPOSING_BACKGROUND = 0xff31363b.toInt()
         private const val REPLACEMENT_CHARACTER = '\ufffd'
         private val ESCAPE_BYTE = 0x1b.toByte()
+        private val CARRIAGE_RETURN_BYTE = 0x0d.toByte()
+        private val LINE_FEED_BYTE = 0x0a.toByte()
         private val BACKSPACE_BYTE = 0x7f.toByte()
+        private val ERASE_BACKSPACE_BYTE = 0x08.toByte()
         private val CARRIAGE_RETURN = byteArrayOf(0x0d)
+        private val CARRIAGE_RETURN_LINE_FEED = byteArrayOf(0x0d, 0x0a)
         private val BACKSPACE = byteArrayOf(0x7f)
+        private val ERASE_BACKSPACE = byteArrayOf(0x08)
         private val TAB = byteArrayOf(0x09)
         private val ESCAPE = byteArrayOf(0x1b)
         private val CURSOR_UP = byteArrayOf(0x1b, 0x5b, 0x41)
@@ -781,6 +885,12 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         private val CURSOR_LEFT = byteArrayOf(0x1b, 0x5b, 0x44)
         private val CURSOR_HOME = byteArrayOf(0x1b, 0x5b, 0x48)
         private val CURSOR_END = byteArrayOf(0x1b, 0x5b, 0x46)
+        private val APPLICATION_CURSOR_UP = byteArrayOf(0x1b, 0x4f, 0x41)
+        private val APPLICATION_CURSOR_DOWN = byteArrayOf(0x1b, 0x4f, 0x42)
+        private val APPLICATION_CURSOR_RIGHT = byteArrayOf(0x1b, 0x4f, 0x43)
+        private val APPLICATION_CURSOR_LEFT = byteArrayOf(0x1b, 0x4f, 0x44)
+        private val APPLICATION_CURSOR_HOME = byteArrayOf(0x1b, 0x4f, 0x48)
+        private val APPLICATION_CURSOR_END = byteArrayOf(0x1b, 0x4f, 0x46)
         private val BACK_TAB = byteArrayOf(0x1b, 0x5b, 0x5a)
         private val INSERT = byteArrayOf(0x1b, 0x5b, 0x32, 0x7e)
         private val DELETE = byteArrayOf(0x1b, 0x5b, 0x33, 0x7e)
@@ -798,6 +908,24 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         private val FUNCTION_10 = byteArrayOf(0x1b, 0x5b, 0x32, 0x31, 0x7e)
         private val FUNCTION_11 = byteArrayOf(0x1b, 0x5b, 0x32, 0x33, 0x7e)
         private val FUNCTION_12 = byteArrayOf(0x1b, 0x5b, 0x32, 0x34, 0x7e)
+        private val KEYPAD_0 = byteArrayOf(0x1b, 0x4f, 0x70)
+        private val KEYPAD_1 = byteArrayOf(0x1b, 0x4f, 0x71)
+        private val KEYPAD_2 = byteArrayOf(0x1b, 0x4f, 0x72)
+        private val KEYPAD_3 = byteArrayOf(0x1b, 0x4f, 0x73)
+        private val KEYPAD_4 = byteArrayOf(0x1b, 0x4f, 0x74)
+        private val KEYPAD_5 = byteArrayOf(0x1b, 0x4f, 0x75)
+        private val KEYPAD_6 = byteArrayOf(0x1b, 0x4f, 0x76)
+        private val KEYPAD_7 = byteArrayOf(0x1b, 0x4f, 0x77)
+        private val KEYPAD_8 = byteArrayOf(0x1b, 0x4f, 0x78)
+        private val KEYPAD_9 = byteArrayOf(0x1b, 0x4f, 0x79)
+        private val KEYPAD_DOT = byteArrayOf(0x1b, 0x4f, 0x6e)
+        private val KEYPAD_COMMA = byteArrayOf(0x1b, 0x4f, 0x6c)
+        private val KEYPAD_DIVIDE = byteArrayOf(0x1b, 0x4f, 0x6f)
+        private val KEYPAD_MULTIPLY = byteArrayOf(0x1b, 0x4f, 0x6a)
+        private val KEYPAD_SUBTRACT = byteArrayOf(0x1b, 0x4f, 0x6d)
+        private val KEYPAD_ADD = byteArrayOf(0x1b, 0x4f, 0x6b)
+        private val KEYPAD_EQUALS = byteArrayOf(0x1b, 0x4f, 0x58)
+        private val KEYPAD_ENTER = byteArrayOf(0x1b, 0x4f, 0x4d)
         private val SURROGATE_RANGE = 0xd800..0xdfff
         private val ANSI_COLORS =
             intArrayOf(

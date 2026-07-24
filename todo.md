@@ -109,7 +109,9 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
       - [x] Prove direct text, Backspace correction, Enter execution, PTY delivery, rendering, accessibility, IME attachment, lifecycle, and full-device visuals with exact-ABI APKs on the emulator and Samsung.
       - [x] Preallocate bounded primary and alternate grids, implement DEC `47`/`1047`/`1049` screen switching plus cursor visibility/save/restore, resize both grids, and preserve warmed zero-allocation screen changes.
       - [x] Prove installed `tput` alternate-screen clearing, content, discard, exact primary restoration, scoped logs, and full-device visuals on both exact-ABI targets.
-      - [ ] Complete Unicode width/combining, extended color, remaining xterm controls and mode-dependent keys, scrollback/reflow, selection, clipboard, non-Latin/composing IME coverage, richer accessibility, and user-controlled text sizing before calling the surface production-ready.
+      - [x] Publish application cursor/keypad, bracketed-paste, newline, and backarrow modes through the existing damage flags; select static mode-correct Android hardware and IME sequences without extra JNI or per-key allocation.
+      - [x] Prove exact normal `ESC [ A` and application `ESC O A` hardware Up sequences through installed `tput`, Bash byte capture, accessibility, scoped logs, and full-device screenshots on both ABIs.
+      - [ ] Complete Unicode width/combining, extended color, remaining xterm controls/modes, scrollback/reflow, selection, bracketed clipboard paste, non-Latin/composing IME coverage, richer accessibility, and user-controlled text sizing before calling the surface production-ready.
       - [x] Replace the clipped temporary diagnostic strip during active sessions with the measured full-height terminal surface; retain emulator and Samsung full-device portrait/landscape/rebind evidence.
   - [ ] Wayland compositor, presentation, and lifecycle
   - [ ] Pointer, touch, keyboard, IME, clipboard, and drag-and-drop
