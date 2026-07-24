@@ -414,6 +414,16 @@ hardware Shift+PageUp/PageDown, and framework accessibility scroll actions use
 the same clamped offset. The accessibility snapshot reads the visible history
 rather than the hidden live cursor row.
 
+The Android terminal surface now supports bounded selection over its currently
+visible grid. A long press selects the complete nonblank cell run under the
+finger, dragging extends the range, and a cell-aligned overlay makes the exact
+range visible without rebuilding terminal strings. Copy assembles at most
+2 KiB of the selected graphemes and row separators only on the explicit user
+action, then publishes through Android's clipboard. The long-press menu,
+`Ctrl+Shift+C`, InputConnection context action, and accessibility Copy share
+that path. Output, viewport changes, resize, and terminal input clear stale
+grid-relative ranges.
+
 The entire Rust workspace, damage-format contracts, and warmed zero-allocation
 gate pass. Exact-ABI builds render installed `tput` 256-color output, exact
 `#123456` on `#abcdef`, reset, DEC line drawing, accessibility markers, scoped
@@ -426,6 +436,11 @@ also pass on both targets with protocol v4. A dedicated exact-ABI gate proves
 visible retained history, touch, mouse wheel, hardware page navigation,
 accessibility, return to live output, scoped logs, and visually inspected
 full-device screenshots on the emulator and physical Samsung.
+An additional exact-ABI gate selects a complete terminal word by touch, checks
+the visible cell highlight and Copy menu in a full-device screenshot, and
+pastes the clipboard back through the PTY for an exact string assertion.
+Existing touch-menu/bracketed Paste and scrollback gesture gates still pass on
+both targets.
 
 That device gate also exposed an incomplete generic root-identity bridge:
 glibc's filesystem-ID query reached Android's blocked x86_64 syscall 122.
@@ -446,10 +461,11 @@ This is not yet the production terminal promised by the milestone. Bounded
 physical-row scrollback is implemented, but resizing still preserves the
 current cursor window rather than joining soft-wrapped logical lines and
 reflowing them consistently across the screen/history boundary. Remaining
-xterm controls, logical reflow, selection/copy, an explicit overlong-grapheme
-user-visible policy, broader non-Latin composing IME behavior, and richer
-accessibility remain required. The temporary command field remains as a
-fallback above the renderer; direct terminal input no longer depends on it.
+xterm controls, logical reflow, selection handles/autoscroll and ranges stable
+across history movement, an explicit overlong-grapheme user-visible policy,
+broader non-Latin composing IME behavior, and richer accessibility remain
+required. The temporary command field remains as a fallback above the
+renderer; direct terminal input no longer depends on it.
 
 The validated prototype below remains reference evidence until replacement
 vertical slices pass equivalent gates. Installed prototype state is no longer a

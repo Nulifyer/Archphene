@@ -1,0 +1,6 @@
+#!/usr/bin/bash
+set -euo pipefail
+
+tput clear
+printf 'COPY-SELECTION-MARKER'
+IFS= read -r -n 1

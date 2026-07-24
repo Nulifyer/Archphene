@@ -1,7 +1,8 @@
 package org.archphene.app
 
-import android.content.Context
+import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -67,7 +68,11 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
                     distanceX: Float,
                     distanceY: Float,
                 ): Boolean {
-                    if (scaleGestureDetector.isInProgress || historyRows == 0) {
+                    if (
+                        scaleGestureDetector.isInProgress ||
+                        selectionDragging ||
+                        historyRows == 0
+                    ) {
                         return false
                     }
                     scrollRowRemainder += distanceY / cellHeight
@@ -81,12 +86,13 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
                 }
 
                 override fun onSingleTapUp(event: MotionEvent): Boolean {
+                    clearSelection()
                     performClick()
                     return true
                 }
 
                 override fun onLongPress(event: MotionEvent) {
-                    performLongClick()
+                    startSelection(event.x, event.y)
                 }
             },
         )
@@ -140,6 +146,11 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
     private var historyRows = 0
     private var viewportOffset = 0
     private var scrollRowRemainder = 0f
+    private var selectionAnchor = NO_SELECTION
+    private var selectionExtent = NO_SELECTION
+    private var selectionTouchCell = NO_SELECTION
+    private var selectionInitialExtent = NO_SELECTION
+    private var selectionDragging = false
     private var needsFullSnapshot = true
     private var composingText = ""
     private var pastePopup: PopupMenu? = null
@@ -239,6 +250,20 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
             argument0 = event.getX(pointerIndex).toRawBits(),
             argument1 = event.getY(pointerIndex).toRawBits(),
         )
+        if (selectionDragging) {
+            when (event.actionMasked) {
+                MotionEvent.ACTION_MOVE -> extendSelection(event.x, event.y)
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
+                    extendSelection(event.getX(pointerIndex), event.getY(pointerIndex))
+                    selectionDragging = false
+                    showTerminalContextMenu()
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    selectionDragging = false
+                    clearSelection()
+                }
+            }
+        }
         return true
     }
 
@@ -266,36 +291,43 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         return true
     }
 
-    override fun performLongClick(): Boolean {
+    override fun performLongClick(): Boolean = showTerminalContextMenu()
+
+    private fun showTerminalContextMenu(): Boolean {
         if (runtimeBinder == null) {
             return false
         }
         requestFocus()
         pastePopup?.dismiss()
         val popup = PopupMenu(context, this)
-        popup.menu.add(0, android.R.id.paste, 0, android.R.string.paste).apply {
+        popup.menu.add(0, android.R.id.copy, 0, android.R.string.copy).apply {
+            isEnabled = hasSelection()
+            setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
+        }
+        popup.menu.add(0, android.R.id.paste, 1, android.R.string.paste).apply {
             isEnabled =
                 context.getSystemService(ClipboardManager::class.java)?.hasPrimaryClip() == true
             setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
         }
-        popup.menu.add(0, MENU_TEXT_SMALLER, 1, R.string.terminal_text_smaller).apply {
+        popup.menu.add(0, MENU_TEXT_SMALLER, 2, R.string.terminal_text_smaller).apply {
             isEnabled = terminalTextSp > MIN_TERMINAL_TEXT_SP
         }
         popup.menu.add(
             0,
             MENU_TEXT_RESET,
-            2,
+            3,
             if (automaticTextSize) {
                 context.getString(R.string.terminal_text_size_automatic, terminalTextSp)
             } else {
                 context.getString(R.string.terminal_text_size_explicit, terminalTextSp)
             },
         )
-        popup.menu.add(0, MENU_TEXT_LARGER, 3, R.string.terminal_text_larger).apply {
+        popup.menu.add(0, MENU_TEXT_LARGER, 4, R.string.terminal_text_larger).apply {
             isEnabled = terminalTextSp < MAX_TERMINAL_TEXT_SP
         }
         popup.setOnMenuItemClickListener { item ->
             when (item.itemId) {
+                android.R.id.copy -> copySelection()
                 android.R.id.paste -> pasteClipboard()
                 MENU_TEXT_SMALLER -> setTerminalTextSize(terminalTextSp - 1, false)
                 MENU_TEXT_RESET -> setTerminalTextSize(AUTOMATIC_TERMINAL_TEXT_SP, true)
@@ -323,8 +355,12 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         info.className = "android.widget.TextView"
         info.isEditable = false
         info.isMultiLine = true
+        info.isScrollable = historyRows > 0
         if (rows != 0 && columns != 0) {
             info.text = accessibilitySnapshot()
+        }
+        if (hasSelection()) {
+            info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_COPY)
         }
         if (
             runtimeBinder != null &&
@@ -345,6 +381,7 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         arguments: Bundle?,
     ): Boolean =
         when (action) {
+            AccessibilityNodeInfo.ACTION_COPY -> copySelection()
             AccessibilityNodeInfo.ACTION_PASTE -> pasteClipboard()
             AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD ->
                 setViewportOffset(viewportOffset + rows.coerceAtLeast(1))
@@ -390,6 +427,9 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         if (isPasteShortcut(keyCode, event)) {
             return pasteClipboard()
         }
+        if (isCopyShortcut(keyCode, event)) {
+            return copySelection()
+        }
         terminalSequence(keyCode, event.isShiftPressed)?.let { return sendSequence(it) }
         val altGraph = isAltGraph(event)
         val baseCodepoint = textCodepoint(event, altGraph)
@@ -418,6 +458,7 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         if (
             terminalTextSizeShortcut(keyCode, event) != TEXT_SIZE_UNCHANGED ||
             isPasteShortcut(keyCode, event) ||
+            isCopyShortcut(keyCode, event) ||
             terminalSequence(keyCode, event.isShiftPressed) != null ||
             textCodepoint(event, isAltGraph(event)) != 0
         ) {
@@ -509,6 +550,17 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         val nextTerminalRevision = damageBuffer.getLong(24)
         if (terminalRevision != Long.MIN_VALUE && nextTerminalRevision < terminalRevision) {
             return false
+        }
+        if (
+            hasSelection() &&
+            (
+                dirtyStart < dirtyEnd ||
+                    nextRows != rows ||
+                    nextColumns != columns ||
+                    nextViewportOffset != viewportOffset
+            )
+        ) {
+            clearSelection()
         }
         if (viewportOffset > 0 && nextHistoryRows > historyRows) {
             val anchoredOffset =
@@ -673,6 +725,24 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
             }
             runStart = runEnd
         }
+        if (hasSelection()) {
+            val first = minOf(selectionAnchor, selectionExtent)
+            val last = maxOf(selectionAnchor, selectionExtent)
+            val rowFirst = row * columns
+            val rowLast = rowFirst + columns - 1
+            if (first <= rowLast && last >= rowFirst) {
+                val firstColumn = (first - rowFirst).coerceAtLeast(0)
+                val lastColumn = (last - rowFirst).coerceAtMost(columns - 1)
+                backgroundPaint.color = SELECTION_OVERLAY
+                canvas.drawRect(
+                    CONTENT_PADDING + firstColumn * cellWidth,
+                    0f,
+                    CONTENT_PADDING + (lastColumn + 1) * cellWidth,
+                    cellHeight,
+                    backgroundPaint,
+                )
+            }
+        }
         if (cursorVisible && row == cursorRow && cursorColumn in 0 until columns) {
             backgroundPaint.color = CURSOR_COLOR
             val left = CONTENT_PADDING + cursorColumn * cellWidth
@@ -791,10 +861,152 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         return sendClipboardText(text)
     }
 
+    private fun copySelection(): Boolean {
+        if (!hasSelection()) {
+            return false
+        }
+        val first = minOf(selectionAnchor, selectionExtent)
+        val last = maxOf(selectionAnchor, selectionExtent)
+        val firstRow = first / columns
+        val lastRow = last / columns
+        val builder =
+            StringBuilder(
+                (last - first + lastRow - firstRow)
+                    .coerceAtMost(MAX_CLIPBOARD_CHARACTERS),
+            )
+        for (row in firstRow..lastRow) {
+            val firstColumn = if (row == firstRow) first % columns else 0
+            val lastColumn = if (row == lastRow) last % columns else columns - 1
+            for (column in firstColumn..lastColumn) {
+                val cell = row * columns + column
+                if (glyphWidths[cell].toInt() == 0) {
+                    continue
+                }
+                val glyphStart = cell * MAX_GRAPHEME_CODEPOINTS
+                val glyphLength = glyphLengths[cell].toInt() and 0xff
+                for (index in 0 until glyphLength) {
+                    val codepoint = glyphCodepoints[glyphStart + index]
+                    if (
+                        builder.length + Character.charCount(codepoint) >
+                        MAX_CLIPBOARD_CHARACTERS
+                    ) {
+                        return false
+                    }
+                    builder.appendCodePoint(codepoint)
+                }
+            }
+            if (row != lastRow) {
+                if (builder.length >= MAX_CLIPBOARD_CHARACTERS) {
+                    return false
+                }
+                builder.append('\n')
+            }
+        }
+        val clipboard = context.getSystemService(ClipboardManager::class.java) ?: return false
+        clipboard.setPrimaryClip(
+            ClipData.newPlainText(context.getString(R.string.app_name), builder),
+        )
+        clearSelection()
+        return true
+    }
+
+    private fun startSelection(
+        x: Float,
+        y: Float,
+    ) {
+        val cell = cellAtPosition(x, y) ?: return
+        val rowStart = cell / columns * columns
+        val rowEnd = rowStart + columns
+        var first = cell
+        var last = cell
+        if (!isBlankGlyph(cell)) {
+            while (first > rowStart && !isBlankGlyph(first - 1)) {
+                first--
+            }
+            while (last + 1 < rowEnd && !isBlankGlyph(last + 1)) {
+                last++
+            }
+        }
+        selectionAnchor = first
+        selectionExtent = last
+        selectionTouchCell = cell
+        selectionInitialExtent = last
+        selectionDragging = true
+        recordSelectionRows()
+    }
+
+    private fun extendSelection(
+        x: Float,
+        y: Float,
+    ) {
+        val cell = cellAtPosition(x, y) ?: return
+        val nextExtent =
+            if (cell == selectionTouchCell) {
+                selectionInitialExtent
+            } else {
+                cell
+            }
+        if (nextExtent == selectionExtent) {
+            return
+        }
+        selectionExtent = nextExtent
+        recordSelectionRows()
+    }
+
+    private fun cellAtPosition(
+        x: Float,
+        y: Float,
+    ): Int? {
+        if (rows == 0 || columns == 0) {
+            return null
+        }
+        val row =
+            ((y - CONTENT_PADDING) / cellHeight)
+                .toInt()
+                .coerceIn(0, rows - 1)
+        var column =
+            ((x - CONTENT_PADDING) / cellWidth)
+                .toInt()
+                .coerceIn(0, columns - 1)
+        val rowStart = row * columns
+        if (glyphWidths[rowStart + column].toInt() == 0 && column > 0) {
+            column--
+        }
+        return rowStart + column
+    }
+
+    private fun hasSelection(): Boolean =
+        selectionAnchor != NO_SELECTION &&
+            selectionExtent != NO_SELECTION &&
+            rows != 0 &&
+            columns != 0 &&
+            selectionAnchor < rows * columns &&
+            selectionExtent < rows * columns
+
+    private fun clearSelection() {
+        if (!hasSelection() && !selectionDragging) {
+            return
+        }
+        selectionAnchor = NO_SELECTION
+        selectionExtent = NO_SELECTION
+        selectionTouchCell = NO_SELECTION
+        selectionInitialExtent = NO_SELECTION
+        selectionDragging = false
+        recordSelectionRows()
+    }
+
+    private fun recordSelectionRows() {
+        for (row in rowNodes.indices) {
+            recordRow(row)
+        }
+        invalidate()
+    }
+
     private fun setTerminalTextSize(
         requestedSp: Int,
         automatic: Boolean,
     ): Boolean {
+        clearSelection()
         val nextSp = requestedSp.coerceIn(MIN_TERMINAL_TEXT_SP, MAX_TERMINAL_TEXT_SP)
         if (nextSp == terminalTextSp && automatic == automaticTextSize) {
             invalidate()
@@ -912,6 +1124,7 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
     }
 
     private fun submitTerminalInput(length: Int): Boolean {
+        clearSelection()
         returnToLiveView()
         return runtimeBinder?.submitTerminalInput(terminalInputBytes, length) == true
     }
@@ -984,6 +1197,15 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         event: KeyEvent,
     ): Boolean =
         keyCode == KeyEvent.KEYCODE_V &&
+            event.isCtrlPressed &&
+            event.isShiftPressed &&
+            !event.isAltPressed
+
+    private fun isCopyShortcut(
+        keyCode: Int,
+        event: KeyEvent,
+    ): Boolean =
+        keyCode == KeyEvent.KEYCODE_C &&
             event.isCtrlPressed &&
             event.isShiftPressed &&
             !event.isAltPressed
@@ -1194,10 +1416,10 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
             )
 
         override fun performContextMenuAction(id: Int): Boolean =
-            if (id == android.R.id.paste) {
-                pasteClipboard()
-            } else {
-                super.performContextMenuAction(id)
+            when (id) {
+                android.R.id.copy -> copySelection()
+                android.R.id.paste -> pasteClipboard()
+                else -> super.performContextMenuAction(id)
             }
 
         override fun sendKeyEvent(event: KeyEvent): Boolean =
@@ -1238,6 +1460,11 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         historyRows = 0
         viewportOffset = 0
         scrollRowRemainder = 0f
+        selectionAnchor = NO_SELECTION
+        selectionExtent = NO_SELECTION
+        selectionTouchCell = NO_SELECTION
+        selectionInitialExtent = NO_SELECTION
+        selectionDragging = false
         needsFullSnapshot = true
         composingText = ""
         glyphCodepoints = IntArray(0)
@@ -1308,6 +1535,7 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         if (nextOffset == viewportOffset) {
             return true
         }
+        clearSelection()
         viewportOffset = nextOffset
         needsFullSnapshot = true
         invalidate()
@@ -1340,6 +1568,7 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         private const val TEXT_SIZE_SMALLER = 0
         private const val TEXT_SIZE_RESET = 1
         private const val TEXT_SIZE_LARGER = 2
+        private const val NO_SELECTION = -1
         private const val MENU_TEXT_SMALLER = 0x415201
         private const val MENU_TEXT_RESET = 0x415202
         private const val MENU_TEXT_LARGER = 0x415203
@@ -1380,6 +1609,7 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         private const val TERMINAL_BACKGROUND = 0xff1f2326.toInt()
         private const val CURSOR_COLOR = 0xff7dd3fc.toInt()
         private const val COMPOSING_BACKGROUND = 0xff31363b.toInt()
+        private const val SELECTION_OVERLAY = 0x667dd3fc
         private const val REPLACEMENT_CHARACTER = '\ufffd'
         private val ESCAPE_BYTE = 0x1b.toByte()
         private val CARRIAGE_RETURN_BYTE = 0x0d.toByte()
