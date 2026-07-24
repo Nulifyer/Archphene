@@ -1,14 +1,18 @@
 package org.archphene.app
 
 import android.content.Context
+import android.content.ClipboardManager
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RenderNode
 import android.graphics.Typeface
+import android.os.Bundle
 import android.text.InputType
 import android.util.TypedValue
+import android.view.GestureDetector
 import android.view.KeyEvent
+import android.view.MenuItem
 import android.view.MotionEvent
 import android.view.View
 import android.view.accessibility.AccessibilityNodeInfo
@@ -16,6 +20,7 @@ import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
+import android.widget.PopupMenu
 import java.nio.ByteBuffer
 import kotlin.math.ceil
 import org.archphene.app.runtime.ArchpheneRuntimeService
@@ -36,6 +41,22 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
                 )
         }
     private val backgroundPaint = Paint()
+    private val gestureDetector =
+        GestureDetector(
+            context,
+            object : GestureDetector.SimpleOnGestureListener() {
+                override fun onDown(event: MotionEvent): Boolean = true
+
+                override fun onSingleTapUp(event: MotionEvent): Boolean {
+                    performClick()
+                    return true
+                }
+
+                override fun onLongPress(event: MotionEvent) {
+                    performLongClick()
+                }
+            },
+        )
     private var glyphs = CharArray(0)
     private var styles = IntArray(0)
     private var rowNodes = emptyArray<RenderNode>()
@@ -49,6 +70,7 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
     private var sourceRevision = Long.MIN_VALUE
     private var needsFullSnapshot = true
     private var composingText = ""
+    private var pastePopup: PopupMenu? = null
     private var runtimeBinder: ArchpheneRuntimeService.LocalBinder? = null
     private var cellWidth = ceil(textPaint.measureText("M").toDouble()).toFloat().coerceAtLeast(1f)
     private var cellHeight =
@@ -61,6 +83,8 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
     init {
         isFocusable = true
         isFocusableInTouchMode = true
+        isClickable = true
+        isLongClickable = true
         setBackgroundColor(TERMINAL_BACKGROUND)
         contentDescription = context.getString(R.string.linux_session_display)
     }
@@ -106,6 +130,7 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        gestureDetector.onTouchEvent(event)
         val kind =
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN ->
@@ -123,9 +148,6 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
             argument0 = event.getX(pointerIndex).toRawBits(),
             argument1 = event.getY(pointerIndex).toRawBits(),
         )
-        if (event.actionMasked == MotionEvent.ACTION_UP) {
-            performClick()
-        }
         return true
     }
 
@@ -137,6 +159,34 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         return true
     }
 
+    override fun performLongClick(): Boolean {
+        if (runtimeBinder == null) {
+            return false
+        }
+        requestFocus()
+        pastePopup?.dismiss()
+        val popup = PopupMenu(context, this)
+        popup.menu
+            .add(0, android.R.id.paste, 0, android.R.string.paste)
+            .setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
+        popup.setOnMenuItemClickListener { item ->
+            item.itemId == android.R.id.paste && pasteClipboard()
+        }
+        popup.setOnDismissListener {
+            if (pastePopup === popup) {
+                pastePopup = null
+            }
+        }
+        pastePopup = popup
+        popup.show()
+        return true
+    }
+
+    override fun onDetachedFromWindow() {
+        pastePopup?.dismiss()
+        super.onDetachedFromWindow()
+    }
+
     override fun onInitializeAccessibilityNodeInfo(info: AccessibilityNodeInfo) {
         super.onInitializeAccessibilityNodeInfo(info)
         info.className = "android.widget.TextView"
@@ -145,7 +195,23 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         if (rows != 0 && columns != 0) {
             info.text = accessibilitySnapshot()
         }
+        if (
+            runtimeBinder != null &&
+            context.getSystemService(ClipboardManager::class.java)?.hasPrimaryClip() == true
+        ) {
+            info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_PASTE)
+        }
     }
+
+    override fun performAccessibilityAction(
+        action: Int,
+        arguments: Bundle?,
+    ): Boolean =
+        if (action == AccessibilityNodeInfo.ACTION_PASTE) {
+            pasteClipboard()
+        } else {
+            super.performAccessibilityAction(action, arguments)
+        }
 
     override fun onCheckIsTextEditor(): Boolean = true
 
@@ -168,6 +234,9 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         keyCode: Int,
         event: KeyEvent,
     ): Boolean {
+        if (isPasteShortcut(keyCode, event)) {
+            return pasteClipboard()
+        }
         terminalSequence(keyCode, event.isShiftPressed)?.let { return sendSequence(it) }
         val altGraph = isAltGraph(event)
         val baseCodepoint = textCodepoint(event, altGraph)
@@ -194,6 +263,7 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         event: KeyEvent,
     ): Boolean =
         if (
+            isPasteShortcut(keyCode, event) ||
             terminalSequence(keyCode, event.isShiftPressed) != null ||
             textCodepoint(event, isAltGraph(event)) != 0
         ) {
@@ -471,6 +541,67 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         return output == 0 || submitTerminalInput(output)
     }
 
+    private fun pasteClipboard(): Boolean {
+        val clipboard = context.getSystemService(ClipboardManager::class.java) ?: return false
+        val clip = clipboard.primaryClip ?: return false
+        if (clip.itemCount == 0) {
+            return false
+        }
+        val text = clip.getItemAt(0).coerceToText(context) ?: return false
+        return sendClipboardText(text)
+    }
+
+    private fun sendClipboardText(text: CharSequence): Boolean {
+        if (text.length > MAX_CLIPBOARD_CHARACTERS) {
+            return false
+        }
+        val bracketed = terminalFlags and BRACKETED_PASTE_FLAG != 0
+        var output = 0
+        if (bracketed) {
+            System.arraycopy(
+                BRACKETED_PASTE_START,
+                0,
+                terminalInputBytes,
+                output,
+                BRACKETED_PASTE_START.size,
+            )
+            output += BRACKETED_PASTE_START.size
+        }
+        var input = 0
+        val reserved = if (bracketed) BRACKETED_PASTE_END.size else 0
+        while (input < text.length) {
+            val first = text[input++]
+            val codepoint =
+                if (first.isHighSurrogate()) {
+                    if (input < text.length && text[input].isLowSurrogate()) {
+                        Character.toCodePoint(first, text[input++])
+                    } else {
+                        REPLACEMENT_CHARACTER.code
+                    }
+                } else if (first.isLowSurrogate()) {
+                    REPLACEMENT_CHARACTER.code
+                } else {
+                    first.code
+                }
+            val required = encodedLength(codepoint)
+            if (output + required + reserved > terminalInputBytes.size) {
+                return false
+            }
+            output += encodeCodepoint(codepoint, terminalInputBytes, output)
+        }
+        if (bracketed) {
+            System.arraycopy(
+                BRACKETED_PASTE_END,
+                0,
+                terminalInputBytes,
+                output,
+                BRACKETED_PASTE_END.size,
+            )
+            output += BRACKETED_PASTE_END.size
+        }
+        return output == 0 || submitTerminalInput(output)
+    }
+
     private fun encodedTextLength(text: CharSequence): Int {
         var input = 0
         var output = 0
@@ -566,6 +697,15 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
     private fun isAltGraph(event: KeyEvent): Boolean =
         event.isCtrlPressed &&
             (event.metaState and KeyEvent.META_ALT_RIGHT_ON) != 0
+
+    private fun isPasteShortcut(
+        keyCode: Int,
+        event: KeyEvent,
+    ): Boolean =
+        keyCode == KeyEvent.KEYCODE_V &&
+            event.isCtrlPressed &&
+            event.isShiftPressed &&
+            !event.isAltPressed
 
     private fun textCodepoint(
         event: KeyEvent,
@@ -757,6 +897,13 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
                 },
             )
 
+        override fun performContextMenuAction(id: Int): Boolean =
+            if (id == android.R.id.paste) {
+                pasteClipboard()
+            } else {
+                super.performContextMenuAction(id)
+            }
+
         override fun sendKeyEvent(event: KeyEvent): Boolean =
             this@RuntimeSurfaceView.dispatchKeyEvent(event)
     }
@@ -852,10 +999,12 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         private const val ACCESSIBILITY_CHARACTER_LIMIT = 8 * 1024
         private const val TERMINAL_INPUT_LIMIT = 8 * 1024
         private const val MAX_COMPOSING_CHARACTERS = 2 * 1024
+        private const val MAX_CLIPBOARD_CHARACTERS = 2 * 1024
         private const val MAX_IME_DELETE = 64
         private const val CURSOR_VISIBLE_FLAG = 1
         private const val APPLICATION_CURSOR_FLAG = 1 shl 1
         private const val APPLICATION_KEYPAD_FLAG = 1 shl 2
+        private const val BRACKETED_PASTE_FLAG = 1 shl 3
         private const val NEW_LINE_MODE_FLAG = 1 shl 4
         private const val BACKARROW_KEY_FLAG = 1 shl 5
         private const val COLOR_MASK = 0xff
@@ -877,6 +1026,8 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         private val CARRIAGE_RETURN_LINE_FEED = byteArrayOf(0x0d, 0x0a)
         private val BACKSPACE = byteArrayOf(0x7f)
         private val ERASE_BACKSPACE = byteArrayOf(0x08)
+        private val BRACKETED_PASTE_START = byteArrayOf(0x1b, 0x5b, 0x32, 0x30, 0x30, 0x7e)
+        private val BRACKETED_PASTE_END = byteArrayOf(0x1b, 0x5b, 0x32, 0x30, 0x31, 0x7e)
         private val TAB = byteArrayOf(0x09)
         private val ESCAPE = byteArrayOf(0x1b)
         private val CURSOR_UP = byteArrayOf(0x1b, 0x5b, 0x41)

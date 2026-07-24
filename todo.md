@@ -115,7 +115,9 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
       - [x] Exercise the editing controls in the warmed zero-allocation gate, then prove installed `tput` ICH/DCH/IL/DL behavior through exact-ABI PTYs, accessibility, scoped logs, and visually inspected full-device screenshots on both targets.
       - [x] Preserve full-byte foreground/background indexes in Android styles, render the fixed 256-color palette, parse indexed SGR plus bounded RGB fallback, and keep the existing 8-byte damage cell/JNI path.
       - [x] Consume G0/G1 character-set designation correctly, render DEC special-graphics line drawing, and prove installed `tput` colors, background reset, line drawing, accessibility, scoped logs, and full-device visuals on both exact-ABI targets.
-      - [ ] Complete Unicode width/combining, exact direct RGB color, remaining xterm controls/modes, scrollback/reflow, selection, bracketed clipboard paste, non-Latin/composing IME coverage, richer accessibility, and user-controlled text sizing before calling the surface production-ready.
+      - [x] Add bounded Android clipboard paste through a long-press touch menu, `Ctrl+Shift+V`, InputConnection context action, and accessibility action; preserve literal UTF-8/newlines and wrap it only when the terminal publishes bracketed-paste mode.
+      - [x] Prove normal and exact `ESC [ 200 ~`/`ESC [ 201 ~` bracketed bytes through Android clipboard, touch/hardware input, Bash capture, accessibility, scoped logs, and full-device screenshots on both ABIs.
+      - [ ] Complete Unicode width/combining, exact direct RGB color, remaining xterm controls/modes, scrollback/reflow, selection/copy, non-Latin/composing IME coverage, richer accessibility, and user-controlled text sizing before calling the surface production-ready.
       - [x] Replace the clipped temporary diagnostic strip during active sessions with the measured full-height terminal surface; retain emulator and Samsung full-device portrait/landscape/rebind evidence.
   - [ ] Wayland compositor, presentation, and lifecycle
   - [ ] Pointer, touch, keyboard, IME, clipboard, and drag-and-drop

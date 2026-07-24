@@ -1,0 +1,8 @@
+#!/usr/bin/bash
+set -euo pipefail
+
+case "${1:-}" in
+  on) printf '\033[?2004h' ;;
+  off) printf '\033[?2004l' ;;
+  *) exit 2 ;;
+esac

@@ -344,6 +344,23 @@ warmed allocation tests pass; installed 256-color foreground/background,
 reset, line drawing, accessibility, scoped logs, and visually inspected
 full-device screenshots pass on both exact-ABI targets.
 
+Android clipboard paste is bounded to 2,048 UTF-16 code units, encoded into
+the existing reusable 8 KiB terminal input buffer, and submitted through the
+existing Service queue. No new JNI call or per-key allocation was added.
+Literal paste newlines remain LF; when Rust publishes bracketed-paste mode in
+the existing damage flags, Android adds exact `ESC [ 200 ~` and
+`ESC [ 201 ~` wrappers. Paste is available from a long-press touch menu,
+hardware `Ctrl+Shift+V`, the InputConnection context action, and accessibility.
+The popup is allocated only for the explicit long-press action; one reusable
+gesture detector handles the motion stream.
+
+A bounded exported receiver exists only in the debug source set to seed the
+real Android clipboard deterministically; release manifests do not include
+it. The device gate uses that clipboard, installed Bash, normal line capture,
+exact bracketed byte capture, touch and hardware routes, accessibility,
+scoped logs, and full-device screenshots. It passes on the emulator and
+Samsung exact-ABI builds.
+
 That device gate also exposed an incomplete generic root-identity bridge:
 glibc's filesystem-ID query reached Android's blocked x86_64 syscall 122.
 The path bridge now consistently virtualizes uid, gid, effective uid/gid, and
@@ -363,10 +380,10 @@ This is not yet the production terminal promised by the milestone. Resizing
 preserves the current cursor window but does not reflow or retain discarded
 rows because scrollback is not implemented. Unicode width and combining
 behavior, exact direct RGB color, remaining xterm controls, scrollback,
-selection, remaining terminal modes, clipboard/bracketed paste, broader
-composing IME behavior, richer accessibility, and user-controlled terminal
-text sizing remain required. The temporary command field remains as a fallback
-above the renderer; direct terminal input no longer depends on it.
+selection/copy, remaining terminal modes, broader composing IME behavior,
+richer accessibility, and user-controlled terminal text sizing remain
+required. The temporary command field remains as a fallback above the renderer;
+direct terminal input no longer depends on it.
 
 The validated prototype below remains reference evidence until replacement
 vertical slices pass equivalent gates. Installed prototype state is no longer a
