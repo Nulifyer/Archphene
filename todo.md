@@ -104,7 +104,9 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
       - [x] Consume terminal snapshots in a frame-paced Android renderer with one Service-owned reusable direct buffer, dimension-bound primitive cell storage, revision-gated JNI reads, and cached RenderNode rows that are re-recorded only when damaged.
       - [x] Size the PTY from measured 14sp monospace cells, give active sessions the available phone/tablet viewport, preserve cursor-adjacent rows when shrinking, and reconstruct a fresh Activity from one explicit full snapshot after rotation, Home, or Back.
       - [x] Expose a bounded terminal accessibility snapshot only when Android queries the node, keeping the normal frame path free of synthesized terminal strings.
-      - [ ] Complete alternate-screen, Unicode width/combining, extended color, remaining xterm control, scrollback, selection, input-mode, renderer, clipboard, IME, hardware-keyboard, and accessibility behavior before calling the surface production-ready.
+      - [x] Route terminal focus through a full-editor Android `InputConnection` with local preedit display, bounded UTF-8 commit/delete delivery, and direct hardware Enter/Backspace/Tab/Escape/navigation/function/Ctrl/Alt handling without per-keystroke byte-array allocation.
+      - [x] Prove direct text, Backspace correction, Enter execution, PTY delivery, rendering, accessibility, IME attachment, lifecycle, and full-device visuals with exact-ABI APKs on the emulator and Samsung.
+      - [ ] Complete alternate-screen, Unicode width/combining, extended color, remaining xterm controls and mode-dependent keys, scrollback/reflow, selection, clipboard, non-Latin/composing IME coverage, richer accessibility, and user-controlled text sizing before calling the surface production-ready.
       - [x] Replace the clipped temporary diagnostic strip during active sessions with the measured full-height terminal surface; retain emulator and Samsung full-device portrait/landscape/rebind evidence.
   - [ ] Wayland compositor, presentation, and lifecycle
   - [ ] Pointer, touch, keyboard, IME, clipboard, and drag-and-drop

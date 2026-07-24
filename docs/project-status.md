@@ -274,13 +274,34 @@ Home/Back process retention and full reconstruction, foreground notification,
 exit status, restart, stop/reap, unsafe-shell-catalog recovery, scoped fatal
 logs, accessibility trees, and visually inspected full-device screenshots.
 
+Terminal focus now opens Android's software keyboard through a full-editor
+`InputConnection` while keeping composing text local until commit. Committed
+text is encoded directly into one reusable 8 KiB UTF-8 buffer; the Service
+copies it atomically into its fixed PTY queue and wakes the Rust pump. Hardware
+Enter, Backspace, forward Delete, Tab, Escape, navigation, Insert, F1-F12,
+common Ctrl characters, Alt escape prefixes, and AltGr text use static
+sequences or that same scratch buffer rather than allocating a byte array per
+key. Preedit is capped at 2,048 UTF-16 code units, oversized commits fail
+atomically before entering the editable shadow, and IME surrounding deletion
+is bounded to 64 characters with both backward and forward terminal deletion.
+
+The exact-ABI lifecycle gate now focuses the terminal, attaches each device's
+IME, types a command containing a deliberate final error, removes it through
+the hardware Backspace route, executes it through Enter, and waits for a Bash
+builtin result that did not appear in the typed command. This passes on the API
+36 emulator and physical Samsung, including scoped fatal logs and visually
+inspected full-device IME screenshots. This automated injection validates the
+hardware-style Android key route; broader OEM/non-Latin composing and commit
+behavior still needs dedicated coverage.
+
 This is not yet the production terminal promised by the milestone. Resizing
 preserves the current cursor window but does not reflow or retain discarded
 rows because scrollback is not implemented. Alternate screens, Unicode width
 and combining behavior, extended color, remaining xterm controls, scrollback,
-selection, direct IME/hardware-keyboard input, clipboard, richer accessibility,
-and user-controlled terminal text sizing remain required. The current shell
-input still uses the temporary command field above the renderer.
+selection, mode-dependent keys, clipboard, broader composing IME behavior,
+richer accessibility, and user-controlled terminal text sizing remain
+required. The temporary command field remains as a fallback above the
+renderer; direct terminal input no longer depends on it.
 
 The validated prototype below remains reference evidence until replacement
 vertical slices pass equivalent gates. Installed prototype state is no longer a

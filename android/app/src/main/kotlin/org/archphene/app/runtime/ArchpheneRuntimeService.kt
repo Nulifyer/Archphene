@@ -137,6 +137,11 @@ class ArchpheneRuntimeService : Service() {
                 requestLinuxCommand(commandLine)
             }
 
+        fun submitTerminalInput(
+            source: ByteArray,
+            length: Int,
+        ): Boolean = requestTerminalInput(source, length)
+
         fun selectSharedShell(index: Int): Boolean = requestShellSelection(index)
 
         fun resizeSharedShell(
@@ -312,9 +317,21 @@ class ArchpheneRuntimeService : Service() {
             if (required > bytes.size - size) {
                 return false
             }
-            append(source)
+            append(source, source.size)
             bytes[(start + size) % bytes.size] = '\n'.code.toByte()
             size++
+            return true
+        }
+
+        @Synchronized
+        fun offer(
+            source: ByteArray,
+            length: Int,
+        ): Boolean {
+            if (length !in 1..source.size || length > bytes.size - size) {
+                return false
+            }
+            append(source, length)
             return true
         }
 
@@ -339,16 +356,19 @@ class ArchpheneRuntimeService : Service() {
             size -= length
         }
 
-        private fun append(source: ByteArray) {
+        private fun append(
+            source: ByteArray,
+            length: Int,
+        ) {
             var destination = (start + size) % bytes.size
             var copied = 0
-            while (copied < source.size) {
-                val count = minOf(source.size - copied, bytes.size - destination)
+            while (copied < length) {
+                val count = minOf(length - copied, bytes.size - destination)
                 System.arraycopy(source, copied, bytes, destination, count)
                 copied += count
                 destination = 0
             }
-            size += source.size
+            size += length
         }
     }
 
@@ -1996,6 +2016,31 @@ class ArchpheneRuntimeService : Service() {
         }
         val bytes = commandLine.toByteArray(StandardCharsets.UTF_8)
         if (bytes.size + 1 > SHELL_INPUT_BYTES || !shellInput.offerLine(bytes)) {
+            shellPhase = "Shared shell input queue is full"
+            return false
+        }
+        val result = NativeRuntime.nativeWakePty(readyHandle, shellHandle)
+        if (result < 0) {
+            shellPhase = "Could not wake the shared shell"
+            return false
+        }
+        return result == 0
+    }
+
+    private fun requestTerminalInput(
+        source: ByteArray,
+        length: Int,
+    ): Boolean {
+        if (
+            !shellActive ||
+            shellHandle == 0L ||
+            shellStopRequested ||
+            length !in 1..SHELL_INPUT_BYTES ||
+            length > source.size
+        ) {
+            return false
+        }
+        if (!shellInput.offer(source, length)) {
             shellPhase = "Shared shell input queue is full"
             return false
         }

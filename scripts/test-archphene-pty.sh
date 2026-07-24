@@ -72,6 +72,21 @@ enter_shell_line() {
   archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="SEND"' 'send shell input'
 }
 
+enter_terminal_line() {
+  local line="$1" ui_name="$2" backspaces="${3:-0}" index
+  archphene_wait_ui 'content-desc="Linux terminal, [0-9]+ columns by [0-9]+ rows"' \
+    "$ui_name-terminal" 15
+  archphene_tap_ui_pattern "$ARCHPHENE_UI" \
+    'content-desc="Linux terminal, [0-9]+ columns by [0-9]+ rows"' \
+    'terminal surface'
+  sleep 0.5
+  archphene_adb_run shell input text "${line// /%s}" >/dev/null
+  for ((index = 0; index < backspaces; index++)); do
+    archphene_adb_run shell input keyevent KEYCODE_DEL >/dev/null
+  done
+  archphene_adb_run shell input keyevent KEYCODE_ENTER >/dev/null
+}
+
 archphene_adb_run logcat -c
 archphene_adb_run shell am force-stop "$package" >/dev/null
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
@@ -94,6 +109,11 @@ enter_shell_line "locale charmap" "archphene-shell-locale-$serial"
 archphene_wait_ui 'UTF-8' "archphene-shell-locale-output-$serial" 15
 enter_shell_line "echo archphene-session-one" "archphene-shell-one-$serial"
 archphene_wait_ui 'archphene-session-one' "archphene-shell-one-output-$serial" 15
+enter_terminal_line "type echox" "archphene-shell-direct-$serial" 1
+archphene_wait_ui 'echo is a shell builtin' \
+  "archphene-shell-direct-output-$serial" 15
+archphene_adb_run exec-out screencap -p >"$output_dir/$serial-direct-input.png"
+archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null
 
 original_accelerometer_rotation="$(
   archphene_adb_run shell settings get system accelerometer_rotation | tr -d '\r'
@@ -194,5 +214,6 @@ fatal_log="$(archphene_adb_run logcat -d -v brief \
 archphene_note "Archphene shared-shell lifecycle regression passed on $serial"
 archphene_note "  Startup, paths, Home/Back foreground survival, exit, and stop/reap passed"
 archphene_note "  Full-device screenshots: $output_dir/$serial-running.png"
+archphene_note "                           $output_dir/$serial-direct-input.png"
 archphene_note "                           $output_dir/$serial-exited.png"
 archphene_note "                           $output_dir/$serial-background.png"
