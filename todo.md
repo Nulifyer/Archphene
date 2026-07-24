@@ -91,7 +91,9 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
       - [x] Make the Service own a user-started package-installed Bash session across Activity recreation, with bounded fixed input/output rings, reusable direct I/O buffers, explicit stop, process-group reap, and preserved signed exit status.
       - [x] Pass two-command, rotation/rebind, retained-output, `exit 7`, restart/stop, child-reap, scoped-log, and full-device screenshot gates on the x86_64 emulator and AArch64 Samsung.
       - [x] Replace the 100 ms Kotlin polling loop with a Rust-owned `poll(2)` pump, fixed per-session wake channel, write-readiness backpressure, and coarse 16 KiB read batches; pass the full lifecycle gate on both targets.
-      - [ ] Define explicit HOME/Back/background behavior, durable session metadata, manager process-death recovery, and reboot recovery.
+      - [x] Keep a user-started shell alive across Home, Back, and task removal in a special-use foreground Service with a visible low-priority notification, open-app route, explicit Stop action, and notification permission requested at the user action.
+      - [x] Prove identical manager/Linux process ownership, retained output, foreground state, notification title/Stop route, cleanup, and full-device visuals across Home and Back on both targets.
+      - [ ] Add durable session metadata, report manager/process/reboot interruption honestly, and offer explicit restart rather than pretending a lost PTY can be resumed.
     - [ ] Replace the diagnostic command panel with production terminal rendering, scrollback, selection, IME, hardware keyboard, clipboard, and accessibility.
       - [ ] Fix the temporary manager panel's landscape clipping only as part of that replacement; current full-device rotation screenshots prove the status strip is not a usable terminal surface.
   - [ ] Wayland compositor, presentation, and lifecycle

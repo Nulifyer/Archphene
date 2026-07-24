@@ -1,10 +1,12 @@
 package org.archphene.app
 
+import android.Manifest
 import android.app.Activity
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
@@ -44,6 +46,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private var serviceBound = false
     private var frameCallbackActive = false
     private var statusFrameCountdown = 0
+    private var keepServiceAfterFinish = false
 
     private val serviceConnection =
         object : ServiceConnection {
@@ -283,6 +286,9 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 isEnabled = false
                 setOnClickListener {
                     hideKeyboard(commandInput)
+                    if (runtimeBinder?.sharedShellRunning == false) {
+                        requestSessionNotificationPermission()
+                    }
                     runtimeBinder?.toggleSharedShell()
                 }
             }
@@ -432,6 +438,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     }
 
     override fun onStop() {
+        keepServiceAfterFinish = runtimeBinder?.sharedShellRunning == true
         if (serviceBound) {
             unbindService(serviceConnection)
             serviceBound = false
@@ -441,7 +448,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     }
 
     override fun onDestroy() {
-        if (isFinishing) {
+        if (isFinishing && !keepServiceAfterFinish) {
             stopService(Intent(this, ArchpheneRuntimeService::class.java))
         }
         super.onDestroy()
@@ -553,6 +560,19 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         view.clearFocus()
     }
 
+    private fun requestSessionNotificationPermission() {
+        if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(
+                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                SESSION_NOTIFICATION_PERMISSION_REQUEST,
+            )
+        }
+    }
+
     private fun setTextIfChanged(
         view: TextView,
         text: CharSequence,
@@ -590,6 +610,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     companion object {
         private const val TAG = "ArchpheneActivity"
         private const val STATUS_FRAME_INTERVAL = 30
+        private const val SESSION_NOTIFICATION_PERMISSION_REQUEST = 0x4152
         private var activityGeneration = 0
     }
 }

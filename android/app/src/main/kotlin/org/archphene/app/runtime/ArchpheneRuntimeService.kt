@@ -1,7 +1,12 @@
 package org.archphene.app.runtime
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.Binder
 import android.os.Handler
@@ -14,6 +19,8 @@ import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 import java.net.URL
 import javax.net.ssl.HttpsURLConnection
+import org.archphene.app.MainActivity
+import org.archphene.app.R
 
 class ArchpheneRuntimeService : Service() {
     inner class LocalBinder : Binder() {
@@ -84,6 +91,9 @@ class ArchpheneRuntimeService : Service() {
                         !commandActive
                 }
 
+        val sharedShellRunning: Boolean
+            get() = shellActive
+
         fun refreshPackageCatalogs(): Boolean = requestCatalogRefresh()
 
         fun searchPackages(query: String): Boolean = requestPackageSearch(query)
@@ -116,6 +126,7 @@ class ArchpheneRuntimeService : Service() {
     private var packageThread: Thread? = null
     private var commandThread: Thread? = null
     private var shellThread: Thread? = null
+    private var boundClients = 0
     @Volatile private var catalogRefreshActive = false
     @Volatile private var catalogStatus = "Package catalog not downloaded"
     @Volatile private var searchActive = false
@@ -281,6 +292,7 @@ class ArchpheneRuntimeService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        createSessionNotificationChannel()
         if (NativeRuntime.nativeProtocolVersion() != NativeRuntime.PROTOCOL_VERSION) {
             Log.e(TAG, "Native protocol version mismatch")
             stopSelf()
@@ -295,10 +307,37 @@ class ArchpheneRuntimeService : Service() {
         startBootstrap(handle)
     }
 
-    override fun onBind(intent: Intent): IBinder = binder
+    override fun onStartCommand(
+        intent: Intent?,
+        flags: Int,
+        startId: Int,
+    ): Int {
+        if (intent?.action == ACTION_STOP_SHELL) {
+            stopSharedShell(waitForWorker = false)
+        }
+        return START_NOT_STICKY
+    }
+
+    override fun onBind(intent: Intent): IBinder {
+        boundClients++
+        return binder
+    }
+
+    override fun onUnbind(intent: Intent?): Boolean {
+        boundClients = (boundClients - 1).coerceAtLeast(0)
+        return false
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        if (!shellActive) {
+            stopSelf()
+        }
+        super.onTaskRemoved(rootIntent)
+    }
 
     override fun onDestroy() {
         stopSharedShell(waitForWorker = true)
+        removeSessionNotification()
         val activeHandle = handle
         handle = 0L
         readyHandle = 0L
@@ -329,6 +368,93 @@ class ArchpheneRuntimeService : Service() {
         private const val SHELL_INPUT_CHARACTERS = 2 * 1024
         private const val SHELL_IO_BYTES = 4 * 1024
         private const val SHELL_READ_BATCHES = 4
+        private const val SESSION_NOTIFICATION_ID = 0x4152
+        private const val SESSION_NOTIFICATION_CHANNEL = "archphene_linux_sessions"
+        private const val ACTION_STOP_SHELL = "org.archphene.app.action.STOP_SHARED_SHELL"
+    }
+
+    private fun createSessionNotificationChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            return
+        }
+        val channel =
+            NotificationChannel(
+                SESSION_NOTIFICATION_CHANNEL,
+                getString(R.string.session_channel_name),
+                NotificationManager.IMPORTANCE_LOW,
+            ).apply {
+                description = getString(R.string.session_channel_description)
+            }
+        getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
+    }
+
+    private fun sessionNotification(): Notification {
+        val openIntent =
+            Intent(this, MainActivity::class.java).addFlags(
+                Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP,
+            )
+        val openAction =
+            PendingIntent.getActivity(
+                this,
+                0,
+                openIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+        val stopIntent = Intent(this, ArchpheneRuntimeService::class.java).setAction(ACTION_STOP_SHELL)
+        val stopAction =
+            PendingIntent.getService(
+                this,
+                1,
+                stopIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+        return Notification.Builder(this, SESSION_NOTIFICATION_CHANNEL)
+            .setSmallIcon(R.drawable.ic_session_notification)
+            .setContentTitle(getString(R.string.session_notification_title))
+            .setContentText(
+                getString(
+                    if (shellHandle == 0L) {
+                        R.string.session_notification_starting
+                    } else {
+                        R.string.session_notification_running
+                    },
+                ),
+            )
+            .setContentIntent(openAction)
+            .setCategory(Notification.CATEGORY_SERVICE)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setShowWhen(false)
+            .addAction(
+                Notification.Action.Builder(
+                    null,
+                    getString(R.string.session_notification_stop),
+                    stopAction,
+                ).build(),
+            )
+            .build()
+    }
+
+    private fun promoteSessionToForeground() {
+        val notification = sessionNotification()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(
+                SESSION_NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
+            )
+        } else {
+            startForeground(SESSION_NOTIFICATION_ID, notification)
+        }
+    }
+
+    private fun updateSessionNotification() {
+        getSystemService(NotificationManager::class.java)
+            ?.notify(SESSION_NOTIFICATION_ID, sessionNotification())
+    }
+
+    private fun removeSessionNotification() {
+        stopForeground(STOP_FOREGROUND_REMOVE)
     }
 
     private fun startBootstrap(activeHandle: Long) {
@@ -1652,6 +1778,7 @@ class ArchpheneRuntimeService : Service() {
         shellWasStarted = true
         shellActive = true
         shellPhase = "Starting shared shell"
+        promoteSessionToForeground()
         shellThread =
             Thread(
                 { runSharedShell(activeHandle) },
@@ -1723,6 +1850,7 @@ class ArchpheneRuntimeService : Service() {
                 shellHandle = ptyHandle
                 shellPhase = "Shared shell ready"
             }
+            mainHandler.post(::updateSessionNotification)
             Log.i(TAG, "Shared Bash session started")
             while (!shellStopRequested) {
                 val queued = shellInput.peek(writeBytes)
@@ -1824,6 +1952,12 @@ class ArchpheneRuntimeService : Service() {
                 Log.e(TAG, "Shared Bash session failed", failure)
             } else {
                 Log.i(TAG, "Shared Bash session finished with status ${exitStatus ?: "stopped"}")
+            }
+            mainHandler.post {
+                removeSessionNotification()
+                if (boundClients == 0) {
+                    stopSelf()
+                }
             }
         }
     }

@@ -20,4 +20,10 @@
     <string name="package_job_empty">No package transaction</string>
     <string name="package_job_unavailable">Package operation unavailable</string>
     <string name="package_search_prompt">Search the official Arch repositories</string>
+    <string name="session_channel_name">Linux sessions</string>
+    <string name="session_channel_description">Keeps user-started Archphene sessions running</string>
+    <string name="session_notification_title">Archphene Linux session</string>
+    <string name="session_notification_starting">Starting the shared shell</string>
+    <string name="session_notification_running">Shared shell is running</string>
+    <string name="session_notification_stop">Stop</string>
 </resources>

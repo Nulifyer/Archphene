@@ -47,6 +47,7 @@ restore_rotation() {
 }
 cleanup() {
   restore_rotation || true
+  archphene_adb_run shell cmd statusbar collapse >/dev/null 2>&1 || true
   archphene_adb_run shell am force-stop "$package" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -55,6 +56,8 @@ if [[ "$skip_install" == false ]]; then
   archphene_require_file "$apk"
   archphene_adb_run install -r "$apk" >/dev/null
 fi
+archphene_adb_run shell pm grant "$package" android.permission.POST_NOTIFICATIONS \
+  >/dev/null 2>&1 || true
 archphene_adb_run shell run-as "$package" test -x files/arch-root/usr/bin/bash ||
   archphene_die "shared-shell regression requires installed bash"
 
@@ -113,6 +116,58 @@ archphene_wait_ui 'text="STOP SHELL"' "archphene-shell-restored-$serial" 20
 
 enter_shell_line "echo archphene-session-two" "archphene-shell-two-$serial"
 archphene_wait_ui 'archphene-session-two' "archphene-shell-two-output-$serial" 15
+
+android_background_pid="$(archphene_android_pid "$package")"
+linux_background_pid="$(
+  archphene_adb_run shell ps -A -o PID,PPID |
+    awk -v parent="$android_background_pid" '$2 == parent { print $1; exit }'
+)"
+[[ -n "$linux_background_pid" ]] ||
+  archphene_die "shared shell has no direct Linux child before backgrounding"
+archphene_adb_run shell input keyevent KEYCODE_HOME >/dev/null
+deadline=$((SECONDS + 15))
+while ((SECONDS < deadline)); do
+  current_android_pid="$(archphene_android_pid "$package" 2>/dev/null || true)"
+  current_linux_pid="$(
+    archphene_adb_run shell ps -A -o PID,PPID |
+      awk -v parent="$current_android_pid" '$2 == parent { print $1; exit }'
+  )"
+  service_dump="$(archphene_adb_run shell dumpsys activity services "$package")"
+  notification_dump="$(archphene_adb_run shell dumpsys notification --noredact)"
+  if [[ "$current_android_pid" == "$android_background_pid" &&
+        "$current_linux_pid" == "$linux_background_pid" &&
+        "$service_dump" == *"isForeground=true"* &&
+        "$notification_dump" == *"Archphene Linux session"* &&
+        "$notification_dump" == *'[0] "Stop"'* ]]; then
+    break
+  fi
+  sleep 0.3
+done
+[[ "$current_android_pid" == "$android_background_pid" &&
+   "$current_linux_pid" == "$linux_background_pid" &&
+   "$service_dump" == *"isForeground=true"* &&
+   "$notification_dump" == *"Archphene Linux session"* &&
+   "$notification_dump" == *'[0] "Stop"'* ]] ||
+  archphene_die "Home did not preserve the foreground shell and notification"
+
+archphene_adb_run shell am start -W -n "$activity" >/dev/null
+archphene_wait_ui 'archphene-session-two' "archphene-shell-home-return-$serial" 20
+archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null
+sleep 1
+current_android_pid="$(archphene_android_pid "$package" 2>/dev/null || true)"
+current_linux_pid="$(
+  archphene_adb_run shell ps -A -o PID,PPID |
+    awk -v parent="$current_android_pid" '$2 == parent { print $1; exit }'
+)"
+service_dump="$(archphene_adb_run shell dumpsys activity services "$package")"
+[[ "$current_android_pid" == "$android_background_pid" &&
+   "$current_linux_pid" == "$linux_background_pid" &&
+   "$service_dump" == *"isForeground=true"* ]] ||
+  archphene_die "Back did not preserve the foreground shell"
+archphene_adb_run shell am start -W -n "$activity" >/dev/null
+archphene_wait_ui 'archphene-session-two' "archphene-shell-back-return-$serial" 20
+archphene_adb_run exec-out screencap -p >"$output_dir/$serial-background.png"
+
 enter_shell_line "exit 7" "archphene-shell-exit-$serial"
 archphene_wait_ui 'Shared shell exited 7' "archphene-shell-exited-$serial" 20
 archphene_wait_log 'Shared Bash session finished with status 7' 15 >/dev/null
@@ -122,8 +177,8 @@ archphene_wait_ui 'text="START SHELL"' "archphene-shell-restart-$serial" 15
 archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="START SHELL"' 'restart shell'
 archphene_wait_ui 'text="STOP SHELL"' "archphene-shell-stop-action-$serial" 20
 archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="STOP SHELL"' 'stop shell'
-archphene_wait_ui 'Shared shell stopped' "archphene-shell-stopped-$serial" 20
 archphene_wait_log 'Shared Bash session finished with status stopped' 15 >/dev/null
+archphene_wait_ui 'Shared shell stopped' "archphene-shell-stopped-$serial" 20
 
 android_pid="$(archphene_android_pid "$package")"
 [[ -n "$android_pid" ]] || archphene_die "Archphene process stopped unexpectedly"
@@ -137,6 +192,7 @@ fatal_log="$(archphene_adb_run logcat -d -v brief \
   archphene_die "shared-shell regression emitted a fatal runtime error: $fatal_log"
 
 archphene_note "Archphene shared-shell lifecycle regression passed on $serial"
-archphene_note "  Startup, C.UTF-8, paths, lifecycle, exit status, and stop/reap passed"
+archphene_note "  Startup, paths, Home/Back foreground survival, exit, and stop/reap passed"
 archphene_note "  Full-device screenshots: $output_dir/$serial-running.png"
 archphene_note "                           $output_dir/$serial-exited.png"
+archphene_note "                           $output_dir/$serial-background.png"

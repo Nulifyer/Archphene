@@ -148,6 +148,14 @@ most four reusable 4 KiB buffers before blocking again. Bash runs with
 the redundant GNU Readline idle path is killed by the inherited Android app
 seccomp profile. This is a generic shared-shell policy, not a patch to Bash.
 
+A user-started shell promotes the runtime owner to an Android special-use
+foreground Service. Its low-priority ongoing notification opens Archphene and
+publishes an explicit Stop action; Android 13+ notification permission is
+requested only when the user starts a shell. Home, Back, and task removal no
+longer terminate an active session. Once the shell exits or is stopped, the
+notification is removed, the Linux process group is reaped, and an unbound
+Service stops itself.
+
 User-visible processes now receive Linux-facing `HOME=/home/archphene`,
 `TMPDIR=/tmp`, conventional XDG locations, and
 `PATH=/usr/local/sbin:/usr/local/bin:/usr/bin`; bridge-private host paths remain
@@ -163,13 +171,15 @@ Interactive lifecycle gates now pass on the x86_64 emulator and AArch64
 Samsung. Each proves the Archphene prompt, HOME, PWD, conventional PATH, and
 UTF-8 charmap, sends and observes two markers, forces an
 Activity recreation by changing device rotation, proves the Service retains
-the session and output, observes `exit 7`, restarts and explicitly stops the
-shell, proves no loader child survives, checks scoped fatal logs, restores
-rotation, and captures full-device screenshots. The images also honestly show
+the session and output, proves Home and Back retain the same Android and Linux
+processes with a real foreground notification and Stop route, observes
+`exit 7`, restarts and explicitly stops the shell, proves no loader child
+survives, checks scoped fatal logs, restores rotation, and captures full-device
+screenshots. The images also honestly show
 that the temporary two-line diagnostic strip clips in landscape. Explicit
-background/process-death/reboot policy, a real terminal parser and renderer,
-scrollback, selection, IME/hardware-keyboard handling, clipboard, and
-accessibility remain open.
+process-death/reboot interruption and restart policy, a real terminal parser
+and renderer, scrollback, selection, IME/hardware-keyboard handling,
+clipboard, and accessibility remain open.
 
 The validated prototype below remains reference evidence until replacement
 vertical slices pass equivalent gates. Installed prototype state is no longer a
