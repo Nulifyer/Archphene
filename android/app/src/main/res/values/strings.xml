@@ -12,6 +12,7 @@
     <string name="details">Details</string>
     <string name="install">Install</string>
     <string name="remove">Remove</string>
+    <string name="cancel">Cancel</string>
     <string name="linux_session_display">Linux session display</string>
     <string name="terminal_accessibility_dimensions">Linux terminal, %1$d columns by %2$d rows</string>
     <string name="terminal_text_smaller">Text smaller</string>

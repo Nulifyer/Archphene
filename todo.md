@@ -76,8 +76,9 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
     - [x] Pass clean full-device install, verify/tamper recovery, remove, absence, verified-cache reinstall, database-validity, and process-death gates on both targets.
     - [x] Preflight the entire re-verified closure through pacman's normal dependency, conflict, and replacement preparation; reject missing, duplicate, changed-version, or unknown plan entries before mutation. Cache-only full-device gates pass on both targets.
     - [x] Commit the complete prepared archive set through one normal pacman transaction without `--nodeps` or blanket overwrite; persist and recover explicit install reasons across manager death. Cache-only remove/reinstall and restart-recovery gates pass on both targets.
+    - [x] Allow cancellation while work is queued, resolving, downloading, or verifying; disconnect an active transfer, delete partial payloads, persist a terminal Cancelled result, and disable cancellation before pacman mutation. Cache-only cancellation and normal-commit regressions pass on both targets.
     - [ ] Prove a real older-to-newer repository update, including changed dependencies and replacements, on both targets.
-    - [ ] Complete hooks/scriptlets, proven replacement handling, failure rollback/recovery, orphan cleanup, cancellation, and low-storage recovery.
+    - [ ] Complete hooks/scriptlets, proven replacement handling, failure rollback/recovery, orphan cleanup, and low-storage recovery.
   - [ ] Terminal/PTY and shared command environment
     - [x] Execute one installed ELF command without a shell through the verified loader and generic path bridge, with bounded names, arguments, output, time, process group, environment, working directory, and symlink resolution.
     - [x] Pass clean `btop --version` execution, scoped-log, and full-device UI gates on the x86_64 emulator and AArch64 Samsung after signed install/remove/reinstall cycles.
@@ -201,7 +202,8 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [x] Preflight the complete verified closure with normal pacman dependency/conflict/replacement checks and require an exact name/version plan before mutation.
   - [x] Recover a bounded stale database lock and durable explicit-install-reason intent after interruption.
   - [x] Preserve pacman install reasons, validate the local database after mutation, and support conservative non-cascading removal with exact postcondition checks.
-  - [ ] Add hooks/scriptlets, proven upgrades/replacements, failure rollback/recovery, orphan cleanup, cancellation, and storage-failure recovery.
+  - [x] Cancel safely before the commit boundary, including active-transfer disconnect, partial-file cleanup, durable Cancelled state, and exact installed/cache postconditions.
+  - [ ] Add hooks/scriptlets, proven upgrades/replacements, failure rollback/recovery, orphan cleanup, and storage-failure recovery.
 - [ ] Add a bounded AUR workflow suitable for packages such as `visual-studio-code-bin`.
   - [ ] Show source, PKGBUILD, maintainer, signatures/checksums, build steps, permissions, and disk impact before installation.
   - [ ] Run builds as an unprivileged Linux user and clearly communicate that installed Arch/AUR packages share one trust domain.
@@ -220,7 +222,8 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [x] The current exact-package details flow immediately shows persistent resolve, download, verify, install, complete, and failure state.
   - [ ] Show queued, resolving, downloading, verifying, building, installing, awaiting Android confirmation, completed, failed, and cancelled states.
   - [ ] Keep state correct across rotation, backgrounding, process death, reboot, and manager restart.
-  - [ ] Provide actionable diagnostics, retry/cancel controls, and package-scoped failure isolation.
+  - [ ] Provide actionable diagnostics, retry controls, and package-scoped failure isolation.
+  - [x] Show a state-driven Cancel action only before Linux package mutation and retain the durable Cancelled result across manager restart.
 - [x] Make the current package details and operation content responsive and scrollable; full-device emulator and Samsung audits show the complete `btop` closure with state-driven Install/Update/Verify and Remove actions.
 - [x] Profile and fix slow first launch after boot; retain the visible runtime-loading state while avoiding unchanged verification-keyring rebuilds.
   - [x] Cache the derived GPG keybox only for the exact immutable packaged keyring/ownertrust identity, reject unsafe or oversized cache entries, and prove real signed-package verification after reuse.

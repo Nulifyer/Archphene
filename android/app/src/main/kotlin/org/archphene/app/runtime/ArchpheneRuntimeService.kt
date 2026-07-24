@@ -55,6 +55,9 @@ class ArchpheneRuntimeService : Service() {
                     !packageOperationActive &&
                     !commandActive
 
+        val packageCancellationAvailable: Boolean
+            get() = packageOperationActive && packageOperationCancelable
+
         val linuxCommandStatus: String
             get() =
                 if (shellActive) {
@@ -130,6 +133,8 @@ class ArchpheneRuntimeService : Service() {
         fun removePackage(packageName: String): Boolean =
             requestPackageRemoval(packageName)
 
+        fun cancelPackageOperation(): Boolean = requestPackageCancellation()
+
         fun submitLinuxInput(commandLine: String): Boolean =
             if (shellActive) {
                 requestShellInput(commandLine)
@@ -186,6 +191,9 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var searchActive = false
     @Volatile private var searchStatus = "Search the official Arch repositories"
     @Volatile private var packageOperationActive = false
+    @Volatile private var packageOperationCancelable = false
+    @Volatile private var packageCancellationRequested = false
+    @Volatile private var activePackageConnection: HttpsURLConnection? = null
     @Volatile private var commandActive = false
     @Volatile private var shellActive = false
     @Volatile private var shellWasStarted = false
@@ -431,6 +439,8 @@ class ArchpheneRuntimeService : Service() {
         bootstrapThread = null
         catalogThread?.interrupt()
         catalogThread = null
+        packageCancellationRequested = true
+        activePackageConnection?.disconnect()
         packageThread?.interrupt()
         packageThread = null
         commandThread?.interrupt()
@@ -1241,6 +1251,8 @@ class ArchpheneRuntimeService : Service() {
             jobStatus = "Could not queue install: ${readNativeMessage(outputBuffer, jobId)}"
             return false
         }
+        packageCancellationRequested = false
+        packageOperationCancelable = true
         packageOperationActive = true
         jobStatus = "$normalized · Queued · 0%\nQueued"
         packageThread =
@@ -1269,6 +1281,7 @@ class ArchpheneRuntimeService : Service() {
                         recordedProgress = progress
                     }
                     try {
+                        throwIfPackageCancelled()
                         record(
                             NativeRuntime.JOB_RESOLVING,
                             1,
@@ -1276,6 +1289,7 @@ class ArchpheneRuntimeService : Service() {
                             "Resolving signed dependency closure",
                         )
                         val packages = resolvePayloads(activeHandle, normalized)
+                        throwIfPackageCancelled()
                         val target =
                             packages.firstOrNull { payload -> payload.name == normalized }
                                 ?: throw IllegalStateException(
@@ -1290,9 +1304,7 @@ class ArchpheneRuntimeService : Service() {
                             )
                         }
                         packages.forEachIndexed { index, payload ->
-                            if (Thread.currentThread().isInterrupted) {
-                                throw InterruptedException("Package install interrupted")
-                            }
+                            throwIfPackageCancelled()
                             val progress = 10 + (index * 65 / packages.size)
                             record(
                                 NativeRuntime.JOB_DOWNLOADING,
@@ -1307,9 +1319,7 @@ class ArchpheneRuntimeService : Service() {
                             downloadPackagePayload(activeHandle, payload, true, scratch)
                         }
                         packages.forEachIndexed { index, payload ->
-                            if (Thread.currentThread().isInterrupted) {
-                                throw InterruptedException("Package install interrupted")
-                            }
+                            throwIfPackageCancelled()
                             val progress = 76 + (index * 20 / packages.size)
                             record(
                                 NativeRuntime.JOB_VERIFYING,
@@ -1318,6 +1328,9 @@ class ArchpheneRuntimeService : Service() {
                                 "Verifying ${payload.name} (${index + 1}/${packages.size})",
                             )
                             verifyPackagePayload(activeHandle, payload, scratch)
+                        }
+                        if (!enterPackageCommit()) {
+                            throw InterruptedException("Package operation cancelled")
                         }
                         record(
                             NativeRuntime.JOB_INSTALLING,
@@ -1360,15 +1373,26 @@ class ArchpheneRuntimeService : Service() {
                             },
                         )
                     } catch (error: Exception) {
+                        val cancelled =
+                            error is InterruptedException || packageCancellationRequested
                         try {
                             updatePackageJob(
                                 activeHandle,
                                 jobId,
-                                NativeRuntime.JOB_FAILED,
+                                if (cancelled) {
+                                    NativeRuntime.JOB_CANCELLED
+                                } else {
+                                    NativeRuntime.JOB_FAILED
+                                },
                                 recordedPhase,
                                 recordedProgress,
                                 boundedJobMessage(
-                                    "Install failed: ${error.message ?: error.javaClass.simpleName}",
+                                    if (cancelled) {
+                                        "Cancelled before package mutation"
+                                    } else {
+                                        "Install failed: " +
+                                            (error.message ?: error.javaClass.simpleName)
+                                    },
                                 ),
                                 normalized,
                                 scratch,
@@ -1378,8 +1402,16 @@ class ArchpheneRuntimeService : Service() {
                                 "Install failed and journal update failed: " +
                                     (updateError.message ?: updateError.javaClass.simpleName)
                         }
-                        Log.e(TAG, "Package install failed", error)
+                        if (cancelled) {
+                            Log.i(TAG, "Cancelled package operation for $normalized")
+                        } else {
+                            Log.e(TAG, "Package install failed", error)
+                        }
                     } finally {
+                        activePackageConnection?.disconnect()
+                        activePackageConnection = null
+                        packageOperationCancelable = false
+                        packageCancellationRequested = false
                         packageOperationActive = false
                         packageThread = null
                     }
@@ -1448,6 +1480,8 @@ class ArchpheneRuntimeService : Service() {
             jobStatus = "Could not queue removal: ${readNativeMessage(outputBuffer, jobId)}"
             return false
         }
+        packageCancellationRequested = false
+        packageOperationCancelable = true
         packageOperationActive = true
         jobStatus = "$normalized · Queued · 0%\nQueued"
         packageThread =
@@ -1476,6 +1510,7 @@ class ArchpheneRuntimeService : Service() {
                         recordedProgress = progress
                     }
                     try {
+                        throwIfPackageCancelled()
                         record(
                             NativeRuntime.JOB_RESOLVING,
                             1,
@@ -1483,6 +1518,7 @@ class ArchpheneRuntimeService : Service() {
                             "Checking installed package and dependents",
                         )
                         val currentVersion = installedPackageVersion(activeHandle, normalized)
+                        throwIfPackageCancelled()
                         if (currentVersion != installedVersion) {
                             throw IllegalStateException(
                                 "Installed version changed; open Details again",
@@ -1494,6 +1530,9 @@ class ArchpheneRuntimeService : Service() {
                             60,
                             "Validating conservative removal plan",
                         )
+                        if (!enterPackageCommit()) {
+                            throw InterruptedException("Package operation cancelled")
+                        }
                         record(
                             NativeRuntime.JOB_INSTALLING,
                             3,
@@ -1519,15 +1558,26 @@ class ArchpheneRuntimeService : Service() {
                         )
                         Log.i(TAG, "Removed $normalized $installedVersion")
                     } catch (error: Exception) {
+                        val cancelled =
+                            error is InterruptedException || packageCancellationRequested
                         try {
                             updatePackageJob(
                                 activeHandle,
                                 jobId,
-                                NativeRuntime.JOB_FAILED,
+                                if (cancelled) {
+                                    NativeRuntime.JOB_CANCELLED
+                                } else {
+                                    NativeRuntime.JOB_FAILED
+                                },
                                 recordedPhase,
                                 recordedProgress,
                                 boundedJobMessage(
-                                    "Removal failed: ${error.message ?: error.javaClass.simpleName}",
+                                    if (cancelled) {
+                                        "Cancelled before package mutation"
+                                    } else {
+                                        "Removal failed: " +
+                                            (error.message ?: error.javaClass.simpleName)
+                                    },
                                 ),
                                 normalized,
                                 scratch,
@@ -1537,14 +1587,48 @@ class ArchpheneRuntimeService : Service() {
                                 "Removal failed and journal update failed: " +
                                     (updateError.message ?: updateError.javaClass.simpleName)
                         }
-                        Log.e(TAG, "Package removal failed", error)
+                        if (cancelled) {
+                            Log.i(TAG, "Cancelled package operation for $normalized")
+                        } else {
+                            Log.e(TAG, "Package removal failed", error)
+                        }
                     } finally {
+                        packageOperationCancelable = false
+                        packageCancellationRequested = false
                         packageOperationActive = false
                         packageThread = null
                     }
                 },
                 "ArchpheneRemove",
             ).also(Thread::start)
+        return true
+    }
+
+    @Synchronized
+    private fun requestPackageCancellation(): Boolean {
+        if (!packageOperationActive || !packageOperationCancelable) {
+            return false
+        }
+        packageCancellationRequested = true
+        packageOperationCancelable = false
+        jobStatus = "Cancellation requested\nFinishing the current safe step"
+        activePackageConnection?.disconnect()
+        packageThread?.interrupt()
+        return true
+    }
+
+    private fun throwIfPackageCancelled() {
+        if (packageCancellationRequested || Thread.currentThread().isInterrupted) {
+            throw InterruptedException("Package operation cancelled")
+        }
+    }
+
+    @Synchronized
+    private fun enterPackageCommit(): Boolean {
+        if (packageCancellationRequested || Thread.currentThread().isInterrupted) {
+            return false
+        }
+        packageOperationCancelable = false
         return true
     }
 
@@ -1673,7 +1757,9 @@ class ArchpheneRuntimeService : Service() {
                 }
                 val maximumBytes = if (signature) 1024L * 1024 else payload.size
                 val connection = endpoint.openConnection() as HttpsURLConnection
+                activePackageConnection = connection
                 try {
+                    throwIfPackageCancelled()
                     connection.instanceFollowRedirects = false
                     connection.connectTimeout = 15_000
                     connection.readTimeout = 60_000
@@ -1694,6 +1780,7 @@ class ArchpheneRuntimeService : Service() {
                     connection.inputStream.use { input ->
                         var total = 0L
                         while (true) {
+                            throwIfPackageCancelled()
                             val count = input.read(scratch.transferBuffer)
                             if (count < 0) {
                                 break
@@ -1713,6 +1800,9 @@ class ArchpheneRuntimeService : Service() {
                         }
                     }
                 } finally {
+                    if (activePackageConnection === connection) {
+                        activePackageConnection = null
+                    }
                     connection.disconnect()
                 }
             }

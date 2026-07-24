@@ -110,8 +110,22 @@ UID, copies when SELinux rejects hard links, avoids Android app seccomp's
 blocked `fchmodat2`, and maps generic root-relative mutation calls without
 package-specific changes. The current path validates pacman's local database
 and proves the requested package and version. Scriptlets/hooks remain disabled,
-and real upgrade/replacement, failure injection, rollback/recovery, cancellation,
-orphan cleanup, and low-storage behavior remain open.
+and real upgrade/replacement, failure injection, rollback/recovery, orphan
+cleanup, and low-storage behavior remain open.
+
+Package operations are now user-cancellable while queued, resolving,
+downloading, or verifying. The Activity enables a visible Cancel action
+immediately after queueing; the Service records the request, interrupts its
+worker, disconnects any active HTTPS transfer, and relies on Rust's owned
+download object to remove unpublished partial files. A synchronized commit
+boundary disables cancellation before pacman mutation, so the UI never claims
+that an in-flight transaction was cancelled. The bounded journal records a
+terminal Cancelled result that survives manager restart. Cache-only gates on
+the emulator and Samsung cancel `btop` verification at 5%, prove its executable,
+database/cache payloads, and transaction intent remain unchanged, inspect
+full-device screenshots, and then rerun successful verify/remove/reinstall on
+both targets. Cancellation during a deliberately slow live network transfer
+and cancellation after actual process death remain broader failure-matrix work.
 
 Exact installed-version queries now drive state-specific Install, Update,
 Verify, and Remove actions. Removal first asks pacman for a non-cascading plan,

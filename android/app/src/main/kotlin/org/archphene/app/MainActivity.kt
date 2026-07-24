@@ -44,6 +44,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private lateinit var runtimePanel: FrameLayout
     private lateinit var installButton: Button
     private lateinit var removeButton: Button
+    private lateinit var cancelButton: Button
     private lateinit var commandButton: Button
     private lateinit var ptyButton: Button
     private lateinit var shellSpinner: Spinner
@@ -77,6 +78,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 commandStatusView.setText(R.string.linux_command_unavailable)
                 installButton.isEnabled = false
                 removeButton.isEnabled = false
+                cancelButton.isEnabled = false
                 commandButton.isEnabled = false
                 ptyButton.isEnabled = false
                 shellSpinner.isEnabled = false
@@ -178,7 +180,9 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 isEnabled = false
                 setOnClickListener {
                     hideKeyboard(searchInput)
-                    runtimeBinder?.installPackage(searchInput.text.toString())
+                    if (runtimeBinder?.installPackage(searchInput.text.toString()) == true) {
+                        cancelButton.isEnabled = true
+                    }
                 }
             }
         removeButton =
@@ -187,7 +191,9 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 isEnabled = false
                 setOnClickListener {
                     hideKeyboard(searchInput)
-                    runtimeBinder?.removePackage(searchInput.text.toString())
+                    if (runtimeBinder?.removePackage(searchInput.text.toString()) == true) {
+                        cancelButton.isEnabled = true
+                    }
                 }
             }
         searchInput.setOnEditorActionListener { _, actionId, _ ->
@@ -264,6 +270,34 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 setText(R.string.package_job_empty)
                 setBackgroundColor(Color.rgb(31, 35, 38))
                 maxLines = 2
+            }
+        cancelButton =
+            Button(this).apply {
+                setText(R.string.cancel)
+                isEnabled = false
+                setOnClickListener {
+                    isEnabled = false
+                    runtimeBinder?.cancelPackageOperation()
+                }
+            }
+        val jobRow =
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                addView(
+                    jobStatusView,
+                    LinearLayout.LayoutParams(
+                        0,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        1f,
+                    ),
+                )
+                addView(
+                    cancelButton,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                    ),
+                )
             }
         shellAdapter =
             ArrayAdapter<String>(this, R.layout.shell_spinner_item).apply {
@@ -429,7 +463,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     ),
                 )
                 addView(
-                    jobStatusView,
+                    jobRow,
                     LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         dp(64),
@@ -623,6 +657,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         if (binder == null) {
             installButton.isEnabled = false
             removeButton.isEnabled = false
+            cancelButton.isEnabled = false
             commandButton.isEnabled = false
             ptyButton.isEnabled = false
             shellSpinner.isEnabled = false
@@ -634,6 +669,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         setTextIfChanged(installButton, binder.packagePrimaryActionLabel)
         installButton.isEnabled = binder.packagePrimaryActionAvailable
         removeButton.isEnabled = binder.packageRemoveAvailable
+        cancelButton.isEnabled = binder.packageCancellationAvailable
         setTextIfChanged(commandButton, binder.linuxInputActionLabel)
         commandButton.isEnabled = binder.linuxCommandAvailable
         setTextIfChanged(ptyButton, binder.sharedShellActionLabel)
