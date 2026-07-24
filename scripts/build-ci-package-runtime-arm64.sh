@@ -112,7 +112,7 @@ while IFS="|" read -r name version repository url filename; do
   bsdtar -xf "$package" -C /tmp/arm/expanded
 done < /tmp/arm/transaction.tsv
 
-for binary in pacman gpg gpgv bsdtar; do
+for binary in pacman gpg gpgv gpgconf bsdtar; do
   [[ -x "/tmp/arm/expanded/usr/bin/$binary" ]] || {
     echo "missing AArch64 runtime binary: $binary" >&2; exit 1;
   }
@@ -131,7 +131,8 @@ done < <(find /tmp/arm/expanded/usr/lib /tmp/arm/expanded/lib \
   -maxdepth 1 \( -type f -o -type l \) -print0 2>/dev/null)
 
 queue=(/tmp/arm/expanded/usr/bin/pacman /tmp/arm/expanded/usr/bin/gpg \
-  /tmp/arm/expanded/usr/bin/gpgv /tmp/arm/expanded/usr/bin/bsdtar)
+  /tmp/arm/expanded/usr/bin/gpgv /tmp/arm/expanded/usr/bin/gpgconf \
+  /tmp/arm/expanded/usr/bin/bsdtar)
 for ((index=0; index<${#queue[@]}; index++)); do
   object="${queue[$index]}"
   canonical="$(readlink -f "$object")"
@@ -151,7 +152,7 @@ for ((index=0; index<${#queue[@]}; index++)); do
     | sed -n "s/.*Shared library: \[\([^]]*\)\].*/\1/p")
 done
 
-for name in pacman gpg gpgv bsdtar; do
+for name in pacman gpg gpgv gpgconf bsdtar; do
   cp -L "/tmp/arm/expanded/usr/bin/$name" "/out/runtime-root/usr/bin/$name"
 done
 : > /out/elf-needed-resolved.tsv
@@ -205,11 +206,17 @@ aarch64-linux-gnu-gcc -shared -fPIC -O2 -Wall -Wextra -Werror \
 [[ "$(readelf -h /out/path-bridge/libarchphene_path_bridge.so \
   | sed -n "s/.*Machine:[[:space:]]*//p")" == "AArch64" ]]
 readelf -Ws /out/path-bridge/libarchphene_path_bridge.so \
-  | grep -Eq "execve@@GLIBC_2\\.17"
-readelf -Ws /out/path-bridge/libarchphene_path_bridge.so \
-  | grep -Eq "readlink@@GLIBC_2\\.17"
-readelf -Ws /out/path-bridge/libarchphene_path_bridge.so \
-  | grep -Eq "readlinkat@@GLIBC_2\\.17"
+  > /tmp/path-bridge-symbols.txt
+grep -Eq "execve@@GLIBC_2\\.17" /tmp/path-bridge-symbols.txt
+grep -Eq "execv@@GLIBC_2\\.17" /tmp/path-bridge-symbols.txt
+grep -Eq "chdir@@GLIBC_2\\.17" /tmp/path-bridge-symbols.txt
+grep -Eq "chroot@@GLIBC_2\\.17" /tmp/path-bridge-symbols.txt
+grep -Eq "geteuid@@GLIBC_2\\.17" /tmp/path-bridge-symbols.txt
+grep -Eq "fchmodat@@GLIBC_2\\.17" /tmp/path-bridge-symbols.txt
+grep -Eq "fchownat@@GLIBC_2\\.17" /tmp/path-bridge-symbols.txt
+grep -Eq "linkat@@GLIBC_2\\.17" /tmp/path-bridge-symbols.txt
+grep -Eq "readlink@@GLIBC_2\\.17" /tmp/path-bridge-symbols.txt
+grep -Eq "readlinkat@@GLIBC_2\\.17" /tmp/path-bridge-symbols.txt
 
 printf "glibc-%s+sha256.%s\n" "$GLIBC_VERSION" "$GLIBC_SHA256" \
   > /out/glibc/source-commit.txt

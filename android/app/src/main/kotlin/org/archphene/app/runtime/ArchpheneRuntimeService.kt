@@ -36,8 +36,8 @@ class ArchpheneRuntimeService : Service() {
         fun resolvePackage(packageName: String): Boolean =
             requestPackageResolution(packageName)
 
-        fun preparePackage(packageName: String): Boolean =
-            requestPackagePreparation(packageName)
+        fun installPackage(packageName: String): Boolean =
+            requestPackageInstall(packageName)
     }
 
     private val binder = LocalBinder()
@@ -52,7 +52,7 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var searchActive = false
     @Volatile private var searchStatus = "Search the official Arch repositories"
     @Volatile private var packageOperationActive = false
-    @Volatile private var jobStatus = "No prepared package transaction"
+    @Volatile private var jobStatus = "No package transaction"
     @Volatile private var lastResolvedPackage = ""
     @Volatile private var lastResolvedRepository = ""
 
@@ -612,7 +612,7 @@ class ArchpheneRuntimeService : Service() {
     }
 
     @Synchronized
-    private fun requestPackagePreparation(packageName: String): Boolean {
+    private fun requestPackageInstall(packageName: String): Boolean {
         val normalized = packageName.trim()
         val repository = lastResolvedRepository
         val activeHandle = readyHandle
@@ -624,7 +624,7 @@ class ArchpheneRuntimeService : Service() {
             normalized != lastResolvedPackage ||
             (repository != "core" && repository != "extra")
         ) {
-            jobStatus = "Open Details for one exact package before preparing it"
+            jobStatus = "Open Details for one exact package before installing it"
             return false
         }
         val outputBuffer = ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
@@ -640,7 +640,7 @@ class ArchpheneRuntimeService : Service() {
                 outputBuffer,
             )
         if (jobId <= 0) {
-            jobStatus = "Could not queue preparation: ${readNativeMessage(outputBuffer, jobId)}"
+            jobStatus = "Could not queue install: ${readNativeMessage(outputBuffer, jobId)}"
             return false
         }
         packageOperationActive = true
@@ -684,11 +684,11 @@ class ArchpheneRuntimeService : Service() {
                                     "Resolved packages omit the requested target",
                                 )
                         if (target.repository != repository) {
-                            throw SecurityException("Target repository changed during preparation")
+                            throw SecurityException("Target repository changed during install")
                         }
                         packages.forEachIndexed { index, payload ->
                             if (Thread.currentThread().isInterrupted) {
-                                throw InterruptedException("Package preparation interrupted")
+                                throw InterruptedException("Package install interrupted")
                             }
                             val progress = 10 + (index * 65 / packages.size)
                             record(
@@ -705,7 +705,7 @@ class ArchpheneRuntimeService : Service() {
                         }
                         packages.forEachIndexed { index, payload ->
                             if (Thread.currentThread().isInterrupted) {
-                                throw InterruptedException("Package preparation interrupted")
+                                throw InterruptedException("Package install interrupted")
                             }
                             val progress = 76 + (index * 20 / packages.size)
                             record(
@@ -719,18 +719,19 @@ class ArchpheneRuntimeService : Service() {
                         record(
                             NativeRuntime.JOB_INSTALLING,
                             4,
-                            99,
-                            "Publishing verified package cache",
+                            97,
+                            "Installing verified packages",
                         )
+                        installPreparedPackage(activeHandle, normalized, scratch)
                         record(
                             NativeRuntime.JOB_COMPLETE,
                             5,
                             100,
-                            "Verified package cache ready",
+                            "Installed ${target.name} ${target.version}",
                         )
                         Log.i(
                             TAG,
-                            "Prepared $normalized: ${packages.size} signed packages",
+                            "Installed $normalized: ${packages.size} signed packages",
                         )
                     } catch (error: Exception) {
                         try {
@@ -741,25 +742,46 @@ class ArchpheneRuntimeService : Service() {
                                 recordedPhase,
                                 recordedProgress,
                                 boundedJobMessage(
-                                    "Preparation failed: ${error.message ?: error.javaClass.simpleName}",
+                                    "Install failed: ${error.message ?: error.javaClass.simpleName}",
                                 ),
                                 normalized,
                                 scratch,
                             )
                         } catch (updateError: Exception) {
                             jobStatus =
-                                "Preparation failed and journal update failed: " +
+                                "Install failed and journal update failed: " +
                                     (updateError.message ?: updateError.javaClass.simpleName)
                         }
-                        Log.e(TAG, "Package preparation failed", error)
+                        Log.e(TAG, "Package install failed", error)
                     } finally {
                         packageOperationActive = false
                         packageThread = null
                     }
                 },
-                "ArchphenePrepare",
+                "ArchpheneInstall",
             ).also(Thread::start)
         return true
+    }
+
+    private fun installPreparedPackage(
+        activeHandle: Long,
+        packageName: String,
+        scratch: PackageIoScratch,
+    ) {
+        val packageBytes = packageName.toByteArray(StandardCharsets.UTF_8)
+        scratch.requestBuffer.clear()
+        scratch.requestBuffer.put(packageBytes)
+        scratch.outputBuffer.clear()
+        val outputLength =
+            NativeRuntime.nativeInstallPackage(
+                activeHandle,
+                scratch.requestBuffer,
+                packageBytes.size,
+                scratch.outputBuffer,
+            )
+        if (outputLength < 0) {
+            throw IllegalStateException(readNativeMessage(scratch.outputBuffer, outputLength))
+        }
     }
 
     private fun updatePackageJob(
@@ -994,7 +1016,7 @@ class ArchpheneRuntimeService : Service() {
             return "Package journal unavailable: ${readNativeMessage(outputBuffer, length)}"
         }
         if (length == 0) {
-            return "No prepared package transaction"
+            return "No package transaction"
         }
         val bytes = ByteArray(length)
         outputBuffer.position(0)

@@ -67,12 +67,18 @@ if match is None:
 print(match.group(1))
 ' <<<"$ARCHPHENE_UI")"
 
-archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="PREPARE"' 'prepare package'
-archphene_wait_ui 'text="btop · (Downloading|Verifying|Publishing|Complete) · [1-9][0-9]*%' \
+archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="INSTALL"' 'install package'
+archphene_wait_ui 'text="btop · (Downloading|Verifying|Installing|Complete) · [1-9][0-9]*%' \
   "archphene-prepare-active-$serial" 60
-archphene_wait_ui 'text="btop · Complete · 100%.*Verified package cache ready"' \
+archphene_wait_ui 'text="btop · Complete · 100%.*Installed btop [^"]+"' \
   "archphene-prepare-complete-$serial" 180
-archphene_wait_log "Prepared btop: $closure_count signed packages" 15 >/dev/null
+archphene_wait_log "Installed btop: $closure_count signed packages" 15 >/dev/null
+archphene_adb_run shell run-as "$package" test -x files/arch-root/usr/bin/btop ||
+  archphene_die "installed btop executable is missing"
+local_btop="$(archphene_adb_run exec-out run-as "$package" find \
+  files/arch-root/var/lib/pacman/local -maxdepth 1 -type d -name 'btop-*' |
+  tr -d '\r')"
+[[ -n "$local_btop" ]] || archphene_die "pacman did not record the btop installation"
 
 cache=files/arch-root/var/cache/pacman/pkg
 cache_listing="$(archphene_adb_run exec-out run-as "$package" find "$cache" \
@@ -89,15 +95,16 @@ while IFS= read -r file; do
   [[ "$mode" == 600 ]] || archphene_die "unexpected package cache mode: $file $mode"
 done <<<"$cache_listing"
 
-tampered_package="$(grep -v '\.sig$' <<<"$cache_listing" | head -n1)"
+tampered_package="$(grep '/btop-[^/]*\.pkg\.tar\.' <<<"$cache_listing" |
+  grep -v '\.sig$' | head -n1)"
 [[ -n "$tampered_package" ]] || archphene_die "verified package cache has no archive"
 archphene_adb_run logcat -c
 archphene_adb_run shell run-as "$package" dd if=/dev/zero of="$tampered_package" \
   bs=1 count=1 conv=notrunc >/dev/null 2>&1
-archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="PREPARE"' 'reprepare tampered cache'
+archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="INSTALL"' 'reinstall tampered cache'
 archphene_wait_log 'Rejected invalid cached package .*package command failed with status' \
   30 >/dev/null
-archphene_wait_ui 'text="btop · Complete · 100%.*Verified package cache ready"' \
+archphene_wait_ui 'text="btop · Complete · 100%.*Installed btop [^"]+"' \
   "archphene-prepare-tamper-recovered-$serial" 90
 
 archphene_adb_run exec-out screencap -p >"$output_dir/$serial-btop.png"
@@ -105,16 +112,16 @@ archphene_adb_run exec-out screencap -p >"$output_dir/$serial-btop.png"
 archphene_adb_run shell am force-stop "$package" >/dev/null
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
 archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 15 >/dev/null
-archphene_wait_ui 'text="btop · Complete · 100%.*Verified package cache ready"' \
+archphene_wait_ui 'text="btop · Complete · 100%.*Installed btop [^"]+"' \
   "archphene-prepare-reused-$serial" 20
 
 fatal_log="$(archphene_adb_run logcat -d -v brief \
   -s AndroidRuntime:E libc:F '*:S' 2>/dev/null || true)"
 [[ "$fatal_log" != *"FATAL EXCEPTION"* && "$fatal_log" != *"Fatal signal"* ]] ||
-  archphene_die "package preparation emitted a fatal runtime error: $fatal_log"
+  archphene_die "package install emitted a fatal runtime error: $fatal_log"
 
-archphene_note "Archphene signed package preparation passed on $serial"
-archphene_note "  $closure_count archives and signatures were atomically cached and verified"
+archphene_note "Archphene signed package install passed on $serial"
+archphene_note "  $closure_count archives and signatures were atomically cached, verified, and installed"
 archphene_note "  Tampered cache was rejected, redownloaded, and reverified"
 archphene_note "  Durable Complete state survived process death"
 archphene_note "  Full-device screenshot: $output_dir/$serial-btop.png"

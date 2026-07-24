@@ -48,7 +48,7 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
     - [x] Reject unsafe layout entries and unknown versions; repair known directory modes on reuse.
     - [x] Bootstrap off Android's main thread and publish readiness through the fixed native snapshot.
     - [x] Host safety tests plus clean/reused-root gates pass on the emulator and Samsung using full-device screenshots.
-  - [ ] Package catalog/search and persistent job state
+  - [x] Package catalog/search and persistent job state
     - [x] Add a Rust-owned, fixed-size persistent operation journal with bounded fields and legal state transitions.
     - [x] Atomically publish journal updates, reject corruption/symlinks, recover interrupted work explicitly, and avoid warmed in-memory heap allocation.
     - [x] Bootstrap and reuse the empty journal on the emulator and Samsung; report readiness through the native snapshot.
@@ -62,11 +62,17 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
     - [x] Resolve an exact package and its real dependency closure without mutating the root.
       - [x] Pacman emits repository, package, version, archive, exact HTTPS URL, and download size through a fixed response; Rust rejects untrusted endpoints, unsafe fields, duplicates, missing targets, oversized closures, and malformed output.
       - [x] Kotlin renders the target, package count, bounded download size, and closure off the main thread. Process-death reuse, scoped logs, and full-device screenshots pass for the 33-package `dotnet-sdk` x86_64 closure and 9-package `btop` AArch64 closure.
-    - [x] Queue real package-preparation operations from the Kotlin UI and render every durable phase immediately.
-      - [x] The UI persists Queued, Resolving, Downloading, Verifying, Publishing, Complete, and Failed transitions before rendering them; the latest result survives Activity and manager process death.
+    - [x] Queue real signed-package operations from the Kotlin UI and render every durable phase immediately.
+      - [x] The UI persists Queued, Resolving, Downloading, Verifying, Publishing, Complete, and Failed transitions before rendering them; installation is also rendered explicitly, and the latest result survives Activity and manager process death.
       - [x] Android transports exact official archives and detached signatures through Rust-owned bounded descriptors. Rust enforces resolved sizes, atomic mode-0600 cache publication, signed name/version/architecture identity, the packaged Arch keyring, and the pinned Arch Linux ARM build signer.
-      - [x] Current `btop` closures prepare on the emulator and Samsung; deliberate cache tampering is rejected, redownloaded, and reverified on both, with scoped logs and full-device screenshots.
+      - [x] Current `btop` closures install on the emulator and Samsung; deliberate cache tampering is rejected, redownloaded, and reverified on both, with scoped logs and full-device screenshots.
   - [ ] Pacman install/update/remove
+    - [x] Install a bounded exact official package closure into the shared Arch root only after re-verifying every cached signature and package identity.
+    - [x] Adapt the generic runtime to Android app-UID ownership, SELinux hard-link denial, app seccomp's blocked `fchmodat2`, and the explicit-loader environment without modifying individual packages.
+    - [x] Commit dependency-ordered package transactions durably, recover a stale database lock or incomplete current package entry after interruption, and prove the requested package through pacman's local database.
+    - [x] Pass clean full-device `btop` install, cache-tamper, process-death, executable, and package-database gates on the x86_64 emulator and AArch64 Samsung.
+    - [ ] Add safe package update and removal operations.
+    - [ ] Complete hooks/scriptlets, replacements, dependency consistency checks, closure-wide rollback, orphan cleanup, cancellation, and low-storage recovery.
   - [ ] Terminal/PTY and shared command environment
   - [ ] Wayland compositor, presentation, and lifecycle
   - [ ] Pointer, touch, keyboard, IME, clipboard, and drag-and-drop
@@ -99,8 +105,10 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
 - [ ] Preserve Android launcher entries, icons, intents, windows, notifications, and lifecycle without duplicating Linux roots.
 - [ ] Define supervision, background execution, daemons, resource limits, crash recovery, and shutdown.
 - [ ] Define trust for pacman, AUR builds, hooks, arbitrary executables, runtime content, and launcher signing.
+  - [x] Pin and seal the official pacman runtime, exact repository endpoints, Arch keyring, and bounded official signer trust used by the current install path.
+  - [ ] Define the remaining AUR, hook/scriptlet, arbitrary executable, and launcher-signing policies.
 - [ ] Document that packages inside the shared Arch environment intentionally share one Linux trust domain.
-- [ ] Wipe the emulator and Samsung prototype installations only when the new base APK is ready; retain source and any explicitly requested evidence.
+- [x] Wipe the emulator and Samsung prototype installations only when the new base APK is ready; retain source and any explicitly requested evidence.
 
 ## P0 - Android and Linux file integration
 
@@ -128,7 +136,10 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
 
 ## P0 - Package system and shared Arch behavior
 
-- [ ] Make pacman transactions operate atomically against the shared Arch root.
+- [ ] Complete pacman transaction semantics against the shared Arch root.
+  - [x] Re-verify signed archives immediately before mutation and make each dependency-ordered package commit durable and resumable.
+  - [x] Recover the bounded stale-lock and incomplete-current-entry cases proven by the current install flow.
+  - [ ] Add hooks/scriptlets, upgrades, replacements, full dependency validation, closure-wide rollback, orphan cleanup, cancellation, and storage-failure recovery.
 - [ ] Add a bounded AUR workflow suitable for packages such as `visual-studio-code-bin`.
   - [ ] Show source, PKGBUILD, maintainer, signatures/checksums, build steps, permissions, and disk impact before installation.
   - [ ] Run builds as an unprivileged Linux user and clearly communicate that installed Arch/AUR packages share one trust domain.
@@ -144,9 +155,11 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
 ## P0 - Manager UX and reliability
 
 - [ ] Make every install/update/remove operation appear in the app list immediately with persistent state and progress.
+  - [x] The current exact-package details flow immediately shows persistent resolve, download, verify, install, complete, and failure state.
   - [ ] Show queued, resolving, downloading, verifying, building, installing, awaiting Android confirmation, completed, failed, and cancelled states.
   - [ ] Keep state correct across rotation, backgrounding, process death, reboot, and manager restart.
   - [ ] Provide actionable diagnostics, retry/cancel controls, and package-scoped failure isolation.
+- [ ] Make package details and operation content responsive and scrollable; the full-device emulator audit found the current dependency list clipped on shorter content regions.
 - [ ] Profile and fix slow first launch after boot; display useful loading/synchronization state instead of a frozen or empty UI.
 - [ ] Perform a complete UX pass over discovery, package details, installation, launcher creation, updates, storage, permissions, setup, settings, and recovery.
 - [ ] Review Obtainium's source, license, screenshots, app-list structure, and update progress UI. Adapt suitable open-source patterns to Archphene's compact list, spinner, and richer phase strings without copying blindly.

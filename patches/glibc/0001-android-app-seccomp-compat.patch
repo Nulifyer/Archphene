@@ -163,6 +163,33 @@ index 97efb740..8bd2f924 100644
    return ret;
  #else
    if (ret == 0 || errno != ENOSYS)
+diff --git a/sysdeps/unix/sysv/linux/fchmodat.c b/sysdeps/unix/sysv/linux/fchmodat.c
+index 0c4e7b4d..8c091efd 100644
+--- a/sysdeps/unix/sysv/linux/fchmodat.c
++++ b/sysdeps/unix/sysv/linux/fchmodat.c
+@@ -27,7 +27,7 @@
+ #include <sysdep.h>
+ #include <unistd.h>
+ 
+-#if !__ASSUME_FCHMODAT2
++#if !__ASSUME_FCHMODAT2 || defined ARCHPHENE_ANDROID_APP_COMPAT
+ static int
+ fchmodat_fallback (int fd, const char *file, mode_t mode, int flag)
+ {
+@@ -89,7 +89,12 @@ fchmodat_fallback (int fd, const char *file, mode_t mode, int flag)
+ int
+ fchmodat (int fd, const char *file, mode_t mode, int flag)
+ {
+-#if __ASSUME_FCHMODAT2
++#ifdef ARCHPHENE_ANDROID_APP_COMPAT
++  if (flag == 0)
++    return INLINE_SYSCALL_CALL (fchmodat, fd, file, mode);
++
++  return fchmodat_fallback (fd, file, mode, flag);
++#elif __ASSUME_FCHMODAT2
+   return INLINE_SYSCALL_CALL (fchmodat2, fd, file, mode, flag);
+ #else
+   if (flag == 0)
 diff --git a/sysdeps/unix/sysv/linux/inotify_init.c b/sysdeps/unix/sysv/linux/inotify_init.c
 index fcc6e2b6..eb57a223 100644
 --- a/sysdeps/unix/sysv/linux/inotify_init.c

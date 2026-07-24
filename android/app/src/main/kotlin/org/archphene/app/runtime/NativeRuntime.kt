@@ -73,6 +73,12 @@ internal object NativeRuntime {
         packageLength: Int,
         outputBuffer: ByteBuffer,
     ): Int
+    external fun nativeInstallPackage(
+        handle: Long,
+        packageBuffer: ByteBuffer,
+        packageLength: Int,
+        outputBuffer: ByteBuffer,
+    ): Int
     external fun nativeQueuePackagePrepare(
         handle: Long,
         requestBuffer: ByteBuffer,

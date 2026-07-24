@@ -6,12 +6,14 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <linux/stat.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 /* Android PTYs are valid even when this glibc build's isatty probe is rejected. */
@@ -44,6 +46,168 @@ extern char **environ;
 
 static char trusted_loader[PATH_MAX];
 static char trusted_program_path[PATH_MAX];
+static char trusted_root[PATH_MAX];
+static bool fake_chroot_active;
+
+static void report_blocked_syscall(int signal_number, siginfo_t *information,
+        void *context) {
+    (void)signal_number;
+    (void)context;
+    static const char prefix[] = "Archphene blocked Linux syscall ";
+    char message[sizeof(prefix) + 16];
+    size_t length = sizeof(prefix) - 1;
+    memcpy(message, prefix, length);
+    unsigned int value = information == NULL || information->si_syscall < 0
+            ? 0U : (unsigned int)information->si_syscall;
+    char digits[16];
+    size_t digit_count = 0;
+    do {
+        digits[digit_count++] = (char)('0' + value % 10);
+        value /= 10;
+    } while (value != 0 && digit_count < sizeof(digits));
+    while (digit_count > 0) message[length++] = digits[--digit_count];
+    message[length++] = '\n';
+    (void)write(STDERR_FILENO, message, length);
+    _exit(128 + SIGSYS);
+}
+
+__attribute__((constructor))
+static void install_sigsys_diagnostic(void) {
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_sigaction = report_blocked_syscall;
+    action.sa_flags = SA_SIGINFO | SA_RESETHAND;
+    sigemptyset(&action.sa_mask);
+    (void)sigaction(SIGSYS, &action, NULL);
+}
+
+/*
+ * The Linux root is entirely app-private, so its conventional uid 0 metadata
+ * maps to the Android app uid. Pacman must see a root-like identity while the
+ * kernel continues to enforce the real Android sandbox identity.
+ */
+uid_t getuid(void) { return 0; }
+uid_t geteuid(void) { return 0; }
+int chown(const char *path, uid_t owner, gid_t group) {
+    (void)path;
+    (void)owner;
+    (void)group;
+    return 0;
+}
+int lchown(const char *path, uid_t owner, gid_t group) {
+    (void)path;
+    (void)owner;
+    (void)group;
+    return 0;
+}
+int fchown(int fd, uid_t owner, gid_t group) {
+    (void)fd;
+    (void)owner;
+    (void)group;
+    return 0;
+}
+int fchownat(int directory, const char *path, uid_t owner, gid_t group, int flags) {
+    (void)directory;
+    (void)path;
+    (void)owner;
+    (void)group;
+    (void)flags;
+    return 0;
+}
+
+int fchmodat(int directory, const char *path, mode_t mode, int flags) {
+    if (flags == 0) {
+        return (int)syscall(SYS_fchmodat, directory, path, mode);
+    }
+    if (flags == AT_EMPTY_PATH && path[0] == '\0') {
+        return fchmod(directory, mode);
+    }
+    if (flags == AT_SYMLINK_NOFOLLOW) {
+        struct stat metadata;
+        if (fstatat(directory, path, &metadata, AT_SYMLINK_NOFOLLOW) != 0) return -1;
+        if (S_ISLNK(metadata.st_mode)) return 0;
+        return (int)syscall(SYS_fchmodat, directory, path, mode);
+    }
+    errno = EINVAL;
+    return -1;
+}
+
+static int copy_hardlink_fallback(int source_directory, const char *source,
+        int destination_directory, const char *destination) {
+    typedef int (*openat_type)(int, const char *, int, ...);
+    typedef int (*unlinkat_type)(int, const char *, int);
+    openat_type real_openat = (openat_type)dlsym(RTLD_NEXT, "openat");
+    unlinkat_type real_unlinkat = (unlinkat_type)dlsym(RTLD_NEXT, "unlinkat");
+    if (real_openat == NULL || real_unlinkat == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    int input = real_openat(source_directory, source, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (input < 0) return -1;
+    int output = real_openat(destination_directory, destination,
+            O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (output < 0) {
+        int saved_errno = errno;
+        close(input);
+        errno = saved_errno;
+        return -1;
+    }
+    char buffer[64 * 1024];
+    int result = 0;
+    while (true) {
+        ssize_t count = read(input, buffer, sizeof(buffer));
+        if (count == 0) break;
+        if (count < 0) {
+            if (errno == EINTR) continue;
+            result = -1;
+            break;
+        }
+        ssize_t offset = 0;
+        while (offset < count) {
+            ssize_t written = write(output, buffer + offset, (size_t)(count - offset));
+            if (written < 0 && errno == EINTR) continue;
+            if (written <= 0) {
+                result = -1;
+                break;
+            }
+            offset += written;
+        }
+        if (result != 0) break;
+    }
+    int saved_errno = errno;
+    if (close(input) != 0 || close(output) != 0) result = -1;
+    if (result != 0) real_unlinkat(destination_directory, destination, 0);
+    errno = saved_errno;
+    return result;
+}
+
+int link(const char *source, const char *destination) {
+    typedef int (*function_type)(const char *, const char *);
+    function_type real = (function_type)dlsym(RTLD_NEXT, "link");
+    if (real == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    if (real(source, destination) == 0) return 0;
+    if (errno != EPERM && errno != EACCES) return -1;
+    return copy_hardlink_fallback(AT_FDCWD, source, AT_FDCWD, destination);
+}
+
+int linkat(int source_directory, const char *source, int destination_directory,
+        const char *destination, int flags) {
+    typedef int (*function_type)(int, const char *, int, const char *, int);
+    function_type real = (function_type)dlsym(RTLD_NEXT, "linkat");
+    if (real == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    if (real(source_directory, source, destination_directory, destination, flags) == 0) {
+        return 0;
+    }
+    if ((errno != EPERM && errno != EACCES) || flags != 0) return -1;
+    return copy_hardlink_fallback(
+            source_directory, source, destination_directory, destination);
+}
 
 __attribute__((constructor))
 static void capture_trusted_loader(void) {
@@ -84,6 +248,27 @@ static void capture_trusted_program_path(void) {
     memcpy(trusted_program_path, resolved, length + 1);
 }
 
+__attribute__((constructor))
+static void capture_trusted_root(void) {
+    const char *candidate = getenv("ARCHPHENE_RUNTIME_ROOT");
+    if (candidate == NULL || candidate[0] != '/' || has_parent_component(candidate)
+            || strchr(candidate, '\n') != NULL) {
+        return;
+    }
+    char resolved[PATH_MAX];
+    if (realpath(candidate, resolved) == NULL) return;
+    struct stat metadata;
+    if (stat(resolved, &metadata) != 0 || !S_ISDIR(metadata.st_mode)
+            || (metadata.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+        return;
+    }
+    size_t length = strlen(resolved);
+    if (length >= sizeof(trusted_root)) return;
+    memcpy(trusted_root, resolved, length + 1);
+    const char *active = getenv("ARCHPHENE_FAKE_CHROOT");
+    fake_chroot_active = active != NULL && strcmp(active, "1") == 0;
+}
+
 static bool safe_command_name(const char *name) {
     if (name == NULL || name[0] == '\0' || strchr(name, '/') != NULL) return false;
     for (const unsigned char *cursor = (const unsigned char *)name; *cursor != '\0'; cursor++) {
@@ -100,14 +285,36 @@ static bool safe_command_name(const char *name) {
 static bool runtime_command(const char *name, char output[PATH_MAX]) {
     if (!safe_command_name(name)) return false;
     const char *directory = getenv("ARCHPHENE_RUNTIME_COMMAND_DIR");
-    if (directory == NULL || directory[0] != '/' || strchr(directory, '\n') != NULL) return false;
-    int length = snprintf(output, PATH_MAX, "%s/%s", directory, name);
-    if (length <= 0 || length >= PATH_MAX) return false;
+    if (directory == NULL || directory[0] != '/' || strchr(directory, '\n') != NULL) {
+        return false;
+    }
     struct stat metadata;
     typedef int (*access_type)(const char *, int);
     access_type real_access = (access_type)dlsym(RTLD_NEXT, "access");
-    return lstat(output, &metadata) == 0 && S_ISREG(metadata.st_mode)
+    int length = snprintf(output, PATH_MAX, "%s/%s", directory, name);
+    if (length > 0 && length < PATH_MAX
+            && stat(output, &metadata) == 0 && S_ISREG(metadata.st_mode)
+            && (metadata.st_mode & (S_IWGRP | S_IWOTH)) == 0
+            && real_access != NULL && real_access(output, R_OK) == 0) {
+        return true;
+    }
+    if (trusted_root[0] == '\0') return false;
+    length = snprintf(output, PATH_MAX, "%s/usr/bin/%s", trusted_root, name);
+    return length > 0 && length < PATH_MAX
+            && stat(output, &metadata) == 0 && S_ISREG(metadata.st_mode)
+            && (metadata.st_mode & (S_IWGRP | S_IWOTH)) == 0
             && real_access != NULL && real_access(output, R_OK) == 0;
+}
+
+static bool conventional_linux_command(const char *path, const char *name) {
+    if (path == NULL || name == NULL) return false;
+    const char *component = NULL;
+    if (strncmp(path, "/usr/bin/", 9) == 0) {
+        component = path + 9;
+    } else if (strncmp(path, "/bin/", 5) == 0) {
+        component = path + 5;
+    }
+    return component != NULL && strcmp(component, name) == 0;
 }
 
 static bool exact_runtime_command(const char *path) {
@@ -115,11 +322,24 @@ static bool exact_runtime_command(const char *path) {
     const char *name = strrchr(path, '/');
     name = name == NULL ? path : name + 1;
     char command[PATH_MAX];
-    return runtime_command(name, command) && strcmp(path, command) == 0;
+    return runtime_command(name, command)
+            && (strcmp(path, command) == 0
+                || conventional_linux_command(path, name));
+}
+
+static void complete_managed_maintenance_command(const char *name) {
+    /*
+     * Arch ships ldconfig as a static PIE, so it cannot participate in the
+     * preload path translation. Archphene always supplies the root's library
+     * path directly to its dynamic loader, making the conventional cache
+     * redundant. Pacman runs this in a dedicated child after transactions.
+     */
+    if (strcmp(name, "ldconfig") == 0) _exit(EXIT_SUCCESS);
 }
 
 static int launch_runtime_command(const char *name, char *const arguments[],
         char *const environment[]) {
+    complete_managed_maintenance_command(name);
     char command[PATH_MAX];
     if (!runtime_command(name, command)) return 1;
     const char *library_path = getenv("ARCHPHENE_RUNTIME_LIB");
@@ -205,13 +425,22 @@ int execve(const char *path, char *const arguments[], char *const environment[])
     }
     const char *name = strrchr(path, '/');
     name = name == NULL ? path : name + 1;
-    char command[PATH_MAX];
-    if (runtime_command(name, command) && strcmp(path, command) == 0) {
+    if (exact_runtime_command(path)) {
         return launch_runtime_command(name, arguments, environment);
     }
     if (strcmp(path, "/system/bin/cat") == 0
             || strcmp(path, "/system/bin/sleep") == 0) {
         return launch_android_system_command(name, arguments, environment);
+    }
+    errno = ENOENT;
+    return -1;
+}
+
+int execv(const char *path, char *const arguments[]) {
+    const char *name = strrchr(path, '/');
+    name = name == NULL ? path : name + 1;
+    if (exact_runtime_command(path)) {
+        return launch_runtime_command(name, arguments, environ);
     }
     errno = ENOENT;
     return -1;
@@ -261,16 +490,34 @@ int execlp(const char *file, const char *argument, ...) {
 
 static const char *translate_path(const char *path, char output[PATH_MAX],
         bool *translated) {
-    static const char *const prefixes[] = {"/usr/share", "/usr/lib/locale"};
+    static const char *const fake_root_prefixes[] = {
+        "/bin", "/etc", "/home", "/lib", "/lib64", "/opt", "/run",
+        "/sbin", "/tmp", "/usr", "/var"
+    };
+    static const char *const resource_prefixes[] = {"/usr/share", "/usr/lib/locale"};
     *translated = false;
     if (path == NULL) return path;
+    if (trusted_root[0] != '\0') {
+        size_t root_length = strlen(trusted_root);
+        if (strncmp(path, trusted_root, root_length) == 0
+                && (path[root_length] == '\0' || path[root_length] == '/')) {
+            return path;
+        }
+    }
     bool allowed = false;
-    for (size_t index = 0; index < sizeof(prefixes) / sizeof(prefixes[0]); index++) {
+    if (fake_chroot_active && strcmp(path, "/") == 0) {
+        allowed = true;
+    }
+    const char *const *prefixes =
+            fake_chroot_active ? fake_root_prefixes : resource_prefixes;
+    size_t prefix_count = fake_chroot_active
+            ? sizeof(fake_root_prefixes) / sizeof(fake_root_prefixes[0])
+            : sizeof(resource_prefixes) / sizeof(resource_prefixes[0]);
+    for (size_t index = 0; !allowed && index < prefix_count; index++) {
         size_t length = strlen(prefixes[index]);
         if (strncmp(path, prefixes[index], length) == 0
                 && (path[length] == '\0' || path[length] == '/')) {
             allowed = true;
-            break;
         }
     }
     if (!allowed) return path;
@@ -278,18 +525,53 @@ static const char *translate_path(const char *path, char output[PATH_MAX],
         errno = EACCES;
         return NULL;
     }
-    const char *root = getenv("ARCHPHENE_RUNTIME_ROOT");
-    if (root == NULL || root[0] != '/' || strchr(root, '\n') != NULL) return path;
-    size_t root_length = strlen(root);
+    if (trusted_root[0] == '\0') return path;
+    size_t root_length = strlen(trusted_root);
     size_t path_length = strlen(path);
     if (root_length + path_length + 1 > PATH_MAX) {
         errno = ENAMETOOLONG;
         return NULL;
     }
-    memcpy(output, root, root_length);
+    memcpy(output, trusted_root, root_length);
     memcpy(output + root_length, path, path_length + 1);
     *translated = true;
     return output;
+}
+
+int chroot(const char *path) {
+    if (trusted_root[0] == '\0' || has_parent_component(path)) {
+        errno = EACCES;
+        return -1;
+    }
+    char resolved[PATH_MAX];
+    if (realpath(path, resolved) == NULL || strcmp(resolved, trusted_root) != 0) {
+        errno = EACCES;
+        return -1;
+    }
+    typedef int (*function_type)(const char *);
+    function_type real = (function_type)dlsym(RTLD_NEXT, "chdir");
+    if (real == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    if (real(trusted_root) != 0) return -1;
+    if (setenv("ARCHPHENE_FAKE_CHROOT", "1", 1) != 0) return -1;
+    fake_chroot_active = true;
+    return 0;
+}
+
+int chdir(const char *path) {
+    typedef int (*function_type)(const char *);
+    function_type real = (function_type)dlsym(RTLD_NEXT, "chdir");
+    bool translated;
+    char buffer[PATH_MAX];
+    const char *target = translate_path(path, buffer, &translated);
+    if (target == NULL) return -1;
+    if (real == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    return real(target);
 }
 
 static bool write_flags(int flags) {
@@ -366,7 +648,7 @@ static int open_impl(const char *symbol, const char *path, int flags, mode_t mod
     const char *target = translate_path(path, buffer, &translated);
     if (target == NULL) return -1;
     REQUIRE_REAL(real);
-    if (translated && write_flags(flags)) {
+    if (translated && !fake_chroot_active && write_flags(flags)) {
         errno = EROFS;
         return -1;
     }
@@ -406,7 +688,7 @@ static int openat_impl(const char *symbol, int directory, const char *path, int 
     const char *target = translate_path(path, buffer, &translated);
     if (target == NULL) return -1;
     REQUIRE_REAL(real);
-    if (translated && write_flags(flags)) {
+    if (translated && !fake_chroot_active && write_flags(flags)) {
         errno = EROFS;
         return -1;
     }
@@ -451,7 +733,7 @@ static FILE *fopen_impl(const char *symbol, const char *path, const char *mode) 
         errno = ENOSYS;
         return NULL;
     }
-    if (translated && write_mode(mode)) {
+    if (translated && !fake_chroot_active && write_mode(mode)) {
         errno = EROFS;
         return NULL;
     }
@@ -521,7 +803,7 @@ int access(const char *path, int mode) {
     const char *target = translate_path(path, buffer, &translated);
     if (target == NULL) return -1;
     REQUIRE_REAL(real);
-    if (translated && (mode & W_OK) != 0) {
+    if (translated && !fake_chroot_active && (mode & W_OK) != 0) {
         errno = EROFS;
         return -1;
     }
@@ -540,7 +822,7 @@ int eaccess(const char *path, int mode) {
     const char *target = translate_path(path, buffer, &translated);
     if (target == NULL) return -1;
     REQUIRE_REAL(real);
-    if (translated && (mode & W_OK) != 0) {
+    if (translated && !fake_chroot_active && (mode & W_OK) != 0) {
         errno = EROFS;
         return -1;
     }
@@ -559,7 +841,7 @@ int faccessat(int directory, const char *path, int mode, int flags) {
     const char *target = translate_path(path, buffer, &translated);
     if (target == NULL) return -1;
     REQUIRE_REAL(real);
-    if (translated && (mode & W_OK) != 0) {
+    if (translated && !fake_chroot_active && (mode & W_OK) != 0) {
         errno = EROFS;
         return -1;
     }
@@ -635,7 +917,7 @@ int mkdir(const char *path, mode_t mode) {
     const char *target = translate_path(path, buffer, &translated);
     if (target == NULL) return -1;
     REQUIRE_REAL(real);
-    if (translated) {
+    if (translated && !fake_chroot_active) {
         errno = EROFS;
         return -1;
     }
@@ -653,7 +935,7 @@ int rename(const char *old_path, const char *new_path) {
     const char *new_target = translate_path(new_path, new_buffer, &new_translated);
     if (old_target == NULL || new_target == NULL) return -1;
     REQUIRE_REAL(real);
-    if (old_translated || new_translated) {
+    if (!fake_chroot_active && (old_translated || new_translated)) {
         errno = EROFS;
         return -1;
     }

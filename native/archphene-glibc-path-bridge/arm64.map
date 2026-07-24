@@ -1,9 +1,21 @@
 GLIBC_2.17 {
     global:
         access;
+        chdir;
+        chroot;
         eaccess;
         faccessat;
+        fchmodat;
+        chown;
+        fchown;
+        fchownat;
+        geteuid;
+        getuid;
+        lchown;
+        link;
+        linkat;
         execlp;
+        execv;
         execve;
         execvp;
         execvpe;

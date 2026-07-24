@@ -5,6 +5,7 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -16,6 +17,7 @@ pub const MAX_TOOL_OUTPUT_BYTES: usize = 16 * 1024;
 
 const MANIFEST_HEADER: &str = "# org.archphene.package-runtime.v1";
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+const TRANSACTION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const ALIAS_DIRECTORY: &str = "run/package-runtime-v1";
 const OUTPUT_FILE: &str = "run/package-command-output.tmp";
 const PACMAN_CONFIG_FILE: &str = "etc/pacman.conf";
@@ -27,6 +29,7 @@ const PACKAGE_ARCHIVE_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
 const PACKAGE_SIGNATURE_LIMIT: u64 = 1024 * 1024;
 const PACKAGE_CACHE_DIRECTORY: &str = "var/cache/pacman/pkg";
 const PACKAGE_TRUST_DIRECTORY: &str = "run/package-trust-v1";
+const PATH_BRIDGE_NAME: &str = "libarchphene_path_bridge.so";
 const AARCH64_BUILD_KEY: &str = "68B3537F39A313B3E574D06777193F152BDBE6A6";
 
 const X86_64_PACMAN_CONFIG: &[u8] = b"[options]\n\
@@ -135,6 +138,7 @@ pub enum PackageTool {
     Bsdtar,
     Gpg,
     Gpgv,
+    Gpgconf,
 }
 
 impl PackageTool {
@@ -144,6 +148,7 @@ impl PackageTool {
             Self::Bsdtar => 1,
             Self::Gpg => 2,
             Self::Gpgv => 3,
+            Self::Gpgconf => 4,
         }
     }
 
@@ -153,6 +158,7 @@ impl PackageTool {
             Self::Bsdtar => "@bsdtar",
             Self::Gpg => "@gpg",
             Self::Gpgv => "@gpgv",
+            Self::Gpgconf => "@gpgconf",
         }
     }
 }
@@ -238,8 +244,11 @@ pub struct PackageRuntime {
     architecture: RepositoryArchitecture,
     loader: PathBuf,
     keyring: PathBuf,
-    tools: [Option<PathBuf>; 4],
+    ownertrust: PathBuf,
+    path_bridge: PathBuf,
+    tools: [Option<PathBuf>; 5],
     library_path: OsString,
+    executable_path: OsString,
 }
 
 #[derive(Debug)]
@@ -299,7 +308,9 @@ impl PackageRuntime {
 
         let mut loader = None;
         let mut keyring = None;
-        let mut tools: [Option<PathBuf>; 4] = std::array::from_fn(|_| None);
+        let mut ownertrust = None;
+        let mut has_path_bridge = false;
+        let mut tools: [Option<PathBuf>; 5] = std::array::from_fn(|_| None);
         let mut entry_count = 0_usize;
         for (index, line) in manifest.lines().skip(1).enumerate() {
             if line.is_empty() {
@@ -319,12 +330,15 @@ impl PackageRuntime {
             match entry.role {
                 "loader" if entry.logical == "@loader" => loader = Some(source),
                 "keyring" if entry.logical == "@keyring" => keyring = Some(source),
+                "ownertrust" if entry.logical == "@ownertrust" => ownertrust = Some(source),
                 "tool" => {
                     let tool = tool_from_logical(entry.logical)
                         .ok_or(PackageRuntimeError::InvalidManifest)?;
                     tools[tool.index()] = Some(source);
                 }
-                "library" if !entry.logical.starts_with('@') => {}
+                "library" if !entry.logical.starts_with('@') => {
+                    has_path_bridge |= entry.logical == PATH_BRIDGE_NAME;
+                }
                 _ => return Err(PackageRuntimeError::InvalidManifest),
             }
         }
@@ -333,6 +347,10 @@ impl PackageRuntime {
         }
         let loader = loader.ok_or(PackageRuntimeError::MissingEntry("@loader"))?;
         let keyring = keyring.ok_or(PackageRuntimeError::MissingEntry("@keyring"))?;
+        let ownertrust = ownertrust.ok_or(PackageRuntimeError::MissingEntry("@ownertrust"))?;
+        if !has_path_bridge {
+            return Err(PackageRuntimeError::MissingEntry(PATH_BRIDGE_NAME));
+        }
         if tools[PackageTool::Pacman.index()].is_none() {
             return Err(PackageRuntimeError::MissingEntry("@pacman"));
         }
@@ -343,6 +361,17 @@ impl PackageRuntime {
             if entry.role == "library" {
                 let source = verified_source(&native_root, entry.packaged, entry.size)?;
                 symlink(&source, alias_root.join(entry.logical))?;
+            } else if entry.role == "tool" && matches!(entry.logical, "@gpg" | "@gpgconf") {
+                let source = verified_source(&native_root, entry.packaged, entry.size)?;
+                symlink(
+                    &source,
+                    alias_root.join(
+                        entry
+                            .logical
+                            .strip_prefix('@')
+                            .ok_or(PackageRuntimeError::InvalidManifest)?,
+                    ),
+                )?;
             }
         }
 
@@ -355,6 +384,10 @@ impl PackageRuntime {
         let mut library_path = alias_root.as_os_str().to_os_string();
         library_path.push(":");
         library_path.push(native_root.as_os_str());
+        let mut executable_path = alias_root.as_os_str().to_os_string();
+        executable_path.push(":");
+        executable_path.push(arch_root.join("usr/bin").as_os_str());
+        let path_bridge = alias_root.join(PATH_BRIDGE_NAME);
         Ok(Self {
             arch_root: arch_root.to_path_buf(),
             native_root,
@@ -363,8 +396,11 @@ impl PackageRuntime {
             architecture,
             loader,
             keyring,
+            ownertrust,
+            path_bridge,
             tools,
             library_path,
+            executable_path,
         })
     }
 
@@ -496,6 +532,120 @@ impl PackageRuntime {
         parse_resolution_output(raw.as_str()?, package, self.architecture)
     }
 
+    pub fn install(&self, package: &str) -> Result<ToolOutput, PackageRuntimeError> {
+        let resolution = self.resolve(package)?;
+        let package_count = resolution.as_str()?.lines().count();
+        let mut archives = Vec::with_capacity(package_count);
+        for line in resolution.as_str()?.lines() {
+            let payload = parse_resolved_payload(line)?;
+            self.verify_package(
+                payload.filename,
+                payload.name,
+                payload.version,
+                payload.size,
+            )?;
+            let archive = self
+                .arch_root
+                .join(PACKAGE_CACHE_DIRECTORY)
+                .join(payload.filename);
+            archives.push(InstallArchive {
+                path: archive
+                    .to_str()
+                    .ok_or(PackageRuntimeError::InvalidPath)?
+                    .to_owned(),
+                name: payload.name.to_owned(),
+                version: payload.version.to_owned(),
+            });
+        }
+        if archives.is_empty() || archives.len() > 256 {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+
+        let config = self
+            .pacman_config
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let root = self
+            .arch_root
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let database_path = self.arch_root.join("var/lib/pacman");
+        let database = database_path
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let trust_directory = self
+            .keyring
+            .parent()
+            .and_then(Path::to_str)
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let cache_path = self.arch_root.join(PACKAGE_CACHE_DIRECTORY);
+        let cache = cache_path
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        for archive in &archives {
+            let result = self.run_with_timeout(
+                PackageTool::Pacman,
+                &[
+                    "--config",
+                    config,
+                    "--root",
+                    root,
+                    "--dbpath",
+                    database,
+                    "--gpgdir",
+                    trust_directory,
+                    "--cachedir",
+                    cache,
+                    "--noconfirm",
+                    "--noprogressbar",
+                    "--noscriptlet",
+                    "--needed",
+                    "--nodeps",
+                    "--overwrite=*",
+                    "-U",
+                    archive.path.as_str(),
+                ],
+                TRANSACTION_TIMEOUT,
+            );
+            if let Err(error) = result {
+                self.recover_interrupted_transaction(archive)?;
+                return Err(error);
+            }
+        }
+        self.run_with_timeout(
+            PackageTool::Pacman,
+            &[
+                "--config", config, "--root", root, "--dbpath", database, "-Q", package,
+            ],
+            COMMAND_TIMEOUT,
+        )
+    }
+
+    fn recover_interrupted_transaction(
+        &self,
+        archive: &InstallArchive,
+    ) -> Result<(), PackageRuntimeError> {
+        let database = self.arch_root.join("var/lib/pacman");
+        match fs::remove_file(database.join("db.lck")) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(PackageRuntimeError::Io(error)),
+        }
+        let entry = database
+            .join("local")
+            .join(format!("{}-{}", archive.name, archive.version));
+        match fs::symlink_metadata(&entry) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(PackageRuntimeError::UnsafeEntry(entry));
+            }
+            Ok(_) if !entry.join("desc").is_file() => fs::remove_dir_all(entry)?,
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(PackageRuntimeError::Io(error)),
+        }
+        Ok(())
+    }
+
     pub fn begin_package_download(
         &self,
         filename: &str,
@@ -616,6 +766,10 @@ impl PackageRuntime {
             .keyring
             .to_str()
             .ok_or(PackageRuntimeError::InvalidPath)?;
+        let ownertrust = self
+            .ownertrust
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
         self.run_with_timeout(
             PackageTool::Gpg,
             &[
@@ -630,8 +784,38 @@ impl PackageRuntime {
             ],
             Duration::from_secs(60),
         )?;
+        self.run_with_timeout(
+            PackageTool::Gpg,
+            &[
+                "--homedir",
+                trust,
+                "--batch",
+                "--quiet",
+                "--no-autostart",
+                "--import-ownertrust",
+                ownertrust,
+            ],
+            Duration::from_secs(60),
+        )?;
+        self.run_with_timeout(
+            PackageTool::Gpg,
+            &[
+                "--homedir",
+                trust,
+                "--batch",
+                "--quiet",
+                "--no-autostart",
+                "--check-trustdb",
+            ],
+            Duration::from_secs(60),
+        )?;
         let keybox = trust_directory.join("pubring.kbx");
         let metadata = fs::symlink_metadata(&keybox)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() == 0 {
+            return Err(PackageRuntimeError::InvalidSignature);
+        }
+        let trustdb = trust_directory.join("trustdb.gpg");
+        let metadata = fs::symlink_metadata(&trustdb)?;
         if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() == 0 {
             return Err(PackageRuntimeError::InvalidSignature);
         }
@@ -666,10 +850,15 @@ impl PackageRuntime {
             .env_clear()
             .env("HOME", self.arch_root.join("home/archphene"))
             .env("TMPDIR", self.arch_root.join("tmp"))
-            .env("PATH", self.arch_root.join("usr/bin"))
+            .env("PATH", &self.executable_path)
             .env("LANG", "C")
             .env("LC_ALL", "C")
             .env("GLIBC_TUNABLES", "glibc.pthread.rseq=0")
+            .env("LD_PRELOAD", &self.path_bridge)
+            .env("ARCHPHENE_RUNTIME_LOADER", &self.loader)
+            .env("ARCHPHENE_RUNTIME_LIB", &self.library_path)
+            .env("ARCHPHENE_RUNTIME_COMMAND_DIR", &self.alias_root)
+            .env("ARCHPHENE_RUNTIME_ROOT", &self.arch_root)
             .stdin(Stdio::null())
             .stdout(Stdio::from(output_file))
             .stderr(Stdio::from(error_file))
@@ -691,7 +880,10 @@ impl PackageRuntime {
         let result = read_output(&output_path);
         let _ = fs::remove_file(&output_path);
         let output = result?;
-        let code = status.code().unwrap_or(-1);
+        let code = status
+            .code()
+            .or_else(|| status.signal().map(|signal| -signal))
+            .unwrap_or(-1);
         if !status.success() {
             return Err(PackageRuntimeError::ToolFailed(code, output));
         }
@@ -861,7 +1053,10 @@ fn parse_entry(line: &str) -> Result<ManifestEntry<'_>, PackageRuntimeError> {
         .parse::<u64>()
         .map_err(|_| PackageRuntimeError::InvalidManifest)?;
     if fields.next().is_some()
-        || !matches!(role, "loader" | "tool" | "library" | "keyring")
+        || !matches!(
+            role,
+            "loader" | "tool" | "library" | "keyring" | "ownertrust"
+        )
         || !safe_logical_name(logical)
         || !safe_packaged_name(packaged)
         || size == 0
@@ -906,6 +1101,7 @@ fn tool_from_logical(value: &str) -> Option<PackageTool> {
         "@bsdtar" => Some(PackageTool::Bsdtar),
         "@gpg" => Some(PackageTool::Gpg),
         "@gpgv" => Some(PackageTool::Gpgv),
+        "@gpgconf" => Some(PackageTool::Gpgconf),
         _ => None,
     }
 }
@@ -1168,6 +1364,60 @@ fn parse_resolution_output(
     Ok(output)
 }
 
+struct ResolvedPayload<'a> {
+    name: &'a str,
+    version: &'a str,
+    filename: &'a str,
+    size: u64,
+}
+
+struct InstallArchive {
+    path: String,
+    name: String,
+    version: String,
+}
+
+fn parse_resolved_payload(line: &str) -> Result<ResolvedPayload<'_>, PackageRuntimeError> {
+    let mut fields = line.split('\t');
+    let repository = fields
+        .next()
+        .ok_or(PackageRuntimeError::InvalidResolution)?;
+    let name = fields
+        .next()
+        .ok_or(PackageRuntimeError::InvalidResolution)?;
+    let version = fields
+        .next()
+        .ok_or(PackageRuntimeError::InvalidResolution)?;
+    let filename = fields
+        .next()
+        .ok_or(PackageRuntimeError::InvalidResolution)?;
+    let url = fields
+        .next()
+        .ok_or(PackageRuntimeError::InvalidResolution)?;
+    let size = fields
+        .next()
+        .ok_or(PackageRuntimeError::InvalidResolution)?
+        .parse::<u64>()
+        .map_err(|_| PackageRuntimeError::InvalidResolution)?;
+    if fields.next().is_some()
+        || !matches!(repository, "core" | "extra")
+        || !safe_logical_name(name)
+        || version.is_empty()
+        || !safe_package_filename(filename)
+        || url.is_empty()
+        || size == 0
+        || size > PACKAGE_ARCHIVE_LIMIT
+    {
+        return Err(PackageRuntimeError::InvalidResolution);
+    }
+    Ok(ResolvedPayload {
+        name,
+        version,
+        filename,
+        size,
+    })
+}
+
 fn resolution_contains(output: &ToolOutput, package: &str) -> Result<bool, PackageRuntimeError> {
     Ok(output.as_str()?.lines().any(|line| {
         let mut fields = line.split('\t');
@@ -1297,10 +1547,14 @@ mod tests {
         tree.file("libarchphene_pkg_222222222222222222222222.so", b"pacman");
         tree.file("libarchphene_pkg_333333333333333333333333.so", b"library");
         tree.file("libarchphene_pkg_444444444444444444444444.so", b"keyring");
+        tree.file("libarchphene_pkg_555555555555555555555555.so", b"bridge");
+        tree.file("libarchphene_pkg_666666666666666666666666.so", b"trust");
         let manifest = b"# org.archphene.package-runtime.v1\n\
 loader\t@loader\tlibarchphene_pkg_111111111111111111111111.so\t6\n\
 tool\t@pacman\tlibarchphene_pkg_222222222222222222222222.so\t6\n\
 keyring\t@keyring\tlibarchphene_pkg_444444444444444444444444.so\t7\n\
+ownertrust\t@ownertrust\tlibarchphene_pkg_666666666666666666666666.so\t5\n\
+library\tlibarchphene_path_bridge.so\tlibarchphene_pkg_555555555555555555555555.so\t6\n\
 library\tlibalpm.so.16\tlibarchphene_pkg_333333333333333333333333.so\t7\n";
         let runtime = PackageRuntime::prepare(
             &tree.root,
@@ -1375,10 +1629,14 @@ loader\t@loader\tlibarchphene_pkg_111111111111111111111111.so\t5\n";
         tree.file("libarchphene_pkg_111111111111111111111111.so", b"loader");
         tree.file("libarchphene_pkg_222222222222222222222222.so", b"pacman");
         tree.file("libarchphene_pkg_444444444444444444444444.so", b"keyring");
+        tree.file("libarchphene_pkg_555555555555555555555555.so", b"bridge");
+        tree.file("libarchphene_pkg_666666666666666666666666.so", b"trust");
         let manifest = b"# org.archphene.package-runtime.v1\n\
 loader\t@loader\tlibarchphene_pkg_111111111111111111111111.so\t6\n\
 tool\t@pacman\tlibarchphene_pkg_222222222222222222222222.so\t6\n\
-keyring\t@keyring\tlibarchphene_pkg_444444444444444444444444.so\t7\n";
+keyring\t@keyring\tlibarchphene_pkg_444444444444444444444444.so\t7\n\
+ownertrust\t@ownertrust\tlibarchphene_pkg_666666666666666666666666.so\t5\n\
+library\tlibarchphene_path_bridge.so\tlibarchphene_pkg_555555555555555555555555.so\t6\n";
         assert!(matches!(
             PackageRuntime::prepare(
                 &tree.root,
@@ -1396,10 +1654,14 @@ keyring\t@keyring\tlibarchphene_pkg_444444444444444444444444.so\t7\n";
         tree.file("libarchphene_pkg_111111111111111111111111.so", b"loader");
         tree.file("libarchphene_pkg_222222222222222222222222.so", b"pacman");
         tree.file("libarchphene_pkg_444444444444444444444444.so", b"keyring");
+        tree.file("libarchphene_pkg_555555555555555555555555.so", b"bridge");
+        tree.file("libarchphene_pkg_666666666666666666666666.so", b"trust");
         let manifest = b"# org.archphene.package-runtime.v1\n\
 loader\t@loader\tlibarchphene_pkg_111111111111111111111111.so\t6\n\
 tool\t@pacman\tlibarchphene_pkg_222222222222222222222222.so\t6\n\
-keyring\t@keyring\tlibarchphene_pkg_444444444444444444444444.so\t7\n";
+keyring\t@keyring\tlibarchphene_pkg_444444444444444444444444.so\t7\n\
+ownertrust\t@ownertrust\tlibarchphene_pkg_666666666666666666666666.so\t5\n\
+library\tlibarchphene_path_bridge.so\tlibarchphene_pkg_555555555555555555555555.so\t6\n";
         let runtime = PackageRuntime::prepare(
             &tree.root,
             &tree.native,
@@ -1484,10 +1746,14 @@ extra\tdotnet-sdk\t10.0.10.sdk110-1\tdotnet-sdk-10.0.10.sdk110-1-x86_64.pkg.tar.
         tree.file("libarchphene_pkg_111111111111111111111111.so", b"loader");
         tree.file("libarchphene_pkg_222222222222222222222222.so", b"pacman");
         tree.file("libarchphene_pkg_444444444444444444444444.so", b"keyring");
+        tree.file("libarchphene_pkg_555555555555555555555555.so", b"bridge");
+        tree.file("libarchphene_pkg_666666666666666666666666.so", b"trust");
         let manifest = b"# org.archphene.package-runtime.v1\n\
 loader\t@loader\tlibarchphene_pkg_111111111111111111111111.so\t6\n\
 tool\t@pacman\tlibarchphene_pkg_222222222222222222222222.so\t6\n\
-keyring\t@keyring\tlibarchphene_pkg_444444444444444444444444.so\t7\n";
+keyring\t@keyring\tlibarchphene_pkg_444444444444444444444444.so\t7\n\
+ownertrust\t@ownertrust\tlibarchphene_pkg_666666666666666666666666.so\t5\n\
+library\tlibarchphene_path_bridge.so\tlibarchphene_pkg_555555555555555555555555.so\t6\n";
         let runtime = PackageRuntime::prepare(
             &tree.root,
             &tree.native,

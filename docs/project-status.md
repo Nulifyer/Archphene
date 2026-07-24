@@ -18,7 +18,8 @@ batching, Activity recreation, HOME/resume continuity, Back shutdown, private
 root creation and required modes, version validation, and idempotent service
 restart. The private root currently establishes conventional `/usr`, `/etc`,
 `/var`, `/opt`, `/home`, `/tmp`, and `/mnt/android` layout locations; it does
-not yet contain a bootstrapped Arch userspace.
+not yet contain a complete base userspace, but verified package closures now
+populate it incrementally through pacman's normal local database.
 
 The replacement also owns a fixed 11,808-byte package-operation journal. It
 holds at most 32 bounded jobs, enforces legal transitions, publishes updates
@@ -27,17 +28,17 @@ interrupted active work into an explicit retryable failure, and reuses terminal
 slots deterministically. Host tests prove the warmed in-memory input and job
 paths allocate no heap objects.
 
-The verified pacman, bsdtar, GnuPG, patched glibc loader, and complete ELF
-closures are now staged into content-addressed exact-ABI Android native
-payloads. Rust validates a bounded signed-APK manifest and every packaged file
-before creating private symlink aliases, invokes tools directly through the
-patched loader with a cleared environment and bounded output/timeout, and
-proves the real pacman version before publishing readiness. Exact-ABI debug
-artifacts are 38 MiB for x86_64 and 36 MiB for arm64-v8a; executable native
-payloads and signed keyrings are deliberately extracted because child
-processes cannot consume them from mmap-only APK entries. Clean and reused-root
-gates pass on the emulator and Samsung with full-device screenshots,
-lifecycle/input checks, and scoped fatal logs.
+The verified pacman, bsdtar, GnuPG/GPGConf, generic path bridge, patched glibc
+loader, and complete ELF closures are now staged into content-addressed
+exact-ABI Android native payloads. Rust validates a bounded signed-APK manifest
+and every packaged file before creating private symlink aliases, invokes tools
+directly through the patched loader with a cleared environment and bounded
+output/timeout, and proves the real pacman version before publishing readiness.
+Exact-ABI debug artifacts are 38 MiB for x86_64 and 36 MiB for arm64-v8a;
+executable native payloads and signed keyrings are deliberately extracted
+because child processes cannot consume them from mmap-only APK entries. Clean
+and reused-root gates pass on the emulator and Samsung with full-device
+screenshots, lifecycle/input checks, and scoped fatal logs.
 
 Official exact-ABI repository catalogs are now connected. Rust selects the
 fixed HTTPS endpoint and opens one bounded transfer file; Kotlin's Android TLS
@@ -62,22 +63,32 @@ Samsung resolves current AArch64 `btop` to nine packages and a 13 MiB
 download. Both pass process-death reuse, scoped-log, and full-device screenshot
 gates.
 
-The Kotlin UI now exposes an honest **Prepare** action rather than a
-nonfunctional Install button. It persists and renders Queued, Resolving,
-Downloading, Verifying, Publishing, Complete, and Failed phases. Android
-transports exact official archives and detached signatures through Rust-owned
-bounded descriptors; Rust enforces the resolved byte size, atomically publishes
-mode-0600 cache files, imports the signed architecture-specific keyring into a
-fresh private keybox, verifies the detached signature, and checks the signed
-`.PKGINFO` name, version, and architecture. AArch64 additionally requires the
-pinned Arch Linux ARM build signer. Current nine-package `btop` closures pass
-on the emulator and Samsung. Both gates deliberately corrupt a cached archive,
-prove rejection, redownload and reverify it, then prove the durable Complete
-result survives manager process death with full-device screenshots and clean
-scoped logs.
+The Kotlin UI now exposes a functional **Install** action. It persists and
+renders Queued, Resolving, Downloading, Verifying, Publishing, Installing,
+Complete, and Failed work. Android transports exact official archives and
+detached signatures through Rust-owned bounded descriptors; Rust enforces the
+resolved byte size, atomically publishes mode-0600 cache files, imports the
+sealed architecture-specific keyring and owner trust into a fresh private
+keybox, verifies each detached signature, and checks the signed `.PKGINFO`
+name, version, and architecture. AArch64 additionally requires the pinned Arch
+Linux ARM build signer.
 
-Pacman root mutation and durable install/update/remove actions are not
-connected yet, so the replacement still does not expose Install.
+Immediately before mutation, Rust re-resolves and re-verifies the full bounded
+closure. Pacman then commits it in dependency order to the shared private root,
+using the generic compatibility layer to map Linux root ownership to the
+Android app UID, copy when SELinux rejects hard links, and avoid Android app
+seccomp's blocked `fchmodat2`. The current path recovers its bounded stale-lock
+and incomplete-entry cases and proves the requested package through pacman's
+local database.
+
+Clean nine-package `btop` installs pass on the x86_64 emulator and AArch64
+Samsung. Both gates deliberately corrupt the target archive, prove rejection,
+redownload and reverify it, check the installed executable and database entry,
+then prove the durable Complete result survives manager process death with
+full-device screenshots and clean scoped logs. Package update/removal,
+hooks/scriptlets, closure-wide rollback, full dependency validation,
+cancellation, and low-storage recovery remain open, so this is not yet a
+complete production transaction engine.
 
 The validated prototype below remains reference evidence until replacement
 vertical slices pass equivalent gates. Installed prototype state is no longer a

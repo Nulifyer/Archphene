@@ -20,6 +20,7 @@ mkdir -p "$container_out"
 
 container_volume="$container_out"
 patch_volume="$root/patches/glibc"
+path_bridge_volume="$root/native/archphene-glibc-path-bridge"
 
 "$container_cli" run --rm \
   -e HOST_UID="$(id -u)" \
@@ -30,6 +31,7 @@ patch_volume="$root/patches/glibc"
   -e JOBS="$jobs" \
   -v "$container_volume:/out" \
   -v "$patch_volume:/archphene-patches:ro" \
+  -v "$path_bridge_volume:/archphene-path-bridge:ro" \
   archlinux:base-devel bash -c '
 set -euo pipefail
 pacman-key --init
@@ -44,7 +46,7 @@ while IFS= read -r -d "" file; do
   [[ -v "provided[$name]" ]] || provided["$name"]="$file"
 done < <(find /usr/lib -maxdepth 1 \( -type f -o -type l \) -print0)
 
-queue=(/usr/bin/pacman /usr/bin/gpg /usr/bin/gpgv /usr/bin/bsdtar)
+queue=(/usr/bin/pacman /usr/bin/gpg /usr/bin/gpgv /usr/bin/gpgconf /usr/bin/bsdtar)
 for ((index=0; index<${#queue[@]}; index++)); do
   object="${queue[$index]}"
   canonical="$(readlink -f "$object")"
@@ -61,7 +63,7 @@ for ((index=0; index<${#queue[@]}; index++)); do
     sed -n "s/.*Shared library: \[\([^]]*\)\].*/\1/p")
 done
 
-for name in pacman gpg gpgv bsdtar; do
+for name in pacman gpg gpgv gpgconf bsdtar; do
   cp -L "/usr/bin/$name" "/out/runtime-root/usr/bin/$name"
 done
 : > /out/elf-needed-resolved.tsv
@@ -71,6 +73,22 @@ while IFS= read -r name; do
 done < <(printf "%s\n" "${!resolved[@]}" | sort)
 cp -a /usr/share/pacman/keyrings/. /out/keyrings/
 pacman -Q archlinux-keyring gnupg libarchive pacman > /out/package-versions.txt
+mkdir -p /out/path-bridge
+gcc -shared -fPIC -O2 -Wall -Wextra -Werror \
+  -o /out/path-bridge/libarchphene_path_bridge.so \
+  /archphene-path-bridge/path_bridge.c -ldl
+readelf -Ws /out/path-bridge/libarchphene_path_bridge.so \
+  > /tmp/path-bridge-symbols.txt
+grep -Eq " execve$" /tmp/path-bridge-symbols.txt
+grep -Eq " execv$" /tmp/path-bridge-symbols.txt
+grep -Eq " chdir$" /tmp/path-bridge-symbols.txt
+grep -Eq " chroot$" /tmp/path-bridge-symbols.txt
+grep -Eq " geteuid$" /tmp/path-bridge-symbols.txt
+grep -Eq " fchmodat$" /tmp/path-bridge-symbols.txt
+grep -Eq " fchownat$" /tmp/path-bridge-symbols.txt
+grep -Eq " linkat$" /tmp/path-bridge-symbols.txt
+grep -Eq " readlink$" /tmp/path-bridge-symbols.txt
+grep -Eq " readlinkat$" /tmp/path-bridge-symbols.txt
 
 if [[ "$SKIP_CHOWN" != "1" ]]; then
   chown -R "$HOST_UID:$HOST_GID" /out
@@ -129,6 +147,12 @@ if [[ "$SKIP_CHOWN" != "1" ]]; then
 fi
 '
 
+# Rootless Podman maps container UID 0 to the invoking host user. Normalize the
+# bind mount before host-side staging and trap cleanup.
+if [[ "$(basename "$container_cli")" == podman && "${SKIP_CHOWN:-0}" != 1 ]]; then
+  "$container_cli" unshare chown -R 0:0 "$container_out"
+fi
+
 cp -a "$container_out/glibc" "$glibc_out"
 
 pacman_stage="$stage/tooling/downloads/arch-runtime-pacman-x86_64"
@@ -142,6 +166,8 @@ cp "$container_out/package-versions.txt" "$pacman_stage/"
 cp -a "$container_out/keyrings/." \
   "$keyring_stage/runtime-root/usr/share/pacman/keyrings/"
 cp -a "$glibc_out" "$stage/tooling/build/"
+cp -a "$container_out/path-bridge" \
+  "$stage/tooling/build/archphene-path-bridge-x86_64"
 
 (cd "$stage" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum) \
   > "$stage/SHA256SUMS"

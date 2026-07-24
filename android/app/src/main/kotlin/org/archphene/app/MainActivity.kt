@@ -129,12 +129,12 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     runtimeBinder?.resolvePackage(searchInput.text.toString())
                 }
             }
-        val prepareButton =
+        val installButton =
             Button(this).apply {
-                setText(R.string.prepare)
+                setText(R.string.install)
                 setOnClickListener {
                     hideKeyboard(searchInput)
-                    runtimeBinder?.preparePackage(searchInput.text.toString())
+                    runtimeBinder?.installPackage(searchInput.text.toString())
                 }
             }
         searchInput.setOnEditorActionListener { _, actionId, _ ->
@@ -172,7 +172,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     ),
                 )
                 addView(
-                    prepareButton,
+                    installButton,
                     LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.WRAP_CONTENT,
                         ViewGroup.LayoutParams.MATCH_PARENT,
