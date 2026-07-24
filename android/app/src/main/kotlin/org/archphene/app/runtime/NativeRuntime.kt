@@ -78,6 +78,10 @@ internal object NativeRuntime {
         queryLength: Int,
         outputBuffer: ByteBuffer,
     ): Int
+    external fun nativeDiscoverShells(
+        handle: Long,
+        outputBuffer: ByteBuffer,
+    ): Int
     external fun nativeResolvePackage(
         handle: Long,
         packageBuffer: ByteBuffer,

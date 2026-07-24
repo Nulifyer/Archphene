@@ -16,6 +16,8 @@
     <string name="linux_command_hint">Linux command, for example btop --version</string>
     <string name="run_command">Run</string>
     <string name="start_shell">Start shell</string>
+    <string name="installed_shell">Shell</string>
+    <string name="no_supported_shell">No supported shell</string>
     <string name="linux_command_unavailable">Linux command environment unavailable</string>
     <string name="package_job_empty">No package transaction</string>
     <string name="package_job_unavailable">Package operation unavailable</string>

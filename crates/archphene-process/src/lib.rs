@@ -173,6 +173,17 @@ impl CommandEnvironment {
         result
     }
 
+    pub fn command_available(&self, command: &str) -> Result<bool, ProcessError> {
+        validate_request(command, &[])?;
+        let command_path = match resolve_installed_command(&self.arch_root, command) {
+            Ok(path) => path,
+            Err(ProcessError::MissingCommand) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        prepare_launch(&self.arch_root, command, command_path)?;
+        Ok(true)
+    }
+
     pub fn open_pty(
         &self,
         command: &str,

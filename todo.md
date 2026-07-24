@@ -85,7 +85,8 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
       - [x] Keep package-installed Bash interactive in a controlling PTY while Archphene owns line editing; disable Bash's redundant Readline path, which Android app seccomp kills while idle.
       - [x] Publish conventional `/home/archphene`, `/tmp`, XDG, and `/usr` PATH values; map `getcwd` back into the Linux root; activate the installed `C.utf8` data; and create user-owned `.bashrc`/`.bash_profile` defaults once without overwriting edits.
       - [x] Pass root-contained multibyte script plus interactive prompt, HOME, PWD, PATH, UTF-8 charmap, Activity recreation, scoped-log, and full-device gates on both targets.
-      - [ ] Add shell discovery/selection, per-shell startup adapters, user-editing UI/document access, and a documented PATH extension policy.
+      - [x] Discover declared, safely installed Bash/POSIX-shell adapters in Rust; expose a bounded Kotlin selector; persist the stable choice; refresh it after package mutation; lock it during a session; and pass exact-ABI process-restart, PTY, scoped-log, and full-device gates on both targets.
+      - [ ] Add reviewed startup adapters for additional installed shells, user-editing UI/document access for shell startup files, and a documented PATH extension policy.
     - [x] Add a four-slot generation-checked PTY registry with controlling-terminal setup, bounded nonblocking direct-buffer I/O, resize, deterministic close, and process-group kill/reap on runtime destruction.
     - [x] Pass package-installed Bash PTY open, 24×80 to 40×120 resize, bidirectional marker, close/reap, scoped-log, and full-device UI gates on both targets.
     - [x] Add user-controlled long-lived session ownership, backpressure queues, cancellation, exit status, Activity/process-death policy, and reboot recovery.

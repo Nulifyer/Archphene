@@ -15,15 +15,19 @@ import android.text.TextUtils
 import android.util.Log
 import android.view.Choreographer
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.Spinner
 import android.widget.TextView
 import org.archphene.app.runtime.ArchpheneRuntimeService
 import org.archphene.app.runtime.NativeRuntime
@@ -40,6 +44,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private lateinit var removeButton: Button
     private lateinit var commandButton: Button
     private lateinit var ptyButton: Button
+    private lateinit var shellSpinner: Spinner
+    private lateinit var shellAdapter: ArrayAdapter<String>
     private val snapshot = RuntimeSnapshot()
     private val statusText = StringBuilder(128)
     private var runtimeBinder: ArchpheneRuntimeService.LocalBinder? = null
@@ -47,6 +53,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private var frameCallbackActive = false
     private var statusFrameCountdown = 0
     private var keepServiceAfterFinish = false
+    private var shellCatalogRevision = Int.MIN_VALUE
 
     private val serviceConnection =
         object : ServiceConnection {
@@ -69,6 +76,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 removeButton.isEnabled = false
                 commandButton.isEnabled = false
                 ptyButton.isEnabled = false
+                shellSpinner.isEnabled = false
             }
         }
 
@@ -263,6 +271,60 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 setBackgroundColor(Color.rgb(31, 35, 38))
                 maxLines = 2
             }
+        shellAdapter =
+            ArrayAdapter<String>(this, R.layout.shell_spinner_item).apply {
+                setDropDownViewResource(R.layout.shell_spinner_dropdown_item)
+            }
+        shellSpinner =
+            Spinner(this).apply {
+                adapter = shellAdapter
+                backgroundTintList = getColorStateList(R.color.shell_spinner_tint)
+                contentDescription = getString(R.string.installed_shell)
+                isEnabled = false
+                onItemSelectedListener =
+                    object : AdapterView.OnItemSelectedListener {
+                        override fun onItemSelected(
+                            parent: AdapterView<*>?,
+                            view: View?,
+                            position: Int,
+                            id: Long,
+                        ) {
+                            val binder = runtimeBinder ?: return
+                            if (position != binder.selectedSharedShellIndex) {
+                                binder.selectSharedShell(position)
+                            }
+                        }
+
+                        override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+                    }
+            }
+        val shellRow =
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setBackgroundColor(Color.rgb(31, 35, 38))
+                addView(
+                    TextView(this@MainActivity).apply {
+                        setText(R.string.installed_shell)
+                        setTextColor(Color.WHITE)
+                        textSize = 14f
+                        gravity = Gravity.CENTER_VERTICAL
+                        setPadding(dp(16), 0, dp(8), 0)
+                    },
+                    LinearLayout.LayoutParams(
+                        dp(96),
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                    ),
+                )
+                addView(
+                    shellSpinner,
+                    LinearLayout.LayoutParams(
+                        0,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        1f,
+                    ),
+                )
+            }
         val commandInput =
             EditText(this).apply {
                 setHint(R.string.linux_command_hint)
@@ -384,6 +446,13 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         dp(64),
+                    ),
+                )
+                addView(
+                    shellRow,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        dp(48),
                     ),
                 )
                 addView(
@@ -548,8 +617,10 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             removeButton.isEnabled = false
             commandButton.isEnabled = false
             ptyButton.isEnabled = false
+            shellSpinner.isEnabled = false
             return
         }
+        updateShellSelector(binder)
         setTextIfChanged(installButton, binder.packagePrimaryActionLabel)
         installButton.isEnabled = binder.packagePrimaryActionAvailable
         removeButton.isEnabled = binder.packageRemoveAvailable
@@ -557,6 +628,25 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         commandButton.isEnabled = binder.linuxCommandAvailable
         setTextIfChanged(ptyButton, binder.sharedShellActionLabel)
         ptyButton.isEnabled = binder.sharedShellActionAvailable
+    }
+
+    private fun updateShellSelector(binder: ArchpheneRuntimeService.LocalBinder) {
+        val revision = binder.shellCatalogRevision
+        if (revision != shellCatalogRevision) {
+            shellCatalogRevision = revision
+            shellAdapter.clear()
+            val labels = binder.supportedShellLabels
+            if (labels.isEmpty()) {
+                shellAdapter.add(getString(R.string.no_supported_shell))
+            } else {
+                shellAdapter.addAll(labels.asList())
+            }
+            val selected = binder.selectedSharedShellIndex
+            if (selected in 0 until shellAdapter.count) {
+                shellSpinner.setSelection(selected, false)
+            }
+        }
+        shellSpinner.isEnabled = binder.sharedShellSelectionAvailable
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density + 0.5f).toInt()

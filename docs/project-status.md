@@ -207,6 +207,23 @@ process-death/reboot interruption and restart policy, a real terminal parser
 and renderer, scrollback, selection, IME/hardware-keyboard handling,
 clipboard, and accessibility remain open.
 
+Shell launch is no longer hardcoded in Kotlin. Rust reads the bounded,
+non-symlinked, non-group/world-writable shared `/etc/shells`, cross-checks each
+supported adapter against the safely resolved installed executable, and
+publishes only the reviewed Bash and POSIX-shell launch records. The Kotlin
+Service persists
+the stable shell identifier, refreshes discovery after package mutation,
+prebuilds each bounded NUL-delimited PTY request once, and keeps the selector
+disabled while a session is active. Unsupported or unsafe catalogs disable
+shell launch without making package management unavailable.
+
+The readable Android selector, process-death persistence, distinct
+`archphene:~$` and `sh-5.3$` PTY prompts, stop/reap behavior, scoped fatal
+logs, and full-device screenshots pass with exact-ABI APKs on the API 36
+x86_64 emulator and AArch64 Samsung. Bash is restored as the selected default
+after each gate. Additional shell-specific startup adapters, editable startup
+files, and the production terminal surface remain pending.
+
 The validated prototype below remains reference evidence until replacement
 vertical slices pass equivalent gates. Installed prototype state is no longer a
 replacement requirement.
@@ -290,7 +307,7 @@ Local debug builds can remain multi-ABI. Release builds emit independently signe
 - Rich notification actions, non-HTTP URI policies, and remaining desktop portals.
 - Broader Qt, GTK, SDL, Electron, and Rust-native compatibility.
 - GrapheneOS Pixel and sustained desktop-mode validation.
-- Project trees and granted GUI documents currently use explicit synchronized mirrors; a live SAF path broker remains pending. Optional shells beyond managed Bash have not been selected.
+- Project trees and granted GUI documents currently use explicit synchronized mirrors; a live SAF path broker remains pending. The replacement selects installed Bash or its POSIX-shell mode; additional shell-specific startup adapters remain pending.
 - Build a separately signed 16 KB x86_64 package universe. The Archphene-owned glibc loader now passes real 16 KB Android execution, but official Arch executables and shared objects remain 4 KB-aligned. The manager continues to block Add/install on 16 KB x86_64 until an entire no-mixing closure, including late-loaded modules, is rebuilt and validated.
 - Pin the missing KConfig development sysroot needed for a completely self-contained AArch64 Qt bridge rebuild, and restore the GTK settings bridge's clean container dependency declaration.
 - Broaden the validated Qt/GTK theme, density, focus, menu, and dialog behavior beyond KCalc, Kate, Mousepad, and GNOME Text Editor and across the remaining release representatives.

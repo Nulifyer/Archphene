@@ -208,6 +208,13 @@ impl RuntimeHost {
         self.package_runtime.as_ref()
     }
 
+    pub fn discover_shells(&self) -> Result<ToolOutput, PackageRuntimeError> {
+        self.package_runtime
+            .as_ref()
+            .ok_or(PackageRuntimeError::InvalidPath)?
+            .discover_shells()
+    }
+
     pub fn begin_package_job(
         &mut self,
         operation: JobOperation,

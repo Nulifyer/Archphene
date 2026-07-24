@@ -85,6 +85,7 @@ class ArchpheneRuntimeService : Service() {
                     true
                 } else {
                     readyHandle != 0L &&
+                        selectedShellIndex >= 0 &&
                         !catalogRefreshActive &&
                         !searchActive &&
                         !packageOperationActive &&
@@ -93,6 +94,18 @@ class ArchpheneRuntimeService : Service() {
 
         val sharedShellRunning: Boolean
             get() = shellActive
+
+        val shellCatalogRevision: Int
+            get() = shellChoicesRevision
+
+        val supportedShellLabels: Array<String>
+            get() = shellChoices.map(ShellChoice::label).toTypedArray()
+
+        val selectedSharedShellIndex: Int
+            get() = selectedShellIndex
+
+        val sharedShellSelectionAvailable: Boolean
+            get() = !shellActive && shellChoices.size > 1
 
         fun refreshPackageCatalogs(): Boolean = requestCatalogRefresh()
 
@@ -113,6 +126,8 @@ class ArchpheneRuntimeService : Service() {
             } else {
                 requestLinuxCommand(commandLine)
             }
+
+        fun selectSharedShell(index: Int): Boolean = requestShellSelection(index)
 
         fun toggleSharedShell(): Boolean = requestSharedShellToggle()
     }
@@ -138,6 +153,9 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var shellStopRequested = false
     @Volatile private var shellHandle = 0L
     @Volatile private var shellPhase = "Shared shell stopped"
+    @Volatile private var shellChoices: List<ShellChoice> = emptyList()
+    @Volatile private var shellChoicesRevision = 0
+    @Volatile private var selectedShellIndex = -1
     @Volatile private var jobStatus = "No package transaction"
     @Volatile private var lastResolvedPackage = ""
     @Volatile private var lastResolvedRepository = ""
@@ -156,6 +174,12 @@ class ArchpheneRuntimeService : Service() {
         val filename: String,
         val url: String,
         val size: Long,
+    )
+
+    private data class ShellChoice(
+        val id: String,
+        val label: String,
+        val requestBytes: ByteArray,
     )
 
     private class PackageIoScratch {
@@ -368,6 +392,10 @@ class ArchpheneRuntimeService : Service() {
         private const val SHELL_INPUT_CHARACTERS = 2 * 1024
         private const val SHELL_IO_BYTES = 4 * 1024
         private const val SHELL_READ_BATCHES = 4
+        private const val SHELL_CHOICE_LIMIT = 8
+        private const val SHELL_FIELD_LIMIT = 64
+        private const val SHELL_PREFERENCES = "terminal"
+        private const val SHELL_PREFERENCE_ID = "shared_shell_id"
         private const val SESSION_NOTIFICATION_ID = 0x4152
         private const val SESSION_NOTIFICATION_CHANNEL = "archphene_linux_sessions"
         private const val ACTION_STOP_SHELL = "org.archphene.app.action.STOP_SHARED_SHELL"
@@ -481,6 +509,7 @@ class ArchpheneRuntimeService : Service() {
                             )
                         }
                         val packageVersion = preparePackageRuntime(activeHandle)
+                        refreshShellChoices(activeHandle)
                         jobStatus = readLatestPackageJob(activeHandle)
                         mainHandler.post {
                             if (handle != activeHandle) {
@@ -1004,6 +1033,105 @@ class ArchpheneRuntimeService : Service() {
         return String(bytes, StandardCharsets.UTF_8)
     }
 
+    private fun discoverShells(activeHandle: Long): List<ShellChoice> {
+        val outputBuffer = ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
+        val outputLength = NativeRuntime.nativeDiscoverShells(activeHandle, outputBuffer)
+        if (outputLength < 0) {
+            throw IllegalStateException(
+                "Installed shell discovery failed: ${readNativeMessage(outputBuffer, outputLength)}",
+            )
+        }
+        if (outputLength == 0 || outputLength > NativeRuntime.PACKAGE_OUTPUT_SIZE) {
+            throw IllegalStateException("No supported installed shell is available")
+        }
+        val bytes = ByteArray(outputLength)
+        outputBuffer.position(0)
+        outputBuffer.get(bytes)
+        val choices = ArrayList<ShellChoice>(2)
+        val seenIds = HashSet<String>(2)
+        String(bytes, StandardCharsets.UTF_8).lineSequence().forEach { line ->
+            if (line.isEmpty()) {
+                return@forEach
+            }
+            if (choices.size >= SHELL_CHOICE_LIMIT) {
+                throw IllegalStateException("Installed shell catalog is too large")
+            }
+            val fields = line.split('\t')
+            if (
+                fields.size < 3 ||
+                fields.size > 7 ||
+                fields.any { field ->
+                    field.isEmpty() ||
+                        field.length > SHELL_FIELD_LIMIT ||
+                        field.any { character ->
+                            character.code !in 0x20..0x7e || character == '\u0000'
+                        }
+                } ||
+                fields.drop(2).any { field -> field.indexOf(' ') >= 0 }
+            ) {
+                throw IllegalStateException("Installed shell catalog is invalid")
+            }
+            val id = fields[0]
+            val label = fields[1]
+            if (
+                !id.all { character ->
+                    character.isLowerCase() || character.isDigit() || character == '-'
+                } ||
+                !seenIds.add(id)
+            ) {
+                throw IllegalStateException("Installed shell catalog has an invalid identifier")
+            }
+            val encoded = fields.drop(2).map { field -> field.toByteArray(StandardCharsets.UTF_8) }
+            val requestLength = encoded.sumOf(ByteArray::size) + encoded.size - 1
+            if (requestLength > NativeRuntime.COMMAND_REQUEST_LIMIT) {
+                throw IllegalStateException("Installed shell launch request is too large")
+            }
+            val requestBytes = ByteArray(requestLength)
+            var offset = 0
+            encoded.forEachIndexed { index, field ->
+                if (index != 0) {
+                    requestBytes[offset++] = 0
+                }
+                field.copyInto(requestBytes, offset)
+                offset += field.size
+            }
+            choices.add(ShellChoice(id, label, requestBytes))
+        }
+        if (choices.isEmpty()) {
+            throw IllegalStateException("No supported installed shell is available")
+        }
+        return choices
+    }
+
+    @Synchronized
+    private fun publishShellChoices(choices: List<ShellChoice>) {
+        val preferredId =
+            getSharedPreferences(SHELL_PREFERENCES, MODE_PRIVATE)
+                .getString(SHELL_PREFERENCE_ID, "bash")
+        shellChoices = choices
+        selectedShellIndex =
+            if (choices.isEmpty()) {
+                -1
+            } else {
+                choices.indexOfFirst { choice -> choice.id == preferredId }
+                    .takeIf { index -> index >= 0 }
+                    ?: choices.indexOfFirst { choice -> choice.id == "bash" }
+                        .takeIf { index -> index >= 0 }
+                    ?: 0
+            }
+        shellChoicesRevision++
+    }
+
+    private fun refreshShellChoices(activeHandle: Long) {
+        try {
+            publishShellChoices(discoverShells(activeHandle))
+        } catch (error: Exception) {
+            publishShellChoices(emptyList())
+            shellPhase = "No supported installed shell"
+            Log.w(TAG, "Installed shell catalog unavailable", error)
+        }
+    }
+
     @Synchronized
     private fun requestPackageInstall(packageName: String): Boolean {
         val normalized = packageName.trim()
@@ -1135,6 +1263,7 @@ class ArchpheneRuntimeService : Service() {
                             normalized,
                             scratch,
                         )
+                        refreshShellChoices(activeHandle)
                         record(
                             NativeRuntime.JOB_COMPLETE,
                             5,
@@ -1309,6 +1438,7 @@ class ArchpheneRuntimeService : Service() {
                             normalized,
                             scratch,
                         )
+                        refreshShellChoices(activeHandle)
                         lastResolvedInstalledVersion = ""
                         primaryActionLabel = "Install"
                         removeAvailable = false
@@ -1757,14 +1887,36 @@ class ArchpheneRuntimeService : Service() {
     }
 
     @Synchronized
+    private fun requestShellSelection(index: Int): Boolean {
+        if (shellActive || index !in shellChoices.indices) {
+            return false
+        }
+        if (selectedShellIndex == index) {
+            return true
+        }
+        val saved =
+            getSharedPreferences(SHELL_PREFERENCES, MODE_PRIVATE)
+                .edit()
+                .putString(SHELL_PREFERENCE_ID, shellChoices[index].id)
+                .commit()
+        if (!saved) {
+            return false
+        }
+        selectedShellIndex = index
+        return true
+    }
+
+    @Synchronized
     private fun requestSharedShellToggle(): Boolean {
         if (shellActive) {
             stopSharedShell(waitForWorker = false)
             return true
         }
         val activeHandle = readyHandle
+        val selectedShell = shellChoices.getOrNull(selectedShellIndex)
         if (
             activeHandle == 0L ||
+            selectedShell == null ||
             catalogRefreshActive ||
             searchActive ||
             packageOperationActive ||
@@ -1781,7 +1933,7 @@ class ArchpheneRuntimeService : Service() {
         promoteSessionToForeground()
         shellThread =
             Thread(
-                { runSharedShell(activeHandle) },
+                { runSharedShell(activeHandle, selectedShell) },
                 "ArchpheneShell",
             ).also(Thread::start)
         return true
@@ -1811,7 +1963,10 @@ class ArchpheneRuntimeService : Service() {
         return result == 0
     }
 
-    private fun runSharedShell(activeHandle: Long) {
+    private fun runSharedShell(
+        activeHandle: Long,
+        selectedShell: ShellChoice,
+    ) {
         var ptyHandle = 0L
         var exitStatus: Int? = null
         var failure: Exception? = null
@@ -1820,14 +1975,7 @@ class ArchpheneRuntimeService : Service() {
         val readBytes = ByteArray(SHELL_IO_BYTES)
         val writeBytes = ByteArray(SHELL_IO_BYTES)
         try {
-            val requestBytes =
-                byteArrayOf(
-                    *"bash".toByteArray(StandardCharsets.UTF_8),
-                    0.toByte(),
-                    *"--noprofile".toByteArray(StandardCharsets.UTF_8),
-                    0.toByte(),
-                    *"--noediting".toByteArray(StandardCharsets.UTF_8),
-                )
+            val requestBytes = selectedShell.requestBytes
             val requestBuffer = ByteBuffer.allocateDirect(requestBytes.size)
             requestBuffer.put(requestBytes)
             val outputBuffer = ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
@@ -1851,7 +1999,7 @@ class ArchpheneRuntimeService : Service() {
                 shellPhase = "Shared shell ready"
             }
             mainHandler.post(::updateSessionNotification)
-            Log.i(TAG, "Shared Bash session started")
+            Log.i(TAG, "Shared ${selectedShell.label} session started")
             while (!shellStopRequested) {
                 val queued = shellInput.peek(writeBytes)
                 if (queued != 0) {
@@ -1949,9 +2097,13 @@ class ArchpheneRuntimeService : Service() {
                     }
             }
             if (failure != null) {
-                Log.e(TAG, "Shared Bash session failed", failure)
+                Log.e(TAG, "Shared ${selectedShell.label} session failed", failure)
             } else {
-                Log.i(TAG, "Shared Bash session finished with status ${exitStatus ?: "stopped"}")
+                Log.i(
+                    TAG,
+                    "Shared ${selectedShell.label} session finished with status " +
+                        "${exitStatus ?: "stopped"}",
+                )
             }
             mainHandler.post {
                 removeSessionNotification()

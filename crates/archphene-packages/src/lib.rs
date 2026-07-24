@@ -35,6 +35,8 @@ const PACKAGE_TRUST_STATE: &str = "source-v1";
 const PACKAGE_TRUST_STATE_LIMIT: u64 = 512;
 const PACKAGE_KEYBOX_LIMIT: u64 = 8 * 1024 * 1024;
 const PACKAGE_TRUSTDB_LIMIT: u64 = 1024 * 1024;
+const SHELLS_FILE: &str = "etc/shells";
+const SHELLS_FILE_LIMIT: u64 = 4 * 1024;
 const LOCAL_DATABASE_ENTRY_LIMIT: usize = 4096;
 const LOCAL_DESCRIPTION_LIMIT: u64 = 64 * 1024;
 const PATH_BRIDGE_NAME: &str = "libarchphene_path_bridge.so";
@@ -428,6 +430,53 @@ impl PackageRuntime {
         arguments: &[&str],
     ) -> Result<ToolOutput, PackageRuntimeError> {
         self.run_with_timeout(tool, arguments, COMMAND_TIMEOUT)
+    }
+
+    pub fn discover_shells(&self) -> Result<ToolOutput, PackageRuntimeError> {
+        let path = self.arch_root.join(SHELLS_FILE);
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || metadata.permissions().mode() & 0o022 != 0
+            || metadata.len() == 0
+            || metadata.len() > SHELLS_FILE_LIMIT
+        {
+            return Err(PackageRuntimeError::UnsafeEntry(path));
+        }
+        let source = fs::read_to_string(&path)?;
+        if source.len() as u64 != metadata.len() {
+            return Err(PackageRuntimeError::InvalidManifest);
+        }
+        let environment = self.command_environment()?;
+        let mut output = ToolOutput {
+            bytes: [0; MAX_TOOL_OUTPUT_BYTES],
+            length: 0,
+        };
+        for (id, label, command, arguments, paths) in [
+            (
+                "bash",
+                "Bash",
+                "bash",
+                "--noprofile\t--noediting",
+                ["/bin/bash", "/usr/bin/bash"],
+            ),
+            (
+                "sh",
+                "POSIX shell",
+                "sh",
+                "--noprofile\t--noediting",
+                ["/bin/sh", "/usr/bin/sh"],
+            ),
+        ] {
+            let declared = source.lines().any(|line| {
+                let line = line.trim();
+                !line.starts_with('#') && paths.contains(&line)
+            });
+            if declared && environment.command_available(command)? {
+                output.push(format!("{id}\t{label}\t{command}\t{arguments}\n").as_bytes())?;
+            }
+        }
+        Ok(output)
     }
 
     pub fn begin_catalog_download(
@@ -2008,6 +2057,15 @@ mod tests {
         fn file(&self, name: &str, bytes: &[u8]) {
             fs::write(self.native.join(name), bytes).expect("native fixture");
         }
+
+        fn command(&self, name: &str) {
+            let directory = self.root.join("usr/bin");
+            fs::create_dir_all(&directory).expect("command directory");
+            let path = directory.join(name);
+            fs::write(&path, b"\x7fELF test command").expect("command fixture");
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+                .expect("command permissions");
+        }
     }
 
     impl Drop for TestTree {
@@ -2120,6 +2178,55 @@ library\tlibarchphene_path_bridge.so\tlibarchphene_pkg_555555555555555555555555.
         symlink("/system/build.prop", trust.join("pubring.kbx")).expect("unsafe keybox");
         assert!(matches!(
             changed.reuse_verification_keyring(&trust, &expected),
+            Err(PackageRuntimeError::UnsafeEntry(_))
+        ));
+    }
+
+    #[test]
+    fn shell_discovery_uses_declared_safe_installed_adapters() {
+        let tree = TestTree::new();
+        tree.file("libarchphene_pkg_111111111111111111111111.so", b"loader");
+        tree.file("libarchphene_pkg_222222222222222222222222.so", b"pacman");
+        tree.file("libarchphene_pkg_444444444444444444444444.so", b"keyring");
+        tree.file("libarchphene_pkg_555555555555555555555555.so", b"bridge");
+        tree.file("libarchphene_pkg_666666666666666666666666.so", b"trust");
+        tree.command("bash");
+        std::os::unix::fs::symlink("bash", tree.root.join("usr/bin/sh")).expect("sh alias");
+        fs::write(
+            tree.root.join(SHELLS_FILE),
+            b"# valid shells\n/bin/sh\n/usr/bin/bash\n/usr/bin/zsh\n",
+        )
+        .expect("shells file");
+        let manifest = b"# org.archphene.package-runtime.v1\n\
+loader\t@loader\tlibarchphene_pkg_111111111111111111111111.so\t6\n\
+tool\t@pacman\tlibarchphene_pkg_222222222222222222222222.so\t6\n\
+keyring\t@keyring\tlibarchphene_pkg_444444444444444444444444.so\t7\n\
+ownertrust\t@ownertrust\tlibarchphene_pkg_666666666666666666666666.so\t5\n\
+library\tlibarchphene_path_bridge.so\tlibarchphene_pkg_555555555555555555555555.so\t6\n";
+        let runtime = PackageRuntime::prepare(
+            &tree.root,
+            &tree.native,
+            manifest,
+            RepositoryArchitecture::X86_64,
+        )
+        .expect("package runtime");
+        assert_eq!(
+            runtime
+                .discover_shells()
+                .expect("shell catalog")
+                .as_str()
+                .expect("utf-8"),
+            "bash\tBash\tbash\t--noprofile\t--noediting\n\
+sh\tPOSIX shell\tsh\t--noprofile\t--noediting\n"
+        );
+
+        fs::set_permissions(
+            tree.root.join(SHELLS_FILE),
+            fs::Permissions::from_mode(0o666),
+        )
+        .expect("unsafe shells mode");
+        assert!(matches!(
+            runtime.discover_shells(),
             Err(PackageRuntimeError::UnsafeEntry(_))
         ));
     }
