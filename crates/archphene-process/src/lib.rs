@@ -369,9 +369,9 @@ impl PtySession {
         let Some(mut child) = self.child.take() else {
             return;
         };
-        if child.try_wait().ok().flatten().is_none() {
-            terminate_process_group(&mut child);
-        }
+        // Signal the group before reaping its leader. This keeps the leader
+        // pid reserved while addressing descendants that may still be alive.
+        terminate_process_group(&mut child);
         let _ = child.wait();
     }
 }
