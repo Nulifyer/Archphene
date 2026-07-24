@@ -1,12 +1,16 @@
 #![forbid(unsafe_code)]
 
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
+
 pub const MIN_ROWS: u16 = 2;
 pub const MAX_ROWS: u16 = 200;
 pub const MIN_COLUMNS: u16 = 2;
 pub const MAX_COLUMNS: u16 = 400;
-pub const DAMAGE_PROTOCOL_VERSION: u32 = 2;
+pub const MAX_GRAPHEME_CODEPOINTS: usize = 16;
+pub const DAMAGE_PROTOCOL_VERSION: u32 = 3;
 pub const DAMAGE_HEADER_SIZE: usize = 32;
-pub const DAMAGE_CELL_SIZE: usize = 16;
+pub const DAMAGE_CELL_SIZE: usize = 76;
 pub const MAX_DAMAGE_BYTES: usize =
     DAMAGE_HEADER_SIZE + MAX_ROWS as usize * MAX_COLUMNS as usize * DAMAGE_CELL_SIZE;
 const DAMAGE_MAGIC: u32 = u32::from_le_bytes(*b"ATRM");
@@ -25,18 +29,52 @@ const FLAG_BACKARROW_KEY: u32 = 1 << 5;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Cell {
     pub codepoint: u32,
+    pub trailing_codepoints: [u32; MAX_GRAPHEME_CODEPOINTS - 1],
     pub foreground: u32,
     pub background: u32,
     pub attributes: u8,
+    pub grapheme_len: u8,
+    pub width: u8,
 }
 
 impl Cell {
     const fn blank() -> Self {
         Self {
             codepoint: 0x20,
+            trailing_codepoints: [0; MAX_GRAPHEME_CODEPOINTS - 1],
             foreground: DEFAULT_FOREGROUND,
             background: DEFAULT_BACKGROUND,
             attributes: 0,
+            grapheme_len: 1,
+            width: 1,
+        }
+    }
+
+    const fn continuation(foreground: u32, background: u32, attributes: u8) -> Self {
+        Self {
+            codepoint: 0,
+            trailing_codepoints: [0; MAX_GRAPHEME_CODEPOINTS - 1],
+            foreground,
+            background,
+            attributes,
+            grapheme_len: 0,
+            width: 0,
+        }
+    }
+
+    fn codepoint(&self, index: usize) -> u32 {
+        if index == 0 {
+            self.codepoint
+        } else {
+            self.trailing_codepoints[index - 1]
+        }
+    }
+
+    fn set_codepoint(&mut self, index: usize, codepoint: u32) {
+        if index == 0 {
+            self.codepoint = codepoint;
+        } else {
+            self.trailing_codepoints[index - 1] = codepoint;
         }
     }
 }
@@ -93,8 +131,10 @@ pub struct Terminal {
     new_line_mode: bool,
     backarrow_key: bool,
     insert_mode: bool,
+    origin_mode: bool,
+    auto_wrap: bool,
     tab_stops: [bool; MAX_COLUMNS as usize],
-    last_printed: Option<u32>,
+    last_printed: Option<Cell>,
     g0_charset: Charset,
     g1_charset: Charset,
     use_g1: bool,
@@ -150,6 +190,8 @@ impl Terminal {
             new_line_mode: false,
             backarrow_key: false,
             insert_mode: false,
+            origin_mode: false,
+            auto_wrap: true,
             tab_stops,
             last_printed: None,
             g0_charset: Charset::Ascii,
@@ -272,11 +314,16 @@ impl Terminal {
         for row in dirty_start..dirty_end {
             for column in 0..self.columns {
                 let cell = self.cells[self.index(row, column)];
-                output[offset..offset + 4].copy_from_slice(&cell.codepoint.to_le_bytes());
-                output[offset + 4..offset + 8].copy_from_slice(&cell.foreground.to_le_bytes());
-                output[offset + 8..offset + 12].copy_from_slice(&cell.background.to_le_bytes());
-                output[offset + 12] = cell.attributes;
-                output[offset + 13] = 1;
+                for codepoint_index in 0..MAX_GRAPHEME_CODEPOINTS {
+                    let start = offset + codepoint_index * 4;
+                    output[start..start + 4]
+                        .copy_from_slice(&cell.codepoint(codepoint_index).to_le_bytes());
+                }
+                output[offset + 64..offset + 68].copy_from_slice(&cell.foreground.to_le_bytes());
+                output[offset + 68..offset + 72].copy_from_slice(&cell.background.to_le_bytes());
+                output[offset + 72] = cell.attributes;
+                output[offset + 73] = cell.width;
+                output[offset + 74] = cell.grapheme_len;
                 offset += DAMAGE_CELL_SIZE;
             }
         }
@@ -539,14 +586,20 @@ impl Terminal {
             return;
         }
         self.wrap_pending = false;
+        let (vertical_top, vertical_bottom) = self.vertical_bounds();
         match final_byte {
             b'@' => self.insert_characters(self.parameter(0, 1)),
-            b'A' => self.cursor_row = self.cursor_row.saturating_sub(self.parameter(0, 1)),
+            b'A' => {
+                self.cursor_row = self
+                    .cursor_row
+                    .saturating_sub(self.parameter(0, 1))
+                    .max(vertical_top);
+            }
             b'B' => {
                 self.cursor_row = self
                     .cursor_row
                     .saturating_add(self.parameter(0, 1))
-                    .min(self.rows - 1);
+                    .min(vertical_bottom);
             }
             b'C' => {
                 self.cursor_column = self
@@ -561,18 +614,23 @@ impl Terminal {
                 self.cursor_row = self
                     .cursor_row
                     .saturating_add(self.parameter(0, 1))
-                    .min(self.rows - 1);
+                    .min(vertical_bottom);
                 self.cursor_column = 0;
             }
             b'F' => {
-                self.cursor_row = self.cursor_row.saturating_sub(self.parameter(0, 1));
+                self.cursor_row = self
+                    .cursor_row
+                    .saturating_sub(self.parameter(0, 1))
+                    .max(vertical_top);
                 self.cursor_column = 0;
             }
             b'G' => {
                 self.cursor_column = self.parameter(0, 1).saturating_sub(1).min(self.columns - 1)
             }
             b'H' | b'f' => {
-                self.cursor_row = self.parameter(0, 1).saturating_sub(1).min(self.rows - 1);
+                self.cursor_row = vertical_top
+                    .saturating_add(self.parameter(0, 1).saturating_sub(1))
+                    .min(vertical_bottom);
                 self.cursor_column = self.parameter(1, 1).saturating_sub(1).min(self.columns - 1);
             }
             b'I' => self.tab_forward(self.parameter(0, 1)),
@@ -589,7 +647,11 @@ impl Terminal {
                 self.cursor_column = self.parameter(0, 1).saturating_sub(1).min(self.columns - 1)
             }
             b'b' => self.repeat_last(self.parameter(0, 1)),
-            b'd' => self.cursor_row = self.parameter(0, 1).saturating_sub(1).min(self.rows - 1),
+            b'd' => {
+                self.cursor_row = vertical_top
+                    .saturating_add(self.parameter(0, 1).saturating_sub(1))
+                    .min(vertical_bottom);
+            }
             b'g' => self.clear_tab_stops(self.csi_parameters[0]),
             b'm' => self.select_graphics(),
             b'h' | b'l' => self.execute_ansi_mode(final_byte == b'h'),
@@ -602,7 +664,7 @@ impl Terminal {
                 if top < bottom {
                     self.scroll_top = top;
                     self.scroll_bottom = bottom;
-                    self.cursor_row = top;
+                    self.cursor_row = if self.origin_mode { top } else { 0 };
                     self.cursor_column = 0;
                 }
             }
@@ -627,6 +689,8 @@ impl Terminal {
         for index in 0..self.csi_count {
             match self.csi_parameters[index] {
                 1 => self.set_application_cursor(enabled),
+                6 => self.set_origin_mode(enabled),
+                7 => self.set_auto_wrap(enabled),
                 25 => {
                     if self.cursor_visible != enabled {
                         self.cursor_visible = enabled;
@@ -695,6 +759,20 @@ impl Terminal {
         }
     }
 
+    fn set_origin_mode(&mut self, enabled: bool) {
+        self.origin_mode = enabled;
+        self.cursor_row = if enabled { self.scroll_top } else { 0 };
+        self.cursor_column = 0;
+        self.wrap_pending = false;
+    }
+
+    fn set_auto_wrap(&mut self, enabled: bool) {
+        self.auto_wrap = enabled;
+        if !enabled {
+            self.wrap_pending = false;
+        }
+    }
+
     fn set_alternate_screen(&mut self, enabled: bool, clear_on_entry: bool) {
         if enabled == self.alternate_active {
             return;
@@ -722,28 +800,122 @@ impl Terminal {
     }
 
     fn put_codepoint(&mut self, codepoint: u32) {
-        if self.wrap_pending {
+        if self.try_append_codepoint(codepoint) {
+            return;
+        }
+        if self.auto_wrap && self.wrap_pending {
             self.cursor_column = 0;
             self.line_feed();
             self.wrap_pending = false;
         }
-        if self.insert_mode {
-            self.insert_characters(1);
+        let mut width = codepoint_width(codepoint).clamp(1, 2);
+        if width == 2 && self.cursor_column + 1 >= self.columns {
+            if self.auto_wrap {
+                self.cursor_column = 0;
+                self.line_feed();
+            } else {
+                width = 1;
+            }
         }
+        if self.insert_mode {
+            self.insert_characters(u16::from(width));
+        }
+        self.clear_wide_intersections(self.cursor_row, self.cursor_column, u16::from(width));
         let index = self.index(self.cursor_row, self.cursor_column);
         self.cells[index] = Cell {
             codepoint,
+            trailing_codepoints: [0; MAX_GRAPHEME_CODEPOINTS - 1],
             foreground: self.foreground,
             background: self.background,
             attributes: self.attributes,
+            grapheme_len: 1,
+            width,
         };
-        self.last_printed = Some(codepoint);
+        if width == 2 {
+            self.cells[index + 1] =
+                Cell::continuation(self.foreground, self.background, self.attributes);
+        }
+        self.last_printed = Some(self.cells[index]);
         self.mark_dirty(self.cursor_row);
-        if self.cursor_column + 1 >= self.columns {
+        let last_column = self.cursor_column + u16::from(width) - 1;
+        if self.auto_wrap && last_column + 1 >= self.columns {
+            self.cursor_column = last_column;
             self.wrap_pending = true;
         } else {
-            self.cursor_column += 1;
+            self.cursor_column = (last_column + 1).min(self.columns - 1);
+            self.wrap_pending = false;
         }
+    }
+
+    fn try_append_codepoint(&mut self, codepoint: u32) -> bool {
+        let Some((row, column)) = self.previous_grapheme_position() else {
+            return false;
+        };
+        let index = self.index(row, column);
+        let mut cell = self.cells[index];
+        if cell.grapheme_len == 0 {
+            return false;
+        }
+        let length = usize::from(cell.grapheme_len);
+        let mut candidate = [0_u32; MAX_GRAPHEME_CODEPOINTS + 1];
+        for (candidate_codepoint, source_index) in candidate[..length].iter_mut().zip(0..length) {
+            *candidate_codepoint = cell.codepoint(source_index);
+        }
+        candidate[length] = codepoint;
+        if !is_single_grapheme(&candidate[..=length]) {
+            return false;
+        }
+        if length >= MAX_GRAPHEME_CODEPOINTS {
+            cell.set_codepoint(MAX_GRAPHEME_CODEPOINTS - 1, 0xfffd);
+            self.cells[index] = cell;
+            self.mark_dirty(row);
+            return true;
+        }
+
+        cell.set_codepoint(length, codepoint);
+        cell.grapheme_len += 1;
+        let old_width = cell.width.max(1);
+        let new_width = grapheme_width(&candidate[..=length]).clamp(1, 2);
+        if new_width > old_width && column + 1 < self.columns {
+            self.clear_wide_intersections(row, column, 2);
+            self.cells[index + 1] =
+                Cell::continuation(cell.foreground, cell.background, cell.attributes);
+            if self.wrap_pending {
+                if column + 1 >= self.columns - 1 {
+                    self.cursor_column = self.columns - 1;
+                }
+            } else if self.cursor_row == row && self.cursor_column == column + 1 {
+                self.cursor_column = (column + 2).min(self.columns - 1);
+                self.wrap_pending = self.auto_wrap && column + 2 >= self.columns;
+            }
+            cell.width = new_width;
+        } else if new_width < old_width {
+            if column + 1 < self.columns {
+                self.cells[index + 1] = Cell::blank();
+            }
+            if self.cursor_row == row {
+                self.cursor_column = column + 1;
+                self.wrap_pending = false;
+            }
+            cell.width = new_width;
+        }
+        self.cells[index] = cell;
+        self.last_printed = Some(cell);
+        self.mark_dirty(row);
+        true
+    }
+
+    fn previous_grapheme_position(&self) -> Option<(u16, u16)> {
+        let mut column = if self.wrap_pending {
+            self.cursor_column
+        } else {
+            self.cursor_column.checked_sub(1)?
+        };
+        if self.cells[self.index(self.cursor_row, column)].width == 0 {
+            column = column.checked_sub(1)?;
+        }
+        (self.cells[self.index(self.cursor_row, column)].grapheme_len != 0)
+            .then_some((self.cursor_row, column))
     }
 
     fn line_feed(&mut self) {
@@ -767,6 +939,7 @@ impl Terminal {
     }
 
     fn insert_characters(&mut self, count: u16) {
+        self.clear_wide_intersections(self.cursor_row, self.cursor_column, 1);
         let row_start = self.index(self.cursor_row, 0);
         let start = row_start + usize::from(self.cursor_column);
         let end = row_start + usize::from(self.columns);
@@ -776,10 +949,12 @@ impl Terminal {
         }
         self.cells.copy_within(start..end - count, start + count);
         self.cells[start..start + count].fill(Cell::blank());
+        normalize_cell_row(&mut self.cells, self.columns, self.cursor_row);
         self.mark_dirty(self.cursor_row);
     }
 
     fn delete_characters(&mut self, count: u16) {
+        self.clear_wide_intersections(self.cursor_row, self.cursor_column, count);
         let row_start = self.index(self.cursor_row, 0);
         let start = row_start + usize::from(self.cursor_column);
         let end = row_start + usize::from(self.columns);
@@ -789,16 +964,19 @@ impl Terminal {
         }
         self.cells.copy_within(start + count..end, start);
         self.cells[end - count..end].fill(Cell::blank());
+        normalize_cell_row(&mut self.cells, self.columns, self.cursor_row);
         self.mark_dirty(self.cursor_row);
     }
 
     fn erase_characters(&mut self, count: u16) {
+        self.clear_wide_intersections(self.cursor_row, self.cursor_column, count);
         let start = self.index(self.cursor_row, self.cursor_column);
         let count = usize::from(count).min(usize::from(self.columns - self.cursor_column));
         if count == 0 {
             return;
         }
         self.cells[start..start + count].fill(Cell::blank());
+        normalize_cell_row(&mut self.cells, self.columns, self.cursor_row);
         self.mark_dirty(self.cursor_row);
     }
 
@@ -881,9 +1059,11 @@ impl Terminal {
     }
 
     fn repeat_last(&mut self, count: u16) {
-        if let Some(codepoint) = self.last_printed {
+        if let Some(cell) = self.last_printed {
             for _ in 0..count {
-                self.put_codepoint(codepoint);
+                for index in 0..usize::from(cell.grapheme_len) {
+                    self.put_codepoint(cell.codepoint(index));
+                }
             }
         }
     }
@@ -892,12 +1072,24 @@ impl Terminal {
         match mode {
             0 => {
                 let start = self.index(self.cursor_row, self.cursor_column);
+                self.clear_wide_intersections(
+                    self.cursor_row,
+                    self.cursor_column,
+                    self.columns - self.cursor_column,
+                );
                 self.cells[start..].fill(Cell::blank());
+                for row in self.cursor_row..self.rows {
+                    normalize_cell_row(&mut self.cells, self.columns, row);
+                }
                 self.mark_dirty_range(self.cursor_row, self.rows);
             }
             1 => {
                 let end = self.index(self.cursor_row, self.cursor_column) + 1;
+                self.clear_wide_intersections(self.cursor_row, 0, self.cursor_column + 1);
                 self.cells[..end].fill(Cell::blank());
+                for row in 0..=self.cursor_row {
+                    normalize_cell_row(&mut self.cells, self.columns, row);
+                }
                 self.mark_dirty_range(0, self.cursor_row + 1);
             }
             2 | 3 => {
@@ -913,11 +1105,22 @@ impl Terminal {
         let column = usize::from(self.cursor_column);
         let end = start + usize::from(self.columns);
         match mode {
-            0 => self.cells[start + column..end].fill(Cell::blank()),
-            1 => self.cells[start..=start + column].fill(Cell::blank()),
+            0 => {
+                self.clear_wide_intersections(
+                    self.cursor_row,
+                    self.cursor_column,
+                    self.columns - self.cursor_column,
+                );
+                self.cells[start + column..end].fill(Cell::blank());
+            }
+            1 => {
+                self.clear_wide_intersections(self.cursor_row, 0, self.cursor_column + 1);
+                self.cells[start..=start + column].fill(Cell::blank());
+            }
             2 => self.cells[start..end].fill(Cell::blank()),
             _ => return,
         }
+        normalize_cell_row(&mut self.cells, self.columns, self.cursor_row);
         self.mark_dirty(self.cursor_row);
     }
 
@@ -1005,6 +1208,8 @@ impl Terminal {
         self.new_line_mode = false;
         self.backarrow_key = false;
         self.insert_mode = false;
+        self.origin_mode = false;
+        self.auto_wrap = true;
         self.tab_stops.fill(false);
         for column in (8..MAX_COLUMNS as usize).step_by(8) {
             self.tab_stops[column] = true;
@@ -1022,6 +1227,40 @@ impl Terminal {
 
     fn index(&self, row: u16, column: u16) -> usize {
         usize::from(row) * usize::from(self.columns) + usize::from(column)
+    }
+
+    fn vertical_bounds(&self) -> (u16, u16) {
+        if self.origin_mode {
+            (self.scroll_top, self.scroll_bottom)
+        } else {
+            (0, self.rows - 1)
+        }
+    }
+
+    fn clear_wide_intersections(&mut self, row: u16, column: u16, count: u16) {
+        if count == 0 || row >= self.rows || column >= self.columns {
+            return;
+        }
+        let start = column;
+        let end = column.saturating_add(count).min(self.columns);
+        if start > 0 {
+            let previous = self.index(row, start - 1);
+            if self.cells[previous].width == 2 {
+                self.cells[previous] = Cell::blank();
+                self.cells[previous + 1] = Cell::blank();
+            }
+        }
+        for current in start..end {
+            let index = self.index(row, current);
+            if self.cells[index].width == 2 {
+                self.cells[index] = Cell::blank();
+                if current + 1 < self.columns {
+                    self.cells[index + 1] = Cell::blank();
+                }
+            } else if self.cells[index].width == 0 {
+                self.cells[index] = Cell::blank();
+            }
+        }
     }
 
     fn mark_dirty(&mut self, row: u16) {
@@ -1057,7 +1296,40 @@ fn resize_cells(
         replacement[new..new + usize::from(copied_columns)]
             .copy_from_slice(&source[old..old + usize::from(copied_columns)]);
     }
+    for row in 0..rows {
+        normalize_cell_row(&mut replacement, columns, row);
+    }
     (replacement, source_row)
+}
+
+fn normalize_cell_row(cells: &mut [Cell], columns: u16, row: u16) {
+    let row_start = usize::from(row) * usize::from(columns);
+    let mut column = 0;
+    while column < columns {
+        let index = row_start + usize::from(column);
+        match cells[index].width {
+            2 if column + 1 < columns => {
+                cells[index + 1] = Cell::continuation(
+                    cells[index].foreground,
+                    cells[index].background,
+                    cells[index].attributes,
+                );
+                column += 2;
+            }
+            2 => {
+                cells[index].width = 1;
+                column += 1;
+            }
+            0 => {
+                cells[index] = Cell::blank();
+                column += 1;
+            }
+            _ => {
+                cells[index].width = 1;
+                column += 1;
+            }
+        }
+    }
 }
 
 fn validate_size(rows: u16, columns: u16) -> Result<(), TerminalError> {
@@ -1065,6 +1337,29 @@ fn validate_size(rows: u16, columns: u16) -> Result<(), TerminalError> {
         return Err(TerminalError::InvalidSize);
     }
     Ok(())
+}
+
+fn codepoint_width(codepoint: u32) -> u8 {
+    grapheme_width(&[codepoint])
+}
+
+fn grapheme_width(codepoints: &[u32]) -> u8 {
+    with_codepoints_as_str(codepoints, |text| text.width() as u8).unwrap_or(1)
+}
+
+fn is_single_grapheme(codepoints: &[u32]) -> bool {
+    with_codepoints_as_str(codepoints, |text| text.graphemes(true).count() == 1).unwrap_or(false)
+}
+
+fn with_codepoints_as_str<T>(codepoints: &[u32], operation: impl FnOnce(&str) -> T) -> Option<T> {
+    let mut utf8 = [0_u8; (MAX_GRAPHEME_CODEPOINTS + 1) * 4];
+    let mut length = 0;
+    for &codepoint in codepoints {
+        let character = char::from_u32(codepoint)?;
+        let encoded = character.encode_utf8(&mut utf8[length..]);
+        length += encoded.len();
+    }
+    std::str::from_utf8(&utf8[..length]).ok().map(operation)
 }
 
 const fn charset_designation(byte: u8) -> Charset {
@@ -1122,8 +1417,20 @@ mod tests {
     fn text(terminal: &Terminal, row: u16) -> String {
         (0..terminal.columns())
             .map(|column| {
-                char::from_u32(terminal.cell(row, column).unwrap().codepoint).unwrap_or('\u{fffd}')
+                let cell = terminal.cell(row, column).unwrap();
+                if cell.grapheme_len == 0 {
+                    ' '
+                } else {
+                    char::from_u32(cell.codepoint).unwrap_or('\u{fffd}')
+                }
             })
+            .collect()
+    }
+
+    fn grapheme(terminal: &Terminal, row: u16, column: u16) -> String {
+        let cell = terminal.cell(row, column).unwrap();
+        (0..usize::from(cell.grapheme_len))
+            .map(|index| char::from_u32(cell.codepoint(index)).unwrap_or('\u{fffd}'))
             .collect()
     }
 
@@ -1136,6 +1443,65 @@ mod tests {
         assert_eq!(text(&terminal, 0), "abc     ");
         assert_eq!(text(&terminal, 1), "\u{2603}!      ");
         assert_eq!(terminal.cursor(), (1, 2));
+    }
+
+    #[test]
+    fn unicode_graphemes_combine_and_occupy_bounded_terminal_columns() {
+        let mut terminal = Terminal::new(3, 12).unwrap();
+        terminal.feed("e\u{301}界🇺🇸👨‍👩‍👧‍👦".as_bytes());
+
+        assert_eq!(grapheme(&terminal, 0, 0), "e\u{301}");
+        assert_eq!(terminal.cell(0, 0).unwrap().width, 1);
+        assert_eq!(grapheme(&terminal, 0, 1), "界");
+        assert_eq!(terminal.cell(0, 1).unwrap().width, 2);
+        assert_eq!(terminal.cell(0, 2).unwrap().width, 0);
+        assert_eq!(grapheme(&terminal, 0, 3), "🇺🇸");
+        assert_eq!(terminal.cell(0, 3).unwrap().width, 2);
+        assert_eq!(grapheme(&terminal, 0, 5), "👨‍👩‍👧‍👦");
+        assert_eq!(terminal.cell(0, 5).unwrap().width, 2);
+        assert_eq!(terminal.cursor(), (0, 7));
+    }
+
+    #[test]
+    fn unicode_graphemes_remain_streaming_across_feed_boundaries_and_damage() {
+        let mut terminal = Terminal::new(2, 8).unwrap();
+        terminal.feed(&[b'e', 0xcc]);
+        terminal.feed(&[0x81, 0xf0, 0x9f]);
+        terminal.feed(&[0x87, 0xba, 0xf0, 0x9f, 0x87, 0xb8]);
+        assert_eq!(grapheme(&terminal, 0, 0), "e\u{301}");
+        assert_eq!(grapheme(&terminal, 0, 1), "🇺🇸");
+
+        let mut damage = vec![0_u8; MAX_DAMAGE_BYTES];
+        terminal.write_full_damage(&mut damage).unwrap();
+        let first = DAMAGE_HEADER_SIZE;
+        assert_eq!(damage[first + 73], 1);
+        assert_eq!(damage[first + 74], 2);
+        assert_eq!(
+            u32::from_le_bytes(damage[first + 4..first + 8].try_into().unwrap()),
+            0x301
+        );
+        let flag = first + DAMAGE_CELL_SIZE;
+        assert_eq!(damage[flag + 73], 2);
+        assert_eq!(damage[flag + 74], 2);
+    }
+
+    #[test]
+    fn edits_cannot_leave_orphaned_wide_cell_continuations() {
+        let mut terminal = Terminal::new(2, 8).unwrap();
+        terminal.feed("A界B".as_bytes());
+        terminal.feed(b"\x1b[1;3HX");
+        assert_eq!(text(&terminal, 0), "A XB    ");
+        assert_eq!(terminal.cell(0, 1).unwrap().width, 1);
+        assert_eq!(terminal.cell(0, 2).unwrap().width, 1);
+
+        terminal.feed(b"\x1b[1;1H\x1b[2P");
+        assert_eq!(text(&terminal, 0), "XB      ");
+        assert!(
+            terminal
+                .cells()
+                .iter()
+                .all(|cell| cell.width != 0 || cell.grapheme_len == 0)
+        );
     }
 
     #[test]
@@ -1163,11 +1529,11 @@ mod tests {
         assert_eq!(rgb.foreground, DIRECT_COLOR_FLAG | 0xff0000);
         assert_eq!(rgb.background, DIRECT_COLOR_FLAG | 0x005faf);
 
-        let mut damage = [0_u8; 256];
+        let mut damage = [0_u8; 2048];
         terminal.write_full_damage(&mut damage).unwrap();
         assert_eq!(
             u32::from_le_bytes(
-                damage[DAMAGE_HEADER_SIZE + 4..DAMAGE_HEADER_SIZE + 8]
+                damage[DAMAGE_HEADER_SIZE + 64..DAMAGE_HEADER_SIZE + 68]
                     .try_into()
                     .unwrap()
             ),
@@ -1175,7 +1541,7 @@ mod tests {
         );
         assert_eq!(
             u32::from_le_bytes(
-                damage[DAMAGE_HEADER_SIZE + 8..DAMAGE_HEADER_SIZE + 12]
+                damage[DAMAGE_HEADER_SIZE + 68..DAMAGE_HEADER_SIZE + 72]
                     .try_into()
                     .unwrap()
             ),
@@ -1183,8 +1549,8 @@ mod tests {
         );
         assert_eq!(
             u32::from_le_bytes(
-                damage[DAMAGE_HEADER_SIZE + DAMAGE_CELL_SIZE + 4
-                    ..DAMAGE_HEADER_SIZE + DAMAGE_CELL_SIZE + 8]
+                damage[DAMAGE_HEADER_SIZE + DAMAGE_CELL_SIZE + 64
+                    ..DAMAGE_HEADER_SIZE + DAMAGE_CELL_SIZE + 68]
                     .try_into()
                     .unwrap()
             ),
@@ -1192,8 +1558,8 @@ mod tests {
         );
         assert_eq!(
             u32::from_le_bytes(
-                damage[DAMAGE_HEADER_SIZE + DAMAGE_CELL_SIZE + 8
-                    ..DAMAGE_HEADER_SIZE + DAMAGE_CELL_SIZE + 12]
+                damage[DAMAGE_HEADER_SIZE + DAMAGE_CELL_SIZE + 68
+                    ..DAMAGE_HEADER_SIZE + DAMAGE_CELL_SIZE + 72]
                     .try_into()
                     .unwrap()
             ),
@@ -1255,7 +1621,7 @@ mod tests {
     #[test]
     fn dec_private_screen_and_cursor_modes_publish_full_damage() {
         let mut terminal = Terminal::new(2, 5).unwrap();
-        let mut output = [0_u8; 256];
+        let mut output = [0_u8; 2048];
         terminal.write_damage(&mut output).unwrap();
 
         terminal.feed(b"main\x1b[?47halt\x1b[?25l");
@@ -1276,7 +1642,7 @@ mod tests {
     #[test]
     fn input_modes_are_versioned_in_damage_flags() {
         let mut terminal = Terminal::new(2, 5).unwrap();
-        let mut output = [0_u8; 256];
+        let mut output = [0_u8; 2048];
         terminal.write_damage(&mut output).unwrap();
 
         terminal.feed(b"\x1b[?1;66;67;2004h\x1b=\x1b[20h");
@@ -1345,6 +1711,51 @@ mod tests {
     }
 
     #[test]
+    fn dec_auto_wrap_can_be_disabled_and_restored() {
+        let mut terminal = Terminal::new(3, 4).unwrap();
+        terminal.feed(b"ABCD");
+        assert_eq!(terminal.cursor(), (0, 3));
+        terminal.feed(b"E");
+        assert_eq!(text(&terminal, 0), "ABCD");
+        assert_eq!(text(&terminal, 1), "E   ");
+
+        terminal.feed(b"\x1b[1;1H\x1b[2J\x1b[?7lABCDE");
+        assert_eq!(text(&terminal, 0), "ABCE");
+        assert_eq!(text(&terminal, 1), "    ");
+        assert_eq!(terminal.cursor(), (0, 3));
+
+        terminal.feed(b"\x1b[?7hFG");
+        assert_eq!(text(&terminal, 0), "ABCF");
+        assert_eq!(text(&terminal, 1), "G   ");
+        assert_eq!(terminal.cursor(), (1, 1));
+    }
+
+    #[test]
+    fn dec_origin_mode_makes_cursor_rows_relative_to_scrolling_margins() {
+        let mut terminal = Terminal::new(5, 6).unwrap();
+        terminal.feed(b"\x1b[2;4r");
+        assert_eq!(terminal.cursor(), (0, 0));
+
+        terminal.feed(b"\x1b[?6h");
+        assert_eq!(terminal.cursor(), (1, 0));
+        terminal.feed(b"\x1b[2;3H");
+        assert_eq!(terminal.cursor(), (2, 2));
+        terminal.feed(b"\x1b[99B");
+        assert_eq!(terminal.cursor(), (3, 2));
+        terminal.feed(b"\x1b[99A");
+        assert_eq!(terminal.cursor(), (1, 2));
+        terminal.feed(b"\x1b[3d");
+        assert_eq!(terminal.cursor(), (3, 2));
+
+        terminal.feed(b"\x1b[?6l");
+        assert_eq!(terminal.cursor(), (0, 0));
+        terminal.feed(b"\x1b[5;6H");
+        assert_eq!(terminal.cursor(), (4, 5));
+        terminal.feed(b"\x1b[2;4r");
+        assert_eq!(terminal.cursor(), (0, 0));
+    }
+
+    #[test]
     fn cursor_tab_and_save_restore_controls_are_bounded() {
         let mut terminal = Terminal::new(3, 20).unwrap();
         terminal.feed(b"\t");
@@ -1384,7 +1795,7 @@ mod tests {
             Err(TerminalError::OutputTooSmall)
         );
         assert_eq!(terminal.required_damage_bytes(), required);
-        let mut output = [0_u8; 256];
+        let mut output = [0_u8; 2048];
         assert_eq!(terminal.write_damage(&mut output), Ok(required));
         assert_eq!(&output[0..4], b"ATRM");
         assert_eq!(

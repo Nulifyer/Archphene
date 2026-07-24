@@ -224,9 +224,9 @@ x86_64 emulator and AArch64 Samsung. Bash is restored as the selected default
 after each gate. Additional shell-specific startup adapters, editable startup
 files, and the production terminal surface remain pending.
 
-The production terminal replacement now has a separate dependency-free Rust
-state-core foundation. It bounds grids to 200 by 400 cells, parses strict
-streaming UTF-8 without per-feed allocation, implements delayed VT autowrap,
+The production terminal replacement now has a separate Rust state-core
+foundation. It bounds grids to 200 by 400 cells, parses strict streaming UTF-8
+without per-feed allocation, implements delayed VT autowrap,
 cursor movement, erase operations, scroll regions, basic SGR attributes,
 bounded OSC/DCS/APC suppression, resize preservation, and coarse dirty-row
 tracking. Host gates cover split multibyte input, malformed/control input,
@@ -375,20 +375,38 @@ on the emulator and Samsung. The broad PTY/input/lifecycle gate and
 clipboard/bracketed-paste gate still pass on both targets after the gesture and
 menu changes. Offline Android lint also passes.
 
-The terminal damage protocol is now version 2 with fixed 16-byte cells. Each
-cell carries a codepoint, independently encoded foreground/background, compact
-attributes, and reserved width metadata. Palette colors remain integer indexes;
-direct SGR `38;2`/`48;2` colors carry exact 24-bit RGB instead of being reduced
-to the nearest 256-color entry. Android stores attributes in unused high bits
-of its foreground integer, so the larger wire format does not require a third
-maximum-grid primitive array or change the single coarse JNI read.
+The terminal damage protocol is now version 3 with fixed 76-byte cells. Each
+cell carries up to 16 Unicode scalar values, one/two-column width or continuation
+state, independently encoded foreground/background, and compact attributes.
+The exact dependency lock pins `unicode-width` 0.2.2 and
+`unicode-segmentation` 1.13.3; both are available to the established offline
+Cargo cache. Streaming grapheme assembly, width calculation, grid mutation,
+and damage publication remain allocation-free after warm-up.
+
+Rust preserves decomposed combining text, CJK width, regional-indicator flags,
+emoji modifiers, and ZWJ families. Wide cells are normalized after overwrite,
+insert/delete/erase, and resize so edits cannot leave orphaned continuation
+cells. Android uses dimension-bound primitive arrays and one reusable UTF-16
+row scratch buffer rather than per-cell strings. It shapes contiguous nonblank
+grapheme runs while anchoring runs after blank cells to their exact terminal
+column; a Samsung full-device gate exposed and fixed the prior proportional
+whitespace drift.
+
+Palette colors remain integer indexes; direct SGR `38;2`/`48;2` colors carry
+exact 24-bit RGB. Android stores attributes in unused high bits of its
+foreground integer, so protocol v3 still uses the same single coarse JNI read.
+The maximum reusable direct buffer is explicitly bounded at 6,080,032 bytes,
+and normal dirty updates publish only the affected rows.
 
 The entire Rust workspace, damage-format contracts, and warmed zero-allocation
 gate pass. Exact-ABI builds render installed `tput` 256-color output, exact
 `#123456` on `#abcdef`, reset, DEC line drawing, accessibility markers, scoped
 logs, and visually inspected full-device screenshots on the emulator and
-Samsung. The broad PTY/render/input/lifecycle gate also passes on both targets
-with protocol v2.
+Samsung. Installed Bash/terminfo gates additionally prove DEC autowrap disable
+and origin-relative cursor positioning, decomposed accents, CJK, flags,
+modifiers, ZWJ emoji, accessibility text, and exact last-column rendering on
+both targets. The broad PTY/render/input/lifecycle, color, and editing gates
+also pass on both targets with protocol v3.
 
 That device gate also exposed an incomplete generic root-identity bridge:
 glibc's filesystem-ID query reached Android's blocked x86_64 syscall 122.
@@ -407,11 +425,11 @@ kernel metrics are reliable.
 
 This is not yet the production terminal promised by the milestone. Resizing
 preserves the current cursor window but does not reflow or retain discarded
-rows because scrollback is not implemented. Unicode width and combining
-behavior, remaining xterm controls, scrollback, selection/copy, remaining
-terminal modes, broader composing IME behavior, and richer accessibility remain
-required. The temporary command field remains as a fallback above the renderer;
-direct terminal input no longer depends on it.
+rows because scrollback is not implemented. Remaining xterm controls,
+scrollback/reflow, selection/copy, an explicit overlong-grapheme user-visible
+policy, broader non-Latin composing IME behavior, and richer accessibility
+remain required. The temporary command field remains as a fallback above the
+renderer; direct terminal input no longer depends on it.
 
 The validated prototype below remains reference evidence until replacement
 vertical slices pass equivalent gates. Installed prototype state is no longer a

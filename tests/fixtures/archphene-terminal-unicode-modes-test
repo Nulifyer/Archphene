@@ -1,0 +1,21 @@
+#!/usr/bin/bash
+set -euo pipefail
+
+tput clear
+printf 'COMBINING: cafe\u0301\r\n'
+printf 'CJK: 日本語\r\n'
+printf 'FLAG: 🇺🇸\r\n'
+printf 'EMOJI: 👨‍👩‍👧‍👦 👍🏽\r\n'
+
+columns="$(tput cols)"
+printf 'AUTOWRAP-OFF:'
+tput rmam
+tput cup 5 "$((columns - 1))"
+printf 'XY'
+tput smam
+
+printf '\033[8;10r\033[?6h\033[1;1HORIGIN-TOP\033[3;1HORIGIN-BOTTOM\033[?6l\033[r'
+tput cup 11 0
+printf 'terminal-unicode-modes-ready'
+IFS= read -r -n 1
+tput clear

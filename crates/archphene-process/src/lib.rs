@@ -1328,9 +1328,9 @@ mod tests {
             u32::from(b'O')
         );
         assert_eq!(
-            u32::from_le_bytes(damage[36..40].try_into().expect("foreground")),
+            u32::from_le_bytes(damage[96..100].try_into().expect("foreground")),
             2
         );
-        assert_eq!(damage[44] & 1, 1);
+        assert_eq!(damage[104] & 1, 1);
     }
 }

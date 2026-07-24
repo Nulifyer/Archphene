@@ -121,7 +121,10 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
       - [x] Prove normal and exact `ESC [ 200 ~`/`ESC [ 201 ~` bracketed bytes through Android clipboard, touch/hardware input, Bash capture, accessibility, scoped logs, and full-device screenshots on both ABIs.
       - [x] Follow Android's scaled 16sp baseline by default and add persistent bounded 10–32sp terminal sizing through pinch, long-press controls, and hardware `Ctrl+-`/`Ctrl++`/`Ctrl+0`; defer metric re-recording and PTY resize until pinch completion.
       - [x] Prove Auto, explicit 20sp, hardware/touch controls, process-restart persistence, reset, scoped logs, and visually inspected full-device screenshots on both exact-ABI targets.
-      - [ ] Complete Unicode width/combining, remaining xterm controls/modes, scrollback/reflow, selection/copy, non-Latin/composing IME coverage, and richer accessibility before calling the surface production-ready.
+      - [x] Pin `unicode-width` and `unicode-segmentation`, retain at most 16 Unicode scalar values per grapheme, and keep streaming width/segmentation plus protocol publication allocation-free after warm-up.
+      - [x] Version terminal damage to bounded grapheme cells; render combining text, CJK, flags, emoji modifiers, and ZWJ families through reusable primitive/scratch storage while preserving one/two-column geometry and normalizing wide cells across edits and resize.
+      - [x] Implement DEC origin and autowrap modes, then prove Unicode, exact last-column placement, margin-relative cursor positioning, accessibility, scoped logs, and full-device visuals on both exact-ABI targets.
+      - [ ] Complete remaining xterm controls/modes, scrollback/reflow, selection/copy, bounded grapheme-overflow policy, non-Latin/composing IME coverage, and richer accessibility before calling the surface production-ready.
       - [x] Replace the clipped temporary diagnostic strip during active sessions with the measured full-height terminal surface; retain emulator and Samsung full-device portrait/landscape/rebind evidence.
   - [ ] Wayland compositor, presentation, and lifecycle
   - [ ] Pointer, touch, keyboard, IME, clipboard, and drag-and-drop

@@ -102,7 +102,10 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
                 }
             },
         )
-    private var glyphs = CharArray(0)
+    private var glyphCodepoints = IntArray(0)
+    private var glyphLengths = ByteArray(0)
+    private var glyphWidths = ByteArray(0)
+    private val rowGlyphScratch = CharArray(MAX_COLUMNS * MAX_GRAPHEME_UTF16_UNITS)
     private var styledForegroundColors = IntArray(0)
     private var backgroundColors = IntArray(0)
     private var rowNodes = emptyArray<RenderNode>()
@@ -448,7 +451,12 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
                     columns,
                     rows,
                 )
-            glyphs = CharArray(rows * columns) { ' ' }
+            glyphCodepoints = IntArray(rows * columns * MAX_GRAPHEME_CODEPOINTS)
+            glyphLengths = ByteArray(rows * columns) { 1 }
+            glyphWidths = ByteArray(rows * columns) { 1 }
+            for (cell in 0 until rows * columns) {
+                glyphCodepoints[cell * MAX_GRAPHEME_CODEPOINTS] = ' '.code
+            }
             styledForegroundColors = IntArray(rows * columns) { DEFAULT_FOREGROUND }
             backgroundColors = IntArray(rows * columns) { DEFAULT_BACKGROUND }
             rowNodes = Array(rows) { row -> RenderNode("terminal-row-$row") }
@@ -463,17 +471,35 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         for (row in dirtyStart until dirtyEnd) {
             val rowStart = row * columns
             for (column in 0 until columns) {
-                val codepoint = damageBuffer.getInt(offset)
-                glyphs[rowStart + column] =
-                    if (codepoint in 0..Char.MAX_VALUE.code && codepoint !in SURROGATE_RANGE) {
-                        codepoint.toChar()
-                    } else {
-                        REPLACEMENT_CHARACTER
-                    }
-                styledForegroundColors[rowStart + column] =
-                    damageBuffer.getInt(offset + 4) or
-                        ((damageBuffer.get(offset + 12).toInt() and 0x7f) shl ATTRIBUTE_SHIFT)
-                backgroundColors[rowStart + column] = damageBuffer.getInt(offset + 8)
+                val cell = rowStart + column
+                val glyphStart = cell * MAX_GRAPHEME_CODEPOINTS
+                val graphemeLength =
+                    (damageBuffer.get(offset + 74).toInt() and 0xff)
+                        .coerceIn(0, MAX_GRAPHEME_CODEPOINTS)
+                for (codepointIndex in 0 until MAX_GRAPHEME_CODEPOINTS) {
+                    val codepoint = damageBuffer.getInt(offset + codepointIndex * 4)
+                    glyphCodepoints[glyphStart + codepointIndex] =
+                        if (
+                            codepointIndex < graphemeLength &&
+                            codepoint in 0..MAX_UNICODE_CODEPOINT &&
+                            codepoint !in SURROGATE_RANGE
+                        ) {
+                            codepoint
+                        } else if (codepointIndex < graphemeLength) {
+                            REPLACEMENT_CODEPOINT
+                        } else {
+                            0
+                        }
+                }
+                glyphLengths[cell] = graphemeLength.toByte()
+                glyphWidths[cell] =
+                    (damageBuffer.get(offset + 73).toInt() and 0xff)
+                        .coerceIn(0, 2)
+                        .toByte()
+                styledForegroundColors[cell] =
+                    damageBuffer.getInt(offset + 64) or
+                        ((damageBuffer.get(offset + 72).toInt() and 0x7f) shl ATTRIBUTE_SHIFT)
+                backgroundColors[cell] = damageBuffer.getInt(offset + 68)
                 offset += DAMAGE_CELL_SIZE
             }
         }
@@ -533,14 +559,26 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
             }
             textPaint.color = foreground
             textPaint.isFakeBoldText = attributes and ATTRIBUTE_BOLD != 0
-            canvas.drawText(
-                glyphs,
-                start + runStart,
-                runEnd - runStart,
-                CONTENT_PADDING + runStart * cellWidth,
-                baseline,
-                textPaint,
-            )
+            var column = runStart
+            while (column < runEnd) {
+                if (isBlankGlyph(start + column)) {
+                    column++
+                    continue
+                }
+                val glyphStartColumn = column
+                do {
+                    column++
+                } while (column < runEnd && !isBlankGlyph(start + column))
+                val glyphCount = packGlyphRun(start + glyphStartColumn, start + column)
+                canvas.drawText(
+                    rowGlyphScratch,
+                    0,
+                    glyphCount,
+                    CONTENT_PADDING + glyphStartColumn * cellWidth,
+                    baseline,
+                    textPaint,
+                )
+            }
             if (attributes and ATTRIBUTE_UNDERLINE != 0) {
                 backgroundPaint.color = foreground
                 canvas.drawRect(
@@ -565,6 +603,31 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
             )
         }
         rowNodes[row].endRecording()
+    }
+
+    private fun packGlyphRun(
+        start: Int,
+        end: Int,
+    ): Int {
+        var output = 0
+        for (cell in start until end) {
+            if (glyphWidths[cell].toInt() == 0) {
+                continue
+            }
+            val glyphStart = cell * MAX_GRAPHEME_CODEPOINTS
+            val glyphLength = glyphLengths[cell].toInt() and 0xff
+            for (index in 0 until glyphLength) {
+                val codepoint = glyphCodepoints[glyphStart + index]
+                if (codepoint <= Char.MAX_VALUE.code) {
+                    rowGlyphScratch[output++] = codepoint.toChar()
+                } else {
+                    val supplementary = codepoint - 0x10000
+                    rowGlyphScratch[output++] = ((supplementary ushr 10) + 0xd800).toChar()
+                    rowGlyphScratch[output++] = ((supplementary and 0x3ff) + 0xdc00).toChar()
+                }
+            }
+        }
+        return output
     }
 
     private fun drawComposingText(canvas: Canvas) {
@@ -1088,7 +1151,9 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         sourceRevision = Long.MIN_VALUE
         needsFullSnapshot = true
         composingText = ""
-        glyphs = CharArray(0)
+        glyphCodepoints = IntArray(0)
+        glyphLengths = ByteArray(0)
+        glyphWidths = ByteArray(0)
         styledForegroundColors = IntArray(0)
         backgroundColors = IntArray(0)
         rowNodes = emptyArray()
@@ -1108,18 +1173,40 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         for (row in firstRow..cursorRow.coerceAtMost(rows - 1)) {
             val start = row * columns
             var end = columns
-            while (end > 0 && glyphs[start + end - 1] == ' ') {
+            while (end > 0 && isBlankGlyph(start + end - 1)) {
                 end--
             }
-            if (end != 0) {
-                builder.append(glyphs, start, end)
+            for (cell in start until start + end) {
+                if (glyphWidths[cell].toInt() == 0) {
+                    continue
+                }
+                val glyphStart = cell * MAX_GRAPHEME_CODEPOINTS
+                val glyphLength = glyphLengths[cell].toInt() and 0xff
+                for (index in 0 until glyphLength) {
+                    val codepoint = glyphCodepoints[glyphStart + index]
+                    if (
+                        builder.length + Character.charCount(codepoint) >
+                        ACCESSIBILITY_CHARACTER_LIMIT
+                    ) {
+                        return builder.toString()
+                    }
+                    builder.appendCodePoint(codepoint)
+                }
             }
             if (row != cursorRow) {
+                if (builder.length >= ACCESSIBILITY_CHARACTER_LIMIT) {
+                    return builder.toString()
+                }
                 builder.append('\n')
             }
         }
         return builder.toString()
     }
+
+    private fun isBlankGlyph(cell: Int): Boolean =
+        glyphWidths[cell].toInt() == 1 &&
+            glyphLengths[cell].toInt() == 1 &&
+            glyphCodepoints[cell * MAX_GRAPHEME_CODEPOINTS] == ' '.code
 
     private fun resolveTerminalColor(color: Int): Int =
         if (color and DIRECT_COLOR_FLAG != 0) {
@@ -1147,9 +1234,13 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         private const val CURSOR_HEIGHT = 2f
         private const val UNDERLINE_HEIGHT = 1f
         private const val DAMAGE_MAGIC = 0x4d525441
-        private const val DAMAGE_VERSION = 2
+        private const val DAMAGE_VERSION = 3
         private const val DAMAGE_HEADER_SIZE = 32
-        private const val DAMAGE_CELL_SIZE = 16
+        private const val DAMAGE_CELL_SIZE = 76
+        private const val MAX_GRAPHEME_CODEPOINTS = 16
+        private const val MAX_GRAPHEME_UTF16_UNITS = MAX_GRAPHEME_CODEPOINTS * 2
+        private const val MAX_UNICODE_CODEPOINT = 0x10ffff
+        private const val REPLACEMENT_CODEPOINT = 0xfffd
         private const val MIN_ROWS = 2
         private const val MAX_ROWS = 200
         private const val MIN_COLUMNS = 2
