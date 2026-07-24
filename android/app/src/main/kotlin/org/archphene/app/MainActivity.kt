@@ -31,9 +31,11 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private lateinit var catalogStatusView: TextView
     private lateinit var searchStatusView: TextView
     private lateinit var jobStatusView: TextView
+    private lateinit var commandStatusView: TextView
     private lateinit var runtimeSurface: RuntimeSurfaceView
     private lateinit var installButton: Button
     private lateinit var removeButton: Button
+    private lateinit var commandButton: Button
     private val snapshot = RuntimeSnapshot()
     private val statusText = StringBuilder(128)
     private var runtimeBinder: ArchpheneRuntimeService.LocalBinder? = null
@@ -57,8 +59,10 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 catalogStatusView.setText(R.string.package_catalog_unavailable)
                 searchStatusView.setText(R.string.package_search_unavailable)
                 jobStatusView.setText(R.string.package_job_unavailable)
+                commandStatusView.setText(R.string.linux_command_unavailable)
                 installButton.isEnabled = false
                 removeButton.isEnabled = false
+                commandButton.isEnabled = false
             }
         }
 
@@ -251,6 +255,60 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 setBackgroundColor(Color.rgb(31, 35, 38))
                 maxLines = 2
             }
+        val commandInput =
+            EditText(this).apply {
+                setHint(R.string.linux_command_hint)
+                setSingleLine(true)
+                imeOptions = EditorInfo.IME_ACTION_GO
+            }
+        commandButton =
+            Button(this).apply {
+                setText(R.string.run_command)
+                isEnabled = false
+                setOnClickListener {
+                    hideKeyboard(commandInput)
+                    runtimeBinder?.runLinuxCommand(commandInput.text.toString())
+                }
+            }
+        commandInput.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_GO) {
+                hideKeyboard(commandInput)
+                runtimeBinder?.runLinuxCommand(commandInput.text.toString())
+                true
+            } else {
+                false
+            }
+        }
+        val commandRow =
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                addView(
+                    commandInput,
+                    LinearLayout.LayoutParams(
+                        0,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        1f,
+                    ),
+                )
+                addView(
+                    commandButton,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                    ),
+                )
+            }
+        commandStatusView =
+            TextView(this).apply {
+                setTextColor(Color.WHITE)
+                textSize = 14f
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(16), dp(4), dp(16), dp(4))
+                setText(R.string.linux_command_unavailable)
+                setBackgroundColor(Color.rgb(24, 28, 31))
+                maxLines = 2
+                setTextIsSelectable(true)
+            }
         val layout =
             LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
@@ -295,6 +353,20 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         dp(64),
+                    ),
+                )
+                addView(
+                    commandRow,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        dp(52),
+                    ),
+                )
+                addView(
+                    commandStatusView,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        dp(52),
                     ),
                 )
                 addView(
@@ -381,6 +453,10 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 jobStatusView,
                 runtimeBinder?.packageJobStatus ?: "Package operation unavailable",
             )
+            setTextIfChanged(
+                commandStatusView,
+                runtimeBinder?.linuxCommandStatus ?: "Linux command environment unavailable",
+            )
             updatePackageActions()
             return
         }
@@ -419,6 +495,10 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             jobStatusView,
             runtimeBinder?.packageJobStatus ?: "Package operation unavailable",
         )
+        setTextIfChanged(
+            commandStatusView,
+            runtimeBinder?.linuxCommandStatus ?: "Linux command environment unavailable",
+        )
         updatePackageActions()
     }
 
@@ -427,11 +507,13 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         if (binder == null) {
             installButton.isEnabled = false
             removeButton.isEnabled = false
+            commandButton.isEnabled = false
             return
         }
         setTextIfChanged(installButton, binder.packagePrimaryActionLabel)
         installButton.isEnabled = binder.packagePrimaryActionAvailable
         removeButton.isEnabled = binder.packageRemoveAvailable
+        commandButton.isEnabled = binder.linuxCommandAvailable
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density + 0.5f).toInt()

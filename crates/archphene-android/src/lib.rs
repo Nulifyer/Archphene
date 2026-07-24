@@ -93,6 +93,9 @@ mod android {
         MAX_MANIFEST_BYTES, MAX_TOOL_OUTPUT_BYTES, PackageRuntimeError, Repository,
         RepositoryArchitecture, ToolOutput,
     };
+    use archphene_process::{
+        MAX_COMMAND_ARGUMENTS, MAX_COMMAND_OUTPUT_BYTES, MAX_COMMAND_REQUEST_BYTES, ProcessError,
+    };
     use jni::JNIEnv;
     use jni::objects::{JByteBuffer, JClass};
     use jni::sys::{JNI_FALSE, JNI_TRUE, jboolean, jint, jlong};
@@ -106,6 +109,7 @@ mod android {
     const ERROR_INTERNAL: jint = -5;
     const ERROR_BOOTSTRAP: jint = -6;
     const ERROR_PACKAGE_RUNTIME: jint = -7;
+    const ERROR_PROCESS: jint = -8;
 
     static REGISTRY: OnceLock<Mutex<RuntimeRegistry>> = OnceLock::new();
 
@@ -159,6 +163,14 @@ mod android {
         destination[..length].copy_from_slice(&diagnostic.as_bytes()[..length]);
         destination[length] = 0;
         ERROR_PACKAGE_RUNTIME
+    }
+
+    fn copy_process_error(error: &ProcessError, destination: &mut [u8]) -> jint {
+        let diagnostic = error.to_string();
+        let length = diagnostic.len().min(destination.len().saturating_sub(1));
+        destination[..length].copy_from_slice(&diagnostic.as_bytes()[..length]);
+        destination[length] = 0;
+        ERROR_PROCESS
     }
 
     fn decode_job_operation(value: jint) -> Option<JobOperation> {
@@ -641,6 +653,97 @@ mod android {
         };
         let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
         copy_tool_result(result, destination)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeRunCommand(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        request_buffer: JByteBuffer,
+        request_length: jint,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let (Ok(handle), Ok(request_length)) =
+            (u64::try_from(handle), usize::try_from(request_length))
+        else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let (Ok(request_capacity), Ok(output_capacity)) = (
+            environment.get_direct_buffer_capacity(&request_buffer),
+            environment.get_direct_buffer_capacity(&output_buffer),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if request_length == 0
+            || request_length > request_capacity
+            || request_length > MAX_COMMAND_REQUEST_BYTES
+            || output_capacity < MAX_TOOL_OUTPUT_BYTES
+        {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let (Ok(request_address), Ok(output_address)) = (
+            environment.get_direct_buffer_address(&request_buffer),
+            environment.get_direct_buffer_address(&output_buffer),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if request_address.is_null() || output_address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let request_bytes =
+            unsafe { slice::from_raw_parts(request_address.cast_const(), request_length) };
+        let mut fields = request_bytes.split(|byte| *byte == 0);
+        let Some(command_bytes) = fields.next() else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(command) = str::from_utf8(command_bytes) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let mut arguments = [""; MAX_COMMAND_ARGUMENTS];
+        let mut argument_count = 0_usize;
+        for field in fields {
+            if argument_count == arguments.len() {
+                return ERROR_INVALID_ARGUMENT;
+            }
+            let Ok(argument) = str::from_utf8(field) else {
+                return ERROR_INVALID_ARGUMENT;
+            };
+            arguments[argument_count] = argument;
+            argument_count += 1;
+        }
+        let command_environment = {
+            let Ok(mut registry) = registry().lock() else {
+                return ERROR_INTERNAL;
+            };
+            let Some(runtime) = registry.runtime_mut(handle) else {
+                return ERROR_INVALID_HANDLE;
+            };
+            let Some(package_runtime) = runtime.package_runtime() else {
+                return ERROR_INVALID_STATE;
+            };
+            match package_runtime.command_environment() {
+                Ok(command_environment) => command_environment,
+                Err(error) => {
+                    let destination =
+                        unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
+                    return copy_package_error(&error, destination);
+                }
+            }
+        };
+        let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
+        let output = match command_environment.run(command, &arguments[..argument_count]) {
+            Ok(output) => output,
+            Err(error) => return copy_process_error(&error, destination),
+        };
+        let mut writer = &mut destination[..MAX_TOOL_OUTPUT_BYTES];
+        if write!(writer, "{}\n", output.exit_code()).is_err()
+            || output.as_bytes().len() > MAX_COMMAND_OUTPUT_BYTES
+            || writer.write_all(output.as_bytes()).is_err()
+        {
+            return ERROR_INTERNAL;
+        }
+        i32::try_from(MAX_TOOL_OUTPUT_BYTES - writer.len()).unwrap_or(i32::MAX)
     }
 
     #[unsafe(no_mangle)]

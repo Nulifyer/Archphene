@@ -36,10 +36,26 @@ class ArchpheneRuntimeService : Service() {
             get() =
                 lastResolvedPackage.isNotEmpty() &&
                     !searchActive &&
-                    !packageOperationActive
+                    !packageOperationActive &&
+                    !commandActive
 
         val packageRemoveAvailable: Boolean
-            get() = removeAvailable && !searchActive && !packageOperationActive
+            get() =
+                removeAvailable &&
+                    !searchActive &&
+                    !packageOperationActive &&
+                    !commandActive
+
+        val linuxCommandStatus: String
+            get() = commandStatus
+
+        val linuxCommandAvailable: Boolean
+            get() =
+                readyHandle != 0L &&
+                    !catalogRefreshActive &&
+                    !searchActive &&
+                    !packageOperationActive &&
+                    !commandActive
 
         fun refreshPackageCatalogs(): Boolean = requestCatalogRefresh()
 
@@ -53,6 +69,9 @@ class ArchpheneRuntimeService : Service() {
 
         fun removePackage(packageName: String): Boolean =
             requestPackageRemoval(packageName)
+
+        fun runLinuxCommand(commandLine: String): Boolean =
+            requestLinuxCommand(commandLine)
     }
 
     private val binder = LocalBinder()
@@ -62,11 +81,13 @@ class ArchpheneRuntimeService : Service() {
     private var bootstrapThread: Thread? = null
     private var catalogThread: Thread? = null
     private var packageThread: Thread? = null
+    private var commandThread: Thread? = null
     @Volatile private var catalogRefreshActive = false
     @Volatile private var catalogStatus = "Package catalog not downloaded"
     @Volatile private var searchActive = false
     @Volatile private var searchStatus = "Search the official Arch repositories"
     @Volatile private var packageOperationActive = false
+    @Volatile private var commandActive = false
     @Volatile private var jobStatus = "No package transaction"
     @Volatile private var lastResolvedPackage = ""
     @Volatile private var lastResolvedRepository = ""
@@ -74,6 +95,7 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var lastResolvedAvailableVersion = ""
     @Volatile private var primaryActionLabel = "Install"
     @Volatile private var removeAvailable = false
+    @Volatile private var commandStatus = "Run an installed Linux command"
 
     private data class ResolvedPayload(
         val repository: String,
@@ -120,6 +142,8 @@ class ArchpheneRuntimeService : Service() {
         catalogThread = null
         packageThread?.interrupt()
         packageThread = null
+        commandThread?.interrupt()
+        commandThread = null
         if (activeHandle != 0L) {
             NativeRuntime.nativeTransition(activeHandle, NativeRuntime.LIFECYCLE_STOPPING)
             NativeRuntime.nativeTransition(activeHandle, NativeRuntime.LIFECYCLE_STOPPED)
@@ -275,7 +299,8 @@ class ArchpheneRuntimeService : Service() {
             activeHandle == 0L ||
             catalogRefreshActive ||
             searchActive ||
-            packageOperationActive
+            packageOperationActive ||
+            commandActive
         ) {
             return false
         }
@@ -437,6 +462,7 @@ class ArchpheneRuntimeService : Service() {
             catalogRefreshActive ||
             searchActive ||
             packageOperationActive ||
+            commandActive ||
             normalized.length !in 2..128 ||
             normalized.any { character ->
                 character.code > 0x7f ||
@@ -510,6 +536,7 @@ class ArchpheneRuntimeService : Service() {
             catalogRefreshActive ||
             searchActive ||
             packageOperationActive ||
+            commandActive ||
             normalized.length !in 1..128 ||
             normalized.any { character ->
                 character.code > 0x7f ||
@@ -691,6 +718,7 @@ class ArchpheneRuntimeService : Service() {
             catalogRefreshActive ||
             searchActive ||
             packageOperationActive ||
+            commandActive ||
             normalized != lastResolvedPackage ||
             availableVersion.isEmpty() ||
             (repository != "core" && repository != "extra")
@@ -900,6 +928,7 @@ class ArchpheneRuntimeService : Service() {
             catalogRefreshActive ||
             searchActive ||
             packageOperationActive ||
+            commandActive ||
             normalized != lastResolvedPackage ||
             installedVersion.isEmpty() ||
             (repository != "core" && repository != "extra")
@@ -1263,6 +1292,149 @@ class ArchpheneRuntimeService : Service() {
             Log.w(TAG, "Rejected invalid cached package ${payload.filename}: $diagnostic")
         }
         return false
+    }
+
+    @Synchronized
+    private fun requestLinuxCommand(commandLine: String): Boolean {
+        val activeHandle = readyHandle
+        val tokens = splitCommandLine(commandLine)
+        if (
+            activeHandle == 0L ||
+            catalogRefreshActive ||
+            searchActive ||
+            packageOperationActive ||
+            commandActive ||
+            tokens.isEmpty()
+        ) {
+            if (tokens.isEmpty()) {
+                commandStatus = "Enter a command and optional whitespace-separated arguments"
+            }
+            return false
+        }
+        val encoded = tokens.map { token -> token.toByteArray(StandardCharsets.UTF_8) }
+        val requestLength =
+            encoded.sumOf { bytes -> bytes.size } + (encoded.size - 1).coerceAtLeast(0)
+        if (requestLength > NativeRuntime.COMMAND_REQUEST_LIMIT) {
+            commandStatus = "Command request is too large"
+            return false
+        }
+        val requestBuffer = ByteBuffer.allocateDirect(requestLength)
+        encoded.forEachIndexed { index, bytes ->
+            if (index != 0) {
+                requestBuffer.put(0.toByte())
+            }
+            requestBuffer.put(bytes)
+        }
+        commandActive = true
+        commandStatus = "Running ${tokens.first()}"
+        commandThread =
+            Thread(
+                {
+                    try {
+                        val outputBuffer =
+                            ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
+                        val outputLength =
+                            NativeRuntime.nativeRunCommand(
+                                activeHandle,
+                                requestBuffer,
+                                requestLength,
+                                outputBuffer,
+                            )
+                        if (outputLength < 0) {
+                            throw IllegalStateException(
+                                readNativeMessage(outputBuffer, outputLength),
+                            )
+                        }
+                        val bytes = ByteArray(outputLength)
+                        outputBuffer.position(0)
+                        outputBuffer.get(bytes)
+                        val separator = bytes.indexOf('\n'.code.toByte())
+                        if (separator <= 0) {
+                            throw IllegalStateException("Linux command returned an invalid result")
+                        }
+                        val exitCode =
+                            String(bytes, 0, separator, StandardCharsets.US_ASCII).toIntOrNull()
+                                ?: throw IllegalStateException(
+                                    "Linux command returned an invalid exit status",
+                                )
+                        val text =
+                            sanitizeCommandOutput(
+                                String(
+                                    bytes,
+                                    separator + 1,
+                                    bytes.size - separator - 1,
+                                    StandardCharsets.UTF_8,
+                                ),
+                            )
+                        commandStatus =
+                            if (text.isEmpty()) {
+                                "Exited $exitCode"
+                            } else {
+                                "Exited $exitCode\n$text"
+                            }
+                        Log.i(TAG, "Linux command ${tokens.first()} exited $exitCode")
+                    } catch (error: Exception) {
+                        commandStatus =
+                            "Command failed: ${error.message ?: error.javaClass.simpleName}"
+                        Log.e(TAG, "Linux command failed", error)
+                    } finally {
+                        commandActive = false
+                        commandThread = null
+                    }
+                },
+                "ArchpheneCommand",
+            ).also(Thread::start)
+        return true
+    }
+
+    private fun splitCommandLine(commandLine: String): List<String> {
+        val normalized = commandLine.trim()
+        if (normalized.isEmpty() || normalized.length > NativeRuntime.COMMAND_REQUEST_LIMIT) {
+            return emptyList()
+        }
+        val result = ArrayList<String>(8)
+        var start = -1
+        for (index in normalized.indices) {
+            if (normalized[index].isWhitespace()) {
+                if (start >= 0) {
+                    result.add(normalized.substring(start, index))
+                    if (result.size > 33) {
+                        return emptyList()
+                    }
+                    start = -1
+                }
+            } else if (start < 0) {
+                start = index
+            }
+        }
+        if (start >= 0) {
+            result.add(normalized.substring(start))
+        }
+        return result
+    }
+
+    private fun sanitizeCommandOutput(output: String): String {
+        val sanitized = StringBuilder(output.length.coerceAtMost(4096))
+        var index = 0
+        while (index < output.length && sanitized.length < 4096) {
+            val character = output[index++]
+            if (character == '\u001b') {
+                if (index < output.length && output[index] == '[') {
+                    index++
+                    while (index < output.length) {
+                        val value = output[index++]
+                        if (value.code in 0x40..0x7e) {
+                            break
+                        }
+                    }
+                }
+                continue
+            }
+            if (character == '\n' || character == '\t' || character.code >= 0x20) {
+                sanitized.append(character)
+            }
+        }
+        return sanitized.toString().trimEnd()
     }
 
     private fun readLatestPackageJob(activeHandle: Long): String {

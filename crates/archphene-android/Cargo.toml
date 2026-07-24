@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]
 archphene-core = { path = "../archphene-core" }
 archphene-jobs = { path = "../archphene-jobs" }
 archphene-packages = { path = "../archphene-packages" }
+archphene-process = { path = "../archphene-process" }
 archphene-runtime = { path = "../archphene-runtime" }
 
 [target.'cfg(target_os = "android")'.dependencies]

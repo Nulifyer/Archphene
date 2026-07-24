@@ -151,6 +151,19 @@ archphene_wait_log 'Installed btop: [1-9][0-9]* signed packages' 15 >/dev/null
 archphene_adb_run shell run-as "$package" test -x files/arch-root/usr/bin/btop ||
   archphene_die "reinstalled btop executable is missing"
 
+archphene_wait_ui 'text="Linux command, for example btop --version"' \
+  "archphene-command-field-$serial" 15
+archphene_tap_ui_pattern "$ARCHPHENE_UI" \
+  'text="Linux command, for example btop --version"' 'Linux command'
+archphene_adb_run shell input text 'btop%s--version' >/dev/null
+archphene_wait_ui 'text="btop --version"' "archphene-command-entered-$serial" 10
+archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null
+archphene_wait_ui 'text="RUN"' "archphene-command-keyboard-dismissed-$serial" 10
+archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="RUN"' 'run Linux command'
+archphene_wait_ui 'text="Exited 0[^"]*btop version' \
+  "archphene-command-complete-$serial" 45
+archphene_wait_log 'Linux command btop exited 0' 15 >/dev/null
+
 archphene_adb_run exec-out screencap -p >"$output_dir/$serial-btop.png"
 
 archphene_adb_run shell am force-stop "$package" >/dev/null
@@ -168,5 +181,6 @@ archphene_note "Archphene signed package install passed on $serial"
 archphene_note "  $closure_count archives and signatures were atomically cached, verified, and installed"
 archphene_note "  Tampered cache was rejected, redownloaded, and reverified"
 archphene_note "  Conservative removal and verified-cache reinstall passed"
+archphene_note "  Shared Linux command environment executed btop --version"
 archphene_note "  Durable Complete state survived process death"
 archphene_note "  Full-device screenshot: $output_dir/$serial-btop.png"

@@ -4,6 +4,7 @@ members = [
     "crates/archphene-core",
     "crates/archphene-jobs",
     "crates/archphene-packages",
+    "crates/archphene-process",
     "crates/archphene-root",
     "crates/archphene-runtime",
 ]

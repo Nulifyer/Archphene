@@ -76,6 +76,11 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
     - [ ] Prove a real older-to-newer repository update, including changed dependencies and replacements, on both targets.
     - [ ] Complete hooks/scriptlets, replacements, dependency consistency checks, closure-wide rollback, orphan cleanup, cancellation, and low-storage recovery.
   - [ ] Terminal/PTY and shared command environment
+    - [x] Execute one installed ELF command without a shell through the verified loader and generic path bridge, with bounded names, arguments, output, time, process group, environment, working directory, and symlink resolution.
+    - [x] Pass clean `btop --version` execution, scoped-log, and full-device UI gates on the x86_64 emulator and AArch64 Samsung after signed install/remove/reinstall cycles.
+    - [ ] Support verified script interpreters and a conventional shared shell environment without escaping into Android's `/system/bin`.
+    - [ ] Add a bounded interactive PTY registry, resize, UTF-8 input/output queues, cancellation, process-tree supervision, and durable session lifecycle.
+    - [ ] Replace the diagnostic command panel with production terminal rendering, scrollback, selection, IME, hardware keyboard, clipboard, and accessibility.
   - [ ] Wayland compositor, presentation, and lifecycle
   - [ ] Pointer, touch, keyboard, IME, clipboard, and drag-and-drop
   - [ ] Android file integration and `/mnt/android`

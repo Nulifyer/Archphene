@@ -9,6 +9,7 @@ dependencies = [
  "archphene-core",
  "archphene-jobs",
  "archphene-packages",
+ "archphene-process",
  "archphene-runtime",
  "jni",
 ]
@@ -23,6 +24,13 @@ version = "0.1.0"
 
 [[package]]
 name = "archphene-packages"
+version = "0.1.0"
+dependencies = [
+ "archphene-process",
+]
+
+[[package]]
+name = "archphene-process"
 version = "0.1.0"
 
 [[package]]

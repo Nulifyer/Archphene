@@ -7,6 +7,7 @@ internal object NativeRuntime {
     const val SNAPSHOT_SIZE = 64
     const val PACKAGE_MANIFEST_LIMIT = 32 * 1024
     const val PACKAGE_OUTPUT_SIZE = 16 * 1024
+    const val COMMAND_REQUEST_LIMIT = 16 * 1024
 
     const val LIFECYCLE_RUNNING = 2
     const val LIFECYCLE_SUSPENDED = 3
@@ -84,6 +85,12 @@ internal object NativeRuntime {
         action: Int,
         packageBuffer: ByteBuffer,
         packageLength: Int,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeRunCommand(
+        handle: Long,
+        requestBuffer: ByteBuffer,
+        requestLength: Int,
         outputBuffer: ByteBuffer,
     ): Int
     external fun nativeQueuePackageJob(

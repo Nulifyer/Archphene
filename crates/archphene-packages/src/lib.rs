@@ -11,6 +11,8 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use archphene_process::{CommandEnvironment, ProcessError};
+
 pub const MAX_MANIFEST_BYTES: usize = 32 * 1024;
 pub const MAX_MANIFEST_ENTRIES: usize = 128;
 pub const MAX_TOOL_OUTPUT_BYTES: usize = 16 * 1024;
@@ -184,6 +186,7 @@ pub enum PackageRuntimeError {
     InvalidPayload,
     InvalidSignature,
     ToolFailed(i32, ToolOutput),
+    Process(ProcessError),
     Io(io::Error),
 }
 
@@ -226,6 +229,7 @@ impl fmt::Display for PackageRuntimeError {
                 }
                 Ok(())
             }
+            Self::Process(error) => error.fmt(formatter),
             Self::Io(error) => write!(formatter, "package-runtime I/O error: {error}"),
         }
     }
@@ -236,6 +240,12 @@ impl std::error::Error for PackageRuntimeError {}
 impl From<io::Error> for PackageRuntimeError {
     fn from(error: io::Error) -> Self {
         Self::Io(error)
+    }
+}
+
+impl From<ProcessError> for PackageRuntimeError {
+    fn from(error: ProcessError) -> Self {
+        Self::Process(error)
     }
 }
 
@@ -1139,6 +1149,18 @@ impl PackageRuntime {
 
     pub fn native_root(&self) -> &Path {
         &self.native_root
+    }
+
+    pub fn command_environment(&self) -> Result<CommandEnvironment, PackageRuntimeError> {
+        CommandEnvironment::new(
+            &self.arch_root,
+            &self.loader,
+            &self.library_path,
+            &self.path_bridge,
+            &self.alias_root,
+            &self.executable_path,
+        )
+        .map_err(PackageRuntimeError::from)
     }
 }
 
