@@ -111,6 +111,10 @@ mod android {
     const ERROR_BOOTSTRAP: jint = -6;
     const ERROR_PACKAGE_RUNTIME: jint = -7;
     const ERROR_PROCESS: jint = -8;
+    const PTY_EVENT_READABLE: jint = 1;
+    const PTY_EVENT_WRITABLE: jint = 1 << 1;
+    const PTY_EVENT_HANGUP: jint = 1 << 2;
+    const PTY_EVENT_WOKEN: jint = 1 << 3;
 
     static REGISTRY: OnceLock<Mutex<RuntimeRegistry>> = OnceLock::new();
 
@@ -860,6 +864,73 @@ mod android {
             Ok(length) => i32::try_from(length).unwrap_or(i32::MAX),
             Err(_) => ERROR_PROCESS,
         }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeWaitPty(
+        _environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        pty_handle: jlong,
+        write_pending: jboolean,
+    ) -> jint {
+        let (Ok(handle), Ok(pty_handle)) = (u64::try_from(handle), u64::try_from(pty_handle))
+        else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let waiter = {
+            let Ok(mut registry) = registry().lock() else {
+                return ERROR_INTERNAL;
+            };
+            let Some(runtime) = registry.runtime_mut(handle) else {
+                return ERROR_INVALID_HANDLE;
+            };
+            match runtime.pty_waiter(pty_handle) {
+                Ok(waiter) => waiter,
+                Err(_) => return ERROR_PROCESS,
+            }
+        };
+        match waiter.wait(None, write_pending != JNI_FALSE) {
+            Ok(event) => {
+                (if event.readable {
+                    PTY_EVENT_READABLE
+                } else {
+                    0
+                }) | (if event.writable {
+                    PTY_EVENT_WRITABLE
+                } else {
+                    0
+                }) | (if event.hangup { PTY_EVENT_HANGUP } else { 0 })
+                    | (if event.woken { PTY_EVENT_WOKEN } else { 0 })
+            }
+            Err(_) => ERROR_PROCESS,
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeWakePty(
+        _environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        pty_handle: jlong,
+    ) -> jint {
+        let (Ok(handle), Ok(pty_handle)) = (u64::try_from(handle), u64::try_from(pty_handle))
+        else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let waiter = {
+            let Ok(mut registry) = registry().lock() else {
+                return ERROR_INTERNAL;
+            };
+            let Some(runtime) = registry.runtime_mut(handle) else {
+                return ERROR_INVALID_HANDLE;
+            };
+            match runtime.pty_waiter(pty_handle) {
+                Ok(waiter) => waiter,
+                Err(_) => return ERROR_PROCESS,
+            }
+        };
+        waiter.signal().map_or(ERROR_PROCESS, |_| 0)
     }
 
     #[unsafe(no_mangle)]

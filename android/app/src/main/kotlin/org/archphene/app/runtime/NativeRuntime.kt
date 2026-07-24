@@ -33,6 +33,10 @@ internal object NativeRuntime {
     const val JOB_COMPLETE = 6
     const val JOB_FAILED = 7
     const val JOB_CANCELLED = 8
+    const val PTY_EVENT_READABLE = 1
+    const val PTY_EVENT_WRITABLE = 1 shl 1
+    const val PTY_EVENT_HANGUP = 1 shl 2
+    const val PTY_EVENT_WOKEN = 1 shl 3
 
     init {
         System.loadLibrary("archphene_android")
@@ -107,6 +111,15 @@ internal object NativeRuntime {
         writeOperation: Boolean,
         buffer: ByteBuffer,
         byteCount: Int,
+    ): Int
+    external fun nativeWaitPty(
+        handle: Long,
+        ptyHandle: Long,
+        writePending: Boolean,
+    ): Int
+    external fun nativeWakePty(
+        handle: Long,
+        ptyHandle: Long,
     ): Int
     external fun nativeResizePty(
         handle: Long,

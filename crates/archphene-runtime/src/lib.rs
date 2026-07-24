@@ -10,7 +10,7 @@ use archphene_packages::{
     CatalogDownload, PackagePayloadDownload, PackageRuntime, PackageRuntimeError, PackageTool,
     Repository, RepositoryArchitecture, ToolOutput,
 };
-use archphene_process::PtyRegistry;
+use archphene_process::{PtyRegistry, PtyWaiter};
 use archphene_root::{ArchRoot, BootstrapReport, RootError};
 
 pub const STATUS_ARCH_ROOT_READY: u32 = 1 << 0;
@@ -301,6 +301,12 @@ impl RuntimeHost {
     pub fn pty_exit_status(&mut self, handle: u64) -> Result<Option<i32>, PackageRuntimeError> {
         self.pty_sessions
             .exit_status(handle)
+            .map_err(PackageRuntimeError::from)
+    }
+
+    pub fn pty_waiter(&self, handle: u64) -> Result<PtyWaiter, PackageRuntimeError> {
+        self.pty_sessions
+            .waiter(handle)
             .map_err(PackageRuntimeError::from)
     }
 

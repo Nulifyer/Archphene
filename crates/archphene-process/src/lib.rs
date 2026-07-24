@@ -6,9 +6,11 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -183,6 +185,7 @@ impl CommandEnvironment {
         let command_path = resolve_installed_command(&self.arch_root, command)?;
         let launch = prepare_launch(&self.arch_root, command, command_path)?;
         let (master, slave) = system::open_pty(rows, columns)?;
+        let waiter = PtyWaiter::new(&master)?;
         let input = slave.try_clone()?;
         let output = slave.try_clone()?;
         let mut command_builder = self.build_command(&launch, arguments, "xterm-256color");
@@ -194,6 +197,7 @@ impl CommandEnvironment {
             .spawn()?;
         Ok(PtySession {
             master,
+            waiter,
             child: Some(child),
             exit_status: None,
             rows,
@@ -302,6 +306,7 @@ impl CommandEnvironment {
 #[derive(Debug)]
 pub struct PtySession {
     master: File,
+    waiter: PtyWaiter,
     child: Option<std::process::Child>,
     exit_status: Option<i32>,
     rows: u16,
@@ -355,7 +360,12 @@ impl PtySession {
         (self.rows, self.columns)
     }
 
+    pub fn waiter(&self) -> PtyWaiter {
+        self.waiter.clone()
+    }
+
     pub fn close(&mut self) {
+        let _ = self.waiter.signal();
         self.finish();
     }
 
@@ -373,6 +383,77 @@ impl PtySession {
 impl Drop for PtySession {
     fn drop(&mut self) {
         self.close();
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct PtyWaiter {
+    inner: Arc<PtyWaiterInner>,
+}
+
+#[derive(Debug)]
+struct PtyWaiterInner {
+    master: File,
+    wake_reader: UnixStream,
+    wake_writer: UnixStream,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PtyWaitEvent {
+    pub readable: bool,
+    pub writable: bool,
+    pub hangup: bool,
+    pub woken: bool,
+}
+
+impl PtyWaiter {
+    fn new(master: &File) -> Result<Self, ProcessError> {
+        let (wake_reader, wake_writer) = UnixStream::pair()?;
+        wake_reader.set_nonblocking(true)?;
+        wake_writer.set_nonblocking(true)?;
+        Ok(Self {
+            inner: Arc::new(PtyWaiterInner {
+                master: master.try_clone()?,
+                wake_reader,
+                wake_writer,
+            }),
+        })
+    }
+
+    pub fn wait(
+        &self,
+        timeout: Option<Duration>,
+        write_pending: bool,
+    ) -> Result<PtyWaitEvent, ProcessError> {
+        let event = system::wait_for_pty(
+            self.inner.master.as_raw_fd(),
+            self.inner.wake_reader.as_raw_fd(),
+            timeout,
+            write_pending,
+        )
+        .map_err(ProcessError::from)?;
+        if event.woken {
+            let mut buffer = [0_u8; 64];
+            let mut reader = &self.inner.wake_reader;
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(error) => return Err(ProcessError::Io(error)),
+                }
+            }
+        }
+        Ok(event)
+    }
+
+    pub fn signal(&self) -> Result<(), ProcessError> {
+        let mut writer = &self.inner.wake_writer;
+        match writer.write(&[1]) {
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(()),
+            Err(error) => Err(ProcessError::Io(error)),
+        }
     }
 }
 
@@ -432,6 +513,10 @@ impl PtyRegistry {
         Ok(self.session_mut(handle)?.exit_status())
     }
 
+    pub fn waiter(&self, handle: u64) -> Result<PtyWaiter, ProcessError> {
+        Ok(self.session(handle)?.waiter())
+    }
+
     pub fn close(&mut self, handle: u64) -> Result<(), ProcessError> {
         let (index, generation) =
             decode_pty_handle(handle).ok_or(ProcessError::InvalidPtyHandle)?;
@@ -452,6 +537,16 @@ impl PtyRegistry {
             .get_mut(index)
             .filter(|slot| slot.generation == generation)
             .and_then(|slot| slot.session.as_mut())
+            .ok_or(ProcessError::InvalidPtyHandle)
+    }
+
+    fn session(&self, handle: u64) -> Result<&PtySession, ProcessError> {
+        let (index, generation) =
+            decode_pty_handle(handle).ok_or(ProcessError::InvalidPtyHandle)?;
+        self.slots
+            .get(index)
+            .filter(|slot| slot.generation == generation)
+            .and_then(|slot| slot.session.as_ref())
             .ok_or(ProcessError::InvalidPtyHandle)
     }
 }
@@ -683,6 +778,7 @@ fn exit_code(status: std::process::ExitStatus) -> i32 {
 
 #[allow(unsafe_code)]
 mod system {
+    use super::PtyWaitEvent;
     use std::ffi::CStr;
     use std::fs::{File, OpenOptions};
     use std::io;
@@ -691,12 +787,25 @@ mod system {
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::process::CommandExt;
     use std::process::Command;
+    use std::time::Duration;
 
     const O_NOCTTY: c_int = 0x100;
     const O_NONBLOCK: c_int = 0x800;
     const O_CLOEXEC: c_int = 0x80000;
     const TIOCSCTTY: c_ulong = 0x540e;
     const TIOCSWINSZ: c_ulong = 0x5414;
+    const POLLIN: i16 = 0x0001;
+    const POLLOUT: i16 = 0x0004;
+    const POLLERR: i16 = 0x0008;
+    const POLLHUP: i16 = 0x0010;
+    const POLLNVAL: i16 = 0x0020;
+
+    #[repr(C)]
+    struct PollDescriptor {
+        descriptor: c_int,
+        events: i16,
+        returned_events: i16,
+    }
 
     #[repr(C)]
     struct WindowSize {
@@ -713,6 +822,7 @@ mod system {
         fn ptsname_r(descriptor: c_int, output: *mut c_char, length: usize) -> c_int;
         fn setsid() -> c_int;
         fn ioctl(descriptor: c_int, request: c_ulong, ...) -> c_int;
+        fn poll(descriptors: *mut PollDescriptor, count: c_ulong, timeout: c_int) -> c_int;
     }
 
     pub fn kill_process_group(group: u32) -> io::Result<()> {
@@ -783,6 +893,50 @@ mod system {
         } else {
             Err(io::Error::last_os_error())
         }
+    }
+
+    pub fn wait_for_pty(
+        master: c_int,
+        wake_reader: c_int,
+        timeout: Option<Duration>,
+        write_pending: bool,
+    ) -> io::Result<PtyWaitEvent> {
+        let timeout_millis = timeout.map_or(-1, |duration| {
+            let milliseconds = duration.as_millis().max(1);
+            i32::try_from(milliseconds).unwrap_or(i32::MAX)
+        });
+        let mut descriptors = [
+            PollDescriptor {
+                descriptor: master,
+                events: POLLIN | if write_pending { POLLOUT } else { 0 },
+                returned_events: 0,
+            },
+            PollDescriptor {
+                descriptor: wake_reader,
+                events: POLLIN,
+                returned_events: 0,
+            },
+        ];
+        loop {
+            // SAFETY: `descriptors` is a writable two-element pollfd-compatible
+            // array that remains alive for the complete non-retaining call.
+            let result = unsafe { poll(descriptors.as_mut_ptr(), 2, timeout_millis) };
+            if result >= 0 {
+                break;
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+        let terminal_events = descriptors[0].returned_events;
+        let wake_events = descriptors[1].returned_events;
+        Ok(PtyWaitEvent {
+            readable: terminal_events & POLLIN != 0,
+            writable: terminal_events & POLLOUT != 0,
+            hangup: terminal_events & (POLLERR | POLLHUP | POLLNVAL) != 0,
+            woken: wake_events & (POLLIN | POLLERR | POLLHUP | POLLNVAL) != 0,
+        })
     }
 
     pub fn configure_controlling_terminal(command: &mut Command) {
@@ -1016,8 +1170,37 @@ mod tests {
     }
 
     #[test]
+    fn pty_waiter_reports_output_and_explicit_wakes() {
+        let (master, mut slave) = system::open_pty(24, 80).expect("PTY pair");
+        let waiter = PtyWaiter::new(&master).expect("PTY waiter");
+        let blocking_waiter = waiter.clone();
+        let wait_thread = thread::spawn(move || {
+            blocking_waiter
+                .wait(Some(Duration::from_secs(1)), false)
+                .expect("blocking wake event")
+        });
+        thread::sleep(Duration::from_millis(20));
+        waiter.signal().expect("signal waiter");
+        let wake = wait_thread.join().expect("wait thread");
+        assert!(wake.woken);
+        assert!(!wake.writable);
+
+        let writable = waiter
+            .wait(Some(Duration::from_secs(1)), true)
+            .expect("write-readiness event");
+        assert!(writable.writable);
+
+        slave.write_all(b"ready").expect("PTY output");
+        let output = waiter
+            .wait(Some(Duration::from_secs(1)), false)
+            .expect("output event");
+        assert!(output.readable);
+    }
+
+    #[test]
     fn pty_preserves_exit_status_after_terminal_eof() {
         let (master, slave) = system::open_pty(24, 80).expect("PTY pair");
+        let waiter = PtyWaiter::new(&master).expect("PTY waiter");
         let input = slave.try_clone().expect("PTY input");
         let output = slave.try_clone().expect("PTY output");
         let mut command = Command::new("/bin/sh");
@@ -1033,6 +1216,7 @@ mod tests {
         drop(command);
         let mut session = PtySession {
             master,
+            waiter,
             child: Some(child),
             exit_status: None,
             rows: 24,

@@ -328,7 +328,7 @@ class ArchpheneRuntimeService : Service() {
         private const val SHELL_INPUT_BYTES = 8 * 1024
         private const val SHELL_INPUT_CHARACTERS = 2 * 1024
         private const val SHELL_IO_BYTES = 4 * 1024
-        private const val SHELL_POLL_MILLIS = 100L
+        private const val SHELL_READ_BATCHES = 4
     }
 
     private fun startBootstrap(activeHandle: Long) {
@@ -1676,8 +1676,12 @@ class ArchpheneRuntimeService : Service() {
             shellPhase = "Shared shell input queue is full"
             return false
         }
-        shellThread?.interrupt()
-        return true
+        val result = NativeRuntime.nativeWakePty(readyHandle, shellHandle)
+        if (result < 0) {
+            shellPhase = "Could not wake the shared shell"
+            return false
+        }
+        return result == 0
     }
 
     private fun runSharedShell(activeHandle: Long) {
@@ -1741,19 +1745,24 @@ class ArchpheneRuntimeService : Service() {
                     }
                 }
 
-                readBuffer.clear()
-                val read =
-                    NativeRuntime.nativePtyIo(
-                        activeHandle,
-                        ptyHandle,
-                        false,
-                        readBuffer,
-                        SHELL_IO_BYTES,
-                    )
-                if (read < 0) {
-                    throw IllegalStateException("Could not read from the shared shell")
-                }
-                if (read != 0) {
+                var readBatches = 0
+                while (readBatches < SHELL_READ_BATCHES) {
+                    readBatches++
+                    readBuffer.clear()
+                    val read =
+                        NativeRuntime.nativePtyIo(
+                            activeHandle,
+                            ptyHandle,
+                            false,
+                            readBuffer,
+                            SHELL_IO_BYTES,
+                        )
+                    if (read < 0) {
+                        throw IllegalStateException("Could not read from the shared shell")
+                    }
+                    if (read == 0) {
+                        break
+                    }
                     readBuffer.position(0)
                     readBuffer.get(readBytes, 0, read)
                     shellOutput.append(readBytes, read)
@@ -1767,10 +1776,22 @@ class ArchpheneRuntimeService : Service() {
                     exitStatus = (encodedStatus ushr 1).toInt()
                     break
                 }
-                try {
-                    Thread.sleep(SHELL_POLL_MILLIS)
-                } catch (_: InterruptedException) {
-                    // Input and stop requests wake the bounded I/O loop.
+                if (!shellStopRequested) {
+                    val writePending = shellInput.peek(writeBytes) != 0
+                    val events =
+                        NativeRuntime.nativeWaitPty(
+                            activeHandle,
+                            ptyHandle,
+                            writePending,
+                        )
+                    val knownEvents =
+                        NativeRuntime.PTY_EVENT_READABLE or
+                            NativeRuntime.PTY_EVENT_WRITABLE or
+                            NativeRuntime.PTY_EVENT_HANGUP or
+                            NativeRuntime.PTY_EVENT_WOKEN
+                    if (events <= 0 || events and knownEvents != events) {
+                        throw IllegalStateException("Could not wait for shared shell activity")
+                    }
                 }
             }
         } catch (error: InterruptedException) {
@@ -1809,6 +1830,8 @@ class ArchpheneRuntimeService : Service() {
 
     private fun stopSharedShell(waitForWorker: Boolean) {
         val worker: Thread?
+        val activeHandle: Long
+        val ptyHandle: Long
         synchronized(this) {
             if (!shellActive) {
                 return
@@ -1816,8 +1839,12 @@ class ArchpheneRuntimeService : Service() {
             shellStopRequested = true
             shellPhase = "Stopping shared shell"
             worker = shellThread
+            activeHandle = readyHandle
+            ptyHandle = shellHandle
         }
-        worker?.interrupt()
+        if (activeHandle != 0L && ptyHandle != 0L) {
+            NativeRuntime.nativeWakePty(activeHandle, ptyHandle)
+        }
         if (waitForWorker && worker !== Thread.currentThread()) {
             try {
                 worker?.join(1_000)
