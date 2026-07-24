@@ -14,6 +14,10 @@
     <string name="remove">Remove</string>
     <string name="linux_session_display">Linux session display</string>
     <string name="terminal_accessibility_dimensions">Linux terminal, %1$d columns by %2$d rows</string>
+    <string name="terminal_text_smaller">Text smaller</string>
+    <string name="terminal_text_larger">Text larger</string>
+    <string name="terminal_text_size_automatic">Text size: Auto (%1$d sp)</string>
+    <string name="terminal_text_size_explicit">Text size: %1$d sp (reset to Auto)</string>
     <string name="linux_command_hint">Linux command, for example btop --version</string>
     <string name="run_command">Run</string>
     <string name="start_shell">Start shell</string>

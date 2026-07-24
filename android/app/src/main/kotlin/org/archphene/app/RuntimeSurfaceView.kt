@@ -14,6 +14,7 @@ import android.view.GestureDetector
 import android.view.KeyEvent
 import android.view.MenuItem
 import android.view.MotionEvent
+import android.view.ScaleGestureDetector
 import android.view.View
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.inputmethod.BaseInputConnection
@@ -23,6 +24,7 @@ import android.view.inputmethod.InputMethodManager
 import android.widget.PopupMenu
 import java.nio.ByteBuffer
 import kotlin.math.ceil
+import kotlin.math.roundToInt
 import org.archphene.app.runtime.ArchpheneRuntimeService
 import org.archphene.app.runtime.InputBatch
 import org.archphene.app.runtime.NativeRuntime
@@ -30,13 +32,24 @@ import org.archphene.app.runtime.NativeRuntime
 internal class RuntimeSurfaceView(context: Context) : View(context) {
     private val inputBatch = InputBatch()
     private val terminalInputBytes = ByteArray(TERMINAL_INPUT_LIMIT)
+    private val displayPreferences =
+        context.getSharedPreferences(DISPLAY_PREFERENCES, Context.MODE_PRIVATE)
+    private var automaticTextSize =
+        displayPreferences.getInt(TERMINAL_TEXT_SP_KEY, AUTOMATIC_TEXT_SIZE) ==
+            AUTOMATIC_TEXT_SIZE
+    private var terminalTextSp =
+        displayPreferences
+            .getInt(TERMINAL_TEXT_SP_KEY, AUTOMATIC_TEXT_SIZE)
+            .takeUnless { it == AUTOMATIC_TEXT_SIZE }
+            ?.coerceIn(MIN_TERMINAL_TEXT_SP, MAX_TERMINAL_TEXT_SP)
+            ?: AUTOMATIC_TERMINAL_TEXT_SP
     private val textPaint =
         Paint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG).apply {
             typeface = Typeface.MONOSPACE
             textSize =
                 TypedValue.applyDimension(
                     TypedValue.COMPLEX_UNIT_SP,
-                    TERMINAL_TEXT_SP,
+                    terminalTextSp.toFloat(),
                     resources.displayMetrics,
                 )
         }
@@ -57,6 +70,38 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
                 }
             },
         )
+    private val scaleGestureDetector =
+        ScaleGestureDetector(
+            context,
+            object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
+                    pendingPinchTextSp = terminalTextSp.toFloat()
+                    pinchPreviewScale = 1f
+                    pinchFocusX = detector.focusX
+                    pinchFocusY = detector.focusY
+                    return true
+                }
+
+                override fun onScale(detector: ScaleGestureDetector): Boolean {
+                    pendingPinchTextSp =
+                        (pendingPinchTextSp * detector.scaleFactor)
+                            .coerceIn(
+                                MIN_TERMINAL_TEXT_SP.toFloat(),
+                                MAX_TERMINAL_TEXT_SP.toFloat(),
+                            )
+                    pinchPreviewScale = pendingPinchTextSp / terminalTextSp
+                    pinchFocusX = detector.focusX
+                    pinchFocusY = detector.focusY
+                    invalidate()
+                    return true
+                }
+
+                override fun onScaleEnd(detector: ScaleGestureDetector) {
+                    pinchPreviewScale = 1f
+                    setTerminalTextSize(pendingPinchTextSp.roundToInt(), false)
+                }
+            },
+        )
     private var glyphs = CharArray(0)
     private var styles = IntArray(0)
     private var rowNodes = emptyArray<RenderNode>()
@@ -72,6 +117,10 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
     private var composingText = ""
     private var pastePopup: PopupMenu? = null
     private var runtimeBinder: ArchpheneRuntimeService.LocalBinder? = null
+    private var pendingPinchTextSp = terminalTextSp.toFloat()
+    private var pinchPreviewScale = 1f
+    private var pinchFocusX = 0f
+    private var pinchFocusY = 0f
     private var cellWidth = ceil(textPaint.measureText("M").toDouble()).toFloat().coerceAtLeast(1f)
     private var cellHeight =
         ceil((textPaint.fontMetrics.descent - textPaint.fontMetrics.ascent).toDouble())
@@ -91,6 +140,11 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
+        val previewingPinch = pinchPreviewScale != 1f
+        if (previewingPinch) {
+            canvas.save()
+            canvas.scale(pinchPreviewScale, pinchPreviewScale, pinchFocusX, pinchFocusY)
+        }
         if (rows == 0 || columns == 0) {
             textPaint.color = ANSI_COLORS[7]
             textPaint.isFakeBoldText = false
@@ -100,6 +154,9 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
                 CONTENT_PADDING - textPaint.fontMetrics.ascent,
                 textPaint,
             )
+            if (previewingPinch) {
+                canvas.restore()
+            }
             return
         }
         for (node in rowNodes) {
@@ -108,6 +165,9 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
             }
         }
         drawComposingText(canvas)
+        if (previewingPinch) {
+            canvas.restore()
+        }
     }
 
     override fun onSizeChanged(
@@ -130,6 +190,7 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        scaleGestureDetector.onTouchEvent(event)
         gestureDetector.onTouchEvent(event)
         val kind =
             when (event.actionMasked) {
@@ -166,11 +227,35 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         requestFocus()
         pastePopup?.dismiss()
         val popup = PopupMenu(context, this)
-        popup.menu
-            .add(0, android.R.id.paste, 0, android.R.string.paste)
-            .setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
+        popup.menu.add(0, android.R.id.paste, 0, android.R.string.paste).apply {
+            isEnabled =
+                context.getSystemService(ClipboardManager::class.java)?.hasPrimaryClip() == true
+            setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
+        }
+        popup.menu.add(0, MENU_TEXT_SMALLER, 1, R.string.terminal_text_smaller).apply {
+            isEnabled = terminalTextSp > MIN_TERMINAL_TEXT_SP
+        }
+        popup.menu.add(
+            0,
+            MENU_TEXT_RESET,
+            2,
+            if (automaticTextSize) {
+                context.getString(R.string.terminal_text_size_automatic, terminalTextSp)
+            } else {
+                context.getString(R.string.terminal_text_size_explicit, terminalTextSp)
+            },
+        )
+        popup.menu.add(0, MENU_TEXT_LARGER, 3, R.string.terminal_text_larger).apply {
+            isEnabled = terminalTextSp < MAX_TERMINAL_TEXT_SP
+        }
         popup.setOnMenuItemClickListener { item ->
-            item.itemId == android.R.id.paste && pasteClipboard()
+            when (item.itemId) {
+                android.R.id.paste -> pasteClipboard()
+                MENU_TEXT_SMALLER -> setTerminalTextSize(terminalTextSp - 1, false)
+                MENU_TEXT_RESET -> setTerminalTextSize(AUTOMATIC_TERMINAL_TEXT_SP, true)
+                MENU_TEXT_LARGER -> setTerminalTextSize(terminalTextSp + 1, false)
+                else -> false
+            }
         }
         popup.setOnDismissListener {
             if (pastePopup === popup) {
@@ -234,6 +319,11 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         keyCode: Int,
         event: KeyEvent,
     ): Boolean {
+        when (terminalTextSizeShortcut(keyCode, event)) {
+            TEXT_SIZE_SMALLER -> return setTerminalTextSize(terminalTextSp - 1, false)
+            TEXT_SIZE_RESET -> return setTerminalTextSize(AUTOMATIC_TERMINAL_TEXT_SP, true)
+            TEXT_SIZE_LARGER -> return setTerminalTextSize(terminalTextSp + 1, false)
+        }
         if (isPasteShortcut(keyCode, event)) {
             return pasteClipboard()
         }
@@ -263,6 +353,7 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         event: KeyEvent,
     ): Boolean =
         if (
+            terminalTextSizeShortcut(keyCode, event) != TEXT_SIZE_UNCHANGED ||
             isPasteShortcut(keyCode, event) ||
             terminalSequence(keyCode, event.isShiftPressed) != null ||
             textCodepoint(event, isAltGraph(event)) != 0
@@ -551,6 +642,43 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         return sendClipboardText(text)
     }
 
+    private fun setTerminalTextSize(
+        requestedSp: Int,
+        automatic: Boolean,
+    ): Boolean {
+        val nextSp = requestedSp.coerceIn(MIN_TERMINAL_TEXT_SP, MAX_TERMINAL_TEXT_SP)
+        if (nextSp == terminalTextSp && automatic == automaticTextSize) {
+            invalidate()
+            return true
+        }
+        terminalTextSp = nextSp
+        automaticTextSize = automatic
+        if (automatic) {
+            displayPreferences.edit().remove(TERMINAL_TEXT_SP_KEY).apply()
+        } else {
+            displayPreferences.edit().putInt(TERMINAL_TEXT_SP_KEY, nextSp).apply()
+        }
+        textPaint.textSize =
+            TypedValue.applyDimension(
+                TypedValue.COMPLEX_UNIT_SP,
+                nextSp.toFloat(),
+                resources.displayMetrics,
+            )
+        cellWidth = ceil(textPaint.measureText("M").toDouble()).toFloat().coerceAtLeast(1f)
+        cellHeight =
+            ceil((textPaint.fontMetrics.descent - textPaint.fontMetrics.ascent).toDouble())
+                .toFloat()
+                .coerceAtLeast(1f)
+        positionRowNodes()
+        for (row in rowNodes.indices) {
+            recordRow(row)
+        }
+        publishTerminalSize(width, height)
+        invalidate()
+        sendAccessibilityEvent(android.view.accessibility.AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED)
+        return true
+    }
+
     private fun sendClipboardText(text: CharSequence): Boolean {
         if (text.length > MAX_CLIPBOARD_CHARACTERS) {
             return false
@@ -706,6 +834,21 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
             event.isCtrlPressed &&
             event.isShiftPressed &&
             !event.isAltPressed
+
+    private fun terminalTextSizeShortcut(
+        keyCode: Int,
+        event: KeyEvent,
+    ): Int {
+        if (!event.isCtrlPressed || event.isAltPressed) {
+            return TEXT_SIZE_UNCHANGED
+        }
+        return when (keyCode) {
+            KeyEvent.KEYCODE_MINUS -> TEXT_SIZE_SMALLER
+            KeyEvent.KEYCODE_0 -> TEXT_SIZE_RESET
+            KeyEvent.KEYCODE_EQUALS, KeyEvent.KEYCODE_PLUS -> TEXT_SIZE_LARGER
+            else -> TEXT_SIZE_UNCHANGED
+        }
+    }
 
     private fun textCodepoint(
         event: KeyEvent,
@@ -984,7 +1127,19 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
 
     companion object {
         private const val NANOS_PER_MILLISECOND = 1_000_000L
-        private const val TERMINAL_TEXT_SP = 14f
+        private const val DISPLAY_PREFERENCES = "terminal_display"
+        private const val TERMINAL_TEXT_SP_KEY = "text_sp"
+        private const val AUTOMATIC_TEXT_SIZE = 0
+        private const val AUTOMATIC_TERMINAL_TEXT_SP = 16
+        private const val MIN_TERMINAL_TEXT_SP = 10
+        private const val MAX_TERMINAL_TEXT_SP = 32
+        private const val TEXT_SIZE_UNCHANGED = -1
+        private const val TEXT_SIZE_SMALLER = 0
+        private const val TEXT_SIZE_RESET = 1
+        private const val TEXT_SIZE_LARGER = 2
+        private const val MENU_TEXT_SMALLER = 0x415201
+        private const val MENU_TEXT_RESET = 0x415202
+        private const val MENU_TEXT_LARGER = 0x415203
         private const val CONTENT_PADDING = 8f
         private const val CURSOR_HEIGHT = 2f
         private const val UNDERLINE_HEIGHT = 1f

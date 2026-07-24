@@ -361,6 +361,20 @@ exact bracketed byte capture, touch and hardware routes, accessibility,
 scoped logs, and full-device screenshots. It passes on the emulator and
 Samsung exact-ABI builds.
 
+Terminal text now follows Android's scaled 16sp baseline in automatic mode.
+An explicit choice is bounded to integer 10–32sp steps and persists in the
+Android app sandbox. Users can change it with pinch zoom, the standard
+long-press menu, or hardware `Ctrl+-`/`Ctrl++`; `Ctrl+0` and the labeled menu
+item restore Auto. Pinch motion previews with a canvas transform and commits
+font metrics, cached-row re-recording, persistence, and the coarse PTY resize
+only when the gesture ends.
+
+Exact-ABI device gates prove Auto, explicit 20sp, touch/hardware controls,
+process-restart persistence, reset, scoped logs, and full-device screenshots
+on the emulator and Samsung. The broad PTY/input/lifecycle gate and
+clipboard/bracketed-paste gate still pass on both targets after the gesture and
+menu changes. Offline Android lint also passes.
+
 That device gate also exposed an incomplete generic root-identity bridge:
 glibc's filesystem-ID query reached Android's blocked x86_64 syscall 122.
 The path bridge now consistently virtualizes uid, gid, effective uid/gid, and
@@ -381,9 +395,8 @@ preserves the current cursor window but does not reflow or retain discarded
 rows because scrollback is not implemented. Unicode width and combining
 behavior, exact direct RGB color, remaining xterm controls, scrollback,
 selection/copy, remaining terminal modes, broader composing IME behavior,
-richer accessibility, and user-controlled terminal text sizing remain
-required. The temporary command field remains as a fallback above the renderer;
-direct terminal input no longer depends on it.
+richer accessibility remain required. The temporary command field remains as
+a fallback above the renderer; direct terminal input no longer depends on it.
 
 The validated prototype below remains reference evidence until replacement
 vertical slices pass equivalent gates. Installed prototype state is no longer a
