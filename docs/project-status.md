@@ -328,6 +328,22 @@ uses installed Bash and `tput` to produce ICH/DCH/IL/DL sequences through the
 real PTY; exact content, accessibility, scoped logs, and visually inspected
 full-device screenshots pass on both exact-ABI targets.
 
+Foreground and background indexes now retain all eight wire bits in Android
+instead of being truncated to the original 16 colors. Rust parses
+`38/48;5;n`; RGB SGR is bounded and mapped to its nearest indexed color until
+the damage protocol gains exact direct-color fields. Android creates one fixed
+256-entry palette at class initialization and keeps the existing 8-byte cell,
+coarse direct buffer, and row cache. No per-cell or per-frame allocation was
+added.
+
+The installed-`tput` color gate initially exposed a parser bug: the `ESC ( B`
+ASCII designation in `sgr0` leaked a literal `B` with the previous background.
+The streaming parser now consumes G0/G1 designations, handles SI/SO selection,
+and maps the DEC special-graphics set to Unicode line drawing. Rust wire and
+warmed allocation tests pass; installed 256-color foreground/background,
+reset, line drawing, accessibility, scoped logs, and visually inspected
+full-device screenshots pass on both exact-ABI targets.
+
 That device gate also exposed an incomplete generic root-identity bridge:
 glibc's filesystem-ID query reached Android's blocked x86_64 syscall 122.
 The path bridge now consistently virtualizes uid, gid, effective uid/gid, and
@@ -346,11 +362,11 @@ kernel metrics are reliable.
 This is not yet the production terminal promised by the milestone. Resizing
 preserves the current cursor window but does not reflow or retain discarded
 rows because scrollback is not implemented. Unicode width and combining
-behavior, extended color, remaining xterm controls, scrollback, selection,
-remaining terminal modes, clipboard/bracketed paste, broader composing IME
-behavior, richer accessibility, and user-controlled terminal text sizing
-remain required. The temporary command field remains as a fallback above the
-renderer; direct terminal input no longer depends on it.
+behavior, exact direct RGB color, remaining xterm controls, scrollback,
+selection, remaining terminal modes, clipboard/bracketed paste, broader
+composing IME behavior, richer accessibility, and user-controlled terminal
+text sizing remain required. The temporary command field remains as a fallback
+above the renderer; direct terminal input no longer depends on it.
 
 The validated prototype below remains reference evidence until replacement
 vertical slices pass equivalent gates. Installed prototype state is no longer a

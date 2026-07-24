@@ -53,6 +53,15 @@ enum ParserState {
     Csi,
     Osc,
     OscEscape,
+    CharsetG0,
+    CharsetG1,
+    CharsetOther,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Charset {
+    Ascii,
+    DecSpecial,
 }
 
 #[derive(Debug)]
@@ -85,6 +94,9 @@ pub struct Terminal {
     insert_mode: bool,
     tab_stops: [bool; MAX_COLUMNS as usize],
     last_printed: Option<u32>,
+    g0_charset: Charset,
+    g1_charset: Charset,
+    use_g1: bool,
     parser_state: ParserState,
     csi_parameters: [u16; MAX_CSI_PARAMETERS],
     csi_count: usize,
@@ -139,6 +151,9 @@ impl Terminal {
             insert_mode: false,
             tab_stops,
             last_printed: None,
+            g0_charset: Charset::Ascii,
+            g1_charset: Charset::Ascii,
+            use_g1: false,
             parser_state: ParserState::Ground,
             csi_parameters: [0; MAX_CSI_PARAMETERS],
             csi_count: 0,
@@ -341,6 +356,17 @@ impl Terminal {
                     ParserState::Osc
                 };
             }
+            ParserState::CharsetG0 => {
+                self.g0_charset = charset_designation(byte);
+                self.parser_state = ParserState::Ground;
+            }
+            ParserState::CharsetG1 => {
+                self.g1_charset = charset_designation(byte);
+                self.parser_state = ParserState::Ground;
+            }
+            ParserState::CharsetOther => {
+                self.parser_state = ParserState::Ground;
+            }
         }
         if old_cursor != (self.cursor_row, self.cursor_column) {
             self.mark_dirty(old_cursor.0);
@@ -387,7 +413,16 @@ impl Terminal {
                 self.wrap_pending = false;
                 self.tab_forward(1);
             }
-            0x20..=0x7e => self.put_codepoint(u32::from(byte)),
+            0x0e => self.use_g1 = true,
+            0x0f => self.use_g1 = false,
+            0x20..=0x7e => {
+                let charset = if self.use_g1 {
+                    self.g1_charset
+                } else {
+                    self.g0_charset
+                };
+                self.put_codepoint(map_charset(charset, byte));
+            }
             0xc2..=0xdf => {
                 self.utf8_codepoint = u32::from(byte & 0x1f);
                 self.utf8_minimum = 0x80;
@@ -419,6 +454,9 @@ impl Terminal {
                 self.string_bytes = 0;
                 self.parser_state = ParserState::Osc;
             }
+            b'(' => self.parser_state = ParserState::CharsetG0,
+            b')' => self.parser_state = ParserState::CharsetG1,
+            b'*' | b'+' => self.parser_state = ParserState::CharsetOther,
             b'7' => {
                 self.saved_row = self.cursor_row;
                 self.saved_column = self.cursor_column;
@@ -883,7 +921,9 @@ impl Terminal {
     }
 
     fn select_graphics(&mut self) {
-        for index in 0..self.csi_count.max(1) {
+        let parameter_count = self.csi_count.max(1);
+        let mut index = 0;
+        while index < parameter_count {
             match self.csi_parameters[index] {
                 0 => {
                     self.foreground = DEFAULT_FOREGROUND;
@@ -900,10 +940,35 @@ impl Terminal {
                 39 => self.foreground = DEFAULT_FOREGROUND,
                 40..=47 => self.background = self.csi_parameters[index] as u8 - 40,
                 49 => self.background = DEFAULT_BACKGROUND,
+                38 | 48 => {
+                    let target_foreground = self.csi_parameters[index] == 38;
+                    let color = if index + 2 < parameter_count
+                        && self.csi_parameters[index + 1] == 5
+                    {
+                        index += 2;
+                        Some(self.csi_parameters[index].min(255) as u8)
+                    } else if index + 4 < parameter_count && self.csi_parameters[index + 1] == 2 {
+                        let red = self.csi_parameters[index + 2].min(255) as u8;
+                        let green = self.csi_parameters[index + 3].min(255) as u8;
+                        let blue = self.csi_parameters[index + 4].min(255) as u8;
+                        index += 4;
+                        Some(nearest_ansi_color(red, green, blue))
+                    } else {
+                        None
+                    };
+                    if let Some(color) = color {
+                        if target_foreground {
+                            self.foreground = color;
+                        } else {
+                            self.background = color;
+                        }
+                    }
+                }
                 90..=97 => self.foreground = self.csi_parameters[index] as u8 - 82,
                 100..=107 => self.background = self.csi_parameters[index] as u8 - 92,
                 _ => {}
             }
+            index += 1;
         }
     }
 
@@ -939,6 +1004,9 @@ impl Terminal {
             self.tab_stops[column] = true;
         }
         self.last_printed = None;
+        self.g0_charset = Charset::Ascii;
+        self.g1_charset = Charset::Ascii;
+        self.use_g1 = false;
         self.foreground = DEFAULT_FOREGROUND;
         self.background = DEFAULT_BACKGROUND;
         self.attributes = 0;
@@ -993,6 +1061,76 @@ fn validate_size(rows: u16, columns: u16) -> Result<(), TerminalError> {
     Ok(())
 }
 
+fn nearest_ansi_color(red: u8, green: u8, blue: u8) -> u8 {
+    if red == green && green == blue {
+        return match red {
+            0..=7 => 16,
+            8..=242 => 232 + ((red - 8 + 5) / 10).min(23),
+            _ => 231,
+        };
+    }
+    16 + 36 * ansi_cube_level(red) + 6 * ansi_cube_level(green) + ansi_cube_level(blue)
+}
+
+const fn charset_designation(byte: u8) -> Charset {
+    if byte == b'0' {
+        Charset::DecSpecial
+    } else {
+        Charset::Ascii
+    }
+}
+
+const fn map_charset(charset: Charset, byte: u8) -> u32 {
+    if !matches!(charset, Charset::DecSpecial) {
+        return byte as u32;
+    }
+    match byte {
+        b'`' => 0x25c6,
+        b'a' => 0x2592,
+        b'b' => 0x2409,
+        b'c' => 0x240c,
+        b'd' => 0x240d,
+        b'e' => 0x240a,
+        b'f' => 0x00b0,
+        b'g' => 0x00b1,
+        b'h' => 0x2424,
+        b'i' => 0x240b,
+        b'j' => 0x2518,
+        b'k' => 0x2510,
+        b'l' => 0x250c,
+        b'm' => 0x2514,
+        b'n' => 0x253c,
+        b'o' => 0x23ba,
+        b'p' => 0x23bb,
+        b'q' => 0x2500,
+        b'r' => 0x23bc,
+        b's' => 0x23bd,
+        b't' => 0x251c,
+        b'u' => 0x2524,
+        b'v' => 0x2534,
+        b'w' => 0x252c,
+        b'x' => 0x2502,
+        b'y' => 0x2264,
+        b'z' => 0x2265,
+        b'{' => 0x03c0,
+        b'|' => 0x2260,
+        b'}' => 0x00a3,
+        b'~' => 0x00b7,
+        _ => byte as u32,
+    }
+}
+
+const fn ansi_cube_level(value: u8) -> u8 {
+    match value {
+        0..=47 => 0,
+        48..=115 => 1,
+        116..=155 => 2,
+        156..=195 => 3,
+        196..=235 => 4,
+        _ => 5,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1028,6 +1166,33 @@ mod tests {
         assert_eq!(cell.foreground, 1);
         assert_eq!(cell.attributes & 1, 1);
         assert_eq!(text(&terminal, 0), "tX   ");
+    }
+
+    #[test]
+    fn indexed_and_rgb_sgr_colors_use_the_existing_byte_wire_fields() {
+        let mut terminal = Terminal::new(2, 6).unwrap();
+        terminal.feed(b"\x1b[38;5;196;48;5;25mA\x1b[38;2;255;0;0;48;2;0;95;175mB");
+        let indexed = terminal.cell(0, 0).unwrap();
+        assert_eq!(indexed.foreground, 196);
+        assert_eq!(indexed.background, 25);
+        let rgb = terminal.cell(0, 1).unwrap();
+        assert_eq!(rgb.foreground, 196);
+        assert_eq!(rgb.background, 25);
+
+        let mut damage = [0_u8; 256];
+        terminal.write_full_damage(&mut damage).unwrap();
+        assert_eq!(damage[DAMAGE_HEADER_SIZE + 4], 196);
+        assert_eq!(damage[DAMAGE_HEADER_SIZE + 5], 25);
+    }
+
+    #[test]
+    fn designated_dec_charsets_render_lines_without_leaking_reset_bytes() {
+        let mut terminal = Terminal::new(2, 12).unwrap();
+        terminal.feed(b"\x1b(0lqk\x1b(B ASCII");
+        assert_eq!(text(&terminal, 0), "\u{250c}\u{2500}\u{2510} ASCII   ");
+
+        terminal.feed(b"\r\x1b)0\x0elqk\x0f!");
+        assert_eq!(text(&terminal, 0), "\u{250c}\u{2500}\u{2510}!ASCII   ");
     }
 
     #[test]

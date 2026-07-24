@@ -858,9 +858,9 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         private const val APPLICATION_KEYPAD_FLAG = 1 shl 2
         private const val NEW_LINE_MODE_FLAG = 1 shl 4
         private const val BACKARROW_KEY_FLAG = 1 shl 5
-        private const val COLOR_MASK = 0x0f
-        private const val BACKGROUND_SHIFT = 4
-        private const val ATTRIBUTE_SHIFT = 8
+        private const val COLOR_MASK = 0xff
+        private const val BACKGROUND_SHIFT = 8
+        private const val ATTRIBUTE_SHIFT = 16
         private const val ATTRIBUTE_BOLD = 1
         private const val ATTRIBUTE_UNDERLINE = 2
         private const val ATTRIBUTE_INVERSE = 4
@@ -928,24 +928,50 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         private val KEYPAD_ENTER = byteArrayOf(0x1b, 0x4f, 0x4d)
         private val SURROGATE_RANGE = 0xd800..0xdfff
         private val ANSI_COLORS =
-            intArrayOf(
-                TERMINAL_BACKGROUND,
-                0xfff38ba8.toInt(),
-                0xffa6e3a1.toInt(),
-                0xfff9e2af.toInt(),
-                0xff89b4fa.toInt(),
-                0xffcba6f7.toInt(),
-                0xff94e2d5.toInt(),
-                0xffcdd6f4.toInt(),
-                0xff585b70.toInt(),
-                0xfff38ba8.toInt(),
-                0xffa6e3a1.toInt(),
-                0xfff9e2af.toInt(),
-                0xff89b4fa.toInt(),
-                0xffcba6f7.toInt(),
-                0xff94e2d5.toInt(),
-                Color.WHITE,
-            )
+            IntArray(256).apply {
+                this[0] = TERMINAL_BACKGROUND
+                this[1] = 0xfff38ba8.toInt()
+                this[2] = 0xffa6e3a1.toInt()
+                this[3] = 0xfff9e2af.toInt()
+                this[4] = 0xff89b4fa.toInt()
+                this[5] = 0xffcba6f7.toInt()
+                this[6] = 0xff94e2d5.toInt()
+                this[7] = 0xffcdd6f4.toInt()
+                this[8] = 0xff585b70.toInt()
+                this[9] = 0xfff38ba8.toInt()
+                this[10] = 0xffa6e3a1.toInt()
+                this[11] = 0xfff9e2af.toInt()
+                this[12] = 0xff89b4fa.toInt()
+                this[13] = 0xffcba6f7.toInt()
+                this[14] = 0xff94e2d5.toInt()
+                this[15] = Color.WHITE
+                for (red in 0..5) {
+                    for (green in 0..5) {
+                        for (blue in 0..5) {
+                            this[16 + 36 * red + 6 * green + blue] =
+                                Color.rgb(
+                                    ansiCubeComponent(red),
+                                    ansiCubeComponent(green),
+                                    ansiCubeComponent(blue),
+                                )
+                        }
+                    }
+                }
+                for (index in 232..255) {
+                    val level = 8 + (index - 232) * 10
+                    this[index] = Color.rgb(level, level, level)
+                }
+            }
         private val DEFAULT_STYLE = 7
+
+        private fun ansiCubeComponent(index: Int): Int =
+            when (index) {
+                0 -> 0
+                1 -> 95
+                2 -> 135
+                3 -> 175
+                4 -> 215
+                else -> 255
+            }
     }
 }

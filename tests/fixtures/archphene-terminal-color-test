@@ -1,0 +1,32 @@
+#!/usr/bin/bash
+set -euo pipefail
+
+tput clear
+tput setaf 196
+printf 'RED196 '
+tput setaf 46
+printf 'GREEN46 '
+tput setaf 21
+printf 'BLUE21'
+printf '\r\n'
+tput setaf 201
+printf 'MAGENTA201 '
+tput setaf 226
+printf 'YELLOW226 '
+tput setaf 51
+printf 'CYAN51 '
+tput setaf 244
+printf 'GRAY244'
+printf '\r\n'
+tput setab 25
+tput setaf 231
+printf ' WHITE231-ON-BLUE25 '
+tput sgr0
+printf '\r\n'
+tput smacs
+printf 'lqqqqk'
+tput rmacs
+printf ' DEC-LINE'
+printf '\r\n\r\nterminal-color-ready'
+IFS= read -r -n 1
+tput clear
