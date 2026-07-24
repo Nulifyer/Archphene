@@ -4,7 +4,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -31,6 +31,10 @@ const PACKAGE_ARCHIVE_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
 const PACKAGE_SIGNATURE_LIMIT: u64 = 1024 * 1024;
 const PACKAGE_CACHE_DIRECTORY: &str = "var/cache/pacman/pkg";
 const PACKAGE_TRUST_DIRECTORY: &str = "run/package-trust-v1";
+const PACKAGE_TRUST_STATE: &str = "source-v1";
+const PACKAGE_TRUST_STATE_LIMIT: u64 = 512;
+const PACKAGE_KEYBOX_LIMIT: u64 = 8 * 1024 * 1024;
+const PACKAGE_TRUSTDB_LIMIT: u64 = 1024 * 1024;
 const LOCAL_DATABASE_ENTRY_LIMIT: usize = 4096;
 const LOCAL_DESCRIPTION_LIMIT: u64 = 64 * 1024;
 const PATH_BRIDGE_NAME: &str = "libarchphene_path_bridge.so";
@@ -1002,9 +1006,13 @@ impl PackageRuntime {
 
     pub fn prepare_verification_keyring(&mut self) -> Result<(), PackageRuntimeError> {
         let trust_directory = self.arch_root.join(PACKAGE_TRUST_DIRECTORY);
+        let source_state = self.verification_keyring_source_state()?;
         match fs::symlink_metadata(&trust_directory) {
             Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
                 return Err(PackageRuntimeError::UnsafeEntry(trust_directory));
+            }
+            Ok(_) if self.reuse_verification_keyring(&trust_directory, &source_state)? => {
+                return Ok(());
             }
             Ok(_) => fs::remove_dir_all(&trust_directory)?,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -1064,7 +1072,11 @@ impl PackageRuntime {
         )?;
         let keybox = trust_directory.join("pubring.kbx");
         let metadata = fs::symlink_metadata(&keybox)?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() == 0 {
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || metadata.len() == 0
+            || metadata.len() > PACKAGE_KEYBOX_LIMIT
+        {
             return Err(PackageRuntimeError::InvalidSignature);
         }
         let trustdb = trust_directory.join("trustdb.gpg");
@@ -1072,8 +1084,53 @@ impl PackageRuntime {
         if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() == 0 {
             return Err(PackageRuntimeError::InvalidSignature);
         }
+        if metadata.len() > PACKAGE_TRUSTDB_LIMIT {
+            return Err(PackageRuntimeError::InvalidSignature);
+        }
+        let state_path = trust_directory.join(PACKAGE_TRUST_STATE);
+        let mut state_file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(state_path)?;
+        state_file.write_all(source_state.as_bytes())?;
+        state_file.sync_all()?;
+        File::open(&trust_directory)?.sync_all()?;
         self.keyring = keybox;
         Ok(())
+    }
+
+    fn verification_keyring_source_state(&self) -> Result<String, PackageRuntimeError> {
+        let keyring = immutable_source_identity(&self.native_root, &self.keyring)?;
+        let ownertrust = immutable_source_identity(&self.native_root, &self.ownertrust)?;
+        Ok(format!(
+            "org.archphene.package-trust.v1\n{keyring}\n{ownertrust}\n"
+        ))
+    }
+
+    fn reuse_verification_keyring(
+        &mut self,
+        trust_directory: &Path,
+        expected_state: &str,
+    ) -> Result<bool, PackageRuntimeError> {
+        validate_trust_cache_directory(trust_directory)?;
+        let state_path = trust_directory.join(PACKAGE_TRUST_STATE);
+        let state = match read_bounded_regular_file(&state_path, PACKAGE_TRUST_STATE_LIMIT)? {
+            Some(state) => state,
+            None => return Ok(false),
+        };
+        if state != expected_state.as_bytes() {
+            return Ok(false);
+        }
+        let keybox = trust_directory.join("pubring.kbx");
+        let trustdb = trust_directory.join("trustdb.gpg");
+        if !bounded_regular_file(&keybox, PACKAGE_KEYBOX_LIMIT)?
+            || !bounded_regular_file(&trustdb, PACKAGE_TRUSTDB_LIMIT)?
+        {
+            return Ok(false);
+        }
+        self.keyring = keybox;
+        Ok(true)
     }
 
     fn run_with_timeout(
@@ -1430,6 +1487,100 @@ fn verified_source(
         return Err(PackageRuntimeError::UnsafeEntry(canonical));
     }
     Ok(canonical)
+}
+
+fn immutable_source_identity(
+    native_root: &Path,
+    path: &Path,
+) -> Result<String, PackageRuntimeError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() == 0 {
+        return Err(PackageRuntimeError::UnsafeEntry(path.to_path_buf()));
+    }
+    let canonical = path.canonicalize()?;
+    if canonical.parent() != Some(native_root) {
+        return Err(PackageRuntimeError::UnsafeEntry(canonical));
+    }
+    let name = canonical
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(PackageRuntimeError::InvalidManifest)?;
+    if name.is_empty()
+        || name.len() > 128
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(PackageRuntimeError::InvalidManifest);
+    }
+    Ok(format!("{name}\t{}", metadata.len()))
+}
+
+fn read_bounded_regular_file(
+    path: &Path,
+    limit: u64,
+) -> Result<Option<Vec<u8>>, PackageRuntimeError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(PackageRuntimeError::Io(error)),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(PackageRuntimeError::UnsafeEntry(path.to_path_buf()));
+    }
+    if metadata.len() == 0 || metadata.len() > limit {
+        return Ok(None);
+    }
+    let mut content = Vec::with_capacity(metadata.len() as usize);
+    File::open(path)?.read_to_end(&mut content)?;
+    if content.len() as u64 != metadata.len() {
+        return Ok(None);
+    }
+    Ok(Some(content))
+}
+
+fn bounded_regular_file(path: &Path, limit: u64) -> Result<bool, PackageRuntimeError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(PackageRuntimeError::Io(error)),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(PackageRuntimeError::UnsafeEntry(path.to_path_buf()));
+    }
+    Ok(metadata.len() != 0 && metadata.len() <= limit)
+}
+
+fn validate_trust_cache_directory(path: &Path) -> Result<(), PackageRuntimeError> {
+    let mut count = 0_usize;
+    for entry in fs::read_dir(path)? {
+        count = count.saturating_add(1);
+        if count > 4 {
+            return Err(PackageRuntimeError::InvalidSignature);
+        }
+        let entry = entry?;
+        let entry_path = entry.path();
+        let name = entry
+            .file_name()
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidSignature)?
+            .to_owned();
+        let limit = match name.as_str() {
+            PACKAGE_TRUST_STATE => PACKAGE_TRUST_STATE_LIMIT,
+            "pubring.kbx" | "pubring.kbx~" => PACKAGE_KEYBOX_LIMIT,
+            "trustdb.gpg" => PACKAGE_TRUSTDB_LIMIT,
+            _ => return Err(PackageRuntimeError::UnsafeEntry(entry_path)),
+        };
+        let metadata = fs::symlink_metadata(&entry_path)?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || metadata.len() == 0
+            || metadata.len() > limit
+        {
+            return Err(PackageRuntimeError::UnsafeEntry(entry_path));
+        }
+    }
+    Ok(())
 }
 
 fn prepare_output_path(path: &Path) -> Result<(), PackageRuntimeError> {
@@ -1914,6 +2065,63 @@ library\tlibalpm.so.16\tlibarchphene_pkg_333333333333333333333333.so\t7\n";
                 & 0o7777,
             0o600
         );
+    }
+
+    #[test]
+    fn verification_keyring_cache_is_source_keyed_and_bounded() {
+        let tree = TestTree::new();
+        tree.file("libarchphene_pkg_111111111111111111111111.so", b"loader");
+        tree.file("libarchphene_pkg_222222222222222222222222.so", b"pacman");
+        tree.file("libarchphene_pkg_444444444444444444444444.so", b"keyring");
+        tree.file("libarchphene_pkg_555555555555555555555555.so", b"bridge");
+        tree.file("libarchphene_pkg_666666666666666666666666.so", b"trust");
+        let manifest = b"# org.archphene.package-runtime.v1\n\
+loader\t@loader\tlibarchphene_pkg_111111111111111111111111.so\t6\n\
+tool\t@pacman\tlibarchphene_pkg_222222222222222222222222.so\t6\n\
+keyring\t@keyring\tlibarchphene_pkg_444444444444444444444444.so\t7\n\
+ownertrust\t@ownertrust\tlibarchphene_pkg_666666666666666666666666.so\t5\n\
+library\tlibarchphene_path_bridge.so\tlibarchphene_pkg_555555555555555555555555.so\t6\n";
+        let mut runtime = PackageRuntime::prepare(
+            &tree.root,
+            &tree.native,
+            manifest,
+            RepositoryArchitecture::X86_64,
+        )
+        .expect("package runtime");
+        let expected = runtime
+            .verification_keyring_source_state()
+            .expect("source state");
+        let trust = tree.root.join(PACKAGE_TRUST_DIRECTORY);
+        fs::create_dir(&trust).expect("trust directory");
+        fs::write(trust.join("pubring.kbx"), b"keybox").expect("keybox");
+        fs::write(trust.join("trustdb.gpg"), b"trustdb").expect("trustdb");
+        fs::write(trust.join(PACKAGE_TRUST_STATE), &expected).expect("state");
+        assert!(
+            runtime
+                .reuse_verification_keyring(&trust, &expected)
+                .expect("reuse")
+        );
+        assert_eq!(runtime.keyring, trust.join("pubring.kbx"));
+
+        let mut changed = PackageRuntime::prepare(
+            &tree.root,
+            &tree.native,
+            manifest,
+            RepositoryArchitecture::X86_64,
+        )
+        .expect("changed runtime");
+        assert!(
+            !changed
+                .reuse_verification_keyring(&trust, "different\n")
+                .expect("changed source")
+        );
+
+        fs::remove_file(trust.join("pubring.kbx")).expect("remove keybox");
+        symlink("/system/build.prop", trust.join("pubring.kbx")).expect("unsafe keybox");
+        assert!(matches!(
+            changed.reuse_verification_keyring(&trust, &expected),
+            Err(PackageRuntimeError::UnsafeEntry(_))
+        ));
     }
 
     #[test]

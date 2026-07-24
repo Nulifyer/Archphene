@@ -77,6 +77,17 @@ keybox, verifies each detached signature, and checks the signed `.PKGINFO`
 name, version, and architecture. AArch64 additionally requires the pinned Arch
 Linux ARM build signer.
 
+Runtime startup no longer deletes and reimports the unchanged packaged GPG
+trust anchor on every manager process. Rust keys the bounded derived keybox to
+the immutable packaged keyring and ownertrust identities, rejects
+symlink/non-file/oversized cache entries, and rebuilds on any identity change.
+The retained loading state remains visible while startup runs. Forced rebuild
+versus steady reuse measures 1,708–1,843 ms versus 232–237 ms on the emulator
+and 315–323 ms versus 222–230 ms on Samsung; first reuse after a real reboot
+measures 442 ms and 1,222 ms respectively. Both targets remain under the
+1,000 ms steady and 1,500 ms post-boot budgets, execute installed `btop`, and
+reverify its signed closure through the reused keybox.
+
 Immediately before mutation, Rust re-resolves and re-verifies the full bounded
 closure. Pacman then commits it in dependency order to the shared private root,
 preserving explicit and dependency install reasons. The generic compatibility

@@ -186,7 +186,9 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [ ] Keep state correct across rotation, backgrounding, process death, reboot, and manager restart.
   - [ ] Provide actionable diagnostics, retry/cancel controls, and package-scoped failure isolation.
 - [x] Make the current package details and operation content responsive and scrollable; full-device emulator and Samsung audits show the complete `btop` closure with state-driven Install/Update/Verify and Remove actions.
-- [ ] Profile and fix slow first launch after boot; display useful loading/synchronization state instead of a frozen or empty UI.
+- [x] Profile and fix slow first launch after boot; retain the visible runtime-loading state while avoiding unchanged verification-keyring rebuilds.
+  - [x] Cache the derived GPG keybox only for the exact immutable packaged keyring/ownertrust identity, reject unsafe or oversized cache entries, and prove real signed-package verification after reuse.
+  - [x] Gate steady cold-process readiness below 1,000 ms and post-boot readiness below 1,500 ms on both targets; final steady reuse is 237 ms on the emulator and 222 ms on Samsung, with post-boot reuse at 442 ms and 1,222 ms respectively.
 - [ ] Perform a complete UX pass over discovery, package details, installation, launcher creation, updates, storage, permissions, setup, settings, and recovery.
 - [ ] Review Obtainium's source, license, screenshots, app-list structure, and update progress UI. Adapt suitable open-source patterns to Archphene's compact list, spinner, and richer phase strings without copying blindly.
 - [ ] Ensure search results distinguish graphical apps, CLI tools, libraries, installed packages, available updates, AUR results, unsupported packages, and compatibility status.
