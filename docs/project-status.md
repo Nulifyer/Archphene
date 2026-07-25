@@ -200,12 +200,31 @@ manager process death while the wrapper is visible also produces a fresh
 manager PID, reauthenticates a new session, reattaches the same wrapper Surface,
 and returns to the bounded status without user intervention or a fatal log.
 
+The production session now also bridges text clipboard without granting the
+background manager direct Android clipboard access. Only the focused wrapper
+reads/writes `ClipboardManager`; its additive Binder transaction is
+UID/signer/descriptor/generation authenticated and bounded to 16,384 UTF-16
+units and 64 KiB UTF-8. Rust caps pending Wayland copy/paste descriptors at
+four, and a dedicated manager worker switches each descriptor to nonblocking
+mode and enforces a two-second poll deadline. Strict UTF-8 decoding,
+revision-based stale/echo suppression, deferred focus publication, selection
+clear, detach, and close are explicit. The compositor suite now has 46 tests,
+including exact pipe success, overflow, and timeout cases. The physical
+Samsung passes the existing real Wayland bidirectional demand-driven clipboard
+probe and a production generated-wrapper Unicode Android-to-Binder gate at 28
+UTF-8 bytes. The final generation-135 wrapper repeats that gate with 27 bytes
+after the focus-deferral audit. Full-device captures show the system clipboard
+confirmation; Back drains the compositor and clipboard workers and leaves no
+socket or fatal log.
+
 This does not yet prove a real Linux application frame or input delivery to a
 Linux client. The current Samsung root contains only deliberately non-runnable
 Foot/Kate discovery fixtures and no cached GUI package archive, while the
-x86_64 emulator is offline. A real signed GUI package transaction, exact
-transformed input/live-resize tests, IME, and the repeated two-target gate
-remain open.
+x86_64 emulator is offline. The native probe proves the Wayland clipboard
+protocol and the generated wrapper proves the production Binder boundary, but
+a real manager-launched client must still close that integration gap. A real
+signed GUI package transaction, exact transformed input/live-resize tests,
+IME, and the repeated two-target gate remain open.
 
 The recent-activity action is now terminal-state aware. Complete has no dead
 disabled Cancel button; active pre-commit work exposes Cancel; and durable

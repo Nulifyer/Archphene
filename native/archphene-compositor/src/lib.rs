@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 #[cfg(target_os = "android")]
 use jni::objects::{JByteBuffer, JObject};
@@ -70,6 +71,9 @@ use wayland_server::{
 
 const MAX_TOPLEVELS: usize = 32;
 const MAX_ACTIVE_TOUCHES: usize = 32;
+const MAX_PENDING_CLIPBOARD_TRANSFERS: usize = 4;
+#[cfg(target_os = "android")]
+const MAX_CLIPBOARD_BYTES: usize = 65_536;
 
 fn pointer_button_bit(button: u32) -> Option<u8> {
     (272..=276)
@@ -178,6 +182,7 @@ pub struct CompositorState {
     android_clipboard_offered: bool,
     pending_android_paste_fds: VecDeque<File>,
     pending_linux_copy_fds: VecDeque<File>,
+    pending_linux_clipboard_clear: bool,
     pending_linux_drag_fds: VecDeque<File>,
     pending_linux_drag_mime_types: VecDeque<String>,
     linux_drag_source: Option<WlDataSource>,
@@ -1147,6 +1152,132 @@ fn valid_launcher_surface_size(width: i32, height: i32) -> bool {
         && width <= MAX_DIMENSION
         && height <= MAX_DIMENSION
         && i64::from(width) * i64::from(height) <= MAX_PIXELS
+}
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn wait_for_clipboard_descriptor(
+    descriptor: RawFd,
+    events: i16,
+    deadline: Instant,
+) -> io::Result<bool> {
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(false);
+        }
+        let timeout = remaining.as_millis().clamp(1, i32::MAX as u128) as i32;
+        let mut poll_descriptor = libc::pollfd {
+            fd: descriptor,
+            events,
+            revents: 0,
+        };
+        let result = unsafe { libc::poll(&mut poll_descriptor, 1, timeout) };
+        if result > 0 {
+            if poll_descriptor.revents & libc::POLLNVAL != 0 {
+                return Err(io::Error::from_raw_os_error(libc::EBADF));
+            }
+            return Ok(true);
+        }
+        if result == 0 {
+            return Ok(false);
+        }
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::EINTR) {
+            return Err(error);
+        }
+    }
+}
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn set_clipboard_descriptor_nonblocking(descriptor: RawFd) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if flags & libc::O_NONBLOCK == 0
+        && unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn read_clipboard_descriptor(descriptor: File, output: &mut [u8], timeout_millis: u64) -> i32 {
+    if set_clipboard_descriptor_nonblocking(descriptor.as_raw_fd()).is_err() {
+        return -1;
+    }
+    let deadline = Instant::now() + Duration::from_millis(timeout_millis);
+    let mut length = 0_usize;
+    loop {
+        match wait_for_clipboard_descriptor(descriptor.as_raw_fd(), libc::POLLIN, deadline) {
+            Ok(true) => {}
+            Ok(false) => return -2,
+            Err(_) => return -1,
+        }
+        let mut overflow_probe = [0_u8; 1];
+        let destination = if length < output.len() {
+            &mut output[length..]
+        } else {
+            &mut overflow_probe
+        };
+        let read = unsafe {
+            libc::read(
+                descriptor.as_raw_fd(),
+                destination.as_mut_ptr().cast(),
+                destination.len(),
+            )
+        };
+        if read == 0 {
+            return i32::try_from(length).unwrap_or(-1);
+        }
+        if read > 0 {
+            if length == output.len() {
+                return -3;
+            }
+            length += read as usize;
+            continue;
+        }
+        let error = io::Error::last_os_error();
+        if !matches!(error.raw_os_error(), Some(libc::EINTR) | Some(libc::EAGAIN)) {
+            return -1;
+        }
+    }
+}
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn write_clipboard_descriptor(descriptor: File, input: &[u8], timeout_millis: u64) -> i32 {
+    if set_clipboard_descriptor_nonblocking(descriptor.as_raw_fd()).is_err() {
+        return -1;
+    }
+    let deadline = Instant::now() + Duration::from_millis(timeout_millis);
+    let mut offset = 0_usize;
+    while offset < input.len() {
+        match wait_for_clipboard_descriptor(descriptor.as_raw_fd(), libc::POLLOUT, deadline) {
+            Ok(true) => {}
+            Ok(false) => return -2,
+            Err(_) => return -1,
+        }
+        let written = unsafe {
+            libc::write(
+                descriptor.as_raw_fd(),
+                input[offset..].as_ptr().cast(),
+                input.len() - offset,
+            )
+        };
+        if written > 0 {
+            offset += written as usize;
+            continue;
+        }
+        if written == 0 {
+            return -1;
+        }
+        let error = io::Error::last_os_error();
+        if !matches!(error.raw_os_error(), Some(libc::EINTR) | Some(libc::EAGAIN)) {
+            return -1;
+        }
+    }
+    i32::try_from(offset).unwrap_or(-1)
 }
 
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
@@ -2689,7 +2820,10 @@ fn source_text_mime(source: &WlDataSource) -> Option<String> {
 }
 
 fn queue_linux_copy(state: &mut CompositorState, source: &WlDataSource) {
-    if !state.clipboard_active || !source.is_alive() {
+    if !state.clipboard_active
+        || !source.is_alive()
+        || state.pending_linux_copy_fds.len() >= MAX_PENDING_CLIPBOARD_TRANSFERS
+    {
         return;
     }
     let Some(mime_type) = source_text_mime(source) else {
@@ -3462,9 +3596,15 @@ impl Dispatch<WlDataDevice, DataDeviceData> for CompositorState {
                     }
                 }
                 state.android_clipboard_offered = false;
+                state.pending_android_paste_fds.clear();
+                state.pending_linux_copy_fds.clear();
+                state.pending_linux_clipboard_clear = false;
                 state.selection_source = source.clone();
                 if let Some(source) = source.as_ref() {
+                    state.pending_linux_clipboard_clear = false;
                     queue_linux_copy(state, source);
+                } else if state.clipboard_active {
+                    state.pending_linux_clipboard_clear = true;
                 }
                 publish_wayland_selection(state, handle, source.as_ref());
             }
@@ -3544,7 +3684,9 @@ impl Dispatch<WlDataOffer, DataOfferData> for CompositorState {
                         source.send(mime_type, fd.as_fd());
                     }
                     ClipboardOfferSource::AndroidClipboard if state.clipboard_active => {
-                        state.pending_android_paste_fds.push_back(File::from(fd));
+                        if state.pending_android_paste_fds.len() < MAX_PENDING_CLIPBOARD_TRANSFERS {
+                            state.pending_android_paste_fds.push_back(File::from(fd));
+                        }
                     }
                     ClipboardOfferSource::AndroidDrag(payloads) => {
                         if let Some(bytes) = payloads
@@ -7367,6 +7509,7 @@ impl CompositorCore {
         if !active {
             self.state.pending_android_paste_fds.clear();
             self.state.pending_linux_copy_fds.clear();
+            self.state.pending_linux_clipboard_clear = false;
             self.state.pending_linux_drag_fds.clear();
             self.state.pending_linux_drag_mime_types.clear();
             if let Some(source) = self.state.linux_drag_source.take()
@@ -7403,7 +7546,9 @@ impl CompositorCore {
         {
             previous.cancelled();
         }
+        self.state.pending_android_paste_fds.clear();
         self.state.android_clipboard_offered = true;
+        self.state.pending_linux_clipboard_clear = false;
         let handle = self.display.handle();
         publish_android_selection(&mut self.state, &handle);
         u32::try_from(
@@ -7414,6 +7559,29 @@ impl CompositorCore {
                 .count(),
         )
         .unwrap_or(u32::MAX)
+    }
+
+    pub fn clear_android_clipboard(&mut self) -> u32 {
+        let mut changed = false;
+        if let Some(previous) = self.state.selection_source.take()
+            && previous.is_alive()
+        {
+            previous.cancelled();
+            changed = true;
+        }
+        changed |= self.state.android_clipboard_offered;
+        self.state.android_clipboard_offered = false;
+        self.state.pending_android_paste_fds.clear();
+        self.state.pending_linux_clipboard_clear = false;
+        for device in self
+            .state
+            .data_devices
+            .iter()
+            .filter(|device| device.is_alive())
+        {
+            device.selection(None);
+        }
+        u32::from(changed)
     }
 
     pub fn take_android_paste_fd(&mut self) -> RawFd {
@@ -7428,6 +7596,10 @@ impl CompositorCore {
             .pending_linux_copy_fds
             .pop_front()
             .map_or(-1, IntoRawFd::into_raw_fd)
+    }
+
+    pub fn take_linux_clipboard_clear(&mut self) -> bool {
+        std::mem::take(&mut self.state.pending_linux_clipboard_clear)
     }
 
     pub fn take_linux_drag_fd(&mut self) -> RawFd {
@@ -11089,6 +11261,149 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
 
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeSetClipboardActive(
+    _environment: *mut std::ffi::c_void,
+    _owner: *mut std::ffi::c_void,
+    handle: i64,
+    active: jboolean,
+) {
+    if let Some(compositor) = unsafe { (handle as *mut LauncherSurfaceCompositor).as_mut() } {
+        compositor.core.set_clipboard_active(active != 0);
+    }
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeOfferAndroidClipboardText(
+    _environment: *mut std::ffi::c_void,
+    _owner: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(compositor) = (unsafe { (handle as *mut LauncherSurfaceCompositor).as_mut() }) else {
+        return -1;
+    };
+    i32::try_from(compositor.core.offer_android_clipboard_text()).unwrap_or(i32::MAX)
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeClearAndroidClipboard(
+    _environment: *mut std::ffi::c_void,
+    _owner: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(compositor) = (unsafe { (handle as *mut LauncherSurfaceCompositor).as_mut() }) else {
+        return -1;
+    };
+    i32::try_from(compositor.core.clear_android_clipboard()).unwrap_or(i32::MAX)
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeTakeAndroidPasteFd(
+    _environment: *mut std::ffi::c_void,
+    _owner: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(compositor) = (unsafe { (handle as *mut LauncherSurfaceCompositor).as_mut() }) else {
+        return -1;
+    };
+    compositor.core.take_android_paste_fd()
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeTakeLinuxCopyFd(
+    _environment: *mut std::ffi::c_void,
+    _owner: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(compositor) = (unsafe { (handle as *mut LauncherSurfaceCompositor).as_mut() }) else {
+        return -1;
+    };
+    compositor.core.take_linux_copy_fd()
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeTakeLinuxClipboardClear(
+    _environment: *mut std::ffi::c_void,
+    _owner: *mut std::ffi::c_void,
+    handle: i64,
+) -> jboolean {
+    let Some(compositor) = (unsafe { (handle as *mut LauncherSurfaceCompositor).as_mut() }) else {
+        return 0;
+    };
+    jboolean::from(compositor.core.take_linux_clipboard_clear())
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeReadClipboardFd(
+    environment: JNIEnv,
+    _owner: JObject,
+    descriptor: i32,
+    output: JByteBuffer,
+    capacity: i32,
+    timeout_millis: i32,
+) -> i32 {
+    if descriptor < 0 {
+        return -1;
+    }
+    let descriptor = unsafe { File::from_raw_fd(descriptor) };
+    let (Ok(capacity), Ok(actual_capacity), Ok(address)) = (
+        usize::try_from(capacity),
+        environment.get_direct_buffer_capacity(&output),
+        environment.get_direct_buffer_address(&output),
+    ) else {
+        return -1;
+    };
+    if capacity == 0
+        || capacity > MAX_CLIPBOARD_BYTES
+        || capacity > actual_capacity
+        || address.is_null()
+        || !(1..=5_000).contains(&timeout_millis)
+    {
+        return -1;
+    }
+    let output = unsafe { std::slice::from_raw_parts_mut(address, capacity) };
+    read_clipboard_descriptor(descriptor, output, timeout_millis as u64)
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeWriteClipboardFd(
+    environment: JNIEnv,
+    _owner: JObject,
+    descriptor: i32,
+    input: JByteBuffer,
+    length: i32,
+    timeout_millis: i32,
+) -> i32 {
+    if descriptor < 0 {
+        return -1;
+    }
+    let descriptor = unsafe { File::from_raw_fd(descriptor) };
+    let (Ok(length), Ok(capacity), Ok(address)) = (
+        usize::try_from(length),
+        environment.get_direct_buffer_capacity(&input),
+        environment.get_direct_buffer_address(&input),
+    ) else {
+        return -1;
+    };
+    if length > MAX_CLIPBOARD_BYTES
+        || length > capacity
+        || address.is_null()
+        || !(1..=5_000).contains(&timeout_millis)
+    {
+        return -1;
+    }
+    let input = unsafe { std::slice::from_raw_parts(address.cast_const(), length) };
+    write_clipboard_descriptor(descriptor, input, timeout_millis as u64)
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeDispatchAndPresent(
     _environment: *mut std::ffi::c_void,
     _owner: *mut std::ffi::c_void,
@@ -12683,8 +12998,11 @@ mod tests {
         assert_eq!(core.data_offer_count(), 0);
         assert_eq!(core.take_android_paste_fd(), -1);
         assert_eq!(core.take_linux_copy_fd(), -1);
+        assert!(!core.take_linux_clipboard_clear());
         assert_eq!(core.set_clipboard_active(true), 1);
         assert_eq!(core.offer_android_clipboard_text(), 0);
+        assert_eq!(core.clear_android_clipboard(), 1);
+        assert_eq!(core.clear_android_clipboard(), 0);
         assert_eq!(core.set_clipboard_active(false), 0);
         assert_eq!(core.text_input_manager_bind_count(), 0);
         assert_eq!(core.text_input_count(), 0);
@@ -13020,6 +13338,39 @@ mod tests {
             dispatch_launcher_input_record(&mut core, [5, 29, 3, 9, 0, 0]),
             Err(())
         );
+    }
+
+    #[test]
+    fn clipboard_descriptor_io_is_bounded_and_deadline_driven() {
+        use std::io::Read;
+
+        let (read_end, mut write_end) = create_cloexec_pipe().expect("read pipe");
+        write_end.write_all(b"clipboard").expect("write fixture");
+        drop(write_end);
+        let mut output = [0_u8; 16];
+        assert_eq!(read_clipboard_descriptor(read_end, &mut output, 100), 9);
+        assert_eq!(&output[..9], b"clipboard");
+
+        let (read_end, mut write_end) = create_cloexec_pipe().expect("overflow pipe");
+        write_end
+            .write_all(b"four")
+            .expect("write overflow fixture");
+        drop(write_end);
+        assert_eq!(
+            read_clipboard_descriptor(read_end, &mut output[..3], 100),
+            -3
+        );
+
+        let (read_end, _write_end) = create_cloexec_pipe().expect("timeout pipe");
+        assert_eq!(read_clipboard_descriptor(read_end, &mut output, 10), -2);
+
+        let (mut read_end, write_end) = create_cloexec_pipe().expect("write pipe");
+        assert_eq!(write_clipboard_descriptor(write_end, b"android", 100), 7);
+        let mut received = [0_u8; 7];
+        read_end
+            .read_exact(&mut received)
+            .expect("read written text");
+        assert_eq!(&received, b"android");
     }
 
     #[test]

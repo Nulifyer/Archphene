@@ -143,6 +143,19 @@ retaining the session; resume reattaches it; Back and Binder death reap and
 remove the private endpoint. Process exit polling is kept outside the frame hot
 path, drains stdout/stderr into a fixed 16 KiB tail ring, and addresses
 remaining descendants before showing a bounded status.
+
+Android text clipboard access stays in the visible wrapper rather than the
+background manager. The focused wrapper reads or writes Android
+`ClipboardManager` state and sends only a generation-checked, authenticated
+text message. The manager accepts at most 16,384 UTF-16 units and 64 KiB of
+UTF-8, while Rust exposes standard `wl_data_device` selections and caps pending
+pipe descriptors at four per direction. Descriptor reads and writes run on one
+dedicated manager worker, are switched to nonblocking mode, and have a
+two-second poll deadline. Invalid UTF-8, overflow, stalled peers, stale
+revisions, and echoed Android notifications fail without blocking Binder or
+the compositor. Linux clipboard changes received during focus loss are held
+until the wrapper is visible again; detach disables the bridge and closes
+pending descriptors.
 Status does not compete with native rendering for the same `Surface`: the
 manager sends authenticated one-way state callbacks and the wrapper renders an
 opaque Android overlay until the first Linux frame, or again after a stop.
@@ -152,9 +165,12 @@ on the physical Samsung without a retained stretched buffer.
 The connected-device gate currently uses deliberately non-runnable discovery
 fixtures. It proves wrapper input validation and focus/lifecycle stability
 through HOME/resume and rotation, but cannot prove delivery to a Linux client.
-A real package-installed Wayland client, transformed input, live
-rotation/resize, IME, and repeated emulator coverage remain required before
-this session is a production Linux application host.
+The native Samsung probe separately proves both text clipboard directions
+against real Wayland data sources/offers, and the production wrapper proves the
+authenticated Android-to-manager transaction, but those two gates do not
+replace a real package-installed client in the manager session. That client,
+transformed input, live rotation/resize, IME, and repeated emulator coverage
+remain required before this session is a production Linux application host.
 
 ### Wayland and graphics bridge
 

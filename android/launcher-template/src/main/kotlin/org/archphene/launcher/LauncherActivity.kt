@@ -1,6 +1,8 @@
 package org.archphene.launcher
 
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -44,6 +46,18 @@ class LauncherActivity :
     private var attachedWidth = 0
     private var attachedHeight = 0
     private var pointerButtonState = 0
+    private var hasPendingLinuxClipboard = false
+    private var pendingLinuxClipboardText: String? = null
+    private val clipboardManager by lazy {
+        getSystemService(ClipboardManager::class.java)
+    }
+    private var clipboardListening = false
+    private val clipboardListener =
+        ClipboardManager.OnPrimaryClipChangedListener {
+            if (hasWindowFocus()) {
+                submitAndroidClipboard()
+            }
+        }
     private val clientToken =
         object : Binder() {
             override fun onTransact(
@@ -52,27 +66,53 @@ class LauncherActivity :
                 reply: Parcel?,
                 flags: Int,
             ): Boolean {
-                if (code != CALLBACK_STATUS || Binder.getCallingUid() != managerUid) {
+                if (
+                    code !in CALLBACK_STATUS..CALLBACK_CLIPBOARD ||
+                    Binder.getCallingUid() != managerUid
+                ) {
                     return super.onTransact(code, data, reply, flags)
                 }
                 return runCatching {
                     data.enforceInterface(CALLBACK_INTERFACE)
                     val version = data.readInt()
                     val callbackSession = data.readInt()
-                    val state = data.readInt()
-                    val message = data.readString().orEmpty()
                     if (
                         version != PROTOCOL_VERSION ||
-                        callbackSession != sessionId ||
-                        state !in STATUS_STARTING..STATUS_STOPPED ||
-                        message.isEmpty() ||
-                        message.length > 256 ||
-                        data.dataAvail() != 0
+                        callbackSession != sessionId
                     ) {
                         return@runCatching false
                     }
-                    handler.post { applyRemoteStatus(state, message) }
-                    true
+                    when (code) {
+                        CALLBACK_STATUS -> {
+                            val state = data.readInt()
+                            val message = data.readString().orEmpty()
+                            if (
+                                state !in STATUS_STARTING..STATUS_STOPPED ||
+                                message.isEmpty() ||
+                                message.length > 256 ||
+                                data.dataAvail() != 0
+                            ) {
+                                return@runCatching false
+                            }
+                            handler.post { applyRemoteStatus(state, message) }
+                            true
+                        }
+                        CALLBACK_CLIPBOARD -> {
+                            val present = data.readInt()
+                            val text = if (present == 1) data.readString() else null
+                            if (
+                                present !in 0..1 ||
+                                (present == 1 &&
+                                    (text == null || text.length > MAX_CLIPBOARD_UTF16)) ||
+                                data.dataAvail() != 0
+                            ) {
+                                return@runCatching false
+                            }
+                            handler.post { applyLinuxClipboard(text) }
+                            true
+                        }
+                        else -> false
+                    }
                 }.getOrDefault(false)
             }
         }
@@ -95,6 +135,8 @@ class LauncherActivity :
                 attachedWidth = 0
                 attachedHeight = 0
                 pointerButtonState = 0
+                hasPendingLinuxClipboard = false
+                pendingLinuxClipboardText = null
                 status.setText(R.string.launcher_disconnected)
                 status.visibility = View.VISIBLE
             }
@@ -227,6 +269,8 @@ class LauncherActivity :
         attachedWidth = 0
         attachedHeight = 0
         pointerButtonState = 0
+        hasPendingLinuxClipboard = false
+        pendingLinuxClipboardText = null
         if (binding) {
             runCatching { unbindService(connection) }
             binding = false
@@ -237,6 +281,7 @@ class LauncherActivity :
 
     override fun onStop() {
         handler.removeCallbacksAndMessages(null)
+        stopClipboardListening()
         submitHostActive(false)
         detachSurface()
         super.onStop()
@@ -244,6 +289,7 @@ class LauncherActivity :
 
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
+        stopClipboardListening()
         detachSurface()
         closeSession()
         remote = null
@@ -265,6 +311,12 @@ class LauncherActivity :
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) {
             surfaceView.requestFocus()
+            startClipboardListening()
+            if (!applyPendingLinuxClipboard()) {
+                submitAndroidClipboard()
+            }
+        } else {
+            stopClipboardListening()
         }
         submitHostActive(hasFocus)
     }
@@ -550,6 +602,10 @@ class LauncherActivity :
                     status.text = getString(R.string.launcher_connected, label)
                     Log.i(TAG, "Authenticated session=$sessionId")
                     attachSurface()
+                    if (hasWindowFocus()) {
+                        startClipboardListening()
+                        submitAndroidClipboard()
+                    }
                 }
                 RESULT_NOT_READY -> {
                     reply.readInt()
@@ -611,6 +667,9 @@ class LauncherActivity :
                     attachedHeight = height
                     Log.i(TAG, "Attached Surface session=$activeSession size=${width}x$height")
                     submitHostActive(hasWindowFocus())
+                    if (hasWindowFocus()) {
+                        submitAndroidClipboard()
+                    }
                 }
             }
         } catch (error: RemoteException) {
@@ -671,6 +730,102 @@ class LauncherActivity :
         }
         if (!active) {
             pointerButtonState = 0
+        }
+    }
+
+    private fun startClipboardListening() {
+        if (!clipboardListening) {
+            clipboardManager.addPrimaryClipChangedListener(clipboardListener)
+            clipboardListening = true
+        }
+    }
+
+    private fun stopClipboardListening() {
+        if (clipboardListening) {
+            clipboardManager.removePrimaryClipChangedListener(clipboardListener)
+            clipboardListening = false
+        }
+    }
+
+    private fun submitAndroidClipboard() {
+        val service = remote ?: return
+        val activeSession = sessionId
+        if (activeSession <= 0 || !hasWindowFocus()) {
+            return
+        }
+        val clip =
+            runCatching { clipboardManager.primaryClip }
+                .getOrElse {
+                    Log.w(TAG, "Android clipboard is unavailable while launcher is focused", it)
+                    return
+                }
+        val text =
+            if (clip != null && clip.itemCount > 0) {
+                clip.getItemAt(0).text?.toString()
+            } else {
+                null
+            }
+        val boundedText =
+            if (text == null || text.length <= MAX_CLIPBOARD_UTF16) {
+                text
+            } else {
+                Log.w(TAG, "Android clipboard text exceeds launcher limit")
+                null
+            }
+        val data = Parcel.obtain()
+        val reply = Parcel.obtain()
+        try {
+            data.writeInterfaceToken(INTERFACE)
+            data.writeInt(PROTOCOL_VERSION)
+            data.writeInt(activeSession)
+            data.writeInt(if (boundedText == null) 0 else 1)
+            if (boundedText != null) {
+                data.writeString(boundedText)
+            }
+            if (service.transact(TRANSACTION_CLIPBOARD, data, reply, 0)) {
+                reply.readException()
+                val result = reply.readInt()
+                if (result != RESULT_OK && result != RESULT_NOT_READY) {
+                    Log.w(TAG, "Manager rejected Android clipboard result=$result")
+                }
+            }
+        } catch (error: RemoteException) {
+            Log.w(TAG, "Could not submit Android clipboard", error)
+        } finally {
+            reply.recycle()
+            data.recycle()
+        }
+    }
+
+    private fun applyLinuxClipboard(text: String?) {
+        if (!hasWindowFocus()) {
+            hasPendingLinuxClipboard = true
+            pendingLinuxClipboardText = text
+            return
+        }
+        publishLinuxClipboard(text)
+    }
+
+    private fun applyPendingLinuxClipboard(): Boolean {
+        if (!hasPendingLinuxClipboard) {
+            return false
+        }
+        val text = pendingLinuxClipboardText
+        hasPendingLinuxClipboard = false
+        pendingLinuxClipboardText = null
+        publishLinuxClipboard(text)
+        return true
+    }
+
+    private fun publishLinuxClipboard(text: String?) {
+        runCatching {
+            if (text == null) {
+                clipboardManager.clearPrimaryClip()
+            } else {
+                clipboardManager.setPrimaryClip(ClipData.newPlainText(appLabel(), text))
+            }
+        }.onFailure { error ->
+            Log.w(TAG, "Could not publish Linux clipboard to Android", error)
         }
     }
 
@@ -751,8 +906,10 @@ class LauncherActivity :
         private const val TRANSACTION_ATTACH_SURFACE = IBinder.FIRST_CALL_TRANSACTION + 2
         private const val TRANSACTION_DETACH_SURFACE = IBinder.FIRST_CALL_TRANSACTION + 3
         private const val TRANSACTION_INPUT = IBinder.FIRST_CALL_TRANSACTION + 4
+        private const val TRANSACTION_CLIPBOARD = IBinder.FIRST_CALL_TRANSACTION + 5
         private const val CALLBACK_INTERFACE = "org.archphene.launcher.IClientV1"
         private const val CALLBACK_STATUS = IBinder.FIRST_CALL_TRANSACTION
+        private const val CALLBACK_CLIPBOARD = IBinder.FIRST_CALL_TRANSACTION + 1
         private const val RESULT_OK = 0
         private const val RESULT_NOT_READY = 1
         private const val MAX_OPEN_ATTEMPTS = 120
@@ -772,6 +929,7 @@ class LauncherActivity :
         private const val KEY_REPEATED = 2
         private const val AXIS_FIXED_SCALE = 1000f
         private const val MAX_AXIS_STEPS = 120f
+        private const val MAX_CLIPBOARD_UTF16 = 16_384
         private const val POINTER_BUTTON_MASK =
             MotionEvent.BUTTON_PRIMARY or
                 MotionEvent.BUTTON_SECONDARY or

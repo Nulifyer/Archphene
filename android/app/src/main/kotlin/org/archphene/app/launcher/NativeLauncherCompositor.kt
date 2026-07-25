@@ -44,6 +44,57 @@ internal class NativeLauncherCompositor(
         }
     }
 
+    fun setClipboardActive(active: Boolean) {
+        if (handle != 0L) {
+            nativeSetClipboardActive(handle, active)
+        }
+    }
+
+    fun offerAndroidClipboardText(): Int =
+        if (handle == 0L) {
+            RESULT_CLOSED
+        } else {
+            nativeOfferAndroidClipboardText(handle)
+        }
+
+    fun clearAndroidClipboard(): Int =
+        if (handle == 0L) {
+            RESULT_CLOSED
+        } else {
+            nativeClearAndroidClipboard(handle)
+        }
+
+    fun takeAndroidPasteFd(): Int =
+        if (handle == 0L) {
+            RESULT_CLOSED
+        } else {
+            nativeTakeAndroidPasteFd(handle)
+        }
+
+    fun takeLinuxCopyFd(): Int =
+        if (handle == 0L) {
+            RESULT_CLOSED
+        } else {
+            nativeTakeLinuxCopyFd(handle)
+        }
+
+    fun takeLinuxClipboardClear(): Boolean =
+        handle != 0L && nativeTakeLinuxClipboardClear(handle)
+
+    fun readClipboardFd(
+        descriptor: Int,
+        output: ByteBuffer,
+        capacity: Int,
+        timeoutMillis: Int,
+    ): Int = nativeReadClipboardFd(descriptor, output, capacity, timeoutMillis)
+
+    fun writeClipboardFd(
+        descriptor: Int,
+        input: ByteBuffer,
+        length: Int,
+        timeoutMillis: Int,
+    ): Int = nativeWriteClipboardFd(descriptor, input, length, timeoutMillis)
+
     /**
      * Dispatches pending Wayland traffic and presents only when a new surface
      * commit is available. The return flags are stable for diagnostics.
@@ -92,6 +143,35 @@ internal class NativeLauncherCompositor(
         handle: Long,
         active: Boolean,
     )
+
+    private external fun nativeSetClipboardActive(
+        handle: Long,
+        active: Boolean,
+    )
+
+    private external fun nativeOfferAndroidClipboardText(handle: Long): Int
+
+    private external fun nativeClearAndroidClipboard(handle: Long): Int
+
+    private external fun nativeTakeAndroidPasteFd(handle: Long): Int
+
+    private external fun nativeTakeLinuxCopyFd(handle: Long): Int
+
+    private external fun nativeTakeLinuxClipboardClear(handle: Long): Boolean
+
+    private external fun nativeReadClipboardFd(
+        descriptor: Int,
+        output: ByteBuffer,
+        capacity: Int,
+        timeoutMillis: Int,
+    ): Int
+
+    private external fun nativeWriteClipboardFd(
+        descriptor: Int,
+        input: ByteBuffer,
+        length: Int,
+        timeoutMillis: Int,
+    ): Int
 
     private external fun nativeDispatchAndPresent(
         handle: Long,
