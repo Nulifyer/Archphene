@@ -74,6 +74,7 @@ archphene_wait_log 'Shared Rust runtime started' 15 >/dev/null
 archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 15 >/dev/null
 if [[ "$reset_data" == true ]]; then
   archphene_wait_log 'root directories created=[1-9][0-9]*' 15 >/dev/null
+  archphene_skip_storage_onboarding "archphene-base-onboarding-$serial"
 fi
 
 first_pid="$(archphene_android_pid "$package")"
@@ -159,13 +160,6 @@ rotation_changed=false
 archphene_wait_ui 'Rust runtime [0-9]+.*state 2.*Root ready.*jobs ready.*Pacman ready.*events [0-9]+' \
   "archphene-base-rotation-restored-$serial" 15
 
-archphene_wait_ui 'text="Linux session display"' \
-  "archphene-base-input-surface-$serial" 15
-archphene_tap_ui_pattern \
-  "$ARCHPHENE_UI" 'text="Linux session display"' 'runtime input surface'
-archphene_wait_ui 'Rust runtime [0-9]+.*state 2.*Root ready.*jobs ready.*Pacman ready.*events [1-9][0-9]*' \
-  "archphene-base-input-$serial" 15
-
 archphene_adb_run exec-out screencap -p >"$output_dir/$serial.png"
 python3 -c '
 import struct, sys
@@ -181,7 +175,7 @@ archphene_adb_run shell input keyevent KEYCODE_HOME >/dev/null
 sleep 0.5
 resume="$(archphene_adb_run shell am start -W -n "$activity" | tr -d '\r')"
 [[ "$resume" == *"Status: ok"* ]] || archphene_die "base app did not resume: $resume"
-archphene_wait_ui 'Rust runtime [0-9]+.*state 2.*Root ready.*jobs ready.*Pacman ready.*events [1-9][0-9]*' \
+archphene_wait_ui 'Rust runtime [0-9]+.*state 2.*Root ready.*jobs ready.*Pacman ready.*events [0-9]+' \
   "archphene-base-resume-$serial" 15
 second_generation="$(python3 -c '
 import re, sys

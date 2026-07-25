@@ -61,8 +61,16 @@ complete cleanup and retry, process-restart persistence, grant removal with
 retained Linux content, scoped logs, cleanup, and full-device visuals pass on
 both exact-ABI targets. It is not yet a live or conflict-safe synchronizer:
 subsequent pull/push, change manifests, conflict copies, deletion policy,
-sync-plan cancellation, `/mnt/android`, export/share, and guided first-run
-storage setup remain open.
+sync-plan cancellation, `/mnt/android`, and export/share remain open.
+
+On first clean launch, the manager now explains that the conventional Linux
+environment stays in private app storage and that choosing an Android folder
+creates an initial `~/Projects` snapshot rather than a live mount or broad
+all-files grant. The user can choose a folder or select Not now; either choice,
+including picker cancellation, is remembered so the prompt does not nag after
+restart, while the normal Connect/Change action remains available. Semantic
+UI, picker-cancellation, no-repeat restart, scoped-log, and visually inspected
+full-device gates pass on the exact-ABI emulator and Samsung.
 
 Single Android documents can now enter the shared environment from the system
 picker, Open With, or Share. Android passes one read-only content descriptor;

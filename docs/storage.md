@@ -104,6 +104,16 @@ unsafe paths are rejected. Interrupted staging is recovered without following
 a substituted symlink. The published private project remains available if the
 Android grant is later removed.
 
+On a clean first launch, the manager explains this boundary before asking for
+any Android folder. It states that Linux packages and projects use private app
+storage, that a selected Android folder is copied into `~/Projects` as an
+initial snapshot rather than live synchronization, and that no broad all-files
+permission is required. Choose folder opens Android's system tree picker; Not
+now and picker cancellation both suppress repeat prompting across process
+restart. The normal Connect/Change action remains available afterward.
+Semantic UI, picker-cancellation, no-repeat restart, scoped-log, and visually
+inspected full-device gates pass on the exact-ABI emulator and Samsung.
+
 This is deliberately an initial snapshot, not a live mount or completed
 synchronizer. Android-side edits made after publication and Linux-side edits
 are not yet reconciled or written back. The next storage slice must add an

@@ -2,6 +2,7 @@ package org.archphene.app
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -65,6 +66,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private var statusFrameCountdown = 0
     private var keepServiceAfterFinish = false
     private var shellCatalogRevision = Int.MIN_VALUE
+    private var storageOnboardingDialog: AlertDialog? = null
     private var pendingImportUri: Uri? = null
     private var pendingFolderUri: Uri? = null
     private var pendingFolderFlags = 0
@@ -726,6 +728,9 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     }
 
     override fun onDestroy() {
+        storageOnboardingDialog?.setOnDismissListener(null)
+        storageOnboardingDialog?.dismiss()
+        storageOnboardingDialog = null
         if (isFinishing && !keepServiceAfterFinish) {
             stopService(Intent(this, ArchpheneRuntimeService::class.java))
         }
@@ -880,6 +885,39 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             ),
         )
         updatePackageActions()
+        maybeShowStorageOnboarding()
+    }
+
+    private fun maybeShowStorageOnboarding() {
+        val binder = runtimeBinder ?: return
+        if (
+            !binder.storageOnboardingRequired ||
+            storageOnboardingDialog != null ||
+            isFinishing ||
+            isDestroyed
+        ) {
+            return
+        }
+        val dialog =
+            AlertDialog
+                .Builder(this)
+                .setTitle(R.string.storage_onboarding_title)
+                .setMessage(R.string.storage_onboarding_message)
+                .setPositiveButton(R.string.storage_onboarding_choose) { _, _ ->
+                    binder.completeStorageOnboarding()
+                    openAndroidFolder()
+                }.setNegativeButton(R.string.storage_onboarding_skip) { _, _ ->
+                    binder.completeStorageOnboarding()
+                }.setOnCancelListener {
+                    binder.completeStorageOnboarding()
+                }.create()
+        dialog.setOnDismissListener {
+            if (storageOnboardingDialog === dialog) {
+                storageOnboardingDialog = null
+            }
+        }
+        storageOnboardingDialog = dialog
+        dialog.show()
     }
 
     private fun updatePackageActions() {

@@ -108,6 +108,9 @@ class ArchpheneRuntimeService : Service() {
         val folderGrantRunning: Boolean
             get() = folderOperationActive
 
+        val storageOnboardingRequired: Boolean
+            get() = folderStateReady && folderOnboardingNeeded
+
         val linuxCommandStatus: String
             get() =
                 if (shellActive) {
@@ -201,6 +204,14 @@ class ArchpheneRuntimeService : Service() {
                 requestFolderMirror()
             }
 
+        fun completeStorageOnboarding() {
+            folderOnboardingNeeded = false
+            getSharedPreferences(STORAGE_PREFERENCES, MODE_PRIVATE)
+                .edit()
+                .putBoolean(FOLDER_ONBOARDING_SEEN, true)
+                .apply()
+        }
+
         fun submitLinuxInput(commandLine: String): Boolean =
             if (shellActive) {
                 requestShellInput(commandLine)
@@ -273,6 +284,7 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var folderMirrorPath = ""
     @Volatile private var folderMirrorRunning = false
     @Volatile private var folderMirrorCancellationRequested = false
+    @Volatile private var folderOnboardingNeeded = false
     @Volatile private var folderStatus = "Loading Android folder access…"
     @Volatile private var shellActive = false
     @Volatile private var shellWasStarted = false
@@ -586,6 +598,7 @@ class ArchpheneRuntimeService : Service() {
         private const val FOLDER_REVOKED = "revoked"
         private const val FOLDER_MIRROR_URI = "folder_mirror_uri"
         private const val FOLDER_MIRROR_NAME = "folder_mirror_name"
+        private const val FOLDER_ONBOARDING_SEEN = "folder_onboarding_seen"
         private const val MAX_MIRROR_ENTRIES = 10_000
         private const val MAX_MIRROR_DEPTH = 64
         private const val MAX_MIRROR_PATH_BYTES = 4 * 1024
@@ -645,6 +658,10 @@ class ArchpheneRuntimeService : Service() {
                 ?: "selected folder"
         val savedUri = preferences.getString(FOLDER_URI, null)
         val state = preferences.getString(FOLDER_STATE, FOLDER_DISCONNECTED)
+        folderOnboardingNeeded =
+            !preferences.getBoolean(FOLDER_ONBOARDING_SEEN, false) &&
+                savedUri == null &&
+                state == FOLDER_DISCONNECTED
         if (savedUri == null) {
             folderConnected = false
             folderWritable = false
@@ -792,6 +809,7 @@ class ArchpheneRuntimeService : Service() {
                     .putString(FOLDER_URI, encodedUri)
                     .putString(FOLDER_LABEL, label)
                     .putString(FOLDER_STATE, FOLDER_CONNECTED)
+                    .putBoolean(FOLDER_ONBOARDING_SEEN, true)
             if (preferences.getString(FOLDER_MIRROR_URI, null) != encodedUri) {
                 editor.remove(FOLDER_MIRROR_URI).remove(FOLDER_MIRROR_NAME)
             }
@@ -805,6 +823,7 @@ class ArchpheneRuntimeService : Service() {
                     }
             }
             folderConnected = true
+            folderOnboardingNeeded = false
             folderWritable = permission.second
             folderUri = encodedUri
             folderLabel = label

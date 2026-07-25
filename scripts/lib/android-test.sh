@@ -89,3 +89,29 @@ archphene_tap_text() {
   escaped="$(python3 -c 'import re,sys;print(re.escape(sys.argv[1]))' "$2")"
   archphene_tap_ui_pattern "$1" "text=\"$escaped\"" "$2"
 }
+
+archphene_skip_storage_onboarding() {
+  local name="${1:-storage-onboarding}"
+  local deadline=$((SECONDS + 20))
+  local ui
+  while ((SECONDS < deadline)); do
+    ui="$(archphene_capture_ui "$name" 2>/dev/null || true)"
+    if archphene_regex_contains "$ui" 'text="Connect Android files\?"'; then
+      archphene_tap_ui_pattern \
+        "$ui" 'text="(?:NOT NOW|Not now)"' "Not now"
+      break
+    fi
+    sleep 0.5
+  done
+  ((SECONDS < deadline)) ||
+    archphene_die "timed out waiting for first-run storage onboarding"
+  while ((SECONDS < deadline)); do
+    ui="$(archphene_capture_ui "$name-dismissed" 2>/dev/null || true)"
+    if ! archphene_regex_contains "$ui" 'text="Connect Android files\?"'; then
+      ARCHPHENE_UI="$ui"
+      return 0
+    fi
+    sleep 0.5
+  done
+  archphene_die "storage onboarding did not dismiss"
+}

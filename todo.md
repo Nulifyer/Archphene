@@ -196,7 +196,7 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [ ] Clearly show unavailable, revoked, read-only, syncing, conflict, and error states instead of silently failing.
   - [x] Keep working project trees in private `~/Projects` POSIX storage and treat each selected SAF tree as an explicitly synchronized Android endpoint, never as a mount.
   - [ ] Keep package databases, builds, symlinks, executables, sockets, and other POSIX-dependent data in private Arch storage.
-- [ ] Add a first-run storage flow: explain the model, let the user grant a folder, and allow skipping or changing it later.
+- [x] Add a first-run storage flow that explains private Linux storage and the optional Android-folder snapshot, lets the user choose a folder or skip without granting broad file access, persists either choice across restart, and leaves Connect/Change available later. Pass semantic, picker-cancellation, no-repeat, scoped-log, and visually inspected full-device gates on the exact-ABI emulator and Samsung.
 - [x] Expose visible files in shared `/home/archphene` through a `DocumentsProvider` so Android Files, pickers, share sheets, browsers, and other apps can open and save them.
   - [x] Use `MANAGE_DOCUMENTS` plus Android URI grants rather than broad storage permission; keep dotfiles, symlinks, package/runtime trees, and unsupported file types private.
   - [x] Pass exact framework create/read/write/non-replacing-rename/delete, child, collision, traversal, bidi-spoof, and symlink gates plus visually inspected full-device DocumentsUI browsing on the emulator and Samsung.
