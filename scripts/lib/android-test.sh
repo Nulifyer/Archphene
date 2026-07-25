@@ -115,3 +115,19 @@ archphene_skip_storage_onboarding() {
   done
   archphene_die "storage onboarding did not dismiss"
 }
+
+archphene_open_manager_section() {
+  local section="$1"
+  local name="${2:-manager-section-${section,,}}"
+  local ui
+  archphene_wait_ui \
+    "text=\"$section\"[^>]*class=\"android\\.widget\\.Button\"" \
+    "$name-navigation" 15
+  ui="$ARCHPHENE_UI"
+  archphene_tap_ui_pattern \
+    "$ui" "text=\"$section\"[^>]*class=\"android\\.widget\\.Button\"" \
+    "$section"
+  archphene_wait_ui \
+    "text=\"$section\"[^>]*class=\"android\\.widget\\.Button\"[^>]*selected=\"true\"" \
+    "$name-selected" 15
+}

@@ -31,9 +31,17 @@ resources; native actions use sentence case; and the visible header reports
 user-facing readiness rather than internal native handles. Debug builds retain
 the bounded runtime evidence used by lifecycle gates without placing it in the
 visible header. Reversible light/dark semantic and full-device visual gates,
-plus clean-data lifecycle gates, pass on the emulator and Samsung. The dense
-single-screen manager layout is still a scaffold and remains scheduled for
-responsive Packages, Files, and Terminal navigation.
+plus clean-data lifecycle gates, pass on the emulator and Samsung.
+
+The dense single-screen manager scaffold has been split into focused Packages,
+Files, and Terminal sections with a persistent bottom navigation surface. The
+selected section survives Activity recreation and rotation; switching sections
+does not stop a running shared shell; storage pickers return to Files; and short
+landscape windows omit nonessential terminal explanation so every control stays
+on screen. Exact-ABI full-device portrait/landscape navigation, onboarding,
+clean lifecycle, and persisted-folder gates pass on the emulator and Samsung.
+Adaptive tablet/external-display composition and populated package/active-shell
+visual audits remain planned; this clean-data pass did not download packages.
 
 Visible files in the shared `/home/archphene` are now available to Android
 Files, system pickers, and explicitly granted Android consumers through an

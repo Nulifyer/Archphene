@@ -101,6 +101,7 @@ archphene_adb_run shell am start -W -n "$activity" >/dev/null
 archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 25 >/dev/null
 wait_receiver "$action_prepare" "Stale native staging fixture prepared"
 
+archphene_open_manager_section Files "folder-mirror-files-$serial"
 archphene_wait_ui 'text="(?:CONNECT|CHANGE|Connect|Change)"' \
   "folder-mirror-connect-$serial" 20
 archphene_tap_ui_pattern \
@@ -138,6 +139,7 @@ archphene_adb_run exec-out screencap -p >"$output_dir/$serial-connected.png"
 
 archphene_adb_run shell am force-stop "$package" >/dev/null
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
+archphene_open_manager_section Files "folder-mirror-files-restart-$serial"
 archphene_wait_ui_unwrapped \
   "Linux: ~/Projects/$folder" \
   "folder-mirror-restart-$serial" 25

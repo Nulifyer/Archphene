@@ -28,6 +28,7 @@ archphene_adb_run shell pm grant "$package" android.permission.POST_NOTIFICATION
   >/dev/null 2>&1 || true
 archphene_adb_run shell am force-stop "$package" >/dev/null
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
+archphene_open_manager_section Terminal "session-reboot-terminal-$serial"
 archphene_wait_ui 'text="START SHELL"' "session-reboot-start-$serial" 20
 archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="START SHELL"' 'start shell'
 archphene_wait_ui 'archphene:~\$' "session-reboot-ready-$serial" 20
@@ -43,6 +44,7 @@ archphene_adb_run shell wm dismiss-keyguard >/dev/null 2>&1 || true
   archphene_die "reboot did not preserve the active session marker"
 
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
+archphene_open_manager_section Terminal "session-reboot-restart-terminal-$serial"
 archphene_wait_ui 'The previous Linux session was interrupted' \
   "session-reboot-interrupted-$serial" 30
 archphene_wait_ui 'text="START SHELL"' "session-reboot-restart-$serial" 15

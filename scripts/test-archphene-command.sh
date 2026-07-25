@@ -43,10 +43,11 @@ archphene_adb_run logcat -c
 archphene_adb_run shell am force-stop "$package" >/dev/null
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
 archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 15 >/dev/null
-archphene_wait_ui 'text="Linux command, for example btop --version"' \
+archphene_open_manager_section Terminal "archphene-command-terminal-$serial"
+archphene_wait_ui 'text="Linux command, for example btop"' \
   "archphene-command-field-$serial" 15
 archphene_tap_ui_pattern "$ARCHPHENE_UI" \
-  'text="Linux command, for example btop --version"' 'Linux command'
+  'text="Linux command, for example btop"' 'Linux command'
 archphene_adb_run shell input text 'btop%s--version' >/dev/null
 archphene_wait_ui 'text="btop --version"' "archphene-command-entered-$serial" 10
 archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null

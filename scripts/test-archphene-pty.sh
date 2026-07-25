@@ -63,9 +63,9 @@ archphene_adb_run shell run-as "$package" test -x files/arch-root/usr/bin/bash |
 
 enter_shell_line() {
   local line="$1" ui_name="$2"
-  archphene_wait_ui 'text="Linux command, for example btop --version"' "$ui_name-field" 15
+  archphene_wait_ui 'text="Linux command, for example btop"' "$ui_name-field" 15
   archphene_tap_ui_pattern "$ARCHPHENE_UI" \
-    'text="Linux command, for example btop --version"' 'Linux shell input'
+    'text="Linux command, for example btop"' 'Linux shell input'
   archphene_adb_run shell input text "${line// /%s}" >/dev/null
   archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null
   archphene_wait_ui 'text="SEND"' "$ui_name-send" 10
@@ -92,6 +92,7 @@ archphene_adb_run shell am force-stop "$package" >/dev/null
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
 archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 15 >/dev/null
 archphene_wait_log 'Activity created generation=1' 15 'ArchpheneActivity:V *:S' >/dev/null
+archphene_open_manager_section Terminal "archphene-shell-terminal-$serial"
 archphene_wait_ui 'text="START SHELL"' "archphene-shell-action-$serial" 15
 archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="START SHELL"' 'start shell'
 archphene_wait_ui 'text="Shared shell ready' "archphene-shell-ready-$serial" 20

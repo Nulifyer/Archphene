@@ -45,8 +45,15 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private lateinit var storageStatusView: TextView
     private lateinit var folderStatusView: TextView
     private lateinit var runtimeSurface: RuntimeSurfaceView
-    private lateinit var managerPanel: LinearLayout
+    private lateinit var managerPanel: FrameLayout
+    private lateinit var packagePanel: LinearLayout
+    private lateinit var filesPanel: ScrollView
+    private lateinit var terminalEmptyPanel: LinearLayout
+    private lateinit var terminalControls: LinearLayout
     private lateinit var runtimePanel: FrameLayout
+    private lateinit var packagesNavigationButton: Button
+    private lateinit var filesNavigationButton: Button
+    private lateinit var terminalNavigationButton: Button
     private lateinit var installButton: Button
     private lateinit var removeButton: Button
     private lateinit var cancelButton: Button
@@ -77,6 +84,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private var pendingImportUri: Uri? = null
     private var pendingFolderUri: Uri? = null
     private var pendingFolderFlags = 0
+    private var selectedManagerSection = MANAGER_SECTION_PACKAGES
 
     private val serviceConnection =
         object : ServiceConnection {
@@ -119,6 +127,13 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         activityGeneration++
+        selectedManagerSection =
+            (
+                savedInstanceState?.getInt(
+                    MANAGER_SECTION_STATE,
+                    MANAGER_SECTION_PACKAGES,
+                ) ?: MANAGER_SECTION_PACKAGES
+            ).coerceIn(MANAGER_SECTION_PACKAGES, MANAGER_SECTION_TERMINAL)
         debugRuntimeEvidenceEnabled =
             applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
         Log.i(TAG, "Activity created generation=$activityGeneration")
@@ -573,15 +588,28 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 maxLines = 2
                 setTextIsSelectable(true)
             }
-        managerPanel =
+        packagePanel =
             LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 setBackgroundColor(getColor(R.color.archphene_background))
                 addView(
+                    TextView(this@MainActivity).apply {
+                        setText(R.string.packages)
+                        setTextColor(getColor(R.color.archphene_on_surface))
+                        textSize = 22f
+                        gravity = Gravity.CENTER_VERTICAL
+                        setPadding(dp(20), 0, dp(20), 0)
+                    },
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        dp(56),
+                    ),
+                )
+                addView(
                     catalogRow,
                     LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
-                        dp(48),
+                        dp(56),
                     ),
                 )
                 addView(
@@ -595,7 +623,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     actionRow,
                     LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
-                        dp(48),
+                        dp(56),
                     ),
                 )
                 addView(
@@ -610,42 +638,137 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     jobRow,
                     LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
-                        dp(64),
-                    ),
-                )
-                addView(
-                    storageRow,
-                    LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        dp(64),
-                    ),
-                )
-                addView(
-                    folderRow,
-                    LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        dp(104),
+                        dp(72),
                     ),
                 )
             }
-        val layout =
+        filesPanel =
+            ScrollView(this).apply {
+                isFillViewport = true
+                setBackgroundColor(getColor(R.color.archphene_background))
+                addView(
+                    LinearLayout(this@MainActivity).apply {
+                        orientation = LinearLayout.VERTICAL
+                        setPadding(dp(16), dp(8), dp(16), dp(16))
+                        addView(
+                            TextView(this@MainActivity).apply {
+                                setText(R.string.files_heading)
+                                setTextColor(getColor(R.color.archphene_on_surface))
+                                textSize = 22f
+                                gravity = Gravity.CENTER_VERTICAL
+                            },
+                            LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                dp(56),
+                            ),
+                        )
+                        addView(
+                            TextView(this@MainActivity).apply {
+                                setText(R.string.files_description)
+                                setTextColor(getColor(R.color.archphene_on_surface_muted))
+                                textSize = 15f
+                                setPadding(0, 0, 0, dp(12))
+                            },
+                            LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.WRAP_CONTENT,
+                            ),
+                        )
+                        addView(
+                            storageRow,
+                            LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                dp(72),
+                            ),
+                        )
+                        addView(
+                            folderRow,
+                            LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                dp(120),
+                            ).apply {
+                                topMargin = dp(12)
+                            },
+                        )
+                    },
+                    FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ),
+                )
+            }
+        terminalEmptyPanel =
             LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                setPadding(dp(24), dp(24), dp(24), dp(24))
+                setBackgroundColor(getColor(R.color.archphene_background))
                 addView(
-                    statusView,
+                    TextView(this@MainActivity).apply {
+                        setText(R.string.terminal_heading)
+                        setTextColor(getColor(R.color.archphene_on_surface))
+                        textSize = 22f
+                        gravity = Gravity.CENTER
+                    },
                     LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
-                        dp(64),
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ),
+                )
+                if (
+                    resources.configuration.screenHeightDp >=
+                    MIN_TERMINAL_DESCRIPTION_HEIGHT_DP
+                ) {
+                    addView(
+                        TextView(this@MainActivity).apply {
+                            setText(R.string.terminal_description)
+                            setTextColor(getColor(R.color.archphene_on_surface_muted))
+                            textSize = 15f
+                            gravity = Gravity.CENTER
+                            setPadding(0, dp(12), 0, 0)
+                        },
+                        LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ),
+                    )
+                }
+            }
+        managerPanel =
+            FrameLayout(this).apply {
+                setBackgroundColor(getColor(R.color.archphene_background))
+                addView(
+                    packagePanel,
+                    FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
                     ),
                 )
                 addView(
-                    managerPanel,
-                    LinearLayout.LayoutParams(
+                    filesPanel,
+                    FrameLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
-                        0,
-                        1f,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
                     ),
                 )
+                addView(
+                    terminalEmptyPanel,
+                    FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                    ),
+                )
+                addView(
+                    runtimePanel,
+                    FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                    ),
+                )
+            }
+        terminalControls =
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
                 addView(
                     shellRow,
                     LinearLayout.LayoutParams(
@@ -667,17 +790,67 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                         dp(52),
                     ),
                 )
+            }
+        packagesNavigationButton =
+            managerNavigationButton(R.string.packages, MANAGER_SECTION_PACKAGES)
+        filesNavigationButton =
+            managerNavigationButton(R.string.files, MANAGER_SECTION_FILES)
+        terminalNavigationButton =
+            managerNavigationButton(R.string.terminal, MANAGER_SECTION_TERMINAL)
+        val navigationRow =
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(dp(8), dp(4), dp(8), dp(4))
+                setBackgroundColor(getColor(R.color.archphene_surface))
                 addView(
-                    runtimePanel,
+                    packagesNavigationButton,
+                    LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f),
+                )
+                addView(
+                    filesNavigationButton,
+                    LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f),
+                )
+                addView(
+                    terminalNavigationButton,
+                    LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f),
+                )
+            }
+        val layout =
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(
+                    statusView,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        dp(64),
+                    ),
+                )
+                addView(
+                    managerPanel,
                     LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         0,
                         1f,
                     ),
                 )
+                addView(
+                    terminalControls,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        dp(152),
+                    ),
+                )
+                addView(
+                    navigationRow,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        dp(64),
+                    ),
+                )
             }
         applySystemBarInsets(layout)
         setContentView(layout)
+        updateShellPresentation(false)
         startService(Intent(this, ArchpheneRuntimeService::class.java))
         val restoredImport =
             savedInstanceState
@@ -756,6 +929,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
+        outState.putInt(MANAGER_SECTION_STATE, selectedManagerSection)
         pendingImportUri?.let { uri ->
             outState.putString(PENDING_IMPORT_URI_STATE, uri.toString())
         }
@@ -1015,19 +1189,79 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     }
 
     private fun updateShellPresentation(shellRunning: Boolean) {
-        val managerVisibility = if (shellRunning) View.GONE else View.VISIBLE
-        val terminalVisibility = if (shellRunning) View.VISIBLE else View.GONE
-        if (managerPanel.visibility != managerVisibility) {
-            managerPanel.visibility = managerVisibility
-        }
+        val packagesVisible =
+            selectedManagerSection == MANAGER_SECTION_PACKAGES
+        val filesVisible =
+            selectedManagerSection == MANAGER_SECTION_FILES
+        val terminalSelected =
+            selectedManagerSection == MANAGER_SECTION_TERMINAL
+        setVisibilityIfChanged(
+            packagePanel,
+            if (packagesVisible) View.VISIBLE else View.GONE,
+        )
+        setVisibilityIfChanged(
+            filesPanel,
+            if (filesVisible) View.VISIBLE else View.GONE,
+        )
+        setVisibilityIfChanged(
+            terminalEmptyPanel,
+            if (terminalSelected && !shellRunning) View.VISIBLE else View.GONE,
+        )
+        setVisibilityIfChanged(
+            terminalControls,
+            if (terminalSelected) View.VISIBLE else View.GONE,
+        )
+        val terminalVisibility =
+            if (terminalSelected && shellRunning) View.VISIBLE else View.GONE
         if (runtimePanel.visibility != terminalVisibility) {
             runtimePanel.visibility = terminalVisibility
-            if (shellRunning) {
+            if (terminalVisibility == View.VISIBLE) {
                 runtimePanel.post {
                     runtimeSurface.synchronizeTerminalSize(runtimeBinder)
                     runtimeSurface.requestFocus()
                 }
             }
+        }
+        setSelectedIfChanged(packagesNavigationButton, packagesVisible)
+        setSelectedIfChanged(filesNavigationButton, filesVisible)
+        setSelectedIfChanged(terminalNavigationButton, terminalSelected)
+    }
+
+    private fun setVisibilityIfChanged(view: View, visibility: Int) {
+        if (view.visibility != visibility) {
+            view.visibility = visibility
+        }
+    }
+
+    private fun setSelectedIfChanged(view: View, selected: Boolean) {
+        if (view.isSelected != selected) {
+            view.isSelected = selected
+        }
+    }
+
+    private fun managerNavigationButton(
+        textResource: Int,
+        section: Int,
+    ): Button =
+        Button(this).apply {
+            setText(textResource)
+            textSize = 14f
+            backgroundTintList =
+                getColorStateList(R.color.manager_navigation_background)
+            setTextColor(getColorStateList(R.color.manager_navigation_text))
+            setOnClickListener {
+                selectedManagerSection = section
+                updateShellPresentation(runtimeBinder?.sharedShellRunning == true)
+            }
+        }
+
+    private fun selectManagerSection(section: Int) {
+        if (selectedManagerSection == section) {
+            return
+        }
+        selectedManagerSection = section
+        if (::packagePanel.isInitialized) {
+            updateShellPresentation(runtimeBinder?.sharedShellRunning == true)
         }
     }
 
@@ -1040,6 +1274,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     }
 
     private fun openAndroidDocument() {
+        selectManagerSection(MANAGER_SECTION_FILES)
         val picker =
             Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                 addCategory(Intent.CATEGORY_OPENABLE)
@@ -1051,6 +1286,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     }
 
     private fun openAndroidFolder() {
+        selectManagerSection(MANAGER_SECTION_FILES)
         val picker =
             Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
                 addFlags(
@@ -1068,6 +1304,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         uri: Uri,
         resultFlags: Int,
     ) {
+        selectManagerSection(MANAGER_SECTION_FILES)
         val encodedBytes = uri.toString().toByteArray(Charsets.UTF_8).size
         val grantedFlags =
             resultFlags and
@@ -1133,6 +1370,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     }
 
     private fun queueDocumentImport(uri: Uri) {
+        selectManagerSection(MANAGER_SECTION_FILES)
         if (uri.scheme != "content") {
             setTextIfChanged(
                 storageStatusView,
@@ -1216,6 +1454,11 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         private const val PENDING_IMPORT_URI_STATE = "pending_import_uri"
         private const val PENDING_FOLDER_URI_STATE = "pending_folder_uri"
         private const val PENDING_FOLDER_FLAGS_STATE = "pending_folder_flags"
+        private const val MANAGER_SECTION_STATE = "manager_section"
+        private const val MANAGER_SECTION_PACKAGES = 0
+        private const val MANAGER_SECTION_FILES = 1
+        private const val MANAGER_SECTION_TERMINAL = 2
+        private const val MIN_TERMINAL_DESCRIPTION_HEIGHT_DP = 480
         private const val MAX_FOLDER_URI_BYTES = 4 * 1024
         private var activityGeneration = 0
     }

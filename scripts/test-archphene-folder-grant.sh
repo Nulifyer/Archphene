@@ -82,6 +82,7 @@ select_folder() {
 
 tap_folder_action() {
   local phase="$1"
+  archphene_open_manager_section Files "folder-grant-files-$phase-$serial"
   archphene_wait_ui 'text="(?:CONNECT|CHANGE|Connect|Change)"' \
     "folder-grant-action-$phase-$serial" 20
   archphene_tap_ui_pattern \
@@ -125,6 +126,7 @@ verify_grant replacement
 
 archphene_adb_run shell am force-stop "$package" >/dev/null
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
+archphene_open_manager_section Files "folder-grant-files-restart-$serial"
 archphene_wait_ui_unwrapped \
   "Android folder: $second_folder.*read/write" \
   "folder-grant-restart-$serial" 25
@@ -139,6 +141,7 @@ archphene_wait_log \
   15 'ArchpheneFolderGrantTest:V AndroidRuntime:E *:S' >/dev/null
 archphene_adb_run shell am force-stop "$package" >/dev/null
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
+archphene_open_manager_section Files "folder-grant-files-revoked-$serial"
 archphene_wait_ui_unwrapped \
   "Access to $second_folder was revoked.*Connect it again" \
   "folder-grant-revoked-$serial" 25
@@ -159,6 +162,7 @@ archphene_wait_log \
   15 'ArchpheneFolderGrantTest:V AndroidRuntime:E *:S' >/dev/null
 archphene_adb_run shell am force-stop "$package" >/dev/null
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
+archphene_open_manager_section Files "folder-grant-files-read-only-$serial"
 archphene_wait_ui_unwrapped \
   "Android folder: $second_folder.*read-only" \
   "folder-grant-read-only-$serial" 25

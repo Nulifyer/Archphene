@@ -60,6 +60,7 @@ start_manager() {
   archphene_adb_run shell am force-stop "$package" >/dev/null
   archphene_adb_run shell am start -W -n "$activity" >/dev/null
   archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 20 >/dev/null
+  archphene_open_manager_section Terminal "$name-terminal"
   archphene_wait_ui 'class="android.widget.Spinner"[^>]*content-desc="Shell"' \
     "$name-shell-selector" 20
 }
@@ -89,6 +90,7 @@ select_shell "POSIX shell" "archphene-posix-$serial"
 # A real process restart proves the stable shell identifier was durably saved,
 # rather than surviving only in the Activity or Service heap.
 start_manager "archphene-posix-restart-$serial"
+archphene_open_manager_section Terminal "archphene-posix-terminal-$serial"
 assert_selected_shell "POSIX shell" "archphene-posix-restart-$serial"
 archphene_wait_ui 'text="START SHELL"' "archphene-posix-start-$serial" 15
 archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="START SHELL"' 'start POSIX shell'

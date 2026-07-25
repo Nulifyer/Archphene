@@ -4,6 +4,13 @@
     <string name="runtime_starting">Starting the shared Arch runtime…</string>
     <string name="runtime_ready">Archphene is ready</string>
     <string name="runtime_unavailable">Shared Arch runtime unavailable</string>
+    <string name="packages">Packages</string>
+    <string name="files">Files</string>
+    <string name="terminal">Terminal</string>
+    <string name="files_heading">Android and Linux files</string>
+    <string name="files_description">Import individual Android files into ~/Downloads, or connect a folder and copy an initial snapshot into ~/Projects.</string>
+    <string name="terminal_heading">Shared Linux terminal</string>
+    <string name="terminal_description">Install and select a supported shell, or run an installed Linux command directly.</string>
     <string name="package_catalog_unavailable">Package catalog unavailable</string>
     <string name="package_search_unavailable">Package search unavailable</string>
     <string name="refresh_catalogs">Refresh catalogs</string>
@@ -41,7 +48,7 @@
     <string name="terminal_text_larger">Text larger</string>
     <string name="terminal_text_size_automatic">Text size: Auto (%1$d sp)</string>
     <string name="terminal_text_size_explicit">Text size: %1$d sp (reset to Auto)</string>
-    <string name="linux_command_hint">Linux command, for example btop --version</string>
+    <string name="linux_command_hint">Linux command, for example btop</string>
     <string name="run_command">Run</string>
     <string name="start_shell">Start shell</string>
     <string name="installed_shell">Shell</string>

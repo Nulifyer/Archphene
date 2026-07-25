@@ -47,6 +47,7 @@ start_shell() {
   local name="$1"
   archphene_adb_run shell am force-stop "$package" >/dev/null
   archphene_adb_run shell am start -W -n "$activity" >/dev/null
+  archphene_open_manager_section Terminal "$name-terminal"
   archphene_wait_ui 'text="START SHELL"' "$name-start" 20
   archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="START SHELL"' 'start shell'
   archphene_wait_ui 'content-desc="Linux terminal, [0-9]+ columns by [0-9]+ rows"' \

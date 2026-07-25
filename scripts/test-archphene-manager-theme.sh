@@ -51,9 +51,11 @@ capture_mode() {
     archphene_die "$label manager did not retain the runtime diagnostics gate"
   archphene_regex_contains "$ARCHPHENE_UI" 'text="Package catalog [^"]+"' ||
     archphene_die "$label manager did not render package catalog status"
+  archphene_open_manager_section Files "manager-theme-$label-files-$serial"
   archphene_regex_contains "$ARCHPHENE_UI" \
     'text="(?:No Android folder connected|Android folder: [^"]+)"' ||
     archphene_die "$label manager did not render Android folder status"
+  archphene_open_manager_section Packages "manager-theme-$label-packages-$serial"
   archphene_adb_run exec-out screencap -p >"$output_dir/$serial-$label.png"
 }
 
