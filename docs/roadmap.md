@@ -8,10 +8,11 @@ Archphene is moving from application-specific proofs toward a package-driven And
    - synchronize Arch and Arch Linux ARM repository databases;
    - resolve dependency closures;
    - verify package signatures and extraction safety;
-   - select the desktop entrypoint, icon, toolkit, ABI, and capabilities;
+   - discover and register desktop entrypoints, icons, toolkit, ABI, and capabilities from the shared Arch root;
    - generate a wrapper APK from a reusable template;
    - sign with a persistent per-device identity;
    - install through Android PackageInstaller;
+   - authenticate the thin launcher over Binder and render a manager-owned Linux process into its Surface;
    - preserve per-package progress, cancellation, retry, and process-death reconciliation;
    - allow bounded parallel preparation while serializing wrapper mutation, signing, and Android confirmation.
 
@@ -23,15 +24,16 @@ Archphene is moving from application-specific proofs toward a package-driven And
    - add deterministic protocol errors and fuzzable parsers.
 
 3. **Production runtime model**
-   - atomically materialize immutable runtime contents;
+   - keep one conventional manager-owned Arch root and package database;
    - validate 4 KB and 16 KB page-size compatibility;
-   - isolate each wrapper Linux tree in a dedicated process group and Android UID cleanup boundary;
-   - reduce per-app runtime duplication without weakening UID isolation.
+   - supervise each launch in a dedicated manager-owned process group tied to an authenticated Binder death token;
+   - avoid per-wrapper Linux roots and runtime-pack duplication;
+   - document that installed Linux packages intentionally share one trust domain.
 
 4. **Permission and document policy**
    - generate manifest permissions from declared capabilities;
    - extend the manager-owned user-document provider from individual document grants to persisted GUI project trees.
-   - expose Android services through same-UID, metadata-gated brokers; URL opening, notifications, audio input/output, and printing are validated;
+   - expose Android services through descriptor-gated manager brokers and authenticated launcher requests;
    - expose the validated URL and notification brokers through app-private standard XDG portal and freedesktop.org adapters.
 
 ## P1: desktop usability

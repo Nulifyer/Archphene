@@ -1,83 +1,171 @@
 # Architecture
 
-Archphene runs a Linux desktop application as a child process of a normal Android application. Android remains responsible for package identity, installation, UID isolation, SELinux confinement, storage, lifecycle, and runtime permissions.
+Updated: 2026-07-25
+
+Archphene is one user-owned Arch Linux environment inside one ordinary Android
+application. Pacman and AUR packages intentionally share one filesystem, home,
+package database, toolchain, and Linux trust domain. Android remains
+responsible for installation confirmation, application identity, lifecycle,
+system UI, permissions, and access to files outside Archphene.
+
+## Production model
+
+```text
+thin launcher Activity (separate APK/UID)
+          │ authenticated, versioned Binder session
+          │ Surface + batched input + Android capability results
+          ▼
+Archphene manager runtime Service (one Android UID)
+          │ owns Linux processes and all mutable Linux state
+          ▼
+one private Arch root
+  /usr  /etc  /var  /opt  /home/archphene  /tmp
+```
+
+The launcher APK is an Android entry point, not a Linux container. The manager
+starts and supervises the Linux process under its own UID, inside the same
+private Arch root used by Terminal and every other Linux application. Removing
+a launcher must not remove a pacman package or Linux user data. Removing a
+package must reconcile every launcher whose desktop entry or executable it
+owned.
+
+This deliberately does not provide package isolation inside Arch. Installing
+an Arch or AUR package grants it the same Linux trust level it has in a normal
+single-user Arch installation, subject to Android's outer application sandbox.
 
 ## Components
 
 ### Archphene manager
 
-The manager discovers wrapped Linux applications through Android package metadata. It provides package search, update checks, version selection and pinning, prerelease policy, repository settings, verified APK installation, and GitHub Releases self-update discovery. Release assets are checksum-validated, package/signer-validated, and installed through Android confirmation.
+Rust owns:
 
-The target product flow is:
+- the shared Arch root, pacman database, package cache, and AUR build area;
+- bounded package resolution, verification, mutation, and durable jobs;
+- desktop-entry discovery and launcher descriptors;
+- Linux process groups, Wayland sessions, terminal state, storage
+  synchronization, and teardown;
+- compositor, input, rendering, and capability wire state.
 
-```text
-Arch repository metadata
-  -> dependency resolution and signature verification
-  -> on-device wrapper generation
-  -> persistent per-device APK signing
-  -> Android PackageInstaller
-```
+Kotlin owns:
 
-The full on-device transaction is proven for supported x86_64 Qt, GTK, and CLI packages and for AArch64 Qt and CLI packages: repository resolution, signature verification, staging, closure reduction, package classification, wrapper assembly, persistent Android Keystore signing, and PackageInstaller installation. Generated wrappers carry the selected desktop label, executable, icon, MIME intents, toolkit, ABI, source URL, and an enforced bridge-capability contract. AArch64 GTK3 wrapper assembly and broader toolkit coverage remain incomplete.
+- Activities, Services, notifications, and lifecycle;
+- PackageInstaller and Android installation confirmation;
+- Storage Access Framework, DocumentsProvider, permissions, IME, accessibility,
+  and Android system UI;
+- the authenticated cross-APK launcher session and Android `Surface` handoff.
 
-Package conversions run as durable per-package jobs. Two package preparation jobs may overlap, while wrapper mutation/signing and Android installation confirmation use fair single-slot gates. State is committed before phase transitions, failures and cancellation are isolated by canonical package identity, and startup reconciles an Android install that completed after the manager process stopped.
+Blocking work stays off Android's main thread. JNI remains coarse-grained and
+passes descriptors, direct buffers, native windows, and bounded snapshots
+instead of object graphs or rendered bitmaps.
 
-### Wrapper application
+### Thin launcher application
 
-Each Linux application is installed as a distinct APK with:
+Each graphical desktop entry can receive one deterministic Android package
+identity and launcher Activity. A wrapper contains only:
 
-- a stable Android package name and signing identity;
-- a thin Android code/resource shell without Linux runtime payloads;
-- an Android Activity and launcher entry;
-- bridge capability and package-source metadata;
-- private Android storage for background state;
-- Android document brokers for user-visible files.
+- the generic Archphene launcher client;
+- a stable descriptor identifier and generation;
+- label, icon, MIME intents, and declared Android capabilities;
+- no Arch package closure, Linux home, package database, or executable.
 
-Separate APK identities preserve Android's per-app UID and lifecycle boundaries. Linux executables, the patched glibc loader, and shared libraries remain in manager-owned immutable packs rather than being duplicated in each generated APK.
+The manager assembles wrappers from a reproducible precompiled template, signs
+them with one persistent non-exportable Android Keystore identity, verifies the
+generated APK, and hands it to PackageInstaller. Android confirmation remains
+mandatory. Updates retain package name and signer; a desktop-entry identity
+change is explicit rather than silently retargeting an installed launcher.
 
-### Wayland bridge
+The wrapper signing certificate is intentionally different from the manager's
+release certificate. The exported launcher Service therefore cannot rely on a
+static signature permission. During every Binder transaction it resolves the
+calling UID, requires exactly the registered generated package, verifies the
+installed signer against the manager's wrapper-signing certificate, and checks
+the bounded launcher descriptor. Package-name strings supplied by callers are
+never authentication.
 
-The Linux process connects to an app-local Wayland socket. The bridge maps Wayland surfaces, input, popups, dialogs, clipboard, IME, output changes, and Android window geometry into the Activity.
+### Cross-process launcher session
 
-KCalc and Mousepad use the same Android Activity, input, clipboard, window host, and Rust native compositor. Application Activities contain only package metadata and inherit the shared bridge behavior.
+The internal manager Activity continues to use a non-exported local Binder.
+Generated wrappers use a separate exported, versioned Binder protocol with a
+small fixed transaction surface:
 
-### Graphics bridge
+1. authenticate caller UID, package signer, descriptor, and protocol version;
+2. acquire a generation-checked session with a Binder death token;
+3. attach or replace an Android `Surface` and exact display metrics;
+4. submit bounded input batches and receive coarse state/damage revisions;
+5. broker explicit Android capability requests and results;
+6. stop or detach the session.
 
-For Wayland applications, the wrapper starts a Bionic virglrenderer helper under the same Android UID and exposes a private Unix socket inside the app cache directory. The glibc Mesa client selects `virpipe` and sends Gallium commands over that socket. Virglrenderer executes those commands through Android EGL/OpenGL ES. If the helper cannot initialize, the launcher selects `llvmpipe` without changing Android permissions or sandbox identity. Unexpected helper loss replaces that same-UID helper and restarts the payload once through `virpipe`; only replacement startup/failure can consume one final `llvmpipe` attempt. The Android Activity and compositor remain alive, while normal exits and repeated failures do not loop.
+The manager converts the supplied `Surface` to an `ANativeWindow`; the Linux
+process never crosses into the wrapper UID. Binder death, wrapper force-stop,
+or an explicit close detaches the surface and applies the documented
+background/termination policy to the manager-owned process group.
 
-The current compositor accepts `wl_shm` output, so rendered frames still return through a CPU-visible shared-memory presentation path. This accelerates GL command execution but is not a zero-copy pipeline. Android HardwareBuffer/dmabuf import and Vulkan remain future work. See [GPU acceleration](gpu-acceleration.md).
+The first implementation gate must prove caller rejection, real cross-process
+Surface presentation, touch/key coordinates, rotation/rebind, wrapper death,
+and descendant cleanup before the protocol is used for generated launchers.
 
-### Runtime compatibility
+### Wayland and graphics bridge
 
-Arch glibc and application libraries run inside the Android app sandbox. Source-level glibc compatibility patches replace optional or blocked startup syscall forms. They do not change the Android UID, grant permissions, bypass SELinux, or modify the kernel.
+Each launched Linux application receives a private Wayland socket and a
+manager-owned compositor session. The bridge maps Wayland surfaces, popups,
+dialogs, input, clipboard, IME, output changes, and Android window geometry to
+the attached launcher Surface.
 
-Official Arch Linux supplies x86_64 packages. AArch64 experiments use the separate Arch Linux ARM project and trust roots.
+OpenGL ES acceleration uses a manager-owned virglrenderer helper and Android
+EGL/GLES, with bounded software fallback. The current final Wayland
+presentation path remains shared-memory based. Android HardwareBuffer/dmabuf
+and Vulkan presentation remain separate gates.
 
-### Shared runtime packs
+### Android capabilities
 
-After package signature and extraction checks, the manager reduces the dependency closure and publishes an immutable pack under the SHA-256 of its bounded manifest. Publication uses a staging directory plus atomic rename. A separate atomic binding selects the active pack for one deterministic Android package identity.
+Linux clients connect only to a random manager-owned session endpoint. The
+descriptor declares allowed capabilities, and the manager associates every
+request with the authenticated launcher session.
 
-Generated wrappers do not contain the Linux closure. On launch they call an exported manager provider with their Android package identity. The provider authenticates the Binder calling UID against the installed package, verifies the active binding and every manifest/file hash, and returns only exact read-only module descriptors with explicit URI grants. Untrusted shell access and package-name impersonation are rejected. The wrapper builds a private descriptor-backed symlink view and invokes the manager-owned patched glibc loader while the Linux process remains under the wrapper UID.
-
-The emulator validates a cold app-drawer KCalc launch from the manager-owned pack, a separately supplied dependency, provider rejection for an untrusted caller, and reduction of the generated KCalc wrapper from 57,205,287 bytes to 628,675 bytes. Successful updates immediately remove superseded unreferenced packs, uninstall removes the released pack, and the manager cache action collects other unbound packs while package operations are idle. External Android uninstalls are reconciled with package-scoped grant revocation, unchanged closures are reused before module copying, and ELF modules fail closed on incompatible 4 KB/16 KB page layouts. Each wrapper holds a stable provider client and authenticated Binder death token while its Linux child runs; leases are GC roots, survive binding removal, and release on normal exit or wrapper death. Terminal uses the same authenticated protocol while hash-verifying a pack into its isolated UID, then explicitly releases it after atomic materialization. Managed wrapper launches create a dedicated process group before exec, request a parent-death kill signal, expose cancellation to Activity teardown with TERM/KILL escalation, and finally kill any remaining descendant under the wrapper's dedicated Android UID. Tests preserve one KCalc PID/PGID across rotation, remove its loader on Back and force-stop, recover after a failed launch, and terminate a synthetic shell plus grandchild on 4 KB and 16 KB emulators and a physical AArch64 Samsung device.
-
-### Android capability broker
-
-The shared Activity creates a random abstract Unix socket for each launch and accepts requests only from Linux peers with the wrapper's Android UID. Generated capability metadata gates dispatch. ABI-specific glibc clients are content-addressed runtime-pack modules rather than wrapper payloads. Each wrapper starts an app-private D-Bus session with XDG OpenURI/Notification, classic notification, and `xdg-open` adapters; Android permission denial remains authoritative.
-
-An audio-enabled wrapper also starts a private Pulse native-protocol server. The unmodified glibc application connects through `PULSE_SERVER`; the Bionic server renders through Android AAudio with an OpenSL ES fallback. Playback does not require a runtime permission. Optional microphone input uses a separate generated capability, a private Pulse pipe source, and a Bionic AAudio helper that requests `RECORD_AUDIO` through the same-UID broker only after a Linux source stream attaches. Bounded Camera2 capture, Android virtual accessibility semantics/actions, and an Android Keystore-backed encrypted secret collection also cross this broker. The private session bus conditionally exposes AT-SPI2 and Secret Service adapters. Real KCalc/Qt and Mousepad/GTK semantics and actions pass on x86_64 and AArch64, as do unmodified Arch and Arch Linux ARM libsecret/KWallet client flows. The private XDG Camera/PipeWire path is validated with unmodified Snapshot on both architectures. See [Android capability broker](android-capabilities.md).
+Capabilities that must be attributed to the visible launcher—such as a picker,
+permission prompt, notification, share sheet, or camera surface—are requested
+through the wrapper Activity and returned over Binder. Capabilities owned by
+Archphene as a whole—such as shared package storage and synchronized project
+state—remain in the manager. The design must not pretend Android can enforce
+per-Linux-package network or filesystem isolation when every Linux process
+intentionally shares the manager UID and Arch root.
 
 ### Storage
 
-Private Linux state remains inside each wrapper's Android sandbox. User-visible files use Android's Storage Access Framework and document-provider APIs. See [Storage](storage.md).
+Linux-owned state lives only in the manager's private shared root. Visible
+files under `/home/archphene` are exposed through the manager DocumentsProvider.
+Selected Android documents and folders cross the boundary through SAF and
+bounded synchronization. Thin launchers do not own a second Linux home.
+
+See [Linux home and Android storage](storage.md).
 
 ## Trust boundaries
 
-1. Repository metadata and packages must be retrieved over trusted HTTPS endpoints.
-2. Package signatures and dependency closures must be verified before extraction.
-3. Generated APK contents must be deterministic and bounded.
-4. Android package names, versions, hashes, and signing identities must be verified.
-5. Android's `PackageInstaller` remains the final installation authority.
-6. Linux capabilities requiring Android permissions must cross explicit broker APIs.
+1. Repository metadata and official packages require pinned endpoints and
+   package-signature verification before mutation.
+2. AUR builds require explicit source/build review and run unprivileged, but
+   their installed results join the shared Linux trust domain.
+3. Generated APK contents are deterministic and bounded; package, signer,
+   capabilities, and descriptor identity are verified before PackageInstaller.
+4. Every launcher Binder call is authenticated from the kernel-supplied UID,
+   installed signer, and manager registry.
+5. Linux paths and file descriptors never become caller-selected Android host
+   paths.
+6. Process groups, Binder death, and Service lifecycle provide deterministic
+   cleanup without claiming that packages are isolated from one another.
 
-See [Security](security.md) and [Package repositories](package-repositories.md).
+See [Security model](security.md).
+
+## Historical prototype
+
+The legacy Java prototype proved on-device wrapper assembly, Android Keystore
+signing, PackageInstaller handoff, caller-authenticated runtime-pack delivery,
+and broad Qt/GTK/Wayland capability bridges. It ran Linux payloads under each
+wrapper UID using immutable manager-owned runtime packs.
+
+That evidence remains valuable, but the per-wrapper runtime-pack execution
+model is not the approved production architecture because it creates separate
+Linux homes and prevents packages from behaving like one normal Arch
+installation. Prototype source and historical results remain under
+`prototypes/` and `research/`; they are reference material, not greenfield
+feature-completion claims.

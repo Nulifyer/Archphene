@@ -4,18 +4,48 @@
 [![Latest release](https://img.shields.io/github/v/release/Nulifyer/Archphene?display_name=tag&sort=semver)](https://github.com/Nulifyer/Archphene/releases/latest)
 [![Android](https://img.shields.io/badge/Android-15%20%7C%2016-3DDC84?logo=android&logoColor=white)](#tested-systems)
 
-Archphene is a research project for running unmodified Arch Linux desktop applications as isolated Android applications, without a VM, root access, chroot, or OS modification.
+Archphene is a research project for running unmodified Arch Linux desktop
+applications from one shared, user-owned Arch environment inside an ordinary
+Android app, without a VM, root access, chroot, or OS modification.
 
-Each wrapped Linux application receives a normal Android package identity, UID, private data directory, lifecycle, and permission boundary. An Android-owned Wayland bridge renders the Linux interface and brokers Android features such as input, clipboard, documents, themes, rotation, and freeform resizing.
+Graphical desktop entries receive thin Android launcher APKs, but Linux
+packages, processes, files, home, and tools remain in the manager-owned shared
+root. An Android-owned Wayland bridge renders the Linux interface and brokers
+Android features such as input, clipboard, documents, themes, rotation, and
+freeform resizing.
 
 > [!WARNING]
-> Archphene is an active prototype, not a production application store. The manager now installs KCalc from a signed Arch transaction entirely on-device, but broad package, toolkit, ABI, and device compatibility is not complete. GrapheneOS-specific behavior has not been validated on a supported Pixel.
+> Archphene is an active prototype, not a production application store. The
+> published v1.0.1 and older Java prototype used separate per-wrapper runtime
+> packs. The greenfield Rust + Kotlin implementation is replacing that model
+> with the approved shared Arch root and is not yet feature-complete.
 
 <p align="center">
   <img src="docs/images/archphene-manager.png" width="360" alt="Archphene app manager showing Archphene, KCalc, and Mousepad as Android applications">
 </p>
 
-## What works today
+## Greenfield implementation
+
+The current `android/app` + `crates/` implementation has exact-ABI emulator and
+physical Samsung coverage for:
+
+- signed official-package search, resolution, shared-root install/remove, and
+  durable recovery;
+- one package-installed shared Bash environment and production terminal
+  surface;
+- Android DocumentsProvider, document import, folder grants, and initial
+  project snapshots;
+- persistent package activity, actionable failures, background work, adaptive
+  manager navigation, and every planned package/launcher state.
+
+Desktop-entry discovery, the cross-process launcher Surface protocol, wrapper
+generation/signing, and Android installer reconciliation remain open.
+
+## Historical bridge evidence
+
+The results below belong to the retained Java/C/Rust prototype. They prove
+bridge feasibility and remain regression references, but its per-wrapper
+runtime-pack architecture is not the production model.
 
 - Runs real, unmodified Arch Linux and Arch Linux ARM ELF application payloads as child processes of ordinary Android apps.
 - Gives each Linux app a distinct Android package, UID, SELinux app domain, storage sandbox, launcher entry, and system install/uninstall flow.
@@ -45,28 +75,24 @@ Each wrapped Linux application receives a normal Android package identity, UID, 
 
 These results prove the bridge on the listed targets only. They do not establish compatibility with every Android device, Linux application, GPU driver, or GrapheneOS release.
 
-## How it works
+## Approved production model
 
 ```text
-signed Arch package and dependency closure
+thin launcher Activity (separate APK/UID)
+                    |
+       authenticated Binder + Surface
                     |
                     v
-        generated Android wrapper APK
-        - Linux executable and runtime
-        - Android Activity and permissions
-        - Wayland and document bridge
+ manager-owned Linux process and Wayland session
                     |
                     v
-          Android PackageInstaller
-                    |
-                    v
-       separate Android UID and sandbox
-                    |
-                    v
- Linux process <-> Wayland bridge <-> Android UI
+ one private shared Arch root and Linux home
 ```
 
-Android remains the installer and sandbox authority. The glibc compatibility patches only replace optional or blocked syscall forms needed during process startup. They do not grant permissions, bypass SELinux, or alter the Android kernel.
+Android remains the installer and outer sandbox authority. The launcher is an
+entry point and Android UI host, not a second Linux container. See the
+[architecture](docs/architecture.md) for the authenticated session and trust
+boundaries.
 
 Official Arch Linux packages are used for x86_64. AArch64 testing uses the separate Arch Linux ARM repositories and signing keys.
 
@@ -85,7 +111,20 @@ The manager can generate and install the tested Qt/KCalc wrapper on x86_64 and A
 
 ## Build from source
 
-### Linux release build
+### Greenfield Rust + Kotlin build
+
+Build the exact ABI without downloading dependencies:
+
+```bash
+./scripts/build-archphene-app.sh --abi x86_64
+./scripts/build-archphene-app.sh --abi arm64-v8a
+```
+
+The command requires the pinned local SDK/NDK, Gradle cache, and existing
+network-disabled native container documented in
+[development](docs/development.md).
+
+### Historical release build
 
 Release CI builds the Arch runtime, patched glibc, wrapper template, isolated Terminal companion, and signed manager APK on Linux. The same-release-signed companion is embedded in the manager and installed through Android confirmation on first use. The local Linux launcher runs those build phases inside Podman:
 
@@ -118,7 +157,10 @@ The repository contains focused emulator and physical-device tests under `script
 
 `--provision` installs the required KCalc and Mousepad fixtures through real manager package transactions on an emulator; omit it when those fixtures already exist. The physical suite expects the curated ARM64 package/runtime workspace and a compatible attached device. Use `--skip-install` for a non-destructive run against already-installed fixtures. Signer migration is a separate explicit backup-and-confirm workflow, never an implicit test step. Individual scripts cover manager workflows, package signatures, KCalc interactions, Mousepad documents, IME behavior, rotation, and update transactions.
 
-## Current limitations
+## Historical prototype limitations and evidence
+
+This section documents the published/legacy implementation unless a bullet
+explicitly names the greenfield manager.
 
 - The complete on-device KCalc/Qt transaction is proven on x86_64 and AArch64 with durable per-package jobs, list/detail progress, cancellation, retry, bounded parallel preparation, serialized signing/installation, isolated failures, and process-death reconciliation. Arbitrary packages still need broader toolkit detection, capability policy, wrapper templates, and compatibility reporting.
 - GitHub Releases discovery, checksum validation, bounded download, signer/package verification, Android confirmation, replacement, and restart reconciliation are implemented. The commit-pinned Linux workflow published independently signed and checksummed x86_64 and arm64-v8a `v1.0.1` APKs after verification. Live `0.9.0 -> 1.0.1` exact-ABI updates pass on the x86_64 emulator and physical AArch64 Samsung, and the published x86_64 `v1.0.0 -> v1.0.1` compatibility migration passes.

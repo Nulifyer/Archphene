@@ -170,13 +170,13 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
 ### Architecture gates
 
 - [x] Define one Archphene-owned private Arch root with conventional `/usr`, `/etc`, `/var`, `/opt`, `/home`, and `/tmp` semantics.
-- [ ] Define how thin launcher APKs bind to the shared runtime service while Linux processes, packages, and files remain in that environment.
+- [x] Define how thin launcher APKs bind to the shared runtime service while Linux processes, packages, and files remain in that environment: a separately exported, versioned Binder authenticates the kernel-supplied caller UID, installed generated-wrapper signer, and bounded descriptor registry; the wrapper supplies an Android Surface, input batches, capability results, and a death token while the manager UID owns the Linux process and shared root.
 - [ ] Preserve Android launcher entries, icons, intents, windows, notifications, and lifecycle without duplicating Linux roots.
 - [ ] Define supervision, background execution, daemons, resource limits, crash recovery, and shutdown.
 - [ ] Define trust for pacman, AUR builds, hooks, arbitrary executables, runtime content, and launcher signing.
   - [x] Pin and seal the official pacman runtime, exact repository endpoints, Arch keyring, and bounded official signer trust used by the current install path.
   - [ ] Define the remaining AUR, hook/scriptlet, arbitrary executable, and launcher-signing policies.
-- [ ] Document that packages inside the shared Arch environment intentionally share one Linux trust domain.
+- [x] Document that packages inside the shared Arch environment intentionally share one Linux trust domain.
 - [x] Wipe the emulator and Samsung prototype installations only when the new base APK is ready; retain source and any explicitly requested evidence.
 
 ## P0 - Android and Linux file integration
@@ -319,7 +319,7 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
 
 ## P2 - Documentation and publication
 
-- [ ] Update architecture and storage documentation to the approved shared-environment model; clearly mark older per-wrapper research as historical.
+- [x] Update README, architecture, security, roadmap, and storage documentation to the approved shared-environment model; clearly mark older per-wrapper runtime-pack results as historical.
 - [ ] Document the Android/Linux filesystem boundary, `/mnt/android`, backup/export, permissions, revocation, and uninstall consequences.
 - [ ] Document normal-Arch compatibility limits imposed by Android's kernel, SELinux, seccomp, background execution, and lack of root/systemd assumptions.
 - [ ] Update README, roadmap, project status, compatibility matrix, security model, changelog, and release notes after behavior is implemented.

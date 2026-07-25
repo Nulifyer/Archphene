@@ -277,6 +277,14 @@ The sections below describe the retained Java/prototype implementation and its
 measurements. They are reference evidence, not the architecture or current
 support claims of the Rust + Kotlin replacement.
 
+## Historical per-wrapper prototype evidence
+
+The sections below record the retired Java prototype's per-wrapper runtime-pack
+storage measurements. They do not describe the approved production model.
+Greenfield Archphene keeps packages, Linux processes, and user state in the one
+shared manager-owned root described above; thin launcher APKs do not
+materialize a second Linux home or persistent package closure.
+
 ### Validated runtime descriptor proof
 
 Linux builds generate a bounded catalog from the exact immutable module bytes for the selected x86_64 or AArch64 release ABI and place it inside the signed manager APK. The parser rejects malformed, duplicate, traversing, unknown, and out-of-bounds entries. A non-exported provider accepts only exact catalog URIs and read mode, verifies canonical file paths, sizes, and digests, and returns read-only descriptors. The manager grants those URIs only on an explicit wrapper launch.
