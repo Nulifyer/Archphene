@@ -168,16 +168,21 @@ The dual-ABI Rust compositor owns a private per-session socket and presents
 committed SHM frames directly through `ANativeWindow`. A bounded Rust registry
 launches only the reauthorized desktop descriptor's installed executable,
 without a shell, in a manager-owned process group with private Wayland and
-standard Qt/GTK/SDL environment. Fixed-size touch, primary-pointer, and
-hardware-key batches cross one Binder transaction and one direct-buffer JNI
-call. On Samsung, full-device and scoped-log gates prove the complete input
-transport, native socket creation/removal, retained session across HOME/resume,
-and deterministic Back cleanup. Process status is polled outside the frame hot
-path; merged stdout/stderr drains into a fixed 16 KiB tail ring, and exited
-leaders trigger remaining group cleanup. Start, stop, and failure state travels
-back through an authenticated one-way Binder callback to a wrapper-owned
-Android overlay, leaving native code as the exclusive owner of compositor
-pixels. A temporary no-download
+standard Qt/GTK/SDL environment. Fixed-size touch, five-button pointer,
+bounded horizontal/vertical axis, and hardware-key batches cross one Binder
+transaction and one direct-buffer JNI call. Key records include repeat and
+Android modifier state. Both Kotlin and Rust enforce the record semantics;
+native focus loss releases held keys and buttons and cancels active touches.
+On Samsung, full-device and scoped-log gates prove the complete input
+transport, native socket creation/removal, retained session across HOME/resume
+and rotation, and deterministic Back cleanup without a malformed-input
+rejection or crash. The native suite contains 45 compositor tests, including
+button/modifier mappings and inactive-host cleanup. Process status is polled
+outside the frame hot path; merged stdout/stderr drains into a fixed 16 KiB
+tail ring, and exited leaders trigger remaining group cleanup. Start, stop,
+and failure state travels back through an authenticated one-way Binder
+callback to a wrapper-owned Android overlay, leaving native code as the
+exclusive owner of compositor pixels. A temporary no-download
 Samsung gate pointed the existing Kate fixture at the already staged glibc
 loader: the real manager process path captured `loader cannot load itself`,
 reported exit 127 on the full device, removed the socket, and restored
@@ -195,11 +200,12 @@ manager process death while the wrapper is visible also produces a fresh
 manager PID, reauthenticates a new session, reattaches the same wrapper Surface,
 and returns to the bounded status without user intervention or a fatal log.
 
-This does not yet prove a real Linux application frame. The current Samsung
-root contains only deliberately non-runnable Foot/Kate discovery fixtures and
-no cached GUI package archive, while the x86_64 emulator is offline. A real
-signed GUI package transaction, exact transformed input/live-resize tests, IME,
-and the repeated two-target gate remain open.
+This does not yet prove a real Linux application frame or input delivery to a
+Linux client. The current Samsung root contains only deliberately non-runnable
+Foot/Kate discovery fixtures and no cached GUI package archive, while the
+x86_64 emulator is offline. A real signed GUI package transaction, exact
+transformed input/live-resize tests, IME, and the repeated two-target gate
+remain open.
 
 The recent-activity action is now terminal-state aware. Complete has no dead
 disabled Cancel button; active pre-commit work exposes Cancel; and durable

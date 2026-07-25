@@ -38,6 +38,12 @@ internal class NativeLauncherCompositor(
         }
     }
 
+    fun setHostActive(active: Boolean) {
+        if (handle != 0L) {
+            nativeSetHostActive(handle, active)
+        }
+    }
+
     /**
      * Dispatches pending Wayland traffic and presents only when a new surface
      * commit is available. The return flags are stable for diagnostics.
@@ -81,6 +87,11 @@ internal class NativeLauncherCompositor(
     ): Int
 
     private external fun nativeDetachSurface(handle: Long)
+
+    private external fun nativeSetHostActive(
+        handle: Long,
+        active: Boolean,
+    )
 
     private external fun nativeDispatchAndPresent(
         handle: Long,

@@ -132,10 +132,16 @@ full-device light/dark presentation, and wrapper-death cleanup on the physical
 AArch64 target. Behind that Surface, the manager now owns a private Rust
 Wayland compositor, direct `ANativeWindow` SHM presentation, a bounded
 generation-checked GUI process registry, process groups, and fixed touch,
-primary-pointer, and hardware-key batches. HOME detaches presentation while
+five-button pointer, bounded horizontal/vertical axis, and hardware-key
+batches. Key records carry press, release, repeat, and Android modifier state.
+The fixed six-integer records are checked independently at the Binder and
+native boundaries; touch identifiers and coordinates, buttons, axis distance,
+key codes, and active touches all have explicit limits. Window focus loss,
+HOME, detach, and close cancel touches, release held pointer buttons and keys,
+clear modifiers, and remove keyboard focus. HOME detaches presentation while
 retaining the session; resume reattaches it; Back and Binder death reap and
-remove the private endpoint. Process exit polling is kept outside the frame
-hot path, drains stdout/stderr into a fixed 16 KiB tail ring, and addresses
+remove the private endpoint. Process exit polling is kept outside the frame hot
+path, drains stdout/stderr into a fixed 16 KiB tail ring, and addresses
 remaining descendants before showing a bounded status.
 Status does not compete with native rendering for the same `Surface`: the
 manager sends authenticated one-way state callbacks and the wrapper renders an
@@ -144,8 +150,10 @@ Portrait/landscape replacement and HOME/resume reattachment have been proven
 on the physical Samsung without a retained stretched buffer.
 
 The connected-device gate currently uses deliberately non-runnable discovery
-fixtures, so a real package-installed Wayland client, transformed input,
-live rotation/resize, IME, and repeated emulator coverage remain required before
+fixtures. It proves wrapper input validation and focus/lifecycle stability
+through HOME/resume and rotation, but cannot prove delivery to a Linux client.
+A real package-installed Wayland client, transformed input, live
+rotation/resize, IME, and repeated emulator coverage remain required before
 this session is a production Linux application host.
 
 ### Wayland and graphics bridge

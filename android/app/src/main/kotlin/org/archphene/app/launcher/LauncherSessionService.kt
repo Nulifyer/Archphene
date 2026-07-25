@@ -157,6 +157,7 @@ class LauncherSessionService : Service() {
                 }
                 session.pumpStarted = false
             } else {
+                session.compositor?.setHostActive(false)
                 session.compositor?.detach()
             }
             surface?.release()
@@ -507,8 +508,23 @@ class LauncherSessionService : Service() {
                 return RESULT_BUSY
             }
             var destination = session.inputCount * INPUT_FIELDS
-            repeat(count * INPUT_FIELDS) {
-                session.inputRecords[destination++] = data.readInt()
+            repeat(count) {
+                val start = destination
+                repeat(INPUT_FIELDS) {
+                    session.inputRecords[destination++] = data.readInt()
+                }
+                if (
+                    !validInputRecord(
+                        session.inputRecords[start],
+                        session.inputRecords[start + 1],
+                        session.inputRecords[start + 2],
+                        session.inputRecords[start + 3],
+                        session.inputRecords[start + 4],
+                        session.inputRecords[start + 5],
+                    )
+                ) {
+                    return RESULT_INVALID
+                }
             }
             session.inputCount += count
             if (!session.inputPosted) {
@@ -518,6 +534,56 @@ class LauncherSessionService : Service() {
         }
         return RESULT_OK
     }
+
+    private fun validInputRecord(
+        kind: Int,
+        a: Int,
+        b: Int,
+        c: Int,
+        d: Int,
+        e: Int,
+    ): Boolean =
+        when (kind) {
+            INPUT_TOUCH_DOWN,
+            INPUT_TOUCH_MOTION,
+            -> {
+                a in 0 until MAX_TOUCHES &&
+                    b in MIN_INPUT_COORDINATE..MAX_INPUT_COORDINATE &&
+                    c in MIN_INPUT_COORDINATE..MAX_INPUT_COORDINATE &&
+                    e == 0
+            }
+            INPUT_TOUCH_UP -> a in 0 until MAX_TOUCHES && c == 0 && d == 0 && e == 0
+            INPUT_TOUCH_CANCEL -> a == 0 && b == 0 && c == 0 && d == 0 && e == 0
+            INPUT_KEY -> {
+                a in 1..MAX_ANDROID_KEY_CODE &&
+                    b in KEY_RELEASED..KEY_REPEATED &&
+                    d >= 0 &&
+                    e == 0
+            }
+            INPUT_POINTER_MOTION -> {
+                a in MIN_INPUT_COORDINATE..MAX_INPUT_COORDINATE &&
+                    b in MIN_INPUT_COORDINATE..MAX_INPUT_COORDINATE &&
+                    d == 0 &&
+                    e == 0
+            }
+            INPUT_POINTER_BUTTON_LEGACY -> a in 0..1 && c == 0 && d == 0 && e == 0
+            INPUT_POINTER_BUTTON -> {
+                a in 1..MAX_POINTER_BUTTON &&
+                    a and (a - 1) == 0 &&
+                    b in 0..1 &&
+                    d == 0 &&
+                    e == 0
+            }
+            INPUT_POINTER_AXIS -> {
+                (a != 0 || b != 0) &&
+                    a in -MAX_AXIS_FIXED..MAX_AXIS_FIXED &&
+                    b in -MAX_AXIS_FIXED..MAX_AXIS_FIXED &&
+                    d == 0 &&
+                    e == 0
+            }
+            INPUT_HOST_ACTIVE -> a in 0..1 && c == 0 && d == 0 && e == 0
+            else -> false
+        }
 
     private fun drainInput(session: Session) {
         val count =
@@ -573,6 +639,7 @@ class LauncherSessionService : Service() {
             check(compositor.attach(surface, width, height)) {
                 "ANativeWindow attachment failed"
             }
+            compositor.setHostActive(true)
             if (!session.pumpStarted) {
                 session.pumpStarted = true
                 surfaceHandler.post(CompositorPump(session))
@@ -813,6 +880,24 @@ class LauncherSessionService : Service() {
         private const val STATUS_STOPPED = 3
         private const val MAX_INPUT_RECORDS = 32
         private const val INPUT_FIELDS = 6
+        private const val MAX_TOUCHES = 32
+        private const val MIN_INPUT_COORDINATE = -8192
+        private const val MAX_INPUT_COORDINATE = 16384
+        private const val MAX_ANDROID_KEY_CODE = 512
+        private const val MAX_AXIS_FIXED = 120_000
+        private const val INPUT_TOUCH_DOWN = 1
+        private const val INPUT_TOUCH_MOTION = 2
+        private const val INPUT_TOUCH_UP = 3
+        private const val INPUT_TOUCH_CANCEL = 4
+        private const val INPUT_KEY = 5
+        private const val INPUT_POINTER_MOTION = 6
+        private const val INPUT_POINTER_BUTTON_LEGACY = 7
+        private const val INPUT_POINTER_BUTTON = 8
+        private const val INPUT_POINTER_AXIS = 9
+        private const val INPUT_HOST_ACTIVE = 10
+        private const val KEY_RELEASED = 0
+        private const val KEY_REPEATED = 2
+        private const val MAX_POINTER_BUTTON = 16
         private const val RESULT_OK = 0
         private const val RESULT_NOT_READY = 1
         private const val RESULT_UNAUTHORIZED = 2

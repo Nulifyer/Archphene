@@ -43,6 +43,7 @@ class LauncherActivity :
     private var attachedSurface: Surface? = null
     private var attachedWidth = 0
     private var attachedHeight = 0
+    private var pointerButtonState = 0
     private val clientToken =
         object : Binder() {
             override fun onTransact(
@@ -93,6 +94,7 @@ class LauncherActivity :
                 attachedSurface = null
                 attachedWidth = 0
                 attachedHeight = 0
+                pointerButtonState = 0
                 status.setText(R.string.launcher_disconnected)
                 status.visibility = View.VISIBLE
             }
@@ -224,6 +226,7 @@ class LauncherActivity :
         attachedSurface = null
         attachedWidth = 0
         attachedHeight = 0
+        pointerButtonState = 0
         if (binding) {
             runCatching { unbindService(connection) }
             binding = false
@@ -234,6 +237,7 @@ class LauncherActivity :
 
     override fun onStop() {
         handler.removeCallbacksAndMessages(null)
+        submitHostActive(false)
         detachSurface()
         super.onStop()
     }
@@ -257,6 +261,14 @@ class LauncherActivity :
         attachSurface()
     }
 
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            surfaceView.requestFocus()
+        }
+        submitHostActive(hasFocus)
+    }
+
     override fun surfaceCreated(holder: SurfaceHolder) {
         attachSurface()
     }
@@ -276,7 +288,7 @@ class LauncherActivity :
 
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
         if (event.isFromSource(InputDevice.SOURCE_MOUSE)) {
-            return submitPrimaryPointer(event) || super.dispatchTouchEvent(event)
+            return submitPointer(event) || super.dispatchTouchEvent(event)
         }
         val count =
             when (event.actionMasked) {
@@ -347,39 +359,35 @@ class LauncherActivity :
         if (!event.isFromSource(InputDevice.SOURCE_MOUSE)) {
             return super.dispatchGenericMotionEvent(event)
         }
-        return submitPrimaryPointer(event) || super.dispatchGenericMotionEvent(event)
+        return submitPointer(event) || super.dispatchGenericMotionEvent(event)
     }
 
-    private fun submitPrimaryPointer(event: MotionEvent): Boolean {
+    private fun submitPointer(event: MotionEvent): Boolean {
         val supportedAction =
             event.actionMasked == MotionEvent.ACTION_HOVER_MOVE ||
                 event.actionMasked == MotionEvent.ACTION_MOVE ||
                 event.actionMasked == MotionEvent.ACTION_DOWN ||
                 event.actionMasked == MotionEvent.ACTION_UP ||
+                event.actionMasked == MotionEvent.ACTION_SCROLL ||
                 event.actionMasked == MotionEvent.ACTION_BUTTON_PRESS ||
                 event.actionMasked == MotionEvent.ACTION_BUTTON_RELEASE
-        val button =
-            when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN,
-                MotionEvent.ACTION_BUTTON_PRESS,
-                -> true
-                MotionEvent.ACTION_UP,
-                MotionEvent.ACTION_BUTTON_RELEASE,
-                -> false
-                else -> null
-            }
-        val primaryButton =
-            event.actionButton == MotionEvent.BUTTON_PRIMARY ||
-                event.buttonState and MotionEvent.BUTTON_PRIMARY != 0 ||
-                (event.actionMasked == MotionEvent.ACTION_UP && event.actionButton == 0)
-        if (
-            sessionId <= 0 ||
-            !supportedAction ||
-            (button != null && !primaryButton)
-        ) {
+        if (sessionId <= 0 || !supportedAction) {
             return false
         }
-        val count = if (button == null) 1 else 2
+        val nextButtons = pointerButtonsAfter(event)
+        val changedButtons = pointerButtonState xor nextButtons
+        val horizontal = axisToFixed(event.getAxisValue(MotionEvent.AXIS_HSCROLL))
+        val vertical = axisToFixed(event.getAxisValue(MotionEvent.AXIS_VSCROLL))
+        val hasAxis =
+            event.actionMasked == MotionEvent.ACTION_SCROLL &&
+                (horizontal != 0 || vertical != 0)
+        val count =
+            1 +
+                Integer.bitCount(changedButtons) +
+                if (hasAxis) 1 else 0
+        if (count > MAX_INPUT_RECORDS) {
+            return false
+        }
         val data = beginInputParcel(count)
         val reply = Parcel.obtain()
         try {
@@ -390,19 +398,55 @@ class LauncherActivity :
                 event.y.roundToInt(),
                 event.eventTime.toInt(),
             )
-            if (count == 2) {
+            for (button in POINTER_BUTTONS) {
+                if (changedButtons and button != 0) {
+                    writeInputRecord(
+                        data,
+                        INPUT_POINTER_BUTTON_V2,
+                        button,
+                        if (nextButtons and button != 0) 1 else 0,
+                        event.eventTime.toInt(),
+                    )
+                }
+            }
+            if (hasAxis) {
                 writeInputRecord(
                     data,
-                    INPUT_POINTER_BUTTON,
-                    if (button == true) 1 else 0,
+                    INPUT_POINTER_AXIS,
+                    horizontal,
+                    vertical,
                     event.eventTime.toInt(),
                 )
             }
-            return sendInputParcel(data, reply)
+            val submitted = sendInputParcel(data, reply)
+            if (submitted) {
+                pointerButtonState = nextButtons
+            }
+            return submitted
         } finally {
             reply.recycle()
             data.recycle()
         }
+    }
+
+    private fun pointerButtonsAfter(event: MotionEvent): Int {
+        val reported = event.buttonState and POINTER_BUTTON_MASK
+        val actionButton = event.actionButton and POINTER_BUTTON_MASK
+        return when (event.actionMasked) {
+            MotionEvent.ACTION_BUTTON_PRESS -> reported or actionButton
+            MotionEvent.ACTION_BUTTON_RELEASE -> reported and actionButton.inv()
+            MotionEvent.ACTION_DOWN ->
+                if (reported != 0) reported else pointerButtonState or MotionEvent.BUTTON_PRIMARY
+            MotionEvent.ACTION_UP -> 0
+            else -> reported
+        } and POINTER_BUTTON_MASK
+    }
+
+    private fun axisToFixed(value: Float): Int {
+        if (!value.isFinite()) {
+            return 0
+        }
+        return (value.coerceIn(-MAX_AXIS_STEPS, MAX_AXIS_STEPS) * AXIS_FIXED_SCALE).roundToInt()
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
@@ -416,12 +460,21 @@ class LauncherActivity :
         val data = beginInputParcel(1)
         val reply = Parcel.obtain()
         try {
+            val keyAction =
+                if (event.action == KeyEvent.ACTION_UP) {
+                    KEY_RELEASED
+                } else if (event.repeatCount > 0) {
+                    KEY_REPEATED
+                } else {
+                    KEY_PRESSED
+                }
             writeInputRecord(
                 data,
                 INPUT_KEY,
                 event.keyCode,
-                if (event.action == KeyEvent.ACTION_DOWN) 1 else 0,
+                keyAction,
                 event.eventTime.toInt(),
+                event.metaState,
             )
             return sendInputParcel(data, reply)
         } finally {
@@ -557,6 +610,7 @@ class LauncherActivity :
                     attachedWidth = width
                     attachedHeight = height
                     Log.i(TAG, "Attached Surface session=$activeSession size=${width}x$height")
+                    submitHostActive(hasWindowFocus())
                 }
             }
         } catch (error: RemoteException) {
@@ -574,6 +628,7 @@ class LauncherActivity :
         attachedSurface = null
         attachedWidth = 0
         attachedHeight = 0
+        pointerButtonState = 0
         if (service == null || activeSession <= 0 || !wasAttached) {
             return
         }
@@ -594,6 +649,29 @@ class LauncherActivity :
             data.recycle()
         }
         status.visibility = View.VISIBLE
+    }
+
+    private fun submitHostActive(active: Boolean) {
+        if (sessionId <= 0) {
+            return
+        }
+        val data = beginInputParcel(1)
+        val reply = Parcel.obtain()
+        try {
+            writeInputRecord(
+                data,
+                INPUT_HOST_ACTIVE,
+                if (active) 1 else 0,
+                android.os.SystemClock.uptimeMillis().toInt(),
+            )
+            sendInputParcel(data, reply)
+        } finally {
+            reply.recycle()
+            data.recycle()
+        }
+        if (!active) {
+            pointerButtonState = 0
+        }
     }
 
     private fun retryOpen() {
@@ -686,7 +764,28 @@ class LauncherActivity :
         private const val INPUT_TOUCH_CANCEL = 4
         private const val INPUT_KEY = 5
         private const val INPUT_POINTER_MOTION = 6
-        private const val INPUT_POINTER_BUTTON = 7
+        private const val INPUT_POINTER_BUTTON_V2 = 8
+        private const val INPUT_POINTER_AXIS = 9
+        private const val INPUT_HOST_ACTIVE = 10
+        private const val KEY_RELEASED = 0
+        private const val KEY_PRESSED = 1
+        private const val KEY_REPEATED = 2
+        private const val AXIS_FIXED_SCALE = 1000f
+        private const val MAX_AXIS_STEPS = 120f
+        private const val POINTER_BUTTON_MASK =
+            MotionEvent.BUTTON_PRIMARY or
+                MotionEvent.BUTTON_SECONDARY or
+                MotionEvent.BUTTON_TERTIARY or
+                MotionEvent.BUTTON_BACK or
+                MotionEvent.BUTTON_FORWARD
+        private val POINTER_BUTTONS =
+            intArrayOf(
+                MotionEvent.BUTTON_PRIMARY,
+                MotionEvent.BUTTON_SECONDARY,
+                MotionEvent.BUTTON_TERTIARY,
+                MotionEvent.BUTTON_BACK,
+                MotionEvent.BUTTON_FORWARD,
+            )
         private const val STATUS_STARTING = 1
         private const val STATUS_RUNNING = 2
         private const val STATUS_STOPPED = 3

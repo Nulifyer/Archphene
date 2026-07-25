@@ -13,6 +13,8 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(target_os = "android")]
 use jni::objects::{JByteBuffer, JObject};
+#[cfg(target_os = "android")]
+use jni::sys::jboolean;
 use jni::{JNIEnv, objects::JByteArray, sys::jbyteArray};
 use wayland_protocols::wp::fractional_scale::v1::server::wp_fractional_scale_manager_v1::{
     self, WpFractionalScaleManagerV1,
@@ -67,6 +69,13 @@ use wayland_server::{
 };
 
 const MAX_TOPLEVELS: usize = 32;
+const MAX_ACTIVE_TOUCHES: usize = 32;
+
+fn pointer_button_bit(button: u32) -> Option<u8> {
+    (272..=276)
+        .contains(&button)
+        .then(|| 1_u8 << (button - 272))
+}
 
 /// Owns protocol dispatch independently from Android Activity and rendering state.
 pub struct CompositorCore {
@@ -145,8 +154,9 @@ pub struct CompositorState {
     pinch_gestures: Vec<ZwpPointerGesturePinchV1>,
     hold_gestures: Vec<ZwpPointerGestureHoldV1>,
     gesture_event_count: u32,
+    host_active: bool,
     pointer_inside: bool,
-    pointer_pressed: bool,
+    pointer_buttons: u8,
     pointer_x: f64,
     pointer_y: f64,
     keyboard_count: u32,
@@ -155,6 +165,7 @@ pub struct CompositorState {
     keyboard_focus_surface: Option<WlSurface>,
     selection_focus_dirty: bool,
     pressed_keys: Vec<u32>,
+    reported_modifiers: u32,
     data_device_manager_binds: u32,
     data_source_count: u32,
     data_device_count: u32,
@@ -1189,6 +1200,92 @@ fn android_key_to_evdev(key: i32) -> Option<u32> {
         142 => 88,
         _ => return None,
     })
+}
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn android_button_to_evdev(button: i32) -> Option<u32> {
+    Some(match button {
+        1 => 272,
+        2 => 273,
+        4 => 274,
+        8 => 275,
+        16 => 276,
+        _ => return None,
+    })
+}
+
+fn android_meta_to_wayland(meta: i32) -> u32 {
+    const ANDROID_SHIFT: i32 = 0x0000_00c1;
+    const ANDROID_ALT: i32 = 0x0000_0032;
+    const ANDROID_CONTROL: i32 = 0x0000_7000;
+    u32::from(meta & ANDROID_SHIFT != 0)
+        | (u32::from(meta & ANDROID_CONTROL != 0) << 2)
+        | (u32::from(meta & ANDROID_ALT != 0) << 3)
+}
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn dispatch_launcher_input_record(core: &mut CompositorCore, record: [i32; 6]) -> Result<u32, ()> {
+    const MIN_COORDINATE: i32 = -8192;
+    const MAX_COORDINATE: i32 = 16384;
+    const MAX_AXIS_FIXED: i32 = 120_000;
+    let [kind, a, b, c, d, e] = record;
+    let coordinate = |value: i32| (MIN_COORDINATE..=MAX_COORDINATE).contains(&value);
+    match kind {
+        1 if (0..MAX_ACTIVE_TOUCHES as i32).contains(&a)
+            && coordinate(b)
+            && coordinate(c)
+            && e == 0 =>
+        {
+            Ok(core.touch_down(a, f64::from(b), f64::from(c), d as u32))
+        }
+        2 if (0..MAX_ACTIVE_TOUCHES as i32).contains(&a)
+            && coordinate(b)
+            && coordinate(c)
+            && e == 0 =>
+        {
+            Ok(core.touch_motion(a, f64::from(b), f64::from(c), d as u32))
+        }
+        3 if (0..MAX_ACTIVE_TOUCHES as i32).contains(&a) && c == 0 && d == 0 && e == 0 => {
+            Ok(core.touch_up(a, b as u32))
+        }
+        4 if a == 0 && b == 0 && c == 0 && d == 0 && e == 0 => Ok(core.touch_cancel()),
+        5 if (1..=512).contains(&a) && (0..=2).contains(&b) && d >= 0 && e == 0 => {
+            let Some(key) = android_key_to_evdev(a) else {
+                return Ok(0);
+            };
+            let modifiers = android_meta_to_wayland(d);
+            Ok(match b {
+                0 => core.keyboard_key_with_modifiers(key, false, c as u32, modifiers),
+                1 => core.keyboard_key_with_modifiers(key, true, c as u32, modifiers),
+                2 => core.keyboard_repeat_with_modifiers(key, c as u32, modifiers),
+                _ => unreachable!("bounded key action"),
+            })
+        }
+        6 if coordinate(a) && coordinate(b) && d == 0 && e == 0 => {
+            Ok(core.pointer_motion(f64::from(a), f64::from(b), c as u32))
+        }
+        7 if (0..=1).contains(&a) && c == 0 && d == 0 && e == 0 => {
+            Ok(core.pointer_button(a != 0, b as u32))
+        }
+        8 if (0..=1).contains(&b) && d == 0 && e == 0 => {
+            let Some(button) = android_button_to_evdev(a) else {
+                return Err(());
+            };
+            Ok(core.pointer_button_code(button, b != 0, c as u32))
+        }
+        9 if (a != 0 || b != 0)
+            && (-MAX_AXIS_FIXED..=MAX_AXIS_FIXED).contains(&a)
+            && (-MAX_AXIS_FIXED..=MAX_AXIS_FIXED).contains(&b)
+            && d == 0
+            && e == 0 =>
+        {
+            Ok(core.pointer_axis(f64::from(a) / 1000.0, f64::from(b) / 1000.0, c as u32))
+        }
+        10 if (0..=1).contains(&a) && c == 0 && d == 0 && e == 0 => {
+            Ok(core.set_host_active(a != 0))
+        }
+        _ => Err(()),
+    }
 }
 
 #[cfg(target_os = "android")]
@@ -2305,7 +2402,7 @@ impl Dispatch<XdgToplevel, XdgToplevelData> for CompositorState {
                 state.root_frame = Some(frame);
                 state.pointer_focus_surface = Some(surface.clone());
                 state.pointer_inside = false;
-                state.pointer_pressed = false;
+                state.pointer_buttons = 0;
                 set_keyboard_focus(state, Some(surface));
             } else {
                 state.active_toplevel = None;
@@ -2378,7 +2475,10 @@ fn remember_selection_serial(state: &mut CompositorState, serial: u32, surface: 
     }
 }
 
-fn set_keyboard_focus(state: &mut CompositorState, surface: Option<WlSurface>) {
+fn set_keyboard_focus(state: &mut CompositorState, mut surface: Option<WlSurface>) {
+    if !state.host_active {
+        surface = None;
+    }
     if state.keyboard_focus_surface.as_ref().map(Resource::id) == surface.as_ref().map(Resource::id)
     {
         return;
@@ -2411,6 +2511,8 @@ fn set_keyboard_focus(state: &mut CompositorState, surface: Option<WlSurface>) {
             state.ime_active = false;
             state.ime_hide_requests = state.ime_hide_requests.saturating_add(1);
         }
+        state.pressed_keys.clear();
+        state.reported_modifiers = 0;
     }
 
     if let Some(surface) = surface {
@@ -2438,6 +2540,7 @@ fn set_keyboard_focus(state: &mut CompositorState, surface: Option<WlSurface>) {
         state.keyboard_focus_surface = Some(surface);
     } else {
         state.pressed_keys.clear();
+        state.reported_modifiers = 0;
     }
 }
 const TEXT_MIME_TYPES: [&str; 2] = ["text/plain;charset=utf-8", "text/plain"];
@@ -5033,7 +5136,7 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                         state.root_frame = Some(frame);
                         state.pointer_focus_surface = Some(surface.clone());
                         state.pointer_inside = false;
-                        state.pointer_pressed = false;
+                        state.pointer_buttons = 0;
                         set_keyboard_focus(state, Some(surface));
                     } else {
                         state.active_toplevel = None;
@@ -5041,7 +5144,7 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                         state.root_frame = None;
                         state.pointer_focus_surface = None;
                         state.pointer_inside = false;
-                        state.pointer_pressed = false;
+                        state.pointer_buttons = 0;
                         set_keyboard_focus(state, None);
                     }
                     state.window_change_serial = state.window_change_serial.wrapping_add(1).max(1);
@@ -5073,7 +5176,7 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                             .is_none_or(|focused| focused.id() != resource.id())
                         {
                             state.pointer_inside = false;
-                            state.pointer_pressed = false;
+                            state.pointer_buttons = 0;
                         }
                         state.pointer_focus_surface = Some(resource.clone());
                         set_keyboard_focus(state, Some(resource.clone()));
@@ -5085,7 +5188,7 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                     {
                         state.pointer_focus_surface = None;
                         state.pointer_inside = false;
-                        state.pointer_pressed = false;
+                        state.pointer_buttons = 0;
                         set_keyboard_focus(state, None);
                     }
                 }
@@ -5121,7 +5224,7 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
         {
             state.pointer_focus_surface = None;
             state.pointer_inside = false;
-            state.pointer_pressed = false;
+            state.pointer_buttons = 0;
         }
         if state
             .keyboard_focus_surface
@@ -6572,6 +6675,7 @@ impl CompositorCore {
             output_height: 160,
             output_scale: 1,
             output_fractional_scale: 120,
+            host_active: true,
             ..CompositorState::default()
         };
         Ok(Self {
@@ -6792,7 +6896,7 @@ impl CompositorCore {
                 }
             }
             self.state.pointer_focus_surface = Some(root.clone());
-            self.state.pointer_pressed = false;
+            self.state.pointer_buttons = 0;
             set_keyboard_focus(&mut self.state, Some(root));
         }
         dismissed
@@ -6983,7 +7087,7 @@ impl CompositorCore {
         self.state.root_frame = Some(frame);
         self.state.pointer_focus_surface = Some(surface.clone());
         self.state.pointer_inside = false;
-        self.state.pointer_pressed = false;
+        self.state.pointer_buttons = 0;
         set_keyboard_focus(&mut self.state, Some(surface));
         if changed {
             self.state.window_change_serial =
@@ -7012,18 +7116,21 @@ impl CompositorCore {
         1
     }
     pub fn set_host_active(&mut self, active: bool) -> u32 {
+        if self.state.host_active == active {
+            return 0;
+        }
         if !active {
             let mut changed = self.touch_cancel();
-            if self.state.pointer_pressed {
-                changed = changed.saturating_add(self.pointer_button(false, 0));
-            }
+            changed = changed.saturating_add(self.release_pointer_buttons(0));
             changed = changed.saturating_add(self.pointer_leave());
+            self.state.host_active = false;
             if self.state.keyboard_focus_surface.is_some() {
                 set_keyboard_focus(&mut self.state, None);
                 changed = changed.saturating_add(1);
             }
             return changed;
         }
+        self.state.host_active = true;
         let surface = self
             .state
             .active_toplevel
@@ -7647,12 +7754,39 @@ impl CompositorCore {
         mask
     }
     pub fn keyboard_key(&mut self, key: u32, pressed: bool, time: u32) -> u32 {
-        if self.state.pressed_keys.contains(&key) == pressed {
+        self.keyboard_key_with_modifiers(key, pressed, time, self.state.reported_modifiers)
+    }
+
+    pub fn keyboard_key_with_modifiers(
+        &mut self,
+        key: u32,
+        pressed: bool,
+        time: u32,
+        reported_modifiers: u32,
+    ) -> u32 {
+        if !self.state.host_active {
             return 0;
         }
         let keyboards = self.focused_keyboard_resources();
         if keyboards.is_empty() {
             return 0;
+        }
+        let duplicate = self.state.pressed_keys.contains(&key) == pressed;
+        let previous_modifiers =
+            Self::keyboard_modifier_mask(&self.state.pressed_keys) | self.state.reported_modifiers;
+        self.state.reported_modifiers = reported_modifiers & 0x0d;
+        if duplicate {
+            let modifiers = Self::keyboard_modifier_mask(&self.state.pressed_keys)
+                | self.state.reported_modifiers;
+            if modifiers == previous_modifiers {
+                return 0;
+            }
+            let serial = self.next_input_serial();
+            for keyboard in keyboards {
+                keyboard.modifiers(serial, modifiers, 0, 0, 0);
+            }
+            self.state.keyboard_event_count = self.state.keyboard_event_count.saturating_add(1);
+            return 1;
         }
         let serial = self.next_input_serial();
         if let Some(surface) = self.state.keyboard_focus_surface.clone() {
@@ -7675,7 +7809,6 @@ impl CompositorCore {
         } else {
             wl_keyboard::KeyState::Released
         };
-        let previous_modifiers = Self::keyboard_modifier_mask(&self.state.pressed_keys);
         for keyboard in &keyboards {
             keyboard.key(serial, time, key, key_state.into());
         }
@@ -7686,7 +7819,46 @@ impl CompositorCore {
                 .pressed_keys
                 .retain(|pressed_key| *pressed_key != key);
         }
-        let modifiers = Self::keyboard_modifier_mask(&self.state.pressed_keys);
+        let modifiers =
+            Self::keyboard_modifier_mask(&self.state.pressed_keys) | self.state.reported_modifiers;
+        if modifiers != previous_modifiers {
+            for keyboard in &keyboards {
+                keyboard.modifiers(serial, modifiers, 0, 0, 0);
+            }
+        }
+        self.state.keyboard_event_count = self
+            .state
+            .keyboard_event_count
+            .saturating_add(1 + u32::from(modifiers != previous_modifiers));
+        1
+    }
+
+    pub fn keyboard_repeat(&mut self, key: u32, time: u32) -> u32 {
+        self.keyboard_repeat_with_modifiers(key, time, self.state.reported_modifiers)
+    }
+
+    pub fn keyboard_repeat_with_modifiers(
+        &mut self,
+        key: u32,
+        time: u32,
+        reported_modifiers: u32,
+    ) -> u32 {
+        if !self.state.host_active || !self.state.pressed_keys.contains(&key) {
+            return 0;
+        }
+        let keyboards = self.focused_keyboard_resources();
+        if keyboards.is_empty() {
+            return 0;
+        }
+        let previous_modifiers =
+            Self::keyboard_modifier_mask(&self.state.pressed_keys) | self.state.reported_modifiers;
+        self.state.reported_modifiers = reported_modifiers & 0x0d;
+        let modifiers =
+            Self::keyboard_modifier_mask(&self.state.pressed_keys) | self.state.reported_modifiers;
+        let serial = self.next_input_serial();
+        for keyboard in &keyboards {
+            keyboard.key(serial, time, key, wl_keyboard::KeyState::Pressed.into());
+        }
         if modifiers != previous_modifiers {
             for keyboard in &keyboards {
                 keyboard.modifiers(serial, modifiers, 0, 0, 0);
@@ -7804,7 +7976,10 @@ impl CompositorCore {
     }
 
     pub fn pointer_motion(&mut self, x: f64, y: f64, time: u32) -> u32 {
-        let target = if self.state.pointer_pressed {
+        if !self.state.host_active {
+            return 0;
+        }
+        let target = if self.state.pointer_buttons != 0 {
             self.state.pointer_focus_surface.clone().map(|surface| {
                 let (local_x, local_y) = self.pointer_local_coordinates(&surface, x, y);
                 (surface, local_x, local_y)
@@ -7832,7 +8007,7 @@ impl CompositorCore {
             })
         };
         let Some((surface, local_x, local_y)) = target else {
-            if self.state.pointer_pressed || !self.state.pointer_inside {
+            if self.state.pointer_buttons != 0 || !self.state.pointer_inside {
                 return 0;
             }
             let Some(previous) = self.state.pointer_focus_surface.clone() else {
@@ -7939,7 +8114,10 @@ impl CompositorCore {
     }
 
     pub fn touch_down(&mut self, id: i32, x: f64, y: f64, time: u32) -> u32 {
-        if self.state.active_touches.iter().any(|touch| touch.id == id) {
+        if !self.state.host_active
+            || self.state.active_touches.len() >= MAX_ACTIVE_TOUCHES
+            || self.state.active_touches.iter().any(|touch| touch.id == id)
+        {
             return 0;
         }
         let Some((surface, local_x, local_y)) = self.touch_target(x, y) else {
@@ -7975,6 +8153,9 @@ impl CompositorCore {
     }
 
     pub fn touch_motion(&mut self, id: i32, x: f64, y: f64, time: u32) -> u32 {
+        if !self.state.host_active {
+            return 0;
+        }
         let Some(surface) = self
             .state
             .active_touches
@@ -8289,7 +8470,15 @@ impl CompositorCore {
         self.state.touch_event_count
     }
     pub fn pointer_button(&mut self, pressed: bool, time: u32) -> u32 {
-        if !self.state.pointer_inside || self.state.pointer_pressed == pressed {
+        self.pointer_button_code(272, pressed, time)
+    }
+
+    pub fn pointer_button_code(&mut self, button: u32, pressed: bool, time: u32) -> u32 {
+        let Some(bit) = pointer_button_bit(button) else {
+            return 0;
+        };
+        let was_pressed = self.state.pointer_buttons & bit != 0;
+        if !self.state.host_active || !self.state.pointer_inside || was_pressed == pressed {
             return 0;
         }
         let Some((surface, pointers)) = self.focused_pointer_resources() else {
@@ -8315,18 +8504,39 @@ impl CompositorCore {
             wl_pointer::ButtonState::Released
         };
         for pointer in pointers {
-            pointer.button(serial, time, 272, button_state.into());
+            pointer.button(serial, time, button, button_state.into());
             if pointer.version() >= 5 {
                 pointer.frame();
             }
         }
-        self.state.pointer_pressed = pressed;
+        if pressed {
+            self.state.pointer_buttons |= bit;
+        } else {
+            self.state.pointer_buttons &= !bit;
+        }
         self.state.pointer_event_count = self.state.pointer_event_count.saturating_add(1);
         1
     }
 
+    fn release_pointer_buttons(&mut self, time: u32) -> u32 {
+        let pressed = self.state.pointer_buttons;
+        let mut changed = 0_u32;
+        for button in [272, 273, 274, 275, 276] {
+            if pointer_button_bit(button).is_some_and(|bit| pressed & bit != 0) {
+                changed = changed.saturating_add(self.pointer_button_code(button, false, time));
+            }
+        }
+        // Losing the Android host focus is authoritative even if a Wayland
+        // pointer resource disappeared before its release could be delivered.
+        self.state.pointer_buttons = 0;
+        changed
+    }
+
     pub fn pointer_axis(&mut self, horizontal: f64, vertical: f64, time: u32) -> u32 {
-        if !self.state.pointer_inside || (horizontal == 0.0 && vertical == 0.0) {
+        if !self.state.host_active
+            || !self.state.pointer_inside
+            || (horizontal == 0.0 && vertical == 0.0)
+        {
             return 0;
         }
         let Some((_surface, pointers)) = self.focused_pointer_resources() else {
@@ -8421,7 +8631,7 @@ impl CompositorCore {
     }
 
     pub fn pointer_leave(&mut self) -> u32 {
-        if !self.state.pointer_inside || self.state.pointer_pressed {
+        if !self.state.pointer_inside || self.state.pointer_buttons != 0 {
             return 0;
         }
         let Some((surface, pointers)) = self.focused_pointer_resources() else {
@@ -10866,6 +11076,19 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
 
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeSetHostActive(
+    _environment: *mut std::ffi::c_void,
+    _owner: *mut std::ffi::c_void,
+    handle: i64,
+    active: jboolean,
+) {
+    if let Some(compositor) = unsafe { (handle as *mut LauncherSurfaceCompositor).as_mut() } {
+        compositor.core.set_host_active(active != 0);
+    }
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeDispatchAndPresent(
     _environment: *mut std::ffi::c_void,
     _owner: *mut std::ffi::c_void,
@@ -10923,27 +11146,9 @@ pub extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_
                     .expect("fixed input field"),
             )
         };
-        let kind = field(0);
-        let a = field(1);
-        let b = field(2);
-        let c = field(3);
-        let d = field(4);
-        let accepted = match kind {
-            1 => compositor
-                .core
-                .touch_down(a, f64::from(b), f64::from(c), d as u32),
-            2 => compositor
-                .core
-                .touch_motion(a, f64::from(b), f64::from(c), d as u32),
-            3 => compositor.core.touch_up(a, b as u32),
-            4 => compositor.core.touch_cancel(),
-            5 => android_key_to_evdev(a)
-                .map_or(0, |key| compositor.core.keyboard_key(key, b != 0, c as u32)),
-            6 => compositor
-                .core
-                .pointer_motion(f64::from(a), f64::from(b), c as u32),
-            7 => compositor.core.pointer_button(a != 0, b as u32),
-            _ => 0,
+        let fields = [field(0), field(1), field(2), field(3), field(4), field(5)];
+        let Ok(accepted) = dispatch_launcher_input_record(&mut compositor.core, fields) else {
+            return -3;
         };
         handled = handled.saturating_add(i32::from(accepted != 0));
     }
@@ -12759,6 +12964,62 @@ mod tests {
         assert_eq!(android_key_to_evdev(142), Some(88));
         assert_eq!(android_key_to_evdev(0), None);
         assert_eq!(android_key_to_evdev(143), None);
+        assert_eq!(android_meta_to_wayland(0), 0);
+        assert_eq!(android_meta_to_wayland(0x41), 1);
+        assert_eq!(android_meta_to_wayland(0x2000), 1 << 2);
+        assert_eq!(android_meta_to_wayland(0x20), 1 << 3);
+        assert_eq!(android_meta_to_wayland(0x7073), 0x0d);
+    }
+
+    #[test]
+    fn maps_all_supported_android_mouse_buttons_without_aliasing() {
+        assert_eq!(android_button_to_evdev(1), Some(272));
+        assert_eq!(android_button_to_evdev(2), Some(273));
+        assert_eq!(android_button_to_evdev(4), Some(274));
+        assert_eq!(android_button_to_evdev(8), Some(275));
+        assert_eq!(android_button_to_evdev(16), Some(276));
+        assert_eq!(android_button_to_evdev(0), None);
+        assert_eq!(android_button_to_evdev(3), None);
+        assert_eq!(pointer_button_bit(272), Some(1));
+        assert_eq!(pointer_button_bit(276), Some(16));
+        assert_eq!(pointer_button_bit(277), None);
+    }
+
+    #[test]
+    fn launcher_input_records_are_semantic_bounded_and_reset_host_focus() {
+        let mut core = CompositorCore::new().expect("compositor");
+        assert!(core.state.host_active);
+        assert_eq!(
+            dispatch_launcher_input_record(&mut core, [10, 0, 7, 0, 0, 0]),
+            Ok(0)
+        );
+        assert!(!core.state.host_active);
+        assert_eq!(core.pointer_motion(10.0, 10.0, 8), 0);
+        assert_eq!(
+            dispatch_launcher_input_record(&mut core, [10, 1, 9, 0, 0, 0]),
+            Ok(0)
+        );
+        assert!(core.state.host_active);
+        assert_eq!(
+            dispatch_launcher_input_record(&mut core, [8, 3, 1, 9, 0, 0]),
+            Err(())
+        );
+        assert_eq!(
+            dispatch_launcher_input_record(&mut core, [9, 0, 120_001, 9, 0, 0]),
+            Err(())
+        );
+        assert_eq!(
+            dispatch_launcher_input_record(&mut core, [1, 32, 0, 0, 9, 0]),
+            Err(())
+        );
+        assert_eq!(
+            dispatch_launcher_input_record(&mut core, [5, 29, 2, 9, 0, 0]),
+            Ok(0)
+        );
+        assert_eq!(
+            dispatch_launcher_input_record(&mut core, [5, 29, 3, 9, 0, 0]),
+            Err(())
+        );
     }
 
     #[test]
