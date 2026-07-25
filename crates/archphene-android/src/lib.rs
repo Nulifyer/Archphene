@@ -1154,6 +1154,49 @@ mod android {
     }
 
     #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeListDesktopEntries(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        offset: jint,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let (Ok(handle), Ok(offset)) = (u64::try_from(handle), usize::try_from(offset)) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(output_capacity) = environment.get_direct_buffer_capacity(&output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if output_capacity < MAX_TOOL_OUTPUT_BYTES {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let Ok(output_address) = environment.get_direct_buffer_address(&output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if output_address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let result = {
+            let Ok(mut registry) = registry().lock() else {
+                return ERROR_INTERNAL;
+            };
+            let Some(runtime) = registry.runtime_mut(handle) else {
+                return ERROR_INVALID_HANDLE;
+            };
+            if offset == 0 {
+                if let Err(error) = runtime.refresh_desktop_entries() {
+                    let destination =
+                        unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
+                    return copy_package_error(&error, destination);
+                }
+            }
+            runtime.desktop_entry_page(offset)
+        };
+        let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
+        copy_tool_result(result, destination)
+    }
+
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeRunCommand(
         environment: JNIEnv,
         _class: JClass,

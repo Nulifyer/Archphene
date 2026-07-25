@@ -147,6 +147,10 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
       - [x] Define and atomically persist a canonical versioned baseline manifest with a stable mapping ID, sorted unique safe paths, fixed fingerprints, strict entry/content/encoded-size limits, stale-temp recovery, symlink/substitution/corruption rejection, and round-trip tests.
       - [ ] Populate manifests with bounded SHA-256 baselines, execute resumable pull/push/delete plans transactionally, and retain both versions for every conflict.
   - [ ] Launcher wrapper generation and runtime-service binding
+    - [x] Discover launchable shared-root desktop entries through a bounded Rust parser: accept safe structured `Exec` arguments without a shell, validate executable containment and modes, isolate malformed/symlink entries, cap files/bytes/results, page one immutable snapshot through coarse JNI, and surface scan status in the manager. Exact-ABI cold/restart and light/dark full-device gates pass on the emulator and Samsung.
+    - [ ] Reconcile discovered entries into an atomic manager-owned descriptor registry with package ownership, stable Android identities, icon inputs, capabilities, generation, and removal/update state.
+    - [ ] Generate and sign thin launcher APKs, hand them to `PackageInstaller`, retain Android confirmation state, and update/remove wrappers without touching shared Linux package or user data.
+    - [ ] Authenticate wrapper Binder callers and run manager-owned Surface/input/lifecycle sessions against registry descriptors.
   - [ ] Qt, GTK, native Wayland, SDL, Electron, and XWayland adaptation
   - [ ] Audio, camera, printing, notifications, URLs, secrets, and accessibility
   - [ ] GPU acceleration, external displays, and secondary windows

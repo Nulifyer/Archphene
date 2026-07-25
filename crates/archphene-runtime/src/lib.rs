@@ -11,6 +11,7 @@ use archphene_jobs::{JobError, JobOperation, JobState, PackageJob, PackageJobSto
 use archphene_packages::{
     CatalogDownload, InstalledPackageCatalog, PackagePayloadDownload, PackageRuntime,
     PackageRuntimeError, PackageTool, Repository, RepositoryArchitecture, ToolOutput,
+    desktop::DesktopCatalog,
 };
 use archphene_process::{PtyRegistry, PtyWaiter};
 use archphene_root::{ArchRoot, BootstrapReport, RootError};
@@ -31,6 +32,7 @@ pub struct RuntimeHost {
     package_jobs: Option<PackageJobStore>,
     package_runtime: Option<PackageRuntime>,
     installed_packages: Option<InstalledPackageCatalog>,
+    desktop_entries: Option<DesktopCatalog>,
     catalog_download: Option<CatalogDownload>,
     package_download: Option<PackagePayloadDownload>,
     pty_sessions: PtyRegistry,
@@ -90,6 +92,7 @@ impl RuntimeHost {
             package_jobs: None,
             package_runtime: None,
             installed_packages: None,
+            desktop_entries: None,
             catalog_download: None,
             package_download: None,
             pty_sessions: PtyRegistry::new(),
@@ -232,6 +235,7 @@ impl RuntimeHost {
         let catalogs_ready = package_runtime.catalogs_ready();
         self.package_runtime = Some(package_runtime);
         self.installed_packages = None;
+        self.desktop_entries = None;
         let mut status_flags =
             STATUS_ARCH_ROOT_READY | STATUS_JOB_STORE_READY | STATUS_PACKAGE_RUNTIME_READY;
         if catalogs_ready {
@@ -308,6 +312,23 @@ impl RuntimeHost {
 
     pub fn installed_package_page(&self, offset: usize) -> Result<ToolOutput, PackageRuntimeError> {
         self.installed_packages
+            .as_ref()
+            .ok_or(PackageRuntimeError::InvalidPath)?
+            .page(offset)
+    }
+
+    pub fn refresh_desktop_entries(&mut self) -> Result<(), PackageRuntimeError> {
+        self.desktop_entries = Some(
+            self.package_runtime
+                .as_ref()
+                .ok_or(PackageRuntimeError::InvalidPath)?
+                .desktop_catalog()?,
+        );
+        Ok(())
+    }
+
+    pub fn desktop_entry_page(&self, offset: usize) -> Result<ToolOutput, PackageRuntimeError> {
+        self.desktop_entries
             .as_ref()
             .ok_or(PackageRuntimeError::InvalidPath)?
             .page(offset)

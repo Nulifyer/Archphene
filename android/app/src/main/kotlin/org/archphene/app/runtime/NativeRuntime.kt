@@ -9,6 +9,7 @@ internal object NativeRuntime {
     const val PACKAGE_OUTPUT_SIZE = 16 * 1024
     const val INSTALLED_PACKAGE_PAGE_SIZE = 60
     const val INSTALLED_PACKAGE_LIMIT = 4096
+    const val DESKTOP_ENTRY_LIMIT = 256
     const val COMMAND_REQUEST_LIMIT = 16 * 1024
     const val TERMINAL_DAMAGE_SIZE = 6_080_040
 
@@ -161,6 +162,11 @@ internal object NativeRuntime {
         outputBuffer: ByteBuffer,
     ): Int
     external fun nativeListInstalledPackages(
+        handle: Long,
+        offset: Int,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeListDesktopEntries(
         handle: Long,
         offset: Int,
         outputBuffer: ByteBuffer,

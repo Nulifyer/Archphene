@@ -10,6 +10,8 @@
     <string name="search_results">Search results</string>
     <string name="installed_packages_loading">Loading installed packages…</string>
     <string name="installed_packages_unavailable">Installed packages unavailable</string>
+    <string name="desktop_entries_loading">Discovering launchable Linux apps…</string>
+    <string name="desktop_entries_unavailable">Launchable Linux app discovery unavailable</string>
     <string name="available_packages_unavailable">Package search unavailable</string>
     <string name="package_reason_explicit">Explicit</string>
     <string name="package_reason_dependency">Dependency</string>

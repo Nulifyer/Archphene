@@ -40,6 +40,16 @@ internal class InstalledPackageSnapshot(
     val revision: Int,
 )
 
+internal class DesktopEntrySnapshot(
+    val desktopIds: Array<String>,
+    val names: Array<String>,
+    val executables: Array<String>,
+    val terminal: BooleanArray,
+    val icons: Array<String>,
+    val status: String,
+    val revision: Int,
+)
+
 internal class AvailablePackageSnapshot(
     val repositories: Array<String>,
     val names: Array<String>,
@@ -62,6 +72,9 @@ class ArchpheneRuntimeService : Service() {
 
         internal val installedPackages: InstalledPackageSnapshot
             get() = installedPackageSnapshot
+
+        internal val desktopEntries: DesktopEntrySnapshot
+            get() = desktopEntrySnapshot
 
         internal val availablePackages: AvailablePackageSnapshot
             get() = availablePackageSnapshot
@@ -379,6 +392,17 @@ class ArchpheneRuntimeService : Service() {
             0,
         )
     @Volatile
+    private var desktopEntrySnapshot =
+        DesktopEntrySnapshot(
+            emptyArray(),
+            emptyArray(),
+            emptyArray(),
+            BooleanArray(0),
+            emptyArray(),
+            "Discovering Linux apps…",
+            0,
+        )
+    @Volatile
     private var availablePackageSnapshot =
         AvailablePackageSnapshot(
             emptyArray(),
@@ -443,6 +467,9 @@ class ArchpheneRuntimeService : Service() {
     private val installedPackageOutputBuffer =
         ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
     private val installedPackageOutputBytes = ByteArray(NativeRuntime.PACKAGE_OUTPUT_SIZE)
+    private val desktopEntryOutputBuffer =
+        ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
+    private val desktopEntryOutputBytes = ByteArray(NativeRuntime.PACKAGE_OUTPUT_SIZE)
     private val shellTerminalDamageBuffer: ByteBuffer by lazy(LazyThreadSafetyMode.NONE) {
         ByteBuffer
             .allocateDirect(NativeRuntime.TERMINAL_DAMAGE_SIZE)
@@ -1874,7 +1901,7 @@ class ArchpheneRuntimeService : Service() {
                             )
                         }
                         val packageVersion = preparePackageRuntime(activeHandle)
-                        refreshInstalledPackages(activeHandle)
+                        refreshPackageInventory(activeHandle)
                         refreshShellChoices(activeHandle)
                         jobStatus = readLatestPackageJob(activeHandle)
                         restorePackageCacheRecovery()
@@ -2121,6 +2148,210 @@ class ArchpheneRuntimeService : Service() {
             Log.w(TAG, "Could not refresh installed package list", error)
             return false
         }
+    }
+
+    private fun refreshDesktopEntries(activeHandle: Long): Boolean {
+        val desktopIds = ArrayList<String>()
+        val names = ArrayList<String>()
+        val executables = ArrayList<String>()
+        val terminal = BooleanArray(NativeRuntime.DESKTOP_ENTRY_LIMIT)
+        val icons = ArrayList<String>()
+        var offset = 0
+        var expectedTotal = -1
+        var examined = 0
+        var rejected = 0
+        var truncated = false
+        var previousName = ""
+        var previousDesktopId = ""
+        try {
+            while (true) {
+                desktopEntryOutputBuffer.clear()
+                val outputLength =
+                    NativeRuntime.nativeListDesktopEntries(
+                        activeHandle,
+                        offset,
+                        desktopEntryOutputBuffer,
+                    )
+                if (outputLength < 0) {
+                    throw IllegalStateException(
+                        readNativeMessage(desktopEntryOutputBuffer, outputLength),
+                    )
+                }
+                if (
+                    outputLength == 0 ||
+                    outputLength > desktopEntryOutputBytes.size
+                ) {
+                    throw IllegalStateException("Invalid desktop-entry page length")
+                }
+                desktopEntryOutputBuffer.position(0)
+                desktopEntryOutputBuffer.get(desktopEntryOutputBytes, 0, outputLength)
+                if (desktopEntryOutputBytes[outputLength - 1] != '\n'.code.toByte()) {
+                    throw IllegalStateException("Desktop-entry page is not terminated")
+                }
+                val lines =
+                    String(
+                        desktopEntryOutputBytes,
+                        0,
+                        outputLength,
+                        StandardCharsets.UTF_8,
+                    ).dropLast(1).split('\n')
+                val header = lines.first().split('\t')
+                if (header.size != 6 || header[0] != "D1") {
+                    throw IllegalStateException("Invalid desktop-entry page header")
+                }
+                val nextOffset = header[1].toInt()
+                val total = header[2].toInt()
+                val pageExamined = header[3].toInt()
+                val pageRejected = header[4].toInt()
+                val pageTruncated =
+                    when (header[5]) {
+                        "0" -> false
+                        "1" -> true
+                        else -> throw IllegalStateException("Invalid desktop scan state")
+                    }
+                if (
+                    total !in 0..NativeRuntime.DESKTOP_ENTRY_LIMIT ||
+                    nextOffset !in offset..total ||
+                    lines.size - 1 != nextOffset - offset ||
+                    pageExamined !in total..1024 ||
+                    pageRejected !in 0..pageExamined ||
+                    (expectedTotal >= 0 && expectedTotal != total)
+                ) {
+                    throw IllegalStateException("Inconsistent desktop-entry page")
+                }
+                expectedTotal = total
+                examined = pageExamined
+                rejected = pageRejected
+                truncated = pageTruncated
+                for (line in lines.drop(1)) {
+                    val fields = line.split('\t', limit = 8)
+                    if (fields.size != 8) {
+                        throw IllegalStateException("Invalid desktop-entry row")
+                    }
+                    val desktopId = fields[0]
+                    val name = fields[1]
+                    val executable = fields[2]
+                    val rowTerminal =
+                        when (fields[3]) {
+                            "0" -> false
+                            "1" -> true
+                            else -> throw IllegalStateException("Invalid desktop terminal flag")
+                        }
+                    val icon = fields[4]
+                    val tryExec = fields[5]
+                    val argumentSpec = fields[6]
+                    val mimeSpec = fields[7]
+                    if (
+                        desktopId.isEmpty() ||
+                        name.isEmpty() ||
+                        !executable.startsWith('/') ||
+                        (tryExec.isNotEmpty() && !tryExec.startsWith('/')) ||
+                        (
+                            previousName.isNotEmpty() &&
+                                (name < previousName ||
+                                    (name == previousName && desktopId <= previousDesktopId))
+                        )
+                    ) {
+                        throw IllegalStateException("Invalid desktop-entry identity")
+                    }
+                    if (argumentSpec.isNotEmpty()) {
+                        for (argument in argumentSpec.split('\u001f')) {
+                            when (argument) {
+                                "f", "F", "u", "U", "i", "c", "k" -> Unit
+                                else -> {
+                                    if (!(argument.startsWith("L:") && argument.length > 2)) {
+                                        throw IllegalStateException("Invalid desktop argument")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (
+                        mimeSpec.isNotEmpty() &&
+                        (
+                            !mimeSpec.endsWith(';') ||
+                                mimeSpec
+                                    .dropLast(1)
+                                    .split(';')
+                                    .any { value -> !value.contains('/') }
+                        )
+                    ) {
+                        throw IllegalStateException("Invalid desktop MIME list")
+                    }
+                    terminal[desktopIds.size] = rowTerminal
+                    desktopIds.add(desktopId)
+                    names.add(name)
+                    executables.add(executable)
+                    icons.add(icon)
+                    previousName = name
+                    previousDesktopId = desktopId
+                }
+                offset = nextOffset
+                if (offset == total) {
+                    break
+                }
+                if (lines.size == 1) {
+                    throw IllegalStateException("Desktop-entry pagination made no progress")
+                }
+            }
+            val status =
+                buildString {
+                    append(desktopIds.size)
+                    append(
+                        if (desktopIds.size == 1) {
+                            " launchable Linux app found"
+                        } else {
+                            " launchable Linux apps found"
+                        },
+                    )
+                    if (rejected > 0) {
+                        append(" · ")
+                        append(rejected)
+                        append(" invalid ")
+                        append(if (rejected == 1) "entry" else "entries")
+                        append(" ignored")
+                    }
+                    if (truncated) {
+                        append(" · scan limit reached")
+                    }
+                }
+            val previousRevision = desktopEntrySnapshot.revision
+            desktopEntrySnapshot =
+                DesktopEntrySnapshot(
+                    desktopIds.toTypedArray(),
+                    names.toTypedArray(),
+                    executables.toTypedArray(),
+                    terminal.copyOf(desktopIds.size),
+                    icons.toTypedArray(),
+                    status,
+                    previousRevision + 1,
+                )
+            Log.i(
+                TAG,
+                "Desktop catalog refreshed: entries=${desktopIds.size} examined=$examined rejected=$rejected truncated=$truncated",
+            )
+            return true
+        } catch (error: Exception) {
+            val previous = desktopEntrySnapshot
+            desktopEntrySnapshot =
+                DesktopEntrySnapshot(
+                    previous.desktopIds,
+                    previous.names,
+                    previous.executables,
+                    previous.terminal,
+                    previous.icons,
+                    "Linux app discovery unavailable",
+                    previous.revision + 1,
+                )
+            Log.w(TAG, "Could not refresh Linux desktop entries", error)
+            return false
+        }
+    }
+
+    private fun refreshPackageInventory(activeHandle: Long): Boolean {
+        val installedPackagesReady = refreshInstalledPackages(activeHandle)
+        refreshDesktopEntries(activeHandle)
+        return installedPackagesReady
     }
 
     @Synchronized
@@ -2876,7 +3107,7 @@ class ArchpheneRuntimeService : Service() {
                             normalized,
                             scratch,
                         )
-                        refreshInstalledPackages(activeHandle)
+                        refreshPackageInventory(activeHandle)
                         refreshShellChoices(activeHandle)
                         record(
                             NativeRuntime.JOB_COMPLETE,
@@ -2912,7 +3143,7 @@ class ArchpheneRuntimeService : Service() {
                         val mutationStarted = !cancelled && recordedPhase >= 4
                         val installedStateRefreshed =
                             if (mutationStarted) {
-                                val refreshed = refreshInstalledPackages(activeHandle)
+                                val refreshed = refreshPackageInventory(activeHandle)
                                 refreshShellChoices(activeHandle)
                                 refreshed
                             } else {
@@ -3115,7 +3346,7 @@ class ArchpheneRuntimeService : Service() {
                             normalized,
                             scratch,
                         )
-                        refreshInstalledPackages(activeHandle)
+                        refreshPackageInventory(activeHandle)
                         refreshShellChoices(activeHandle)
                         lastResolvedInstalledVersion = ""
                         primaryActionLabel = "Install"
@@ -3135,7 +3366,7 @@ class ArchpheneRuntimeService : Service() {
                         val mutationStarted = !cancelled && recordedPhase >= 3
                         val installedStateRefreshed =
                             if (mutationStarted) {
-                                val refreshed = refreshInstalledPackages(activeHandle)
+                                val refreshed = refreshPackageInventory(activeHandle)
                                 refreshShellChoices(activeHandle)
                                 refreshed
                             } else {

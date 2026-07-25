@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod desktop;
+
 use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -190,6 +192,7 @@ pub enum PackageRuntimeError {
     Timeout,
     Busy,
     InvalidCatalog,
+    Desktop(desktop::DesktopEntryError),
     InvalidQuery,
     InvalidResolution,
     MissingTarget,
@@ -222,6 +225,7 @@ impl fmt::Display for PackageRuntimeError {
             Self::Timeout => formatter.write_str("package command timed out"),
             Self::Busy => formatter.write_str("another package catalog transfer is active"),
             Self::InvalidCatalog => formatter.write_str("invalid package repository catalog"),
+            Self::Desktop(error) => error.fmt(formatter),
             Self::InvalidQuery => formatter.write_str("invalid package search query"),
             Self::InvalidResolution => formatter.write_str("invalid package dependency resolution"),
             Self::MissingTarget => {
@@ -257,6 +261,12 @@ impl From<io::Error> for PackageRuntimeError {
 impl From<ProcessError> for PackageRuntimeError {
     fn from(error: ProcessError) -> Self {
         Self::Process(error)
+    }
+}
+
+impl From<desktop::DesktopEntryError> for PackageRuntimeError {
+    fn from(error: desktop::DesktopEntryError) -> Self {
+        Self::Desktop(error)
     }
 }
 
@@ -332,6 +342,116 @@ impl InstalledPackageCatalog {
         }
         Ok(output)
     }
+}
+
+impl desktop::DesktopCatalog {
+    pub fn page(&self, offset: usize) -> Result<ToolOutput, PackageRuntimeError> {
+        const HEADER_BUDGET: usize = 64;
+        if offset > self.entries.len() {
+            return Err(PackageRuntimeError::InvalidQuery);
+        }
+        let mut next = offset;
+        let mut body_bytes = 0_usize;
+        for entry in self.entries.iter().skip(offset) {
+            let record_bytes = desktop_record_bytes(entry)?;
+            if body_bytes
+                .checked_add(record_bytes)
+                .is_none_or(|length| length > MAX_TOOL_OUTPUT_BYTES - HEADER_BUDGET)
+            {
+                break;
+            }
+            body_bytes += record_bytes;
+            next += 1;
+        }
+        if next == offset && offset < self.entries.len() {
+            return Err(PackageRuntimeError::OutputLimit);
+        }
+
+        let mut output = empty_tool_output();
+        let header = format!(
+            "D1\t{next}\t{}\t{}\t{}\t{}\n",
+            self.entries.len(),
+            self.examined,
+            self.rejected,
+            u8::from(self.truncated),
+        );
+        output.push(header.as_bytes())?;
+        for entry in self.entries.iter().take(next).skip(offset) {
+            push_desktop_record(&mut output, entry)?;
+        }
+        Ok(output)
+    }
+}
+
+fn desktop_record_bytes(entry: &desktop::DesktopEntry) -> Result<usize, PackageRuntimeError> {
+    let mut length = entry
+        .desktop_id
+        .len()
+        .checked_add(entry.name.len())
+        .and_then(|value| value.checked_add(entry.executable.len()))
+        .and_then(|value| value.checked_add(entry.icon.as_ref().map_or(0, String::len)))
+        .and_then(|value| value.checked_add(entry.try_exec.as_ref().map_or(0, String::len)))
+        .and_then(|value| value.checked_add(9))
+        .ok_or(PackageRuntimeError::OutputLimit)?;
+    for (index, argument) in entry.arguments.iter().enumerate() {
+        length = length
+            .checked_add(match argument {
+                desktop::ExecArgument::Literal(value) => value.len() + 2,
+                _ => 1,
+            })
+            .and_then(|value| value.checked_add(usize::from(index != 0)))
+            .ok_or(PackageRuntimeError::OutputLimit)?;
+    }
+    for mime_type in &entry.mime_types {
+        length = length
+            .checked_add(mime_type.len() + 1)
+            .ok_or(PackageRuntimeError::OutputLimit)?;
+    }
+    Ok(length)
+}
+
+fn push_desktop_record(
+    output: &mut ToolOutput,
+    entry: &desktop::DesktopEntry,
+) -> Result<(), PackageRuntimeError> {
+    output.push(entry.desktop_id.as_bytes())?;
+    output.push(b"\t")?;
+    output.push(entry.name.as_bytes())?;
+    output.push(b"\t")?;
+    output.push(entry.executable.as_bytes())?;
+    output.push(if entry.terminal { b"\t1\t" } else { b"\t0\t" })?;
+    if let Some(icon) = &entry.icon {
+        output.push(icon.as_bytes())?;
+    }
+    output.push(b"\t")?;
+    if let Some(try_exec) = &entry.try_exec {
+        output.push(try_exec.as_bytes())?;
+    }
+    output.push(b"\t")?;
+    for (index, argument) in entry.arguments.iter().enumerate() {
+        if index != 0 {
+            output.push(b"\x1f")?;
+        }
+        match argument {
+            desktop::ExecArgument::Literal(value) => {
+                output.push(b"L:")?;
+                output.push(value.as_bytes())?;
+            }
+            desktop::ExecArgument::SingleFile => output.push(b"f")?,
+            desktop::ExecArgument::MultipleFiles => output.push(b"F")?,
+            desktop::ExecArgument::SingleUrl => output.push(b"u")?,
+            desktop::ExecArgument::MultipleUrls => output.push(b"U")?,
+            desktop::ExecArgument::Icon => output.push(b"i")?,
+            desktop::ExecArgument::DisplayName => output.push(b"c")?,
+            desktop::ExecArgument::DesktopFile => output.push(b"k")?,
+        }
+    }
+    output.push(b"\t")?;
+    for mime_type in &entry.mime_types {
+        output.push(mime_type.as_bytes())?;
+        output.push(b";")?;
+    }
+    output.push(b"\n")
 }
 
 impl PackageRuntime {
@@ -747,6 +867,10 @@ impl PackageRuntime {
             return Err(PackageRuntimeError::InvalidResolution);
         }
         Ok(InstalledPackageCatalog { packages })
+    }
+
+    pub fn desktop_catalog(&self) -> Result<desktop::DesktopCatalog, PackageRuntimeError> {
+        desktop::discover_desktop_entries(&self.arch_root).map_err(PackageRuntimeError::from)
     }
 
     pub fn install(&self, package: &str) -> Result<ToolOutput, PackageRuntimeError> {

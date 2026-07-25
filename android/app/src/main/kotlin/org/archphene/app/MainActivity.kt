@@ -50,6 +50,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private lateinit var packageSearchResults: ScrollView
     private lateinit var installedPackagePanel: LinearLayout
     private lateinit var installedPackageStatusView: TextView
+    private lateinit var desktopEntryStatusView: TextView
     private lateinit var installedPackageList: ListView
     private lateinit var installedPackageAdapter: InstalledPackageAdapter
     private lateinit var installedPackagesButton: Button
@@ -138,6 +139,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 catalogStatusView.setText(R.string.package_catalog_unavailable)
                 searchStatusView.setText(R.string.package_search_unavailable)
                 installedPackageStatusView.setText(R.string.installed_packages_unavailable)
+                desktopEntryStatusView.setText(R.string.desktop_entries_unavailable)
                 availablePackageStatusView.setText(R.string.available_packages_unavailable)
                 jobStatusView.setText(R.string.package_job_unavailable)
                 commandStatusView.setText(R.string.linux_command_unavailable)
@@ -392,6 +394,16 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
             }
+        desktopEntryStatusView =
+            TextView(this).apply {
+                setTextColor(getColor(R.color.archphene_on_surface_muted))
+                textSize = 14f
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(16), 0, dp(16), 0)
+                setText(R.string.desktop_entries_loading)
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+            }
         installedPackageAdapter = InstalledPackageAdapter()
         installedPackageList =
             ListView(this).apply {
@@ -411,6 +423,13 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 orientation = LinearLayout.VERTICAL
                 addView(
                     installedPackageStatusView,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        dp(40),
+                    ),
+                )
+                addView(
+                    desktopEntryStatusView,
                     LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         dp(40),
@@ -1697,7 +1716,9 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             return
         }
         val packages = binder.installedPackages
+        val desktopEntries = binder.desktopEntries
         setTextIfChanged(installedPackageStatusView, packages.status)
+        setTextIfChanged(desktopEntryStatusView, desktopEntries.status)
         if (packages.revision == installedPackageRevision) {
             return
         }

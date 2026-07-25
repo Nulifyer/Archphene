@@ -115,6 +115,25 @@ device gates separately cover durable Failed and Cancelled. This validates the
 manager state model and presentation, not the still-pending real launcher
 builder and PackageInstaller handoff.
 
+The first launcher implementation slice now discovers graphical applications
+from the shared Arch root rather than assuming one runtime per Android wrapper.
+Rust enumerates at most 4,096 directory entries, examines at most 1,024
+`.desktop` candidates and 4 MiB of source, publishes at most 256 entries,
+validates required fields and visibility, tokenizes `Exec` into bounded
+structured arguments without a shell, and accepts only executable targets whose
+canonical path remains inside the shared root.
+Malformed, unavailable, oversized, and symlinked entries are isolated instead
+of aborting the catalog. One cached immutable catalog is paged through a
+versioned 16 KiB direct-buffer JNI response; Kotlin validates pagination and
+ordering, publishes one revisioned snapshot, and shows launchable/ignored
+counts beside the installed-package list. Debug-only shared-root fixtures prove
+two valid entries, hidden-entry filtering, unavailable-executable and symlink
+rejection, cold manager restart, clean fixture removal, scoped logs, and
+visually inspected light/dark full-device presentation on both exact ABIs. The
+persistent descriptor registry, package ownership, icon extraction, wrapper
+generation/signing/installation, and authenticated Surface session remain
+pending.
+
 The recent-activity action is now terminal-state aware. Complete has no dead
 disabled Cancel button; active pre-commit work exposes Cancel; and durable
 Failed or Cancelled work exposes Review. Review fills the exact package,
