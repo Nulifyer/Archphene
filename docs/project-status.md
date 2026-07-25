@@ -40,8 +40,16 @@ does not stop a running shared shell; storage pickers return to Files; and short
 landscape windows omit nonessential terminal explanation so every control stays
 on screen. Exact-ABI full-device portrait/landscape navigation, onboarding,
 clean lifecycle, and persisted-folder gates pass on the emulator and Samsung.
-Adaptive tablet/external-display composition and populated package/active-shell
-visual audits remain planned; this clean-data pass did not download packages.
+
+At 840 dp and wider, the same stateful controls are composed once into a
+persistent navigation rail, a two-column package workspace, side-by-side file
+actions, and a terminal surface that consumes the remaining display. A
+reversible emulator gate switches to tablet and external-display-sized Android
+configurations, verifies the accessibility geometry, rotates the Activity,
+captures full-device views of every section, restores the original display
+settings, and proves the normal phone branch still passes. A physical Samsung
+DeX/external-display audit and populated package/active-shell visual audits
+remain planned; this clean-data pass did not download packages.
 
 Visible files in the shared `/home/archphene` are now available to Android
 Files, system pickers, and explicitly granted Android consumers through an

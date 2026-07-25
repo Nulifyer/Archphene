@@ -5,6 +5,7 @@
     <string name="runtime_ready">Archphene is ready</string>
     <string name="runtime_unavailable">Shared Arch runtime unavailable</string>
     <string name="packages">Packages</string>
+    <string name="package_results_heading">Package results and activity</string>
     <string name="files">Files</string>
     <string name="terminal">Terminal</string>
     <string name="files_heading">Android and Linux files</string>

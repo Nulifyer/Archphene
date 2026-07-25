@@ -85,6 +85,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private var pendingFolderUri: Uri? = null
     private var pendingFolderFlags = 0
     private var selectedManagerSection = MANAGER_SECTION_PACKAGES
+    private var wideManagerLayout = false
 
     private val serviceConnection =
         object : ServiceConnection {
@@ -134,6 +135,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     MANAGER_SECTION_PACKAGES,
                 ) ?: MANAGER_SECTION_PACKAGES
             ).coerceIn(MANAGER_SECTION_PACKAGES, MANAGER_SECTION_TERMINAL)
+        wideManagerLayout =
+            resources.configuration.screenWidthDp >= WIDE_MANAGER_BREAKPOINT_DP
         debugRuntimeEvidenceEnabled =
             applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
         Log.i(TAG, "Activity created generation=$activityGeneration")
@@ -590,57 +593,122 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             }
         packagePanel =
             LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
+                orientation =
+                    if (wideManagerLayout) {
+                        LinearLayout.HORIZONTAL
+                    } else {
+                        LinearLayout.VERTICAL
+                    }
                 setBackgroundColor(getColor(R.color.archphene_background))
-                addView(
-                    TextView(this@MainActivity).apply {
-                        setText(R.string.packages)
-                        setTextColor(getColor(R.color.archphene_on_surface))
-                        textSize = 22f
-                        gravity = Gravity.CENTER_VERTICAL
-                        setPadding(dp(20), 0, dp(20), 0)
-                    },
-                    LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        dp(56),
-                    ),
-                )
-                addView(
-                    catalogRow,
-                    LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        dp(56),
-                    ),
-                )
-                addView(
-                    searchInput,
-                    LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        dp(52),
-                    ),
-                )
-                addView(
-                    actionRow,
-                    LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        dp(56),
-                    ),
-                )
-                addView(
-                    searchResults,
-                    LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        0,
-                        1f,
-                    ),
-                )
-                addView(
-                    jobRow,
-                    LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        dp(72),
-                    ),
-                )
+                if (wideManagerLayout) {
+                    addView(
+                        LinearLayout(this@MainActivity).apply {
+                            orientation = LinearLayout.VERTICAL
+                            addView(
+                                managerSectionHeading(R.string.packages),
+                                LinearLayout.LayoutParams(
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                    dp(56),
+                                ),
+                            )
+                            addView(
+                                catalogRow,
+                                LinearLayout.LayoutParams(
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                    dp(64),
+                                ),
+                            )
+                            addView(
+                                searchInput,
+                                LinearLayout.LayoutParams(
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                    dp(56),
+                                ),
+                            )
+                            addView(
+                                actionRow,
+                                LinearLayout.LayoutParams(
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                    dp(64),
+                                ),
+                            )
+                        },
+                        LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 0.44f),
+                    )
+                    addView(
+                        LinearLayout(this@MainActivity).apply {
+                            orientation = LinearLayout.VERTICAL
+                            setPadding(dp(12), 0, 0, 0)
+                            addView(
+                                managerSectionHeading(R.string.package_results_heading),
+                                LinearLayout.LayoutParams(
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                    dp(56),
+                                ),
+                            )
+                            addView(
+                                searchResults,
+                                LinearLayout.LayoutParams(
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                    0,
+                                    1f,
+                                ),
+                            )
+                            addView(
+                                jobRow,
+                                LinearLayout.LayoutParams(
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                    dp(80),
+                                ),
+                            )
+                        },
+                        LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 0.56f),
+                    )
+                } else {
+                    addView(
+                        managerSectionHeading(R.string.packages),
+                        LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            dp(56),
+                        ),
+                    )
+                    addView(
+                        catalogRow,
+                        LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            dp(56),
+                        ),
+                    )
+                    addView(
+                        searchInput,
+                        LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            dp(52),
+                        ),
+                    )
+                    addView(
+                        actionRow,
+                        LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            dp(56),
+                        ),
+                    )
+                    addView(
+                        searchResults,
+                        LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            0,
+                            1f,
+                        ),
+                    )
+                    addView(
+                        jobRow,
+                        LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            dp(72),
+                        ),
+                    )
+                }
             }
         filesPanel =
             ScrollView(this).apply {
@@ -651,12 +719,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                         orientation = LinearLayout.VERTICAL
                         setPadding(dp(16), dp(8), dp(16), dp(16))
                         addView(
-                            TextView(this@MainActivity).apply {
-                                setText(R.string.files_heading)
-                                setTextColor(getColor(R.color.archphene_on_surface))
-                                textSize = 22f
-                                gravity = Gravity.CENTER_VERTICAL
-                            },
+                            managerSectionHeading(R.string.files_heading),
                             LinearLayout.LayoutParams(
                                 ViewGroup.LayoutParams.MATCH_PARENT,
                                 dp(56),
@@ -674,22 +737,56 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                                 ViewGroup.LayoutParams.WRAP_CONTENT,
                             ),
                         )
-                        addView(
-                            storageRow,
-                            LinearLayout.LayoutParams(
-                                ViewGroup.LayoutParams.MATCH_PARENT,
-                                dp(72),
-                            ),
-                        )
-                        addView(
-                            folderRow,
-                            LinearLayout.LayoutParams(
-                                ViewGroup.LayoutParams.MATCH_PARENT,
-                                dp(120),
-                            ).apply {
-                                topMargin = dp(12)
-                            },
-                        )
+                        if (wideManagerLayout) {
+                            (importButton.layoutParams as LinearLayout.LayoutParams).apply {
+                                height = dp(64)
+                                gravity = Gravity.CENTER_VERTICAL
+                            }
+                            addView(
+                                LinearLayout(this@MainActivity).apply {
+                                    orientation = LinearLayout.HORIZONTAL
+                                    addView(
+                                        storageRow,
+                                        LinearLayout.LayoutParams(
+                                            0,
+                                            dp(WIDE_FILE_CARD_HEIGHT_DP),
+                                            1f,
+                                        ),
+                                    )
+                                    addView(
+                                        folderRow,
+                                        LinearLayout.LayoutParams(
+                                            0,
+                                            dp(WIDE_FILE_CARD_HEIGHT_DP),
+                                            1f,
+                                        ).apply {
+                                            marginStart = dp(16)
+                                        },
+                                    )
+                                },
+                                LinearLayout.LayoutParams(
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                    dp(WIDE_FILE_CARD_HEIGHT_DP),
+                                ),
+                            )
+                        } else {
+                            addView(
+                                storageRow,
+                                LinearLayout.LayoutParams(
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                    dp(72),
+                                ),
+                            )
+                            addView(
+                                folderRow,
+                                LinearLayout.LayoutParams(
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                    dp(120),
+                                ).apply {
+                                    topMargin = dp(12)
+                                },
+                            )
+                        }
                     },
                     FrameLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
@@ -797,25 +894,68 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             managerNavigationButton(R.string.files, MANAGER_SECTION_FILES)
         terminalNavigationButton =
             managerNavigationButton(R.string.terminal, MANAGER_SECTION_TERMINAL)
-        val navigationRow =
+        val navigationSurface =
             LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
+                orientation =
+                    if (wideManagerLayout) {
+                        LinearLayout.VERTICAL
+                    } else {
+                        LinearLayout.HORIZONTAL
+                    }
                 setPadding(dp(8), dp(4), dp(8), dp(4))
                 setBackgroundColor(getColor(R.color.archphene_surface))
-                addView(
-                    packagesNavigationButton,
-                    LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f),
-                )
-                addView(
-                    filesNavigationButton,
-                    LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f),
-                )
-                addView(
-                    terminalNavigationButton,
-                    LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f),
-                )
+                if (wideManagerLayout) {
+                    addView(
+                        TextView(this@MainActivity).apply {
+                            setText(R.string.app_name)
+                            setTextColor(getColor(R.color.archphene_on_surface))
+                            textSize = 18f
+                            gravity = Gravity.CENTER_VERTICAL
+                            setPadding(dp(12), 0, dp(12), 0)
+                            maxLines = 1
+                        },
+                        LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            dp(64),
+                        ),
+                    )
+                    addView(
+                        packagesNavigationButton,
+                        LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            dp(64),
+                        ),
+                    )
+                    addView(
+                        filesNavigationButton,
+                        LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            dp(64),
+                        ),
+                    )
+                    addView(
+                        terminalNavigationButton,
+                        LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            dp(64),
+                        ),
+                    )
+                } else {
+                    addView(
+                        packagesNavigationButton,
+                        LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f),
+                    )
+                    addView(
+                        filesNavigationButton,
+                        LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f),
+                    )
+                    addView(
+                        terminalNavigationButton,
+                        LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f),
+                    )
+                }
             }
-        val layout =
+        val contentColumn =
             LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 addView(
@@ -840,13 +980,38 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                         dp(152),
                     ),
                 )
-                addView(
-                    navigationRow,
-                    LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        dp(64),
-                    ),
-                )
+                if (!wideManagerLayout) {
+                    addView(
+                        navigationSurface,
+                        LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            dp(64),
+                        ),
+                    )
+                }
+            }
+        val layout =
+            if (wideManagerLayout) {
+                LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    addView(
+                        navigationSurface,
+                        LinearLayout.LayoutParams(
+                            dp(WIDE_NAVIGATION_WIDTH_DP),
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                        ),
+                    )
+                    addView(
+                        contentColumn,
+                        LinearLayout.LayoutParams(
+                            0,
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            1f,
+                        ),
+                    )
+                }
+            } else {
+                contentColumn
             }
         applySystemBarInsets(layout)
         setContentView(layout)
@@ -1239,6 +1404,16 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         }
     }
 
+    private fun managerSectionHeading(textResource: Int): TextView =
+        TextView(this).apply {
+            setText(textResource)
+            setTextColor(getColor(R.color.archphene_on_surface))
+            textSize = 22f
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(20), 0, dp(20), 0)
+            maxLines = 1
+        }
+
     private fun managerNavigationButton(
         textResource: Int,
         section: Int,
@@ -1459,6 +1634,9 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         private const val MANAGER_SECTION_FILES = 1
         private const val MANAGER_SECTION_TERMINAL = 2
         private const val MIN_TERMINAL_DESCRIPTION_HEIGHT_DP = 480
+        private const val WIDE_MANAGER_BREAKPOINT_DP = 840
+        private const val WIDE_NAVIGATION_WIDTH_DP = 176
+        private const val WIDE_FILE_CARD_HEIGHT_DP = 136
         private const val MAX_FOLDER_URI_BYTES = 4 * 1024
         private var activityGeneration = 0
     }
