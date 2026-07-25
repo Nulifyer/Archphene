@@ -56,15 +56,21 @@ for fixture in "${cases[@]}"; do
   token="diag-$failure-$serial_slug"
   archphene_adb_run shell am force-stop "$package" >/dev/null
   archphene_adb_run logcat -c
-  archphene_adb_run shell am broadcast \
-    -f 0x20 \
-    -n "$receiver" \
-    -a "$action" \
-    --es token "$token" \
-    --es package "$package_name" \
-    --es state failed \
-    --es operation "$operation" \
-    --es failure "$failure" >/dev/null
+  broadcast_args=(
+    shell am broadcast
+    -f 0x20
+    -n "$receiver"
+    -a "$action"
+    --es token "$token"
+    --es package "$package_name"
+    --es state failed
+    --es operation "$operation"
+    --es failure "$failure"
+  )
+  if [[ "$failure" == storage ]]; then
+    broadcast_args+=(--ez cache-fixture true)
+  fi
+  archphene_adb_run "${broadcast_args[@]}" >/dev/null
   archphene_wait_log \
     "Seeded package job state=failed token=$token" 20 \
     "ArchphenePackageJobProbe:V *:S" >/dev/null
@@ -78,8 +84,10 @@ for fixture in "${cases[@]}"; do
     "$package_name" "package-diagnostics-name-$failure-$serial" 20
   archphene_wait_ui_exact_text \
     "$message" "package-diagnostics-message-$failure-$serial" 15
+  action_label=Review
+  [[ "$failure" == storage ]] && action_label="Clear cache"
   archphene_wait_ui_exact_text \
-    "Review" "package-diagnostics-review-$failure-$serial" 15
+    "$action_label" "package-diagnostics-action-$failure-$serial" 15
   operation_label=Install
   [[ "$operation" == remove ]] && operation_label=Remove
   archphene_wait_ui_exact_text \
@@ -88,6 +96,24 @@ for fixture in "${cases[@]}"; do
   sleep 1
   archphene_adb_run exec-out screencap -p \
     >"$output_dir/$serial-$failure.png"
+  if [[ "$failure" == storage ]]; then
+    archphene_tap_text "$ARCHPHENE_UI" "Clear cache"
+    archphene_wait_ui_exact_text \
+      "Freed 4 KiB of downloaded packages. Review before retrying." \
+      "package-diagnostics-storage-cleaned-$serial" 20
+    archphene_wait_ui_exact_text \
+      "Review" "package-diagnostics-storage-review-$serial" 15
+    remaining="$(
+      archphene_adb_run shell run-as "$package" \
+        ls files/arch-root/var/cache/pacman/pkg |
+        tr -d '\r'
+    )"
+    [[ -z "$remaining" ]] ||
+      archphene_die "package cache cleanup left entries behind: $remaining"
+    sleep 1
+    archphene_adb_run exec-out screencap -p \
+      >"$output_dir/$serial-storage-cleaned.png"
+  fi
 done
 
 fatal_log="$(archphene_adb_run logcat -d -v brief \
@@ -98,5 +124,5 @@ fatal_log="$(archphene_adb_run logcat -d -v brief \
 trap - EXIT
 cleanup
 archphene_note "Archphene package diagnostics passed on $serial"
-archphene_note "  Network, storage, trust, changed-state, catalog, generic, and mutation guidance passed"
-archphene_note "  Full-device screenshots: $output_dir/$serial-{network,storage,trust,changed,catalog,generic,mutation,refresh-failed}.png"
+archphene_note "  Network, storage cleanup, trust, changed-state, catalog, generic, and mutation guidance passed"
+archphene_note "  Full-device screenshots: $output_dir/$serial-{network,storage,storage-cleaned,trust,changed,catalog,generic,mutation,refresh-failed}.png"

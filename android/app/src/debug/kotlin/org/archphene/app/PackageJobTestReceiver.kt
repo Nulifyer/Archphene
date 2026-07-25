@@ -25,6 +25,7 @@ internal class PackageJobTestReceiver : BroadcastReceiver() {
         val terminalState = intent.getStringExtra(EXTRA_STATE)
         val operation = intent.getStringExtra(EXTRA_OPERATION) ?: "install"
         val failure = intent.getStringExtra(EXTRA_FAILURE)
+        val cacheFixture = intent.getBooleanExtra(EXTRA_CACHE_FIXTURE, false)
         if (
             token == null ||
             !TOKEN.matches(token) ||
@@ -35,7 +36,8 @@ internal class PackageJobTestReceiver : BroadcastReceiver() {
             (
                 failure != null &&
                     (terminalState != "failed" || failure !in FAILURE_CLASSES)
-            )
+            ) ||
+            (cacheFixture && (terminalState != "failed" || failure != "storage"))
         ) {
             Log.e(TAG, "Rejected invalid package-job fixture")
             return
@@ -61,6 +63,9 @@ internal class PackageJobTestReceiver : BroadcastReceiver() {
                         ) >= 0,
                     ) {
                         "could not bootstrap package-job fixture root"
+                    }
+                    if (cacheFixture) {
+                        seedPackageCache(context)
                     }
                     val requestBytes = "extra\t$packageName".toByteArray(StandardCharsets.UTF_8)
                     val requestBuffer =
@@ -191,6 +196,14 @@ internal class PackageJobTestReceiver : BroadcastReceiver() {
         }
     }
 
+    private fun seedPackageCache(context: Context) {
+        val cache = File(context.filesDir, "arch-root/var/cache/pacman/pkg")
+        check(cache.isDirectory) { "package cache directory is unavailable" }
+        File(cache, "fixture-1.0-1-any.pkg.tar.zst").writeBytes(ByteArray(2048) { 1 })
+        File(cache, "fixture-1.0-1-any.pkg.tar.zst.sig").writeBytes(ByteArray(1024) { 2 })
+        File(cache, "dependency-1.0-1-any.pkg.tar.zst.part").writeBytes(ByteArray(512) { 3 })
+    }
+
     private fun failureMessage(
         operation: String,
         failure: String,
@@ -229,6 +242,7 @@ internal class PackageJobTestReceiver : BroadcastReceiver() {
         private const val EXTRA_STATE = "state"
         private const val EXTRA_OPERATION = "operation"
         private const val EXTRA_FAILURE = "failure"
+        private const val EXTRA_CACHE_FIXTURE = "cache-fixture"
         private val TOKEN = Regex("[a-z0-9-]{1,48}")
         private val PACKAGE = Regex("[a-z0-9@._+\\-]{1,96}")
         private val FAILURE_CLASSES =

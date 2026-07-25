@@ -1723,6 +1723,41 @@ mod android {
     }
 
     #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeClearPackageCache(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        output_buffer: JByteBuffer,
+    ) -> jlong {
+        let Ok(handle) = u64::try_from(handle) else {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        };
+        let Ok(output_capacity) = environment.get_direct_buffer_capacity(&output_buffer) else {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        };
+        if output_capacity < MAX_TOOL_OUTPUT_BYTES {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        }
+        let Ok(output_address) = environment.get_direct_buffer_address(&output_buffer) else {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        };
+        if output_address.is_null() {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        }
+        let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
+        let Ok(mut registry) = registry().lock() else {
+            return i64::from(ERROR_INTERNAL);
+        };
+        let Some(runtime) = registry.runtime_mut(handle) else {
+            return i64::from(ERROR_INVALID_HANDLE);
+        };
+        match runtime.clear_package_cache() {
+            Ok(bytes) => i64::try_from(bytes).unwrap_or(i64::from(ERROR_INTERNAL)),
+            Err(error) => i64::from(copy_package_error(&error, destination)),
+        }
+    }
+
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeBeginPackageDownload(
         environment: JNIEnv,
         _class: JClass,

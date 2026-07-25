@@ -81,7 +81,15 @@ class ArchpheneRuntimeService : Service() {
             get() = jobRevision
 
         val packageJobMessage: String
-            get() = jobMessage
+            get() =
+                if (
+                    packageRecoveryMessageRevision == jobRevision &&
+                    packageRecoveryMessage.isNotEmpty()
+                ) {
+                    packageRecoveryMessage
+                } else {
+                    jobMessage
+                }
 
         val packageJobActivityLabel: String
             get() = jobActivityLabel
@@ -127,8 +135,16 @@ class ArchpheneRuntimeService : Service() {
                     !commandActive &&
                     recoveryReviewedJobRevision != jobRevision
 
+        val packageCacheRecoveryAvailable: Boolean
+            get() = packageCacheRecoveryReady()
+
         val packageActivityActionLabel: String
-            get() = if (packageCancellationAvailable) "Cancel" else "Review"
+            get() =
+                when {
+                    packageCancellationAvailable -> "Cancel"
+                    packageCacheRecoveryAvailable -> "Clear cache"
+                    else -> "Review"
+                }
 
         val documentImportStatus: String
             get() = storageStatus
@@ -252,6 +268,8 @@ class ArchpheneRuntimeService : Service() {
             requestPackageRemoval(packageName)
 
         fun cancelPackageOperation(): Boolean = requestPackageCancellation()
+
+        fun clearPackageCache(): Boolean = requestPackageCacheCleanup()
 
         fun importAndroidDocument(uri: Uri): Boolean = requestDocumentImport(uri)
 
@@ -397,6 +415,9 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var removeActionLabel = "Remove"
     @Volatile private var removeAvailable = false
     @Volatile private var recoveryReviewedJobRevision = Int.MIN_VALUE
+    @Volatile private var packageCacheRecoveryHandledJobRevision = Int.MIN_VALUE
+    @Volatile private var packageRecoveryMessageRevision = Int.MIN_VALUE
+    @Volatile private var packageRecoveryMessage = ""
     @Volatile private var commandStatus = "Run an installed Linux command"
     private val shellOutput = BoundedByteRing(SHELL_SCROLLBACK_BYTES)
     private val shellInput = FixedByteQueue(SHELL_INPUT_BYTES)
@@ -3083,6 +3104,72 @@ class ArchpheneRuntimeService : Service() {
     }
 
     @Synchronized
+    private fun requestPackageCacheCleanup(): Boolean {
+        val activeHandle = readyHandle
+        val recoveryRevision = jobRevision
+        if (activeHandle == 0L || !packageCacheRecoveryReady()) {
+            return false
+        }
+        packageOperationActive = true
+        packageOperationCancelable = false
+        packageCancellationRequested = false
+        packageRecoveryMessageRevision = recoveryRevision
+        packageRecoveryMessage = "Clearing downloaded package cache…"
+        val worker =
+            Thread(
+                {
+                    try {
+                        val outputBuffer =
+                            ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
+                        val reclaimedBytes =
+                            NativeRuntime.nativeClearPackageCache(activeHandle, outputBuffer)
+                        if (reclaimedBytes < 0L) {
+                            throw IllegalStateException(
+                                readNativeMessage(outputBuffer, reclaimedBytes.toInt()),
+                            )
+                        }
+                        if (jobRevision == recoveryRevision) {
+                            packageCacheRecoveryHandledJobRevision = recoveryRevision
+                            packageRecoveryMessage =
+                                if (reclaimedBytes == 0L) {
+                                    "No cached downloads could be freed. " +
+                                        "Free Android storage, then Review."
+                                } else {
+                                    "Freed ${formatStorageBytes(reclaimedBytes)} of downloaded " +
+                                        "packages. Review before retrying."
+                                }
+                        }
+                        Log.i(TAG, "Cleared $reclaimedBytes bytes from the package cache")
+                    } catch (error: Exception) {
+                        if (jobRevision == recoveryRevision) {
+                            packageCacheRecoveryHandledJobRevision = recoveryRevision
+                            packageRecoveryMessage =
+                                boundedJobMessage(
+                                    "Cache cleanup failed: " +
+                                        (error.message ?: error.javaClass.simpleName) +
+                                        ". Restart Archphene, then Review.",
+                                )
+                        }
+                        Log.e(TAG, "Package cache cleanup failed", error)
+                    } finally {
+                        synchronized(this@ArchpheneRuntimeService) {
+                            if (packageThread === Thread.currentThread()) {
+                                packageOperationActive = false
+                                packageOperationCancelable = false
+                                packageCancellationRequested = false
+                                packageThread = null
+                            }
+                        }
+                    }
+                },
+                "ArchphenePackageCache",
+            )
+        packageThread = worker
+        worker.start()
+        return true
+    }
+
+    @Synchronized
     private fun requestPackageCancellation(): Boolean {
         if (!packageOperationActive || !packageOperationCancelable) {
             return false
@@ -3229,6 +3316,24 @@ class ArchpheneRuntimeService : Service() {
                     jobState == NativeRuntime.JOB_CANCELLED
             ) &&
             recoveryReviewedJobRevision != jobRevision
+
+    private fun packageCacheRecoveryReady(): Boolean =
+        jobPackage.isNotEmpty() &&
+            (
+                jobState == NativeRuntime.JOB_FAILED ||
+                    jobState == NativeRuntime.JOB_CANCELLED
+            ) &&
+            packageJobNeedsStorageRecovery() &&
+            readyHandle != 0L &&
+            !catalogRefreshActive &&
+            !searchActive &&
+            !packageOperationActive &&
+            !commandActive &&
+            recoveryReviewedJobRevision != jobRevision &&
+            packageCacheRecoveryHandledJobRevision != jobRevision
+
+    private fun packageJobNeedsStorageRecovery(): Boolean =
+        jobMessage.startsWith("Not enough Linux storage.")
 
     private fun downloadPackagePayload(
         activeHandle: Long,

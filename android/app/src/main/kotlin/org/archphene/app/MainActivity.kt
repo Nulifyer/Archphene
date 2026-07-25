@@ -563,6 +563,12 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                             isEnabled = false
                             binder.cancelPackageOperation()
                         }
+                        binder.packageCacheRecoveryAvailable -> {
+                            isEnabled = false
+                            if (binder.clearPackageCache()) {
+                                updateStatus()
+                            }
+                        }
                         binder.packageRecoveryAvailable -> {
                             val packageName = binder.packageJobName
                             packageSearchInput.setText(packageName)

@@ -381,6 +381,16 @@ impl RuntimeHost {
         self.package_download = None;
     }
 
+    pub fn clear_package_cache(&self) -> Result<u64, PackageRuntimeError> {
+        if self.package_download.is_some() {
+            return Err(PackageRuntimeError::Busy);
+        }
+        self.package_runtime
+            .as_ref()
+            .ok_or(PackageRuntimeError::InvalidPath)?
+            .clear_package_cache()
+    }
+
     pub fn open_pty(
         &mut self,
         command: &str,

@@ -1173,6 +1173,58 @@ impl PackageRuntime {
         })
     }
 
+    pub fn clear_package_cache(&self) -> Result<u64, PackageRuntimeError> {
+        let directory = self.arch_root.join(PACKAGE_CACHE_DIRECTORY);
+        let metadata = fs::symlink_metadata(&directory)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(PackageRuntimeError::UnsafeEntry(directory));
+        }
+
+        let mut entry_count = 0_usize;
+        let mut reclaimed_bytes = 0_u64;
+        for entry in fs::read_dir(&directory)? {
+            let entry = entry?;
+            entry_count = entry_count.saturating_add(1);
+            if entry_count > LOCAL_DATABASE_ENTRY_LIMIT {
+                return Err(PackageRuntimeError::OutputLimit);
+            }
+            let path = entry.path();
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| PackageRuntimeError::UnsafeEntry(path.clone()))?;
+            let metadata = fs::symlink_metadata(&path)?;
+            if !safe_package_cache_filename(&name)
+                || metadata.file_type().is_symlink()
+                || !metadata.is_file()
+            {
+                return Err(PackageRuntimeError::UnsafeEntry(path));
+            }
+            reclaimed_bytes = reclaimed_bytes
+                .checked_add(metadata.len())
+                .ok_or(PackageRuntimeError::OutputLimit)?;
+        }
+
+        for entry in fs::read_dir(&directory)? {
+            let entry = entry?;
+            let path = entry.path();
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| PackageRuntimeError::UnsafeEntry(path.clone()))?;
+            let metadata = fs::symlink_metadata(&path)?;
+            if !safe_package_cache_filename(&name)
+                || metadata.file_type().is_symlink()
+                || !metadata.is_file()
+            {
+                return Err(PackageRuntimeError::UnsafeEntry(path));
+            }
+            fs::remove_file(path)?;
+        }
+        File::open(&directory)?.sync_all()?;
+        Ok(reclaimed_bytes)
+    }
+
     pub fn verify_package(
         &self,
         filename: &str,
@@ -2205,6 +2257,12 @@ fn safe_package_filename(value: &str) -> bool {
         })
 }
 
+fn safe_package_cache_filename(value: &str) -> bool {
+    let without_part = value.strip_suffix(".part").unwrap_or(value);
+    let without_signature = without_part.strip_suffix(".sig").unwrap_or(without_part);
+    safe_package_filename(without_signature)
+}
+
 fn validate_signature_status(
     output: &str,
     architecture: RepositoryArchitecture,
@@ -2870,6 +2928,63 @@ library\tlibarchphene_path_bridge.so\tlibarchphene_pkg_555555555555555555555555.
                 .join(format!("{filename}.part"))
                 .exists()
         );
+    }
+
+    #[test]
+    fn package_cache_cleanup_is_bounded_fail_closed_and_download_only() {
+        let tree = TestTree::new();
+        tree.file("libarchphene_pkg_111111111111111111111111.so", b"loader");
+        tree.file("libarchphene_pkg_222222222222222222222222.so", b"pacman");
+        tree.file("libarchphene_pkg_444444444444444444444444.so", b"keyring");
+        tree.file("libarchphene_pkg_555555555555555555555555.so", b"bridge");
+        tree.file("libarchphene_pkg_666666666666666666666666.so", b"trust");
+        let manifest = b"# org.archphene.package-runtime.v1\n\
+loader\t@loader\tlibarchphene_pkg_111111111111111111111111.so\t6\n\
+tool\t@pacman\tlibarchphene_pkg_222222222222222222222222.so\t6\n\
+keyring\t@keyring\tlibarchphene_pkg_444444444444444444444444.so\t7\n\
+ownertrust\t@ownertrust\tlibarchphene_pkg_666666666666666666666666.so\t5\n\
+library\tlibarchphene_path_bridge.so\tlibarchphene_pkg_555555555555555555555555.so\t6\n";
+        let runtime = PackageRuntime::prepare(
+            &tree.root,
+            &tree.native,
+            manifest,
+            RepositoryArchitecture::X86_64,
+        )
+        .expect("package runtime");
+        let cache = tree.root.join(PACKAGE_CACHE_DIRECTORY);
+        let archive = cache.join("btop-1.4.7-1-x86_64.pkg.tar.zst");
+        let signature = cache.join("btop-1.4.7-1-x86_64.pkg.tar.zst.sig");
+        let partial = cache.join("glibc-2.42-1-x86_64.pkg.tar.zst.part");
+        fs::write(&archive, b"archive").expect("archive fixture");
+        fs::write(&signature, b"signature").expect("signature fixture");
+        fs::write(&partial, b"partial").expect("partial fixture");
+        let unexpected = cache.join("do-not-delete");
+        fs::write(&unexpected, b"owned data").expect("unexpected fixture");
+
+        assert!(matches!(
+            runtime.clear_package_cache(),
+            Err(PackageRuntimeError::UnsafeEntry(path)) if path == unexpected
+        ));
+        assert!(archive.exists());
+        assert!(signature.exists());
+        assert!(partial.exists());
+        assert_eq!(
+            fs::read(&unexpected).expect("unexpected data retained"),
+            b"owned data"
+        );
+
+        fs::remove_file(unexpected).expect("remove unexpected fixture");
+        assert_eq!(
+            runtime.clear_package_cache().expect("clear package cache"),
+            23
+        );
+        assert!(
+            fs::read_dir(&cache)
+                .expect("empty cache directory")
+                .next()
+                .is_none()
+        );
+        assert_eq!(runtime.clear_package_cache().expect("clear empty cache"), 0);
     }
 
     #[test]

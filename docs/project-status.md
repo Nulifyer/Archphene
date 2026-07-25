@@ -145,6 +145,27 @@ names and the longest partial-mutation guidance remain fully on-screen. Deeper
 cache cleanup, one-tap failure-card catalog refresh, and repair/rollback tooling
 remain pending.
 
+Linux-storage failures now expose Clear cache before Review. The operation runs
+off the Activity thread through a dedicated Rust/JNI boundary and is limited to
+the manager-owned `var/cache/pacman/pkg` directory. Rust first validates the
+directory and every bounded entry, rejects symlinks, directories, non-Unicode
+or unknown names before deleting anything, then removes only recognized package
+archives, detached signatures, and partial downloads and syncs the directory.
+Installed package state, Linux home files, catalogs, and project data are
+outside the cleanup boundary. The card reports reclaimed bytes (or an empty
+cache), then advances only that durable job revision to Review; a cleanup error
+also becomes a handled attempt with restart guidance rather than inviting a
+misleading loop.
+
+The exact APK's debug fixture creates a 4 KiB rounded archive/signature/partial
+set, invokes Clear cache from the full Android UI, verifies the directory is
+empty through the app sandbox, and captures the Clear cache and post-cleanup
+Review states on both the emulator and Samsung. Network-disabled Rust tests
+also prove fail-closed behavior when an unknown cache entry is present and
+verify that an empty cache is idempotent. Package-specific selection, broader
+disk-use controls, catalog recovery, and partial-transaction repair remain
+pending.
+
 Visible files in the shared `/home/archphene` are now available to Android
 Files, system pickers, and explicitly granted Android consumers through an
 exported `DocumentsProvider` protected by Android's `MANAGE_DOCUMENTS`
