@@ -13,6 +13,9 @@
     <string name="install">Install</string>
     <string name="remove">Remove</string>
     <string name="cancel">Cancel</string>
+    <string name="documents_root_title">Archphene Home</string>
+    <string name="documents_root_summary">Linux home files</string>
+    <string name="documents_home_name">Home</string>
     <string name="linux_session_display">Linux session display</string>
     <string name="terminal_accessibility_dimensions">Linux terminal, %1$d columns by %2$d rows</string>
     <string name="terminal_text_smaller">Text smaller</string>

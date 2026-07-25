@@ -138,6 +138,8 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [ ] Wayland compositor, presentation, and lifecycle
   - [ ] Pointer, touch, keyboard, IME, clipboard, and drag-and-drop
   - [ ] Android file integration and `/mnt/android`
+    - [x] Expose visible regular files/directories from shared `/home/archphene` through a scoped Android `DocumentsProvider`; reject dotfiles, symlinks, traversal, spoofing controls, replacement rename, and root mutation through a Rust directory-descriptor broker.
+    - [ ] Add Android folder grants, synchronized POSIX mirrors, imports/exports, familiar home links, and `/mnt/android` status.
   - [ ] Launcher wrapper generation and runtime-service binding
   - [ ] Qt, GTK, native Wayland, SDL, Electron, and XWayland adaptation
   - [ ] Audio, camera, printing, notifications, URLs, secrets, and accessibility
@@ -189,7 +191,9 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [ ] Decide and document where a synchronized POSIX mirror is required because SAF is not a mountable POSIX filesystem.
   - [ ] Keep package databases, builds, symlinks, executables, sockets, and other POSIX-dependent data in private Arch storage.
 - [ ] Add a first-run storage flow: explain the model, let the user grant a folder, and allow skipping or changing it later.
-- [ ] Expose appropriate Archphene files through a `DocumentsProvider` so Android Files, pickers, share sheets, browsers, and other apps can open and save them.
+- [x] Expose visible files in shared `/home/archphene` through a `DocumentsProvider` so Android Files, pickers, share sheets, browsers, and other apps can open and save them.
+  - [x] Use `MANAGE_DOCUMENTS` plus Android URI grants rather than broad storage permission; keep dotfiles, symlinks, package/runtime trees, and unsupported file types private.
+  - [x] Pass exact framework create/read/write/non-replacing-rename/delete, child, collision, traversal, bidi-spoof, and symlink gates plus visually inspected full-device DocumentsUI browsing on the emulator and Samsung.
 - [ ] Support Android-to-Archphene import through Open With, Share, drag-and-drop, and file-picker flows.
 - [ ] Support Archphene-to-Android open, save, export, and share flows.
 - [ ] Avoid `MANAGE_EXTERNAL_STORAGE` as the default; evaluate an optional advanced/sideloaded mode only if SAF cannot satisfy a demonstrated workflow.

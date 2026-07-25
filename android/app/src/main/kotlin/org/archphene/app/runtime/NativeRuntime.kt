@@ -38,12 +38,39 @@ internal object NativeRuntime {
     const val PTY_EVENT_WRITABLE = 1 shl 1
     const val PTY_EVENT_HANGUP = 1 shl 2
     const val PTY_EVENT_WOKEN = 1 shl 3
+    const val STORAGE_OUTPUT_SIZE = 1024
+    const val STORAGE_MODE_READ = 1
+    const val STORAGE_MODE_WRITE = 1 shl 1
+    const val STORAGE_MODE_TRUNCATE = 1 shl 2
+    const val STORAGE_MODE_APPEND = 1 shl 3
 
     init {
         System.loadLibrary("archphene_android")
     }
 
     external fun nativeProtocolVersion(): Int
+    external fun nativeOpenHomeDocument(
+        requestBuffer: ByteBuffer,
+        requestLength: Int,
+        mode: Int,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeCreateHomeDocument(
+        requestBuffer: ByteBuffer,
+        requestLength: Int,
+        directory: Boolean,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeDeleteHomeDocument(
+        requestBuffer: ByteBuffer,
+        requestLength: Int,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeRenameHomeDocument(
+        requestBuffer: ByteBuffer,
+        requestLength: Int,
+        outputBuffer: ByteBuffer,
+    ): Int
     external fun nativeCreate(): Long
     external fun nativeDestroy(handle: Long): Boolean
     external fun nativeTransition(handle: Long, lifecycle: Int): Int

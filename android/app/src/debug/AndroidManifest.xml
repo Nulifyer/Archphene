@@ -3,5 +3,8 @@
         <receiver
             android:name=".ClipboardTestReceiver"
             android:exported="true" />
+        <receiver
+            android:name=".DocumentsProviderTestReceiver"
+            android:exported="true" />
     </application>
 </manifest>

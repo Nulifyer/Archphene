@@ -14,6 +14,7 @@ archphene-jobs = { path = "../archphene-jobs" }
 archphene-packages = { path = "../archphene-packages" }
 archphene-process = { path = "../archphene-process" }
 archphene-runtime = { path = "../archphene-runtime" }
+archphene-storage = { path = "../archphene-storage" }
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { version = "0.21.1", default-features = false }

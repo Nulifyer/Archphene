@@ -97,6 +97,7 @@ mod android {
         MAX_COMMAND_ARGUMENTS, MAX_COMMAND_OUTPUT_BYTES, MAX_COMMAND_REQUEST_BYTES,
         MAX_PTY_TRANSFER_BYTES, MAX_TERMINAL_DAMAGE_BYTES, ProcessError,
     };
+    use archphene_storage::{OpenMode, StorageError};
     use jni::JNIEnv;
     use jni::objects::{JByteBuffer, JClass};
     use jni::sys::{JNI_FALSE, JNI_TRUE, jboolean, jint, jlong};
@@ -111,6 +112,8 @@ mod android {
     const ERROR_BOOTSTRAP: jint = -6;
     const ERROR_PACKAGE_RUNTIME: jint = -7;
     const ERROR_PROCESS: jint = -8;
+    const ERROR_STORAGE: jint = -9;
+    const MAX_STORAGE_REQUEST_BYTES: usize = 4 * 1024;
     const PTY_EVENT_READABLE: jint = 1;
     const PTY_EVENT_WRITABLE: jint = 1 << 1;
     const PTY_EVENT_HANGUP: jint = 1 << 2;
@@ -178,6 +181,69 @@ mod android {
         ERROR_PROCESS
     }
 
+    fn copy_storage_error(error: &StorageError, destination: &mut [u8]) -> jint {
+        let diagnostic = error.to_string();
+        let length = diagnostic.len().min(destination.len().saturating_sub(1));
+        destination[..length].copy_from_slice(&diagnostic.as_bytes()[..length]);
+        destination[length] = 0;
+        ERROR_STORAGE
+    }
+
+    fn storage_request(
+        environment: &JNIEnv,
+        request_buffer: &JByteBuffer,
+        request_length: jint,
+        field_count: usize,
+    ) -> Result<Vec<String>, jint> {
+        let request_length = usize::try_from(request_length).map_err(|_| ERROR_INVALID_ARGUMENT)?;
+        let request_capacity = environment
+            .get_direct_buffer_capacity(request_buffer)
+            .map_err(|_| ERROR_INVALID_ARGUMENT)?;
+        if request_length == 0
+            || request_length > request_capacity
+            || request_length > MAX_STORAGE_REQUEST_BYTES
+        {
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+        let request_address = environment
+            .get_direct_buffer_address(request_buffer)
+            .map_err(|_| ERROR_INVALID_ARGUMENT)?;
+        if request_address.is_null() {
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+        let request =
+            // SAFETY: JNI validated the direct-buffer capacity above, and the
+            // Java buffer remains live for this native call.
+            unsafe { slice::from_raw_parts(request_address.cast_const(), request_length) };
+        let request = str::from_utf8(request).map_err(|_| ERROR_INVALID_ARGUMENT)?;
+        let fields: Vec<String> = request.split('\t').map(str::to_owned).collect();
+        if fields.len() != field_count || fields.iter().any(String::is_empty) {
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+        Ok(fields)
+    }
+
+    fn storage_output<'local>(
+        environment: &JNIEnv<'local>,
+        output_buffer: &JByteBuffer<'local>,
+    ) -> Result<&'local mut [u8], jint> {
+        let output_capacity = environment
+            .get_direct_buffer_capacity(output_buffer)
+            .map_err(|_| ERROR_INVALID_ARGUMENT)?;
+        if output_capacity < 1024 {
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+        let output_address = environment
+            .get_direct_buffer_address(output_buffer)
+            .map_err(|_| ERROR_INVALID_ARGUMENT)?;
+        if output_address.is_null() {
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+        // SAFETY: JNI validated the direct-buffer capacity above, and the Java
+        // buffer remains live for this native call.
+        Ok(unsafe { slice::from_raw_parts_mut(output_address, output_capacity) })
+    }
+
     fn decode_job_operation(value: jint) -> Option<JobOperation> {
         match value {
             1 => Some(JobOperation::Install),
@@ -235,6 +301,102 @@ mod android {
         _class: JClass,
     ) -> jint {
         i32::try_from(PROTOCOL_VERSION).unwrap_or(i32::MAX)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeOpenHomeDocument(
+        environment: JNIEnv,
+        _class: JClass,
+        request_buffer: JByteBuffer,
+        request_length: jint,
+        mode: jint,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        if mode <= 0 || mode & !0x0f != 0 {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let Ok(output) = storage_output(&environment, &output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(request) = storage_request(&environment, &request_buffer, request_length, 2) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let open_mode = OpenMode {
+            read: mode & 1 != 0,
+            write: mode & 2 != 0,
+            truncate: mode & 4 != 0,
+            append: mode & 8 != 0,
+        };
+        match archphene_storage::open_document(Path::new(&request[0]), &request[1], open_mode) {
+            Ok(file) => file.into_raw_fd(),
+            Err(error) => copy_storage_error(&error, output),
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeCreateHomeDocument(
+        environment: JNIEnv,
+        _class: JClass,
+        request_buffer: JByteBuffer,
+        request_length: jint,
+        directory: jboolean,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let Ok(output) = storage_output(&environment, &output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(request) = storage_request(&environment, &request_buffer, request_length, 3) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        match archphene_storage::create_document(
+            Path::new(&request[0]),
+            &request[1],
+            &request[2],
+            directory != JNI_FALSE,
+        ) {
+            Ok(()) => 0,
+            Err(error) => copy_storage_error(&error, output),
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeDeleteHomeDocument(
+        environment: JNIEnv,
+        _class: JClass,
+        request_buffer: JByteBuffer,
+        request_length: jint,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let Ok(output) = storage_output(&environment, &output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(request) = storage_request(&environment, &request_buffer, request_length, 2) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        match archphene_storage::delete_document(Path::new(&request[0]), &request[1]) {
+            Ok(()) => 0,
+            Err(error) => copy_storage_error(&error, output),
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeRenameHomeDocument(
+        environment: JNIEnv,
+        _class: JClass,
+        request_buffer: JByteBuffer,
+        request_length: jint,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let Ok(output) = storage_output(&environment, &output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(request) = storage_request(&environment, &request_buffer, request_length, 3) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        match archphene_storage::rename_document(Path::new(&request[0]), &request[1], &request[2]) {
+            Ok(()) => 0,
+            Err(error) => copy_storage_error(&error, output),
+        }
     }
 
     #[unsafe(no_mangle)]

@@ -25,6 +25,26 @@ restart. The private root currently establishes conventional `/usr`, `/etc`,
 not yet contain a complete base userspace, but verified package closures now
 populate it incrementally through pacman's normal local database.
 
+Visible files in the shared `/home/archphene` are now available to Android
+Files, system pickers, and explicitly granted Android consumers through an
+exported `DocumentsProvider` protected by Android's `MANAGE_DOCUMENTS`
+contract. Dotfiles, symbolic links, unsupported file types, package state, and
+the rest of the private Arch root are not enumerated. Kotlin owns the Android
+provider contract while a dedicated Rust storage crate walks bounded document
+IDs through directory descriptors with `O_NOFOLLOW`, performs non-replacing
+rename, and owns create/open/delete mutation. It rejects hidden names, path
+traversal, control and bidirectional-spoof characters, symlink traversal, root
+mutation, and blocking special-file races.
+
+Exact-ABI device gates pass on the API 36 x86_64 emulator and physical
+AArch64 Samsung. Each exercises framework create, exact read/write, child
+relationships, rename collision preservation, delete and cleanup; directly
+attacks dotfiles, `..`, and a live symlink; then browses the retained visible
+fixture through Android DocumentsUI and captures a full-device screenshot.
+Persisted external folder grants, `/mnt/android` mirrors, Android-to-Linux
+import, Linux-to-Android export/share, revocation/conflict handling, and
+first-run storage UX remain open.
+
 The replacement also owns a fixed 11,808-byte package-operation journal. It
 holds at most 32 bounded jobs, enforces legal transitions, publishes updates
 atomically, detects corruption, rejects symlink substitution, converts

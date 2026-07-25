@@ -1,8 +1,9 @@
-# Linux Home And Storage Policy
+# Linux Home and Android Storage Policy
 
-Date: 2026-07-09
+Updated: 2026-07-24
 
-Goal: define how ArchpheneOS should map Linux paths to Android storage without bypassing Android permissions.
+Goal: give every Linux package one conventional shared Arch environment while
+crossing into Android storage only through Android-controlled capabilities.
 
 ## Policy
 
@@ -12,19 +13,24 @@ The bridge needs two storage classes:
 app-private storage
   background reads/writes
   no prompt
-  scoped to the generated Android app identity
+  one shared Arch root owned by the Archphene Android app
 
 user-visible storage
-  open/save/project files the user interacts with
+  Android files and folders the user selects
   brokered by Android UI or a previously granted capability
   shared only through explicit grants
 ```
 
-This lets Linux apps behave normally while keeping Android in charge of permissions.
+Pacman and AUR packages intentionally share `/home/archphene`, `/usr`, `/etc`,
+`/var`, and the same package database. Thin Android launcher entries will bind
+to that shared runtime; they will not receive separate Linux roots. Android
+still owns URI grants, system pickers, share flows, permissions, lifecycle,
+and the boundary to storage outside Archphene.
 
 ## Direct Answer
 
-If the Linux app wants to create, read, or update implementation files in the background, those files belong in that app's sandbox. Examples:
+If a Linux program wants to create, read, or update Linux-owned files in the
+background, those files belong in Archphene's private shared root. Examples:
 
 - caches
 - temp files
@@ -32,14 +38,14 @@ If the Linux app wants to create, read, or update implementation files in the ba
 - sqlite databases
 - language-server indexes
 - extension metadata
-- package-manager state for that generated app
-- app-owned config that should not be shared
+- the shared pacman database and package cache
+- per-user configuration in `/home/archphene`
 
 Those operations should not prompt the user.
 
-The emulator has now verified the basic app-private write/read path: the Android wrapper pre-created `files/linux-home/.cache`, launched a Linux payload with `HOME` pointed at `getFilesDir()/linux-home`, and the payload wrote/read `.cache/archphene-private-background.txt` with exit code `0` and no storage prompt.
-
-The failed variant matters too: a Linux payload that tried to create the private directories itself with `mkdir` exited with `SIGSYS` (`159`). So the policy is not just "map HOME to app data". The bridge must also provide directory setup or broker calls for filesystem operations blocked by Android's app-spawned syscall filter.
+No Android storage prompt is needed for ordinary work inside this root. The
+generic path bridge adapts Linux filesystem calls that Android's inherited
+seccomp or SELinux policy blocks; individual applications are not patched.
 
 If the Linux app wants to open a user document, save a user document, work inside a project folder, export media, or read/write files the user expects to see outside the app, the bridge must broker that through Android:
 
@@ -50,14 +56,24 @@ If the Linux app wants to open a user document, save a user document, work insid
 - Android permission dialogs for dangerous permissions
 - bridge-managed grant records
 
-After the user grants a project folder, the bridge can continue using its content URIs without prompting again until the grant is revoked.
-The Terminal companion provides the first concrete Android-facing side of this split. Its visible home entries are available as **Archphene Home** through a terminal-owned `DocumentsProvider`; dotfiles and runtime state are excluded. This permits Android Files and share/document flows to use scoped content-URI grants while commands continue to use ordinary paths inside the terminal sandbox. `archphene-import` and `archphene-export` provide explicit one-document transfers. `archphene-project add <alias>` persists a selected tree grant and maps a synchronized local POSIX mirror at `$HOME/Projects/<alias>`.
+After the user grants a project folder, Archphene can persist its content-URI
+grant until the user revokes it. SAF is not a mountable POSIX filesystem, so
+selected Android trees will require explicit, conflict-safe synchronization
+into a private POSIX mirror.
 
-Generated GUI wrappers now expose the same policy through one manager-owned **Archphene Apps** document root. Each installed generated GUI app appears as a directory backed by its visible `files/linux-home` entries. Dotfiles are never enumerated. The wrapper endpoint is not a browsable public DocumentsProvider: manager operations require the manager signature permission and package identity. It also accepts Android-enforced, exact per-URI grants for visible-home files exported by Linux drag-and-drop; ungranted callers and dotfile paths remain denied. Android Files normally interacts with the manager DocumentsProvider.
+The first production bridge is now active: visible regular files and
+directories under shared `/home/archphene` appear as
+**Archphene Home** through one manager-owned `DocumentsProvider`. Dotfiles,
+symlinks, special files, package state, and runtime state remain private.
+Android's `MANAGE_DOCUMENTS` contract and per-URI grants gate other apps.
+Kotlin implements the Android provider surface; Rust performs bounded
+directory-descriptor traversal and mutation without following symlinks or
+replacing an existing rename target.
 
-`ACTION_VIEW` and `ACTION_EDIT` launches accept up to 32 granted documents. The bridge imports them atomically into `Documents/Android`, allocates distinct Linux names for identical display names, hashes local and provider state, and writes back only changed writable documents. If Android and Linux both changed a document, the Android version is retained as `<name>.android-conflict-<hash>` before the Linux edit is written to the granted URI. A new document sent to an active `singleTask` wrapper displays a native warning that unsaved changes may be lost; Cancel leaves the app running, while **Restart and open** closes the previous document session, terminates the Linux process tree, and recreates the same generic wrapper with the new grants. The x86_64 emulator and a physical AArch64 device both verify manager create/read/write/rename/delete, private-provider denial, active-app restart, same-name import, conflict preservation, writeback, and DocumentsUI browse through a real Mousepad wrapper.
-
-SAF is not a POSIX filesystem and unprivileged Android cannot mount arbitrary document trees with FUSE. The current project bridge therefore synchronizes explicitly rather than intercepting every filesystem syscall. It preserves simultaneous edits as conflict copies, defers deletions, rejects symlinks/path escapes, and retains the local mirror when a mapping is removed. A future live path broker would require OS support or a descriptor/RPC interception layer with clearly documented compatibility limits.
+Create/read/write/rename/delete, collision preservation, hidden/traversal/
+symlink rejection, cleanup, and real DocumentsUI browsing pass on the x86_64
+emulator and physical AArch64 Samsung. Imports, exports, persisted external
+trees, conflict handling, and `/mnt/android` mirrors are still planned.
 
 ## Virtual Linux Layout
 
@@ -69,66 +85,69 @@ Recommended layout:
 /usr
 /opt
 /lib
-  read-only app/runtime modules
+  shared verified packages and runtime support
 
-/var/lib/<app>
-  app-private package/runtime state
+/var/lib/pacman
+/var/lib/archphene
+  shared package and runtime state inside the Android sandbox
 
 /tmp
 /run/user/<uid>
   app-private temporary runtime state
 
-/home/user/.cache
-  app-private by default
+/home/archphene/.cache
+  shared private Linux cache
 
-/home/user/.config
-  app-private by default, optionally bridge-synced per app family
+/home/archphene/.config
+  shared private Linux configuration
 
-/home/user/Documents
-/home/user/Downloads
-/home/user/Projects/<name>
+/home/archphene/Documents
+/home/archphene/Downloads
+/home/archphene/Projects/<name>
   synchronized local mirror of a persisted Android tree grant
 
-/mnt/projects/<name>
-  reserved future live path-broker view; not currently exposed
+/mnt/android/<category-or-grant>
+  stable bridge-managed paths; not currently exposed
 ```
 
-The Linux app can use normal paths. The bridge decides whether the backing storage is private app data, a read-only runtime module, or an Android content URI.
+Linux applications use normal paths. The bridge decides whether the backing
+storage is the private shared Arch root, a synchronized Android grant, or a
+brokered Android content URI.
 
 ## Permission Table
 
 | Linux path or action | Backing store | Prompt behavior | Android authority |
 | --- | --- | --- | --- |
-| `/usr`, `/opt`, `/lib` | read-only LAPK/LRPK modules | no prompt | package verification and mount policy |
-| `/var/lib/pacman`, `/var/lib/<app>` | app-private data | no prompt | app sandbox |
+| `/usr`, `/opt`, `/lib` | verified packages in the shared root | no prompt | package verification policy |
+| `/var/lib/pacman`, `/var/lib/archphene` | shared private Arch data | no prompt | Archphene app sandbox |
 | `/tmp`, `/run/user/<uid>` | app-private volatile data | no prompt | app sandbox |
-| `/home/user/.cache` | app-private data | no prompt | app sandbox |
-| `/home/user/.config` | app-private default, opt-in shared profile later | no prompt unless importing/exporting | app sandbox or bridge broker |
+| `/home/archphene/.cache` | shared private Arch data | no prompt | Archphene app sandbox |
+| `/home/archphene/.config` | shared private Arch data | no prompt | Archphene app sandbox |
+| Visible `/home/archphene` files in Android | Archphene `DocumentsProvider` | Android URI grant | Android DocumentsUI |
 | `Open File` | content URI from `ACTION_OPEN_DOCUMENT` | prompt per document unless persisted | Android DocumentsUI |
 | `Save As` or export | content URI from `ACTION_CREATE_DOCUMENT` | prompt per target | Android DocumentsUI |
 | Project folder | local mirror plus persisted tree URI from `ACTION_OPEN_DOCUMENT_TREE` | prompt once per folder | Android DocumentsUI and explicit sync |
-| Background project file read/write | `$HOME/Projects/<name>` local mirror | no repeat prompt | Terminal sandbox; bridge sync uses persisted URI permission |
+| Background project file read/write | `$HOME/Projects/<name>` local mirror | no repeat prompt | Archphene sandbox; bridge sync uses persisted URI permission |
 | Camera, mic, notifications, contacts | Android runtime permissions | prompt through Android permission APIs | Android PermissionController |
 
 ## Home Folder Rule
 
-There should not be a raw shared POSIX home directory that every Linux app can freely read and write.
+`/home/archphene` is intentionally one normal shared POSIX home for every
+Linux application in the environment. This is required so editors, terminals,
+language servers, compilers, and Git see the same projects and configuration.
 
-Instead, `/home/user` should be a virtual home assembled from:
-
-- app-private home pieces for implementation details
-- user-visible document/project grants
-- optional shared profile directories managed by policy
-- stable synthetic paths for previously granted Android content URIs
-
-That preserves desktop compatibility without turning the phone into one global mutable Linux account.
+That trust does not cross the Android boundary automatically. Only visible
+home entries are exposed through **Archphene Home**; dotfiles and the rest of
+the Arch root remain private. Android folders enter through explicit grants
+and bridge-managed paths or mirrors under `/mnt/android` and familiar home
+links.
 
 ## Background Access Rule
 
 Background access is allowed when one of these is true:
 
-1. The path resolves to app-private storage owned by the generated Android app.
-2. The path resolves to a read-only runtime dependency mounted for that app.
+1. The path resolves inside Archphene's private shared Arch root.
+2. The path resolves to a verified package/runtime dependency in that root.
 3. The path resolves under a previously granted and still-valid document tree.
 4. The operation uses an Android permission the app already holds.
 
@@ -139,11 +158,11 @@ If none of those is true, the bridge should fail with a permission error or requ
 The bridge should expose a path broker API:
 
 ```text
-resolve("/home/user/Projects/foo/main.c")
+resolve("/home/archphene/Projects/foo/main.c")
   -> requires tree grant "Projects/foo"
   -> content://...
 
-resolve("/home/user/.cache/zed/index")
+resolve("/home/archphene/.cache/zed/index")
   -> app-private file path
 
 resolve("/usr/lib/libgtk-3.so")
@@ -156,15 +175,22 @@ Linux code should not need to know whether the final backing resource is a norma
 
 Editors such as VS Code, Zed, GIMP, Blender, Kdenlive, and LibreOffice need a project/document grant model:
 
-- app internals stay in private storage
+- Linux internals stay in the shared private Arch root
 - project folders are explicit user grants
 - autosave and background indexing work inside granted project folders
 - export/save-as goes through Android save UI
-- app permissions remain attached to the generated Android app package
+- Android grants remain attached to Archphene or a narrowly scoped launcher
 
-Terminal-style apps such as `btop` should usually need only app-private paths plus specific brokered capabilities, not broad storage.
+Terminal-style apps such as `btop` usually need only the shared private root
+plus specific brokered capabilities, not broad Android storage.
 
-## Validated Runtime Descriptor Proof
+## Historical prototype evidence
+
+The sections below describe the retained Java/prototype implementation and its
+measurements. They are reference evidence, not the architecture or current
+support claims of the Rust + Kotlin replacement.
+
+### Validated runtime descriptor proof
 
 Linux builds generate a bounded catalog from the exact immutable module bytes for the selected x86_64 or AArch64 release ABI and place it inside the signed manager APK. The parser rejects malformed, duplicate, traversing, unknown, and out-of-bounds entries. A non-exported provider accepts only exact catalog URIs and read mode, verifies canonical file paths, sizes, and digests, and returns read-only descriptors. The manager grants those URIs only on an explicit wrapper launch.
 
@@ -184,7 +210,7 @@ Measure an attached test device with:
 
 The report separates APK bytes, installed code, persistent private data, transient cache, and manager runtime-store categories. Public size claims must use a documented clean install and workload; a development device snapshot includes caches and test state and is not a release baseline.
 
-## Clean v1.0.1 x86_64 Baseline
+### Clean v1.0.1 x86_64 baseline
 
 Measured on 2026-07-19 using a wiped Android 16 x86_64 AVD with 4 KB pages. Values are MiB rounded to one decimal and come from `measure-android-storage.sh` reports under the ignored `tooling/build/storage/` directory.
 
@@ -201,6 +227,6 @@ Installing KCalc made the manager retain 582.7 MiB of package state: 362.8 MiB f
 
 The 359.1 MiB KCalc launch cache is the named private view required by the current dynamic-loader and late-`dlopen()` compatibility path. A normal app exit removes it. Android force-stop prevents lifecycle cleanup, so the cache can remain until the next wrapper launch purges stale views or Android reclaims cache storage. This peak must not be presented as steady-state application data.
 
-## Runtime Cache Decision
+### Runtime cache decision
 
 The bounded named-module cache is required by the supported stock-glibc runtime. Persistent package bytes remain deduplicated under the manager UID; the per-wrapper cache exists only while Linux processes need pathname-based loading and is reclaimable by normal exit, the next launch, or Android cache management.
