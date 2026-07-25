@@ -20,6 +20,20 @@ tasks.register<Exec>("buildArchpheneRust") {
     outputs.dir("android/app/build/generated/jniLibs")
 }
 
+tasks.register<Exec>("buildArchpheneCompositor") {
+    workingDir(rootDir)
+    commandLine("bash", "scripts/build-archphene-compositor.sh")
+    inputs.files(
+        fileTree("native/archphene-compositor") {
+            include("src/**", "Cargo.toml", ".cargo/config.toml")
+        },
+        file("Cargo.lock"),
+        file("Cargo.toml"),
+        file("scripts/build-archphene-compositor.sh"),
+    )
+    outputs.dir("android/app/build/generated/compositorJniLibs")
+}
+
 tasks.register<Exec>("stageArchphenePackageRuntime") {
     workingDir(rootDir)
     commandLine("bash", "scripts/stage-archphene-package-runtime.sh")

@@ -12,9 +12,9 @@ use archphene_launcher::{LauncherRegistry, LauncherRegistryError, ReconcileRepor
 use archphene_packages::{
     CatalogDownload, InstalledPackageCatalog, PackagePayloadDownload, PackageRuntime,
     PackageRuntimeError, PackageTool, Repository, RepositoryArchitecture, ToolOutput,
-    desktop::DesktopCatalog,
+    desktop::{DesktopCatalog, ExecArgument},
 };
-use archphene_process::{PtyRegistry, PtyWaiter};
+use archphene_process::{GuiRegistry, MAX_COMMAND_ARGUMENTS, ProcessError, PtyRegistry, PtyWaiter};
 use archphene_root::{ArchRoot, BootstrapReport, RootError};
 use archphene_storage::{MirrorCancellation, MirrorImport, MirrorImportReport, StorageError};
 
@@ -38,6 +38,7 @@ pub struct RuntimeHost {
     catalog_download: Option<CatalogDownload>,
     package_download: Option<PackagePayloadDownload>,
     pty_sessions: PtyRegistry,
+    gui_sessions: GuiRegistry,
     session_marker: Option<PathBuf>,
     mirror_import: Option<MirrorImport>,
     mirror_cancellation: Option<MirrorCancellation>,
@@ -78,6 +79,39 @@ pub struct LauncherRemovalWork {
 pub struct LauncherAuthorization {
     pub label: String,
     pub terminal: bool,
+}
+
+#[derive(Debug)]
+pub enum LauncherProcessError {
+    Unauthorized,
+    InvalidDescriptor,
+    Package(PackageRuntimeError),
+    Process(ProcessError),
+}
+
+impl fmt::Display for LauncherProcessError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unauthorized => formatter.write_str("launcher descriptor is not current"),
+            Self::InvalidDescriptor => formatter.write_str("launcher descriptor cannot be run"),
+            Self::Package(error) => error.fmt(formatter),
+            Self::Process(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for LauncherProcessError {}
+
+impl From<PackageRuntimeError> for LauncherProcessError {
+    fn from(error: PackageRuntimeError) -> Self {
+        Self::Package(error)
+    }
+}
+
+impl From<ProcessError> for LauncherProcessError {
+    fn from(error: ProcessError) -> Self {
+        Self::Process(error)
+    }
 }
 
 #[derive(Debug)]
@@ -159,6 +193,7 @@ impl RuntimeHost {
             catalog_download: None,
             package_download: None,
             pty_sessions: PtyRegistry::new(),
+            gui_sessions: GuiRegistry::new(),
             session_marker: None,
             mirror_import: None,
             mirror_cancellation: None,
@@ -465,6 +500,98 @@ impl RuntimeHost {
             label: descriptor.name.clone(),
             terminal: descriptor.terminal,
         })
+    }
+
+    pub fn open_launcher_process(
+        &mut self,
+        android_package: &str,
+        descriptor_id_hex: &str,
+        generation: u64,
+        wayland_display: &str,
+    ) -> Result<u64, LauncherProcessError> {
+        let (command, arguments) = {
+            let descriptor = self
+                .launcher_registry
+                .as_ref()
+                .and_then(|registry| {
+                    registry.authorize_published(android_package, descriptor_id_hex, generation)
+                })
+                .ok_or(LauncherProcessError::Unauthorized)?;
+            if descriptor.terminal {
+                return Err(LauncherProcessError::InvalidDescriptor);
+            }
+            let command = descriptor
+                .executable
+                .strip_prefix("/usr/bin/")
+                .filter(|command| !command.is_empty() && !command.contains('/'))
+                .ok_or(LauncherProcessError::InvalidDescriptor)?
+                .to_owned();
+            let mut arguments = Vec::with_capacity(descriptor.arguments.len().saturating_add(1));
+            for argument in &descriptor.arguments {
+                match argument {
+                    ExecArgument::Literal(value) => arguments.push(value.clone()),
+                    ExecArgument::Icon => {
+                        if let Some(icon) = descriptor.icon.as_ref() {
+                            arguments.push("--icon".to_owned());
+                            arguments.push(icon.clone());
+                        }
+                    }
+                    ExecArgument::DisplayName => arguments.push(descriptor.name.clone()),
+                    ExecArgument::DesktopFile => arguments
+                        .push(format!("/usr/share/applications/{}", descriptor.desktop_id,)),
+                    ExecArgument::SingleFile
+                    | ExecArgument::MultipleFiles
+                    | ExecArgument::SingleUrl
+                    | ExecArgument::MultipleUrls => {}
+                }
+            }
+            (command, arguments)
+        };
+        let environment = self
+            .package_runtime
+            .as_ref()
+            .ok_or(PackageRuntimeError::InvalidPath)?
+            .command_environment()?;
+        if arguments.len() > MAX_COMMAND_ARGUMENTS {
+            return Err(LauncherProcessError::Process(ProcessError::InvalidArgument));
+        }
+        let mut argument_refs = [""; MAX_COMMAND_ARGUMENTS];
+        for (destination, source) in argument_refs.iter_mut().zip(&arguments) {
+            *destination = source;
+        }
+        self.gui_sessions
+            .open(
+                &environment,
+                &command,
+                &argument_refs[..arguments.len()],
+                wayland_display,
+            )
+            .map_err(LauncherProcessError::from)
+    }
+
+    pub fn launcher_process_exit_status(
+        &mut self,
+        handle: u64,
+    ) -> Result<Option<i32>, LauncherProcessError> {
+        self.gui_sessions
+            .exit_status(handle)
+            .map_err(LauncherProcessError::from)
+    }
+
+    pub fn launcher_process_logs(
+        &mut self,
+        handle: u64,
+        output: &mut [u8],
+    ) -> Result<usize, LauncherProcessError> {
+        self.gui_sessions
+            .read_logs(handle, output)
+            .map_err(LauncherProcessError::from)
+    }
+
+    pub fn close_launcher_process(&mut self, handle: u64) -> Result<(), LauncherProcessError> {
+        self.gui_sessions
+            .close(handle)
+            .map_err(LauncherProcessError::from)
     }
 
     pub fn claim_launcher_publish(

@@ -26,21 +26,20 @@ if [[ "$rebuild_image" == true ]] || ! archphene_podman_image_exists "$image"; t
   podman build -f "$ARCHPHENE_ROOT/containers/android-native.Containerfile" -t "$image" "$ARCHPHENE_ROOT"
 fi
 
-cargo_args=(build --target "$target")
-[[ -f "$ARCHPHENE_ROOT/native/archphene-compositor/Cargo.lock" ]] && cargo_args+=(--locked)
+cargo_args=(build --locked --offline --target "$target")
 profile=debug
 if [[ "$release" == true ]]; then
   cargo_args+=(--release)
   profile=release
 fi
 printf -v command ' %q' "${cargo_args[@]}"
-podman run --rm \
+podman run --rm --network=none \
   -v "$ARCHPHENE_ROOT:/workspace" \
   -v archphene-cargo-registry:/opt/cargo/registry \
   -w /workspace/native/archphene-compositor \
+  -e CARGO_TARGET_DIR=/workspace/native/archphene-compositor/target \
   "$image" bash -lc "cargo${command}"
 
 library="$ARCHPHENE_ROOT/native/archphene-compositor/target/$target/$profile/libarchphene_compositor.so"
 archphene_require_file "$library"
 archphene_note "Native compositor library: $library"
-

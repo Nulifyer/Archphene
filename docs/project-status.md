@@ -159,14 +159,47 @@ The physical AArch64 Samsung passes untrusted-caller and malformed-version
 rejection, cold manager start, exact 1080x2316 Surface attachment,
 full-device light/dark presentation, explicit close, and abrupt wrapper
 Binder-death cleanup. It also exposed and fixed a Samsung-only decor-insets
-ordering crash. Installing a manager with a changed launcher template now
-detects manager-signed stale wrappers, advances their Android versions, and
-republishes normal user-confirmed updates; installed Foot and Kate wrappers
-were advanced to generations 53 and 54 and reauthenticated. The x86_64
-emulator was offline during the final gate and remains to be repeated. The
-Surface still displays an authenticated manager diagnostic frame: a
-manager-owned Wayland compositor, descriptor-selected Linux process group,
-input batching, resize/rebind, and descendant cleanup are the next slice.
+ordering crash. Installing a manager with a changed launcher template detects
+manager-signed stale wrappers, advances their Android versions, and republishes
+normal user-confirmed updates.
+
+The next production slice is now connected behind that authenticated Surface.
+The dual-ABI Rust compositor owns a private per-session socket and presents
+committed SHM frames directly through `ANativeWindow`. A bounded Rust registry
+launches only the reauthorized desktop descriptor's installed executable,
+without a shell, in a manager-owned process group with private Wayland and
+standard Qt/GTK/SDL environment. Fixed-size touch, primary-pointer, and
+hardware-key batches cross one Binder transaction and one direct-buffer JNI
+call. On Samsung, full-device and scoped-log gates prove the complete input
+transport, native socket creation/removal, retained session across HOME/resume,
+and deterministic Back cleanup. Process status is polled outside the frame hot
+path; merged stdout/stderr drains into a fixed 16 KiB tail ring, and exited
+leaders trigger remaining group cleanup. Start, stop, and failure state travels
+back through an authenticated one-way Binder callback to a wrapper-owned
+Android overlay, leaving native code as the exclusive owner of compositor
+pixels. A temporary no-download
+Samsung gate pointed the existing Kate fixture at the already staged glibc
+loader: the real manager process path captured `loader cannot load itself`,
+reported exit 127 on the full device, removed the socket, and restored
+the fixture to its original SHA-256.
+
+Fresh full-device Samsung captures prove that this status overlay reflows
+normally from 1080x2316 portrait to 2316x1080 landscape without retaining or
+stretching the old compositor buffer. Scoped logs prove the same authenticated
+session across HOME/resume and the dimension-changing Surface reattach; Back
+then closes the session, drains its compositor thread, and leaves no private
+socket. A cold-manager variant backgrounds the wrapper during readiness,
+resumes after bootstrap, and still authenticates and attaches; this covers the
+retry-cancellation lifecycle race found during the final code audit. Forcing
+manager process death while the wrapper is visible also produces a fresh
+manager PID, reauthenticates a new session, reattaches the same wrapper Surface,
+and returns to the bounded status without user intervention or a fatal log.
+
+This does not yet prove a real Linux application frame. The current Samsung
+root contains only deliberately non-runnable Foot/Kate discovery fixtures and
+no cached GUI package archive, while the x86_64 emulator is offline. A real
+signed GUI package transaction, exact transformed input/live-resize tests, IME,
+and the repeated two-target gate remain open.
 
 The recent-activity action is now terminal-state aware. Complete has no dead
 disabled Cancel button; active pre-commit work exposes Cancel; and durable

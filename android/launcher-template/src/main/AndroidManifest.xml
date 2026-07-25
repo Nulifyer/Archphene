@@ -23,6 +23,7 @@
 
         <activity
             android:name="org.archphene.launcher.LauncherActivity"
+            android:configChanges="density|keyboard|keyboardHidden|navigation|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
             android:exported="true"
             android:launchMode="singleTask"
             android:resizeableActivity="true">

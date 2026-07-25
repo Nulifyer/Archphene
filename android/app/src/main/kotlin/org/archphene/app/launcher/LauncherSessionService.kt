@@ -5,17 +5,19 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
-import android.content.res.Configuration
+import android.content.pm.ApplicationInfo
 import android.os.Binder
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Parcel
 import android.os.RemoteException
+import android.os.SystemClock
 import android.util.Log
-import android.graphics.Paint
-import android.graphics.Typeface
 import android.view.Surface
+import java.io.File
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicInteger
 import org.archphene.app.runtime.ArchpheneRuntimeService
 import org.archphene.app.runtime.LauncherAuthorization
@@ -29,6 +31,23 @@ class LauncherSessionService : Service() {
         val authorization: LauncherAuthorization,
     ) {
         var surface: Surface? = null
+        @Volatile var active = true
+        var compositor: NativeLauncherCompositor? = null
+        var compositorSocket: File? = null
+        var linuxHandle = 0L
+        var nextProcessStatusMillis = 0L
+        var pumpStarted = false
+        var clientLogged = false
+        var frameLogged = false
+        var inputLogged = false
+        val inputRecords = IntArray(MAX_INPUT_RECORDS * INPUT_FIELDS)
+        val inputBuffer =
+            ByteBuffer
+                .allocateDirect(MAX_INPUT_RECORDS * INPUT_FIELDS * Int.SIZE_BYTES)
+                .order(ByteOrder.LITTLE_ENDIAN)
+        var inputCount = 0
+        var inputPosted = false
+        var inputDrain: Runnable? = null
     }
 
     private val sessions = HashMap<Int, Session>(MAX_SESSIONS)
@@ -85,7 +104,10 @@ class LauncherSessionService : Service() {
             unbindService(runtimeConnection)
             runtimeBound = false
         }
-        surfaceThread.quitSafely()
+        surfaceHandler.post {
+            Log.i(TAG, "Launcher compositor thread drained")
+            surfaceThread.quitSafely()
+        }
         super.onDestroy()
     }
 
@@ -93,7 +115,8 @@ class LauncherSessionService : Service() {
     private fun clearSessions() {
         for (session in sessions.values) {
             session.clientToken.unlinkToDeath(sessionBinder, 0)
-            releaseSurface(session.surface)
+            session.active = false
+            releaseSessionResources(session, session.surface, closeCompositor = true)
             session.surface = null
         }
         sessions.clear()
@@ -103,13 +126,40 @@ class LauncherSessionService : Service() {
     private fun removeSession(sessionId: Int) {
         val session = sessions.remove(sessionId) ?: return
         session.clientToken.unlinkToDeath(sessionBinder, 0)
-        releaseSurface(session.surface)
+        session.active = false
+        releaseSessionResources(session, session.surface, closeCompositor = true)
         session.surface = null
     }
 
-    private fun releaseSurface(surface: Surface?) {
-        if (surface != null) {
-            surfaceHandler.post(surface::release)
+    private fun releaseSessionResources(
+        session: Session,
+        surface: Surface?,
+        closeCompositor: Boolean,
+    ) {
+        val runtime = runtimeBinder
+        surfaceHandler.post {
+            Log.i(
+                TAG,
+                "Releasing launcher resources session=${session.id} close=$closeCompositor",
+            )
+            if (closeCompositor) {
+                val linuxHandle = session.linuxHandle
+                session.linuxHandle = 0L
+                if (linuxHandle != 0L && runtime?.closeLauncherProcess(linuxHandle) != true) {
+                    Log.w(TAG, "Could not close Linux process session=${session.id}")
+                }
+                session.compositor?.close()
+                session.compositor = null
+                val socket = session.compositorSocket
+                session.compositorSocket = null
+                if (socket != null && socket.exists() && !socket.delete()) {
+                    Log.w(TAG, "Could not remove compositor socket session=${session.id}")
+                }
+                session.pumpStarted = false
+            } else {
+                session.compositor?.detach()
+            }
+            surface?.release()
         }
     }
 
@@ -144,6 +194,10 @@ class LauncherSessionService : Service() {
                 }
                 TRANSACTION_DETACH_SURFACE -> {
                     transactDetachSurface(data, reply)
+                    true
+                }
+                TRANSACTION_INPUT -> {
+                    transactInput(data, reply)
                     true
                 }
                 else -> super.onTransact(code, data, reply, flags)
@@ -284,6 +338,33 @@ class LauncherSessionService : Service() {
             reply.writeNoException()
             reply.writeInt(result)
         }
+
+        private fun transactInput(
+            data: Parcel,
+            reply: Parcel,
+        ) {
+            val result =
+                runCatching {
+                    data.enforceInterface(INTERFACE)
+                    val version = data.readInt()
+                    val sessionId = data.readInt()
+                    val count = data.readInt()
+                    if (
+                        version != PROTOCOL_VERSION ||
+                        sessionId <= 0 ||
+                        count !in 1..MAX_INPUT_RECORDS ||
+                        data.dataAvail() != count * INPUT_FIELDS * Int.SIZE_BYTES
+                    ) {
+                        return@runCatching RESULT_INVALID
+                    }
+                    submitInput(Binder.getCallingUid(), sessionId, count, data)
+                }.getOrElse { error ->
+                    Log.w(TAG, "Rejected malformed launcher input", error)
+                    RESULT_INVALID
+                }
+            reply.writeNoException()
+            reply.writeInt(result)
+        }
     }
 
     private data class OpenResult(
@@ -320,9 +401,6 @@ class LauncherSessionService : Service() {
                 )
                 return OpenResult(RESULT_UNAUTHORIZED, 0, null)
             }
-        if (sessions.size >= MAX_SESSIONS) {
-            return OpenResult(RESULT_BUSY, 0, null)
-        }
         val existing =
             sessions.values.firstOrNull { session ->
                 session.uid == callingUid && session.clientToken === clientToken
@@ -330,11 +408,15 @@ class LauncherSessionService : Service() {
         if (existing != null) {
             return OpenResult(RESULT_OK, existing.id, authorization)
         }
+        if (sessions.size >= MAX_SESSIONS) {
+            return OpenResult(RESULT_BUSY, 0, null)
+        }
         val sessionId = nextSessionId.getAndUpdate { value -> if (value == Int.MAX_VALUE) 1 else value + 1 }
         if (sessionId <= 0 || sessions.containsKey(sessionId)) {
             return OpenResult(RESULT_BUSY, 0, null)
         }
         val session = Session(sessionId, callingUid, identity, clientToken, authorization)
+        session.inputDrain = Runnable { drainInput(session) }
         try {
             clientToken.linkToDeath(sessionBinder, 0)
         } catch (_: RemoteException) {
@@ -360,9 +442,18 @@ class LauncherSessionService : Service() {
         val session = authorizedSession(callingUid, sessionId) ?: return RESULT_UNAUTHORIZED
         val previous = session.surface
         session.surface = surface
-        releaseSurface(previous)
         surfaceHandler.post {
-            renderAuthenticatedSurface(sessionId, surface, width, height)
+            val current =
+                synchronized(this) {
+                    session.active && sessions[sessionId] === session && session.surface === surface
+                }
+            if (current) {
+                session.compositor?.detach()
+                previous?.release()
+                attachCompositor(session, surface, width, height)
+            } else {
+                previous?.release()
+            }
         }
         Log.i(TAG, "Attached launcher Surface session=$sessionId size=${width}x$height")
         return RESULT_OK
@@ -376,7 +467,7 @@ class LauncherSessionService : Service() {
         val session = authorizedSession(callingUid, sessionId) ?: return RESULT_UNAUTHORIZED
         val surface = session.surface
         session.surface = null
-        releaseSurface(surface)
+        releaseSessionResources(session, surface, closeCompositor = false)
         Log.i(TAG, "Detached launcher Surface session=$sessionId")
         return RESULT_OK
     }
@@ -403,48 +494,288 @@ class LauncherSessionService : Service() {
         return session
     }
 
-    private fun renderAuthenticatedSurface(
+    @Synchronized
+    private fun submitInput(
+        callingUid: Int,
         sessionId: Int,
+        count: Int,
+        data: Parcel,
+    ): Int {
+        val session = authorizedSession(callingUid, sessionId) ?: return RESULT_UNAUTHORIZED
+        synchronized(session) {
+            if (count > MAX_INPUT_RECORDS - session.inputCount) {
+                return RESULT_BUSY
+            }
+            var destination = session.inputCount * INPUT_FIELDS
+            repeat(count * INPUT_FIELDS) {
+                session.inputRecords[destination++] = data.readInt()
+            }
+            session.inputCount += count
+            if (!session.inputPosted) {
+                session.inputPosted = true
+                surfaceHandler.post(checkNotNull(session.inputDrain))
+            }
+        }
+        return RESULT_OK
+    }
+
+    private fun drainInput(session: Session) {
+        val count =
+            synchronized(session) {
+                val count = session.inputCount
+                session.inputBuffer.clear()
+                for (index in 0 until count * INPUT_FIELDS) {
+                    session.inputBuffer.putInt(session.inputRecords[index])
+                }
+                session.inputBuffer.position(0)
+                session.inputCount = 0
+                session.inputPosted = false
+                count
+            }
+        if (count == 0 || !session.active) {
+            return
+        }
+        val result = session.compositor?.submitInput(session.inputBuffer, count) ?: return
+        if (!session.inputLogged) {
+            session.inputLogged = true
+            Log.i(
+                TAG,
+                "Delivered first bounded input batch session=${session.id} records=$count result=$result",
+            )
+        }
+        if (result < 0) {
+            Log.w(TAG, "Native compositor rejected input session=${session.id} result=$result")
+        }
+    }
+
+    private fun attachCompositor(
+        session: Session,
         surface: Surface,
         width: Int,
         height: Int,
     ) {
-        val label =
-            synchronized(this) {
-                sessions[sessionId]
-                    ?.takeIf { session -> session.surface === surface }
-                    ?.authorization
-                    ?.label
-            } ?: return
-        if (!surface.isValid) {
+        try {
+            val compositor =
+                session.compositor
+                    ?: File(
+                            filesDir,
+                            "arch-root/run/launcher-${session.id}.sock",
+                        ).let { socket ->
+                            NativeLauncherCompositor(
+                                socket.absolutePath,
+                                width,
+                                height,
+                            ).also {
+                                session.compositor = it
+                                session.compositorSocket = socket
+                            }
+                        }
+            check(compositor.attach(surface, width, height)) {
+                "ANativeWindow attachment failed"
+            }
+            if (!session.pumpStarted) {
+                session.pumpStarted = true
+                surfaceHandler.post(CompositorPump(session))
+            }
+            Log.i(TAG, "Native Wayland compositor ready for session=${session.id}")
+            notifyStatus(
+                session,
+                if (session.frameLogged) STATUS_RUNNING else STATUS_STARTING,
+                if (session.frameLogged) {
+                    session.authorization.label
+                } else {
+                    "Starting ${session.authorization.label}…"
+                },
+            )
+            startLinuxProcess(session, surface)
+        } catch (error: Exception) {
+            session.compositor?.close()
+            session.compositor = null
+            session.compositorSocket?.delete()
+            session.compositorSocket = null
+            session.pumpStarted = false
+            notifyStatus(
+                session,
+                STATUS_STOPPED,
+                "Could not start ${session.authorization.label}.",
+            )
+            Log.e(TAG, "Could not start native compositor session=${session.id}", error)
+        }
+    }
+
+    private fun startLinuxProcess(
+        session: Session,
+        attachedSurface: Surface,
+    ) {
+        if (session.linuxHandle != 0L) {
             return
         }
-        var canvas: android.graphics.Canvas? = null
-        try {
-            canvas = surface.lockCanvas(null)
-            val dark =
-                resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
-                    Configuration.UI_MODE_NIGHT_YES
-            canvas.drawColor(if (dark) 0xff10191e.toInt() else 0xfff7f9fa.toInt())
-            val paint =
-                Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                    color = if (dark) 0xfff4f7f8.toInt() else 0xff182025.toInt()
-                    textAlign = Paint.Align.CENTER
-                    typeface = Typeface.create("sans", Typeface.NORMAL)
-                    textSize = (minOf(width, height) / 22f).coerceIn(20f, 48f)
-                }
-            canvas.drawText(
-                "Starting $label…",
-                width / 2f,
-                height / 2f - (paint.ascent() + paint.descent()) / 2f,
-                paint,
+        val runtime = runtimeBinder
+        val socket = session.compositorSocket
+        if (runtime == null || socket == null) {
+            Log.e(TAG, "Shared runtime unavailable for Linux session=${session.id}")
+            return
+        }
+        val linuxHandle =
+            runtime.openLauncherProcess(
+                session.identity.androidPackage,
+                session.identity.descriptorIdHex,
+                session.identity.generation,
+                socket.name,
             )
-        } catch (error: Exception) {
-            Log.w(TAG, "Could not render launcher Surface session=$sessionId", error)
-        } finally {
-            if (canvas != null) {
-                runCatching { surface.unlockCanvasAndPost(canvas) }
+        if (linuxHandle == 0L) {
+            Log.e(TAG, "Could not start descriptor process session=${session.id}")
+            stopCompositorForStatus(
+                session,
+                attachedSurface,
+                "Could not start ${session.authorization.label}.",
+            )
+            return
+        }
+        session.linuxHandle = linuxHandle
+        session.nextProcessStatusMillis =
+            SystemClock.uptimeMillis() + PROCESS_STATUS_DELAY_MILLIS
+        Log.i(TAG, "Started manager-owned Linux process session=${session.id}")
+    }
+
+    private inner class CompositorPump(
+        private val session: Session,
+    ) : Runnable {
+        override fun run() {
+            if (!session.active) {
+                session.pumpStarted = false
+                return
             }
+            val compositor = session.compositor
+            if (compositor == null) {
+                session.pumpStarted = false
+                return
+            }
+            val result = compositor.dispatchAndPresent(SystemClock.uptimeMillis().toInt())
+            if (result < 0) {
+                Log.e(TAG, "Native compositor dispatch failed session=${session.id} result=$result")
+                val surface = session.surface
+                if (surface != null) {
+                    stopCompositorForStatus(
+                        session,
+                        surface,
+                        "${session.authorization.label} stopped.",
+                    )
+                } else {
+                    stopCompositor(session)
+                }
+                return
+            }
+            val clientConnected =
+                result and NativeLauncherCompositor.FLAG_CLIENT_CONNECTED != 0
+            if (clientConnected && !session.clientLogged) {
+                session.clientLogged = true
+                Log.i(TAG, "Linux Wayland client connected session=${session.id}")
+            }
+            if (
+                result and NativeLauncherCompositor.FLAG_FRAME_PRESENTED != 0 &&
+                !session.frameLogged
+            ) {
+                session.frameLogged = true
+                notifyStatus(session, STATUS_RUNNING, session.authorization.label)
+                Log.i(TAG, "Presented first Linux frame session=${session.id}")
+            }
+            pollLinuxProcess(session)
+            surfaceHandler.postDelayed(
+                this,
+                if (clientConnected) COMPOSITOR_ACTIVE_DELAY_MILLIS else COMPOSITOR_IDLE_DELAY_MILLIS,
+            )
+        }
+    }
+
+    private fun pollLinuxProcess(session: Session) {
+        val now = SystemClock.uptimeMillis()
+        val handle = session.linuxHandle
+        if (handle == 0L || now < session.nextProcessStatusMillis) {
+            return
+        }
+        session.nextProcessStatusMillis = now + PROCESS_STATUS_DELAY_MILLIS
+        val runtime = runtimeBinder ?: return
+        val exitStatus = runtime.launcherProcessExitStatus(handle) ?: return
+        if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) {
+            val output = runtime.launcherProcessLog(handle).trim()
+            if (output.isNotEmpty()) {
+                val safeOutput =
+                    output
+                        .take(2048)
+                        .filter { character ->
+                            character == '\n' || character == '\t' || character >= ' '
+                        }
+                Log.d(TAG, "Linux process final output session=${session.id}: $safeOutput")
+            }
+        }
+        runtime.closeLauncherProcess(handle)
+        session.linuxHandle = 0L
+        val message =
+            if (exitStatus == 0) {
+                "${session.authorization.label} closed."
+            } else {
+                "${session.authorization.label} stopped (exit $exitStatus)."
+            }
+        val surface = session.surface
+        if (surface != null) {
+            stopCompositorForStatus(
+                session,
+                surface,
+                message,
+            )
+        } else {
+            stopCompositor(session)
+        }
+        Log.i(TAG, "Linux process exited session=${session.id} status=$exitStatus")
+    }
+
+    private fun stopCompositorForStatus(
+        session: Session,
+        surface: Surface,
+        message: String,
+    ) {
+        stopCompositor(session)
+        val current =
+            synchronized(this) {
+                session.active && session.surface === surface
+            }
+        if (current) {
+            notifyStatus(session, STATUS_STOPPED, message)
+        }
+    }
+
+    private fun stopCompositor(session: Session) {
+        session.compositor?.close()
+        session.compositor = null
+        val socket = session.compositorSocket
+        session.compositorSocket = null
+        if (socket != null && socket.exists() && !socket.delete()) {
+            Log.w(TAG, "Could not remove stopped compositor socket session=${session.id}")
+        }
+        session.pumpStarted = false
+    }
+
+    private fun notifyStatus(
+        session: Session,
+        state: Int,
+        message: String,
+    ) {
+        if (!session.active || state !in STATUS_STARTING..STATUS_STOPPED) {
+            return
+        }
+        val data = Parcel.obtain()
+        try {
+            data.writeInterfaceToken(CALLBACK_INTERFACE)
+            data.writeInt(PROTOCOL_VERSION)
+            data.writeInt(session.id)
+            data.writeInt(state)
+            data.writeString(message.take(256))
+            session.clientToken.transact(CALLBACK_STATUS, data, null, IBinder.FLAG_ONEWAY)
+        } catch (error: RemoteException) {
+            Log.w(TAG, "Could not deliver launcher status session=${session.id}", error)
+        } finally {
+            data.recycle()
         }
     }
 
@@ -468,9 +799,20 @@ class LauncherSessionService : Service() {
         private const val TRANSACTION_CLOSE = IBinder.FIRST_CALL_TRANSACTION + 1
         private const val TRANSACTION_ATTACH_SURFACE = IBinder.FIRST_CALL_TRANSACTION + 2
         private const val TRANSACTION_DETACH_SURFACE = IBinder.FIRST_CALL_TRANSACTION + 3
+        private const val TRANSACTION_INPUT = IBinder.FIRST_CALL_TRANSACTION + 4
+        private const val CALLBACK_INTERFACE = "org.archphene.launcher.IClientV1"
+        private const val CALLBACK_STATUS = IBinder.FIRST_CALL_TRANSACTION
         private const val MAX_SESSIONS = 16
         private const val MAX_SURFACE_DIMENSION = 8192
         private const val MAX_SURFACE_PIXELS = 33_554_432L
+        private const val COMPOSITOR_ACTIVE_DELAY_MILLIS = 8L
+        private const val COMPOSITOR_IDLE_DELAY_MILLIS = 50L
+        private const val PROCESS_STATUS_DELAY_MILLIS = 500L
+        private const val STATUS_STARTING = 1
+        private const val STATUS_RUNNING = 2
+        private const val STATUS_STOPPED = 3
+        private const val MAX_INPUT_RECORDS = 32
+        private const val INPUT_FIELDS = 6
         private const val RESULT_OK = 0
         private const val RESULT_NOT_READY = 1
         private const val RESULT_UNAUTHORIZED = 2

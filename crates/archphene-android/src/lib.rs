@@ -1410,6 +1410,206 @@ mod android {
     }
 
     #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeOpenLauncherProcess(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        request_buffer: JByteBuffer,
+        request_length: jint,
+        output_buffer: JByteBuffer,
+    ) -> jlong {
+        let (Ok(handle), Ok(request_length)) =
+            (u64::try_from(handle), usize::try_from(request_length))
+        else {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        };
+        let (Ok(request_capacity), Ok(output_capacity)) = (
+            environment.get_direct_buffer_capacity(&request_buffer),
+            environment.get_direct_buffer_capacity(&output_buffer),
+        ) else {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        };
+        if request_length == 0
+            || request_length > request_capacity
+            || request_length > 256
+            || output_capacity < 512
+        {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        }
+        let (Ok(request_address), Ok(output_address)) = (
+            environment.get_direct_buffer_address(&request_buffer),
+            environment.get_direct_buffer_address(&output_buffer),
+        ) else {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        };
+        if request_address.is_null() || output_address.is_null() {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        }
+        let request =
+            unsafe { slice::from_raw_parts(request_address.cast_const(), request_length) };
+        let Ok(request) = str::from_utf8(request) else {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        };
+        let Some(request) = request.strip_suffix('\n') else {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        };
+        let mut fields = request.split('\t');
+        let (
+            Some("G1"),
+            Some(android_package),
+            Some(descriptor_id),
+            Some(generation),
+            Some(wayland_display),
+            None,
+        ) = (
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+        )
+        else {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        };
+        if android_package.len() != 53
+            || !android_package.starts_with("org.archphene.linux.p")
+            || !android_package
+                .bytes()
+                .skip(21)
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+            || descriptor_id.len() != 64
+            || !descriptor_id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+            || wayland_display.is_empty()
+            || wayland_display.len() > 64
+            || !wayland_display
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        }
+        let Ok(generation) = generation.parse::<u64>() else {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        };
+        let result = {
+            let Ok(mut registry) = registry().lock() else {
+                return i64::from(ERROR_INTERNAL);
+            };
+            let Some(runtime) = registry.runtime_mut(handle) else {
+                return i64::from(ERROR_INVALID_HANDLE);
+            };
+            runtime.open_launcher_process(
+                android_package,
+                descriptor_id,
+                generation,
+                wayland_display,
+            )
+        };
+        match result {
+            Ok(launcher_handle) => {
+                i64::try_from(launcher_handle).unwrap_or(i64::from(ERROR_INTERNAL))
+            }
+            Err(error) => {
+                let destination =
+                    unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
+                let diagnostic = error.to_string();
+                let length = diagnostic.len().min(destination.len().saturating_sub(1));
+                destination[..length].copy_from_slice(&diagnostic.as_bytes()[..length]);
+                destination[length] = 0;
+                i64::from(ERROR_LAUNCHER)
+            }
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeCloseLauncherProcess(
+        _environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        launcher_handle: jlong,
+    ) -> jint {
+        let (Ok(handle), Ok(launcher_handle)) =
+            (u64::try_from(handle), u64::try_from(launcher_handle))
+        else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(mut registry) = registry().lock() else {
+            return ERROR_INTERNAL;
+        };
+        let Some(runtime) = registry.runtime_mut(handle) else {
+            return ERROR_INVALID_HANDLE;
+        };
+        match runtime.close_launcher_process(launcher_handle) {
+            Ok(()) => 0,
+            Err(_) => ERROR_LAUNCHER,
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeLauncherProcessExitStatus(
+        _environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        launcher_handle: jlong,
+    ) -> jlong {
+        let (Ok(handle), Ok(launcher_handle)) =
+            (u64::try_from(handle), u64::try_from(launcher_handle))
+        else {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        };
+        let Ok(mut registry) = registry().lock() else {
+            return i64::from(ERROR_INTERNAL);
+        };
+        let Some(runtime) = registry.runtime_mut(handle) else {
+            return i64::from(ERROR_INVALID_HANDLE);
+        };
+        match runtime.launcher_process_exit_status(launcher_handle) {
+            Ok(None) => 0,
+            Ok(Some(status)) => (i64::from(u32::from_ne_bytes(status.to_ne_bytes())) << 1) | 1,
+            Err(_) => i64::from(ERROR_LAUNCHER),
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeReadLauncherProcessLog(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        launcher_handle: jlong,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let (Ok(handle), Ok(launcher_handle), Ok(output_capacity)) = (
+            u64::try_from(handle),
+            u64::try_from(launcher_handle),
+            environment.get_direct_buffer_capacity(&output_buffer),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if output_capacity == 0 || output_capacity > archphene_process::MAX_GUI_LOG_BYTES {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let Ok(output_address) = environment.get_direct_buffer_address(&output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if output_address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let output = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
+        let Ok(mut registry) = registry().lock() else {
+            return ERROR_INTERNAL;
+        };
+        let Some(runtime) = registry.runtime_mut(handle) else {
+            return ERROR_INVALID_HANDLE;
+        };
+        match runtime.launcher_process_logs(launcher_handle, output) {
+            Ok(length) => i32::try_from(length).unwrap_or(i32::MAX),
+            Err(_) => ERROR_LAUNCHER,
+        }
+    }
+
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeClaimLauncherPublish(
         environment: JNIEnv,
         _class: JClass,

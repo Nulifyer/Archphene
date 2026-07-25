@@ -10,6 +10,7 @@ internal object NativeRuntime {
     const val INSTALLED_PACKAGE_PAGE_SIZE = 60
     const val INSTALLED_PACKAGE_LIMIT = 4096
     const val DESKTOP_ENTRY_LIMIT = 256
+    const val LAUNCHER_PROCESS_LOG_SIZE = 16 * 1024
     const val COMMAND_REQUEST_LIMIT = 16 * 1024
     const val TERMINAL_DAMAGE_SIZE = 6_080_040
 
@@ -184,6 +185,25 @@ internal object NativeRuntime {
         handle: Long,
         requestBuffer: ByteBuffer,
         requestLength: Int,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeOpenLauncherProcess(
+        handle: Long,
+        requestBuffer: ByteBuffer,
+        requestLength: Int,
+        outputBuffer: ByteBuffer,
+    ): Long
+    external fun nativeCloseLauncherProcess(
+        handle: Long,
+        launcherHandle: Long,
+    ): Int
+    external fun nativeLauncherProcessExitStatus(
+        handle: Long,
+        launcherHandle: Long,
+    ): Long
+    external fun nativeReadLauncherProcessLog(
+        handle: Long,
+        launcherHandle: Long,
         outputBuffer: ByteBuffer,
     ): Int
     external fun nativeClaimLauncherPublish(

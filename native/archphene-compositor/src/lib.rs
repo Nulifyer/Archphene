@@ -11,6 +11,8 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
+#[cfg(target_os = "android")]
+use jni::objects::{JByteBuffer, JObject};
 use jni::{JNIEnv, objects::JByteArray, sys::jbyteArray};
 use wayland_protocols::wp::fractional_scale::v1::server::wp_fractional_scale_manager_v1::{
     self, WpFractionalScaleManagerV1,
@@ -983,6 +985,20 @@ struct AndroidBitmapInfo {
 }
 
 #[cfg(target_os = "android")]
+#[repr(C)]
+struct AndroidNativeWindowBuffer {
+    width: i32,
+    height: i32,
+    stride: i32,
+    format: i32,
+    bits: *mut std::ffi::c_void,
+    reserved: [u32; 6],
+}
+
+#[cfg(target_os = "android")]
+enum AndroidNativeWindow {}
+
+#[cfg(target_os = "android")]
 #[link(name = "jnigraphics")]
 unsafe extern "C" {
     #[link_name = "AndroidBitmap_getInfo"]
@@ -1002,6 +1018,255 @@ unsafe extern "C" {
         environment: *mut std::ffi::c_void,
         bitmap: *mut std::ffi::c_void,
     ) -> i32;
+}
+
+#[cfg(target_os = "android")]
+#[link(name = "android")]
+unsafe extern "C" {
+    #[link_name = "ANativeWindow_fromSurface"]
+    fn android_native_window_from_surface(
+        environment: *mut std::ffi::c_void,
+        surface: *mut std::ffi::c_void,
+    ) -> *mut AndroidNativeWindow;
+    #[link_name = "ANativeWindow_release"]
+    fn android_native_window_release(window: *mut AndroidNativeWindow);
+    #[link_name = "ANativeWindow_setBuffersGeometry"]
+    fn android_native_window_set_buffers_geometry(
+        window: *mut AndroidNativeWindow,
+        width: i32,
+        height: i32,
+        format: i32,
+    ) -> i32;
+    #[link_name = "ANativeWindow_lock"]
+    fn android_native_window_lock(
+        window: *mut AndroidNativeWindow,
+        buffer: *mut AndroidNativeWindowBuffer,
+        dirty_bounds: *mut std::ffi::c_void,
+    ) -> i32;
+    #[link_name = "ANativeWindow_unlockAndPost"]
+    fn android_native_window_unlock_and_post(window: *mut AndroidNativeWindow) -> i32;
+}
+
+#[cfg(target_os = "android")]
+struct LauncherSurfaceCompositor {
+    core: CompositorCore,
+    window: *mut AndroidNativeWindow,
+    last_presented_commit: u32,
+}
+
+#[cfg(target_os = "android")]
+impl LauncherSurfaceCompositor {
+    fn detach_surface(&mut self) {
+        if !self.window.is_null() {
+            unsafe { android_native_window_release(self.window) };
+            self.window = ptr::null_mut();
+        }
+    }
+
+    fn attach_surface(
+        &mut self,
+        environment: *mut std::ffi::c_void,
+        surface: *mut std::ffi::c_void,
+        width: i32,
+        height: i32,
+    ) -> i32 {
+        if !valid_launcher_surface_size(width, height) || surface.is_null() {
+            return -2;
+        }
+        let window = unsafe { android_native_window_from_surface(environment, surface) };
+        if window.is_null() {
+            return -3;
+        }
+        const AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM: i32 = 1;
+        if unsafe {
+            android_native_window_set_buffers_geometry(
+                window,
+                width,
+                height,
+                AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM,
+            )
+        } != 0
+        {
+            unsafe { android_native_window_release(window) };
+            return -4;
+        }
+        self.detach_surface();
+        self.window = window;
+        self.last_presented_commit = u32::MAX;
+        self.core.configure_output(width, height, 1);
+        0
+    }
+
+    fn dispatch_and_present(&mut self, time: u32) -> i32 {
+        if self.core.dispatch_once().is_err() {
+            return -2;
+        }
+        let mut flags = i32::from(self.core.accepted_client_count() != 0);
+        let commit = self.core.surface_commit_count();
+        if !self.window.is_null()
+            && commit != self.last_presented_commit
+            && copy_last_frame_to_native_window(&self.core, self.window) == 0
+        {
+            self.last_presented_commit = commit;
+            self.core.present_frame(time);
+            flags |= 1 << 1;
+        }
+        flags
+    }
+}
+
+#[cfg(target_os = "android")]
+impl Drop for LauncherSurfaceCompositor {
+    fn drop(&mut self) {
+        self.detach_surface();
+        // Unlink while the launcher owner is still explicit. CompositorCore
+        // repeats this idempotently after its listener field is dropped.
+        if let Some(path) = self.core.socket_path.as_ref() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+fn valid_launcher_surface_size(width: i32, height: i32) -> bool {
+    const MAX_DIMENSION: i32 = 8192;
+    const MAX_PIXELS: i64 = 33_554_432;
+    width > 0
+        && height > 0
+        && width <= MAX_DIMENSION
+        && height <= MAX_DIMENSION
+        && i64::from(width) * i64::from(height) <= MAX_PIXELS
+}
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn android_key_to_evdev(key: i32) -> Option<u32> {
+    const LETTERS: [u32; 26] = [
+        30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38, 50, 49, 24, 25, 16, 19, 31, 20, 22, 47, 17,
+        45, 21, 44,
+    ];
+    const DIGITS: [u32; 10] = [11, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    if (29..=54).contains(&key) {
+        return LETTERS.get((key - 29) as usize).copied();
+    }
+    if (7..=16).contains(&key) {
+        return DIGITS.get((key - 7) as usize).copied();
+    }
+    Some(match key {
+        66 | 23 => 28,
+        67 => 14,
+        112 => 111,
+        62 => 57,
+        61 => 15,
+        111 | 4 => 1,
+        81 | 70 => 13,
+        69 => 12,
+        71 => 26,
+        72 => 27,
+        74 => 39,
+        75 => 40,
+        68 => 41,
+        73 => 43,
+        55 => 51,
+        56 => 52,
+        76 => 53,
+        59 => 42,
+        60 => 54,
+        113 => 29,
+        114 => 97,
+        57 => 56,
+        58 => 100,
+        19 => 103,
+        21 => 105,
+        22 => 106,
+        20 => 108,
+        122 => 102,
+        123 => 107,
+        92 => 104,
+        93 => 109,
+        124 => 110,
+        131..=140 => 59 + (key - 131) as u32,
+        141 => 87,
+        142 => 88,
+        _ => return None,
+    })
+}
+
+#[cfg(target_os = "android")]
+fn copy_last_frame_to_native_window(
+    core: &CompositorCore,
+    window: *mut AndroidNativeWindow,
+) -> i32 {
+    let Some(frame) = core.state.last_frame.as_ref() else {
+        return -1;
+    };
+    let mut buffer: AndroidNativeWindowBuffer = unsafe { zeroed() };
+    if unsafe { android_native_window_lock(window, &mut buffer, ptr::null_mut()) } != 0 {
+        return -2;
+    }
+    let result = copy_frame_to_native_window_buffer(frame, &mut buffer);
+    let posted = unsafe { android_native_window_unlock_and_post(window) };
+    if result != 0 {
+        result
+    } else if posted != 0 {
+        -7
+    } else {
+        0
+    }
+}
+
+#[cfg(target_os = "android")]
+fn copy_frame_to_native_window_buffer(
+    frame: &CommittedFrame,
+    buffer: &mut AndroidNativeWindowBuffer,
+) -> i32 {
+    const AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM: i32 = 1;
+    if buffer.bits.is_null()
+        || buffer.format != AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM
+        || buffer.width <= 0
+        || buffer.height <= 0
+        || buffer.stride < buffer.width
+    {
+        return -3;
+    }
+    let (Ok(width), Ok(height), Ok(stride)) = (
+        usize::try_from(buffer.width),
+        usize::try_from(buffer.height),
+        usize::try_from(buffer.stride),
+    ) else {
+        return -3;
+    };
+    let Some(destination_stride) = stride.checked_mul(4) else {
+        return -4;
+    };
+    let Some(destination_bytes) = destination_stride.checked_mul(height) else {
+        return -4;
+    };
+    let destination =
+        unsafe { std::slice::from_raw_parts_mut(buffer.bits.cast::<u8>(), destination_bytes) };
+    destination.fill(0);
+
+    let copy_width = width.min(frame.width as usize);
+    let copy_height = height.min(frame.height as usize);
+    let Some(source_stride) = (frame.width as usize).checked_mul(4) else {
+        return -4;
+    };
+    let Some(copy_bytes) = copy_width.checked_mul(4) else {
+        return -4;
+    };
+    for row in 0..copy_height {
+        let source_start = row * source_stride;
+        let destination_start = row * destination_stride;
+        if copy_wayland_pixels_to_android(
+            &frame.pixels[source_start..source_start + copy_bytes],
+            frame.format,
+            &mut destination[destination_start..destination_start + copy_bytes],
+        )
+        .is_err()
+        {
+            return -5;
+        }
+    }
+    0
 }
 
 #[cfg(target_os = "android")]
@@ -6146,6 +6411,7 @@ fn xdg_toplevel_ancestor_surface(xdg_surface: &XdgSurface, depth: usize) -> Opti
     }
 }
 
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 fn compose_toplevel_frame(
     state: &CompositorState,
     toplevel: &XdgToplevel,
@@ -6685,6 +6951,7 @@ impl CompositorCore {
                 .clone()
         })
     }
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     fn window_frame(&self, index: u32) -> Option<Arc<CommittedFrame>> {
         let toplevel = self.state.toplevels.get(usize::try_from(index).ok()?)?;
         compose_toplevel_frame(&self.state, toplevel)
@@ -10531,6 +10798,170 @@ pub unsafe extern "system" fn Java_org_archphene_bridge_RuntimeFdLauncher_native
     exit_code
 }
 
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeCreate(
+    environment: *mut std::ffi::c_void,
+    _owner: *mut std::ffi::c_void,
+    socket_path: jbyteArray,
+    width: i32,
+    height: i32,
+) -> i64 {
+    if !valid_launcher_surface_size(width, height) {
+        return 0;
+    }
+    let Some(socket_path) =
+        java_byte_array(environment, socket_path).and_then(|path| String::from_utf8(path).ok())
+    else {
+        return 0;
+    };
+    if socket_path.is_empty()
+        || socket_path.len() > 4096
+        || socket_path.as_bytes().contains(&0)
+        || !Path::new(&socket_path).is_absolute()
+    {
+        return 0;
+    }
+    let Ok(mut core) = CompositorCore::new() else {
+        return 0;
+    };
+    if core.bind_socket(Path::new(&socket_path)).is_err() {
+        return 0;
+    }
+    core.configure_output(width, height, 1);
+    Box::into_raw(Box::new(LauncherSurfaceCompositor {
+        core,
+        window: ptr::null_mut(),
+        last_presented_commit: u32::MAX,
+    })) as i64
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeAttachSurface(
+    environment: *mut std::ffi::c_void,
+    _owner: *mut std::ffi::c_void,
+    handle: i64,
+    surface: *mut std::ffi::c_void,
+    width: i32,
+    height: i32,
+) -> i32 {
+    let Some(compositor) = (unsafe { (handle as *mut LauncherSurfaceCompositor).as_mut() }) else {
+        return -1;
+    };
+    compositor.attach_surface(environment, surface, width, height)
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeDetachSurface(
+    _environment: *mut std::ffi::c_void,
+    _owner: *mut std::ffi::c_void,
+    handle: i64,
+) {
+    if let Some(compositor) = unsafe { (handle as *mut LauncherSurfaceCompositor).as_mut() } {
+        compositor.detach_surface();
+    }
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeDispatchAndPresent(
+    _environment: *mut std::ffi::c_void,
+    _owner: *mut std::ffi::c_void,
+    handle: i64,
+    time_millis: i32,
+) -> i32 {
+    let Some(compositor) = (unsafe { (handle as *mut LauncherSurfaceCompositor).as_mut() }) else {
+        return -1;
+    };
+    compositor.dispatch_and_present(time_millis as u32)
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeInputBatch(
+    environment: JNIEnv,
+    _owner: JObject,
+    handle: i64,
+    input: JByteBuffer,
+    record_count: i32,
+) -> i32 {
+    const RECORD_BYTES: usize = 24;
+    const MAX_RECORDS: usize = 32;
+    let (Some(compositor), Ok(record_count)) = (
+        unsafe { (handle as *mut LauncherSurfaceCompositor).as_mut() },
+        usize::try_from(record_count),
+    ) else {
+        return -1;
+    };
+    if record_count == 0 || record_count > MAX_RECORDS {
+        return -2;
+    }
+    let Ok(capacity) = environment.get_direct_buffer_capacity(&input) else {
+        return -2;
+    };
+    let Some(length) = record_count.checked_mul(RECORD_BYTES) else {
+        return -2;
+    };
+    if length > capacity {
+        return -2;
+    }
+    let Ok(address) = environment.get_direct_buffer_address(&input) else {
+        return -2;
+    };
+    if address.is_null() {
+        return -2;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(address.cast_const(), length) };
+    let mut handled = 0_i32;
+    for record in bytes.chunks_exact(RECORD_BYTES) {
+        let field = |index: usize| {
+            i32::from_le_bytes(
+                record[index * 4..index * 4 + 4]
+                    .try_into()
+                    .expect("fixed input field"),
+            )
+        };
+        let kind = field(0);
+        let a = field(1);
+        let b = field(2);
+        let c = field(3);
+        let d = field(4);
+        let accepted = match kind {
+            1 => compositor
+                .core
+                .touch_down(a, f64::from(b), f64::from(c), d as u32),
+            2 => compositor
+                .core
+                .touch_motion(a, f64::from(b), f64::from(c), d as u32),
+            3 => compositor.core.touch_up(a, b as u32),
+            4 => compositor.core.touch_cancel(),
+            5 => android_key_to_evdev(a)
+                .map_or(0, |key| compositor.core.keyboard_key(key, b != 0, c as u32)),
+            6 => compositor
+                .core
+                .pointer_motion(f64::from(a), f64::from(b), c as u32),
+            7 => compositor.core.pointer_button(a != 0, b as u32),
+            _ => 0,
+        };
+        handled = handled.saturating_add(i32::from(accepted != 0));
+    }
+    handled
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeDestroy(
+    _environment: *mut std::ffi::c_void,
+    _owner: *mut std::ffi::c_void,
+    handle: i64,
+) {
+    if handle > 0 {
+        drop(unsafe { Box::from_raw(handle as *mut LauncherSurfaceCompositor) });
+    }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_org_archphene_bridge_NativeCompositor_nativeCreate(
     environment: *mut std::ffi::c_void,
@@ -12316,6 +12747,20 @@ mod tests {
         assert_eq!(CompositorCore::keyboard_modifier_mask(&[54, 97, 100]), 13);
         assert_eq!(CompositorCore::keyboard_modifier_mask(&[24]), 0);
     }
+
+    #[test]
+    fn maps_bounded_android_hardware_keys_to_evdev() {
+        assert_eq!(android_key_to_evdev(29), Some(30));
+        assert_eq!(android_key_to_evdev(54), Some(44));
+        assert_eq!(android_key_to_evdev(7), Some(11));
+        assert_eq!(android_key_to_evdev(16), Some(10));
+        assert_eq!(android_key_to_evdev(66), Some(28));
+        assert_eq!(android_key_to_evdev(113), Some(29));
+        assert_eq!(android_key_to_evdev(142), Some(88));
+        assert_eq!(android_key_to_evdev(0), None);
+        assert_eq!(android_key_to_evdev(143), None);
+    }
+
     #[test]
     fn embeds_null_terminated_xkb_v1_keymap() {
         assert!(XKB_KEYMAP.starts_with(b"xkb_keymap {"));

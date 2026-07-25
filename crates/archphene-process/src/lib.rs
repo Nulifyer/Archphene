@@ -4,7 +4,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
@@ -29,10 +29,14 @@ pub const MAX_PTY_TRANSFER_BYTES: usize = 16 * 1024;
 pub const MAX_PTY_ROWS: u16 = MAX_ROWS;
 pub const MAX_PTY_COLUMNS: u16 = MAX_COLUMNS;
 pub const MAX_PTY_SESSIONS: usize = 4;
+pub const MAX_GUI_SESSIONS: usize = 16;
+pub const MAX_GUI_LOG_BYTES: usize = 16 * 1024;
 pub const MAX_TERMINAL_DAMAGE_BYTES: usize = MAX_DAMAGE_BYTES;
+pub const MAX_WAYLAND_DISPLAY_BYTES: usize = 64;
 
 const MAX_SYMLINKS: usize = 16;
 const MAX_SHEBANG_BYTES: usize = 256;
+const MAX_GUI_LOG_DRAIN_BYTES: usize = 64 * 1024;
 static OUTPUT_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
@@ -46,6 +50,9 @@ pub enum ProcessError {
     InvalidPtySize,
     InvalidPtyHandle,
     PtyLimit,
+    InvalidGuiHandle,
+    GuiLimit,
+    InvalidWaylandDisplay,
     UnsafeCommand(PathBuf),
     OutputLimit,
     Timeout,
@@ -68,6 +75,11 @@ impl fmt::Display for ProcessError {
             Self::InvalidPtySize => formatter.write_str("invalid terminal dimensions"),
             Self::InvalidPtyHandle => formatter.write_str("invalid or closed terminal handle"),
             Self::PtyLimit => formatter.write_str("terminal session limit reached"),
+            Self::InvalidGuiHandle => {
+                formatter.write_str("invalid or closed graphical session handle")
+            }
+            Self::GuiLimit => formatter.write_str("graphical session limit reached"),
+            Self::InvalidWaylandDisplay => formatter.write_str("invalid private Wayland display"),
             Self::UnsafeCommand(path) => {
                 write!(formatter, "unsafe Linux command: {}", path.display())
             }
@@ -224,6 +236,39 @@ impl CommandEnvironment {
         })
     }
 
+    pub fn open_gui(
+        &self,
+        command: &str,
+        arguments: &[&str],
+        wayland_display: &str,
+    ) -> Result<GuiProcess, ProcessError> {
+        validate_request(command, arguments)?;
+        validate_wayland_display(wayland_display)?;
+        let command_path = resolve_installed_command(&self.arch_root, command)?;
+        let launch = prepare_launch(&self.arch_root, command, command_path)?;
+        let (log_reader, log_writer) = UnixStream::pair()?;
+        log_reader.set_nonblocking(true)?;
+        let error_writer = log_writer.try_clone()?;
+        let log_writer: OwnedFd = log_writer.into();
+        let error_writer: OwnedFd = error_writer.into();
+        let child = self
+            .build_gui_command(&launch, arguments, wayland_display)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(log_writer))
+            .stderr(Stdio::from(error_writer))
+            .process_group(0)
+            .spawn()?;
+        Ok(GuiProcess {
+            process_group: child.id(),
+            child: Some(child),
+            exit_status: None,
+            log_reader,
+            log_bytes: [0; MAX_GUI_LOG_BYTES],
+            log_start: 0,
+            log_length: 0,
+        })
+    }
+
     fn build_command(&self, launch: &LaunchPlan, arguments: &[&str], terminal: &str) -> Command {
         let mut command = Command::new(&self.loader);
         command
@@ -266,6 +311,23 @@ impl CommandEnvironment {
             .env("ARCHPHENE_RUNTIME_COMMAND_DIR", &self.command_directory)
             .env("ARCHPHENE_RUNTIME_ROOT", &self.arch_root)
             .env("ARCHPHENE_FAKE_CHROOT", "1");
+        command
+    }
+
+    fn build_gui_command(
+        &self,
+        launch: &LaunchPlan,
+        arguments: &[&str],
+        wayland_display: &str,
+    ) -> Command {
+        let mut command = self.build_command(launch, arguments, "xterm-256color");
+        command
+            .env("WAYLAND_DISPLAY", wayland_display)
+            .env("XDG_SESSION_TYPE", "wayland")
+            .env("XDG_CURRENT_DESKTOP", "Archphene")
+            .env("GDK_BACKEND", "wayland")
+            .env("QT_QPA_PLATFORM", "wayland")
+            .env("SDL_VIDEODRIVER", "wayland");
         command
     }
 
@@ -320,6 +382,187 @@ impl CommandEnvironment {
             OUTPUT_ID.fetch_add(1, Ordering::Relaxed),
         ))
     }
+}
+
+pub struct GuiProcess {
+    process_group: u32,
+    child: Option<std::process::Child>,
+    exit_status: Option<i32>,
+    log_reader: UnixStream,
+    log_bytes: [u8; MAX_GUI_LOG_BYTES],
+    log_start: usize,
+    log_length: usize,
+}
+
+impl GuiProcess {
+    pub fn exit_status(&mut self) -> Result<Option<i32>, ProcessError> {
+        self.drain_logs()?;
+        if self.exit_status.is_none()
+            && let Some(child) = self.child.as_mut()
+            && let Some(status) = child.try_wait()?
+        {
+            // The GUI leader may exit while helper processes remain. Address
+            // the group immediately, before the leader pid can be reused.
+            let _ = system::kill_process_group(self.process_group);
+            self.exit_status = Some(exit_code(status));
+            self.child = None;
+            self.drain_logs()?;
+        }
+        Ok(self.exit_status)
+    }
+
+    pub fn read_logs(&mut self, output: &mut [u8]) -> Result<usize, ProcessError> {
+        self.drain_logs()?;
+        let length = self.log_length.min(output.len());
+        let skipped = self.log_length - length;
+        for (index, destination) in output[..length].iter_mut().enumerate() {
+            *destination = self.log_bytes[(self.log_start + skipped + index) % MAX_GUI_LOG_BYTES];
+        }
+        Ok(length)
+    }
+
+    fn drain_logs(&mut self) -> Result<(), ProcessError> {
+        let mut chunk = [0_u8; 4096];
+        let mut drained = 0_usize;
+        while drained < MAX_GUI_LOG_DRAIN_BYTES {
+            let remaining = MAX_GUI_LOG_DRAIN_BYTES - drained;
+            let read_length = remaining.min(chunk.len());
+            match self.log_reader.read(&mut chunk[..read_length]) {
+                Ok(0) => return Ok(()),
+                Ok(length) => {
+                    self.append_logs(&chunk[..length]);
+                    drained += length;
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+                Err(error) => return Err(ProcessError::Io(error)),
+            }
+        }
+        Ok(())
+    }
+
+    fn append_logs(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            if self.log_length < MAX_GUI_LOG_BYTES {
+                let index = (self.log_start + self.log_length) % MAX_GUI_LOG_BYTES;
+                self.log_bytes[index] = *byte;
+                self.log_length += 1;
+            } else {
+                self.log_bytes[self.log_start] = *byte;
+                self.log_start = (self.log_start + 1) % MAX_GUI_LOG_BYTES;
+            }
+        }
+    }
+
+    pub fn close(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        terminate_process_group(&mut child);
+        self.exit_status = child.wait().ok().map(exit_code);
+        let _ = self.drain_logs();
+    }
+}
+
+impl Drop for GuiProcess {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+pub struct GuiRegistry {
+    slots: [GuiSlot; MAX_GUI_SESSIONS],
+}
+
+struct GuiSlot {
+    generation: u32,
+    process: Option<Box<GuiProcess>>,
+}
+
+impl GuiRegistry {
+    pub fn new() -> Self {
+        Self {
+            slots: std::array::from_fn(|_| GuiSlot {
+                generation: 0,
+                process: None,
+            }),
+        }
+    }
+
+    pub fn open(
+        &mut self,
+        environment: &CommandEnvironment,
+        command: &str,
+        arguments: &[&str],
+        wayland_display: &str,
+    ) -> Result<u64, ProcessError> {
+        let (index, slot) = self
+            .slots
+            .iter_mut()
+            .enumerate()
+            .find(|(_, slot)| slot.process.is_none())
+            .ok_or(ProcessError::GuiLimit)?;
+        let process = environment.open_gui(command, arguments, wayland_display)?;
+        slot.generation = slot.generation.wrapping_add(1).max(1);
+        let handle = encode_gui_handle(index, slot.generation)?;
+        // Keep the fixed 16 KiB log ring with its active process rather than
+        // inflating every empty registry slot or the runtime stack frame.
+        slot.process = Some(Box::new(process));
+        Ok(handle)
+    }
+
+    pub fn exit_status(&mut self, handle: u64) -> Result<Option<i32>, ProcessError> {
+        self.process_mut(handle)?.exit_status()
+    }
+
+    pub fn read_logs(&mut self, handle: u64, output: &mut [u8]) -> Result<usize, ProcessError> {
+        self.process_mut(handle)?.read_logs(output)
+    }
+
+    pub fn close(&mut self, handle: u64) -> Result<(), ProcessError> {
+        let (index, generation) =
+            decode_gui_handle(handle).ok_or(ProcessError::InvalidGuiHandle)?;
+        let slot = self
+            .slots
+            .get_mut(index)
+            .filter(|slot| slot.generation == generation)
+            .ok_or(ProcessError::InvalidGuiHandle)?;
+        let mut process = slot.process.take().ok_or(ProcessError::InvalidGuiHandle)?;
+        process.close();
+        Ok(())
+    }
+
+    fn process_mut(&mut self, handle: u64) -> Result<&mut GuiProcess, ProcessError> {
+        let (index, generation) =
+            decode_gui_handle(handle).ok_or(ProcessError::InvalidGuiHandle)?;
+        self.slots
+            .get_mut(index)
+            .filter(|slot| slot.generation == generation)
+            .and_then(|slot| slot.process.as_deref_mut())
+            .ok_or(ProcessError::InvalidGuiHandle)
+    }
+}
+
+impl Default for GuiRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn encode_gui_handle(index: usize, generation: u32) -> Result<u64, ProcessError> {
+    let encoded_index = u32::try_from(index)
+        .ok()
+        .and_then(|value| value.checked_add(1))
+        .ok_or(ProcessError::GuiLimit)?;
+    Ok((u64::from(generation) << 32) | u64::from(encoded_index))
+}
+
+fn decode_gui_handle(handle: u64) -> Option<(usize, u32)> {
+    let encoded_index = u32::try_from(handle & u64::from(u32::MAX)).ok()?;
+    let generation = u32::try_from(handle >> 32).ok()?;
+    if encoded_index == 0 || generation == 0 {
+        return None;
+    }
+    Some((usize::try_from(encoded_index - 1).ok()?, generation))
 }
 
 #[derive(Debug)]
@@ -634,6 +877,18 @@ fn decode_pty_handle(handle: u64) -> Option<(usize, u32)> {
 fn validate_pty_size(rows: u16, columns: u16) -> Result<(), ProcessError> {
     if !(MIN_ROWS..=MAX_ROWS).contains(&rows) || !(MIN_COLUMNS..=MAX_COLUMNS).contains(&columns) {
         return Err(ProcessError::InvalidPtySize);
+    }
+    Ok(())
+}
+
+fn validate_wayland_display(display: &str) -> Result<(), ProcessError> {
+    if display.is_empty()
+        || display.len() > MAX_WAYLAND_DISPLAY_BYTES
+        || !display
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(ProcessError::InvalidWaylandDisplay);
     }
     Ok(())
 }
@@ -1158,6 +1413,21 @@ mod tests {
         assert_eq!(value("LC_ALL"), Some(OsStr::new("C.UTF-8")));
         let expected_locale_path = root.0.join("usr/lib/locale");
         assert_eq!(value("LOCPATH"), Some(expected_locale_path.as_os_str()),);
+
+        let gui = environment.build_gui_command(&launch, &["--new-window"], "launcher-7.sock");
+        let gui_value = |name: &str| {
+            gui.get_envs()
+                .find_map(|(key, value)| (key == name).then_some(value).flatten())
+        };
+        assert_eq!(
+            gui_value("WAYLAND_DISPLAY"),
+            Some(OsStr::new("launcher-7.sock")),
+        );
+        assert_eq!(gui_value("GDK_BACKEND"), Some(OsStr::new("wayland")));
+        assert_eq!(gui_value("QT_QPA_PLATFORM"), Some(OsStr::new("wayland")));
+        assert_eq!(gui_value("SDL_VIDEODRIVER"), Some(OsStr::new("wayland")));
+        assert!(validate_wayland_display("../escape").is_err());
+        assert!(validate_wayland_display("/absolute").is_err());
     }
 
     #[test]
@@ -1291,6 +1561,71 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(session.exit_status(), Some(7));
+    }
+
+    #[test]
+    fn gui_log_ring_retains_only_the_bounded_tail() {
+        let (reader, mut writer) = UnixStream::pair().expect("log pair");
+        reader.set_nonblocking(true).expect("nonblocking reader");
+        writer.write_all(&[b'a'; 32]).expect("log prefix");
+        writer
+            .write_all(&[b'b'; MAX_GUI_LOG_BYTES])
+            .expect("log tail");
+        let mut process = GuiProcess {
+            process_group: 0,
+            child: None,
+            exit_status: Some(0),
+            log_reader: reader,
+            log_bytes: [0; MAX_GUI_LOG_BYTES],
+            log_start: 0,
+            log_length: 0,
+        };
+        let mut output = [0_u8; MAX_GUI_LOG_BYTES];
+        assert_eq!(
+            process.read_logs(&mut output).expect("bounded log"),
+            MAX_GUI_LOG_BYTES
+        );
+        assert!(output.iter().all(|byte| *byte == b'b'));
+    }
+
+    #[test]
+    fn gui_leader_exit_terminates_remaining_process_group() {
+        let marker = std::env::temp_dir().join(format!(
+            "archphene-gui-descendant-{}-{}",
+            std::process::id(),
+            OUTPUT_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        let command = format!("(sleep 0.2; touch '{}') & exit 7", marker.display());
+        let (reader, writer) = UnixStream::pair().expect("log pair");
+        reader.set_nonblocking(true).expect("nonblocking reader");
+        let error_writer = writer.try_clone().expect("error writer");
+        let writer: OwnedFd = writer.into();
+        let error_writer: OwnedFd = error_writer.into();
+        let child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(command)
+            .stdout(Stdio::from(writer))
+            .stderr(Stdio::from(error_writer))
+            .process_group(0)
+            .spawn()
+            .expect("group leader");
+        let mut process = GuiProcess {
+            process_group: child.id(),
+            child: Some(child),
+            exit_status: None,
+            log_reader: reader,
+            log_bytes: [0; MAX_GUI_LOG_BYTES],
+            log_start: 0,
+            log_length: 0,
+        };
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while process.exit_status().expect("exit status").is_none() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(process.exit_status().expect("final status"), Some(7));
+        thread::sleep(Duration::from_millis(350));
+        assert!(!marker.exists(), "descendant survived its GUI leader");
+        let _ = fs::remove_file(marker);
     }
 
     #[test]

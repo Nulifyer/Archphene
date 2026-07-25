@@ -126,13 +126,27 @@ process never crosses into the wrapper UID. Binder death, wrapper force-stop,
 or an explicit close detaches the surface and applies the documented
 background/termination policy to the manager-owned process group.
 
-The first implementation slice now proves caller rejection, real
-cross-process Surface ownership, cold-runtime retry, wrapper-template
-invalidation, full-device light/dark presentation, and wrapper-death cleanup
-on the physical AArch64 target. The transferred Surface currently contains an
-authenticated manager diagnostic frame. Manager-owned Wayland presentation,
-input batches, rotation/rebind, and Linux descendant cleanup remain required
-before this session is a production Linux application host.
+The current implementation proves caller rejection, real cross-process
+Surface ownership, cold-runtime retry, wrapper-template invalidation,
+full-device light/dark presentation, and wrapper-death cleanup on the physical
+AArch64 target. Behind that Surface, the manager now owns a private Rust
+Wayland compositor, direct `ANativeWindow` SHM presentation, a bounded
+generation-checked GUI process registry, process groups, and fixed touch,
+primary-pointer, and hardware-key batches. HOME detaches presentation while
+retaining the session; resume reattaches it; Back and Binder death reap and
+remove the private endpoint. Process exit polling is kept outside the frame
+hot path, drains stdout/stderr into a fixed 16 KiB tail ring, and addresses
+remaining descendants before showing a bounded status.
+Status does not compete with native rendering for the same `Surface`: the
+manager sends authenticated one-way state callbacks and the wrapper renders an
+opaque Android overlay until the first Linux frame, or again after a stop.
+Portrait/landscape replacement and HOME/resume reattachment have been proven
+on the physical Samsung without a retained stretched buffer.
+
+The connected-device gate currently uses deliberately non-runnable discovery
+fixtures, so a real package-installed Wayland client, transformed input,
+live rotation/resize, IME, and repeated emulator coverage remain required before
+this session is a production Linux application host.
 
 ### Wayland and graphics bridge
 

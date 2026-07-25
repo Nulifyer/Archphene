@@ -157,6 +157,28 @@ class ArchpheneRuntimeService : Service() {
                 generation,
             )
 
+        internal fun openLauncherProcess(
+            androidPackage: String,
+            descriptorIdHex: String,
+            generation: Long,
+            waylandDisplay: String,
+        ): Long =
+            this@ArchpheneRuntimeService.openLauncherProcess(
+                androidPackage,
+                descriptorIdHex,
+                generation,
+                waylandDisplay,
+            )
+
+        internal fun closeLauncherProcess(launcherHandle: Long): Boolean =
+            this@ArchpheneRuntimeService.closeLauncherProcess(launcherHandle)
+
+        internal fun launcherProcessExitStatus(launcherHandle: Long): Int? =
+            this@ArchpheneRuntimeService.launcherProcessExitStatus(launcherHandle)
+
+        internal fun launcherProcessLog(launcherHandle: Long): String =
+            this@ArchpheneRuntimeService.launcherProcessLog(launcherHandle)
+
         val packagePrimaryActionLabel: String
             get() = primaryActionLabel
 
@@ -522,9 +544,12 @@ class ArchpheneRuntimeService : Service() {
     private val desktopEntryOutputBuffer =
         ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
     private val desktopEntryOutputBytes = ByteArray(NativeRuntime.PACKAGE_OUTPUT_SIZE)
-    private val launcherAuthorizationRequestBuffer = ByteBuffer.allocateDirect(192)
+    private val launcherAuthorizationRequestBuffer = ByteBuffer.allocateDirect(256)
     private val launcherAuthorizationOutputBuffer = ByteBuffer.allocateDirect(512)
     private val launcherAuthorizationOutputBytes = ByteArray(512)
+    private val launcherProcessLogBuffer =
+        ByteBuffer.allocateDirect(NativeRuntime.LAUNCHER_PROCESS_LOG_SIZE)
+    private val launcherProcessLogBytes = ByteArray(NativeRuntime.LAUNCHER_PROCESS_LOG_SIZE)
     private val shellTerminalDamageBuffer: ByteBuffer by lazy(LazyThreadSafetyMode.NONE) {
         ByteBuffer
             .allocateDirect(NativeRuntime.TERMINAL_DAMAGE_SIZE)
@@ -782,6 +807,115 @@ class ArchpheneRuntimeService : Service() {
             return null
         }
         return LauncherAuthorization(fields[2], fields[1] == "1")
+    }
+
+    @Synchronized
+    private fun openLauncherProcess(
+        androidPackage: String,
+        descriptorIdHex: String,
+        generation: Long,
+        waylandDisplay: String,
+    ): Long {
+        val activeHandle = readyHandle
+        if (
+            activeHandle == 0L ||
+            androidPackage.length != 53 ||
+            descriptorIdHex.length != 64 ||
+            generation !in 1..Int.MAX_VALUE.toLong() ||
+            waylandDisplay.isEmpty() ||
+            waylandDisplay.length > 64 ||
+            !waylandDisplay.all { character ->
+                character in 'a'..'z' ||
+                    character in 'A'..'Z' ||
+                    character in '0'..'9' ||
+                    character == '.' ||
+                    character == '_' ||
+                    character == '-'
+            }
+        ) {
+            return 0L
+        }
+        val request =
+            "G1\t$androidPackage\t$descriptorIdHex\t$generation\t$waylandDisplay\n"
+        val requestBytes = request.toByteArray(StandardCharsets.US_ASCII)
+        if (requestBytes.size > launcherAuthorizationRequestBuffer.capacity()) {
+            return 0L
+        }
+        launcherAuthorizationRequestBuffer.clear()
+        launcherAuthorizationRequestBuffer.put(requestBytes)
+        launcherAuthorizationOutputBuffer.clear()
+        val launcherHandle =
+            NativeRuntime.nativeOpenLauncherProcess(
+                activeHandle,
+                launcherAuthorizationRequestBuffer,
+                requestBytes.size,
+                launcherAuthorizationOutputBuffer,
+            )
+        if (launcherHandle <= 0L) {
+            launcherAuthorizationOutputBuffer.position(0)
+            launcherAuthorizationOutputBuffer.get(launcherAuthorizationOutputBytes)
+            val length =
+                launcherAuthorizationOutputBytes.indexOf(0).let { index ->
+                    if (index < 0) launcherAuthorizationOutputBytes.size else index
+                }
+            val detail =
+                String(
+                    launcherAuthorizationOutputBytes,
+                    0,
+                    length,
+                    StandardCharsets.UTF_8,
+                ).ifEmpty { "native result $launcherHandle" }
+            Log.e(TAG, "Could not launch graphical Linux process: $detail")
+            return 0L
+        }
+        return launcherHandle
+    }
+
+    @Synchronized
+    private fun closeLauncherProcess(launcherHandle: Long): Boolean {
+        val activeHandle = readyHandle
+        return activeHandle != 0L &&
+            launcherHandle > 0L &&
+            NativeRuntime.nativeCloseLauncherProcess(activeHandle, launcherHandle) == 0
+    }
+
+    @Synchronized
+    private fun launcherProcessExitStatus(launcherHandle: Long): Int? {
+        val activeHandle = readyHandle
+        if (activeHandle == 0L || launcherHandle <= 0L) {
+            return null
+        }
+        val encoded =
+            NativeRuntime.nativeLauncherProcessExitStatus(activeHandle, launcherHandle)
+        if (encoded < 0L) {
+            Log.w(TAG, "Could not read graphical Linux process status: native result $encoded")
+            return null
+        }
+        if (encoded and 1L == 0L) {
+            return null
+        }
+        return (encoded ushr 1).toInt()
+    }
+
+    @Synchronized
+    private fun launcherProcessLog(launcherHandle: Long): String {
+        val activeHandle = readyHandle
+        if (activeHandle == 0L || launcherHandle <= 0L) {
+            return ""
+        }
+        launcherProcessLogBuffer.clear()
+        val length =
+            NativeRuntime.nativeReadLauncherProcessLog(
+                activeHandle,
+                launcherHandle,
+                launcherProcessLogBuffer,
+            )
+        if (length <= 0 || length > launcherProcessLogBytes.size) {
+            return ""
+        }
+        launcherProcessLogBuffer.position(0)
+        launcherProcessLogBuffer.get(launcherProcessLogBytes, 0, length)
+        return String(launcherProcessLogBytes, 0, length, StandardCharsets.UTF_8)
     }
 
     override fun onStartCommand(
