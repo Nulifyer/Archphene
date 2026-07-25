@@ -66,11 +66,16 @@
     <string name="package_activity_heading">Recent package activity</string>
     <string name="package_job_unavailable">Package operation unavailable</string>
     <string name="package_search_prompt">Search the official Arch repositories</string>
-    <string name="session_channel_name">Linux sessions</string>
-    <string name="session_channel_description">Keeps user-started Archphene sessions running</string>
+    <string name="session_channel_name">Linux activity</string>
+    <string name="session_channel_description">Keeps user-started Archphene work running</string>
     <string name="session_notification_title">Archphene Linux session</string>
     <string name="session_notification_starting">Starting the shared shell</string>
     <string name="session_notification_running">Shared shell is running</string>
     <string name="session_notification_stop">Stop</string>
+    <string name="work_notification_title">Archphene is working</string>
+    <string name="work_notification_packages">Package operation in progress</string>
+    <string name="work_notification_catalogs">Refreshing package catalogs</string>
+    <string name="work_notification_command">Linux command is running</string>
+    <string name="work_notification_storage">Moving files between Android and Linux</string>
     <string name="session_interrupted">The previous Linux session was interrupted. Start a new shell to continue in the same Home.</string>
 </resources>

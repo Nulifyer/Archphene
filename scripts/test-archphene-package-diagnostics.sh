@@ -110,6 +110,13 @@ for fixture in "${cases[@]}"; do
     )"
     [[ -z "$remaining" ]] ||
       archphene_die "package cache cleanup left entries behind: $remaining"
+    archphene_adb_run shell am force-stop "$package" >/dev/null
+    archphene_adb_run shell am start -W -n "$activity" >/dev/null
+    archphene_wait_ui_exact_text \
+      "Freed 4 KiB of downloaded packages. Review before retrying." \
+      "package-diagnostics-storage-restored-$serial" 20
+    archphene_wait_ui_exact_text \
+      "Review" "package-diagnostics-storage-restored-review-$serial" 15
     sleep 1
     archphene_adb_run exec-out screencap -p \
       >"$output_dir/$serial-storage-cleaned.png"

@@ -26,6 +26,8 @@ internal class PackageJobTestReceiver : BroadcastReceiver() {
         val operation = intent.getStringExtra(EXTRA_OPERATION) ?: "install"
         val failure = intent.getStringExtra(EXTRA_FAILURE)
         val cacheFixture = intent.getBooleanExtra(EXTRA_CACHE_FIXTURE, false)
+        val cacheEntries = intent.getIntExtra(EXTRA_CACHE_ENTRIES, DEFAULT_CACHE_ENTRIES)
+        val cacheHoldMillis = intent.getIntExtra(EXTRA_CACHE_HOLD_MILLIS, 0)
         if (
             token == null ||
             !TOKEN.matches(token) ||
@@ -37,7 +39,22 @@ internal class PackageJobTestReceiver : BroadcastReceiver() {
                 failure != null &&
                     (terminalState != "failed" || failure !in FAILURE_CLASSES)
             ) ||
-            (cacheFixture && (terminalState != "failed" || failure != "storage"))
+            (
+                cacheFixture &&
+                    (
+                        terminalState != "failed" ||
+                            failure != "storage" ||
+                            cacheEntries !in DEFAULT_CACHE_ENTRIES..MAX_CACHE_ENTRIES ||
+                            cacheHoldMillis !in 0..MAX_CACHE_HOLD_MILLIS
+                    )
+            ) ||
+            (
+                !cacheFixture &&
+                    (
+                        cacheEntries != DEFAULT_CACHE_ENTRIES ||
+                            cacheHoldMillis != 0
+                    )
+            )
         ) {
             Log.e(TAG, "Rejected invalid package-job fixture")
             return
@@ -65,7 +82,18 @@ internal class PackageJobTestReceiver : BroadcastReceiver() {
                         "could not bootstrap package-job fixture root"
                     }
                     if (cacheFixture) {
-                        seedPackageCache(context)
+                        seedPackageCache(context, cacheEntries)
+                        if (cacheHoldMillis != 0) {
+                            check(
+                                context
+                                    .getSharedPreferences(TEST_PREFERENCES, Context.MODE_PRIVATE)
+                                    .edit()
+                                    .putLong(TEST_CACHE_HOLD_MILLIS, cacheHoldMillis.toLong())
+                                    .commit(),
+                            ) {
+                                "could not save package-cache completion gate"
+                            }
+                        }
                     }
                     val requestBytes = "extra\t$packageName".toByteArray(StandardCharsets.UTF_8)
                     val requestBuffer =
@@ -196,12 +224,19 @@ internal class PackageJobTestReceiver : BroadcastReceiver() {
         }
     }
 
-    private fun seedPackageCache(context: Context) {
+    private fun seedPackageCache(
+        context: Context,
+        entries: Int,
+    ) {
         val cache = File(context.filesDir, "arch-root/var/cache/pacman/pkg")
         check(cache.isDirectory) { "package cache directory is unavailable" }
         File(cache, "fixture-1.0-1-any.pkg.tar.zst").writeBytes(ByteArray(2048) { 1 })
         File(cache, "fixture-1.0-1-any.pkg.tar.zst.sig").writeBytes(ByteArray(1024) { 2 })
         File(cache, "dependency-1.0-1-any.pkg.tar.zst.part").writeBytes(ByteArray(512) { 3 })
+        val payload = ByteArray(1024) { 4 }
+        for (index in DEFAULT_CACHE_ENTRIES until entries) {
+            File(cache, "fixture-$index-1.0-1-any.pkg.tar.zst").writeBytes(payload)
+        }
     }
 
     private fun failureMessage(
@@ -243,6 +278,13 @@ internal class PackageJobTestReceiver : BroadcastReceiver() {
         private const val EXTRA_OPERATION = "operation"
         private const val EXTRA_FAILURE = "failure"
         private const val EXTRA_CACHE_FIXTURE = "cache-fixture"
+        private const val EXTRA_CACHE_ENTRIES = "cache-entries"
+        private const val EXTRA_CACHE_HOLD_MILLIS = "cache-hold-ms"
+        private const val DEFAULT_CACHE_ENTRIES = 3
+        private const val MAX_CACHE_ENTRIES = 4096
+        private const val MAX_CACHE_HOLD_MILLIS = 5_000
+        private const val TEST_PREFERENCES = "package_job_test"
+        private const val TEST_CACHE_HOLD_MILLIS = "cache_hold_ms"
         private val TOKEN = Regex("[a-z0-9-]{1,48}")
         private val PACKAGE = Regex("[a-z0-9@._+\\-]{1,96}")
         private val FAILURE_CLASSES =

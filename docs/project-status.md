@@ -141,9 +141,9 @@ progress track, and up to three bounded diagnostic lines. Its three text views
 discard stale horizontal scroll offsets during state polling. Eight
 production-classifier fixtures pass from the exact APK on the emulator and
 Samsung, with settled full-device screenshots confirming that short package
-names and the longest partial-mutation guidance remain fully on-screen. Deeper
-cache cleanup, one-tap failure-card catalog refresh, and repair/rollback tooling
-remain pending.
+names and the longest partial-mutation guidance remain fully on-screen.
+One-tap failure-card catalog refresh and repair/rollback tooling remain
+pending.
 
 Linux-storage failures now expose Clear cache before Review. The operation runs
 off the Activity thread through a dedicated Rust/JNI boundary and is limited to
@@ -153,18 +153,35 @@ or unknown names before deleting anything, then removes only recognized package
 archives, detached signatures, and partial downloads and syncs the directory.
 Installed package state, Linux home files, catalogs, and project data are
 outside the cleanup boundary. The card reports reclaimed bytes (or an empty
-cache), then advances only that durable job revision to Review; a cleanup error
-also becomes a handled attempt with restart guidance rather than inviting a
-misleading loop.
+cache), then advances only that durable job to Review; a cleanup error also
+becomes a handled attempt with restart guidance rather than inviting a
+misleading loop. Kotlin persists the bounded result against the Rust journal's
+durable job ID plus its exact terminal identity, so a cold Service restart
+restores the result while a later identical failure cannot inherit stale
+recovery.
 
 The exact APK's debug fixture creates a 4 KiB rounded archive/signature/partial
 set, invokes Clear cache from the full Android UI, verifies the directory is
-empty through the app sandbox, and captures the Clear cache and post-cleanup
-Review states on both the emulator and Samsung. Network-disabled Rust tests
-also prove fail-closed behavior when an unknown cache entry is present and
-verify that an empty cache is idempotent. Package-specific selection, broader
-disk-use controls, catalog recovery, and partial-transaction repair remain
-pending.
+empty through the app sandbox, cold-restarts the manager, and captures the
+restored post-cleanup Review state on both the emulator and Samsung.
+Network-disabled Rust tests also prove fail-closed behavior when an unknown
+cache entry is present and verify that an empty cache is idempotent.
+
+All user-started manager work now shares one Service-retention predicate:
+bootstrap, catalog refresh, search/resolution, package mutation/cache cleanup,
+bounded commands, storage import/mirroring, and the interactive shell cannot be
+torn down by Activity finish or task removal while active. Package, catalog,
+command, and storage work promote the Service to a low-priority foreground
+notification with an app-open route and package progress; a simultaneous shell
+retains its Stop action. Once the UI is gone and the final operation completes,
+the Service removes the notification and stops rather than leaking an idle
+runtime. A debug-only one-shot completion gate lets the exact APK exercise the
+real operation without slowing release code: both Pixel Launcher and Samsung
+One UI Recents gestures prove foreground promotion, active task-removal
+retention, cache completion, shutdown ordering, empty cache, exact cold-restart
+result restoration, scoped fatal logs, and visually inspected full-device
+screenshots. Package-specific selection, broader disk-use controls, catalog
+recovery, and partial-transaction repair remain pending.
 
 Visible files in the shared `/home/archphene` are now available to Android
 Files, system pickers, and explicitly granted Android consumers through an
@@ -757,7 +774,7 @@ not receive an application-specific bypass.
 | Shared runtime packs | Verified Arch dependency closures are published atomically as immutable content-addressed packs owned by the manager; an exported caller-authenticated provider grants exact read-only module URIs to the generated wrapper UID, Binder-death leases protect active wrappers, cold app-drawer relaunch loads the active pack, untrusted shell access is rejected, superseded/manual-cache unbound packs are reclaimed, and the KCalc wrapper shrank from 57 MB to 629 KB. Each launch uses an Activity-tied subreaper supervisor so daemonized GUI descendants remain owned until the complete Linux tree exits. KCalc survives rotation without duplication and leaves no Linux descendants after Back or force-stop; the runtime-FD lease/cleanup regression passes after the supervisor change. |
 | Secondary-window registry | Parent/child xdg_toplevel ownership is bounded to 32 simultaneous windows, rejects cyclic and cross-client parents, and clears destroyed-parent references. Active-window routing, composited phone policy, separate Android Dialog hosting in freeform/tablet mode, semantic child input, close, and parent restoration pass the emulator regression; current-source Samsung Mousepad also passes checkbox interaction, child close, primary restoration, and final host cleanup. |
 | Native compositor bootstrap | Rust wayland-server core cross-compiles for Android x86_64 and AArch64; registry/compositor/SHM/xdg-shell/pointer/keyboard/touch seat discovery, SCM_RIGHTS SHM and sealed XKB v1 keymap FD transfer, checked padded-stride frames, ordered xdg configure queues, partial/final acknowledgements, mapped/unmapped lifecycle enforcement, and validated xdg_positioner state/destruction, commit-gated popup configure geometry, output-bound flip/slide/resize constraint adjustment, reactive output and committed-parent-geometry reconfiguration, double-buffered xdg window geometry, popup-grab focus preservation across root commits, snapshot-and-commit wl_region input state, effective-region popup fall-through, recursive wl_subsurface composition/input with parent-atomic synchronized content/position/stack latching, input-serial grab validation, nested topmost grab stacks, root-to-popup hit testing and local-coordinate pointer/button routing, clipped stacking-order SHM popup composition with ARGB/XRGB blending, child-first idempotent popup_done/teardown with root focus and pixels restored, wl_data_device_manager same-client input-serial-gated text source/offer/selection/cancellation lifecycle plus focused descriptor-backed Android ClipboardManager transfer in both directions, zwp_text_input_v3 focus and double-buffered enable/surrounding/cursor lifecycle with Android InputConnection content-purpose mapping, arbitrary UTF-8 preedit/commit, delete, editor-action, show/hide sequencing, and invalid-input rejection, demand-driven ClipboardManager reads with self-publish suppression, inverse wl_surface buffer transform/scale with retained-source reinterpretation, accumulated logical/buffer damage translated through synchronized subsurface trees into clipped root presentation batches, double-buffered wp_viewporter crop/destination scaling, wp_fractional_scale_v1 feedback, cursor-role SHM buffers isolated from application composition with Android PointerIcon transfer, zwp_pointer_gestures_v1 swipe/pinch/hold streams, and wl_output surface-enter/mode/scale updates, with post-ack Android bitmap presentation and Choreographer-timestamped frame-callback pacing, focused pointer, wl_pointer v9 value120/relative-direction wheel axes, wl_touch motion, two-pointer gestures, and hardware-key events routed from Android input, exact wire/pixel checks, and resource teardown pass on both |
-| Package job scheduler | Per-package phase/error state and a bounded structured diagnostic history survive Activity recreation and manager process death; legacy jobs migrate without data loss, two preparation jobs can overlap, wrapper mutation/signing and Android confirmation are serialized, package failures are isolated, and list/detail progress, recent phases, cancel, retry, installer completion, and interrupted-completion reconciliation pass emulator tests |
+| Package job scheduler | Per-package phase/error state and a bounded structured diagnostic history survive Activity recreation and manager process death; legacy jobs migrate without data loss, two preparation jobs can overlap, wrapper mutation/signing and Android confirmation are serialized, and package failures are isolated. List/detail progress, recent phases, cancel, retry, installer completion, and interrupted-completion reconciliation pass emulator tests. Active foreground package work also survives real Recents dismissal, shuts down only after completion, and restores exact cache-recovery results after cold restart on both exact-ABI targets. |
 | Terminal command channel | Up to eight foreground-service-owned PTYs issue collision-free per-request pacman facade commands. Search results and durable package-job resolve/download/install/complete/cancel/error states return through a signature- and caller-verified Terminal provider. A verified Arch Bash 5.3.15 closure becomes the default shell after installation; PTY startup, `C.UTF-8`, package queries, and home writes pass on the 4 KB x86_64 emulator and physical ARM64 Samsung device. A real `tree 2.3.2` install and fresh-session execution pass on x86_64, physical AArch64 executes managed `btop 1.4.7`, and untrusted shell result injection is rejected. The 16 KB x86_64 emulator fails closed with an explicit upstream-loader compatibility result |
 | Terminal project folders | A user-selected SAF tree receives a persisted read/write grant and a stable `$HOME/Projects/<alias>` local mirror. Emulator validation covers recursive initial pull, local push, Android pull, process-restart reuse without a prompt, simultaneous-edit conflict preservation, deferred deletions, symlink rejection, mapping removal, and fail-closed access after removal |
 | Android capability broker | A randomized same-UID abstract Unix socket, bounded protocol, generated capability declarations, and ABI-specific glibc client provide Android URL opening and notification post/withdraw. Each wrapper now starts a private D-Bus session plus XDG OpenURI/Notification, classic freedesktop.org notification, and `xdg-open` adapters. A manager-generated KCalc passes contract discovery, permission-queued notification post/withdraw, HTTPS dispatch, unsafe-URI rejection, and process lifecycle on x86_64; the contract and first-use notification lifecycle also pass on physical AArch64. |

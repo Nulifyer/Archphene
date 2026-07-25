@@ -1373,12 +1373,11 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     }
 
     override fun onStop() {
-        keepServiceAfterFinish =
-            runtimeBinder?.let { binder ->
-                binder.sharedShellRunning ||
-                    binder.documentImportRunning ||
-                    binder.folderGrantRunning
-            } == true
+        val binder = runtimeBinder
+        keepServiceAfterFinish = binder?.serviceRetentionRequired == true
+        if (isFinishing && keepServiceAfterFinish) {
+            binder?.releaseWhenIdle()
+        }
         if (serviceBound) {
             unbindService(serviceConnection)
             serviceBound = false

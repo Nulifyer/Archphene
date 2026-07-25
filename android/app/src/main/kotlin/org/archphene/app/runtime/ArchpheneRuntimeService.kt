@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.content.SharedPreferences
+import android.content.pm.ApplicationInfo
 import android.content.pm.ServiceInfo
 import android.net.Uri
 import android.os.Build
@@ -93,6 +94,9 @@ class ArchpheneRuntimeService : Service() {
 
         val packageJobActivityLabel: String
             get() = jobActivityLabel
+
+        val serviceRetentionRequired: Boolean
+            get() = hasActiveRuntimeWork()
 
         val packagePrimaryActionLabel: String
             get() = primaryActionLabel
@@ -271,6 +275,10 @@ class ArchpheneRuntimeService : Service() {
 
         fun clearPackageCache(): Boolean = requestPackageCacheCleanup()
 
+        fun releaseWhenIdle() {
+            stopWhenUnobservedRequested = true
+        }
+
         fun importAndroidDocument(uri: Uri): Boolean = requestDocumentImport(uri)
 
         fun connectAndroidFolder(
@@ -341,12 +349,14 @@ class ArchpheneRuntimeService : Service() {
     private var handle = 0L
     @Volatile private var readyHandle = 0L
     private var bootstrapThread: Thread? = null
+    @Volatile private var bootstrapActive = false
     private var catalogThread: Thread? = null
     private var packageThread: Thread? = null
     private var commandThread: Thread? = null
     private var shellThread: Thread? = null
     private var storageThread: Thread? = null
     private var boundClients = 0
+    private var stopWhenUnobservedRequested = false
     @Volatile private var catalogRefreshActive = false
     @Volatile private var catalogStatus = "Package catalog not downloaded"
     @Volatile private var searchActive = false
@@ -400,6 +410,7 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var shellChoicesRevision = 0
     @Volatile private var selectedShellIndex = -1
     @Volatile private var jobStatus = "No package transaction"
+    @Volatile private var jobPersistentId = 0L
     @Volatile private var jobPackage = ""
     @Volatile private var jobOperation = 0
     @Volatile private var jobState = 0
@@ -632,16 +643,23 @@ class ArchpheneRuntimeService : Service() {
 
     override fun onBind(intent: Intent): IBinder {
         boundClients++
+        stopWhenUnobservedRequested = false
         return binder
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
         boundClients = (boundClients - 1).coerceAtLeast(0)
+        if (stopWhenUnobservedRequested) {
+            stopIfUnobservedAndIdle()
+        }
         return false
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        if (!shellActive && !storageImportActive && !folderOperationActive) {
+        stopWhenUnobservedRequested = true
+        if (hasActiveRuntimeWork()) {
+            Log.i(TAG, "Task removed; keeping active runtime work")
+        } else {
             stopSelf()
         }
         super.onTaskRemoved(rootIntent)
@@ -655,6 +673,7 @@ class ArchpheneRuntimeService : Service() {
         readyHandle = 0L
         bootstrapThread?.interrupt()
         bootstrapThread = null
+        bootstrapActive = false
         catalogThread?.interrupt()
         catalogThread = null
         packageCancellationRequested = true
@@ -698,6 +717,16 @@ class ArchpheneRuntimeService : Service() {
         private const val AVAILABLE_PACKAGE_LIMIT = 100
         private const val SHELL_PREFERENCES = "terminal"
         private const val SHELL_PREFERENCE_ID = "shared_shell_id"
+        private const val PACKAGE_RECOVERY_PREFERENCES = "package_recovery"
+        private const val PACKAGE_RECOVERY_JOB_ID = "job_id"
+        private const val PACKAGE_RECOVERY_PACKAGE = "package"
+        private const val PACKAGE_RECOVERY_OPERATION = "operation"
+        private const val PACKAGE_RECOVERY_STATE = "state"
+        private const val PACKAGE_RECOVERY_FAILURE = "failure"
+        private const val PACKAGE_RECOVERY_RESULT = "result"
+        private const val PACKAGE_JOB_TEST_PREFERENCES = "package_job_test"
+        private const val PACKAGE_JOB_TEST_CACHE_HOLD_MILLIS = "cache_hold_ms"
+        private const val MAX_PACKAGE_JOB_TEST_HOLD_MILLIS = 5_000L
         private const val SESSION_NOTIFICATION_ID = 0x4152
         private const val SESSION_NOTIFICATION_CHANNEL = "archphene_linux_sessions"
         private const val ACTION_STOP_SHELL = "org.archphene.app.action.STOP_SHARED_SHELL"
@@ -889,6 +918,7 @@ class ArchpheneRuntimeService : Service() {
         storageThread = worker
         return try {
             worker.start()
+            promoteWorkToForeground()
             true
         } catch (error: Exception) {
             storageThread = null
@@ -1095,6 +1125,7 @@ class ArchpheneRuntimeService : Service() {
         storageThread = worker
         return try {
             worker.start()
+            promoteWorkToForeground()
             true
         } catch (error: Exception) {
             storageThread = null
@@ -1393,6 +1424,7 @@ class ArchpheneRuntimeService : Service() {
         storageThread = worker
         return try {
             worker.start()
+            promoteWorkToForeground()
             true
         } catch (error: Exception) {
             storageThread = null
@@ -1411,11 +1443,7 @@ class ArchpheneRuntimeService : Service() {
         folderMirrorCancellationRequested = false
         PROCESS_STORAGE_ACTIVE.set(false)
         storageThread = null
-        mainHandler.post {
-            if (!shellActive && boundClients == 0) {
-                stopSelf()
-            }
-        }
+        stopWhenUnobservedAndIdle()
     }
 
     private fun safeTreeUri(uri: Uri): Boolean {
@@ -1590,11 +1618,7 @@ class ArchpheneRuntimeService : Service() {
                         storageImportActive = false
                         PROCESS_STORAGE_ACTIVE.set(false)
                         storageThread = null
-                        mainHandler.post {
-                            if (!shellActive && boundClients == 0) {
-                                stopSelf()
-                            }
-                        }
+                        stopWhenUnobservedAndIdle()
                     }
                 },
                 "ArchpheneImport",
@@ -1602,6 +1626,7 @@ class ArchpheneRuntimeService : Service() {
         storageThread = worker
         return try {
             worker.start()
+            promoteWorkToForeground()
             true
         } catch (error: Exception) {
             storageThread = null
@@ -1677,25 +1702,6 @@ class ArchpheneRuntimeService : Service() {
     }
 
     private fun sessionNotification(): Notification {
-        val openIntent =
-            Intent(this, MainActivity::class.java).addFlags(
-                Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP,
-            )
-        val openAction =
-            PendingIntent.getActivity(
-                this,
-                0,
-                openIntent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-            )
-        val stopIntent = Intent(this, ArchpheneRuntimeService::class.java).setAction(ACTION_STOP_SHELL)
-        val stopAction =
-            PendingIntent.getService(
-                this,
-                1,
-                stopIntent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-            )
         return Notification.Builder(this, SESSION_NOTIFICATION_CHANNEL)
             .setSmallIcon(R.drawable.ic_session_notification)
             .setContentTitle(getString(R.string.session_notification_title))
@@ -1708,7 +1714,7 @@ class ArchpheneRuntimeService : Service() {
                     },
                 ),
             )
-            .setContentIntent(openAction)
+            .setContentIntent(openRuntimeAction())
             .setCategory(Notification.CATEGORY_SERVICE)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
@@ -1717,14 +1723,78 @@ class ArchpheneRuntimeService : Service() {
                 Notification.Action.Builder(
                     null,
                     getString(R.string.session_notification_stop),
-                    stopAction,
+                    shellStopAction(),
                 ).build(),
             )
             .build()
     }
 
+    private fun workNotification(): Notification {
+        val text =
+            when {
+                packageOperationActive -> R.string.work_notification_packages
+                catalogRefreshActive -> R.string.work_notification_catalogs
+                commandActive -> R.string.work_notification_command
+                else -> R.string.work_notification_storage
+            }
+        return Notification.Builder(this, SESSION_NOTIFICATION_CHANNEL)
+            .setSmallIcon(R.drawable.ic_session_notification)
+            .setContentTitle(getString(R.string.work_notification_title))
+            .setContentText(getString(text))
+            .setContentIntent(openRuntimeAction())
+            .setCategory(Notification.CATEGORY_SERVICE)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setShowWhen(false)
+            .apply {
+                if (packageOperationActive) {
+                    setProgress(100, jobProgress, jobProgress == 0)
+                }
+                if (shellActive) {
+                    addAction(
+                        Notification.Action.Builder(
+                            null,
+                            getString(R.string.session_notification_stop),
+                            shellStopAction(),
+                        ).build(),
+                    )
+                }
+            }
+            .build()
+    }
+
+    private fun shellStopAction(): PendingIntent {
+        val stopIntent = Intent(this, ArchpheneRuntimeService::class.java).setAction(ACTION_STOP_SHELL)
+        return PendingIntent.getService(
+            this,
+            1,
+            stopIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+    }
+
+    private fun openRuntimeAction(): PendingIntent {
+        val openIntent =
+            Intent(this, MainActivity::class.java).addFlags(
+                Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP,
+            )
+        return PendingIntent.getActivity(
+            this,
+            0,
+            openIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+    }
+
     private fun promoteSessionToForeground() {
-        val notification = sessionNotification()
+        promoteToForeground(activeForegroundNotification())
+    }
+
+    private fun promoteWorkToForeground() {
+        promoteToForeground(activeForegroundNotification())
+    }
+
+    private fun promoteToForeground(notification: Notification) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(
                 SESSION_NOTIFICATION_ID,
@@ -1734,18 +1804,42 @@ class ArchpheneRuntimeService : Service() {
         } else {
             startForeground(SESSION_NOTIFICATION_ID, notification)
         }
+        Log.i(TAG, "Foreground runtime notification active")
     }
 
     private fun updateSessionNotification() {
         getSystemService(NotificationManager::class.java)
-            ?.notify(SESSION_NOTIFICATION_ID, sessionNotification())
+            ?.notify(SESSION_NOTIFICATION_ID, activeForegroundNotification())
     }
+
+    private fun reconcileForegroundNotification() {
+        if (shellActive || hasForegroundWork()) {
+            updateSessionNotification()
+        } else {
+            removeSessionNotification()
+        }
+    }
+
+    private fun activeForegroundNotification(): Notification =
+        if (hasForegroundWork()) {
+            workNotification()
+        } else {
+            sessionNotification()
+        }
+
+    private fun hasForegroundWork(): Boolean =
+        catalogRefreshActive ||
+            packageOperationActive ||
+            commandActive ||
+            storageImportActive ||
+            folderOperationActive
 
     private fun removeSessionNotification() {
         stopForeground(STOP_FOREGROUND_REMOVE)
     }
 
     private fun startBootstrap(activeHandle: Long) {
+        bootstrapActive = true
         bootstrapThread =
             Thread(
                 {
@@ -1773,6 +1867,7 @@ class ArchpheneRuntimeService : Service() {
                         refreshInstalledPackages(activeHandle)
                         refreshShellChoices(activeHandle)
                         jobStatus = readLatestPackageJob(activeHandle)
+                        restorePackageCacheRecovery()
                         mainHandler.post {
                             if (handle != activeHandle) {
                                 return@post
@@ -1800,6 +1895,12 @@ class ArchpheneRuntimeService : Service() {
                                 Log.e(TAG, "Runtime bootstrap failed", error)
                                 stopSelf()
                             }
+                        }
+                    } finally {
+                        mainHandler.post {
+                            bootstrapActive = false
+                            bootstrapThread = null
+                            stopIfUnobservedAndIdle()
                         }
                     }
                 },
@@ -2042,10 +2143,12 @@ class ArchpheneRuntimeService : Service() {
                     } finally {
                         catalogRefreshActive = false
                         catalogThread = null
+                        stopWhenUnobservedAndIdle()
                     }
                 },
                 "ArchpheneCatalog",
             ).also(Thread::start)
+        promoteWorkToForeground()
         return true
     }
 
@@ -2233,6 +2336,7 @@ class ArchpheneRuntimeService : Service() {
                     Log.e(TAG, "Package search failed", error)
                 } finally {
                     searchActive = false
+                    stopWhenUnobservedAndIdle()
                 }
             },
             "ArchpheneSearch",
@@ -2433,6 +2537,7 @@ class ArchpheneRuntimeService : Service() {
                     Log.e(TAG, "Package resolution failed", error)
                 } finally {
                     searchActive = false
+                    stopWhenUnobservedAndIdle()
                 }
             },
             "ArchpheneResolve",
@@ -2656,6 +2761,7 @@ class ArchpheneRuntimeService : Service() {
             jobStatus = "Could not queue install: ${readNativeMessage(outputBuffer, jobId)}"
             return false
         }
+        jobPersistentId = jobId
         packageCancellationRequested = false
         packageOperationCancelable = true
         packageOperationActive = true
@@ -2857,11 +2963,13 @@ class ArchpheneRuntimeService : Service() {
                         packageCancellationRequested = false
                         packageOperationActive = false
                         packageThread = null
+                        stopWhenUnobservedAndIdle()
                     }
                 },
                 "ArchpheneInstall",
             )
         schedulePackageWorker(worker, activeHandle)
+        promoteWorkToForeground()
         return true
     }
 
@@ -2924,6 +3032,7 @@ class ArchpheneRuntimeService : Service() {
             jobStatus = "Could not queue removal: ${readNativeMessage(outputBuffer, jobId)}"
             return false
         }
+        jobPersistentId = jobId
         packageCancellationRequested = false
         packageOperationCancelable = true
         packageOperationActive = true
@@ -3075,11 +3184,13 @@ class ArchpheneRuntimeService : Service() {
                         packageCancellationRequested = false
                         packageOperationActive = false
                         packageThread = null
+                        stopWhenUnobservedAndIdle()
                     }
                 },
                 "ArchpheneRemove",
             )
         schedulePackageWorker(worker, activeHandle)
+        promoteWorkToForeground()
         return true
     }
 
@@ -3107,6 +3218,11 @@ class ArchpheneRuntimeService : Service() {
     private fun requestPackageCacheCleanup(): Boolean {
         val activeHandle = readyHandle
         val recoveryRevision = jobRevision
+        val recoveryJobId = jobPersistentId
+        val recoveryPackage = jobPackage
+        val recoveryOperation = jobOperation
+        val recoveryState = jobState
+        val recoveryFailure = jobMessage
         if (activeHandle == 0L || !packageCacheRecoveryReady()) {
             return false
         }
@@ -3119,6 +3235,7 @@ class ArchpheneRuntimeService : Service() {
             Thread(
                 {
                     try {
+                        holdDebugPackageCacheCleanup()
                         val outputBuffer =
                             ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
                         val reclaimedBytes =
@@ -3129,8 +3246,7 @@ class ArchpheneRuntimeService : Service() {
                             )
                         }
                         if (jobRevision == recoveryRevision) {
-                            packageCacheRecoveryHandledJobRevision = recoveryRevision
-                            packageRecoveryMessage =
+                            val recoveryResult =
                                 if (reclaimedBytes == 0L) {
                                     "No cached downloads could be freed. " +
                                         "Free Android storage, then Review."
@@ -3138,17 +3254,40 @@ class ArchpheneRuntimeService : Service() {
                                     "Freed ${formatStorageBytes(reclaimedBytes)} of downloaded " +
                                         "packages. Review before retrying."
                                 }
+                            require(
+                                persistPackageCacheRecovery(
+                                    recoveryJobId,
+                                    recoveryPackage,
+                                    recoveryOperation,
+                                    recoveryState,
+                                    recoveryFailure,
+                                    recoveryResult,
+                                ),
+                            ) {
+                                "Could not save the cache cleanup result"
+                            }
+                            packageCacheRecoveryHandledJobRevision = recoveryRevision
+                            packageRecoveryMessage = recoveryResult
                         }
                         Log.i(TAG, "Cleared $reclaimedBytes bytes from the package cache")
                     } catch (error: Exception) {
                         if (jobRevision == recoveryRevision) {
-                            packageCacheRecoveryHandledJobRevision = recoveryRevision
-                            packageRecoveryMessage =
+                            val recoveryResult =
                                 boundedJobMessage(
                                     "Cache cleanup failed: " +
                                         (error.message ?: error.javaClass.simpleName) +
                                         ". Restart Archphene, then Review.",
                                 )
+                            persistPackageCacheRecovery(
+                                recoveryJobId,
+                                recoveryPackage,
+                                recoveryOperation,
+                                recoveryState,
+                                recoveryFailure,
+                                recoveryResult,
+                            )
+                            packageCacheRecoveryHandledJobRevision = recoveryRevision
+                            packageRecoveryMessage = recoveryResult
                         }
                         Log.e(TAG, "Package cache cleanup failed", error)
                     } finally {
@@ -3160,13 +3299,31 @@ class ArchpheneRuntimeService : Service() {
                                 packageThread = null
                             }
                         }
+                        stopWhenUnobservedAndIdle()
                     }
                 },
                 "ArchphenePackageCache",
             )
         packageThread = worker
         worker.start()
+        promoteWorkToForeground()
         return true
+    }
+
+    private fun holdDebugPackageCacheCleanup() {
+        if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0) {
+            return
+        }
+        val preferences = getSharedPreferences(PACKAGE_JOB_TEST_PREFERENCES, MODE_PRIVATE)
+        val holdMillis =
+            preferences
+                .getLong(PACKAGE_JOB_TEST_CACHE_HOLD_MILLIS, 0L)
+                .coerceIn(0L, MAX_PACKAGE_JOB_TEST_HOLD_MILLIS)
+        if (holdMillis == 0L) {
+            return
+        }
+        preferences.edit().remove(PACKAGE_JOB_TEST_CACHE_HOLD_MILLIS).commit()
+        Thread.sleep(holdMillis)
     }
 
     @Synchronized
@@ -3269,6 +3426,14 @@ class ArchpheneRuntimeService : Service() {
             "${jobOperationName(operation)} · ${jobStateName(state)} · $jobProgress%"
         jobStatus = "$packageName · ${jobStateName(state)} · $jobProgress%\n$message"
         jobRevision++
+        if (packageThread != null) {
+            mainHandler.post {
+                if (packageOperationActive) {
+                    getSystemService(NotificationManager::class.java)
+                        ?.notify(SESSION_NOTIFICATION_ID, activeForegroundNotification())
+                }
+            }
+        }
     }
 
     private fun boundedJobMessage(message: String): String {
@@ -3318,7 +3483,8 @@ class ArchpheneRuntimeService : Service() {
             recoveryReviewedJobRevision != jobRevision
 
     private fun packageCacheRecoveryReady(): Boolean =
-        jobPackage.isNotEmpty() &&
+        jobPersistentId > 0L &&
+            jobPackage.isNotEmpty() &&
             (
                 jobState == NativeRuntime.JOB_FAILED ||
                     jobState == NativeRuntime.JOB_CANCELLED
@@ -3334,6 +3500,41 @@ class ArchpheneRuntimeService : Service() {
 
     private fun packageJobNeedsStorageRecovery(): Boolean =
         jobMessage.startsWith("Not enough Linux storage.")
+
+    private fun persistPackageCacheRecovery(
+        jobId: Long,
+        packageName: String,
+        operation: Int,
+        state: Int,
+        failure: String,
+        result: String,
+    ): Boolean =
+        getSharedPreferences(PACKAGE_RECOVERY_PREFERENCES, MODE_PRIVATE)
+            .edit()
+            .putLong(PACKAGE_RECOVERY_JOB_ID, jobId)
+            .putString(PACKAGE_RECOVERY_PACKAGE, packageName)
+            .putInt(PACKAGE_RECOVERY_OPERATION, operation)
+            .putInt(PACKAGE_RECOVERY_STATE, state)
+            .putString(PACKAGE_RECOVERY_FAILURE, failure)
+            .putString(PACKAGE_RECOVERY_RESULT, result)
+            .commit()
+
+    private fun restorePackageCacheRecovery() {
+        val preferences = getSharedPreferences(PACKAGE_RECOVERY_PREFERENCES, MODE_PRIVATE)
+        val result = preferences.getString(PACKAGE_RECOVERY_RESULT, null) ?: return
+        if (
+            preferences.getLong(PACKAGE_RECOVERY_JOB_ID, Long.MIN_VALUE) != jobPersistentId ||
+            preferences.getString(PACKAGE_RECOVERY_PACKAGE, null) != jobPackage ||
+            preferences.getInt(PACKAGE_RECOVERY_OPERATION, Int.MIN_VALUE) != jobOperation ||
+            preferences.getInt(PACKAGE_RECOVERY_STATE, Int.MIN_VALUE) != jobState ||
+            preferences.getString(PACKAGE_RECOVERY_FAILURE, null) != jobMessage
+        ) {
+            return
+        }
+        packageCacheRecoveryHandledJobRevision = jobRevision
+        packageRecoveryMessageRevision = jobRevision
+        packageRecoveryMessage = boundedJobMessage(result)
+    }
 
     private fun downloadPackagePayload(
         activeHandle: Long,
@@ -3591,10 +3792,12 @@ class ArchpheneRuntimeService : Service() {
                     } finally {
                         commandActive = false
                         commandThread = null
+                        stopWhenUnobservedAndIdle()
                     }
                 },
                 "ArchpheneCommand",
             ).also(Thread::start)
+        promoteWorkToForeground()
         return true
     }
 
@@ -3955,10 +4158,31 @@ class ArchpheneRuntimeService : Service() {
             }
             mainHandler.post {
                 removeSessionNotification()
-                if (boundClients == 0) {
-                    stopSelf()
-                }
+                stopIfUnobservedAndIdle()
             }
+        }
+    }
+
+    private fun hasActiveRuntimeWork(): Boolean =
+        bootstrapActive ||
+            catalogRefreshActive ||
+            searchActive ||
+            packageOperationActive ||
+            commandActive ||
+            shellActive ||
+            storageImportActive ||
+            folderOperationActive
+
+    private fun stopWhenUnobservedAndIdle() {
+        mainHandler.post {
+            reconcileForegroundNotification()
+            stopIfUnobservedAndIdle()
+        }
+    }
+
+    private fun stopIfUnobservedAndIdle() {
+        if (boundClients == 0 && !hasActiveRuntimeWork()) {
+            stopSelf()
         }
     }
 
@@ -4004,6 +4228,7 @@ class ArchpheneRuntimeService : Service() {
             return "Package journal unavailable: ${readNativeMessage(outputBuffer, length)}"
         }
         if (length == 0) {
+            jobPersistentId = 0L
             jobPackage = ""
             jobOperation = 0
             jobState = 0
@@ -4020,10 +4245,15 @@ class ArchpheneRuntimeService : Service() {
         if (fields.size != 9) {
             return "Package journal returned an invalid record"
         }
+        val id = fields[0].toLongOrNull() ?: return "Package journal returned invalid identifier"
+        if (id <= 0L) {
+            return "Package journal returned invalid identifier"
+        }
         val operation =
             fields[1].toIntOrNull() ?: return "Package journal returned invalid operation"
         val state = fields[2].toIntOrNull() ?: return "Package journal returned invalid state"
         val progress = fields[4].toIntOrNull() ?: return "Package journal returned invalid progress"
+        jobPersistentId = id
         publishPackageJob(fields[7], operation, state, progress, fields[8])
         return jobStatus
     }

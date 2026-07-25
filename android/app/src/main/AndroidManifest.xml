@@ -43,7 +43,7 @@
             android:stopWithTask="false">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Keeps user-started interactive Linux sessions running while the Archphene UI is not visible" />
+                android:value="Keeps user-started Linux package, command, file, and interactive session work running while the Archphene UI is not visible" />
         </service>
 
         <provider
