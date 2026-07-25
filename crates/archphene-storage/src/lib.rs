@@ -42,6 +42,12 @@ mod sys {
         fn openat(directory: c_int, path: *const c_char, flags: c_int, mode: c_uint) -> c_int;
         fn mkdirat(directory: c_int, path: *const c_char, mode: c_uint) -> c_int;
         fn unlinkat(directory: c_int, path: *const c_char, flags: c_int) -> c_int;
+        fn renameat(
+            source_directory: c_int,
+            old_name: *const c_char,
+            destination_directory: c_int,
+            new_name: *const c_char,
+        ) -> c_int;
         fn fcntl(descriptor: c_int, command: c_int, ...) -> c_int;
         fn syscall(number: c_long, ...) -> c_long;
     }
@@ -132,6 +138,29 @@ mod sys {
             Err(io::Error::last_os_error())
         }
     }
+
+    pub fn rename_replace_between(
+        source_directory: RawFd,
+        old_name: &CStr,
+        destination_directory: RawFd,
+        new_name: &CStr,
+    ) -> io::Result<()> {
+        // SAFETY: both names are NUL-terminated and remain live. The call
+        // receives valid borrowed directory descriptors for source and target.
+        if unsafe {
+            renameat(
+                source_directory,
+                old_name.as_ptr(),
+                destination_directory,
+                new_name.as_ptr(),
+            )
+        } == 0
+        {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
 }
 
 pub const HOME_DOCUMENT_ID: &str = "home";
@@ -144,11 +173,17 @@ pub const MAX_MIRROR_DEPTH: usize = 64;
 pub const MAX_MIRROR_PATH_BYTES: usize = 4 * 1024;
 pub const MAX_MIRROR_FILE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub const MAX_MIRROR_TOTAL_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+pub const MAX_SYNC_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
 
 const IMPORT_STAGING_DIRECTORY: &str = ".archphene-import";
 const IMPORT_STAGING_FILE: &str = "pending";
 const MAX_IMPORT_COLLISIONS: u32 = 999;
 const MIRROR_STAGING_DIRECTORY: &str = ".archphene-mirror-pending";
+const SYNC_MANIFEST_MAGIC: &[u8; 8] = b"ARCSYNC1";
+const SYNC_MANIFEST_VERSION: u32 = 1;
+const SYNC_MANIFEST_HEADER_BYTES: usize = 36;
+const SYNC_MANIFEST_ENTRY_HEADER_BYTES: usize = 44;
+const SYNC_STATE_DIRECTORY: &[&str] = &["var", "lib", "archphene", "storage"];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OpenMode {
@@ -169,6 +204,8 @@ pub enum StorageError {
     MirrorBusy,
     MirrorExists,
     MirrorTooLarge,
+    InvalidManifest,
+    ManifestTooLarge,
     Io(io::Error),
 }
 
@@ -186,6 +223,10 @@ impl fmt::Display for StorageError {
             Self::MirrorBusy => formatter.write_str("another project mirror is incomplete"),
             Self::MirrorExists => formatter.write_str("the Linux project path already exists"),
             Self::MirrorTooLarge => formatter.write_str("Android project mirror exceeds its limit"),
+            Self::InvalidManifest => formatter.write_str("project sync manifest is invalid"),
+            Self::ManifestTooLarge => {
+                formatter.write_str("project sync manifest exceeds its limit")
+            }
             Self::Io(error) => write!(formatter, "Archphene document I/O error: {error}"),
         }
     }
@@ -248,6 +289,245 @@ pub enum SyncAction {
     PreserveConflict,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SyncManifestEntry {
+    pub path: String,
+    pub fingerprint: SyncFingerprint,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SyncManifest {
+    mapping_id: [u8; 16],
+    project_name: String,
+    entries: Vec<SyncManifestEntry>,
+}
+
+impl SyncManifest {
+    pub fn new(
+        mapping_id: [u8; 16],
+        project_name: String,
+        mut entries: Vec<SyncManifestEntry>,
+    ) -> Result<Self, StorageError> {
+        if mapping_id == [0; 16] {
+            return Err(StorageError::InvalidManifest);
+        }
+        validate_visible_name(&project_name).map_err(|_| StorageError::InvalidManifest)?;
+        entries.sort_unstable_by(|left, right| left.path.as_bytes().cmp(right.path.as_bytes()));
+        validate_manifest_entries(&entries)?;
+        Ok(Self {
+            mapping_id,
+            project_name,
+            entries,
+        })
+    }
+
+    pub fn mapping_id(&self) -> [u8; 16] {
+        self.mapping_id
+    }
+
+    pub fn project_name(&self) -> &str {
+        &self.project_name
+    }
+
+    pub fn entries(&self) -> &[SyncManifestEntry] {
+        &self.entries
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, StorageError> {
+        validate_visible_name(&self.project_name).map_err(|_| StorageError::InvalidManifest)?;
+        validate_manifest_entries(&self.entries)?;
+        let project_bytes = self.project_name.as_bytes();
+        let project_length =
+            u16::try_from(project_bytes.len()).map_err(|_| StorageError::InvalidManifest)?;
+        let entry_count =
+            u32::try_from(self.entries.len()).map_err(|_| StorageError::ManifestTooLarge)?;
+        let mut length = SYNC_MANIFEST_HEADER_BYTES
+            .checked_add(project_bytes.len())
+            .ok_or(StorageError::ManifestTooLarge)?;
+        for entry in &self.entries {
+            length = length
+                .checked_add(SYNC_MANIFEST_ENTRY_HEADER_BYTES)
+                .and_then(|value| value.checked_add(entry.path.len()))
+                .ok_or(StorageError::ManifestTooLarge)?;
+        }
+        if length > MAX_SYNC_MANIFEST_BYTES {
+            return Err(StorageError::ManifestTooLarge);
+        }
+
+        let mut output = Vec::with_capacity(length);
+        output.extend_from_slice(SYNC_MANIFEST_MAGIC);
+        output.extend_from_slice(&SYNC_MANIFEST_VERSION.to_le_bytes());
+        output.extend_from_slice(&entry_count.to_le_bytes());
+        output.extend_from_slice(&self.mapping_id);
+        output.extend_from_slice(&project_length.to_le_bytes());
+        output.extend_from_slice(&0_u16.to_le_bytes());
+        output.extend_from_slice(project_bytes);
+        for entry in &self.entries {
+            let path_length =
+                u16::try_from(entry.path.len()).map_err(|_| StorageError::InvalidManifest)?;
+            output.extend_from_slice(&path_length.to_le_bytes());
+            output.push(match entry.fingerprint.kind {
+                SyncEntryKind::Directory => 1,
+                SyncEntryKind::File => 2,
+            });
+            output.push(0);
+            output.extend_from_slice(&entry.fingerprint.bytes.to_le_bytes());
+            output.extend_from_slice(&entry.fingerprint.sha256);
+            output.extend_from_slice(entry.path.as_bytes());
+        }
+        debug_assert_eq!(output.len(), length);
+        Ok(output)
+    }
+
+    pub fn decode(input: &[u8]) -> Result<Self, StorageError> {
+        if input.len() < SYNC_MANIFEST_HEADER_BYTES || input.len() > MAX_SYNC_MANIFEST_BYTES {
+            return Err(StorageError::InvalidManifest);
+        }
+        let mut cursor = 0;
+        if take_manifest_bytes(input, &mut cursor, 8)? != SYNC_MANIFEST_MAGIC {
+            return Err(StorageError::InvalidManifest);
+        }
+        if take_manifest_u32(input, &mut cursor)? != SYNC_MANIFEST_VERSION {
+            return Err(StorageError::InvalidManifest);
+        }
+        let entry_count = take_manifest_u32(input, &mut cursor)? as usize;
+        if entry_count > MAX_MIRROR_ENTRIES as usize {
+            return Err(StorageError::ManifestTooLarge);
+        }
+        let mut mapping_id = [0_u8; 16];
+        mapping_id.copy_from_slice(take_manifest_bytes(input, &mut cursor, 16)?);
+        if mapping_id == [0; 16] {
+            return Err(StorageError::InvalidManifest);
+        }
+        let project_length = take_manifest_u16(input, &mut cursor)? as usize;
+        if take_manifest_u16(input, &mut cursor)? != 0 {
+            return Err(StorageError::InvalidManifest);
+        }
+        let project_name =
+            std::str::from_utf8(take_manifest_bytes(input, &mut cursor, project_length)?)
+                .map_err(|_| StorageError::InvalidManifest)?
+                .to_owned();
+        validate_visible_name(&project_name).map_err(|_| StorageError::InvalidManifest)?;
+
+        let mut entries = Vec::with_capacity(entry_count);
+        for _ in 0..entry_count {
+            let path_length = take_manifest_u16(input, &mut cursor)? as usize;
+            let kind = match take_manifest_bytes(input, &mut cursor, 1)?[0] {
+                1 => SyncEntryKind::Directory,
+                2 => SyncEntryKind::File,
+                _ => return Err(StorageError::InvalidManifest),
+            };
+            if take_manifest_bytes(input, &mut cursor, 1)?[0] != 0 {
+                return Err(StorageError::InvalidManifest);
+            }
+            let bytes = take_manifest_u64(input, &mut cursor)?;
+            let mut sha256 = [0_u8; 32];
+            sha256.copy_from_slice(take_manifest_bytes(input, &mut cursor, 32)?);
+            let path = std::str::from_utf8(take_manifest_bytes(input, &mut cursor, path_length)?)
+                .map_err(|_| StorageError::InvalidManifest)?
+                .to_owned();
+            entries.push(SyncManifestEntry {
+                path,
+                fingerprint: SyncFingerprint {
+                    kind,
+                    bytes,
+                    sha256,
+                },
+            });
+        }
+        if cursor != input.len() {
+            return Err(StorageError::InvalidManifest);
+        }
+        validate_manifest_entries(&entries)?;
+        Ok(Self {
+            mapping_id,
+            project_name,
+            entries,
+        })
+    }
+}
+
+pub fn persist_sync_manifest(
+    arch_root: &Path,
+    manifest: &SyncManifest,
+) -> Result<(), StorageError> {
+    let encoded = manifest.encode()?;
+    let directory = open_directory(arch_root, SYNC_STATE_DIRECTORY)?;
+    let (final_name, temporary_name) = manifest_file_names(manifest.mapping_id)?;
+    validate_manifest_state_entry(&directory, &final_name)?;
+    if validate_manifest_state_entry(&directory, &temporary_name)? {
+        sys::unlink_at(directory.as_raw_fd(), &temporary_name, false)?;
+        directory.sync_all()?;
+    }
+    let mut temporary = sys::open_at(
+        directory.as_raw_fd(),
+        &temporary_name,
+        sys::O_WRONLY | sys::O_CREAT | sys::O_EXCL | sys::O_CLOEXEC | sys::O_NOFOLLOW,
+        0o600,
+    )?;
+    let result = (|| {
+        temporary.write_all(&encoded)?;
+        temporary.sync_all()?;
+        Ok::<(), StorageError>(())
+    })();
+    drop(temporary);
+    if let Err(error) = result {
+        let _ = sys::unlink_at(directory.as_raw_fd(), &temporary_name, false);
+        let _ = directory.sync_all();
+        return Err(error);
+    }
+    sys::rename_replace_between(
+        directory.as_raw_fd(),
+        &temporary_name,
+        directory.as_raw_fd(),
+        &final_name,
+    )?;
+    // The rename is the commit point. Do not report a failed update after the
+    // new canonical manifest is already visible.
+    let _ = directory.sync_all();
+    Ok(())
+}
+
+pub fn load_sync_manifest(
+    arch_root: &Path,
+    mapping_id: [u8; 16],
+) -> Result<Option<SyncManifest>, StorageError> {
+    if mapping_id == [0; 16] {
+        return Err(StorageError::InvalidManifest);
+    }
+    let directory = open_directory(arch_root, SYNC_STATE_DIRECTORY)?;
+    let (final_name, _) = manifest_file_names(mapping_id)?;
+    let file = match sys::open_at(
+        directory.as_raw_fd(),
+        &final_name,
+        sys::O_RDONLY | sys::O_CLOEXEC | sys::O_NOFOLLOW | sys::O_NONBLOCK,
+        0,
+    ) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(StorageError::InvalidManifest),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.len() < SYNC_MANIFEST_HEADER_BYTES as u64
+        || metadata.len() > MAX_SYNC_MANIFEST_BYTES as u64
+    {
+        return Err(StorageError::InvalidManifest);
+    }
+    let length = usize::try_from(metadata.len()).map_err(|_| StorageError::ManifestTooLarge)?;
+    let mut encoded = Vec::with_capacity(length);
+    file.take((MAX_SYNC_MANIFEST_BYTES + 1) as u64)
+        .read_to_end(&mut encoded)?;
+    if encoded.len() != length {
+        return Err(StorageError::InvalidManifest);
+    }
+    let manifest = SyncManifest::decode(&encoded)?;
+    if manifest.mapping_id != mapping_id {
+        return Err(StorageError::InvalidManifest);
+    }
+    Ok(Some(manifest))
+}
+
 pub fn decide_sync_action(
     baseline: Option<SyncFingerprint>,
     linux: Option<SyncFingerprint>,
@@ -279,6 +559,116 @@ pub fn decide_sync_action(
         };
     }
     SyncAction::PreserveConflict
+}
+
+fn manifest_file_names(mapping_id: [u8; 16]) -> Result<(CString, CString), StorageError> {
+    if mapping_id == [0; 16] {
+        return Err(StorageError::InvalidManifest);
+    }
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut identifier = String::with_capacity(32);
+    for byte in mapping_id {
+        identifier.push(HEX[(byte >> 4) as usize] as char);
+        identifier.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    let final_name =
+        CString::new(format!("{identifier}.v1")).map_err(|_| StorageError::InvalidManifest)?;
+    let temporary_name =
+        CString::new(format!(".{identifier}.tmp")).map_err(|_| StorageError::InvalidManifest)?;
+    Ok((final_name, temporary_name))
+}
+
+fn validate_manifest_state_entry(directory: &File, name: &CString) -> Result<bool, StorageError> {
+    match sys::open_at(
+        directory.as_raw_fd(),
+        name,
+        sys::O_RDONLY | sys::O_CLOEXEC | sys::O_NOFOLLOW | sys::O_NONBLOCK,
+        0,
+    ) {
+        Ok(file) => {
+            let metadata = file.metadata()?;
+            if !metadata.is_file() || metadata.len() > MAX_SYNC_MANIFEST_BYTES as u64 {
+                return Err(StorageError::InvalidManifest);
+            }
+            Ok(true)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(StorageError::InvalidManifest),
+    }
+}
+
+fn validate_manifest_entries(entries: &[SyncManifestEntry]) -> Result<(), StorageError> {
+    if entries.len() > MAX_MIRROR_ENTRIES as usize {
+        return Err(StorageError::ManifestTooLarge);
+    }
+    let mut previous: Option<&[u8]> = None;
+    let mut encoded_bytes = SYNC_MANIFEST_HEADER_BYTES;
+    let mut content_bytes = 0_u64;
+    for entry in entries {
+        parse_mirror_path(&entry.path).map_err(|_| StorageError::InvalidManifest)?;
+        let path = entry.path.as_bytes();
+        if previous.is_some_and(|value| value >= path) {
+            return Err(StorageError::InvalidManifest);
+        }
+        if entry.fingerprint.kind == SyncEntryKind::Directory
+            && (entry.fingerprint.bytes != 0 || entry.fingerprint.sha256 != [0; 32])
+        {
+            return Err(StorageError::InvalidManifest);
+        }
+        if entry.fingerprint.kind == SyncEntryKind::File {
+            if entry.fingerprint.bytes > MAX_MIRROR_FILE_BYTES {
+                return Err(StorageError::ManifestTooLarge);
+            }
+            content_bytes = content_bytes
+                .checked_add(entry.fingerprint.bytes)
+                .ok_or(StorageError::ManifestTooLarge)?;
+            if content_bytes > MAX_MIRROR_TOTAL_BYTES {
+                return Err(StorageError::ManifestTooLarge);
+            }
+        }
+        encoded_bytes = encoded_bytes
+            .checked_add(SYNC_MANIFEST_ENTRY_HEADER_BYTES)
+            .and_then(|value| value.checked_add(path.len()))
+            .ok_or(StorageError::ManifestTooLarge)?;
+        if encoded_bytes > MAX_SYNC_MANIFEST_BYTES {
+            return Err(StorageError::ManifestTooLarge);
+        }
+        previous = Some(path);
+    }
+    Ok(())
+}
+
+fn take_manifest_bytes<'a>(
+    input: &'a [u8],
+    cursor: &mut usize,
+    count: usize,
+) -> Result<&'a [u8], StorageError> {
+    let end = cursor
+        .checked_add(count)
+        .ok_or(StorageError::InvalidManifest)?;
+    let value = input
+        .get(*cursor..end)
+        .ok_or(StorageError::InvalidManifest)?;
+    *cursor = end;
+    Ok(value)
+}
+
+fn take_manifest_u16(input: &[u8], cursor: &mut usize) -> Result<u16, StorageError> {
+    let mut bytes = [0_u8; 2];
+    bytes.copy_from_slice(take_manifest_bytes(input, cursor, 2)?);
+    Ok(u16::from_le_bytes(bytes))
+}
+
+fn take_manifest_u32(input: &[u8], cursor: &mut usize) -> Result<u32, StorageError> {
+    let mut bytes = [0_u8; 4];
+    bytes.copy_from_slice(take_manifest_bytes(input, cursor, 4)?);
+    Ok(u32::from_le_bytes(bytes))
+}
+
+fn take_manifest_u64(input: &[u8], cursor: &mut usize) -> Result<u64, StorageError> {
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(take_manifest_bytes(input, cursor, 8)?);
+    Ok(u64::from_le_bytes(bytes))
 }
 
 impl MirrorImport {
@@ -1156,6 +1546,177 @@ mod tests {
         assert_eq!(
             decide_sync_action(Some(DIRECTORY), Some(FILE), None),
             SyncAction::PreserveConflict,
+        );
+    }
+
+    #[test]
+    fn sync_manifest_is_canonical_bounded_and_round_trips_dotfiles() {
+        let manifest = SyncManifest::new(
+            [7; 16],
+            "AndroidProject".to_owned(),
+            vec![
+                SyncManifestEntry {
+                    path: "src/main.rs".to_owned(),
+                    fingerprint: SyncFingerprint::file(13, [3; 32]),
+                },
+                SyncManifestEntry {
+                    path: ".git/config".to_owned(),
+                    fingerprint: SyncFingerprint::file(7, [2; 32]),
+                },
+                SyncManifestEntry {
+                    path: ".git".to_owned(),
+                    fingerprint: SyncFingerprint::directory(),
+                },
+            ],
+        )
+        .expect("manifest");
+        assert_eq!(manifest.mapping_id(), [7; 16]);
+        assert_eq!(manifest.project_name(), "AndroidProject");
+        assert_eq!(
+            manifest
+                .entries()
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>(),
+            [".git", ".git/config", "src/main.rs"],
+        );
+
+        let encoded = manifest.encode().expect("encode");
+        assert!(encoded.len() < MAX_SYNC_MANIFEST_BYTES);
+        assert_eq!(SyncManifest::decode(&encoded).expect("decode"), manifest);
+    }
+
+    #[test]
+    fn sync_manifest_rejects_duplicates_invalid_metadata_and_corruption() {
+        assert!(matches!(
+            SyncManifest::new([0; 16], "Project".to_owned(), Vec::new()),
+            Err(StorageError::InvalidManifest),
+        ));
+        let duplicate = vec![
+            SyncManifestEntry {
+                path: "same".to_owned(),
+                fingerprint: SyncFingerprint::file(1, [1; 32]),
+            },
+            SyncManifestEntry {
+                path: "same".to_owned(),
+                fingerprint: SyncFingerprint::file(1, [1; 32]),
+            },
+        ];
+        assert!(matches!(
+            SyncManifest::new([1; 16], "Project".to_owned(), duplicate),
+            Err(StorageError::InvalidManifest),
+        ));
+        assert!(matches!(
+            SyncManifest::new(
+                [1; 16],
+                "Project".to_owned(),
+                vec![SyncManifestEntry {
+                    path: "directory".to_owned(),
+                    fingerprint: SyncFingerprint {
+                        kind: SyncEntryKind::Directory,
+                        bytes: 1,
+                        sha256: [0; 32],
+                    },
+                }],
+            ),
+            Err(StorageError::InvalidManifest),
+        ));
+
+        let manifest = SyncManifest::new(
+            [2; 16],
+            "Project".to_owned(),
+            vec![SyncManifestEntry {
+                path: "file".to_owned(),
+                fingerprint: SyncFingerprint::file(4, [4; 32]),
+            }],
+        )
+        .expect("manifest");
+        let encoded = manifest.encode().expect("encode");
+        for mutation in [
+            (0, b'X'),
+            (8, 2),
+            (SYNC_MANIFEST_HEADER_BYTES + "Project".len() + 2, 9),
+            (SYNC_MANIFEST_HEADER_BYTES + "Project".len() + 3, 1),
+        ] {
+            let mut corrupt = encoded.clone();
+            corrupt[mutation.0] = mutation.1;
+            assert!(
+                SyncManifest::decode(&corrupt).is_err(),
+                "mutation={mutation:?}",
+            );
+        }
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert!(matches!(
+            SyncManifest::decode(&trailing),
+            Err(StorageError::InvalidManifest),
+        ));
+    }
+
+    #[test]
+    fn sync_manifest_store_recovers_temp_and_atomically_replaces() {
+        let root = TestDirectory::new();
+        fs::create_dir_all(root.0.join("var/lib/archphene/storage")).expect("state directory");
+        let first = SyncManifest::new(
+            [9; 16],
+            "Project".to_owned(),
+            vec![SyncManifestEntry {
+                path: "first".to_owned(),
+                fingerprint: SyncFingerprint::file(5, [1; 32]),
+            }],
+        )
+        .expect("first");
+        persist_sync_manifest(&root.0, &first).expect("persist first");
+        assert_eq!(
+            load_sync_manifest(&root.0, [9; 16]).expect("load first"),
+            Some(first),
+        );
+
+        let state = root.0.join("var/lib/archphene/storage");
+        let identifier = "09".repeat(16);
+        fs::write(state.join(format!(".{identifier}.tmp")), b"interrupted")
+            .expect("stale temporary");
+        let second = SyncManifest::new(
+            [9; 16],
+            "Project".to_owned(),
+            vec![SyncManifestEntry {
+                path: "second".to_owned(),
+                fingerprint: SyncFingerprint::file(6, [2; 32]),
+            }],
+        )
+        .expect("second");
+        persist_sync_manifest(&root.0, &second).expect("replace");
+        assert_eq!(
+            load_sync_manifest(&root.0, [9; 16]).expect("load second"),
+            Some(second),
+        );
+        assert!(!state.join(format!(".{identifier}.tmp")).exists());
+    }
+
+    #[test]
+    fn sync_manifest_store_rejects_symlinks_and_mapping_substitution() {
+        let root = TestDirectory::new();
+        let outside = TestDirectory::new();
+        let state = root.0.join("var/lib/archphene/storage");
+        fs::create_dir_all(&state).expect("state directory");
+        fs::write(outside.0.join("sentinel"), b"outside").expect("sentinel");
+        let first = SyncManifest::new([1; 16], "Project".to_owned(), Vec::new()).expect("manifest");
+        persist_sync_manifest(&root.0, &first).expect("persist");
+
+        let first_name = format!("{}.v1", "01".repeat(16));
+        let second_name = format!("{}.v1", "02".repeat(16));
+        fs::copy(state.join(&first_name), state.join(&second_name)).expect("substitute");
+        assert!(matches!(
+            load_sync_manifest(&root.0, [2; 16]),
+            Err(StorageError::InvalidManifest),
+        ));
+
+        fs::remove_file(state.join(&first_name)).expect("remove manifest");
+        symlink(&outside.0, state.join(&first_name)).expect("manifest symlink");
+        assert!(persist_sync_manifest(&root.0, &first).is_err());
+        assert_eq!(
+            fs::read(outside.0.join("sentinel")).expect("outside remains"),
+            b"outside",
         );
     }
 

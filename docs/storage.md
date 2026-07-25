@@ -121,8 +121,17 @@ propagated only when the other side still matches the baseline. Concurrent
 edits, edit-versus-delete, new unequal files at the same path, and incompatible
 file/directory changes are conflicts whose content must be preserved on both
 sides. The allocation-free Rust decision engine and its exhaustive
-edit/delete/type-change table are implemented; durable manifests, hashing, and
-transactional execution remain.
+edit/delete/type-change table are implemented. The canonical versioned
+baseline format also has a bounded Rust codec: it binds a nonzero 128-bit
+mapping identity to one safe project name and at most 10,000 sorted unique
+paths, rejects invalid directory fingerprints, oversized content, corruption,
+unknown versions, noncanonical order, and trailing data, and is capped at
+4 MiB. Rust persists each mapping under private `var/lib/archphene/storage`
+through a mode-0600 temporary file, file sync, atomic replacement, and
+directory sync; stale regular temporaries recover while symlinked, nonregular,
+oversized, or mapping-substituted state fails closed. SHA-256 calculation,
+initial-manifest population, and transactional synchronization execution
+remain.
 
 The SAF capability itself is never presented as a POSIX mount; Linux sees only
 the private initial snapshot today. Exports, conflict-aware synchronization,

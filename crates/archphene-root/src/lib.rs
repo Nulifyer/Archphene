@@ -30,6 +30,7 @@ const DIRECTORIES: &[(&str, u32)] = &[
     ("var", 0o755),
     ("var/lib", 0o755),
     ("var/lib/archphene", 0o700),
+    ("var/lib/archphene/storage", 0o700),
     ("var/lib/pacman", 0o755),
     ("var/lib/pacman/sync", 0o755),
     ("var/cache", 0o755),
@@ -260,6 +261,7 @@ mod tests {
         assert_eq!(root.path(), temporary.0);
         assert!(temporary.0.join("var/lib/pacman").is_dir());
         assert!(temporary.0.join("var/lib/pacman/sync").is_dir());
+        assert!(temporary.0.join("var/lib/archphene/storage").is_dir());
         assert!(temporary.0.join("home/archphene").is_dir());
         assert!(temporary.0.join("home/archphene/Documents").is_dir());
         assert!(temporary.0.join("home/archphene/Downloads").is_dir());

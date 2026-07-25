@@ -144,7 +144,8 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
     - [x] Materialize one connected Android tree as an initial atomic, non-replacing `~/Projects/<folder>` snapshot. Stream provider descriptors into Rust-owned bounded staging, preserve nested folders and dotfiles, reject unsafe paths/symlinks, recover stale staging, retain the published project after grant removal, and pass exact recursive/restart/full-device gates on both targets.
     - [ ] Evolve the initial snapshot into a conflict-safe synchronized POSIX mirror, then add drag-and-drop, exports, familiar home links, and `/mnt/android` sync/error status.
       - [x] Define an allocation-free three-way decision engine: one-sided edits/deletes propagate, identical changes converge, and concurrent edits, edit/delete races, unequal new files, and incompatible type changes preserve a conflict.
-      - [ ] Persist bounded SHA-256 baselines, execute resumable pull/push/delete plans transactionally, and retain both versions for every conflict.
+      - [x] Define and atomically persist a canonical versioned baseline manifest with a stable mapping ID, sorted unique safe paths, fixed fingerprints, strict entry/content/encoded-size limits, stale-temp recovery, symlink/substitution/corruption rejection, and round-trip tests.
+      - [ ] Populate manifests with bounded SHA-256 baselines, execute resumable pull/push/delete plans transactionally, and retain both versions for every conflict.
   - [ ] Launcher wrapper generation and runtime-service binding
   - [ ] Qt, GTK, native Wayland, SDL, Electron, and XWayland adaptation
   - [ ] Audio, camera, printing, notifications, URLs, secrets, and accessibility
