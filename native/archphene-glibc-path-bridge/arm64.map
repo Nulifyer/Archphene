@@ -1,9 +1,11 @@
 GLIBC_2.17 {
     global:
         access;
+        bind;
         chdir;
         chroot;
         chmod;
+        connect;
         eaccess;
         faccessat;
         fchmodat;
@@ -13,6 +15,10 @@ GLIBC_2.17 {
         getegid;
         geteuid;
         getgid;
+        getpwnam;
+        getpwnam_r;
+        getpwuid;
+        getpwuid_r;
         get_current_dir_name;
         getcwd;
         getuid;
@@ -20,6 +26,8 @@ GLIBC_2.17 {
         link;
         linkat;
         mkdirat;
+        posix_spawn;
+        posix_spawnp;
         remove;
         renameat;
         rmdir;

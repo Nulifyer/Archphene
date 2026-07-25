@@ -133,6 +133,8 @@ pub struct CompositorState {
     output_event_count: u32,
     output_width: i32,
     output_height: i32,
+    output_mode_width: i32,
+    output_mode_height: i32,
     output_scale: i32,
     output_fractional_scale: u32,
     tile_toplevels: bool,
@@ -193,6 +195,7 @@ pub struct CompositorState {
     ime_active: bool,
     ime_show_requests: u32,
     ime_hide_requests: u32,
+    ime_change_serial: u32,
 }
 
 const XKB_KEYMAP: &[u8] = concat!(include_str!("archphene-us.xkb"), "\0").as_bytes();
@@ -827,6 +830,19 @@ fn original_buffer_frame(frame: &Arc<CommittedFrame>) -> Arc<CommittedFrame> {
     source
 }
 
+fn presentation_buffer_frame(
+    frame: &Arc<CommittedFrame>,
+    prefer_original: bool,
+    transform: BufferTransform,
+    viewport_source: Option<ViewportSource>,
+) -> Arc<CommittedFrame> {
+    if prefer_original && transform == BufferTransform::Normal && viewport_source.is_none() {
+        original_buffer_frame(frame)
+    } else {
+        Arc::clone(frame)
+    }
+}
+
 fn transform_buffer_frame(
     frame: Arc<CommittedFrame>,
     transform: BufferTransform,
@@ -1067,6 +1083,10 @@ unsafe extern "C" {
 struct LauncherSurfaceCompositor {
     core: CompositorCore,
     window: *mut AndroidNativeWindow,
+    surface_width: i32,
+    surface_height: i32,
+    buffer_width: i32,
+    buffer_height: i32,
     last_presented_commit: u32,
 }
 
@@ -1085,20 +1105,26 @@ impl LauncherSurfaceCompositor {
         surface: *mut std::ffi::c_void,
         width: i32,
         height: i32,
+        density_dpi: i32,
     ) -> i32 {
-        if !valid_launcher_surface_size(width, height) || surface.is_null() {
+        if !valid_launcher_surface_size(width, height)
+            || !valid_launcher_density(density_dpi)
+            || surface.is_null()
+        {
             return -2;
         }
         let window = unsafe { android_native_window_from_surface(environment, surface) };
         if window.is_null() {
             return -3;
         }
+        let logical_width = launcher_logical_extent(width, density_dpi);
+        let logical_height = launcher_logical_extent(height, density_dpi);
         const AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM: i32 = 1;
         if unsafe {
             android_native_window_set_buffers_geometry(
                 window,
-                width,
-                height,
+                logical_width,
+                logical_height,
                 AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM,
             )
         } != 0
@@ -1108,8 +1134,12 @@ impl LauncherSurfaceCompositor {
         }
         self.detach_surface();
         self.window = window;
+        self.surface_width = width;
+        self.surface_height = height;
+        self.buffer_width = logical_width;
+        self.buffer_height = logical_height;
         self.last_presented_commit = u32::MAX;
-        self.core.configure_output(width, height, 1);
+        configure_launcher_output(&mut self.core, width, height, density_dpi);
         0
     }
 
@@ -1121,7 +1151,12 @@ impl LauncherSurfaceCompositor {
         let commit = self.core.surface_commit_count();
         if !self.window.is_null()
             && commit != self.last_presented_commit
-            && copy_last_frame_to_native_window(&self.core, self.window) == 0
+            && copy_last_frame_to_native_window(
+                &self.core,
+                self.window,
+                &mut self.buffer_width,
+                &mut self.buffer_height,
+            ) == 0
         {
             self.last_presented_commit = commit;
             self.core.present_frame(time);
@@ -1143,7 +1178,7 @@ impl Drop for LauncherSurfaceCompositor {
     }
 }
 
-#[cfg(target_os = "android")]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 fn valid_launcher_surface_size(width: i32, height: i32) -> bool {
     const MAX_DIMENSION: i32 = 8192;
     const MAX_PIXELS: i64 = 33_554_432;
@@ -1152,6 +1187,49 @@ fn valid_launcher_surface_size(width: i32, height: i32) -> bool {
         && width <= MAX_DIMENSION
         && height <= MAX_DIMENSION
         && i64::from(width) * i64::from(height) <= MAX_PIXELS
+}
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn valid_launcher_density(density_dpi: i32) -> bool {
+    (72..=1_000).contains(&density_dpi)
+}
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn launcher_logical_extent(physical: i32, density_dpi: i32) -> i32 {
+    i32::try_from((i64::from(physical) * 160 + i64::from(density_dpi) / 2) / i64::from(density_dpi))
+        .unwrap_or(1)
+        .max(1)
+}
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn configure_launcher_output(
+    core: &mut CompositorCore,
+    width: i32,
+    height: i32,
+    density_dpi: i32,
+) -> u32 {
+    if !valid_launcher_surface_size(width, height) || !valid_launcher_density(density_dpi) {
+        return 0;
+    }
+    let logical_width = launcher_logical_extent(width, density_dpi);
+    let logical_height = launcher_logical_extent(height, density_dpi);
+    let scale = density_dpi.saturating_add(159).saturating_div(160).max(1);
+    let fractional_scale = u32::try_from(
+        density_dpi
+            .saturating_mul(120)
+            .saturating_add(80)
+            .saturating_div(160),
+    )
+    .unwrap_or(120)
+    .max(1);
+    core.configure_output_physical(
+        logical_width,
+        logical_height,
+        width,
+        height,
+        scale,
+        fractional_scale,
+    )
 }
 
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
@@ -1419,19 +1497,78 @@ fn dispatch_launcher_input_record(core: &mut CompositorCore, record: [i32; 6]) -
     }
 }
 
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn scale_launcher_coordinate(value: i32, logical: i32, physical: i32) -> i32 {
+    if logical <= 0 || physical <= 0 {
+        return value;
+    }
+    let numerator = i64::from(value) * i64::from(logical);
+    let half = i64::from(physical) / 2;
+    let rounded = if numerator >= 0 {
+        numerator.saturating_add(half)
+    } else {
+        numerator.saturating_sub(half)
+    };
+    i32::try_from(rounded / i64::from(physical))
+        .unwrap_or_else(|_| if value < 0 { i32::MIN } else { i32::MAX })
+}
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn scale_launcher_input_record(
+    mut record: [i32; 6],
+    logical_width: i32,
+    logical_height: i32,
+    physical_width: i32,
+    physical_height: i32,
+) -> [i32; 6] {
+    match record[0] {
+        1 | 2 => {
+            record[2] = scale_launcher_coordinate(record[2], logical_width, physical_width);
+            record[3] = scale_launcher_coordinate(record[3], logical_height, physical_height);
+        }
+        6 => {
+            record[1] = scale_launcher_coordinate(record[1], logical_width, physical_width);
+            record[2] = scale_launcher_coordinate(record[2], logical_height, physical_height);
+        }
+        _ => {}
+    }
+    record
+}
+
 #[cfg(target_os = "android")]
 fn copy_last_frame_to_native_window(
     core: &CompositorCore,
     window: *mut AndroidNativeWindow,
+    buffer_width: &mut i32,
+    buffer_height: &mut i32,
 ) -> i32 {
-    let Some(frame) = core.state.last_frame.as_ref() else {
+    let Some(frame) = launcher_presentation_frame(&core.state) else {
         return -1;
     };
+    let (Ok(width), Ok(height)) = (i32::try_from(frame.width), i32::try_from(frame.height)) else {
+        return -2;
+    };
+    if width != *buffer_width || height != *buffer_height {
+        const AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM: i32 = 1;
+        if unsafe {
+            android_native_window_set_buffers_geometry(
+                window,
+                width,
+                height,
+                AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM,
+            )
+        } != 0
+        {
+            return -2;
+        }
+        *buffer_width = width;
+        *buffer_height = height;
+    }
     let mut buffer: AndroidNativeWindowBuffer = unsafe { zeroed() };
     if unsafe { android_native_window_lock(window, &mut buffer, ptr::null_mut()) } != 0 {
         return -2;
     }
-    let result = copy_frame_to_native_window_buffer(frame, &mut buffer);
+    let result = copy_frame_to_native_window_buffer(&frame, &mut buffer);
     let posted = unsafe { android_native_window_unlock_and_post(window) };
     if result != 0 {
         result
@@ -1439,6 +1576,120 @@ fn copy_last_frame_to_native_window(
         -7
     } else {
         0
+    }
+}
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn launcher_presentation_frame(state: &CompositorState) -> Option<Arc<CommittedFrame>> {
+    let fallback = state.last_frame.as_ref()?.clone();
+    if !state.tile_toplevels
+        || state.cursor_frame.is_some()
+        || state.popups.iter().any(|popup| {
+            popup.is_alive()
+                && popup
+                    .data::<XdgPopupData>()
+                    .is_some_and(|data| !data.dismissed.load(Ordering::Acquire))
+        })
+    {
+        return Some(fallback);
+    }
+    let root_surface = state.root_surface.as_ref()?;
+    let layout = toplevel_layout(state)?;
+    if layout.overlay_primary
+        || layout.root_x != 0
+        || layout.root_y != 0
+        || layout.root_width != state.output_width
+        || layout.root_height != state.output_height
+    {
+        return Some(fallback);
+    }
+    let data = root_surface.data::<SurfaceData>()?;
+    let surface = data.inner.lock().unwrap_or_else(|error| error.into_inner());
+    let frame = surface.committed_frame.as_ref()?.clone();
+    if surface.committed_buffer_transform != BufferTransform::Normal
+        || surface.committed_viewport_source.is_some()
+        || !surface.children_below.is_empty()
+        || !surface.children_above.is_empty()
+    {
+        return Some(fallback);
+    }
+    drop(surface);
+    let geometry = window_geometry_for_surface(root_surface).unwrap_or(WindowGeometry {
+        x: 0,
+        y: 0,
+        width: frame.width as i32,
+        height: frame.height as i32,
+    });
+    if geometry.x != 0
+        || geometry.y != 0
+        || geometry.width != frame.width as i32
+        || geometry.height != frame.height as i32
+    {
+        return Some(fallback);
+    }
+    Some(original_buffer_frame(&frame))
+}
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn launcher_presentation_component(state: &CompositorState, component: i32) -> i32 {
+    let selected = launcher_presentation_frame(state);
+    let root = state.root_surface.as_ref().and_then(surface_frame);
+    let original = root.as_ref().map(original_buffer_frame);
+    let surface_state = state
+        .root_surface
+        .as_ref()
+        .and_then(|surface| surface.data::<SurfaceData>())
+        .map(|data| data.inner.lock().unwrap_or_else(|error| error.into_inner()));
+    match component {
+        0 => selected.as_ref().map_or(0, |frame| frame.width as i32),
+        1 => selected.as_ref().map_or(0, |frame| frame.height as i32),
+        2 => state
+            .last_frame
+            .as_ref()
+            .map_or(0, |frame| frame.width as i32),
+        3 => state
+            .last_frame
+            .as_ref()
+            .map_or(0, |frame| frame.height as i32),
+        4 => original.as_ref().map_or(0, |frame| frame.width as i32),
+        5 => original.as_ref().map_or(0, |frame| frame.height as i32),
+        6 => root.as_ref().map_or(0, |frame| frame.width as i32),
+        7 => root.as_ref().map_or(0, |frame| frame.height as i32),
+        8 => surface_state
+            .as_ref()
+            .map_or(0, |surface| surface.committed_buffer_scale),
+        9 => {
+            let mut reasons = 0;
+            if state.cursor_frame.is_some() {
+                reasons |= 1;
+            }
+            if state.popups.iter().any(|popup| {
+                popup.is_alive()
+                    && popup
+                        .data::<XdgPopupData>()
+                        .is_some_and(|data| !data.dismissed.load(Ordering::Acquire))
+            }) {
+                reasons |= 1 << 1;
+            }
+            if surface_state.as_ref().is_some_and(|surface| {
+                surface.committed_buffer_transform != BufferTransform::Normal
+            }) {
+                reasons |= 1 << 2;
+            }
+            if surface_state
+                .as_ref()
+                .is_some_and(|surface| surface.committed_viewport_source.is_some())
+            {
+                reasons |= 1 << 3;
+            }
+            if surface_state.as_ref().is_some_and(|surface| {
+                !surface.children_below.is_empty() || !surface.children_above.is_empty()
+            }) {
+                reasons |= 1 << 4;
+            }
+            reasons
+        }
+        _ => -1,
     }
 }
 
@@ -1473,25 +1724,54 @@ fn copy_frame_to_native_window_buffer(
         unsafe { std::slice::from_raw_parts_mut(buffer.bits.cast::<u8>(), destination_bytes) };
     destination.fill(0);
 
-    let copy_width = width.min(frame.width as usize);
-    let copy_height = height.min(frame.height as usize);
-    let Some(source_stride) = (frame.width as usize).checked_mul(4) else {
+    let frame_width = frame.width as usize;
+    let frame_height = frame.height as usize;
+    if frame_width == 0 || frame_height == 0 {
+        return -4;
+    }
+    let Some(source_stride) = frame_width.checked_mul(4) else {
         return -4;
     };
-    let Some(copy_bytes) = copy_width.checked_mul(4) else {
-        return -4;
-    };
-    for row in 0..copy_height {
-        let source_start = row * source_stride;
-        let destination_start = row * destination_stride;
-        if copy_wayland_pixels_to_android(
-            &frame.pixels[source_start..source_start + copy_bytes],
-            frame.format,
-            &mut destination[destination_start..destination_start + copy_bytes],
-        )
-        .is_err()
-        {
-            return -5;
+    if width == frame_width && height == frame_height {
+        for row in 0..height {
+            let source_start = row * source_stride;
+            let destination_start = row * destination_stride;
+            if copy_wayland_pixels_to_android(
+                &frame.pixels[source_start..source_start + source_stride],
+                frame.format,
+                &mut destination[destination_start..destination_start + source_stride],
+            )
+            .is_err()
+            {
+                return -5;
+            }
+        }
+        return 0;
+    }
+    for destination_y in 0..height {
+        let source_y = destination_y.saturating_mul(frame_height) / height;
+        for destination_x in 0..width {
+            let source_x = destination_x.saturating_mul(frame_width) / width;
+            let source = source_y
+                .saturating_mul(source_stride)
+                .saturating_add(source_x.saturating_mul(4));
+            let target = destination_y
+                .saturating_mul(destination_stride)
+                .saturating_add(destination_x.saturating_mul(4));
+            let Some(source_pixel) = frame.pixels.get(source..source + 4) else {
+                return -5;
+            };
+            let Some(destination_pixel) = destination.get_mut(target..target + 4) else {
+                return -5;
+            };
+            destination_pixel[0] = source_pixel[2];
+            destination_pixel[1] = source_pixel[1];
+            destination_pixel[2] = source_pixel[0];
+            destination_pixel[3] = if frame.format == wl_shm::Format::Argb8888 {
+                source_pixel[3]
+            } else {
+                u8::MAX
+            };
         }
     }
     0
@@ -2641,6 +2921,7 @@ fn set_keyboard_focus(state: &mut CompositorState, mut surface: Option<WlSurface
         if disabled > 0 {
             state.ime_active = false;
             state.ime_hide_requests = state.ime_hide_requests.saturating_add(1);
+            state.ime_change_serial = state.ime_change_serial.wrapping_add(1);
         }
         state.pressed_keys.clear();
         state.reported_modifiers = 0;
@@ -3409,6 +3690,7 @@ impl Dispatch<ZwpTextInputV3, TextInputData> for CompositorState {
                     state.ime_active = false;
                     state.ime_hide_requests = state.ime_hide_requests.saturating_add(1);
                 }
+                state.ime_change_serial = state.ime_change_serial.wrapping_add(1);
             }
             _ => {}
         }
@@ -3439,6 +3721,7 @@ impl Dispatch<ZwpTextInputV3, TextInputData> for CompositorState {
                 })
             });
             state.ime_hide_requests = state.ime_hide_requests.saturating_add(1);
+            state.ime_change_serial = state.ime_change_serial.wrapping_add(1);
         }
     }
 }
@@ -3758,8 +4041,8 @@ impl GlobalDispatch<WlOutput, ()> for CompositorState {
         );
         output.mode(
             wl_output::Mode::Current | wl_output::Mode::Preferred,
-            state.output_width,
-            state.output_height,
+            state.output_mode_width,
+            state.output_mode_height,
             60_000,
         );
         if output.version() >= 4 {
@@ -6363,6 +6646,7 @@ fn blend_surface_tree(
     configured_width: i32,
     configured_height: i32,
     depth: usize,
+    prefer_original_buffers: bool,
 ) {
     if depth > state.surface_count as usize {
         return;
@@ -6370,7 +6654,7 @@ fn blend_surface_tree(
     let Some(surface_data) = surface.data::<SurfaceData>() else {
         return;
     };
-    let (frame, children_below, children_above) = {
+    let (frame, children_below, children_above, transform, viewport_source) = {
         let surface = surface_data
             .inner
             .lock()
@@ -6379,6 +6663,8 @@ fn blend_surface_tree(
             surface.committed_frame.clone(),
             surface.children_below.clone(),
             surface.children_above.clone(),
+            surface.committed_buffer_transform,
+            surface.committed_viewport_source,
         )
     };
     let (source_width, source_height) = frame
@@ -6396,12 +6682,15 @@ fn blend_surface_tree(
             configured_width,
             configured_height,
             depth.saturating_add(1),
+            prefer_original_buffers,
         );
     }
     if let Some(frame) = frame {
+        let presentation =
+            presentation_buffer_frame(&frame, prefer_original_buffers, transform, viewport_source);
         blend_popup_frame(
             destination,
-            &frame,
+            &presentation,
             x,
             y,
             configured_width,
@@ -6420,6 +6709,7 @@ fn blend_surface_tree(
             configured_width,
             configured_height,
             depth.saturating_add(1),
+            prefer_original_buffers,
         );
     }
 }
@@ -6436,6 +6726,7 @@ fn blend_subsurface_tree(
     parent_target_width: i32,
     parent_target_height: i32,
     depth: usize,
+    prefer_original_buffers: bool,
 ) {
     let Some((x, y)) = subsurface_position(surface) else {
         return;
@@ -6467,6 +6758,7 @@ fn blend_subsurface_tree(
         target_width,
         target_height,
         depth,
+        prefer_original_buffers,
     );
 }
 fn update_composited_frame(state: &mut CompositorState) {
@@ -6482,9 +6774,25 @@ fn update_composited_frame(state: &mut CompositorState) {
         state.last_frame = None;
         return;
     };
-    let pixel_count = layout
-        .output_width
-        .checked_mul(layout.output_height)
+    let previous_frame = state.last_frame.take();
+    let output_width = u32::try_from(state.output_mode_width)
+        .ok()
+        .filter(|width| *width > 0)
+        .unwrap_or(layout.output_width);
+    let output_height = u32::try_from(state.output_mode_height)
+        .ok()
+        .filter(|height| *height > 0)
+        .unwrap_or(layout.output_height);
+    let prefer_original_buffers =
+        output_width != layout.output_width || output_height != layout.output_height;
+    let scale_x = |value: i32| {
+        scale_surface_coordinate(value, output_width as i32, layout.output_width.max(1))
+    };
+    let scale_y = |value: i32| {
+        scale_surface_coordinate(value, output_height as i32, layout.output_height.max(1))
+    };
+    let pixel_count = output_width
+        .checked_mul(output_height)
         .and_then(|pixels| pixels.checked_mul(4))
         .and_then(|bytes| usize::try_from(bytes).ok())
         .unwrap_or(0);
@@ -6495,26 +6803,41 @@ fn update_composited_frame(state: &mut CompositorState) {
                 .is_some_and(|data| !data.dismissed.load(Ordering::Acquire))
     });
     let popup_base = if active_popups {
-        state.popup_base_frame.as_ref().filter(|frame| {
-            frame.width == layout.output_width && frame.height == layout.output_height
-        })
+        state
+            .popup_base_frame
+            .as_ref()
+            .filter(|frame| frame.width == output_width && frame.height == output_height)
     } else {
         None
     };
+    let reusable_pixels = previous_frame
+        .and_then(|frame| Arc::try_unwrap(frame).ok())
+        .filter(|frame| {
+            frame.width == output_width
+                && frame.height == output_height
+                && frame.format == root.format
+                && frame.pixels.len() == pixel_count
+        })
+        .map(|frame| frame.pixels);
+    let pixels = if let Some(base) = popup_base {
+        base.pixels.clone()
+    } else if !prefer_original_buffers
+        && !state.tile_toplevels
+        && root.format != wl_shm::Format::Argb8888
+        && pixel_count == root.pixels.len()
+    {
+        root.pixels.clone()
+    } else if let Some(mut pixels) = reusable_pixels {
+        pixels.fill(0);
+        pixels
+    } else {
+        vec![0; pixel_count]
+    };
     let mut composed = CommittedFrame {
-        width: layout.output_width,
-        height: layout.output_height,
+        width: output_width,
+        height: output_height,
         format: root.format,
-        pixels: if let Some(base) = popup_base {
-            base.pixels.clone()
-        } else if !state.tile_toplevels
-            && root.format != wl_shm::Format::Argb8888
-            && pixel_count == root.pixels.len()
-        {
-            root.pixels.clone()
-        } else {
-            vec![0; pixel_count]
-        },
+        pixels,
         source: None,
     };
     if pixel_count == 0 {
@@ -6534,11 +6857,12 @@ fn update_composited_frame(state: &mut CompositorState) {
                     state,
                     &mut composed,
                     &primary,
-                    geometry.x.saturating_neg(),
-                    geometry.y.saturating_neg(),
-                    frame.width as i32,
-                    frame.height as i32,
+                    scale_x(geometry.x.saturating_neg()),
+                    scale_y(geometry.y.saturating_neg()),
+                    scale_x(frame.width as i32),
+                    scale_y(frame.height as i32),
                     0,
+                    prefer_original_buffers,
                 );
                 for pixel in composed.pixels.chunks_exact_mut(4) {
                     pixel[0] = ((u16::from(pixel[0]) * 3) / 5) as u8;
@@ -6556,20 +6880,26 @@ fn update_composited_frame(state: &mut CompositorState) {
             state,
             &mut composed,
             root_surface,
-            layout.root_x,
-            layout.root_y,
-            layout.root_width,
-            layout.root_height,
+            scale_x(layout.root_x),
+            scale_y(layout.root_y),
+            scale_x(layout.root_width),
+            scale_y(layout.root_height),
             0,
+            prefer_original_buffers,
         );
     } else {
+        let presentation = if prefer_original_buffers {
+            original_buffer_frame(root)
+        } else {
+            Arc::clone(root)
+        };
         blend_popup_frame(
             &mut composed,
-            root,
-            layout.root_x,
-            layout.root_y,
-            layout.root_width,
-            layout.root_height,
+            &presentation,
+            scale_x(layout.root_x),
+            scale_y(layout.root_y),
+            scale_x(layout.root_width),
+            scale_y(layout.root_height),
         );
     }
     for popup in state.popups.iter().filter(|popup| popup.is_alive()) {
@@ -6615,11 +6945,12 @@ fn update_composited_frame(state: &mut CompositorState) {
             state,
             &mut composed,
             &xdg_data.wl_surface,
-            surface_x,
-            surface_y,
-            surface_width,
-            surface_height,
+            scale_x(surface_x),
+            scale_y(surface_y),
+            scale_x(surface_width),
+            scale_y(surface_height),
             0,
+            prefer_original_buffers,
         );
     }
     state.last_frame_width = composed.width;
@@ -6693,6 +7024,7 @@ fn compose_toplevel_frame(
         root_frame.width as i32,
         root_frame.height as i32,
         0,
+        false,
     );
     for popup in state.popups.iter().filter(|popup| popup.is_alive()) {
         let Some(data) = popup.data::<XdgPopupData>() else {
@@ -6722,6 +7054,7 @@ fn compose_toplevel_frame(
             popup_width,
             popup_height,
             0,
+            false,
         );
     }
     Some(Arc::new(composed))
@@ -6815,6 +7148,8 @@ impl CompositorCore {
         let state = CompositorState {
             output_width: 320,
             output_height: 160,
+            output_mode_width: 320,
+            output_mode_height: 160,
             output_scale: 1,
             output_fractional_scale: 120,
             host_active: true,
@@ -7432,19 +7767,39 @@ impl CompositorCore {
         scale: i32,
         fractional_scale: u32,
     ) -> u32 {
-        if width <= 0 || height <= 0 || scale <= 0 || fractional_scale == 0 {
+        self.configure_output_physical(width, height, width, height, scale, fractional_scale)
+    }
+
+    pub fn configure_output_physical(
+        &mut self,
+        logical_width: i32,
+        logical_height: i32,
+        mode_width: i32,
+        mode_height: i32,
+        scale: i32,
+        fractional_scale: u32,
+    ) -> u32 {
+        if logical_width <= 0
+            || logical_height <= 0
+            || mode_width <= 0
+            || mode_height <= 0
+            || scale <= 0
+            || fractional_scale == 0
+        {
             return 0;
         }
-        self.state.output_width = width;
-        self.state.output_height = height;
+        self.state.output_width = logical_width;
+        self.state.output_height = logical_height;
+        self.state.output_mode_width = mode_width;
+        self.state.output_mode_height = mode_height;
         self.state.output_scale = scale;
         self.state.output_fractional_scale = fractional_scale;
         let mut updated = 0u32;
         for output in self.state.outputs.iter().filter(|output| output.is_alive()) {
             output.mode(
                 wl_output::Mode::Current | wl_output::Mode::Preferred,
-                width,
-                height,
+                mode_width,
+                mode_height,
                 60_000,
             );
             self.state.output_event_count = self.state.output_event_count.saturating_add(1);
@@ -7475,7 +7830,9 @@ impl CompositorCore {
             fractional.preferred_scale(fractional_scale);
         }
         self.reconfigure_reactive_popups();
-        if self.state.tile_toplevels && self.configure_managed_toplevel(width, height) {
+        if self.state.tile_toplevels
+            && self.configure_managed_toplevel(logical_width, logical_height)
+        {
             updated = updated.saturating_add(1);
         }
         updated
@@ -7772,6 +8129,10 @@ impl CompositorCore {
 
     pub fn ime_hide_request_count(&self) -> u32 {
         self.state.ime_hide_requests
+    }
+
+    pub fn ime_change_serial(&self) -> u32 {
+        self.state.ime_change_serial
     }
 
     pub fn ime_surrounding_text_length(&self) -> i32 {
@@ -11188,8 +11549,9 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
     socket_path: jbyteArray,
     width: i32,
     height: i32,
+    density_dpi: i32,
 ) -> i64 {
-    if !valid_launcher_surface_size(width, height) {
+    if !valid_launcher_surface_size(width, height) || !valid_launcher_density(density_dpi) {
         return 0;
     }
     let Some(socket_path) =
@@ -11207,13 +11569,21 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
     let Ok(mut core) = CompositorCore::new() else {
         return 0;
     };
+    // Each generated Android launcher owns one Linux application viewport.
+    // Its primary xdg-toplevel therefore follows the Android Surface instead
+    // of retaining an arbitrary desktop default window size.
+    core.set_toplevel_tiling(true);
     if core.bind_socket(Path::new(&socket_path)).is_err() {
         return 0;
     }
-    core.configure_output(width, height, 1);
+    configure_launcher_output(&mut core, width, height, density_dpi);
     Box::into_raw(Box::new(LauncherSurfaceCompositor {
         core,
         window: ptr::null_mut(),
+        surface_width: width,
+        surface_height: height,
+        buffer_width: 0,
+        buffer_height: 0,
         last_presented_commit: u32::MAX,
     })) as i64
 }
@@ -11227,11 +11597,12 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
     surface: *mut std::ffi::c_void,
     width: i32,
     height: i32,
+    density_dpi: i32,
 ) -> i32 {
     let Some(compositor) = (unsafe { (handle as *mut LauncherSurfaceCompositor).as_mut() }) else {
         return -1;
     };
-    compositor.attach_surface(environment, surface, width, height)
+    compositor.attach_surface(environment, surface, width, height, density_dpi)
 }
 
 #[cfg(target_os = "android")]
@@ -11244,6 +11615,20 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
     if let Some(compositor) = unsafe { (handle as *mut LauncherSurfaceCompositor).as_mut() } {
         compositor.detach_surface();
     }
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativePresentationComponent(
+    _environment: *mut std::ffi::c_void,
+    _owner: *mut std::ffi::c_void,
+    handle: i64,
+    component: i32,
+) -> i32 {
+    let Some(compositor) = (unsafe { (handle as *mut LauncherSurfaceCompositor).as_ref() }) else {
+        return -1;
+    };
+    launcher_presentation_component(&compositor.core.state, component)
 }
 
 #[cfg(target_os = "android")]
@@ -11335,6 +11720,191 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
         return 0;
     };
     jboolean::from(compositor.core.take_linux_clipboard_clear())
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeImeChangeSerial(
+    _environment: *mut std::ffi::c_void,
+    _owner: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(compositor) = (unsafe { (handle as *mut LauncherSurfaceCompositor).as_ref() }) else {
+        return -1;
+    };
+    compositor.core.ime_change_serial() as i32
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeImeActive(
+    _environment: *mut std::ffi::c_void,
+    _owner: *mut std::ffi::c_void,
+    handle: i64,
+) -> jboolean {
+    let Some(compositor) = (unsafe { (handle as *mut LauncherSurfaceCompositor).as_ref() }) else {
+        return 0;
+    };
+    jboolean::from(compositor.core.ime_active() != 0)
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeImeSurroundingTextLength(
+    _environment: *mut std::ffi::c_void,
+    _owner: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(compositor) = (unsafe { (handle as *mut LauncherSurfaceCompositor).as_ref() }) else {
+        return -1;
+    };
+    compositor.core.ime_surrounding_text_length()
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeCopyImeSurroundingText(
+    environment: JNIEnv,
+    _owner: JObject,
+    handle: i64,
+    output: JByteBuffer,
+    capacity: i32,
+) -> i32 {
+    let Some(compositor) = (unsafe { (handle as *mut LauncherSurfaceCompositor).as_ref() }) else {
+        return -1;
+    };
+    let Some(text) = compositor.core.ime_surrounding_text() else {
+        return -2;
+    };
+    let bytes = text.as_bytes();
+    let (Ok(capacity), Ok(actual_capacity), Ok(address)) = (
+        usize::try_from(capacity),
+        environment.get_direct_buffer_capacity(&output),
+        environment.get_direct_buffer_address(&output),
+    ) else {
+        return -1;
+    };
+    if capacity > actual_capacity || bytes.len() > capacity || address.is_null() {
+        return -2;
+    }
+    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), address, bytes.len()) };
+    i32::try_from(bytes.len()).unwrap_or(-2)
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeImeStateComponent(
+    _environment: *mut std::ffi::c_void,
+    _owner: *mut std::ffi::c_void,
+    handle: i64,
+    component: i32,
+) -> i32 {
+    let Some(compositor) = (unsafe { (handle as *mut LauncherSurfaceCompositor).as_ref() }) else {
+        return -1;
+    };
+    match component {
+        0 => compositor.core.ime_surrounding_cursor(),
+        1 => compositor.core.ime_surrounding_anchor(),
+        2 => compositor.core.ime_content_hint(),
+        3 => compositor.core.ime_content_purpose(),
+        4..=7 => compositor
+            .core
+            .ime_cursor_rectangle_component((component - 4) as usize),
+        _ => -1,
+    }
+}
+
+#[cfg(target_os = "android")]
+fn launcher_ime_text(environment: &JNIEnv, input: &JByteBuffer, length: i32) -> Option<String> {
+    let (Ok(length), Ok(capacity), Ok(address)) = (
+        usize::try_from(length),
+        environment.get_direct_buffer_capacity(input),
+        environment.get_direct_buffer_address(input),
+    ) else {
+        return None;
+    };
+    if length > 16_384 || length > capacity || address.is_null() {
+        return None;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(address.cast_const(), length) };
+    std::str::from_utf8(bytes).ok().map(str::to_owned)
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeImeText(
+    environment: JNIEnv,
+    _owner: JObject,
+    handle: i64,
+    operation: i32,
+    input: JByteBuffer,
+    length: i32,
+    cursor_begin: i32,
+    cursor_end: i32,
+) -> i32 {
+    let Some(text) = launcher_ime_text(&environment, &input, length) else {
+        return -2;
+    };
+    let Some(compositor) = (unsafe { (handle as *mut LauncherSurfaceCompositor).as_mut() }) else {
+        return -1;
+    };
+    let result = match operation {
+        1 => compositor.core.ime_commit_text(text),
+        2 if cursor_begin >= 0 && cursor_end >= 0 => {
+            compositor
+                .core
+                .ime_set_preedit(text, cursor_begin, cursor_end)
+        }
+        _ => return -2,
+    };
+    i32::try_from(result).unwrap_or(i32::MAX)
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeImeDeleteSurrounding(
+    _environment: *mut std::ffi::c_void,
+    _owner: *mut std::ffi::c_void,
+    handle: i64,
+    before_bytes: i32,
+    after_bytes: i32,
+) -> i32 {
+    let (Some(compositor), Ok(before_bytes), Ok(after_bytes)) = (
+        unsafe { (handle as *mut LauncherSurfaceCompositor).as_mut() },
+        u32::try_from(before_bytes),
+        u32::try_from(after_bytes),
+    ) else {
+        return -2;
+    };
+    i32::try_from(
+        compositor
+            .core
+            .ime_delete_surrounding(before_bytes, after_bytes),
+    )
+    .unwrap_or(i32::MAX)
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeImeEditorAction(
+    _environment: *mut std::ffi::c_void,
+    _owner: *mut std::ffi::c_void,
+    handle: i64,
+    action: i32,
+    time_millis: i32,
+) -> i32 {
+    let (Some(compositor), Ok(action)) = (
+        unsafe { (handle as *mut LauncherSurfaceCompositor).as_mut() },
+        u32::try_from(action),
+    ) else {
+        return -2;
+    };
+    i32::try_from(
+        compositor
+            .core
+            .ime_editor_action(action, time_millis as u32),
+    )
+    .unwrap_or(i32::MAX)
 }
 
 #[cfg(target_os = "android")]
@@ -11461,7 +12031,13 @@ pub extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_
                     .expect("fixed input field"),
             )
         };
-        let fields = [field(0), field(1), field(2), field(3), field(4), field(5)];
+        let fields = scale_launcher_input_record(
+            [field(0), field(1), field(2), field(3), field(4), field(5)],
+            compositor.core.state.output_width,
+            compositor.core.state.output_height,
+            compositor.surface_width,
+            compositor.surface_height,
+        );
         let Ok(accepted) = dispatch_launcher_input_record(&mut compositor.core, fields) else {
             return -3;
         };
@@ -12586,6 +13162,41 @@ mod tests {
     }
 
     #[test]
+    fn physical_presentation_preserves_original_client_raster() {
+        let original = test_frame(2, 2, &[1, 2, 3, 4]);
+        let logical = Arc::new(CommittedFrame {
+            width: 1,
+            height: 1,
+            format: wl_shm::Format::Xrgb8888,
+            pixels: vec![1, 0, 0, 0],
+            source: Some(Arc::clone(&original)),
+        });
+        let selected = presentation_buffer_frame(&logical, true, BufferTransform::Normal, None);
+        assert!(Arc::ptr_eq(&selected, &original));
+
+        let mut output = CommittedFrame {
+            width: 2,
+            height: 2,
+            format: wl_shm::Format::Xrgb8888,
+            pixels: vec![0; 16],
+            source: None,
+        };
+        blend_popup_frame(&mut output, &selected, 0, 0, 2, 2);
+        assert_eq!(
+            output
+                .pixels
+                .chunks_exact(4)
+                .map(|pixel| pixel[0])
+                .collect::<Vec<_>>(),
+            [1, 2, 3, 4]
+        );
+        assert!(Arc::ptr_eq(
+            &presentation_buffer_frame(&logical, true, BufferTransform::Rotate90, None,),
+            &logical,
+        ));
+    }
+
+    #[test]
     fn maps_every_wayland_buffer_transform_without_losing_pixels() {
         let transforms = [
             (BufferTransform::Normal, (2, 3)),
@@ -13337,6 +13948,32 @@ mod tests {
         assert_eq!(
             dispatch_launcher_input_record(&mut core, [5, 29, 3, 9, 0, 0]),
             Err(())
+        );
+    }
+
+    #[test]
+    fn launcher_density_separates_android_pixels_from_wayland_coordinates() {
+        let mut core = CompositorCore::new().expect("compositor");
+        core.set_toplevel_tiling(true);
+        assert_eq!(configure_launcher_output(&mut core, 1080, 2316, 450), 0);
+        assert_eq!(
+            (core.state.output_width, core.state.output_height),
+            (384, 823)
+        );
+        assert_eq!(
+            (core.state.output_mode_width, core.state.output_mode_height),
+            (1080, 2316)
+        );
+        assert_eq!(core.state.output_scale, 3);
+        assert_eq!(core.state.output_fractional_scale, 338);
+
+        assert_eq!(
+            scale_launcher_input_record([1, 0, 540, 1158, 7, 0], 384, 823, 1080, 2316),
+            [1, 0, 192, 412, 7, 0],
+        );
+        assert_eq!(
+            scale_launcher_input_record([6, 1080, 2316, 9, 0, 0], 384, 823, 1080, 2316),
+            [6, 384, 823, 9, 0, 0],
         );
     }
 

@@ -17,6 +17,10 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.Parcel
 import android.os.RemoteException
+import android.os.SystemClock
+import android.text.Editable
+import android.text.InputType
+import android.text.Selection
 import android.util.Log
 import android.view.Gravity
 import android.view.InputDevice
@@ -26,7 +30,12 @@ import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
+import android.view.WindowInsets
 import android.view.WindowInsetsController
+import android.view.inputmethod.BaseInputConnection
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputConnection
+import android.view.inputmethod.InputMethodManager
 import android.widget.FrameLayout
 import android.widget.TextView
 import kotlin.math.roundToInt
@@ -34,8 +43,19 @@ import kotlin.math.roundToInt
 class LauncherActivity :
     Activity(),
     SurfaceHolder.Callback {
+    private data class ImeState(
+        val active: Boolean,
+        val revision: Int,
+        val text: String,
+        val cursor: Int,
+        val anchor: Int,
+        val hint: Int,
+        val purpose: Int,
+    )
+
     private lateinit var status: TextView
-    private lateinit var surfaceView: SurfaceView
+    private lateinit var surfaceView: LauncherSurfaceView
+    private lateinit var content: FrameLayout
     private val handler = Handler(Looper.getMainLooper())
     private var remote: IBinder? = null
     private var sessionId = 0
@@ -45,7 +65,10 @@ class LauncherActivity :
     private var attachedSurface: Surface? = null
     private var attachedWidth = 0
     private var attachedHeight = 0
+    private var attachedDensityDpi = 0
+    private var attachedFontScaleMillis = 0
     private var pointerButtonState = 0
+    private var imeState = ImeState(false, 0, "", 0, 0, 0, 0)
     private var hasPendingLinuxClipboard = false
     private var pendingLinuxClipboardText: String? = null
     private val clipboardManager by lazy {
@@ -67,7 +90,7 @@ class LauncherActivity :
                 flags: Int,
             ): Boolean {
                 if (
-                    code !in CALLBACK_STATUS..CALLBACK_CLIPBOARD ||
+                    code !in CALLBACK_STATUS..CALLBACK_IME_STATE ||
                     Binder.getCallingUid() != managerUid
                 ) {
                     return super.onTransact(code, data, reply, flags)
@@ -111,6 +134,40 @@ class LauncherActivity :
                             handler.post { applyLinuxClipboard(text) }
                             true
                         }
+                        CALLBACK_IME_STATE -> {
+                            val active = data.readInt()
+                            val revision = data.readInt()
+                            val text = if (active == 1) data.readString() else null
+                            val cursor = if (active == 1) data.readInt() else 0
+                            val anchor = if (active == 1) data.readInt() else 0
+                            val hint = if (active == 1) data.readInt() else 0
+                            val purpose = if (active == 1) data.readInt() else 0
+                            if (
+                                active !in 0..1 ||
+                                (active == 1 &&
+                                    (text == null ||
+                                        text.length > MAX_IME_UTF16 ||
+                                        cursor !in 0..text.length ||
+                                        anchor !in 0..text.length ||
+                                        hint < 0 ||
+                                        purpose !in 0..MAX_IME_PURPOSE)) ||
+                                data.dataAvail() != 0
+                            ) {
+                                return@runCatching false
+                            }
+                            val next =
+                                ImeState(
+                                    active == 1,
+                                    revision,
+                                    text.orEmpty(),
+                                    cursor,
+                                    anchor,
+                                    hint,
+                                    purpose,
+                                )
+                            handler.post { applyImeState(next) }
+                            true
+                        }
                         else -> false
                     }
                 }.getOrDefault(false)
@@ -134,9 +191,12 @@ class LauncherActivity :
                 attachedSurface = null
                 attachedWidth = 0
                 attachedHeight = 0
+                attachedDensityDpi = 0
+                attachedFontScaleMillis = 0
                 pointerButtonState = 0
                 hasPendingLinuxClipboard = false
                 pendingLinuxClipboardText = null
+                applyImeState(ImeState(false, 0, "", 0, 0, 0, 0))
                 status.setText(R.string.launcher_disconnected)
                 status.visibility = View.VISIBLE
             }
@@ -159,7 +219,7 @@ class LauncherActivity :
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         surfaceView =
-            SurfaceView(this).apply {
+            LauncherSurfaceView(this).apply {
                 holder.addCallback(this@LauncherActivity)
                 isFocusable = true
                 isFocusableInTouchMode = true
@@ -174,7 +234,7 @@ class LauncherActivity :
                 setBackgroundColor(getColor(R.color.launcher_background))
                 text = getString(R.string.launcher_opening, appLabel())
             }
-        setContentView(
+        content =
             FrameLayout(this).apply {
                 addView(
                     surfaceView,
@@ -190,8 +250,36 @@ class LauncherActivity :
                         FrameLayout.LayoutParams.MATCH_PARENT,
                     ),
                 )
-            },
-        )
+                setOnApplyWindowInsetsListener { view, insets ->
+                    val safe =
+                        if (Build.VERSION.SDK_INT >= 30) {
+                            insets.getInsets(
+                                WindowInsets.Type.systemBars() or
+                                    WindowInsets.Type.displayCutout() or
+                                    WindowInsets.Type.ime(),
+                            )
+                        } else {
+                            @Suppress("DEPRECATION")
+                            android.graphics.Insets.of(
+                                insets.systemWindowInsetLeft,
+                                insets.systemWindowInsetTop,
+                                insets.systemWindowInsetRight,
+                                insets.systemWindowInsetBottom,
+                            )
+                        }
+                    if (
+                        view.paddingLeft != safe.left ||
+                        view.paddingTop != safe.top ||
+                        view.paddingRight != safe.right ||
+                        view.paddingBottom != safe.bottom
+                    ) {
+                        view.setPadding(safe.left, safe.top, safe.right, safe.bottom)
+                    }
+                    insets
+                }
+            }
+        setContentView(content)
+        content.requestApplyInsets()
         surfaceView.requestFocus()
         applySystemBarAppearance()
     }
@@ -268,9 +356,12 @@ class LauncherActivity :
         attachedSurface = null
         attachedWidth = 0
         attachedHeight = 0
+        attachedDensityDpi = 0
+        attachedFontScaleMillis = 0
         pointerButtonState = 0
         hasPendingLinuxClipboard = false
         pendingLinuxClipboardText = null
+        applyImeState(ImeState(false, 0, "", 0, 0, 0, 0))
         if (binding) {
             runCatching { unbindService(connection) }
             binding = false
@@ -282,6 +373,7 @@ class LauncherActivity :
     override fun onStop() {
         handler.removeCallbacksAndMessages(null)
         stopClipboardListening()
+        hideIme()
         submitHostActive(false)
         detachSurface()
         super.onStop()
@@ -315,8 +407,12 @@ class LauncherActivity :
             if (!applyPendingLinuxClipboard()) {
                 submitAndroidClipboard()
             }
+            if (imeState.active) {
+                showIme(restart = true)
+            }
         } else {
             stopClipboardListening()
+            hideIme()
         }
         submitHostActive(hasFocus)
     }
@@ -635,6 +731,12 @@ class LauncherActivity :
         val surface = surfaceView.holder.surface
         val width = surfaceView.width
         val height = surfaceView.height
+        val configuration = resources.configuration
+        val densityDpi = configuration.densityDpi.coerceIn(MIN_DENSITY_DPI, MAX_DENSITY_DPI)
+        val fontScaleMillis =
+            (configuration.fontScale * 1_000f)
+                .toInt()
+                .coerceIn(MIN_FONT_SCALE_MILLIS, MAX_FONT_SCALE_MILLIS)
         if (
             activeSession <= 0 ||
             !surface.isValid ||
@@ -646,7 +748,9 @@ class LauncherActivity :
         if (
             attachedSurface === surface &&
             attachedWidth == width &&
-            attachedHeight == height
+            attachedHeight == height &&
+            attachedDensityDpi == densityDpi &&
+            attachedFontScaleMillis == fontScaleMillis
         ) {
             return
         }
@@ -659,12 +763,16 @@ class LauncherActivity :
             data.writeInt(width)
             data.writeInt(height)
             surface.writeToParcel(data, 0)
+            data.writeInt(densityDpi)
+            data.writeInt(fontScaleMillis)
             if (service.transact(TRANSACTION_ATTACH_SURFACE, data, reply, 0)) {
                 reply.readException()
                 if (reply.readInt() == RESULT_OK) {
                     attachedSurface = surface
                     attachedWidth = width
                     attachedHeight = height
+                    attachedDensityDpi = densityDpi
+                    attachedFontScaleMillis = fontScaleMillis
                     Log.i(TAG, "Attached Surface session=$activeSession size=${width}x$height")
                     submitHostActive(hasWindowFocus())
                     if (hasWindowFocus()) {
@@ -687,6 +795,8 @@ class LauncherActivity :
         attachedSurface = null
         attachedWidth = 0
         attachedHeight = 0
+        attachedDensityDpi = 0
+        attachedFontScaleMillis = 0
         pointerButtonState = 0
         if (service == null || activeSession <= 0 || !wasAttached) {
             return
@@ -829,6 +939,352 @@ class LauncherActivity :
         }
     }
 
+    private inner class LauncherSurfaceView(
+        context: Context,
+    ) : SurfaceView(context) {
+        override fun onCheckIsTextEditor(): Boolean = true
+
+        override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? {
+            val state = imeState
+            if (!state.active) {
+                return null
+            }
+            outAttrs.inputType = androidInputType(state.hint, state.purpose)
+            outAttrs.imeOptions =
+                androidImeOptions(state.hint, state.purpose) or
+                    EditorInfo.IME_FLAG_NO_EXTRACT_UI or
+                    EditorInfo.IME_FLAG_NO_FULLSCREEN
+            outAttrs.initialSelStart = state.anchor
+            outAttrs.initialSelEnd = state.cursor
+            if (Build.VERSION.SDK_INT >= 30) {
+                outAttrs.setInitialSurroundingSubText(state.text, 0)
+            }
+            return LauncherInputConnection(this, state)
+        }
+    }
+
+    private inner class LauncherInputConnection(
+        target: View,
+        state: ImeState,
+    ) : BaseInputConnection(target, true) {
+        private var composing = false
+        private val editorBuffer: Editable = checkNotNull(editable)
+
+        init {
+            editorBuffer.clear()
+            editorBuffer.append(state.text)
+            Selection.setSelection(
+                editorBuffer,
+                state.anchor.coerceIn(0, editorBuffer.length),
+                state.cursor.coerceIn(0, editorBuffer.length),
+            )
+        }
+
+        override fun setComposingText(
+            text: CharSequence?,
+            newCursorPosition: Int,
+        ): Boolean {
+            val value = text?.toString().orEmpty()
+            val cursorUtf16 =
+                if (newCursorPosition > 0) {
+                    value.length + newCursorPosition - 1
+                } else {
+                    newCursorPosition
+                }.coerceIn(0, value.length)
+            val cursorBytes = utf8Length(value, 0, cursorUtf16)
+            if (
+                value.length > MAX_IME_UTF16 ||
+                cursorBytes < 0 ||
+                utf8Length(value, 0, value.length) > MAX_IME_BYTES
+            ) {
+                return false
+            }
+            val submitted =
+                submitIme(
+                    IME_PREEDIT,
+                    value,
+                    cursorBytes,
+                    cursorBytes,
+                )
+            if (submitted) {
+                composing = value.isNotEmpty()
+            }
+            return submitted && super.setComposingText(text, newCursorPosition)
+        }
+
+        override fun finishComposingText(): Boolean {
+            val submitted = !composing || submitIme(IME_PREEDIT, "", 0, 0)
+            if (submitted) {
+                composing = false
+            }
+            return submitted && super.finishComposingText()
+        }
+
+        override fun commitText(
+            text: CharSequence?,
+            newCursorPosition: Int,
+        ): Boolean {
+            val value = text?.toString().orEmpty()
+            val length = utf8Length(value, 0, value.length)
+            if (
+                value.length > MAX_IME_UTF16 ||
+                length < 0 ||
+                length > MAX_IME_BYTES
+            ) {
+                return false
+            }
+            val submitted = submitIme(IME_COMMIT, value, 0, 0)
+            if (submitted) {
+                composing = false
+            }
+            return submitted && super.commitText(text, newCursorPosition)
+        }
+
+        override fun deleteSurroundingText(
+            beforeLength: Int,
+            afterLength: Int,
+        ): Boolean {
+            if (
+                beforeLength < 0 ||
+                afterLength < 0 ||
+                beforeLength + afterLength > MAX_IME_UTF16
+            ) {
+                return false
+            }
+            val cursor =
+                Selection.getSelectionEnd(editorBuffer).coerceIn(0, editorBuffer.length)
+            val beforeStart = (cursor - beforeLength).coerceAtLeast(0)
+            val afterEnd = (cursor + afterLength).coerceAtMost(editorBuffer.length)
+            val beforeBytes = utf8Length(editorBuffer, beforeStart, cursor)
+            val afterBytes = utf8Length(editorBuffer, cursor, afterEnd)
+            if (
+                beforeBytes < 0 ||
+                afterBytes < 0 ||
+                beforeBytes + afterBytes > MAX_IME_BYTES
+            ) {
+                return false
+            }
+            return submitIme(IME_DELETE, null, beforeBytes, afterBytes) &&
+                super.deleteSurroundingText(beforeLength, afterLength)
+        }
+
+        override fun deleteSurroundingTextInCodePoints(
+            beforeLength: Int,
+            afterLength: Int,
+        ): Boolean {
+            if (
+                beforeLength < 0 ||
+                afterLength < 0 ||
+                beforeLength + afterLength > MAX_IME_UTF16
+            ) {
+                return false
+            }
+            val cursor =
+                Selection.getSelectionEnd(editorBuffer).coerceIn(0, editorBuffer.length)
+            val beforeStart =
+                runCatching {
+                    Character.offsetByCodePoints(editorBuffer, cursor, -beforeLength)
+                }.getOrElse { 0 }
+            val afterEnd =
+                runCatching {
+                    Character.offsetByCodePoints(editorBuffer, cursor, afterLength)
+                }.getOrElse { editorBuffer.length }
+            val beforeBytes = utf8Length(editorBuffer, beforeStart, cursor)
+            val afterBytes = utf8Length(editorBuffer, cursor, afterEnd)
+            if (
+                beforeBytes < 0 ||
+                afterBytes < 0 ||
+                beforeBytes + afterBytes > MAX_IME_BYTES
+            ) {
+                return false
+            }
+            return submitIme(IME_DELETE, null, beforeBytes, afterBytes) &&
+                super.deleteSurroundingTextInCodePoints(beforeLength, afterLength)
+        }
+
+        override fun performEditorAction(actionCode: Int): Boolean =
+            actionCode in 0..MAX_IME_ACTION &&
+                submitIme(IME_EDITOR_ACTION, null, actionCode, 0)
+
+        override fun sendKeyEvent(event: KeyEvent): Boolean =
+            this@LauncherActivity.dispatchKeyEvent(event)
+    }
+
+    private fun submitIme(
+        operation: Int,
+        text: String?,
+        a: Int,
+        b: Int,
+    ): Boolean {
+        val service = remote ?: return false
+        val activeSession = sessionId
+        if (activeSession <= 0 || !imeState.active) {
+            return false
+        }
+        val data = Parcel.obtain()
+        val reply = Parcel.obtain()
+        try {
+            data.writeInterfaceToken(INTERFACE)
+            data.writeInt(PROTOCOL_VERSION)
+            data.writeInt(activeSession)
+            data.writeInt(operation)
+            if (operation == IME_COMMIT || operation == IME_PREEDIT) {
+                data.writeString(text ?: return false)
+            }
+            data.writeInt(a)
+            data.writeInt(b)
+            if (!service.transact(TRANSACTION_IME, data, reply, 0)) {
+                return false
+            }
+            reply.readException()
+            return reply.readInt() == RESULT_OK
+        } catch (error: RemoteException) {
+            Log.w(TAG, "Could not submit launcher IME command", error)
+            return false
+        } finally {
+            reply.recycle()
+            data.recycle()
+        }
+    }
+
+    private fun applyImeState(next: ImeState) {
+        val previous = imeState
+        imeState = next
+        if (!hasWindowFocus()) {
+            return
+        }
+        if (!next.active) {
+            if (previous.active) {
+                hideIme()
+            }
+            return
+        }
+        val restart =
+            !previous.active ||
+                previous.hint != next.hint ||
+                previous.purpose != next.purpose
+        if (restart) {
+            showIme(restart = true)
+        } else {
+            getSystemService(InputMethodManager::class.java)
+                .updateSelection(surfaceView, next.cursor, next.anchor, -1, -1)
+        }
+    }
+
+    private fun showIme(restart: Boolean) {
+        if (!imeState.active || !hasWindowFocus()) {
+            return
+        }
+        surfaceView.requestFocus()
+        val input = getSystemService(InputMethodManager::class.java)
+        if (restart) {
+            input.restartInput(surfaceView)
+        }
+        if (Build.VERSION.SDK_INT >= 30) {
+            surfaceView.windowInsetsController?.show(WindowInsets.Type.ime())
+        }
+        input.showSoftInput(surfaceView, InputMethodManager.SHOW_IMPLICIT)
+    }
+
+    private fun hideIme() {
+        val input = getSystemService(InputMethodManager::class.java)
+        if (Build.VERSION.SDK_INT >= 30) {
+            surfaceView.windowInsetsController?.hide(WindowInsets.Type.ime())
+        }
+        input.hideSoftInputFromWindow(surfaceView.windowToken, 0)
+    }
+
+    private fun utf8Length(
+        text: CharSequence,
+        start: Int,
+        end: Int,
+    ): Int {
+        if (start !in 0..end || end > text.length) {
+            return -1
+        }
+        var bytes = 0
+        var index = start
+        while (index < end) {
+            val character = text[index]
+            when {
+                character.code <= 0x7f -> {
+                    bytes++
+                    index++
+                }
+                character.code <= 0x7ff -> {
+                    bytes += 2
+                    index++
+                }
+                Character.isHighSurrogate(character) -> {
+                    if (
+                        index + 1 >= end ||
+                        !Character.isLowSurrogate(text[index + 1])
+                    ) {
+                        return -1
+                    }
+                    bytes += 4
+                    index += 2
+                }
+                Character.isLowSurrogate(character) -> return -1
+                else -> {
+                    bytes += 3
+                    index++
+                }
+            }
+        }
+        return bytes
+    }
+
+    private fun androidInputType(
+        hint: Int,
+        purpose: Int,
+    ): Int {
+        var type =
+            when (purpose) {
+                2 -> InputType.TYPE_CLASS_NUMBER
+                3 ->
+                    InputType.TYPE_CLASS_NUMBER or
+                        InputType.TYPE_NUMBER_FLAG_DECIMAL or
+                        InputType.TYPE_NUMBER_FLAG_SIGNED
+                4 -> InputType.TYPE_CLASS_PHONE
+                5 -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+                6 -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS
+                7 -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PERSON_NAME
+                8 -> InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                9 -> InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_VARIATION_PASSWORD
+                10 -> InputType.TYPE_CLASS_DATETIME or InputType.TYPE_DATETIME_VARIATION_DATE
+                11 -> InputType.TYPE_CLASS_DATETIME or InputType.TYPE_DATETIME_VARIATION_TIME
+                12 -> InputType.TYPE_CLASS_DATETIME
+                13 ->
+                    InputType.TYPE_CLASS_TEXT or
+                        InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+                else -> InputType.TYPE_CLASS_TEXT
+            }
+        if (hint and 2 != 0) type = type or InputType.TYPE_TEXT_FLAG_AUTO_CORRECT
+        if (hint and 4 != 0) type = type or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+        if (hint and 16 != 0) type = type or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
+        if (hint and 32 != 0) type = type or InputType.TYPE_TEXT_FLAG_CAP_WORDS
+        if (hint and 512 != 0) type = type or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+        if (hint and 128 != 0 || purpose == 13) {
+            type = type or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+        }
+        return type
+    }
+
+    private fun androidImeOptions(
+        hint: Int,
+        purpose: Int,
+    ): Int =
+        if (hint and 512 != 0) {
+            EditorInfo.IME_FLAG_NO_ENTER_ACTION
+        } else {
+            when (purpose) {
+                5 -> EditorInfo.IME_ACTION_GO
+                6 -> EditorInfo.IME_ACTION_SEND
+                else -> EditorInfo.IME_ACTION_DONE
+            }
+        }
+
     private fun retryOpen() {
         if (++attempts > MAX_OPEN_ATTEMPTS) {
             showUnavailable()
@@ -907,13 +1363,19 @@ class LauncherActivity :
         private const val TRANSACTION_DETACH_SURFACE = IBinder.FIRST_CALL_TRANSACTION + 3
         private const val TRANSACTION_INPUT = IBinder.FIRST_CALL_TRANSACTION + 4
         private const val TRANSACTION_CLIPBOARD = IBinder.FIRST_CALL_TRANSACTION + 5
+        private const val TRANSACTION_IME = IBinder.FIRST_CALL_TRANSACTION + 6
         private const val CALLBACK_INTERFACE = "org.archphene.launcher.IClientV1"
         private const val CALLBACK_STATUS = IBinder.FIRST_CALL_TRANSACTION
         private const val CALLBACK_CLIPBOARD = IBinder.FIRST_CALL_TRANSACTION + 1
+        private const val CALLBACK_IME_STATE = IBinder.FIRST_CALL_TRANSACTION + 2
         private const val RESULT_OK = 0
         private const val RESULT_NOT_READY = 1
         private const val MAX_OPEN_ATTEMPTS = 120
         private const val OPEN_RETRY_MILLIS = 250L
+        private const val MIN_DENSITY_DPI = 72
+        private const val MAX_DENSITY_DPI = 1_000
+        private const val MIN_FONT_SCALE_MILLIS = 500
+        private const val MAX_FONT_SCALE_MILLIS = 3_000
         private const val MAX_INPUT_RECORDS = 32
         private const val INPUT_TOUCH_DOWN = 1
         private const val INPUT_TOUCH_MOTION = 2
@@ -930,6 +1392,14 @@ class LauncherActivity :
         private const val AXIS_FIXED_SCALE = 1000f
         private const val MAX_AXIS_STEPS = 120f
         private const val MAX_CLIPBOARD_UTF16 = 16_384
+        private const val MAX_IME_UTF16 = 4_096
+        private const val MAX_IME_BYTES = 16_384
+        private const val MAX_IME_ACTION = 64
+        private const val MAX_IME_PURPOSE = 13
+        private const val IME_COMMIT = 1
+        private const val IME_PREEDIT = 2
+        private const val IME_DELETE = 3
+        private const val IME_EDITOR_ACTION = 4
         private const val POINTER_BUTTON_MASK =
             MotionEvent.BUTTON_PRIMARY or
                 MotionEvent.BUTTON_SECONDARY or

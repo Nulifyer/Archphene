@@ -42,10 +42,15 @@ physical Samsung coverage for:
   publication/removal generations;
 - deterministic thin launcher APK assembly, Android Keystore signing,
   PackageInstaller confirmation, cold-start reconciliation, and
-  launcher-only removal.
+  launcher-only removal;
+- an authenticated generated launcher running package-installed Foot from the
+  shared AArch64 root, with private Wayland, density-aware logical output,
+  physical-resolution subsurface composition, safe Android insets, Samsung IME
+  text, clipboard, and live portrait/landscape Surface replacement.
 
-Icon/capability derivation and the authenticated cross-process launcher
-Surface/session protocol remain open.
+Icon/capability derivation, x86_64 repetition of the real-client gate,
+zero-copy/dmabuf presentation, broader toolkit coverage, and the remaining
+production launcher capabilities are still open.
 
 ## Historical bridge evidence
 

@@ -569,6 +569,8 @@ impl PackageRuntime {
         let mut library_path = alias_root.as_os_str().to_os_string();
         library_path.push(":");
         library_path.push(native_root.as_os_str());
+        library_path.push(":");
+        library_path.push(arch_root.join("usr/lib").as_os_str());
         let mut executable_path = alias_root.as_os_str().to_os_string();
         executable_path.push(":");
         executable_path.push(arch_root.join("usr/bin").as_os_str());

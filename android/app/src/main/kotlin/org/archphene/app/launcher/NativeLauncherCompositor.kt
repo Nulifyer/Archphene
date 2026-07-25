@@ -14,12 +14,14 @@ internal class NativeLauncherCompositor(
     socketPath: String,
     width: Int,
     height: Int,
+    densityDpi: Int,
 ) : AutoCloseable {
     private var handle =
         nativeCreate(
             socketPath.toByteArray(StandardCharsets.UTF_8),
             width,
             height,
+            densityDpi,
         )
 
     init {
@@ -30,7 +32,8 @@ internal class NativeLauncherCompositor(
         surface: Surface,
         width: Int,
         height: Int,
-    ): Boolean = nativeAttachSurface(handle, surface, width, height) == 0
+        densityDpi: Int,
+    ): Boolean = nativeAttachSurface(handle, surface, width, height, densityDpi) == 0
 
     fun detach() {
         if (handle != 0L) {
@@ -81,6 +84,72 @@ internal class NativeLauncherCompositor(
     fun takeLinuxClipboardClear(): Boolean =
         handle != 0L && nativeTakeLinuxClipboardClear(handle)
 
+    fun imeChangeSerial(): Int =
+        if (handle == 0L) {
+            RESULT_CLOSED
+        } else {
+            nativeImeChangeSerial(handle)
+        }
+
+    fun imeActive(): Boolean = handle != 0L && nativeImeActive(handle)
+
+    fun imeSurroundingTextLength(): Int =
+        if (handle == 0L) {
+            RESULT_CLOSED
+        } else {
+            nativeImeSurroundingTextLength(handle)
+        }
+
+    fun copyImeSurroundingText(
+        output: ByteBuffer,
+        capacity: Int,
+    ): Int =
+        if (handle == 0L) {
+            RESULT_CLOSED
+        } else {
+            nativeCopyImeSurroundingText(handle, output, capacity)
+        }
+
+    fun imeStateComponent(component: Int): Int =
+        if (handle == 0L) {
+            RESULT_CLOSED
+        } else {
+            nativeImeStateComponent(handle, component)
+        }
+
+    fun submitImeText(
+        operation: Int,
+        input: ByteBuffer,
+        length: Int,
+        cursorBegin: Int,
+        cursorEnd: Int,
+    ): Int =
+        if (handle == 0L) {
+            RESULT_CLOSED
+        } else {
+            nativeImeText(handle, operation, input, length, cursorBegin, cursorEnd)
+        }
+
+    fun deleteImeSurrounding(
+        beforeBytes: Int,
+        afterBytes: Int,
+    ): Int =
+        if (handle == 0L) {
+            RESULT_CLOSED
+        } else {
+            nativeImeDeleteSurrounding(handle, beforeBytes, afterBytes)
+        }
+
+    fun submitImeEditorAction(
+        action: Int,
+        timeMillis: Int,
+    ): Int =
+        if (handle == 0L) {
+            RESULT_CLOSED
+        } else {
+            nativeImeEditorAction(handle, action, timeMillis)
+        }
+
     fun readClipboardFd(
         descriptor: Int,
         output: ByteBuffer,
@@ -106,6 +175,13 @@ internal class NativeLauncherCompositor(
             nativeDispatchAndPresent(handle, timeMillis)
         }
 
+    fun presentationComponent(component: Int): Int =
+        if (handle == 0L) {
+            RESULT_CLOSED
+        } else {
+            nativePresentationComponent(handle, component)
+        }
+
     fun submitInput(
         input: ByteBuffer,
         recordCount: Int,
@@ -128,6 +204,7 @@ internal class NativeLauncherCompositor(
         socketPath: ByteArray,
         width: Int,
         height: Int,
+        densityDpi: Int,
     ): Long
 
     private external fun nativeAttachSurface(
@@ -135,6 +212,7 @@ internal class NativeLauncherCompositor(
         surface: Surface,
         width: Int,
         height: Int,
+        densityDpi: Int,
     ): Int
 
     private external fun nativeDetachSurface(handle: Long)
@@ -159,6 +237,44 @@ internal class NativeLauncherCompositor(
 
     private external fun nativeTakeLinuxClipboardClear(handle: Long): Boolean
 
+    private external fun nativeImeChangeSerial(handle: Long): Int
+
+    private external fun nativeImeActive(handle: Long): Boolean
+
+    private external fun nativeImeSurroundingTextLength(handle: Long): Int
+
+    private external fun nativeCopyImeSurroundingText(
+        handle: Long,
+        output: ByteBuffer,
+        capacity: Int,
+    ): Int
+
+    private external fun nativeImeStateComponent(
+        handle: Long,
+        component: Int,
+    ): Int
+
+    private external fun nativeImeText(
+        handle: Long,
+        operation: Int,
+        input: ByteBuffer,
+        length: Int,
+        cursorBegin: Int,
+        cursorEnd: Int,
+    ): Int
+
+    private external fun nativeImeDeleteSurrounding(
+        handle: Long,
+        beforeBytes: Int,
+        afterBytes: Int,
+    ): Int
+
+    private external fun nativeImeEditorAction(
+        handle: Long,
+        action: Int,
+        timeMillis: Int,
+    ): Int
+
     private external fun nativeReadClipboardFd(
         descriptor: Int,
         output: ByteBuffer,
@@ -176,6 +292,11 @@ internal class NativeLauncherCompositor(
     private external fun nativeDispatchAndPresent(
         handle: Long,
         timeMillis: Int,
+    ): Int
+
+    private external fun nativePresentationComponent(
+        handle: Long,
+        component: Int,
     ): Int
 
     private external fun nativeInputBatch(

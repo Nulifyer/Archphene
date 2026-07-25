@@ -293,6 +293,11 @@ impl CommandEnvironment {
             .env("LANG", "C.UTF-8")
             .env("LC_ALL", "C.UTF-8")
             .env("LOCPATH", self.arch_root.join("usr/lib/locale"))
+            .env(
+                "FONTCONFIG_FILE",
+                "/var/lib/archphene/fontconfig/fonts.conf",
+            )
+            .env("FONTCONFIG_PATH", "/etc/fonts")
             .env("USER", "archphene")
             .env("LOGNAME", "archphene")
             .env("TERM", terminal)
@@ -1413,6 +1418,11 @@ mod tests {
         assert_eq!(value("LC_ALL"), Some(OsStr::new("C.UTF-8")));
         let expected_locale_path = root.0.join("usr/lib/locale");
         assert_eq!(value("LOCPATH"), Some(expected_locale_path.as_os_str()),);
+        assert_eq!(
+            value("FONTCONFIG_FILE"),
+            Some(OsStr::new("/var/lib/archphene/fontconfig/fonts.conf")),
+        );
+        assert_eq!(value("FONTCONFIG_PATH"), Some(OsStr::new("/etc/fonts")));
 
         let gui = environment.build_gui_command(&launch, &["--new-window"], "launcher-7.sock");
         let gui_value = |name: &str| {

@@ -4012,6 +4012,7 @@ class ArchpheneRuntimeService : Service() {
                         packageCancellationRequested = false
                         packageOperationActive = false
                         packageThread = null
+                        startLauncherPublisher(activeHandle)
                         stopWhenUnobservedAndIdle()
                     }
                 },
@@ -4233,6 +4234,7 @@ class ArchpheneRuntimeService : Service() {
                         packageCancellationRequested = false
                         packageOperationActive = false
                         packageThread = null
+                        startLauncherPublisher(activeHandle)
                         stopWhenUnobservedAndIdle()
                     }
                 },

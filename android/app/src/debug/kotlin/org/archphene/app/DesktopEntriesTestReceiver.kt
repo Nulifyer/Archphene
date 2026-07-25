@@ -159,7 +159,7 @@ internal class DesktopEntriesTestReceiver : BroadcastReceiver() {
         val directory = File(local, "$name-1.0-1")
         check(directory.mkdir()) { "could not create package fixture $name" }
         File(directory, "desc").writeText(
-            "%NAME%\n$name\n\n%VERSION%\n1.0-1\n\n%REASON%\n0\n",
+            "%NAME%\n$name\n\n%VERSION%\n1.0-1\n\n%REASON%\n0\n\n",
         )
         File(directory, "files").writeText("%FILES%\n$files\n")
     }

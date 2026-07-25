@@ -1,7 +1,9 @@
 #include <errno.h>
+#include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 extern char **environ;
@@ -23,6 +25,32 @@ int main(int argc, char **argv) {
         command = argv[2];
         char *arguments[] = {(char *)command, "bridge-arg", NULL};
         execve(command, arguments, environ);
+    } else if (argc > 2 && strcmp(argv[1], "--spawn-direct") == 0) {
+        command = argv[2];
+        char *arguments[] = {(char *)command, "bridge-arg", NULL};
+        pid_t process;
+        int error = posix_spawn(&process, command, NULL, NULL, arguments, environ);
+        if (error != 0) {
+            errno = error;
+            perror("posix_spawn");
+            return 1;
+        }
+        int status;
+        return waitpid(process, &status, 0) == process && WIFEXITED(status)
+                ? WEXITSTATUS(status) : 1;
+    } else if (argc > 2 && strcmp(argv[1], "--spawn-path") == 0) {
+        command = argv[2];
+        char *arguments[] = {(char *)command, "bridge-arg", NULL};
+        pid_t process;
+        int error = posix_spawnp(&process, command, NULL, NULL, arguments, environ);
+        if (error != 0) {
+            errno = error;
+            perror("posix_spawnp");
+            return 1;
+        }
+        int status;
+        return waitpid(process, &status, 0) == process && WIFEXITED(status)
+                ? WEXITSTATUS(status) : 1;
     } else {
         execlp(command, command, "bridge-arg", NULL);
     }

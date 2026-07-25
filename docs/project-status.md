@@ -176,7 +176,7 @@ native focus loss releases held keys and buttons and cancels active touches.
 On Samsung, full-device and scoped-log gates prove the complete input
 transport, native socket creation/removal, retained session across HOME/resume
 and rotation, and deterministic Back cleanup without a malformed-input
-rejection or crash. The native suite contains 45 compositor tests, including
+rejection or crash. The native suite contains 48 compositor tests, including
 button/modifier mappings and inactive-host cleanup. Process status is polled
 outside the frame hot path; merged stdout/stderr drains into a fixed 16 KiB
 tail ring, and exited leaders trigger remaining group cleanup. Start, stop,
@@ -208,7 +208,7 @@ units and 64 KiB UTF-8. Rust caps pending Wayland copy/paste descriptors at
 four, and a dedicated manager worker switches each descriptor to nonblocking
 mode and enforces a two-second poll deadline. Strict UTF-8 decoding,
 revision-based stale/echo suppression, deferred focus publication, selection
-clear, detach, and close are explicit. The compositor suite now has 46 tests,
+clear, detach, and close are explicit. The compositor suite now has 48 tests,
 including exact pipe success, overflow, and timeout cases. The physical
 Samsung passes the existing real Wayland bidirectional demand-driven clipboard
 probe and a production generated-wrapper Unicode Android-to-Binder gate at 28
@@ -217,14 +217,45 @@ after the focus-deferral audit. Full-device captures show the system clipboard
 confirmation; Back drains the compositor and clipboard workers and leaves no
 socket or fatal log.
 
-This does not yet prove a real Linux application frame or input delivery to a
-Linux client. The current Samsung root contains only deliberately non-runnable
-Foot/Kate discovery fixtures and no cached GUI package archive, while the
-x86_64 emulator is offline. The native probe proves the Wayland clipboard
-protocol and the generated wrapper proves the production Binder boundary, but
-a real manager-launched client must still close that integration gap. A real
-signed GUI package transaction, exact transformed input/live-resize tests,
-IME, and the repeated two-target gate remain open.
+A production Foot package now closes the first real-client gap on the physical
+AArch64 Samsung. The package was installed through Archphene's signed pacman
+transaction and its generated launcher was updated through normal Android
+confirmation. The generic glibc bridge maps private-root pathname Unix sockets,
+full-path and PATH-based exec/spawn calls, and bounded passwd identity without
+changing Foot or Bash. The shared root publishes `archphene` at
+`/home/archphene`; an app-managed fontconfig root includes installed Arch fonts
+and Android's system fonts, so Foot remains runnable after `ttf-dejavu` is
+removed through the normal manager UI.
+
+The launcher now treats Android pixels and Wayland logical coordinates as
+separate spaces. It derives logical size, integer output scale, and fractional
+scale from Android density, maps touch/pointer coordinates back to that logical
+space, and retains the client's high-resolution raster while composing
+client-side-decoration subsurfaces at the physical output size. The steady
+output canvas is reused. Mandatory Android edge-to-edge behavior is handled by
+safe system-bar/display-cutout/IME insets rather than drawing Linux controls
+under the status, gesture, or keyboard areas. Full-device Samsung captures
+prove crisp Foot pixels at a 1080x2202 portrait Surface, a live 1080x1343
+keyboard Surface, and a live 2241x978 landscape Surface.
+
+The same authenticated session bridges `zwp_text_input_v3` to the wrapper's
+Android `InputConnection`: bounded surrounding text, preedit/commit, deletion,
+editor actions, content hint/purpose, and show/hide lifecycle remain native
+Wayland state rather than synthetic key text. A real Samsung keyboard tap
+commits `hi` into Foot, with the manager logging the first bounded IME command.
+The production diagnostics report a 1080x2202 physical composite sourced from
+Foot's 1079x2134 raster and 411x813 logical surface tree. The entire Rust
+workspace, 48 compositor tests, glibc path/exec/socket/identity probes, runtime
+source contract, exact AArch64 build/install, scoped fatal-log check, and
+full-device portrait/IME/landscape inspection pass.
+
+The equivalent real-client gate remains open on the x86_64 emulator, which is
+not currently attached. HOME/resume, deliberate client crash/descendant
+cleanup, non-Latin composing input, non-text clipboard, pointer lock, and
+launcher accessibility still need explicit production-client variants.
+SHM snapshots and client-buffer normalization also remain copied; the new
+reused physical output canvas is not a claim of zero-copy, Vulkan, or sustained
+high-frame-rate readiness.
 
 The recent-activity action is now terminal-state aware. Complete has no dead
 disabled Cancel button; active pre-commit work exposes Cancel; and durable

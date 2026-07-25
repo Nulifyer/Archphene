@@ -18,6 +18,7 @@ import android.view.Surface
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.nio.CharBuffer
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.atomic.AtomicInteger
@@ -57,6 +58,27 @@ class LauncherSessionService : Service() {
         var linuxCopyInFlight = false
         var androidPasteInFlight = false
         var clipboardRevision = 0
+        val imeBuffer = ByteBuffer.allocateDirect(MAX_IME_BYTES)
+        val imeEncoder =
+            StandardCharsets.UTF_8
+                .newEncoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+        val imeDecoder =
+            StandardCharsets.UTF_8
+                .newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+        val imeOperations = IntArray(MAX_IME_COMMANDS)
+        val imeTexts = arrayOfNulls<String>(MAX_IME_COMMANDS)
+        val imeA = IntArray(MAX_IME_COMMANDS)
+        val imeB = IntArray(MAX_IME_COMMANDS)
+        var imeHead = 0
+        var imeSize = 0
+        var imePosted = false
+        var imeDrain: Runnable? = null
+        var lastImeChangeSerial = Int.MIN_VALUE
+        var imeLogged = false
     }
 
     private val sessions = HashMap<Int, Session>(MAX_SESSIONS)
@@ -153,6 +175,12 @@ class LauncherSessionService : Service() {
         surface: Surface?,
         closeCompositor: Boolean,
     ) {
+        synchronized(session) {
+            session.imeTexts.fill(null)
+            session.imeHead = 0
+            session.imeSize = 0
+            session.imePosted = false
+        }
         val runtime = runtimeBinder
         surfaceHandler.post {
             Log.i(
@@ -221,6 +249,10 @@ class LauncherSessionService : Service() {
                 }
                 TRANSACTION_CLIPBOARD -> {
                     transactClipboard(data, reply)
+                    true
+                }
+                TRANSACTION_IME -> {
+                    transactIme(data, reply)
                     true
                 }
                 else -> super.onTransact(code, data, reply, flags)
@@ -306,12 +338,26 @@ class LauncherSessionService : Service() {
                     val width = data.readInt()
                     val height = data.readInt()
                     surface = Surface.CREATOR.createFromParcel(data)
+                    val densityDpi =
+                        if (data.dataAvail() >= Int.SIZE_BYTES) {
+                            data.readInt()
+                        } else {
+                            DEFAULT_DENSITY_DPI
+                        }
+                    val fontScaleMillis =
+                        if (data.dataAvail() >= Int.SIZE_BYTES) {
+                            data.readInt()
+                        } else {
+                            DEFAULT_FONT_SCALE_MILLIS
+                        }
                     if (
                         version != PROTOCOL_VERSION ||
                         sessionId <= 0 ||
                         width !in 1..MAX_SURFACE_DIMENSION ||
                         height !in 1..MAX_SURFACE_DIMENSION ||
                         width.toLong() * height > MAX_SURFACE_PIXELS ||
+                        densityDpi !in MIN_DENSITY_DPI..MAX_DENSITY_DPI ||
+                        fontScaleMillis !in MIN_FONT_SCALE_MILLIS..MAX_FONT_SCALE_MILLIS ||
                         surface?.isValid != true ||
                         data.dataAvail() != 0
                     ) {
@@ -323,6 +369,7 @@ class LauncherSessionService : Service() {
                         surface!!,
                         width,
                         height,
+                        densityDpi,
                     ).also { attachResult ->
                         if (attachResult == RESULT_OK) {
                             surface = null
@@ -424,6 +471,67 @@ class LauncherSessionService : Service() {
             reply.writeNoException()
             reply.writeInt(result)
         }
+
+        private fun transactIme(
+            data: Parcel,
+            reply: Parcel,
+        ) {
+            val result =
+                runCatching {
+                    data.enforceInterface(INTERFACE)
+                    if (data.dataAvail() > MAX_IME_PARCEL_BYTES) {
+                        return@runCatching RESULT_INVALID
+                    }
+                    val version = data.readInt()
+                    val sessionId = data.readInt()
+                    val operation = data.readInt()
+                    val text =
+                        if (operation == IME_COMMIT || operation == IME_PREEDIT) {
+                            data.readString()
+                        } else {
+                            null
+                        }
+                    val a = data.readInt()
+                    val b = data.readInt()
+                    if (
+                        version != PROTOCOL_VERSION ||
+                        sessionId <= 0 ||
+                        operation !in IME_COMMIT..IME_EDITOR_ACTION ||
+                        ((operation == IME_COMMIT || operation == IME_PREEDIT) &&
+                            (text == null ||
+                                text.length > MAX_IME_UTF16 ||
+                                !hasWellFormedUtf16(text))) ||
+                        (operation == IME_COMMIT && (a != 0 || b != 0)) ||
+                        (operation == IME_PREEDIT &&
+                            (a !in 0..MAX_IME_BYTES ||
+                                b !in 0..MAX_IME_BYTES ||
+                                utf8OffsetToUtf16(checkNotNull(text), a) < 0 ||
+                                utf8OffsetToUtf16(checkNotNull(text), b) < 0)) ||
+                        (operation == IME_DELETE &&
+                            (a !in 0..MAX_IME_BYTES ||
+                                b !in 0..MAX_IME_BYTES ||
+                                a + b > MAX_IME_BYTES)) ||
+                        (operation == IME_EDITOR_ACTION &&
+                            (a !in 0..MAX_IME_ACTION || b != 0)) ||
+                        data.dataAvail() != 0
+                    ) {
+                        return@runCatching RESULT_INVALID
+                    }
+                    submitIme(
+                        Binder.getCallingUid(),
+                        sessionId,
+                        operation,
+                        text,
+                        a,
+                        b,
+                    )
+                }.getOrElse { error ->
+                    Log.w(TAG, "Rejected malformed launcher IME command", error)
+                    RESULT_INVALID
+                }
+            reply.writeNoException()
+            reply.writeInt(result)
+        }
     }
 
     private data class OpenResult(
@@ -476,6 +584,7 @@ class LauncherSessionService : Service() {
         }
         val session = Session(sessionId, callingUid, identity, clientToken, authorization)
         session.inputDrain = Runnable { drainInput(session) }
+        session.imeDrain = Runnable { drainIme(session) }
         try {
             clientToken.linkToDeath(sessionBinder, 0)
         } catch (_: RemoteException) {
@@ -497,6 +606,7 @@ class LauncherSessionService : Service() {
         surface: Surface,
         width: Int,
         height: Int,
+        densityDpi: Int,
     ): Int {
         val session = authorizedSession(callingUid, sessionId) ?: return RESULT_UNAUTHORIZED
         val previous = session.surface
@@ -509,7 +619,7 @@ class LauncherSessionService : Service() {
             if (current) {
                 session.compositor?.detach()
                 previous?.release()
-                attachCompositor(session, surface, width, height)
+                attachCompositor(session, surface, width, height, densityDpi)
             } else {
                 previous?.release()
             }
@@ -638,6 +748,121 @@ class LauncherSessionService : Service() {
         return RESULT_OK
     }
 
+    @Synchronized
+    private fun submitIme(
+        callingUid: Int,
+        sessionId: Int,
+        operation: Int,
+        text: String?,
+        a: Int,
+        b: Int,
+    ): Int {
+        val session = authorizedSession(callingUid, sessionId) ?: return RESULT_UNAUTHORIZED
+        if (session.surface == null || session.compositor == null) {
+            return RESULT_NOT_READY
+        }
+        synchronized(session) {
+            if (session.imeSize >= MAX_IME_COMMANDS) {
+                return RESULT_BUSY
+            }
+            val index = (session.imeHead + session.imeSize) % MAX_IME_COMMANDS
+            session.imeOperations[index] = operation
+            session.imeTexts[index] = text
+            session.imeA[index] = a
+            session.imeB[index] = b
+            session.imeSize++
+            if (!session.imePosted) {
+                session.imePosted = true
+                surfaceHandler.post(checkNotNull(session.imeDrain))
+            }
+        }
+        return RESULT_OK
+    }
+
+    private fun drainIme(session: Session) {
+        while (session.active) {
+            var operation = 0
+            var text: String? = null
+            var a = 0
+            var b = 0
+            synchronized(session) {
+                if (session.imeSize == 0) {
+                    session.imePosted = false
+                    return
+                }
+                val index = session.imeHead
+                operation = session.imeOperations[index]
+                text = session.imeTexts[index]
+                a = session.imeA[index]
+                b = session.imeB[index]
+                session.imeTexts[index] = null
+                session.imeHead = (index + 1) % MAX_IME_COMMANDS
+                session.imeSize--
+            }
+            val compositor = session.compositor ?: return
+            val result =
+                when (operation) {
+                    IME_COMMIT,
+                    IME_PREEDIT,
+                    -> {
+                        val length = encodeImeText(session, checkNotNull(text))
+                        if (length < 0) {
+                            -2
+                        } else {
+                            compositor.submitImeText(
+                                operation,
+                                session.imeBuffer,
+                                length,
+                                a,
+                                b,
+                            )
+                        }
+                    }
+                    IME_DELETE -> compositor.deleteImeSurrounding(a, b)
+                    IME_EDITOR_ACTION ->
+                        compositor.submitImeEditorAction(
+                            a,
+                            SystemClock.uptimeMillis().toInt(),
+                        )
+                    else -> RESULT_INVALID
+                }
+            if (!session.imeLogged && result >= 0) {
+                session.imeLogged = true
+                Log.i(
+                    TAG,
+                    "Delivered first bounded IME command session=${session.id} " +
+                        "operation=$operation",
+                )
+            }
+            if (result <= 0) {
+                Log.w(
+                    TAG,
+                    "Native compositor rejected IME command session=${session.id} " +
+                        "operation=$operation result=$result",
+                )
+            }
+        }
+    }
+
+    private fun encodeImeText(
+        session: Session,
+        text: String,
+    ): Int {
+        session.imeBuffer.clear()
+        session.imeEncoder.reset()
+        val encoded = session.imeEncoder.encode(CharBuffer.wrap(text), session.imeBuffer, true)
+        if (encoded.isError || encoded.isOverflow) {
+            return -1
+        }
+        val flushed = session.imeEncoder.flush(session.imeBuffer)
+        if (flushed.isError || flushed.isOverflow) {
+            return -1
+        }
+        val length = session.imeBuffer.position()
+        session.imeBuffer.position(0)
+        return length
+    }
+
     private fun validInputRecord(
         kind: Int,
         a: Int,
@@ -722,6 +947,7 @@ class LauncherSessionService : Service() {
         surface: Surface,
         width: Int,
         height: Int,
+        densityDpi: Int,
     ) {
         try {
             val compositor =
@@ -734,12 +960,14 @@ class LauncherSessionService : Service() {
                                 socket.absolutePath,
                                 width,
                                 height,
+                                densityDpi,
                             ).also {
                                 session.compositor = it
                                 session.compositorSocket = socket
+                                session.lastImeChangeSerial = Int.MIN_VALUE
                             }
                         }
-            check(compositor.attach(surface, width, height)) {
+            check(compositor.attach(surface, width, height, densityDpi)) {
                 "ANativeWindow attachment failed"
             }
             compositor.setHostActive(true)
@@ -856,9 +1084,17 @@ class LauncherSessionService : Service() {
             ) {
                 session.frameLogged = true
                 notifyStatus(session, STATUS_RUNNING, session.authorization.label)
-                Log.i(TAG, "Presented first Linux frame session=${session.id}")
+                Log.i(
+                    TAG,
+                    "Presented first Linux frame session=${session.id} " +
+                        "presentation=" +
+                        (0..9).joinToString(",") {
+                            compositor.presentationComponent(it).toString()
+                        },
+                )
             }
             pumpClipboardTransfers(session, compositor)
+            pumpImeState(session, compositor)
             pollLinuxProcess(session)
             surfaceHandler.postDelayed(
                 this,
@@ -948,6 +1184,84 @@ class LauncherSessionService : Service() {
                 }
             }
         }
+    }
+
+    private fun pumpImeState(
+        session: Session,
+        compositor: NativeLauncherCompositor,
+    ) {
+        val changeSerial = compositor.imeChangeSerial()
+        if (changeSerial == session.lastImeChangeSerial) {
+            return
+        }
+        session.lastImeChangeSerial = changeSerial
+        if (!compositor.imeActive()) {
+            notifyImeState(session, changeSerial, null, 0, 0, 0, 0)
+            return
+        }
+        val byteLength = compositor.imeSurroundingTextLength()
+        val text =
+            if (byteLength < 0) {
+                ""
+            } else {
+                if (byteLength > MAX_IME_SURROUNDING_BYTES) {
+                    Log.w(
+                        TAG,
+                        "Rejected oversized IME surrounding text session=${session.id} " +
+                            "bytes=$byteLength",
+                    )
+                    notifyImeState(session, changeSerial, "", 0, 0, 0, 0)
+                    return
+                }
+                session.imeBuffer.clear()
+                val copied =
+                    compositor.copyImeSurroundingText(
+                        session.imeBuffer,
+                        MAX_IME_SURROUNDING_BYTES,
+                    )
+                if (copied != byteLength) {
+                    Log.w(
+                        TAG,
+                        "Could not snapshot IME surrounding text session=${session.id} " +
+                            "expected=$byteLength copied=$copied",
+                    )
+                    notifyImeState(session, changeSerial, "", 0, 0, 0, 0)
+                    return
+                }
+                session.imeBuffer.position(0)
+                session.imeBuffer.limit(copied)
+                session.imeDecoder.reset()
+                runCatching { session.imeDecoder.decode(session.imeBuffer).toString() }
+                    .getOrElse {
+                        Log.w(TAG, "Rejected invalid IME surrounding text session=${session.id}")
+                        notifyImeState(session, changeSerial, "", 0, 0, 0, 0)
+                        return
+                    }
+            }
+        val cursor =
+            utf8OffsetToUtf16(
+                text,
+                compositor.imeStateComponent(IME_COMPONENT_CURSOR),
+            )
+        val anchor =
+            utf8OffsetToUtf16(
+                text,
+                compositor.imeStateComponent(IME_COMPONENT_ANCHOR),
+            )
+        if (cursor < 0 || anchor < 0) {
+            Log.w(TAG, "Rejected invalid IME selection offsets session=${session.id}")
+            notifyImeState(session, changeSerial, "", 0, 0, 0, 0)
+            return
+        }
+        notifyImeState(
+            session,
+            changeSerial,
+            text,
+            cursor,
+            anchor,
+            compositor.imeStateComponent(IME_COMPONENT_HINT).coerceAtLeast(0),
+            compositor.imeStateComponent(IME_COMPONENT_PURPOSE).coerceAtLeast(0),
+        )
     }
 
     private fun decodeClipboardText(bytes: ByteArray): String? =
@@ -1108,6 +1422,96 @@ class LauncherSessionService : Service() {
         }
     }
 
+    private fun notifyImeState(
+        session: Session,
+        revision: Int,
+        text: String?,
+        cursor: Int,
+        anchor: Int,
+        hint: Int,
+        purpose: Int,
+    ) {
+        if (
+            !session.active ||
+            (text != null &&
+                (text.length > MAX_IME_UTF16 ||
+                    cursor !in 0..text.length ||
+                    anchor !in 0..text.length))
+        ) {
+            return
+        }
+        val data = Parcel.obtain()
+        try {
+            data.writeInterfaceToken(CALLBACK_INTERFACE)
+            data.writeInt(PROTOCOL_VERSION)
+            data.writeInt(session.id)
+            data.writeInt(if (text == null) 0 else 1)
+            data.writeInt(revision)
+            if (text != null) {
+                data.writeString(text)
+                data.writeInt(cursor)
+                data.writeInt(anchor)
+                data.writeInt(hint)
+                data.writeInt(purpose)
+            }
+            session.clientToken.transact(CALLBACK_IME_STATE, data, null, IBinder.FLAG_ONEWAY)
+        } catch (error: RemoteException) {
+            Log.w(TAG, "Could not deliver launcher IME state session=${session.id}", error)
+        } finally {
+            data.recycle()
+        }
+    }
+
+    private fun utf8OffsetToUtf16(
+        text: String,
+        byteOffset: Int,
+    ): Int {
+        if (byteOffset < 0) {
+            return if (text.isEmpty()) 0 else -1
+        }
+        var bytes = 0
+        var utf16 = 0
+        while (utf16 < text.length) {
+            if (bytes == byteOffset) {
+                return utf16
+            }
+            val codePoint = text.codePointAt(utf16)
+            bytes +=
+                when {
+                    codePoint <= 0x7f -> 1
+                    codePoint <= 0x7ff -> 2
+                    codePoint <= 0xffff -> 3
+                    else -> 4
+                }
+            utf16 += Character.charCount(codePoint)
+            if (bytes > byteOffset) {
+                return -1
+            }
+        }
+        return if (bytes == byteOffset) utf16 else -1
+    }
+
+    private fun hasWellFormedUtf16(text: String): Boolean {
+        var index = 0
+        while (index < text.length) {
+            val character = text[index]
+            when {
+                Character.isHighSurrogate(character) -> {
+                    if (
+                        index + 1 >= text.length ||
+                        !Character.isLowSurrogate(text[index + 1])
+                    ) {
+                        return false
+                    }
+                    index += 2
+                }
+                Character.isLowSurrogate(character) -> return false
+                else -> index++
+            }
+        }
+        return true
+    }
+
     @Synchronized
     private fun closeSession(
         callingUid: Int,
@@ -1130,12 +1534,20 @@ class LauncherSessionService : Service() {
         private const val TRANSACTION_DETACH_SURFACE = IBinder.FIRST_CALL_TRANSACTION + 3
         private const val TRANSACTION_INPUT = IBinder.FIRST_CALL_TRANSACTION + 4
         private const val TRANSACTION_CLIPBOARD = IBinder.FIRST_CALL_TRANSACTION + 5
+        private const val TRANSACTION_IME = IBinder.FIRST_CALL_TRANSACTION + 6
         private const val CALLBACK_INTERFACE = "org.archphene.launcher.IClientV1"
         private const val CALLBACK_STATUS = IBinder.FIRST_CALL_TRANSACTION
         private const val CALLBACK_CLIPBOARD = IBinder.FIRST_CALL_TRANSACTION + 1
+        private const val CALLBACK_IME_STATE = IBinder.FIRST_CALL_TRANSACTION + 2
         private const val MAX_SESSIONS = 16
         private const val MAX_SURFACE_DIMENSION = 8192
         private const val MAX_SURFACE_PIXELS = 33_554_432L
+        private const val DEFAULT_DENSITY_DPI = 160
+        private const val MIN_DENSITY_DPI = 72
+        private const val MAX_DENSITY_DPI = 1_000
+        private const val DEFAULT_FONT_SCALE_MILLIS = 1_000
+        private const val MIN_FONT_SCALE_MILLIS = 500
+        private const val MAX_FONT_SCALE_MILLIS = 3_000
         private const val COMPOSITOR_ACTIVE_DELAY_MILLIS = 8L
         private const val COMPOSITOR_IDLE_DELAY_MILLIS = 50L
         private const val PROCESS_STATUS_DELAY_MILLIS = 500L
@@ -1166,6 +1578,20 @@ class LauncherSessionService : Service() {
         private const val MAX_CLIPBOARD_BYTES = 65_536
         private const val MAX_CLIPBOARD_PARCEL_BYTES = 131_200
         private const val CLIPBOARD_IO_TIMEOUT_MILLIS = 2_000
+        private const val MAX_IME_COMMANDS = 32
+        private const val MAX_IME_UTF16 = 4_096
+        private const val MAX_IME_BYTES = 16_384
+        private const val MAX_IME_SURROUNDING_BYTES = 4_000
+        private const val MAX_IME_PARCEL_BYTES = 32_896
+        private const val MAX_IME_ACTION = 64
+        private const val IME_COMMIT = 1
+        private const val IME_PREEDIT = 2
+        private const val IME_DELETE = 3
+        private const val IME_EDITOR_ACTION = 4
+        private const val IME_COMPONENT_CURSOR = 0
+        private const val IME_COMPONENT_ANCHOR = 1
+        private const val IME_COMPONENT_HINT = 2
+        private const val IME_COMPONENT_PURPOSE = 3
         private const val RESULT_OK = 0
         private const val RESULT_NOT_READY = 1
         private const val RESULT_UNAUTHORIZED = 2

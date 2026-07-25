@@ -24,6 +24,8 @@ gcc -O2 -Wall -Wextra -Werror \
   -o "$root/readlink-probe" native/archphene-glibc-path-bridge/readlink_probe.c
 gcc -O2 -Wall -Wextra -Werror \
   -o "$root/identity-probe" native/archphene-glibc-path-bridge/identity_probe.c
+gcc -O2 -Wall -Wextra -Werror \
+  -o "$root/socket-probe" native/archphene-glibc-path-bridge/socket_probe.c
 export LD_PRELOAD="$output"
 export ARCHPHENE_RUNTIME_ROOT="$root"
 export XDG_RUNTIME_DIR="$root/runtime"
@@ -56,6 +58,13 @@ exec_output="$(
   "$root/exec-probe"
 )"
 test "$exec_output" = "--library-path /lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu --argv0 cat $root/commands/cat bridge-arg"
+exec_path_output="$(
+  ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+  ARCHPHENE_RUNTIME_LOADER="$loader_path" \
+  ARCHPHENE_RUNTIME_LIB=/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu \
+  "$root/exec-probe" "$root/commands/cat"
+)"
+test "$exec_path_output" = "--library-path /lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu --argv0 cat $root/commands/cat bridge-arg"
 set +e
 ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
 ARCHPHENE_RUNTIME_LOADER="$loader_path" \
@@ -72,6 +81,20 @@ direct_output="$(
   "$root/exec-probe" --direct "$root/commands/cat"
 )"
 test "$direct_output" = "--library-path /lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu --argv0 cat $root/commands/cat bridge-arg"
+spawn_direct_output="$(
+  ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+  ARCHPHENE_RUNTIME_LOADER="$loader_path" \
+  ARCHPHENE_RUNTIME_LIB=/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu \
+  "$root/exec-probe" --spawn-direct "$root/commands/cat"
+)"
+test "$spawn_direct_output" = "--library-path /lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu --argv0 cat $root/commands/cat bridge-arg"
+spawn_path_output="$(
+  ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+  ARCHPHENE_RUNTIME_LOADER="$loader_path" \
+  ARCHPHENE_RUNTIME_LIB=/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu \
+  "$root/exec-probe" --spawn-path cat
+)"
+test "$spawn_path_output" = "--library-path /lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu --argv0 cat $root/commands/cat bridge-arg"
 set +e
 ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
 ARCHPHENE_RUNTIME_LOADER="$loader_path" \
@@ -111,4 +134,9 @@ test "$(cat "$root/rename-target")" = rename-compatible
 test -d "$root/mkdir-target"
 "$root/shm-probe"
 "$root/identity-probe"
+mkdir -p "$root/run"
+ARCHPHENE_FAKE_CHROOT=1 "$root/socket-probe" |
+  grep -qx unix-socket-bridge-passed
+test -S "$root/run/archphene-path-bridge-test.sock"
+test ! -e /run/archphene-path-bridge-test.sock
 printf 'path-bridge-tests-passed\n'

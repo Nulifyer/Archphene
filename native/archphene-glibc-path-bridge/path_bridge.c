@@ -6,15 +6,19 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <linux/stat.h>
+#include <pwd.h>
 #include <signal.h>
+#include <spawn.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/fsuid.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 /* Android PTYs are valid even when this glibc build's isatty probe is rejected. */
@@ -91,6 +95,96 @@ uid_t getuid(void) { return 0; }
 uid_t geteuid(void) { return 0; }
 gid_t getgid(void) { return 0; }
 gid_t getegid(void) { return 0; }
+
+static struct passwd archphene_passwd = {
+    .pw_name = "archphene",
+    .pw_passwd = "x",
+    .pw_uid = 0,
+    .pw_gid = 0,
+    .pw_gecos = "Archphene",
+    .pw_dir = "/home/archphene",
+    .pw_shell = "/usr/bin/bash",
+};
+
+static struct passwd root_passwd = {
+    .pw_name = "root",
+    .pw_passwd = "x",
+    .pw_uid = 0,
+    .pw_gid = 0,
+    .pw_gecos = "Archphene system user",
+    .pw_dir = "/home/archphene",
+    .pw_shell = "/usr/bin/bash",
+};
+
+static int copy_passwd(const struct passwd *source, struct passwd *output,
+        char *buffer, size_t buffer_size, struct passwd **result) {
+    const char *fields[] = {
+        source->pw_name, source->pw_passwd, source->pw_gecos,
+        source->pw_dir, source->pw_shell
+    };
+    size_t lengths[sizeof(fields) / sizeof(fields[0])];
+    size_t required = 0;
+    for (size_t index = 0; index < sizeof(fields) / sizeof(fields[0]); index++) {
+        lengths[index] = strlen(fields[index]) + 1;
+        if (lengths[index] > buffer_size - required) {
+            *result = NULL;
+            return ERANGE;
+        }
+        required += lengths[index];
+    }
+    char *values[sizeof(fields) / sizeof(fields[0])];
+    size_t offset = 0;
+    for (size_t index = 0; index < sizeof(fields) / sizeof(fields[0]); index++) {
+        values[index] = buffer + offset;
+        memcpy(values[index], fields[index], lengths[index]);
+        offset += lengths[index];
+    }
+    *output = (struct passwd) {
+        .pw_name = values[0],
+        .pw_passwd = values[1],
+        .pw_uid = source->pw_uid,
+        .pw_gid = source->pw_gid,
+        .pw_gecos = values[2],
+        .pw_dir = values[3],
+        .pw_shell = values[4],
+    };
+    *result = output;
+    return 0;
+}
+
+struct passwd *getpwuid(uid_t user) {
+    return user == 0 ? &archphene_passwd : NULL;
+}
+
+int getpwuid_r(uid_t user, struct passwd *output, char *buffer,
+        size_t buffer_size, struct passwd **result) {
+    if (user != 0) {
+        *result = NULL;
+        return 0;
+    }
+    return copy_passwd(&archphene_passwd, output, buffer, buffer_size, result);
+}
+
+struct passwd *getpwnam(const char *name) {
+    if (strcmp(name, "archphene") == 0) return &archphene_passwd;
+    return strcmp(name, "root") == 0 ? &root_passwd : NULL;
+}
+
+int getpwnam_r(const char *name, struct passwd *output, char *buffer,
+        size_t buffer_size, struct passwd **result) {
+    const struct passwd *source = NULL;
+    if (strcmp(name, "archphene") == 0) {
+        source = &archphene_passwd;
+    } else if (strcmp(name, "root") == 0) {
+        source = &root_passwd;
+    }
+    if (source == NULL) {
+        *result = NULL;
+        return 0;
+    }
+    return copy_passwd(source, output, buffer, buffer_size, result);
+}
+
 int setfsuid(uid_t user) {
     (void)user;
     return 0;
@@ -389,6 +483,70 @@ static int launch_runtime_command(const char *name, char *const arguments[],
     return -1;
 }
 
+static int spawn_runtime_command(pid_t *process, const char *name,
+        const posix_spawn_file_actions_t *file_actions,
+        const posix_spawnattr_t *attributes, char *const arguments[],
+        char *const environment[]) {
+    char command[PATH_MAX];
+    if (!runtime_command(name, command)) return ENOENT;
+    const char *library_path = getenv("ARCHPHENE_RUNTIME_LIB");
+    if (trusted_loader[0] == '\0' || library_path == NULL
+            || library_path[0] != '/' || strchr(library_path, '\n') != NULL) {
+        return EACCES;
+    }
+    size_t count = 0;
+    while (arguments[count] != NULL) {
+        if (++count > 4088) return E2BIG;
+    }
+    char *loader_arguments[4096];
+    loader_arguments[0] = trusted_loader;
+    loader_arguments[1] = "--library-path";
+    loader_arguments[2] = (char *)library_path;
+    loader_arguments[3] = "--argv0";
+    loader_arguments[4] = (char *)name;
+    loader_arguments[5] = command;
+    for (size_t index = 1; index < count; index++) {
+        loader_arguments[index + 5] = arguments[index];
+    }
+    loader_arguments[count + 5] = NULL;
+    typedef int (*function_type)(pid_t *, const char *,
+            const posix_spawn_file_actions_t *, const posix_spawnattr_t *,
+            char *const[], char *const[]);
+    function_type real = (function_type)dlsym(RTLD_NEXT, "posix_spawn");
+    if (real == NULL) return ENOSYS;
+    return real(process, trusted_loader, file_actions, attributes,
+            loader_arguments, environment == NULL ? environ : environment);
+}
+
+int posix_spawn(pid_t *process, const char *path,
+        const posix_spawn_file_actions_t *file_actions,
+        const posix_spawnattr_t *attributes, char *const arguments[],
+        char *const environment[]) {
+    if (trusted_loader[0] != '\0' && strcmp(path, trusted_loader) == 0) {
+        typedef int (*function_type)(pid_t *, const char *,
+                const posix_spawn_file_actions_t *, const posix_spawnattr_t *,
+                char *const[], char *const[]);
+        function_type real = (function_type)dlsym(RTLD_NEXT, "posix_spawn");
+        return real == NULL ? ENOSYS : real(process, path, file_actions,
+                attributes, arguments, environment == NULL ? environ : environment);
+    }
+    if (!exact_runtime_command(path)) return ENOENT;
+    const char *name = strrchr(path, '/');
+    return spawn_runtime_command(process, name == NULL ? path : name + 1,
+            file_actions, attributes, arguments, environment);
+}
+
+int posix_spawnp(pid_t *process, const char *file,
+        const posix_spawn_file_actions_t *file_actions,
+        const posix_spawnattr_t *attributes, char *const arguments[],
+        char *const environment[]) {
+    const char *separator = strrchr(file, '/');
+    if (separator != NULL && !exact_runtime_command(file)) return ENOENT;
+    return spawn_runtime_command(process,
+            separator == NULL ? file : separator + 1, file_actions, attributes,
+            arguments, environment);
+}
+
 static int launch_android_system_command(const char *name, char *const arguments[],
         char *const environment[]) {
     const char *path;
@@ -422,6 +580,16 @@ static int launch_android_system_command(const char *name, char *const arguments
     }
     real(path, arguments, clean_environment);
     return -1;
+}
+
+static int launch_runtime_file(const char *file, char *const arguments[],
+        char *const environment[]) {
+    const char *separator = strrchr(file, '/');
+    if (separator == NULL) {
+        return launch_runtime_command(file, arguments, environment);
+    }
+    if (!exact_runtime_command(file)) return 1;
+    return launch_runtime_command(separator + 1, arguments, environment);
 }
 
 int execve(const char *path, char *const arguments[], char *const environment[]) {
@@ -458,7 +626,7 @@ int execv(const char *path, char *const arguments[]) {
 }
 
 int execvp(const char *file, char *const arguments[]) {
-    int bridged = launch_runtime_command(file, arguments, environ);
+    int bridged = launch_runtime_file(file, arguments, environ);
     if (bridged <= 0) return -1;
     bridged = launch_android_system_command(file, arguments, environ);
     if (bridged <= 0) return -1;
@@ -467,7 +635,7 @@ int execvp(const char *file, char *const arguments[]) {
 }
 
 int execvpe(const char *file, char *const arguments[], char *const environment[]) {
-    int bridged = launch_runtime_command(file, arguments, environment);
+    int bridged = launch_runtime_file(file, arguments, environment);
     if (bridged <= 0) return -1;
     bridged = launch_android_system_command(file, arguments, environment);
     if (bridged <= 0) return -1;
@@ -491,7 +659,7 @@ int execlp(const char *file, const char *argument, ...) {
         errno = E2BIG;
         return -1;
     }
-    int bridged = launch_runtime_command(file, arguments, environ);
+    int bridged = launch_runtime_file(file, arguments, environ);
     if (bridged <= 0) return -1;
     bridged = launch_android_system_command(file, arguments, environ);
     if (bridged <= 0) return -1;
@@ -547,6 +715,84 @@ static const char *translate_path(const char *path, char output[PATH_MAX],
     memcpy(output + root_length, path, path_length + 1);
     *translated = true;
     return output;
+}
+
+static int translate_unix_address(const struct sockaddr *address,
+        socklen_t address_length, struct sockaddr_un *output,
+        socklen_t *output_length, bool *translated) {
+    *translated = false;
+    if (address == NULL || address_length < sizeof(sa_family_t)
+            || address->sa_family != AF_UNIX) {
+        return 0;
+    }
+    const size_t path_offset = offsetof(struct sockaddr_un, sun_path);
+    if ((size_t)address_length <= path_offset) return 0;
+    const struct sockaddr_un *unix_address =
+            (const struct sockaddr_un *)address;
+    size_t available = (size_t)address_length - path_offset;
+    if (available > sizeof(unix_address->sun_path)) {
+        available = sizeof(unix_address->sun_path);
+    }
+    if (unix_address->sun_path[0] == '\0') return 0;
+    size_t path_length = strnlen(unix_address->sun_path, available);
+    if (path_length == 0) return 0;
+    if (path_length == available
+            && path_length == sizeof(unix_address->sun_path)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    char linux_path[sizeof(unix_address->sun_path) + 1];
+    memcpy(linux_path, unix_address->sun_path, path_length);
+    linux_path[path_length] = '\0';
+
+    bool path_translated;
+    char translated_path[PATH_MAX];
+    const char *target =
+            translate_path(linux_path, translated_path, &path_translated);
+    if (target == NULL) return -1;
+    if (!path_translated) return 0;
+    size_t target_length = strlen(target);
+    if (target_length >= sizeof(output->sun_path)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    memset(output, 0, sizeof(*output));
+    output->sun_family = AF_UNIX;
+    memcpy(output->sun_path, target, target_length + 1);
+    *output_length = (socklen_t)(path_offset + target_length + 1);
+    *translated = true;
+    return 0;
+}
+
+static int socket_address_call(const char *symbol, int descriptor,
+        const struct sockaddr *address, socklen_t address_length) {
+    typedef int (*function_type)(int, const struct sockaddr *, socklen_t);
+    function_type real = (function_type)dlsym(RTLD_NEXT, symbol);
+    if (real == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    struct sockaddr_un translated_address;
+    socklen_t translated_length = 0;
+    bool translated;
+    if (translate_unix_address(address, address_length, &translated_address,
+                &translated_length, &translated) != 0) {
+        return -1;
+    }
+    return translated
+            ? real(descriptor, (const struct sockaddr *)&translated_address,
+                    translated_length)
+            : real(descriptor, address, address_length);
+}
+
+int connect(int descriptor, const struct sockaddr *address,
+        socklen_t address_length) {
+    return socket_address_call("connect", descriptor, address, address_length);
+}
+
+int bind(int descriptor, const struct sockaddr *address,
+        socklen_t address_length) {
+    return socket_address_call("bind", descriptor, address, address_length);
 }
 
 int chroot(const char *path) {

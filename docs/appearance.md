@@ -2,6 +2,23 @@
 
 Archphene maps Android appearance policy into each Linux app at launch. The policy is authenticated through the manager runtime provider, so arbitrary Android apps cannot change another wrapper's theme.
 
+## Greenfield bridge status
+
+The Rust + Kotlin launcher no longer uses a global `QT_SCALE_FACTOR` to make a
+physical Android buffer look logical. It derives a Wayland logical extent from
+the wrapper Surface and Android density, advertises integer
+`wl_output.scale` plus `wp_fractional_scale_v1`, maps physical input into the
+same logical space, and composes retained client/subsurface rasters at the
+physical Surface size. Android system-bar and display-cutout insets are removed
+before the Wayland viewport is attached.
+
+Package-installed Foot on the physical Samsung validates this generic density
+path in portrait and landscape, including crisp client-side decorations and
+Samsung IME text. The separate user-facing geometry, text, and visible-control
+preferences described below are the retained product policy from the validated
+prototype; migrating those live toolkit bridges into the shared-root greenfield
+runtime remains pending.
+
 ## User controls
 
 Settings exposes separate controls for:

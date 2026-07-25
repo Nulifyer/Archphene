@@ -23,6 +23,26 @@ const DEFAULT_BASH_PROFILE: &[u8] =
 if [[ -r ~/.bashrc ]]; then\n\
   . ~/.bashrc\n\
 fi\n";
+const ANDROID_FONTCONFIG: &[u8] = br#"<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
+<fontconfig>
+  <description>Archphene device-font bridge</description>
+  <include ignore_missing="yes">/etc/fonts/fonts.conf</include>
+  <dir>/system/fonts</dir>
+  <alias>
+    <family>sans-serif</family>
+    <prefer><family>Roboto</family><family>Noto Sans</family></prefer>
+  </alias>
+  <alias>
+    <family>serif</family>
+    <prefer><family>Noto Serif</family></prefer>
+  </alias>
+  <alias>
+    <family>monospace</family>
+    <prefer><family>Droid Sans Mono</family><family>Cutive Mono</family></prefer>
+  </alias>
+</fontconfig>
+"#;
 
 const DIRECTORIES: &[(&str, u32)] = &[
     ("usr", 0o755),
@@ -30,6 +50,7 @@ const DIRECTORIES: &[(&str, u32)] = &[
     ("var", 0o755),
     ("var/lib", 0o755),
     ("var/lib/archphene", 0o700),
+    ("var/lib/archphene/fontconfig", 0o700),
     ("var/lib/archphene/storage", 0o700),
     ("var/lib/pacman", 0o755),
     ("var/lib/pacman/sync", 0o755),
@@ -106,6 +127,10 @@ impl ArchRoot {
         ensure_user_file(
             &path.join("home/archphene/.bash_profile"),
             DEFAULT_BASH_PROFILE,
+        )?;
+        ensure_managed_file(
+            &path.join("var/lib/archphene/fontconfig/fonts.conf"),
+            ANDROID_FONTCONFIG,
         )?;
         ensure_version(path)?;
         Ok((
@@ -228,6 +253,49 @@ fn ensure_user_file(path: &Path, content: &[u8]) -> Result<(), RootError> {
     Ok(())
 }
 
+fn ensure_managed_file(path: &Path, content: &[u8]) -> Result<(), RootError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(RootError::InvalidEntry(path.to_path_buf()));
+            }
+            if metadata.len() == content.len() as u64 {
+                let mut current = Vec::with_capacity(content.len());
+                File::open(path)?.read_to_end(&mut current)?;
+                if current == content {
+                    if metadata.permissions().mode() & 0o7777 != 0o600 {
+                        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+                    }
+                    return Ok(());
+                }
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(RootError::Io(error)),
+    }
+    let temporary = path.with_extension("conf.tmp");
+    match fs::symlink_metadata(&temporary) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(RootError::InvalidEntry(temporary));
+            }
+            fs::remove_file(&temporary)?;
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(RootError::Io(error)),
+    }
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    file.write_all(content)?;
+    file.sync_all()?;
+    drop(file);
+    fs::rename(temporary, path)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,6 +330,7 @@ mod tests {
         assert!(temporary.0.join("var/lib/pacman").is_dir());
         assert!(temporary.0.join("var/lib/pacman/sync").is_dir());
         assert!(temporary.0.join("var/lib/archphene/storage").is_dir());
+        assert!(temporary.0.join("var/lib/archphene/fontconfig").is_dir());
         assert!(temporary.0.join("home/archphene").is_dir());
         assert!(temporary.0.join("home/archphene/Documents").is_dir());
         assert!(temporary.0.join("home/archphene/Downloads").is_dir());
@@ -270,6 +339,11 @@ mod tests {
         assert_eq!(
             fs::read(temporary.0.join("home/archphene/.bashrc")).expect("default bashrc"),
             DEFAULT_BASHRC,
+        );
+        assert_eq!(
+            fs::read(temporary.0.join("var/lib/archphene/fontconfig/fonts.conf"))
+                .expect("managed fontconfig"),
+            ANDROID_FONTCONFIG,
         );
 
         let (_, second) = ArchRoot::bootstrap(&temporary.0).expect("second bootstrap");
@@ -312,6 +386,17 @@ mod tests {
         assert_eq!(
             fs::read(temporary.0.join("home/archphene/.bashrc")).expect("custom bashrc"),
             b"# user customization\n",
+        );
+        fs::write(
+            temporary.0.join("var/lib/archphene/fontconfig/fonts.conf"),
+            b"damaged\n",
+        )
+        .expect("damage managed fontconfig");
+        ArchRoot::bootstrap(&temporary.0).expect("repair managed fontconfig");
+        assert_eq!(
+            fs::read(temporary.0.join("var/lib/archphene/fontconfig/fonts.conf"))
+                .expect("repaired fontconfig"),
+            ANDROID_FONTCONFIG,
         );
     }
 
