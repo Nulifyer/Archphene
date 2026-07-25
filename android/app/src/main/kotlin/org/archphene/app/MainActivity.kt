@@ -401,7 +401,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(dp(16), 0, dp(16), 0)
                 setText(R.string.desktop_entries_loading)
-                maxLines = 1
+                maxLines = 2
                 ellipsize = TextUtils.TruncateAt.END
             }
         installedPackageAdapter = InstalledPackageAdapter()
@@ -432,7 +432,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     desktopEntryStatusView,
                     LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
-                        dp(40),
+                        dp(56),
                     ),
                 )
                 addView(

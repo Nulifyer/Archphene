@@ -36,10 +36,13 @@ physical Samsung coverage for:
 - Android DocumentsProvider, document import, folder grants, and initial
   project snapshots;
 - persistent package activity, actionable failures, background work, adaptive
-  manager navigation, and every planned package/launcher state.
+  manager navigation, and every planned package/launcher state;
+- bounded shared-root desktop discovery and an atomic manager-owned launcher
+  registry with package ownership, stable Android identities, and durable
+  publication/removal generations.
 
-Desktop-entry discovery, the cross-process launcher Surface protocol, wrapper
-generation/signing, and Android installer reconciliation remain open.
+Icon/capability derivation, wrapper generation/signing, Android installer
+reconciliation, and the cross-process launcher Surface protocol remain open.
 
 ## Historical bridge evidence
 

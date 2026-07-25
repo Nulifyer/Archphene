@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use archphene_core::{Lifecycle, Runtime, RuntimeError};
 use archphene_jobs::{JobError, JobOperation, JobState, PackageJob, PackageJobStore};
+use archphene_launcher::{LauncherRegistry, LauncherRegistryError, ReconcileReport, WrapperStatus};
 use archphene_packages::{
     CatalogDownload, InstalledPackageCatalog, PackagePayloadDownload, PackageRuntime,
     PackageRuntimeError, PackageTool, Repository, RepositoryArchitecture, ToolOutput,
@@ -33,6 +34,7 @@ pub struct RuntimeHost {
     package_runtime: Option<PackageRuntime>,
     installed_packages: Option<InstalledPackageCatalog>,
     desktop_entries: Option<DesktopCatalog>,
+    launcher_registry: Option<LauncherRegistry>,
     catalog_download: Option<CatalogDownload>,
     package_download: Option<PackagePayloadDownload>,
     pty_sessions: PtyRegistry,
@@ -47,11 +49,51 @@ pub struct RuntimeBootstrapReport {
     pub recovered_jobs: u32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LauncherRegistrySummary {
+    pub generation: u64,
+    pub total: u16,
+    pub needs_publish: u16,
+    pub current: u16,
+    pub needs_removal: u16,
+    pub active: u16,
+    pub failed: u16,
+}
+
 #[derive(Debug)]
 pub enum RuntimeBootstrapError {
     Root(RootError),
     Jobs(JobError),
     Io(io::Error),
+}
+
+#[derive(Debug)]
+pub enum DesktopRefreshError {
+    Package(PackageRuntimeError),
+    Launcher(LauncherRegistryError),
+}
+
+impl fmt::Display for DesktopRefreshError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Package(error) => error.fmt(formatter),
+            Self::Launcher(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for DesktopRefreshError {}
+
+impl From<PackageRuntimeError> for DesktopRefreshError {
+    fn from(error: PackageRuntimeError) -> Self {
+        Self::Package(error)
+    }
+}
+
+impl From<LauncherRegistryError> for DesktopRefreshError {
+    fn from(error: LauncherRegistryError) -> Self {
+        Self::Launcher(error)
+    }
 }
 
 impl fmt::Display for RuntimeBootstrapError {
@@ -93,6 +135,7 @@ impl RuntimeHost {
             package_runtime: None,
             installed_packages: None,
             desktop_entries: None,
+            launcher_registry: None,
             catalog_download: None,
             package_download: None,
             pty_sessions: PtyRegistry::new(),
@@ -236,6 +279,7 @@ impl RuntimeHost {
         self.package_runtime = Some(package_runtime);
         self.installed_packages = None;
         self.desktop_entries = None;
+        self.launcher_registry = None;
         let mut status_flags =
             STATUS_ARCH_ROOT_READY | STATUS_JOB_STORE_READY | STATUS_PACKAGE_RUNTIME_READY;
         if catalogs_ready {
@@ -317,14 +361,27 @@ impl RuntimeHost {
             .page(offset)
     }
 
-    pub fn refresh_desktop_entries(&mut self) -> Result<(), PackageRuntimeError> {
-        self.desktop_entries = Some(
-            self.package_runtime
+    pub fn refresh_desktop_entries(
+        &mut self,
+    ) -> Result<Option<ReconcileReport>, DesktopRefreshError> {
+        let catalog = self
+            .package_runtime
+            .as_ref()
+            .ok_or(PackageRuntimeError::InvalidPath)?
+            .desktop_catalog()?;
+        let report = if catalog.truncated {
+            None
+        } else {
+            let arch_root = self
+                .arch_root
                 .as_ref()
-                .ok_or(PackageRuntimeError::InvalidPath)?
-                .desktop_catalog()?,
-        );
-        Ok(())
+                .ok_or(PackageRuntimeError::InvalidPath)?;
+            let (registry, report) = LauncherRegistry::reconcile(arch_root.path(), &catalog)?;
+            self.launcher_registry = Some(registry);
+            Some(report)
+        };
+        self.desktop_entries = Some(catalog);
+        Ok(report)
     }
 
     pub fn desktop_entry_page(&self, offset: usize) -> Result<ToolOutput, PackageRuntimeError> {
@@ -332,6 +389,45 @@ impl RuntimeHost {
             .as_ref()
             .ok_or(PackageRuntimeError::InvalidPath)?
             .page(offset)
+    }
+
+    pub fn launcher_registry(&self) -> Option<&LauncherRegistry> {
+        self.launcher_registry.as_ref()
+    }
+
+    pub fn launcher_registry_summary(&self) -> Option<LauncherRegistrySummary> {
+        let registry = self.launcher_registry.as_ref()?;
+        let mut summary = LauncherRegistrySummary {
+            generation: registry.generation(),
+            total: u16::try_from(registry.descriptors().len()).ok()?,
+            needs_publish: 0,
+            current: 0,
+            needs_removal: 0,
+            active: 0,
+            failed: 0,
+        };
+        for descriptor in registry.descriptors() {
+            match descriptor.status {
+                WrapperStatus::NeedsPublish => {
+                    summary.needs_publish = summary.needs_publish.saturating_add(1);
+                }
+                WrapperStatus::Current => {
+                    summary.current = summary.current.saturating_add(1);
+                }
+                WrapperStatus::NeedsRemoval => {
+                    summary.needs_removal = summary.needs_removal.saturating_add(1);
+                }
+                WrapperStatus::Building
+                | WrapperStatus::AwaitingInstall
+                | WrapperStatus::AwaitingRemoval => {
+                    summary.active = summary.active.saturating_add(1);
+                }
+                WrapperStatus::Failed => {
+                    summary.failed = summary.failed.saturating_add(1);
+                }
+            }
+        }
+        Some(summary)
     }
 
     pub fn begin_package_job(

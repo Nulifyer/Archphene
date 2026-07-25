@@ -95,6 +95,21 @@ internal class DesktopEntriesTestReceiver : BroadcastReceiver() {
         if (!escape.exists()) {
             Os.symlink("/system/build.prop", escape.absolutePath)
         }
+        val local = File(root, "var/lib/pacman/local")
+        check(local.mkdirs() || local.isDirectory)
+        File(local, "ALPM_DB_VERSION").writeText("9\n")
+        writePackage(
+            local,
+            "archphene-fixture-kate",
+            "usr/bin/archphene-fixture-kate\n" +
+                "usr/share/applications/org.archphene.fixture.kate.desktop\n",
+        )
+        writePackage(
+            local,
+            "archphene-fixture-foot",
+            "usr/bin/archphene-fixture-foot\n" +
+                "usr/share/applications/org.archphene.fixture.foot.desktop\n",
+        )
     }
 
     private fun clean(context: Context) {
@@ -109,6 +124,21 @@ internal class DesktopEntriesTestReceiver : BroadcastReceiver() {
             val file = File(binaries, name)
             check(file.delete() || !file.exists()) { "could not delete fixture $name" }
         }
+        val local = File(root, "var/lib/pacman/local")
+        for (name in PACKAGES) {
+            val directory = File(local, "$name-1.0-1")
+            if (!directory.exists()) {
+                continue
+            }
+            check(directory.isDirectory) { "unsafe package fixture $name" }
+            for (fileName in arrayOf("desc", "files")) {
+                val file = File(directory, fileName)
+                check(file.delete() || !file.exists()) {
+                    "could not delete package fixture file $fileName"
+                }
+            }
+            check(directory.delete()) { "could not delete package fixture $name" }
+        }
     }
 
     private fun writeDesktop(
@@ -121,6 +151,19 @@ internal class DesktopEntriesTestReceiver : BroadcastReceiver() {
         file.writeText(contents)
     }
 
+    private fun writePackage(
+        local: File,
+        name: String,
+        files: String,
+    ) {
+        val directory = File(local, "$name-1.0-1")
+        check(directory.mkdir()) { "could not create package fixture $name" }
+        File(directory, "desc").writeText(
+            "%NAME%\n$name\n\n%VERSION%\n1.0-1\n\n%REASON%\n0\n",
+        )
+        File(directory, "files").writeText("%FILES%\n$files\n")
+    }
+
     private companion object {
         private const val TAG = "ArchpheneDesktopEntriesProbe"
         private const val ACTION_SEED =
@@ -130,6 +173,11 @@ internal class DesktopEntriesTestReceiver : BroadcastReceiver() {
         private const val EXTRA_TOKEN = "token"
         private val TOKEN = Regex("[a-z0-9-]{1,48}")
         private val BINARIES =
+            arrayOf(
+                "archphene-fixture-foot",
+                "archphene-fixture-kate",
+            )
+        private val PACKAGES =
             arrayOf(
                 "archphene-fixture-foot",
                 "archphene-fixture-kate",

@@ -45,7 +45,13 @@ const PACKAGE_TRUSTDB_LIMIT: u64 = 1024 * 1024;
 const SHELLS_FILE: &str = "etc/shells";
 const SHELLS_FILE_LIMIT: u64 = 4 * 1024;
 const LOCAL_DATABASE_ENTRY_LIMIT: usize = 4096;
+const LOCAL_DATABASE_DIRECTORY_ENTRY_LIMIT: usize = 8192;
 const LOCAL_DESCRIPTION_LIMIT: u64 = 64 * 1024;
+const LOCAL_FILES_LIMIT: u64 = 8 * 1024 * 1024;
+const LOCAL_FILES_TOTAL_LIMIT: u64 = 128 * 1024 * 1024;
+const LOCAL_FILE_PATH_LIMIT: usize = 4 * 1024;
+const O_NOFOLLOW: i32 = 0o400000;
+const O_CLOEXEC: i32 = 0o2000000;
 const PATH_BRIDGE_NAME: &str = "libarchphene_path_bridge.so";
 const AARCH64_BUILD_KEY: &str = "68B3537F39A313B3E574D06777193F152BDBE6A6";
 
@@ -369,7 +375,7 @@ impl desktop::DesktopCatalog {
 
         let mut output = empty_tool_output();
         let header = format!(
-            "D1\t{next}\t{}\t{}\t{}\t{}\n",
+            "D2\t{next}\t{}\t{}\t{}\t{}\n",
             self.entries.len(),
             self.examined,
             self.rejected,
@@ -391,7 +397,8 @@ fn desktop_record_bytes(entry: &desktop::DesktopEntry) -> Result<usize, PackageR
         .and_then(|value| value.checked_add(entry.executable.len()))
         .and_then(|value| value.checked_add(entry.icon.as_ref().map_or(0, String::len)))
         .and_then(|value| value.checked_add(entry.try_exec.as_ref().map_or(0, String::len)))
-        .and_then(|value| value.checked_add(9))
+        .and_then(|value| value.checked_add(entry.source_package.as_ref().map_or(0, String::len)))
+        .and_then(|value| value.checked_add(10))
         .ok_or(PackageRuntimeError::OutputLimit)?;
     for (index, argument) in entry.arguments.iter().enumerate() {
         length = length
@@ -450,6 +457,10 @@ fn push_desktop_record(
     for mime_type in &entry.mime_types {
         output.push(mime_type.as_bytes())?;
         output.push(b";")?;
+    }
+    output.push(b"\t")?;
+    if let Some(source_package) = &entry.source_package {
+        output.push(source_package.as_bytes())?;
     }
     output.push(b"\n")
 }
@@ -870,7 +881,136 @@ impl PackageRuntime {
     }
 
     pub fn desktop_catalog(&self) -> Result<desktop::DesktopCatalog, PackageRuntimeError> {
-        desktop::discover_desktop_entries(&self.arch_root).map_err(PackageRuntimeError::from)
+        let mut catalog = desktop::discover_desktop_entries(&self.arch_root)?;
+        self.attach_desktop_owners(&mut catalog)?;
+        Ok(catalog)
+    }
+
+    fn attach_desktop_owners(
+        &self,
+        catalog: &mut desktop::DesktopCatalog,
+    ) -> Result<(), PackageRuntimeError> {
+        if catalog.entries.is_empty() {
+            return Ok(());
+        }
+        let local = self.arch_root.join("var/lib/pacman/local");
+        let metadata = match fs::symlink_metadata(&local) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(PackageRuntimeError::Io(error)),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(PackageRuntimeError::UnsafeEntry(local));
+        }
+
+        let mut targets: Vec<(Vec<u8>, usize)> = catalog
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                (
+                    format!("usr/share/applications/{}", entry.desktop_id).into_bytes(),
+                    index,
+                )
+            })
+            .collect();
+        targets.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        let mut ambiguous = vec![false; catalog.entries.len()];
+        let mut directory_entries = 0_usize;
+        let mut database_entries = 0_usize;
+        let mut total_bytes = 0_u64;
+        let directory = match fs::read_dir(&local) {
+            Ok(directory) => directory,
+            Err(error) => return Err(PackageRuntimeError::Io(error)),
+        };
+        for item in directory {
+            directory_entries = directory_entries.saturating_add(1);
+            if directory_entries > LOCAL_DATABASE_DIRECTORY_ENTRY_LIMIT {
+                catalog.truncated = true;
+                break;
+            }
+            let Ok(item) = item else {
+                catalog.truncated = true;
+                continue;
+            };
+            let path = item.path();
+            let Ok(metadata) = fs::symlink_metadata(&path) else {
+                catalog.truncated = true;
+                continue;
+            };
+            if item.file_name() == "ALPM_DB_VERSION" && metadata.is_file() {
+                continue;
+            }
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                catalog.truncated = true;
+                continue;
+            }
+            database_entries = database_entries.saturating_add(1);
+            if database_entries > LOCAL_DATABASE_ENTRY_LIMIT {
+                catalog.truncated = true;
+                break;
+            }
+            let Some(package) = read_local_package_name(&path) else {
+                catalog.truncated = true;
+                continue;
+            };
+            let files_path = path.join("files");
+            let files_metadata = match fs::symlink_metadata(&files_path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(_) => {
+                    catalog.truncated = true;
+                    continue;
+                }
+            };
+            if files_metadata.file_type().is_symlink()
+                || !files_metadata.is_file()
+                || files_metadata.len() == 0
+                || files_metadata.len() > LOCAL_FILES_LIMIT
+            {
+                catalog.truncated = true;
+                continue;
+            }
+            let Some(next_total) = total_bytes.checked_add(files_metadata.len()) else {
+                catalog.truncated = true;
+                break;
+            };
+            if next_total > LOCAL_FILES_TOTAL_LIMIT {
+                catalog.truncated = true;
+                break;
+            }
+            total_bytes = next_total;
+            let Ok(file) = OpenOptions::new()
+                .read(true)
+                .custom_flags(O_NOFOLLOW | O_CLOEXEC)
+                .open(&files_path)
+            else {
+                catalog.truncated = true;
+                continue;
+            };
+            let Ok(opened) = file.metadata() else {
+                catalog.truncated = true;
+                continue;
+            };
+            if !opened.is_file() || opened.len() != files_metadata.len() {
+                catalog.truncated = true;
+                continue;
+            }
+            if !scan_desktop_owners(
+                file,
+                files_metadata.len(),
+                &package,
+                &targets,
+                &mut catalog.entries,
+                &mut ambiguous,
+            ) {
+                catalog.truncated = true;
+            }
+        }
+        if ambiguous.iter().any(|value| *value) {
+            catalog.truncated = true;
+        }
+        Ok(())
     }
 
     pub fn install(&self, package: &str) -> Result<ToolOutput, PackageRuntimeError> {
@@ -2124,6 +2264,133 @@ fn parse_installed_version(
     Ok(output)
 }
 
+fn read_local_package_name(path: &Path) -> Option<String> {
+    let description = path.join("desc");
+    let metadata = fs::symlink_metadata(&description).ok()?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > LOCAL_DESCRIPTION_LIMIT
+    {
+        return None;
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW | O_CLOEXEC)
+        .open(description)
+        .ok()?;
+    let opened = file.metadata().ok()?;
+    if !opened.is_file() || opened.len() != metadata.len() {
+        return None;
+    }
+    let mut contents = String::with_capacity(usize::try_from(metadata.len()).ok()?.min(4 * 1024));
+    file.take(LOCAL_DESCRIPTION_LIMIT + 1)
+        .read_to_string(&mut contents)
+        .ok()?;
+    if u64::try_from(contents.len()).ok()? != metadata.len() {
+        return None;
+    }
+    local_description_field(&contents, "%NAME%")
+        .ok()
+        .flatten()
+        .filter(|name| safe_logical_name(name))
+        .map(str::to_owned)
+}
+
+fn scan_desktop_owners(
+    mut file: File,
+    expected_bytes: u64,
+    package: &str,
+    targets: &[(Vec<u8>, usize)],
+    entries: &mut [desktop::DesktopEntry],
+    ambiguous: &mut [bool],
+) -> bool {
+    let mut read_bytes = 0_u64;
+    let mut chunk = [0_u8; 8 * 1024];
+    let mut line = Vec::with_capacity(256);
+    let mut overlong = false;
+    let mut in_files = false;
+    let mut valid = true;
+    loop {
+        let read = match file.read(&mut chunk) {
+            Ok(read) => read,
+            Err(_) => return false,
+        };
+        if read == 0 {
+            break;
+        }
+        read_bytes = match read_bytes.checked_add(u64::try_from(read).expect("read size")) {
+            Some(bytes) if bytes <= expected_bytes => bytes,
+            _ => return false,
+        };
+        for byte in &chunk[..read] {
+            if *byte == b'\n' {
+                if !overlong {
+                    process_local_files_line(
+                        &line,
+                        &mut in_files,
+                        package,
+                        targets,
+                        entries,
+                        ambiguous,
+                    );
+                }
+                line.clear();
+                overlong = false;
+            } else if !overlong {
+                if line.len() >= LOCAL_FILE_PATH_LIMIT {
+                    line.clear();
+                    overlong = true;
+                    valid = false;
+                } else {
+                    line.push(*byte);
+                }
+            }
+        }
+    }
+    if !line.is_empty() && !overlong {
+        process_local_files_line(&line, &mut in_files, package, targets, entries, ambiguous);
+    }
+    valid && read_bytes == expected_bytes
+}
+
+fn process_local_files_line(
+    raw_line: &[u8],
+    in_files: &mut bool,
+    package: &str,
+    targets: &[(Vec<u8>, usize)],
+    entries: &mut [desktop::DesktopEntry],
+    ambiguous: &mut [bool],
+) {
+    let line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
+    if line == b"%FILES%" {
+        *in_files = true;
+        return;
+    }
+    if line.len() >= 2 && line.first() == Some(&b'%') && line.last() == Some(&b'%') {
+        *in_files = false;
+        return;
+    }
+    if !*in_files {
+        return;
+    }
+    let Ok(target) = targets.binary_search_by(|candidate| candidate.0.as_slice().cmp(line)) else {
+        return;
+    };
+    let index = targets[target].1;
+    if ambiguous[index] {
+        return;
+    }
+    match entries[index].source_package.as_deref() {
+        None => entries[index].source_package = Some(package.to_owned()),
+        Some(current) if current == package => {}
+        Some(_) => {
+            entries[index].source_package = None;
+            ambiguous[index] = true;
+        }
+    }
+}
+
 fn local_description_field<'a>(
     input: &'a str,
     field: &str,
@@ -2494,6 +2761,38 @@ mod tests {
             fs::set_permissions(path, fs::Permissions::from_mode(0o755))
                 .expect("command permissions");
         }
+
+        fn package_runtime(&self) -> PackageRuntime {
+            self.file("libarchphene_pkg_111111111111111111111111.so", b"loader");
+            self.file("libarchphene_pkg_222222222222222222222222.so", b"pacman");
+            self.file("libarchphene_pkg_444444444444444444444444.so", b"keyring");
+            self.file("libarchphene_pkg_555555555555555555555555.so", b"bridge");
+            self.file("libarchphene_pkg_666666666666666666666666.so", b"trust");
+            let manifest = b"# org.archphene.package-runtime.v1\n\
+loader\t@loader\tlibarchphene_pkg_111111111111111111111111.so\t6\n\
+tool\t@pacman\tlibarchphene_pkg_222222222222222222222222.so\t6\n\
+keyring\t@keyring\tlibarchphene_pkg_444444444444444444444444.so\t7\n\
+ownertrust\t@ownertrust\tlibarchphene_pkg_666666666666666666666666.so\t5\n\
+library\tlibarchphene_path_bridge.so\tlibarchphene_pkg_555555555555555555555555.so\t6\n";
+            PackageRuntime::prepare(
+                &self.root,
+                &self.native,
+                manifest,
+                RepositoryArchitecture::X86_64,
+            )
+            .expect("package runtime")
+        }
+
+        fn local_package(&self, directory: &str, name: &str, files: &[u8]) {
+            let local = self.root.join("var/lib/pacman/local").join(directory);
+            fs::create_dir_all(&local).expect("local package directory");
+            fs::write(
+                local.join("desc"),
+                format!("%NAME%\n{name}\n\n%VERSION%\n1.0-1\n"),
+            )
+            .expect("local package description");
+            fs::write(local.join("files"), files).expect("local package files");
+        }
     }
 
     impl Drop for TestTree {
@@ -2551,6 +2850,54 @@ library\tlibalpm.so.16\tlibarchphene_pkg_333333333333333333333333.so\t7\n";
                 & 0o7777,
             0o600
         );
+    }
+
+    #[test]
+    fn desktop_catalog_derives_bounded_package_ownership_and_rejects_ambiguity() {
+        let tree = TestTree::new();
+        tree.command("editor");
+        let applications = tree.root.join("usr/share/applications");
+        fs::create_dir_all(&applications).expect("applications directory");
+        fs::write(
+            applications.join("editor.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=Editor\nExec=editor\n",
+        )
+        .expect("desktop entry");
+        tree.local_package(
+            "editor-1.0-1",
+            "editor",
+            b"%FILES%\nusr/bin/editor\nusr/share/applications/editor.desktop\n\n",
+        );
+        tree.local_package(
+            "backup-only-1.0-1",
+            "backup-only",
+            b"%FILES%\nusr/bin/backup-only\n\n%BACKUP%\nusr/share/applications/editor.desktop\n",
+        );
+        let runtime = tree.package_runtime();
+        let catalog = runtime.desktop_catalog().expect("owned desktop catalog");
+        assert_eq!(catalog.entries.len(), 1);
+        assert_eq!(catalog.entries[0].source_package.as_deref(), Some("editor"));
+        assert!(!catalog.truncated);
+        assert!(
+            catalog
+                .page(0)
+                .expect("owned desktop page")
+                .as_str()
+                .expect("UTF-8 desktop page")
+                .ends_with("\teditor\n")
+        );
+
+        tree.local_package(
+            "other-editor-1.0-1",
+            "other-editor",
+            b"%FILES%\nusr/share/applications/editor.desktop\n",
+        );
+        let catalog = runtime
+            .desktop_catalog()
+            .expect("ambiguous desktop catalog");
+        assert_eq!(catalog.entries.len(), 1);
+        assert_eq!(catalog.entries[0].source_package, None);
+        assert!(catalog.truncated);
     }
 
     #[test]

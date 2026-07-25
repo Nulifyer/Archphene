@@ -1,0 +1,1748 @@
+#![forbid(unsafe_code)]
+
+use std::fmt;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+
+use archphene_packages::desktop::{DesktopCatalog, DesktopEntry, ExecArgument};
+
+pub const MAX_LAUNCHER_DESCRIPTORS: usize = 256;
+pub const MAX_LAUNCHER_REGISTRY_BYTES: usize = 4 * 1024 * 1024;
+
+const REGISTRY_DIRECTORY: &str = "var/lib/archphene";
+const REGISTRY_FILE: &str = "launcher-registry-v1";
+const REGISTRY_TEMP_FILE: &str = ".launcher-registry-v1.tmp";
+const REGISTRY_MAGIC: &[u8; 8] = b"ARCHLREG";
+const REGISTRY_VERSION: u32 = 1;
+const REGISTRY_HEADER_BYTES: usize = 8 + 4 + 8 + 4 + 32;
+const PACKAGE_PREFIX: &str = "org.archphene.linux.p";
+const O_NOFOLLOW: i32 = 0o400000;
+const O_CLOEXEC: i32 = 0o2000000;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum WrapperStatus {
+    NeedsPublish = 1,
+    Building = 2,
+    AwaitingInstall = 3,
+    Current = 4,
+    NeedsRemoval = 5,
+    AwaitingRemoval = 6,
+    Failed = 7,
+}
+
+impl WrapperStatus {
+    fn from_raw(raw: u8) -> Option<Self> {
+        Some(match raw {
+            1 => Self::NeedsPublish,
+            2 => Self::Building,
+            3 => Self::AwaitingInstall,
+            4 => Self::Current,
+            5 => Self::NeedsRemoval,
+            6 => Self::AwaitingRemoval,
+            7 => Self::Failed,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LauncherDescriptor {
+    pub descriptor_id: [u8; 32],
+    pub android_package: String,
+    pub desktop_id: String,
+    pub source_package: Option<String>,
+    pub name: String,
+    pub executable: String,
+    pub arguments: Vec<ExecArgument>,
+    pub try_exec: Option<String>,
+    pub icon: Option<String>,
+    pub mime_types: Vec<String>,
+    pub terminal: bool,
+    pub desired_present: bool,
+    pub desired_generation: u64,
+    pub published_generation: u64,
+    pub pending_generation: u64,
+    pub status: WrapperStatus,
+    content_digest: [u8; 32],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LauncherRegistry {
+    generation: u64,
+    descriptors: Vec<LauncherDescriptor>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReconcileReport {
+    pub generation: u64,
+    pub added: u16,
+    pub changed: u16,
+    pub removed: u16,
+    pub unchanged: u16,
+}
+
+#[derive(Debug)]
+pub enum LauncherRegistryError {
+    InvalidRoot,
+    UnsafePath(PathBuf),
+    Corrupt,
+    LimitExceeded,
+    IncompleteCatalog,
+    DuplicateDesktopId,
+    IdentityCollision,
+    InvalidTransition,
+    Io(io::Error),
+}
+
+impl fmt::Display for LauncherRegistryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidRoot => formatter.write_str("invalid launcher-registry root"),
+            Self::UnsafePath(path) => {
+                write!(
+                    formatter,
+                    "unsafe launcher-registry path: {}",
+                    path.display()
+                )
+            }
+            Self::Corrupt => formatter.write_str("launcher registry is corrupt"),
+            Self::LimitExceeded => formatter.write_str("launcher registry exceeds its limit"),
+            Self::IncompleteCatalog => {
+                formatter.write_str("launcher catalog is incomplete; registry was not changed")
+            }
+            Self::DuplicateDesktopId => {
+                formatter.write_str("launcher catalog repeats a desktop identity")
+            }
+            Self::IdentityCollision => {
+                formatter.write_str("launcher Android package identity collision")
+            }
+            Self::InvalidTransition => formatter.write_str("invalid launcher state transition"),
+            Self::Io(error) => write!(formatter, "launcher-registry I/O error: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for LauncherRegistryError {}
+
+impl From<io::Error> for LauncherRegistryError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl LauncherRegistry {
+    pub fn empty() -> Self {
+        Self {
+            generation: 0,
+            descriptors: Vec::new(),
+        }
+    }
+
+    pub fn load(arch_root: &Path) -> Result<Self, LauncherRegistryError> {
+        let directory = registry_directory(arch_root)?;
+        recover_stale_temp(&directory)?;
+        let path = directory.join(REGISTRY_FILE);
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::empty()),
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || metadata.permissions().mode() & 0o777 != 0o600
+            || metadata.len() < u64::try_from(REGISTRY_HEADER_BYTES).expect("header size")
+            || metadata.len() > u64::try_from(MAX_LAUNCHER_REGISTRY_BYTES).expect("registry limit")
+        {
+            return Err(LauncherRegistryError::UnsafePath(path));
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(O_NOFOLLOW | O_CLOEXEC)
+            .open(&path)?;
+        let opened = file.metadata()?;
+        if !opened.is_file() || opened.len() != metadata.len() {
+            return Err(LauncherRegistryError::Corrupt);
+        }
+        let mut bytes = Vec::with_capacity(
+            usize::try_from(metadata.len()).map_err(|_| LauncherRegistryError::LimitExceeded)?,
+        );
+        file.take(
+            u64::try_from(MAX_LAUNCHER_REGISTRY_BYTES + 1).expect("launcher registry read limit"),
+        )
+        .read_to_end(&mut bytes)?;
+        if u64::try_from(bytes.len()).map_err(|_| LauncherRegistryError::LimitExceeded)?
+            != metadata.len()
+        {
+            return Err(LauncherRegistryError::Corrupt);
+        }
+        decode_registry(&bytes)
+    }
+
+    pub fn reconcile(
+        arch_root: &Path,
+        catalog: &DesktopCatalog,
+    ) -> Result<(Self, ReconcileReport), LauncherRegistryError> {
+        if catalog.entries.len() > MAX_LAUNCHER_DESCRIPTORS {
+            return Err(LauncherRegistryError::LimitExceeded);
+        }
+        if catalog.truncated {
+            return Err(LauncherRegistryError::IncompleteCatalog);
+        }
+        let mut registry = Self::load(arch_root)?;
+        let mut desired: Vec<&DesktopEntry> = catalog.entries.iter().collect();
+        desired.sort_unstable_by(|left, right| left.desktop_id.cmp(&right.desktop_id));
+        if desired
+            .windows(2)
+            .any(|entries| entries[0].desktop_id == entries[1].desktop_id)
+        {
+            return Err(LauncherRegistryError::DuplicateDesktopId);
+        }
+
+        let mut next = Vec::with_capacity(
+            desired
+                .len()
+                .saturating_add(registry.descriptors.len())
+                .min(MAX_LAUNCHER_DESCRIPTORS),
+        );
+        let mut added = 0_u16;
+        let mut changed = 0_u16;
+        let mut removed = 0_u16;
+        let mut unchanged = 0_u16;
+        let mut old_index = 0_usize;
+        let mut desired_index = 0_usize;
+        while old_index < registry.descriptors.len() || desired_index < desired.len() {
+            let old = registry.descriptors.get(old_index);
+            let target = desired.get(desired_index).copied();
+            match (old, target) {
+                (Some(old), Some(target)) if old.desktop_id < target.desktop_id => {
+                    retain_removed(old, &mut next, &mut removed, &mut unchanged);
+                    old_index += 1;
+                }
+                (Some(old), Some(target)) if old.desktop_id == target.desktop_id => {
+                    let content_digest = descriptor_content_digest(target);
+                    let mut descriptor = old.clone();
+                    if descriptor.content_digest == content_digest {
+                        let revived = !descriptor.desired_present;
+                        descriptor.desired_present = true;
+                        descriptor.status = if descriptor.published_generation
+                            == descriptor.desired_generation
+                            && descriptor.published_generation != 0
+                        {
+                            WrapperStatus::Current
+                        } else {
+                            match descriptor.status {
+                                WrapperStatus::AwaitingInstall => descriptor.status,
+                                WrapperStatus::Building | WrapperStatus::Failed if !revived => {
+                                    descriptor.status
+                                }
+                                _ => WrapperStatus::NeedsPublish,
+                            }
+                        };
+                        if revived {
+                            changed = changed.saturating_add(1);
+                        } else {
+                            unchanged = unchanged.saturating_add(1);
+                        }
+                    } else {
+                        let desired_generation = descriptor
+                            .desired_generation
+                            .checked_add(1)
+                            .ok_or(LauncherRegistryError::LimitExceeded)?;
+                        let mut replacement = descriptor_from_entry(
+                            target,
+                            desired_generation,
+                            old.published_generation,
+                        );
+                        if old.status == WrapperStatus::AwaitingInstall {
+                            replacement.pending_generation = old.pending_generation;
+                            replacement.status = WrapperStatus::AwaitingInstall;
+                        }
+                        descriptor = replacement;
+                        changed = changed.saturating_add(1);
+                    }
+                    next.push(descriptor);
+                    old_index += 1;
+                    desired_index += 1;
+                }
+                (Some(old), Some(target)) if old.desktop_id > target.desktop_id => {
+                    next.push(descriptor_from_entry(target, 1, 0));
+                    added = added.saturating_add(1);
+                    desired_index += 1;
+                }
+                (Some(old), None) => {
+                    retain_removed(old, &mut next, &mut removed, &mut unchanged);
+                    old_index += 1;
+                }
+                (None, Some(target)) => {
+                    next.push(descriptor_from_entry(target, 1, 0));
+                    added = added.saturating_add(1);
+                    desired_index += 1;
+                }
+                (None, None) => break,
+                _ => return Err(LauncherRegistryError::Corrupt),
+            }
+        }
+        if next.len() > MAX_LAUNCHER_DESCRIPTORS {
+            return Err(LauncherRegistryError::LimitExceeded);
+        }
+        next.sort_unstable_by(|left, right| left.desktop_id.cmp(&right.desktop_id));
+        validate_identities(&next)?;
+        let mutated = added != 0 || changed != 0 || removed != 0;
+        if mutated {
+            registry.generation = registry
+                .generation
+                .checked_add(1)
+                .ok_or(LauncherRegistryError::LimitExceeded)?;
+        }
+        registry.descriptors = next;
+        if mutated || !registry_file_exists(arch_root)? {
+            registry.store(arch_root)?;
+        }
+        let generation = registry.generation;
+        Ok((
+            registry,
+            ReconcileReport {
+                generation,
+                added,
+                changed,
+                removed,
+                unchanged,
+            },
+        ))
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn descriptors(&self) -> &[LauncherDescriptor] {
+        &self.descriptors
+    }
+
+    pub fn descriptor_for_package(&self, android_package: &str) -> Option<&LauncherDescriptor> {
+        self.descriptors
+            .iter()
+            .find(|descriptor| descriptor.android_package == android_package)
+    }
+
+    pub fn mark_building(
+        &mut self,
+        arch_root: &Path,
+        android_package: &str,
+        desired_generation: u64,
+    ) -> Result<(), LauncherRegistryError> {
+        let descriptor = self
+            .descriptors
+            .iter_mut()
+            .find(|descriptor| descriptor.android_package == android_package)
+            .ok_or(LauncherRegistryError::InvalidTransition)?;
+        if descriptor.desired_generation != desired_generation
+            || !descriptor.desired_present
+            || descriptor.status != WrapperStatus::NeedsPublish
+            || descriptor.pending_generation != 0
+        {
+            return Err(LauncherRegistryError::InvalidTransition);
+        }
+        descriptor.pending_generation = desired_generation;
+        descriptor.status = WrapperStatus::Building;
+        self.advance_and_store(arch_root)
+    }
+
+    pub fn mark_awaiting_install(
+        &mut self,
+        arch_root: &Path,
+        android_package: &str,
+        desired_generation: u64,
+    ) -> Result<(), LauncherRegistryError> {
+        self.transition(
+            arch_root,
+            android_package,
+            desired_generation,
+            WrapperStatus::Building,
+            WrapperStatus::AwaitingInstall,
+        )
+    }
+
+    pub fn confirm_installed(
+        &mut self,
+        arch_root: &Path,
+        android_package: &str,
+        desired_generation: u64,
+    ) -> Result<(), LauncherRegistryError> {
+        let descriptor = self
+            .descriptors
+            .iter_mut()
+            .find(|descriptor| descriptor.android_package == android_package)
+            .ok_or(LauncherRegistryError::InvalidTransition)?;
+        if descriptor.pending_generation != desired_generation
+            || descriptor.status != WrapperStatus::AwaitingInstall
+        {
+            return Err(LauncherRegistryError::InvalidTransition);
+        }
+        descriptor.published_generation = desired_generation;
+        descriptor.pending_generation = 0;
+        descriptor.status =
+            if descriptor.desired_present && descriptor.desired_generation == desired_generation {
+                WrapperStatus::Current
+            } else if descriptor.desired_present {
+                WrapperStatus::NeedsPublish
+            } else {
+                WrapperStatus::NeedsRemoval
+            };
+        self.advance_and_store(arch_root)
+    }
+
+    pub fn mark_awaiting_removal(
+        &mut self,
+        arch_root: &Path,
+        android_package: &str,
+    ) -> Result<(), LauncherRegistryError> {
+        let descriptor = self
+            .descriptors
+            .iter_mut()
+            .find(|descriptor| descriptor.android_package == android_package)
+            .ok_or(LauncherRegistryError::InvalidTransition)?;
+        if descriptor.status != WrapperStatus::NeedsRemoval {
+            return Err(LauncherRegistryError::InvalidTransition);
+        }
+        descriptor.status = WrapperStatus::AwaitingRemoval;
+        self.advance_and_store(arch_root)
+    }
+
+    pub fn confirm_removed(
+        &mut self,
+        arch_root: &Path,
+        android_package: &str,
+    ) -> Result<(), LauncherRegistryError> {
+        let index = self
+            .descriptors
+            .iter()
+            .position(|descriptor| descriptor.android_package == android_package)
+            .ok_or(LauncherRegistryError::InvalidTransition)?;
+        if self.descriptors[index].status != WrapperStatus::AwaitingRemoval {
+            return Err(LauncherRegistryError::InvalidTransition);
+        }
+        if self.descriptors[index].desired_present {
+            self.descriptors[index].published_generation = 0;
+            self.descriptors[index].pending_generation = 0;
+            self.descriptors[index].status = WrapperStatus::NeedsPublish;
+        } else {
+            self.descriptors.remove(index);
+        }
+        self.advance_and_store(arch_root)
+    }
+
+    pub fn mark_failed(
+        &mut self,
+        arch_root: &Path,
+        android_package: &str,
+        operation_generation: u64,
+    ) -> Result<(), LauncherRegistryError> {
+        let index = self
+            .descriptors
+            .iter()
+            .position(|descriptor| descriptor.android_package == android_package)
+            .ok_or(LauncherRegistryError::InvalidTransition)?;
+        let descriptor = &self.descriptors[index];
+        let matching_publish = matches!(
+            descriptor.status,
+            WrapperStatus::Building | WrapperStatus::AwaitingInstall
+        ) && descriptor.pending_generation == operation_generation;
+        let matching_removal = descriptor.status == WrapperStatus::AwaitingRemoval
+            && descriptor.desired_generation == operation_generation;
+        if !matching_publish && !matching_removal {
+            return Err(LauncherRegistryError::InvalidTransition);
+        }
+        if !descriptor.desired_present && descriptor.published_generation == 0 {
+            self.descriptors.remove(index);
+        } else {
+            self.descriptors[index].pending_generation = 0;
+            self.descriptors[index].status = WrapperStatus::Failed;
+        }
+        self.advance_and_store(arch_root)
+    }
+
+    pub fn retry_failed(
+        &mut self,
+        arch_root: &Path,
+        android_package: &str,
+    ) -> Result<(), LauncherRegistryError> {
+        let descriptor = self
+            .descriptors
+            .iter_mut()
+            .find(|descriptor| descriptor.android_package == android_package)
+            .ok_or(LauncherRegistryError::InvalidTransition)?;
+        if descriptor.status != WrapperStatus::Failed || descriptor.pending_generation != 0 {
+            return Err(LauncherRegistryError::InvalidTransition);
+        }
+        descriptor.status = if descriptor.desired_present {
+            WrapperStatus::NeedsPublish
+        } else if descriptor.published_generation != 0 {
+            WrapperStatus::NeedsRemoval
+        } else {
+            return Err(LauncherRegistryError::InvalidTransition);
+        };
+        self.advance_and_store(arch_root)
+    }
+
+    /// Reconciles one descriptor with a wrapper whose signing certificate and
+    /// Archphene generation metadata were verified by the Android caller.
+    /// `None` means that PackageManager found no matching package.
+    pub fn reconcile_android_package(
+        &mut self,
+        arch_root: &Path,
+        android_package: &str,
+        installed_generation: Option<u64>,
+    ) -> Result<(), LauncherRegistryError> {
+        let index = self
+            .descriptors
+            .iter()
+            .position(|descriptor| descriptor.android_package == android_package)
+            .ok_or(LauncherRegistryError::InvalidTransition)?;
+        if installed_generation.is_some_and(|generation| {
+            generation == 0 || generation > self.descriptors[index].desired_generation
+        }) {
+            return Err(LauncherRegistryError::InvalidTransition);
+        }
+
+        let previous = self.descriptors[index].clone();
+        match installed_generation {
+            Some(generation) => {
+                let descriptor = &mut self.descriptors[index];
+                descriptor.published_generation = generation;
+                descriptor.pending_generation = 0;
+                descriptor.status = if !descriptor.desired_present {
+                    WrapperStatus::NeedsRemoval
+                } else if generation == descriptor.desired_generation {
+                    WrapperStatus::Current
+                } else {
+                    WrapperStatus::NeedsPublish
+                };
+            }
+            None if self.descriptors[index].desired_present => {
+                let descriptor = &mut self.descriptors[index];
+                descriptor.published_generation = 0;
+                descriptor.pending_generation = 0;
+                descriptor.status = WrapperStatus::NeedsPublish;
+            }
+            None => {
+                self.descriptors.remove(index);
+                return self.advance_and_store(arch_root);
+            }
+        }
+        if self.descriptors[index] == previous {
+            Ok(())
+        } else {
+            self.advance_and_store(arch_root)
+        }
+    }
+
+    fn transition(
+        &mut self,
+        arch_root: &Path,
+        android_package: &str,
+        desired_generation: u64,
+        from: WrapperStatus,
+        to: WrapperStatus,
+    ) -> Result<(), LauncherRegistryError> {
+        let descriptor = self
+            .descriptors
+            .iter_mut()
+            .find(|descriptor| descriptor.android_package == android_package)
+            .ok_or(LauncherRegistryError::InvalidTransition)?;
+        if descriptor.desired_generation != desired_generation
+            || !descriptor.desired_present
+            || descriptor.status != from
+            || descriptor.pending_generation != desired_generation
+        {
+            return Err(LauncherRegistryError::InvalidTransition);
+        }
+        descriptor.status = to;
+        self.advance_and_store(arch_root)
+    }
+
+    fn advance_and_store(&mut self, arch_root: &Path) -> Result<(), LauncherRegistryError> {
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .ok_or(LauncherRegistryError::LimitExceeded)?;
+        self.store(arch_root)
+    }
+
+    fn store(&self, arch_root: &Path) -> Result<(), LauncherRegistryError> {
+        validate_registry(self)?;
+        let directory = registry_directory(arch_root)?;
+        recover_stale_temp(&directory)?;
+        let bytes = encode_registry(self)?;
+        let temporary = directory.join(REGISTRY_TEMP_FILE);
+        let destination = directory.join(REGISTRY_FILE);
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(O_CLOEXEC | O_NOFOLLOW)
+            .open(&temporary)?;
+        let result = (|| -> Result<(), LauncherRegistryError> {
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            fs::rename(&temporary, &destination)?;
+            File::open(&directory)?.sync_all()?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
+    }
+}
+
+fn retain_removed(
+    old: &LauncherDescriptor,
+    output: &mut Vec<LauncherDescriptor>,
+    removed: &mut u16,
+    unchanged: &mut u16,
+) {
+    if old.desired_present {
+        *removed = removed.saturating_add(1);
+    } else {
+        *unchanged = unchanged.saturating_add(1);
+    }
+    if old.status == WrapperStatus::AwaitingInstall || old.published_generation != 0 {
+        let mut descriptor = old.clone();
+        if descriptor.desired_present {
+            descriptor.desired_present = false;
+            if descriptor.status != WrapperStatus::AwaitingInstall {
+                descriptor.pending_generation = 0;
+                descriptor.status = WrapperStatus::NeedsRemoval;
+            }
+        }
+        output.push(descriptor);
+    }
+}
+
+fn descriptor_from_entry(
+    entry: &DesktopEntry,
+    desired_generation: u64,
+    published_generation: u64,
+) -> LauncherDescriptor {
+    let descriptor_id = descriptor_identity(&entry.desktop_id);
+    LauncherDescriptor {
+        descriptor_id,
+        android_package: android_package(&descriptor_id),
+        desktop_id: entry.desktop_id.clone(),
+        source_package: entry.source_package.clone(),
+        name: entry.name.clone(),
+        executable: entry.executable.clone(),
+        arguments: entry.arguments.clone(),
+        try_exec: entry.try_exec.clone(),
+        icon: entry.icon.clone(),
+        mime_types: entry.mime_types.clone(),
+        terminal: entry.terminal,
+        desired_present: true,
+        desired_generation,
+        published_generation,
+        pending_generation: 0,
+        status: WrapperStatus::NeedsPublish,
+        content_digest: descriptor_content_digest(entry),
+    }
+}
+
+fn descriptor_identity(desktop_id: &str) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(b"org.archphene.launcher-id.v1\0");
+    hash_field(&mut hash, desktop_id.as_bytes());
+    hash.finalize()
+}
+
+fn descriptor_content_digest(entry: &DesktopEntry) -> [u8; 32] {
+    descriptor_content_digest_fields(
+        &entry.desktop_id,
+        entry.source_package.as_deref(),
+        &entry.name,
+        &entry.executable,
+        &entry.arguments,
+        entry.try_exec.as_deref(),
+        entry.icon.as_deref(),
+        &entry.mime_types,
+        entry.terminal,
+    )
+}
+
+fn descriptor_digest(descriptor: &LauncherDescriptor) -> [u8; 32] {
+    descriptor_content_digest_fields(
+        &descriptor.desktop_id,
+        descriptor.source_package.as_deref(),
+        &descriptor.name,
+        &descriptor.executable,
+        &descriptor.arguments,
+        descriptor.try_exec.as_deref(),
+        descriptor.icon.as_deref(),
+        &descriptor.mime_types,
+        descriptor.terminal,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn descriptor_content_digest_fields(
+    desktop_id: &str,
+    source_package: Option<&str>,
+    name: &str,
+    executable: &str,
+    arguments: &[ExecArgument],
+    try_exec: Option<&str>,
+    icon: Option<&str>,
+    mime_types: &[String],
+    terminal: bool,
+) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(b"org.archphene.launcher-content.v1\0");
+    hash_field(&mut hash, desktop_id.as_bytes());
+    hash_optional(&mut hash, source_package);
+    hash_field(&mut hash, name.as_bytes());
+    hash_field(&mut hash, executable.as_bytes());
+    hash.update(&[u8::from(terminal)]);
+    hash_optional(&mut hash, try_exec);
+    hash_optional(&mut hash, icon);
+    hash.update(&[u8::try_from(arguments.len()).unwrap_or(u8::MAX)]);
+    for argument in arguments {
+        match argument {
+            ExecArgument::Literal(value) => {
+                hash.update(&[0]);
+                hash_field(&mut hash, value.as_bytes());
+            }
+            ExecArgument::SingleFile => hash.update(&[1]),
+            ExecArgument::MultipleFiles => hash.update(&[2]),
+            ExecArgument::SingleUrl => hash.update(&[3]),
+            ExecArgument::MultipleUrls => hash.update(&[4]),
+            ExecArgument::Icon => hash.update(&[5]),
+            ExecArgument::DisplayName => hash.update(&[6]),
+            ExecArgument::DesktopFile => hash.update(&[7]),
+        }
+    }
+    hash.update(&[u8::try_from(mime_types.len()).unwrap_or(u8::MAX)]);
+    for mime_type in mime_types {
+        hash_field(&mut hash, mime_type.as_bytes());
+    }
+    hash.finalize()
+}
+
+fn android_package(descriptor_id: &[u8; 32]) -> String {
+    let mut package = String::with_capacity(PACKAGE_PREFIX.len() + 32);
+    package.push_str(PACKAGE_PREFIX);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in &descriptor_id[..16] {
+        package.push(char::from(HEX[usize::from(byte >> 4)]));
+        package.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    package
+}
+
+fn hash_field(hash: &mut Sha256, bytes: &[u8]) {
+    hash.update(&u32::try_from(bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
+    hash.update(bytes);
+}
+
+fn hash_optional(hash: &mut Sha256, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            hash.update(&[1]);
+            hash_field(hash, value.as_bytes());
+        }
+        None => hash.update(&[0]),
+    }
+}
+
+fn registry_directory(arch_root: &Path) -> Result<PathBuf, LauncherRegistryError> {
+    if !arch_root.is_absolute() {
+        return Err(LauncherRegistryError::InvalidRoot);
+    }
+    let root_metadata =
+        fs::symlink_metadata(arch_root).map_err(|_| LauncherRegistryError::InvalidRoot)?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err(LauncherRegistryError::InvalidRoot);
+    }
+    let root = arch_root
+        .canonicalize()
+        .map_err(|_| LauncherRegistryError::InvalidRoot)?;
+    let directory = root.join(REGISTRY_DIRECTORY);
+    let metadata = fs::symlink_metadata(&directory)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(LauncherRegistryError::UnsafePath(directory));
+    }
+    let canonical = directory.canonicalize()?;
+    if canonical == root || !canonical.starts_with(&root) {
+        return Err(LauncherRegistryError::UnsafePath(directory));
+    }
+    Ok(canonical)
+}
+
+fn recover_stale_temp(directory: &Path) -> Result<(), LauncherRegistryError> {
+    let temporary = directory.join(REGISTRY_TEMP_FILE);
+    let metadata = match fs::symlink_metadata(&temporary) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(LauncherRegistryError::UnsafePath(temporary));
+    }
+    fs::remove_file(temporary)?;
+    File::open(directory)?.sync_all()?;
+    Ok(())
+}
+
+fn registry_file_exists(arch_root: &Path) -> Result<bool, LauncherRegistryError> {
+    let path = registry_directory(arch_root)?.join(REGISTRY_FILE);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            Err(LauncherRegistryError::UnsafePath(path))
+        }
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn encode_registry(registry: &LauncherRegistry) -> Result<Vec<u8>, LauncherRegistryError> {
+    let mut body = Vec::with_capacity(registry.descriptors.len().saturating_mul(1024));
+    for descriptor in &registry.descriptors {
+        body.extend_from_slice(&descriptor.descriptor_id);
+        body.extend_from_slice(&descriptor.content_digest);
+        body.extend_from_slice(&descriptor.desired_generation.to_le_bytes());
+        body.extend_from_slice(&descriptor.published_generation.to_le_bytes());
+        body.extend_from_slice(&descriptor.pending_generation.to_le_bytes());
+        body.push(descriptor.status as u8);
+        body.push(u8::from(descriptor.desired_present));
+        body.push(u8::from(descriptor.terminal));
+        push_string(&mut body, &descriptor.android_package)?;
+        push_string(&mut body, &descriptor.desktop_id)?;
+        push_optional_string(&mut body, descriptor.source_package.as_deref())?;
+        push_string(&mut body, &descriptor.name)?;
+        push_string(&mut body, &descriptor.executable)?;
+        push_optional_string(&mut body, descriptor.try_exec.as_deref())?;
+        push_optional_string(&mut body, descriptor.icon.as_deref())?;
+        body.push(
+            u8::try_from(descriptor.arguments.len())
+                .map_err(|_| LauncherRegistryError::LimitExceeded)?,
+        );
+        for argument in &descriptor.arguments {
+            match argument {
+                ExecArgument::Literal(value) => {
+                    body.push(0);
+                    push_string(&mut body, value)?;
+                }
+                ExecArgument::SingleFile => body.push(1),
+                ExecArgument::MultipleFiles => body.push(2),
+                ExecArgument::SingleUrl => body.push(3),
+                ExecArgument::MultipleUrls => body.push(4),
+                ExecArgument::Icon => body.push(5),
+                ExecArgument::DisplayName => body.push(6),
+                ExecArgument::DesktopFile => body.push(7),
+            }
+        }
+        body.push(
+            u8::try_from(descriptor.mime_types.len())
+                .map_err(|_| LauncherRegistryError::LimitExceeded)?,
+        );
+        for mime_type in &descriptor.mime_types {
+            push_string(&mut body, mime_type)?;
+        }
+        if REGISTRY_HEADER_BYTES
+            .checked_add(body.len())
+            .is_none_or(|length| length > MAX_LAUNCHER_REGISTRY_BYTES)
+        {
+            return Err(LauncherRegistryError::LimitExceeded);
+        }
+    }
+    let checksum = sha256(&body);
+    let mut output = Vec::with_capacity(REGISTRY_HEADER_BYTES + body.len());
+    output.extend_from_slice(REGISTRY_MAGIC);
+    output.extend_from_slice(&REGISTRY_VERSION.to_le_bytes());
+    output.extend_from_slice(&registry.generation.to_le_bytes());
+    output.extend_from_slice(
+        &u32::try_from(registry.descriptors.len())
+            .map_err(|_| LauncherRegistryError::LimitExceeded)?
+            .to_le_bytes(),
+    );
+    output.extend_from_slice(&checksum);
+    output.extend_from_slice(&body);
+    Ok(output)
+}
+
+fn decode_registry(bytes: &[u8]) -> Result<LauncherRegistry, LauncherRegistryError> {
+    if bytes.len() < REGISTRY_HEADER_BYTES || bytes.len() > MAX_LAUNCHER_REGISTRY_BYTES {
+        return Err(LauncherRegistryError::Corrupt);
+    }
+    let mut cursor = Cursor::new(bytes);
+    if cursor.take(8)? != REGISTRY_MAGIC || cursor.u32()? != REGISTRY_VERSION {
+        return Err(LauncherRegistryError::Corrupt);
+    }
+    let generation = cursor.u64()?;
+    let count = usize::try_from(cursor.u32()?).map_err(|_| LauncherRegistryError::LimitExceeded)?;
+    if count > MAX_LAUNCHER_DESCRIPTORS {
+        return Err(LauncherRegistryError::LimitExceeded);
+    }
+    let expected_checksum = cursor.array_32()?;
+    let body_start = cursor.position;
+    if sha256(&bytes[body_start..]) != expected_checksum {
+        return Err(LauncherRegistryError::Corrupt);
+    }
+    let mut descriptors = Vec::with_capacity(count);
+    for _ in 0..count {
+        let descriptor_id = cursor.array_32()?;
+        let content_digest = cursor.array_32()?;
+        let desired_generation = cursor.u64()?;
+        let published_generation = cursor.u64()?;
+        let pending_generation = cursor.u64()?;
+        let status =
+            WrapperStatus::from_raw(cursor.byte()?).ok_or(LauncherRegistryError::Corrupt)?;
+        let desired_present = cursor.boolean()?;
+        let terminal = cursor.boolean()?;
+        let android_package = cursor.string()?;
+        let desktop_id = cursor.string()?;
+        let source_package = cursor.optional_string()?;
+        let name = cursor.string()?;
+        let executable = cursor.string()?;
+        let try_exec = cursor.optional_string()?;
+        let icon = cursor.optional_string()?;
+        let argument_count = usize::from(cursor.byte()?);
+        if argument_count > 32 {
+            return Err(LauncherRegistryError::LimitExceeded);
+        }
+        let mut arguments = Vec::with_capacity(argument_count);
+        for _ in 0..argument_count {
+            arguments.push(match cursor.byte()? {
+                0 => ExecArgument::Literal(cursor.string()?),
+                1 => ExecArgument::SingleFile,
+                2 => ExecArgument::MultipleFiles,
+                3 => ExecArgument::SingleUrl,
+                4 => ExecArgument::MultipleUrls,
+                5 => ExecArgument::Icon,
+                6 => ExecArgument::DisplayName,
+                7 => ExecArgument::DesktopFile,
+                _ => return Err(LauncherRegistryError::Corrupt),
+            });
+        }
+        let mime_count = usize::from(cursor.byte()?);
+        if mime_count > 16 {
+            return Err(LauncherRegistryError::LimitExceeded);
+        }
+        let mut mime_types = Vec::with_capacity(mime_count);
+        for _ in 0..mime_count {
+            mime_types.push(cursor.string()?);
+        }
+        descriptors.push(LauncherDescriptor {
+            descriptor_id,
+            android_package,
+            desktop_id,
+            source_package,
+            name,
+            executable,
+            arguments,
+            try_exec,
+            icon,
+            mime_types,
+            terminal,
+            desired_present,
+            desired_generation,
+            published_generation,
+            pending_generation,
+            status,
+            content_digest,
+        });
+    }
+    if cursor.position != bytes.len() {
+        return Err(LauncherRegistryError::Corrupt);
+    }
+    let registry = LauncherRegistry {
+        generation,
+        descriptors,
+    };
+    validate_registry(&registry)?;
+    Ok(registry)
+}
+
+fn validate_registry(registry: &LauncherRegistry) -> Result<(), LauncherRegistryError> {
+    if registry.descriptors.len() > MAX_LAUNCHER_DESCRIPTORS {
+        return Err(LauncherRegistryError::LimitExceeded);
+    }
+    for descriptor in &registry.descriptors {
+        if descriptor.desired_generation == 0
+            || descriptor.published_generation > descriptor.desired_generation
+            || descriptor.pending_generation > descriptor.desired_generation
+            || descriptor.descriptor_id != descriptor_identity(&descriptor.desktop_id)
+            || descriptor.android_package != android_package(&descriptor.descriptor_id)
+            || descriptor.content_digest != descriptor_digest(descriptor)
+            || !valid_descriptor_strings(descriptor)
+        {
+            return Err(LauncherRegistryError::Corrupt);
+        }
+        let valid_state = if descriptor.desired_present {
+            match descriptor.status {
+                WrapperStatus::Current => {
+                    descriptor.published_generation == descriptor.desired_generation
+                        && descriptor.published_generation != 0
+                        && descriptor.pending_generation == 0
+                }
+                WrapperStatus::NeedsPublish => {
+                    descriptor.published_generation != descriptor.desired_generation
+                        && descriptor.pending_generation == 0
+                }
+                WrapperStatus::Building | WrapperStatus::AwaitingInstall => {
+                    descriptor.published_generation != descriptor.desired_generation
+                        && descriptor.pending_generation != 0
+                }
+                WrapperStatus::Failed => descriptor.pending_generation == 0,
+                WrapperStatus::NeedsRemoval | WrapperStatus::AwaitingRemoval => false,
+            }
+        } else {
+            match descriptor.status {
+                WrapperStatus::AwaitingInstall => descriptor.pending_generation != 0,
+                WrapperStatus::NeedsRemoval
+                | WrapperStatus::AwaitingRemoval
+                | WrapperStatus::Failed => {
+                    descriptor.published_generation != 0 && descriptor.pending_generation == 0
+                }
+                _ => false,
+            }
+        };
+        if !valid_state {
+            return Err(LauncherRegistryError::Corrupt);
+        }
+    }
+    if registry
+        .descriptors
+        .windows(2)
+        .any(|descriptors| descriptors[0].desktop_id >= descriptors[1].desktop_id)
+    {
+        return Err(LauncherRegistryError::Corrupt);
+    }
+    validate_identities(&registry.descriptors)
+}
+
+fn validate_identities(descriptors: &[LauncherDescriptor]) -> Result<(), LauncherRegistryError> {
+    for (index, descriptor) in descriptors.iter().enumerate() {
+        if descriptors[..index]
+            .iter()
+            .any(|known| known.android_package == descriptor.android_package)
+        {
+            return Err(LauncherRegistryError::IdentityCollision);
+        }
+    }
+    Ok(())
+}
+
+fn valid_descriptor_strings(descriptor: &LauncherDescriptor) -> bool {
+    valid_text(&descriptor.desktop_id, 240)
+        && descriptor.desktop_id.ends_with(".desktop")
+        && !descriptor.desktop_id.starts_with('.')
+        && !descriptor.desktop_id.contains(['/', '\\'])
+        && valid_text(&descriptor.name, 256)
+        && valid_path(&descriptor.executable)
+        && descriptor
+            .source_package
+            .as_deref()
+            .is_none_or(valid_package_name)
+        && descriptor.try_exec.as_deref().is_none_or(valid_path)
+        && descriptor
+            .icon
+            .as_deref()
+            .is_none_or(|value| valid_text(value, 240))
+        && descriptor.arguments.len() <= 32
+        && descriptor.arguments.iter().all(|argument| match argument {
+            ExecArgument::Literal(value) => valid_text(value, 512),
+            _ => true,
+        })
+        && descriptor.mime_types.len() <= 16
+        && descriptor
+            .mime_types
+            .iter()
+            .all(|mime_type| valid_text(mime_type, 129) && mime_type.contains('/'))
+}
+
+fn valid_text(value: &str, maximum: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= maximum
+        && !value.chars().any(|character| {
+            character.is_control()
+                || character == '\0'
+                || matches!(
+                    character,
+                    '\u{061c}'
+                        | '\u{200e}'
+                        | '\u{200f}'
+                        | '\u{202a}'..='\u{202e}'
+                        | '\u{2066}'..='\u{2069}'
+                )
+        })
+}
+
+fn valid_path(value: &str) -> bool {
+    valid_text(value, 512)
+        && value.starts_with('/')
+        && value.strip_prefix('/').is_some_and(|relative| {
+            !relative.is_empty()
+                && relative
+                    .split('/')
+                    .all(|part| !part.is_empty() && part != "." && part != "..")
+        })
+}
+
+fn valid_package_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value != "."
+        && value != ".."
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'@' | b'.' | b'_' | b'+' | b'-')
+        })
+}
+
+fn push_string(output: &mut Vec<u8>, value: &str) -> Result<(), LauncherRegistryError> {
+    let length = u16::try_from(value.len()).map_err(|_| LauncherRegistryError::LimitExceeded)?;
+    output.extend_from_slice(&length.to_le_bytes());
+    output.extend_from_slice(value.as_bytes());
+    Ok(())
+}
+
+fn push_optional_string(
+    output: &mut Vec<u8>,
+    value: Option<&str>,
+) -> Result<(), LauncherRegistryError> {
+    match value {
+        Some(value) => {
+            output.push(1);
+            push_string(output, value)
+        }
+        None => {
+            output.push(0);
+            Ok(())
+        }
+    }
+}
+
+struct Cursor<'a> {
+    bytes: &'a [u8],
+    position: usize,
+}
+
+impl<'a> Cursor<'a> {
+    const fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, position: 0 }
+    }
+
+    fn take(&mut self, length: usize) -> Result<&'a [u8], LauncherRegistryError> {
+        let end = self
+            .position
+            .checked_add(length)
+            .ok_or(LauncherRegistryError::Corrupt)?;
+        let value = self
+            .bytes
+            .get(self.position..end)
+            .ok_or(LauncherRegistryError::Corrupt)?;
+        self.position = end;
+        Ok(value)
+    }
+
+    fn byte(&mut self) -> Result<u8, LauncherRegistryError> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn boolean(&mut self) -> Result<bool, LauncherRegistryError> {
+        match self.byte()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(LauncherRegistryError::Corrupt),
+        }
+    }
+
+    fn u32(&mut self) -> Result<u32, LauncherRegistryError> {
+        let mut bytes = [0_u8; 4];
+        bytes.copy_from_slice(self.take(4)?);
+        Ok(u32::from_le_bytes(bytes))
+    }
+
+    fn u64(&mut self) -> Result<u64, LauncherRegistryError> {
+        let mut bytes = [0_u8; 8];
+        bytes.copy_from_slice(self.take(8)?);
+        Ok(u64::from_le_bytes(bytes))
+    }
+
+    fn array_32(&mut self) -> Result<[u8; 32], LauncherRegistryError> {
+        let mut bytes = [0_u8; 32];
+        bytes.copy_from_slice(self.take(32)?);
+        Ok(bytes)
+    }
+
+    fn string(&mut self) -> Result<String, LauncherRegistryError> {
+        let length = usize::from({
+            let mut bytes = [0_u8; 2];
+            bytes.copy_from_slice(self.take(2)?);
+            u16::from_le_bytes(bytes)
+        });
+        let bytes = self.take(length)?;
+        std::str::from_utf8(bytes)
+            .map(str::to_owned)
+            .map_err(|_| LauncherRegistryError::Corrupt)
+    }
+
+    fn optional_string(&mut self) -> Result<Option<String>, LauncherRegistryError> {
+        match self.byte()? {
+            0 => Ok(None),
+            1 => Ok(Some(self.string()?)),
+            _ => Err(LauncherRegistryError::Corrupt),
+        }
+    }
+}
+
+fn sha256(bytes: &[u8]) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(bytes);
+    hash.finalize()
+}
+
+struct Sha256 {
+    state: [u32; 8],
+    buffer: [u8; 64],
+    buffer_length: usize,
+    total_bytes: u64,
+}
+
+impl Sha256 {
+    const fn new() -> Self {
+        Self {
+            state: [
+                0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+                0x5be0cd19,
+            ],
+            buffer: [0; 64],
+            buffer_length: 0,
+            total_bytes: 0,
+        }
+    }
+
+    fn update(&mut self, mut input: &[u8]) {
+        self.total_bytes = self.total_bytes.saturating_add(input.len() as u64);
+        if self.buffer_length != 0 {
+            let copy = (64 - self.buffer_length).min(input.len());
+            self.buffer[self.buffer_length..self.buffer_length + copy]
+                .copy_from_slice(&input[..copy]);
+            self.buffer_length += copy;
+            input = &input[copy..];
+            if self.buffer_length == 64 {
+                let block = self.buffer;
+                self.compress(&block);
+                self.buffer_length = 0;
+            }
+        }
+        while input.len() >= 64 {
+            let mut block = [0_u8; 64];
+            block.copy_from_slice(&input[..64]);
+            self.compress(&block);
+            input = &input[64..];
+        }
+        self.buffer[..input.len()].copy_from_slice(input);
+        self.buffer_length = input.len();
+    }
+
+    fn finalize(mut self) -> [u8; 32] {
+        let bit_length = self.total_bytes.saturating_mul(8);
+        self.buffer[self.buffer_length] = 0x80;
+        self.buffer_length += 1;
+        if self.buffer_length > 56 {
+            self.buffer[self.buffer_length..].fill(0);
+            let block = self.buffer;
+            self.compress(&block);
+            self.buffer = [0; 64];
+        } else {
+            self.buffer[self.buffer_length..56].fill(0);
+        }
+        self.buffer[56..64].copy_from_slice(&bit_length.to_be_bytes());
+        let block = self.buffer;
+        self.compress(&block);
+        let mut output = [0_u8; 32];
+        for (index, word) in self.state.iter().enumerate() {
+            output[index * 4..index * 4 + 4].copy_from_slice(&word.to_be_bytes());
+        }
+        output
+    }
+
+    fn compress(&mut self, block: &[u8; 64]) {
+        const K: [u32; 64] = [
+            0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+            0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+            0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+            0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+            0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+            0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+            0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+            0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+            0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+            0xc67178f2,
+        ];
+        let mut words = [0_u32; 64];
+        for (index, chunk) in block.chunks_exact(4).take(16).enumerate() {
+            words[index] = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        }
+        for index in 16..64 {
+            let s0 = words[index - 15].rotate_right(7)
+                ^ words[index - 15].rotate_right(18)
+                ^ (words[index - 15] >> 3);
+            let s1 = words[index - 2].rotate_right(17)
+                ^ words[index - 2].rotate_right(19)
+                ^ (words[index - 2] >> 10);
+            words[index] = words[index - 16]
+                .wrapping_add(s0)
+                .wrapping_add(words[index - 7])
+                .wrapping_add(s1);
+        }
+        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = self.state;
+        for index in 0..64 {
+            let sum1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let choose = (e & f) ^ ((!e) & g);
+            let temporary1 = h
+                .wrapping_add(sum1)
+                .wrapping_add(choose)
+                .wrapping_add(K[index])
+                .wrapping_add(words[index]);
+            let sum0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let majority = (a & b) ^ (a & c) ^ (b & c);
+            let temporary2 = sum0.wrapping_add(majority);
+            h = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(temporary1);
+            d = c;
+            c = b;
+            b = a;
+            a = temporary1.wrapping_add(temporary2);
+        }
+        for (state, value) in self.state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
+            *state = state.wrapping_add(value);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_ID: AtomicU64 = AtomicU64::new(1);
+
+    struct TestRoot {
+        path: PathBuf,
+    }
+
+    impl TestRoot {
+        fn new() -> Self {
+            let id = TEST_ID.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "archphene-launcher-test-{}-{id}",
+                std::process::id(),
+            ));
+            fs::create_dir_all(path.join(REGISTRY_DIRECTORY)).expect("registry directory");
+            Self { path }
+        }
+    }
+
+    impl Drop for TestRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn entry(desktop_id: &str, name: &str) -> DesktopEntry {
+        DesktopEntry {
+            desktop_id: desktop_id.to_owned(),
+            source_package: Some("kate".to_owned()),
+            name: name.to_owned(),
+            executable: "/usr/bin/kate".to_owned(),
+            arguments: vec![
+                ExecArgument::Literal("--startanon".to_owned()),
+                ExecArgument::MultipleUrls,
+            ],
+            try_exec: Some("/usr/bin/kate".to_owned()),
+            icon: Some("kate".to_owned()),
+            mime_types: vec!["text/plain".to_owned()],
+            terminal: false,
+        }
+    }
+
+    fn catalog(entries: Vec<DesktopEntry>) -> DesktopCatalog {
+        let examined = entries.len();
+        DesktopCatalog {
+            entries,
+            examined,
+            rejected: 0,
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn sha256_matches_published_vectors() {
+        assert_eq!(
+            sha256(b""),
+            [
+                0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f,
+                0xb9, 0x24, 0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b,
+                0x78, 0x52, 0xb8, 0x55,
+            ]
+        );
+        assert_eq!(
+            sha256(b"abc"),
+            [
+                0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae,
+                0x22, 0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61,
+                0xf2, 0x00, 0x15, 0xad,
+            ]
+        );
+    }
+
+    #[test]
+    fn reconcile_is_stable_and_round_trips_atomically() {
+        let root = TestRoot::new();
+        let source = catalog(vec![entry("org.kde.kate.desktop", "Kate")]);
+        let (registry, report) =
+            LauncherRegistry::reconcile(&root.path, &source).expect("initial reconcile");
+        assert_eq!(report.added, 1);
+        assert_eq!(report.generation, 1);
+        assert_eq!(registry.descriptors.len(), 1);
+        let descriptor = &registry.descriptors[0];
+        assert_eq!(descriptor.status, WrapperStatus::NeedsPublish);
+        assert_eq!(descriptor.desired_generation, 1);
+        assert_eq!(descriptor.published_generation, 0);
+        assert!(descriptor.android_package.starts_with(PACKAGE_PREFIX));
+        assert_eq!(descriptor.android_package.len(), PACKAGE_PREFIX.len() + 32);
+        assert_eq!(
+            fs::metadata(root.path.join(REGISTRY_DIRECTORY).join(REGISTRY_FILE))
+                .expect("registry metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+        );
+
+        let loaded = LauncherRegistry::load(&root.path).expect("load registry");
+        assert_eq!(loaded, registry);
+        let bytes =
+            fs::read(root.path.join(REGISTRY_DIRECTORY).join(REGISTRY_FILE)).expect("registry");
+        let (stable, report) =
+            LauncherRegistry::reconcile(&root.path, &source).expect("stable reconcile");
+        assert_eq!(report.unchanged, 1);
+        assert_eq!(report.generation, 1);
+        assert_eq!(stable, registry);
+        assert_eq!(
+            fs::read(root.path.join(REGISTRY_DIRECTORY).join(REGISTRY_FILE)).expect("registry"),
+            bytes,
+        );
+    }
+
+    #[test]
+    fn wrapper_lifecycle_retains_stable_identity_across_updates_and_removal() {
+        let root = TestRoot::new();
+        let source = catalog(vec![entry("org.kde.kate.desktop", "Kate")]);
+        let (mut registry, _) =
+            LauncherRegistry::reconcile(&root.path, &source).expect("initial reconcile");
+        let package = registry.descriptors[0].android_package.clone();
+        registry
+            .mark_building(&root.path, &package, 1)
+            .expect("building");
+        registry
+            .mark_awaiting_install(&root.path, &package, 1)
+            .expect("awaiting install");
+        registry
+            .confirm_installed(&root.path, &package, 1)
+            .expect("installed");
+        assert_eq!(registry.descriptors[0].status, WrapperStatus::Current);
+        assert_eq!(registry.descriptors[0].published_generation, 1);
+
+        let changed = catalog(vec![entry("org.kde.kate.desktop", "Kate Editor")]);
+        let (mut registry, report) =
+            LauncherRegistry::reconcile(&root.path, &changed).expect("changed reconcile");
+        assert_eq!(report.changed, 1);
+        assert_eq!(registry.descriptors[0].android_package, package);
+        assert_eq!(registry.descriptors[0].desired_generation, 2);
+        assert_eq!(registry.descriptors[0].published_generation, 1);
+        assert_eq!(registry.descriptors[0].status, WrapperStatus::NeedsPublish);
+        registry
+            .mark_building(&root.path, &package, 2)
+            .expect("updated build");
+        registry
+            .mark_awaiting_install(&root.path, &package, 2)
+            .expect("updated confirmation");
+        registry
+            .confirm_installed(&root.path, &package, 2)
+            .expect("updated install");
+
+        let (mut registry, report) = LauncherRegistry::reconcile(&root.path, &catalog(Vec::new()))
+            .expect("removed reconcile");
+        assert_eq!(report.removed, 1);
+        assert!(!registry.descriptors[0].desired_present);
+        assert_eq!(registry.descriptors[0].status, WrapperStatus::NeedsRemoval);
+        registry
+            .mark_awaiting_removal(&root.path, &package)
+            .expect("awaiting removal");
+        registry
+            .confirm_removed(&root.path, &package)
+            .expect("removed");
+        assert!(registry.descriptors.is_empty());
+        assert!(
+            LauncherRegistry::load(&root.path)
+                .expect("load empty registry")
+                .descriptors
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn catalog_changes_cannot_orphan_an_awaiting_android_install() {
+        let root = TestRoot::new();
+        let initial = catalog(vec![entry("org.kde.kate.desktop", "Kate")]);
+        let (mut registry, _) =
+            LauncherRegistry::reconcile(&root.path, &initial).expect("initial reconcile");
+        let package = registry.descriptors[0].android_package.clone();
+        registry
+            .mark_building(&root.path, &package, 1)
+            .expect("building");
+        registry
+            .mark_awaiting_install(&root.path, &package, 1)
+            .expect("awaiting install");
+
+        let changed = catalog(vec![entry("org.kde.kate.desktop", "Kate Editor")]);
+        let (mut registry, _) =
+            LauncherRegistry::reconcile(&root.path, &changed).expect("changed reconcile");
+        assert_eq!(registry.descriptors[0].desired_generation, 2);
+        assert_eq!(registry.descriptors[0].pending_generation, 1);
+        assert_eq!(
+            registry.descriptors[0].status,
+            WrapperStatus::AwaitingInstall
+        );
+        registry
+            .confirm_installed(&root.path, &package, 1)
+            .expect("older install confirmation");
+        assert_eq!(registry.descriptors[0].published_generation, 1);
+        assert_eq!(registry.descriptors[0].pending_generation, 0);
+        assert_eq!(registry.descriptors[0].status, WrapperStatus::NeedsPublish);
+
+        registry
+            .mark_building(&root.path, &package, 2)
+            .expect("replacement building");
+        registry
+            .mark_awaiting_install(&root.path, &package, 2)
+            .expect("replacement awaiting");
+        let (mut registry, _) = LauncherRegistry::reconcile(&root.path, &catalog(Vec::new()))
+            .expect("removed while awaiting");
+        assert!(!registry.descriptors[0].desired_present);
+        assert_eq!(
+            registry.descriptors[0].status,
+            WrapperStatus::AwaitingInstall
+        );
+        registry
+            .confirm_installed(&root.path, &package, 2)
+            .expect("install confirmed after removal");
+        assert_eq!(registry.descriptors[0].status, WrapperStatus::NeedsRemoval);
+        assert_eq!(registry.descriptors[0].published_generation, 2);
+    }
+
+    #[test]
+    fn android_package_reconciliation_recovers_interrupted_operations() {
+        let root = TestRoot::new();
+        let source = catalog(vec![entry("org.kde.kate.desktop", "Kate")]);
+        let (mut registry, _) =
+            LauncherRegistry::reconcile(&root.path, &source).expect("initial reconcile");
+        let package = registry.descriptors[0].android_package.clone();
+        registry
+            .mark_building(&root.path, &package, 1)
+            .expect("interrupted build");
+
+        let mut restarted = LauncherRegistry::load(&root.path).expect("restart load");
+        restarted
+            .reconcile_android_package(&root.path, &package, None)
+            .expect("no installed wrapper");
+        assert_eq!(restarted.descriptors[0].status, WrapperStatus::NeedsPublish);
+        assert_eq!(restarted.descriptors[0].pending_generation, 0);
+
+        restarted
+            .mark_building(&root.path, &package, 1)
+            .expect("replacement build");
+        restarted
+            .mark_awaiting_install(&root.path, &package, 1)
+            .expect("interrupted install");
+        let mut restarted = LauncherRegistry::load(&root.path).expect("second restart load");
+        restarted
+            .reconcile_android_package(&root.path, &package, Some(1))
+            .expect("installed while manager stopped");
+        assert_eq!(restarted.descriptors[0].status, WrapperStatus::Current);
+        assert_eq!(restarted.descriptors[0].published_generation, 1);
+        assert_eq!(restarted.descriptors[0].pending_generation, 0);
+
+        let changed = catalog(vec![entry("org.kde.kate.desktop", "Kate Editor")]);
+        let (mut restarted, _) =
+            LauncherRegistry::reconcile(&root.path, &changed).expect("changed desktop entry");
+        restarted
+            .mark_building(&root.path, &package, 2)
+            .expect("update build");
+        restarted
+            .mark_awaiting_install(&root.path, &package, 2)
+            .expect("update install");
+        restarted
+            .reconcile_android_package(&root.path, &package, Some(1))
+            .expect("old wrapper remains");
+        assert_eq!(restarted.descriptors[0].status, WrapperStatus::NeedsPublish);
+        assert_eq!(restarted.descriptors[0].published_generation, 1);
+
+        let (mut restarted, _) =
+            LauncherRegistry::reconcile(&root.path, &catalog(Vec::new())).expect("entry removed");
+        restarted
+            .mark_awaiting_removal(&root.path, &package)
+            .expect("removal submitted");
+        restarted
+            .reconcile_android_package(&root.path, &package, None)
+            .expect("removed while manager stopped");
+        assert!(restarted.descriptors.is_empty());
+    }
+
+    #[test]
+    fn failed_operations_require_an_explicit_retry() {
+        let root = TestRoot::new();
+        let source = catalog(vec![entry("org.kde.kate.desktop", "Kate")]);
+        let (mut registry, _) =
+            LauncherRegistry::reconcile(&root.path, &source).expect("initial reconcile");
+        let package = registry.descriptors[0].android_package.clone();
+        registry
+            .mark_building(&root.path, &package, 1)
+            .expect("building");
+        registry
+            .mark_failed(&root.path, &package, 1)
+            .expect("build failure");
+        assert_eq!(registry.descriptors[0].status, WrapperStatus::Failed);
+        assert!(registry.mark_building(&root.path, &package, 1).is_err());
+        registry
+            .retry_failed(&root.path, &package)
+            .expect("retry build");
+        assert_eq!(registry.descriptors[0].status, WrapperStatus::NeedsPublish);
+
+        registry
+            .mark_building(&root.path, &package, 1)
+            .expect("replacement building");
+        registry
+            .mark_awaiting_install(&root.path, &package, 1)
+            .expect("replacement awaiting install");
+        registry
+            .confirm_installed(&root.path, &package, 1)
+            .expect("installed");
+        let (mut registry, _) =
+            LauncherRegistry::reconcile(&root.path, &catalog(Vec::new())).expect("entry removed");
+        assert!(registry.mark_failed(&root.path, &package, 1).is_err());
+        registry
+            .mark_awaiting_removal(&root.path, &package)
+            .expect("removing");
+        registry
+            .mark_failed(&root.path, &package, 1)
+            .expect("removal failure");
+        assert_eq!(registry.descriptors[0].status, WrapperStatus::Failed);
+        registry
+            .retry_failed(&root.path, &package)
+            .expect("retry removal");
+        assert_eq!(registry.descriptors[0].status, WrapperStatus::NeedsRemoval);
+    }
+
+    #[test]
+    fn unsafe_android_identity_inputs_are_rejected() {
+        let root = TestRoot::new();
+        assert!(matches!(
+            LauncherRegistry::reconcile(
+                &root.path,
+                &catalog(vec![entry("../kate.desktop", "Kate")])
+            ),
+            Err(LauncherRegistryError::Corrupt)
+        ));
+        assert!(matches!(
+            LauncherRegistry::reconcile(
+                &root.path,
+                &catalog(vec![entry("org.kde.kate.desktop", "Kate\u{202e} spoof")])
+            ),
+            Err(LauncherRegistryError::Corrupt)
+        ));
+    }
+
+    #[test]
+    fn corrupt_and_unsafe_registry_files_fail_closed() {
+        let root = TestRoot::new();
+        LauncherRegistry::reconcile(
+            &root.path,
+            &catalog(vec![entry("org.kde.kate.desktop", "Kate")]),
+        )
+        .expect("initial reconcile");
+        let path = root.path.join(REGISTRY_DIRECTORY).join(REGISTRY_FILE);
+        let mut bytes = fs::read(&path).expect("registry");
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0x40;
+        fs::write(&path, bytes).expect("tampered registry");
+        assert!(matches!(
+            LauncherRegistry::load(&root.path),
+            Err(LauncherRegistryError::Corrupt)
+        ));
+
+        fs::remove_file(&path).expect("remove corrupt registry");
+        std::os::unix::fs::symlink("/etc/passwd", &path).expect("unsafe registry");
+        assert!(matches!(
+            LauncherRegistry::load(&root.path),
+            Err(LauncherRegistryError::UnsafePath(_))
+        ));
+    }
+
+    #[test]
+    fn stale_regular_temp_is_recovered_but_unsafe_temp_is_rejected() {
+        let root = TestRoot::new();
+        let temporary = root.path.join(REGISTRY_DIRECTORY).join(REGISTRY_TEMP_FILE);
+        fs::write(&temporary, b"interrupted").expect("stale temporary");
+        assert_eq!(
+            LauncherRegistry::load(&root.path).expect("recover temporary"),
+            LauncherRegistry::empty(),
+        );
+        assert!(!temporary.exists());
+        std::os::unix::fs::symlink("/etc/passwd", &temporary).expect("unsafe temporary");
+        assert!(matches!(
+            LauncherRegistry::load(&root.path),
+            Err(LauncherRegistryError::UnsafePath(_))
+        ));
+    }
+
+    #[test]
+    fn duplicate_catalog_identity_is_rejected_without_replacing_registry() {
+        let root = TestRoot::new();
+        let duplicate = catalog(vec![
+            entry("org.kde.kate.desktop", "Kate"),
+            entry("org.kde.kate.desktop", "Kate duplicate"),
+        ]);
+        assert!(matches!(
+            LauncherRegistry::reconcile(&root.path, &duplicate),
+            Err(LauncherRegistryError::DuplicateDesktopId)
+        ));
+        assert!(
+            LauncherRegistry::load(&root.path)
+                .expect("unchanged empty registry")
+                .descriptors
+                .is_empty()
+        );
+
+        let mut incomplete = catalog(vec![entry("org.kde.kate.desktop", "Kate")]);
+        incomplete.truncated = true;
+        assert!(matches!(
+            LauncherRegistry::reconcile(&root.path, &incomplete),
+            Err(LauncherRegistryError::IncompleteCatalog)
+        ));
+        assert!(
+            LauncherRegistry::load(&root.path)
+                .expect("still empty registry")
+                .descriptors
+                .is_empty()
+        );
+    }
+}

@@ -130,9 +130,19 @@ counts beside the installed-package list. Debug-only shared-root fixtures prove
 two valid entries, hidden-entry filtering, unavailable-executable and symlink
 rejection, cold manager restart, clean fixture removal, scoped logs, and
 visually inspected light/dark full-device presentation on both exact ABIs. The
-persistent descriptor registry, package ownership, icon extraction, wrapper
-generation/signing/installation, and authenticated Surface session remain
-pending.
+persistent Rust registry now adds bounded pacman ownership, deterministic
+collision-checked Android package identities, full structured launch/icon
+inputs, desired/published/pending generations, and explicit build, install,
+update, removal, failure, and retry states. It uses a checksum-protected,
+mode-0600 atomic file, rejects incomplete catalogs and unsafe/corrupt paths,
+preserves late PackageInstaller confirmations across desktop changes, and
+provides a verified-PackageManager reconciliation boundary for manager death or
+external wrapper removal. Ten host lifecycle/safety tests pass. Exact-ABI cold
+restarts preserve byte-identical 640-byte registries on the emulator and
+Samsung; fixture removal reconciles both to the same 56-byte empty registry and
+the manager reports zero packages/apps without fatal logs. Package-owned icon
+normalization, capability derivation, wrapper generation/signing/installation,
+and the authenticated Surface session remain pending.
 
 The recent-activity action is now terminal-state aware. Complete has no dead
 disabled Cancel button; active pre-commit work exposes Cancel; and durable

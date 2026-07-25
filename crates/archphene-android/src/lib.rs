@@ -157,7 +157,7 @@ mod android {
         i32::try_from(bytes.len()).unwrap_or(i32::MAX)
     }
 
-    fn copy_package_error(error: &PackageRuntimeError, destination: &mut [u8]) -> jint {
+    fn copy_package_error(error: &impl std::fmt::Display, destination: &mut [u8]) -> jint {
         let diagnostic = error.to_string();
         let length = diagnostic.len().min(destination.len().saturating_sub(1));
         destination[..length].copy_from_slice(&diagnostic.as_bytes()[..length]);
@@ -1194,6 +1194,58 @@ mod android {
         };
         let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
         copy_tool_result(result, destination)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeLauncherRegistryStatus(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let Ok(handle) = u64::try_from(handle) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(output_capacity) = environment.get_direct_buffer_capacity(&output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if output_capacity < 128 {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let Ok(output_address) = environment.get_direct_buffer_address(&output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if output_address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let summary = {
+            let Ok(mut registry) = registry().lock() else {
+                return ERROR_INTERNAL;
+            };
+            let Some(runtime) = registry.runtime_mut(handle) else {
+                return ERROR_INVALID_HANDLE;
+            };
+            let Some(summary) = runtime.launcher_registry_summary() else {
+                return ERROR_INVALID_STATE;
+            };
+            summary
+        };
+        let encoded = format!(
+            "L1\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            summary.generation,
+            summary.total,
+            summary.needs_publish,
+            summary.current,
+            summary.needs_removal,
+            summary.active,
+            summary.failed,
+        );
+        if encoded.len() > output_capacity {
+            return ERROR_INTERNAL;
+        }
+        let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
+        destination[..encoded.len()].copy_from_slice(encoded.as_bytes());
+        i32::try_from(encoded.len()).unwrap_or(i32::MAX)
     }
 
     #[unsafe(no_mangle)]

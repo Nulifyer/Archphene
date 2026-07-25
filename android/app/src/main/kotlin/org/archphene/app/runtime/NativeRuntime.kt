@@ -171,6 +171,10 @@ internal object NativeRuntime {
         offset: Int,
         outputBuffer: ByteBuffer,
     ): Int
+    external fun nativeLauncherRegistryStatus(
+        handle: Long,
+        outputBuffer: ByteBuffer,
+    ): Int
     external fun nativeRunCommand(
         handle: Long,
         requestBuffer: ByteBuffer,

@@ -82,6 +82,16 @@ installed signer against the manager's wrapper-signing certificate, and checks
 the bounded launcher descriptor. Package-name strings supplied by callers are
 never authentication.
 
+Discovery snapshots are reconciled only when complete. The Rust-owned launcher
+registry derives desktop ownership from pacman's local file database and stores
+the complete structured launch request, stable full descriptor identity,
+deterministic Android package name, and desired/published/pending generations.
+It is checksum-protected, mode 0600, atomically replaced, and fails closed on
+symlinks, corruption, duplicate desktop IDs, or truncated discovery. Build,
+PackageInstaller, and removal transitions are persisted before handoff; after
+process death, Kotlin verifies the installed package signer and embedded
+generation through PackageManager before Rust adopts, retries, or removes it.
+
 ### Cross-process launcher session
 
 The internal manager Activity continues to use a non-exported local Binder.

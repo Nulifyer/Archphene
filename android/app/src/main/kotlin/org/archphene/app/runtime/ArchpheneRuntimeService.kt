@@ -46,6 +46,7 @@ internal class DesktopEntrySnapshot(
     val executables: Array<String>,
     val terminal: BooleanArray,
     val icons: Array<String>,
+    val sourcePackages: Array<String>,
     val status: String,
     val revision: Int,
 )
@@ -399,6 +400,7 @@ class ArchpheneRuntimeService : Service() {
             emptyArray(),
             BooleanArray(0),
             emptyArray(),
+            emptyArray(),
             "Discovering Linux apps…",
             0,
         )
@@ -489,6 +491,15 @@ class ArchpheneRuntimeService : Service() {
         val id: String,
         val label: String,
         val requestBytes: ByteArray,
+    )
+
+    private data class LauncherSummary(
+        val total: Int,
+        val needsPublish: Int,
+        val current: Int,
+        val needsRemoval: Int,
+        val active: Int,
+        val failed: Int,
     )
 
     private data class MirrorDirectory(
@@ -2156,6 +2167,7 @@ class ArchpheneRuntimeService : Service() {
         val executables = ArrayList<String>()
         val terminal = BooleanArray(NativeRuntime.DESKTOP_ENTRY_LIMIT)
         val icons = ArrayList<String>()
+        val sourcePackages = ArrayList<String>()
         var offset = 0
         var expectedTotal = -1
         var examined = 0
@@ -2196,7 +2208,7 @@ class ArchpheneRuntimeService : Service() {
                         StandardCharsets.UTF_8,
                     ).dropLast(1).split('\n')
                 val header = lines.first().split('\t')
-                if (header.size != 6 || header[0] != "D1") {
+                if (header.size != 6 || header[0] != "D2") {
                     throw IllegalStateException("Invalid desktop-entry page header")
                 }
                 val nextOffset = header[1].toInt()
@@ -2224,8 +2236,8 @@ class ArchpheneRuntimeService : Service() {
                 rejected = pageRejected
                 truncated = pageTruncated
                 for (line in lines.drop(1)) {
-                    val fields = line.split('\t', limit = 8)
-                    if (fields.size != 8) {
+                    val fields = line.split('\t', limit = 9)
+                    if (fields.size != 9) {
                         throw IllegalStateException("Invalid desktop-entry row")
                     }
                     val desktopId = fields[0]
@@ -2241,10 +2253,30 @@ class ArchpheneRuntimeService : Service() {
                     val tryExec = fields[5]
                     val argumentSpec = fields[6]
                     val mimeSpec = fields[7]
+                    val sourcePackage = fields[8]
                     if (
                         desktopId.isEmpty() ||
                         name.isEmpty() ||
                         !executable.startsWith('/') ||
+                        (
+                            sourcePackage.isNotEmpty() &&
+                                (
+                                    sourcePackage.length > 128 ||
+                                        sourcePackage == "." ||
+                                        sourcePackage == ".." ||
+                                        !sourcePackage.all { character ->
+                                            character.code < 128 &&
+                                                (
+                                                    character.isLetterOrDigit() ||
+                                                        character == '@' ||
+                                                        character == '.' ||
+                                                        character == '_' ||
+                                                        character == '+' ||
+                                                        character == '-'
+                                                )
+                                        }
+                                )
+                        ) ||
                         (tryExec.isNotEmpty() && !tryExec.startsWith('/')) ||
                         (
                             previousName.isNotEmpty() &&
@@ -2283,6 +2315,7 @@ class ArchpheneRuntimeService : Service() {
                     names.add(name)
                     executables.add(executable)
                     icons.add(icon)
+                    sourcePackages.add(sourcePackage)
                     previousName = name
                     previousDesktopId = desktopId
                 }
@@ -2294,6 +2327,7 @@ class ArchpheneRuntimeService : Service() {
                     throw IllegalStateException("Desktop-entry pagination made no progress")
                 }
             }
+            val launcherSummary = readLauncherSummary(activeHandle)
             val status =
                 buildString {
                     append(desktopIds.size)
@@ -2314,6 +2348,40 @@ class ArchpheneRuntimeService : Service() {
                     if (truncated) {
                         append(" · scan limit reached")
                     }
+                    if (launcherSummary == null) {
+                        append(" · launcher registry paused")
+                    } else {
+                        if (launcherSummary.current > 0) {
+                            append(" · ")
+                            append(launcherSummary.current)
+                            append(" Android ")
+                            append(
+                                if (launcherSummary.current == 1) {
+                                    "launcher"
+                                } else {
+                                    "launchers"
+                                },
+                            )
+                            append(" installed")
+                        }
+                        val pending =
+                            launcherSummary.needsPublish +
+                                launcherSummary.needsRemoval +
+                                launcherSummary.active
+                        if (pending > 0) {
+                            append(" · ")
+                            append(pending)
+                            append(" launcher ")
+                            append(if (pending == 1) "change" else "changes")
+                            append(" pending")
+                        }
+                        if (launcherSummary.failed > 0) {
+                            append(" · ")
+                            append(launcherSummary.failed)
+                            append(" launcher ")
+                            append(if (launcherSummary.failed == 1) "failure" else "failures")
+                        }
+                    }
                 }
             val previousRevision = desktopEntrySnapshot.revision
             desktopEntrySnapshot =
@@ -2323,6 +2391,7 @@ class ArchpheneRuntimeService : Service() {
                     executables.toTypedArray(),
                     terminal.copyOf(desktopIds.size),
                     icons.toTypedArray(),
+                    sourcePackages.toTypedArray(),
                     status,
                     previousRevision + 1,
                 )
@@ -2340,6 +2409,7 @@ class ArchpheneRuntimeService : Service() {
                     previous.executables,
                     previous.terminal,
                     previous.icons,
+                    previous.sourcePackages,
                     "Linux app discovery unavailable",
                     previous.revision + 1,
                 )
@@ -2352,6 +2422,57 @@ class ArchpheneRuntimeService : Service() {
         val installedPackagesReady = refreshInstalledPackages(activeHandle)
         refreshDesktopEntries(activeHandle)
         return installedPackagesReady
+    }
+
+    private fun readLauncherSummary(activeHandle: Long): LauncherSummary? {
+        desktopEntryOutputBuffer.clear()
+        val outputLength =
+            NativeRuntime.nativeLauncherRegistryStatus(
+                activeHandle,
+                desktopEntryOutputBuffer,
+            )
+        if (outputLength <= 0 || outputLength > desktopEntryOutputBytes.size) {
+            return null
+        }
+        desktopEntryOutputBuffer.position(0)
+        desktopEntryOutputBuffer.get(desktopEntryOutputBytes, 0, outputLength)
+        val fields =
+            String(
+                desktopEntryOutputBytes,
+                0,
+                outputLength,
+                StandardCharsets.US_ASCII,
+            ).trimEnd('\n').split('\t')
+        if (fields.size != 8 || fields[0] != "L1") {
+            return null
+        }
+        val generation = fields[1].toLongOrNull() ?: return null
+        val total = fields[2].toLongOrNull() ?: return null
+        val needsPublish = fields[3].toLongOrNull() ?: return null
+        val current = fields[4].toLongOrNull() ?: return null
+        val needsRemoval = fields[5].toLongOrNull() ?: return null
+        val active = fields[6].toLongOrNull() ?: return null
+        val failed = fields[7].toLongOrNull() ?: return null
+        if (
+            generation < 0 ||
+            total !in 0..NativeRuntime.DESKTOP_ENTRY_LIMIT.toLong() ||
+            needsPublish !in 0..total ||
+            current !in 0..total ||
+            needsRemoval !in 0..total ||
+            active !in 0..total ||
+            failed !in 0..total ||
+            needsPublish + current + needsRemoval + active + failed != total
+        ) {
+            return null
+        }
+        return LauncherSummary(
+            total.toInt(),
+            needsPublish.toInt(),
+            current.toInt(),
+            needsRemoval.toInt(),
+            active.toInt(),
+            failed.toInt(),
+        )
     }
 
     @Synchronized

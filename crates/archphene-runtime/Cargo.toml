@@ -11,6 +11,7 @@ crate-type = ["rlib"]
 [dependencies]
 archphene-core = { path = "../archphene-core" }
 archphene-jobs = { path = "../archphene-jobs" }
+archphene-launcher = { path = "../archphene-launcher" }
 archphene-packages = { path = "../archphene-packages" }
 archphene-process = { path = "../archphene-process" }
 archphene-root = { path = "../archphene-root" }
