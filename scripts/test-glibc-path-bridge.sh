@@ -10,7 +10,7 @@ mkdir -p "$root/usr/lib/locale/C.utf8"
 mkdir -p "$root/usr/lib/archphene-example"
 printf expected > "$root/usr/share/archphene-test/value"
 printf expected-locale > "$root/usr/lib/locale/C.utf8/LC_CTYPE"
-printf nested-executable > "$root/usr/lib/archphene-example/example"
+cp "$(readlink -f /bin/echo)" "$root/usr/lib/archphene-example/example"
 chmod 500 "$root/usr/lib/archphene-example/example"
 
 gcc -shared -fPIC -O2 -Wall -Wextra -Werror \
@@ -42,7 +42,8 @@ program_path="$(
 )"
 test "$program_path" = "$root/usr/bin/test-program"
 mkdir -p "$root/commands"
-printf command > "$root/commands/cat"
+cp "$(readlink -f /bin/echo)" "$root/commands/cat"
+chmod 400 "$root/commands/cat"
 test ! -x "$root/commands/cat"
 access_output="$(
   ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
@@ -130,7 +131,103 @@ real_nested_output="$(
   "$root/exec-probe" --direct /usr/lib/archphene-example/real-example
 )"
 test "$real_nested_output" = bridge-arg
-ln -s /bin/sh "$root/usr/lib/archphene-example/escape"
+ln -s /usr/lib/archphene-example/real-example "$root/usr/bin/absolute-bare"
+absolute_bare_output="$(
+  ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+  ARCHPHENE_RUNTIME_LOADER="$host_loader" \
+  ARCHPHENE_RUNTIME_LIB="$(dirname "$host_libc")" \
+  "$root/exec-probe" absolute-bare
+)"
+test "$absolute_bare_output" = bridge-arg
+cp "$(readlink -f /bin/echo)" "$root/usr/bin/non-executable"
+chmod 400 "$root/usr/bin/non-executable"
+set +e
+ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+ARCHPHENE_RUNTIME_LOADER="$host_loader" \
+ARCHPHENE_RUNTIME_LIB="$(dirname "$host_libc")" \
+  "$root/exec-probe" non-executable >"$root/non-executable.out" 2>&1
+non_executable_status=$?
+set -e
+test "$non_executable_status" -eq 2
+grep -qx 'execlp: No such file or directory' "$root/non-executable.out"
+cp "$(readlink -f /bin/sh)" "$root/usr/bin/sh"
+chmod 500 "$root/usr/bin/sh"
+printf '%s\n' '#!/usr/bin/sh' 'printf "nested-script:%s\\n" "$1"' \
+  >"$root/usr/lib/archphene-example/nested-script"
+chmod 500 "$root/usr/lib/archphene-example/nested-script"
+nested_script_output="$(
+  ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+  ARCHPHENE_RUNTIME_LOADER="$host_loader" \
+  ARCHPHENE_RUNTIME_LIB="$(dirname "$host_libc")" \
+  ARCHPHENE_FAKE_CHROOT=1 \
+  "$root/exec-probe" --direct /usr/lib/archphene-example/nested-script
+)"
+test "$nested_script_output" = nested-script:bridge-arg
+nested_script_spawn_output="$(
+  ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+  ARCHPHENE_RUNTIME_LOADER="$host_loader" \
+  ARCHPHENE_RUNTIME_LIB="$(dirname "$host_libc")" \
+  ARCHPHENE_FAKE_CHROOT=1 \
+  "$root/exec-probe" --spawn-path /usr/lib/archphene-example/nested-script
+)"
+test "$nested_script_spawn_output" = nested-script:bridge-arg
+printf '%s\n' '#!/usr/bin/sh -e' 'printf "shebang-argument:%s\\n" "$1"' \
+  >"$root/usr/lib/archphene-example/shebang-argument"
+chmod 500 "$root/usr/lib/archphene-example/shebang-argument"
+shebang_argument_output="$(
+  ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+  ARCHPHENE_RUNTIME_LOADER="$host_loader" \
+  ARCHPHENE_RUNTIME_LIB="$(dirname "$host_libc")" \
+  ARCHPHENE_FAKE_CHROOT=1 \
+  "$root/exec-probe" --direct /usr/lib/archphene-example/shebang-argument
+)"
+test "$shebang_argument_output" = shebang-argument:bridge-arg
+printf '%s\n' '#!/usr/bin/sh' 'printf "bare-script:%s\\n" "$1"' \
+  >"$root/usr/bin/bare-script"
+chmod 500 "$root/usr/bin/bare-script"
+bare_script_output="$(
+  ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+  ARCHPHENE_RUNTIME_LOADER="$host_loader" \
+  ARCHPHENE_RUNTIME_LIB="$(dirname "$host_libc")" \
+  ARCHPHENE_FAKE_CHROOT=1 \
+  "$root/exec-probe" bare-script
+)"
+test "$bare_script_output" = bare-script:bridge-arg
+printf '%s\n' '#!/usr/bin/recursive-interpreter' 'exit 0' \
+  >"$root/usr/bin/recursive-interpreter"
+chmod 500 "$root/usr/bin/recursive-interpreter"
+printf '%s\n' '#!/usr/bin/recursive-interpreter' 'exit 0' \
+  >"$root/usr/lib/archphene-example/recursive-script"
+chmod 500 "$root/usr/lib/archphene-example/recursive-script"
+set +e
+ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+ARCHPHENE_RUNTIME_LOADER="$host_loader" \
+ARCHPHENE_RUNTIME_LIB="$(dirname "$host_libc")" \
+ARCHPHENE_FAKE_CHROOT=1 \
+  "$root/exec-probe" --direct /usr/lib/archphene-example/recursive-script \
+  >"$root/recursive-nested-script.out" 2>&1
+recursive_nested_status=$?
+set -e
+test "$recursive_nested_status" -eq 1
+grep -qx 'execlp: Exec format error' "$root/recursive-nested-script.out"
+ln -s /usr/lib/archphene-example/real-example \
+  "$root/usr/lib/archphene-example/absolute-link"
+absolute_link_output="$(
+  ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+  ARCHPHENE_RUNTIME_LOADER="$host_loader" \
+  ARCHPHENE_RUNTIME_LIB="$(dirname "$host_libc")" \
+  "$root/exec-probe" --direct /usr/lib/archphene-example/absolute-link
+)"
+test "$absolute_link_output" = bridge-arg
+ln -s real-example "$root/usr/lib/archphene-example/relative-link"
+relative_link_output="$(
+  ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+  ARCHPHENE_RUNTIME_LOADER="$host_loader" \
+  ARCHPHENE_RUNTIME_LIB="$(dirname "$host_libc")" \
+  "$root/exec-probe" --spawn-direct /usr/lib/archphene-example/relative-link
+)"
+test "$relative_link_output" = bridge-arg
+ln -s ../../../../../../bin/sh "$root/usr/lib/archphene-example/escape"
 set +e
 ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
 ARCHPHENE_RUNTIME_LOADER="$loader_path" \
@@ -141,6 +238,18 @@ escaped_nested_status=$?
 set -e
 test "$escaped_nested_status" -eq 2
 grep -qx 'execlp: No such file or directory' "$root/escaped-nested-command.out"
+ln -s cycle-b "$root/usr/lib/archphene-example/cycle-a"
+ln -s cycle-a "$root/usr/lib/archphene-example/cycle-b"
+set +e
+ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+ARCHPHENE_RUNTIME_LOADER="$loader_path" \
+ARCHPHENE_RUNTIME_LIB=/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu \
+  "$root/exec-probe" --direct /usr/lib/archphene-example/cycle-a \
+  >"$root/cyclic-nested-command.out" 2>&1
+cyclic_nested_status=$?
+set -e
+test "$cyclic_nested_status" -eq 2
+grep -qx 'execlp: No such file or directory' "$root/cyclic-nested-command.out"
 cp "$root/usr/lib/archphene-example/example" \
   "$root/usr/lib/archphene-example/writable"
 chmod 520 "$root/usr/lib/archphene-example/writable"
@@ -158,7 +267,8 @@ set +e
 ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
 ARCHPHENE_RUNTIME_LOADER="$loader_path" \
 ARCHPHENE_RUNTIME_LIB=/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu \
-  "$root/exec-probe" --direct /bin/sh >"$root/direct-host-command.out" 2>&1
+  "$root/exec-probe" --direct /system/bin/sh \
+  >"$root/direct-host-command.out" 2>&1
 direct_status=$?
 set -e
 test "$direct_status" -eq 2

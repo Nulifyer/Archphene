@@ -387,6 +387,8 @@ static bool safe_command_name(const char *name) {
     return true;
 }
 
+static bool safe_root_executable(const char *path, char output[PATH_MAX]);
+
 static bool runtime_command(const char *name, char output[PATH_MAX]) {
     if (!safe_command_name(name)) return false;
     const char *directory = getenv("ARCHPHENE_RUNTIME_COMMAND_DIR");
@@ -404,11 +406,10 @@ static bool runtime_command(const char *name, char output[PATH_MAX]) {
         return true;
     }
     if (trusted_root[0] == '\0') return false;
-    length = snprintf(output, PATH_MAX, "%s/usr/bin/%s", trusted_root, name);
-    return length > 0 && length < PATH_MAX
-            && stat(output, &metadata) == 0 && S_ISREG(metadata.st_mode)
-            && (metadata.st_mode & (S_IWGRP | S_IWOTH)) == 0
-            && real_access != NULL && real_access(output, R_OK) == 0;
+    char logical[PATH_MAX];
+    length = snprintf(logical, sizeof(logical), "/usr/bin/%s", name);
+    return length > 0 && (size_t)length < sizeof(logical)
+            && safe_root_executable(logical, output);
 }
 
 static bool conventional_linux_command(const char *path, const char *name) {
@@ -429,24 +430,123 @@ static bool inside_trusted_root(const char *path) {
             && (path[root_length] == '\0' || path[root_length] == '/');
 }
 
+static bool normalize_logical_path(const char *path, char output[PATH_MAX]) {
+    if (path == NULL || path[0] != '/' || strchr(path, '\n') != NULL) {
+        return false;
+    }
+    if (inside_trusted_root(path)) {
+        path += strlen(trusted_root);
+        if (path[0] == '\0') path = "/";
+    }
+    size_t output_length = 1;
+    output[0] = '/';
+    output[1] = '\0';
+    const char *cursor = path + 1;
+    while (*cursor != '\0') {
+        while (*cursor == '/') cursor++;
+        const char *component = cursor;
+        while (*cursor != '\0' && *cursor != '/') cursor++;
+        size_t length = (size_t)(cursor - component);
+        if (length == 0 || (length == 1 && component[0] == '.')) continue;
+        if (length == 2 && component[0] == '.' && component[1] == '.') {
+            if (output_length == 1) return false;
+            while (output_length > 1 && output[output_length - 1] != '/') {
+                output_length--;
+            }
+            if (output_length > 1) output_length--;
+            output[output_length] = '\0';
+            continue;
+        }
+        size_t separator = output_length == 1 ? 0 : 1;
+        if (length > PATH_MAX - output_length - separator - 1) return false;
+        if (separator != 0) output[output_length++] = '/';
+        memcpy(output + output_length, component, length);
+        output_length += length;
+        output[output_length] = '\0';
+    }
+    return true;
+}
+
+static bool resolve_root_path(const char *path, char output[PATH_MAX]) {
+    char logical[PATH_MAX];
+    if (!normalize_logical_path(path, logical)) return false;
+    typedef int (*lstat_type)(const char *, struct stat *);
+    typedef ssize_t (*readlink_type)(const char *, char *, size_t);
+    lstat_type real_lstat = (lstat_type)dlsym(RTLD_NEXT, "lstat");
+    readlink_type real_readlink = (readlink_type)dlsym(RTLD_NEXT, "readlink");
+    if (real_lstat == NULL || real_readlink == NULL) return false;
+
+    for (size_t symlink_count = 0; symlink_count <= 40; symlink_count++) {
+        size_t prefix_length = 0;
+        char prefix[PATH_MAX];
+        prefix[0] = '\0';
+        const char *cursor = logical + 1;
+        bool restarted = false;
+        while (*cursor != '\0') {
+            const char *component = cursor;
+            while (*cursor != '\0' && *cursor != '/') cursor++;
+            size_t component_length = (size_t)(cursor - component);
+            size_t parent_length = prefix_length;
+            if (component_length > PATH_MAX - prefix_length - 2) return false;
+            prefix[prefix_length++] = '/';
+            memcpy(prefix + prefix_length, component, component_length);
+            prefix_length += component_length;
+            prefix[prefix_length] = '\0';
+
+            char candidate[PATH_MAX];
+            int candidate_length = snprintf(candidate, sizeof(candidate), "%s%s",
+                    trusted_root, prefix);
+            if (candidate_length <= 0
+                    || (size_t)candidate_length >= sizeof(candidate)) {
+                return false;
+            }
+            struct stat metadata;
+            if (real_lstat(candidate, &metadata) != 0) return false;
+            if (S_ISLNK(metadata.st_mode)) {
+                if (symlink_count == 40) return false;
+                char target[PATH_MAX];
+                ssize_t target_length =
+                        real_readlink(candidate, target, sizeof(target) - 1);
+                if (target_length <= 0
+                        || (size_t)target_length >= sizeof(target)) {
+                    return false;
+                }
+                target[target_length] = '\0';
+                char combined[PATH_MAX];
+                int combined_length;
+                if (target[0] == '/') {
+                    combined_length = snprintf(combined, sizeof(combined), "%s%s",
+                            target, cursor);
+                } else {
+                    prefix[parent_length] = '\0';
+                    combined_length = snprintf(combined, sizeof(combined),
+                            "%s/%s%s", parent_length == 0 ? "" : prefix,
+                            target, cursor);
+                }
+                if (combined_length <= 0
+                        || (size_t)combined_length >= sizeof(combined)
+                        || !normalize_logical_path(combined, logical)) {
+                    return false;
+                }
+                restarted = true;
+                break;
+            }
+            if (*cursor == '/') cursor++;
+        }
+        if (restarted) continue;
+        int output_length = snprintf(output, PATH_MAX, "%s%s",
+                trusted_root, logical);
+        return output_length > 0 && output_length < PATH_MAX;
+    }
+    return false;
+}
+
 static bool safe_root_executable(const char *path, char output[PATH_MAX]) {
     if (path == NULL || path[0] != '/' || trusted_root[0] == '\0'
             || has_parent_component(path) || strchr(path, '\n') != NULL) {
         return false;
     }
-    char candidate[PATH_MAX];
-    if (inside_trusted_root(path)) {
-        size_t length = strlen(path);
-        if (length >= sizeof(candidate)) return false;
-        memcpy(candidate, path, length + 1);
-    } else {
-        int length = snprintf(candidate, sizeof(candidate), "%s%s",
-                trusted_root, path);
-        if (length <= 0 || (size_t)length >= sizeof(candidate)) return false;
-    }
-    if (realpath(candidate, output) == NULL || !inside_trusted_root(output)) {
-        return false;
-    }
+    if (!resolve_root_path(path, output)) return false;
     struct stat metadata;
     if (stat(output, &metadata) != 0 || !S_ISREG(metadata.st_mode)
             || (metadata.st_mode & 0111) == 0
@@ -474,6 +574,167 @@ static bool resolve_runtime_executable(const char *path, char output[PATH_MAX]) 
     return safe_root_executable(path, output);
 }
 
+#define RUNTIME_SHEBANG_LIMIT 256
+
+struct runtime_launch {
+    char program[PATH_MAX];
+    char argv0[PATH_MAX];
+    char script[PATH_MAX];
+    char interpreter_argument[RUNTIME_SHEBANG_LIMIT];
+    bool script_program;
+    bool has_interpreter_argument;
+};
+
+static bool copy_runtime_string(char *output, size_t capacity,
+        const char *source, size_t length) {
+    if (length == 0 || length >= capacity) return false;
+    memcpy(output, source, length);
+    output[length] = '\0';
+    return true;
+}
+
+static bool read_runtime_header(const char *path, unsigned char *output,
+        size_t capacity, size_t *length) {
+    typedef int (*open_type)(const char *, int, ...);
+    open_type real_open = (open_type)dlsym(RTLD_NEXT, "open");
+    if (real_open == NULL) return false;
+    int descriptor = real_open(path, O_RDONLY | O_CLOEXEC);
+    if (descriptor < 0) return false;
+    ssize_t count;
+    do {
+        count = read(descriptor, output, capacity);
+    } while (count < 0 && errno == EINTR);
+    int saved_errno = errno;
+    close(descriptor);
+    errno = saved_errno;
+    if (count < 0) return false;
+    *length = (size_t)count;
+    return true;
+}
+
+static bool runtime_header_is_elf(const char *path) {
+    unsigned char header[4];
+    size_t length;
+    return read_runtime_header(path, header, sizeof(header), &length)
+            && length == sizeof(header)
+            && memcmp(header, "\x7f" "ELF", sizeof(header)) == 0;
+}
+
+static int prepare_runtime_launch(const char *name, const char *requested,
+        const char *command, struct runtime_launch *launch) {
+    memset(launch, 0, sizeof(*launch));
+    size_t command_length = strlen(command);
+    size_t name_length = strlen(name);
+    if (!copy_runtime_string(
+                launch->program, sizeof(launch->program), command, command_length)
+            || !copy_runtime_string(
+                launch->argv0, sizeof(launch->argv0), name, name_length)) {
+        return ENAMETOOLONG;
+    }
+    unsigned char header[RUNTIME_SHEBANG_LIMIT];
+    size_t header_length;
+    if (!read_runtime_header(command, header, sizeof(header), &header_length)) {
+        return errno == 0 ? EIO : errno;
+    }
+    if (header_length >= 4
+            && memcmp(header, "\x7f" "ELF", 4) == 0) {
+        return 0;
+    }
+    if (header_length < 3 || header[0] != '#' || header[1] != '!') {
+        return ENOEXEC;
+    }
+    size_t line_end = 2;
+    while (line_end < header_length && header[line_end] != '\n') line_end++;
+    if (line_end == header_length && header_length == sizeof(header)) {
+        return ENOEXEC;
+    }
+    for (size_t index = 2; index < line_end; index++) {
+        if (header[index] == '\0') return ENOEXEC;
+    }
+    while (line_end > 2
+            && (header[line_end - 1] == '\r'
+                || header[line_end - 1] == ' '
+                || header[line_end - 1] == '\t')) {
+        line_end--;
+    }
+    size_t interpreter_start = 2;
+    while (interpreter_start < line_end
+            && (header[interpreter_start] == ' '
+                || header[interpreter_start] == '\t')) {
+        interpreter_start++;
+    }
+    size_t interpreter_end = interpreter_start;
+    while (interpreter_end < line_end
+            && header[interpreter_end] != ' '
+            && header[interpreter_end] != '\t') {
+        interpreter_end++;
+    }
+    char interpreter[PATH_MAX];
+    if (!copy_runtime_string(interpreter, sizeof(interpreter),
+                (const char *)header + interpreter_start,
+                interpreter_end - interpreter_start)
+            || interpreter[0] != '/') {
+        return ENOEXEC;
+    }
+    while (interpreter_end < line_end
+            && (header[interpreter_end] == ' '
+                || header[interpreter_end] == '\t')) {
+        interpreter_end++;
+    }
+    if (interpreter_end < line_end) {
+        if (!copy_runtime_string(
+                    launch->interpreter_argument,
+                    sizeof(launch->interpreter_argument),
+                    (const char *)header + interpreter_end,
+                    line_end - interpreter_end)) {
+            return ENOEXEC;
+        }
+        launch->has_interpreter_argument = true;
+    }
+    if (!resolve_runtime_executable(interpreter, launch->program)
+            || !runtime_header_is_elf(launch->program)) {
+        return ENOEXEC;
+    }
+    const char *interpreter_name = strrchr(interpreter, '/');
+    interpreter_name =
+            interpreter_name == NULL ? interpreter : interpreter_name + 1;
+    if (!copy_runtime_string(launch->argv0, sizeof(launch->argv0),
+                interpreter_name, strlen(interpreter_name))) {
+        return ENOEXEC;
+    }
+    const char *script = requested;
+    char conventional[PATH_MAX];
+    if (strchr(requested, '/') == NULL) {
+        int length = snprintf(conventional, sizeof(conventional),
+                "/usr/bin/%s", requested);
+        if (length <= 0 || (size_t)length >= sizeof(conventional)) {
+            return ENAMETOOLONG;
+        }
+        script = conventional;
+    } else if (inside_trusted_root(requested)) {
+        const char *logical = requested + strlen(trusted_root);
+        static const char *const prefixes[] = {
+            "/bin", "/etc", "/home", "/lib", "/opt", "/run",
+            "/sbin", "/tmp", "/usr", "/var"
+        };
+        for (size_t index = 0;
+                index < sizeof(prefixes) / sizeof(prefixes[0]); index++) {
+            size_t length = strlen(prefixes[index]);
+            if (strncmp(logical, prefixes[index], length) == 0
+                    && (logical[length] == '\0' || logical[length] == '/')) {
+                script = logical;
+                break;
+            }
+        }
+    }
+    if (!copy_runtime_string(
+                launch->script, sizeof(launch->script), script, strlen(script))) {
+        return ENAMETOOLONG;
+    }
+    launch->script_program = true;
+    return 0;
+}
+
 static void complete_managed_maintenance_command(const char *name) {
     /*
      * Arch ships ldconfig as a static PIE, so it cannot participate in the
@@ -484,8 +745,8 @@ static void complete_managed_maintenance_command(const char *name) {
     if (strcmp(name, "ldconfig") == 0) _exit(EXIT_SUCCESS);
 }
 
-static int launch_runtime_executable(const char *name, const char *command,
-        char *const arguments[],
+static int launch_runtime_executable(const char *name, const char *requested,
+        const char *command, char *const arguments[],
         char *const environment[]) {
     complete_managed_maintenance_command(name);
     const char *library_path = getenv("ARCHPHENE_RUNTIME_LIB");
@@ -495,24 +756,39 @@ static int launch_runtime_executable(const char *name, const char *command,
         errno = EACCES;
         return -1;
     }
-    size_t count = 0;
-    while (arguments[count] != NULL) {
-        if (++count > 4088) {
-            errno = E2BIG;
-            return -1;
-        }
+    if (arguments == NULL || arguments[0] == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    struct runtime_launch launch;
+    int preparation =
+            prepare_runtime_launch(name, requested, command, &launch);
+    if (preparation != 0) {
+        errno = preparation;
+        return -1;
     }
     char *loader_arguments[4096];
     loader_arguments[0] = trusted_loader;
     loader_arguments[1] = "--library-path";
     loader_arguments[2] = (char *)library_path;
     loader_arguments[3] = "--argv0";
-    loader_arguments[4] = (char *)name;
-    loader_arguments[5] = (char *)command;
-    for (size_t index = 1; index < count; index++) {
-        loader_arguments[index + 5] = arguments[index];
+    loader_arguments[4] = launch.argv0;
+    loader_arguments[5] = launch.program;
+    size_t output_count = 6;
+    if (launch.script_program) {
+        if (launch.has_interpreter_argument) {
+            loader_arguments[output_count++] = launch.interpreter_argument;
+        }
+        loader_arguments[output_count++] = launch.script;
     }
-    loader_arguments[count + 5] = NULL;
+    for (size_t index = 1; arguments[index] != NULL; index++) {
+        if (output_count >= 4095) {
+            errno = E2BIG;
+            return -1;
+        }
+        loader_arguments[output_count++] = arguments[index];
+    }
+    loader_arguments[output_count] = NULL;
     typedef int (*function_type)(const char *, char *const[], char *const[]);
     function_type real = (function_type)dlsym(RTLD_NEXT, "execve");
     if (real == NULL) {
@@ -528,11 +804,12 @@ static int launch_runtime_command(const char *name, char *const arguments[],
         char *const environment[]) {
     char command[PATH_MAX];
     if (!runtime_command(name, command)) return 1;
-    return launch_runtime_executable(name, command, arguments, environment);
+    return launch_runtime_executable(
+            name, name, command, arguments, environment);
 }
 
 static int spawn_runtime_executable(pid_t *process, const char *name,
-        const char *command,
+        const char *requested, const char *command,
         const posix_spawn_file_actions_t *file_actions,
         const posix_spawnattr_t *attributes, char *const arguments[],
         char *const environment[]) {
@@ -541,21 +818,30 @@ static int spawn_runtime_executable(pid_t *process, const char *name,
             || library_path[0] != '/' || strchr(library_path, '\n') != NULL) {
         return EACCES;
     }
-    size_t count = 0;
-    while (arguments[count] != NULL) {
-        if (++count > 4088) return E2BIG;
-    }
+    if (arguments == NULL || arguments[0] == NULL) return EINVAL;
+    struct runtime_launch launch;
+    int preparation =
+            prepare_runtime_launch(name, requested, command, &launch);
+    if (preparation != 0) return preparation;
     char *loader_arguments[4096];
     loader_arguments[0] = trusted_loader;
     loader_arguments[1] = "--library-path";
     loader_arguments[2] = (char *)library_path;
     loader_arguments[3] = "--argv0";
-    loader_arguments[4] = (char *)name;
-    loader_arguments[5] = (char *)command;
-    for (size_t index = 1; index < count; index++) {
-        loader_arguments[index + 5] = arguments[index];
+    loader_arguments[4] = launch.argv0;
+    loader_arguments[5] = launch.program;
+    size_t output_count = 6;
+    if (launch.script_program) {
+        if (launch.has_interpreter_argument) {
+            loader_arguments[output_count++] = launch.interpreter_argument;
+        }
+        loader_arguments[output_count++] = launch.script;
     }
-    loader_arguments[count + 5] = NULL;
+    for (size_t index = 1; arguments[index] != NULL; index++) {
+        if (output_count >= 4095) return E2BIG;
+        loader_arguments[output_count++] = arguments[index];
+    }
+    loader_arguments[output_count] = NULL;
     typedef int (*function_type)(pid_t *, const char *,
             const posix_spawn_file_actions_t *, const posix_spawnattr_t *,
             char *const[], char *const[]);
@@ -571,7 +857,7 @@ static int spawn_runtime_command(pid_t *process, const char *name,
         char *const environment[]) {
     char command[PATH_MAX];
     if (!runtime_command(name, command)) return ENOENT;
-    return spawn_runtime_executable(process, name, command, file_actions,
+    return spawn_runtime_executable(process, name, name, command, file_actions,
             attributes, arguments, environment);
 }
 
@@ -591,7 +877,7 @@ int posix_spawn(pid_t *process, const char *path,
     if (!resolve_runtime_executable(path, command)) return ENOENT;
     const char *name = strrchr(path, '/');
     name = name == NULL ? path : name + 1;
-    return spawn_runtime_executable(process, name, command, file_actions,
+    return spawn_runtime_executable(process, name, path, command, file_actions,
             attributes, arguments, environment);
 }
 
@@ -603,7 +889,7 @@ int posix_spawnp(pid_t *process, const char *file,
     if (separator != NULL) {
         char command[PATH_MAX];
         if (!resolve_runtime_executable(file, command)) return ENOENT;
-        return spawn_runtime_executable(process, separator + 1, command,
+        return spawn_runtime_executable(process, separator + 1, file, command,
                 file_actions, attributes, arguments, environment);
     }
     return spawn_runtime_command(process,
@@ -653,7 +939,8 @@ static int launch_runtime_file(const char *file, char *const arguments[],
     }
     char command[PATH_MAX];
     if (!resolve_runtime_executable(file, command)) return 1;
-    return launch_runtime_executable(separator + 1, command, arguments, environment);
+    return launch_runtime_executable(
+            separator + 1, file, command, arguments, environment);
 }
 
 int execve(const char *path, char *const arguments[], char *const environment[]) {
@@ -670,7 +957,8 @@ int execve(const char *path, char *const arguments[], char *const environment[])
     name = name == NULL ? path : name + 1;
     char command[PATH_MAX];
     if (resolve_runtime_executable(path, command)) {
-        return launch_runtime_executable(name, command, arguments, environment);
+        return launch_runtime_executable(
+                name, path, command, arguments, environment);
     }
     if (strcmp(path, "/system/bin/cat") == 0
             || strcmp(path, "/system/bin/sleep") == 0) {
@@ -685,7 +973,7 @@ int execv(const char *path, char *const arguments[]) {
     name = name == NULL ? path : name + 1;
     char command[PATH_MAX];
     if (resolve_runtime_executable(path, command)) {
-        return launch_runtime_executable(name, command, arguments, environ);
+        return launch_runtime_executable(name, path, command, arguments, environ);
     }
     errno = ENOENT;
     return -1;

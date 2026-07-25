@@ -260,8 +260,21 @@ targets. Both exact-ABI APKs build with the refreshed bridge. On the physical
 AArch64 Samsung, a root-contained Bash wrapper under `/usr/bin` launched an
 unmodified Bash ELF copied to `/usr/lib/archphene-bridge-test`, returned its
 real AArch64 version through the manager UI, emitted no fatal log, and left no
-fixture behind. Fake-root absolute symlinks, nested shebang programs, and the
-x86_64 device repetition remain open.
+fixture behind.
+
+The follow-up closes the remaining generic path shapes without adding a
+Code-specific rule. Root-aware canonicalization expands at most 40 relative or
+absolute Arch symlinks, interprets absolute targets inside the private root,
+and rejects cycles or traversal above it. A bounded 256-byte shebang parser
+allows one installed ELF interpreter and the kernel's optional single
+interpreter argument; recursive or non-ELF interpreters fail closed. Host
+probes cover direct and spawned nested scripts, shebang arguments, bare PATH
+scripts, valid relative/absolute links, loops, and escapes. Both exact-ABI APKs
+build with the refreshed bridge. The physical Samsung gate now executes the
+complete `/usr/bin` wrapper → `/usr/lib` script → absolute root-internal symlink
+→ ELF chain and returns the real Bash version in a visually inspected
+full-device capture without a fatal log. The x86_64 device repetition remains
+open.
 
 The equivalent real-client gate remains open on the x86_64 emulator, which is
 not currently attached. HOME/resume, deliberate client crash/descendant

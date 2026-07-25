@@ -52,9 +52,8 @@ physical Samsung coverage for:
   `/usr/lib/<app>`, with real ELF and physical Samsung coverage.
 
 Icon/capability derivation, x86_64 repetition of the real-client gate,
-fake-root absolute-symlink and nested-script handling, zero-copy/dmabuf
-presentation, broader toolkit coverage, and the remaining production launcher
-capabilities are still open.
+zero-copy/dmabuf presentation, broader toolkit coverage, and the remaining
+production launcher capabilities are still open.
 
 ## Historical bridge evidence
 
