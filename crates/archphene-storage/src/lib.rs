@@ -207,6 +207,80 @@ pub struct MirrorImportReport {
     pub bytes: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SyncEntryKind {
+    Directory,
+    File,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SyncFingerprint {
+    pub kind: SyncEntryKind,
+    pub bytes: u64,
+    pub sha256: [u8; 32],
+}
+
+impl SyncFingerprint {
+    pub const fn directory() -> Self {
+        Self {
+            kind: SyncEntryKind::Directory,
+            bytes: 0,
+            sha256: [0; 32],
+        }
+    }
+
+    pub const fn file(bytes: u64, sha256: [u8; 32]) -> Self {
+        Self {
+            kind: SyncEntryKind::File,
+            bytes,
+            sha256,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SyncAction {
+    Converged,
+    PushToAndroid,
+    PullToLinux,
+    DeleteFromAndroid,
+    DeleteFromLinux,
+    PreserveConflict,
+}
+
+pub fn decide_sync_action(
+    baseline: Option<SyncFingerprint>,
+    linux: Option<SyncFingerprint>,
+    android: Option<SyncFingerprint>,
+) -> SyncAction {
+    if linux == android {
+        return SyncAction::Converged;
+    }
+    let Some(baseline) = baseline else {
+        return match (linux, android) {
+            (Some(_), None) => SyncAction::PushToAndroid,
+            (None, Some(_)) => SyncAction::PullToLinux,
+            (Some(_), Some(_)) => SyncAction::PreserveConflict,
+            (None, None) => SyncAction::Converged,
+        };
+    };
+    if linux == Some(baseline) {
+        return if android.is_some() {
+            SyncAction::PullToLinux
+        } else {
+            SyncAction::DeleteFromLinux
+        };
+    }
+    if android == Some(baseline) {
+        return if linux.is_some() {
+            SyncAction::PushToAndroid
+        } else {
+            SyncAction::DeleteFromAndroid
+        };
+    }
+    SyncAction::PreserveConflict
+}
+
 impl MirrorImport {
     pub fn begin(home: &Path, project_name: &str) -> Result<Self, StorageError> {
         validate_visible_name(project_name)?;
@@ -978,6 +1052,111 @@ mod tests {
             assert!(parse_mirror_path(path).is_err(), "{path:?}");
         }
         assert!(parse_mirror_path(".git/objects").is_ok());
+    }
+
+    #[test]
+    fn sync_decisions_preserve_every_two_sided_change() {
+        const ORIGINAL: SyncFingerprint = SyncFingerprint::file(1, [1; 32]);
+        const LINUX_EDIT: SyncFingerprint = SyncFingerprint::file(2, [2; 32]);
+        const ANDROID_EDIT: SyncFingerprint = SyncFingerprint::file(3, [3; 32]);
+
+        let cases = [
+            (
+                Some(ORIGINAL),
+                Some(ORIGINAL),
+                Some(ORIGINAL),
+                SyncAction::Converged,
+            ),
+            (
+                Some(ORIGINAL),
+                Some(LINUX_EDIT),
+                Some(ORIGINAL),
+                SyncAction::PushToAndroid,
+            ),
+            (
+                Some(ORIGINAL),
+                Some(ORIGINAL),
+                Some(ANDROID_EDIT),
+                SyncAction::PullToLinux,
+            ),
+            (
+                Some(ORIGINAL),
+                Some(LINUX_EDIT),
+                Some(LINUX_EDIT),
+                SyncAction::Converged,
+            ),
+            (
+                Some(ORIGINAL),
+                Some(LINUX_EDIT),
+                Some(ANDROID_EDIT),
+                SyncAction::PreserveConflict,
+            ),
+            (
+                Some(ORIGINAL),
+                None,
+                Some(ORIGINAL),
+                SyncAction::DeleteFromAndroid,
+            ),
+            (
+                Some(ORIGINAL),
+                Some(ORIGINAL),
+                None,
+                SyncAction::DeleteFromLinux,
+            ),
+            (
+                Some(ORIGINAL),
+                None,
+                Some(ANDROID_EDIT),
+                SyncAction::PreserveConflict,
+            ),
+            (
+                Some(ORIGINAL),
+                Some(LINUX_EDIT),
+                None,
+                SyncAction::PreserveConflict,
+            ),
+            (Some(ORIGINAL), None, None, SyncAction::Converged),
+            (None, Some(LINUX_EDIT), None, SyncAction::PushToAndroid),
+            (None, None, Some(ANDROID_EDIT), SyncAction::PullToLinux),
+            (
+                None,
+                Some(LINUX_EDIT),
+                Some(ANDROID_EDIT),
+                SyncAction::PreserveConflict,
+            ),
+            (
+                None,
+                Some(LINUX_EDIT),
+                Some(LINUX_EDIT),
+                SyncAction::Converged,
+            ),
+        ];
+        for (baseline, linux, android, expected) in cases {
+            assert_eq!(
+                decide_sync_action(baseline, linux, android),
+                expected,
+                "baseline={baseline:?} linux={linux:?} android={android:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn sync_decisions_treat_type_changes_as_content_changes() {
+        const DIRECTORY: SyncFingerprint = SyncFingerprint::directory();
+        const FILE: SyncFingerprint = SyncFingerprint::file(0, [0; 32]);
+
+        assert_eq!(
+            decide_sync_action(Some(DIRECTORY), Some(FILE), Some(DIRECTORY)),
+            SyncAction::PushToAndroid,
+        );
+        assert_eq!(
+            decide_sync_action(Some(DIRECTORY), Some(DIRECTORY), Some(FILE)),
+            SyncAction::PullToLinux,
+        );
+        assert_eq!(
+            decide_sync_action(Some(DIRECTORY), Some(FILE), None),
+            SyncAction::PreserveConflict,
+        );
     }
 
     #[test]

@@ -143,6 +143,8 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
     - [x] Persist exactly one user-selected Android folder capability with explicit Connect/Change/Remove UX, read/write versus read-only status, process-restart validation, safe replacement ordering, and revoked-grant recovery.
     - [x] Materialize one connected Android tree as an initial atomic, non-replacing `~/Projects/<folder>` snapshot. Stream provider descriptors into Rust-owned bounded staging, preserve nested folders and dotfiles, reject unsafe paths/symlinks, recover stale staging, retain the published project after grant removal, and pass exact recursive/restart/full-device gates on both targets.
     - [ ] Evolve the initial snapshot into a conflict-safe synchronized POSIX mirror, then add drag-and-drop, exports, familiar home links, and `/mnt/android` sync/error status.
+      - [x] Define an allocation-free three-way decision engine: one-sided edits/deletes propagate, identical changes converge, and concurrent edits, edit/delete races, unequal new files, and incompatible type changes preserve a conflict.
+      - [ ] Persist bounded SHA-256 baselines, execute resumable pull/push/delete plans transactionally, and retain both versions for every conflict.
   - [ ] Launcher wrapper generation and runtime-service binding
   - [ ] Qt, GTK, native Wayland, SDL, Electron, and XWayland adaptation
   - [ ] Audio, camera, printing, notifications, URLs, secrets, and accessibility

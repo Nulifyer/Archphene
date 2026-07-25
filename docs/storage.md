@@ -113,6 +113,17 @@ progress/cancellation, and resumable pull/push before the UI calls this
 recovery, restart persistence, grant removal, scoped logs, and visually
 inspected full-device gates pass on both exact-ABI targets.
 
+Synchronization uses a three-way decision, never “newest timestamp wins.”
+For each bounded relative path, Archphene compares the last common fingerprint
+with the current private-Linux and Android fingerprints. A change on only one
+side is propagated to the other. Matching changes are adopted. A delete is
+propagated only when the other side still matches the baseline. Concurrent
+edits, edit-versus-delete, new unequal files at the same path, and incompatible
+file/directory changes are conflicts whose content must be preserved on both
+sides. The allocation-free Rust decision engine and its exhaustive
+edit/delete/type-change table are implemented; durable manifests, hashing, and
+transactional execution remain.
+
 The SAF capability itself is never presented as a POSIX mount; Linux sees only
 the private initial snapshot today. Exports, conflict-aware synchronization,
 drag-and-drop, progress/cancel, provider timeouts, and `/mnt/android` status
