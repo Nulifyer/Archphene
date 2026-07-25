@@ -2594,7 +2594,7 @@ class ArchpheneRuntimeService : Service() {
             0,
             "Queued",
         )
-        packageThread =
+        val worker =
             Thread(
                 {
                     val scratch = PackageIoScratch()
@@ -2757,7 +2757,8 @@ class ArchpheneRuntimeService : Service() {
                     }
                 },
                 "ArchpheneInstall",
-            ).also(Thread::start)
+            )
+        schedulePackageWorker(worker, activeHandle)
         return true
     }
 
@@ -2830,7 +2831,7 @@ class ArchpheneRuntimeService : Service() {
             0,
             "Queued",
         )
-        packageThread =
+        val worker =
             Thread(
                 {
                     val scratch = PackageIoScratch()
@@ -2947,8 +2948,29 @@ class ArchpheneRuntimeService : Service() {
                     }
                 },
                 "ArchpheneRemove",
-            ).also(Thread::start)
+            )
+        schedulePackageWorker(worker, activeHandle)
         return true
+    }
+
+    private fun schedulePackageWorker(
+        worker: Thread,
+        activeHandle: Long,
+    ) {
+        packageThread = worker
+        // Local Binder calls run on the Activity thread. One Looper turn gives that caller a
+        // deterministic chance to render the already-durable Queued record before work advances.
+        mainHandler.post {
+            synchronized(this) {
+                if (
+                    packageThread === worker &&
+                    packageOperationActive &&
+                    handle == activeHandle
+                ) {
+                    worker.start()
+                }
+            }
+        }
     }
 
     @Synchronized

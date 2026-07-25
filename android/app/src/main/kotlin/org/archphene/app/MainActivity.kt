@@ -275,7 +275,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 setOnClickListener {
                     hideKeyboard(searchInput)
                     if (runtimeBinder?.installPackage(searchInput.text.toString()) == true) {
-                        cancelButton.isEnabled = true
+                        updateStatus()
                     }
                 }
             }
@@ -286,7 +286,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 setOnClickListener {
                     hideKeyboard(searchInput)
                     if (runtimeBinder?.removePackage(searchInput.text.toString()) == true) {
-                        cancelButton.isEnabled = true
+                        updateStatus()
                     }
                 }
             }

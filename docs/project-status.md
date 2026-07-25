@@ -88,7 +88,13 @@ exact ABIs pass three-result `dotnet` rows, row selection, retained query and
 results across theme recreation, durable Failed overlay, scoped fatal logs, and
 visually inspected full-device light/dark screenshots without network access.
 The live Queued timing path, full populated details, every phase, and
-retry/recovery actions still require their own deterministic gate.
+retry/recovery actions still require their own deterministic gate. The local
+Binder path now makes the Queued boundary deterministic in code: after the
+journal commit, the Service posts worker start to the next main-Looper turn and
+the Activity synchronously consumes the new job revision before its Install or
+Remove click returns. This avoids a worker racing through Queued before the
+matching/appended row and recent-activity card can render, without adding a
+sleep or delaying background work beyond one UI turn.
 
 Visible files in the shared `/home/archphene` are now available to Android
 Files, system pickers, and explicitly granted Android consumers through an
