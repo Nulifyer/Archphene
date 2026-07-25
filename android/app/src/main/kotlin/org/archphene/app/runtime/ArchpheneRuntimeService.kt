@@ -45,6 +45,18 @@ class ArchpheneRuntimeService : Service() {
         val packageJobStatus: String
             get() = jobStatus
 
+        val packageJobName: String
+            get() = jobPackage
+
+        val packageJobProgress: Int
+            get() = jobProgress
+
+        val packageJobMessage: String
+            get() = jobMessage
+
+        val packageJobActivityLabel: String
+            get() = jobActivityLabel
+
         val packagePrimaryActionLabel: String
             get() = primaryActionLabel
 
@@ -298,6 +310,11 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var shellChoicesRevision = 0
     @Volatile private var selectedShellIndex = -1
     @Volatile private var jobStatus = "No package transaction"
+    @Volatile private var jobPackage = ""
+    @Volatile private var jobOperation = 0
+    @Volatile private var jobProgress = 0
+    @Volatile private var jobMessage = ""
+    @Volatile private var jobActivityLabel = ""
     @Volatile private var lastResolvedPackage = ""
     @Volatile private var lastResolvedRepository = ""
     @Volatile private var lastResolvedInstalledVersion = ""
@@ -2319,7 +2336,17 @@ class ArchpheneRuntimeService : Service() {
         packageCancellationRequested = false
         packageOperationCancelable = true
         packageOperationActive = true
-        jobStatus = "$normalized · Queued · 0%\nQueued"
+        publishPackageJob(
+            normalized,
+            if (installedVersion.isEmpty()) {
+                NativeRuntime.JOB_OPERATION_INSTALL
+            } else {
+                NativeRuntime.JOB_OPERATION_UPDATE
+            },
+            NativeRuntime.JOB_QUEUED,
+            0,
+            "Queued",
+        )
         packageThread =
             Thread(
                 {
@@ -2548,7 +2575,13 @@ class ArchpheneRuntimeService : Service() {
         packageCancellationRequested = false
         packageOperationCancelable = true
         packageOperationActive = true
-        jobStatus = "$normalized · Queued · 0%\nQueued"
+        publishPackageJob(
+            normalized,
+            NativeRuntime.JOB_OPERATION_REMOVE,
+            NativeRuntime.JOB_QUEUED,
+            0,
+            "Queued",
+        )
         packageThread =
             Thread(
                 {
@@ -2677,6 +2710,7 @@ class ArchpheneRuntimeService : Service() {
         packageCancellationRequested = true
         packageOperationCancelable = false
         jobStatus = "Cancellation requested\nFinishing the current safe step"
+        jobMessage = "Finishing the current safe step"
         activePackageConnection?.disconnect()
         packageThread?.interrupt()
         return true
@@ -2743,8 +2777,29 @@ class ArchpheneRuntimeService : Service() {
         if (result != 0) {
             throw IllegalStateException(readNativeMessage(scratch.outputBuffer, result))
         }
-        jobStatus =
-            "$packageName · ${jobStateName(state)} · $progress%\n$safeMessage"
+        publishPackageJob(
+            packageName,
+            jobOperation,
+            state,
+            progress,
+            safeMessage,
+        )
+    }
+
+    private fun publishPackageJob(
+        packageName: String,
+        operation: Int,
+        state: Int,
+        progress: Int,
+        message: String,
+    ) {
+        jobPackage = packageName
+        jobOperation = operation
+        jobProgress = progress.coerceIn(0, 100)
+        jobMessage = message
+        jobActivityLabel =
+            "${jobOperationName(operation)} · ${jobStateName(state)} · $jobProgress%"
+        jobStatus = "$packageName · ${jobStateName(state)} · $jobProgress%\n$message"
     }
 
     private fun boundedJobMessage(message: String): String {
@@ -2775,6 +2830,14 @@ class ArchpheneRuntimeService : Service() {
             NativeRuntime.JOB_FAILED -> "Failed"
             NativeRuntime.JOB_CANCELLED -> "Cancelled"
             else -> "Unknown"
+        }
+
+    private fun jobOperationName(operation: Int): String =
+        when (operation) {
+            NativeRuntime.JOB_OPERATION_INSTALL -> "Install"
+            NativeRuntime.JOB_OPERATION_UPDATE -> "Update"
+            NativeRuntime.JOB_OPERATION_REMOVE -> "Remove"
+            else -> "Package"
         }
 
     private fun downloadPackagePayload(
@@ -3446,6 +3509,11 @@ class ArchpheneRuntimeService : Service() {
             return "Package journal unavailable: ${readNativeMessage(outputBuffer, length)}"
         }
         if (length == 0) {
+            jobPackage = ""
+            jobOperation = 0
+            jobProgress = 0
+            jobMessage = ""
+            jobActivityLabel = ""
             return "No package transaction"
         }
         val bytes = ByteArray(length)
@@ -3455,8 +3523,11 @@ class ArchpheneRuntimeService : Service() {
         if (fields.size != 9) {
             return "Package journal returned an invalid record"
         }
+        val operation =
+            fields[1].toIntOrNull() ?: return "Package journal returned invalid operation"
         val state = fields[2].toIntOrNull() ?: return "Package journal returned invalid state"
         val progress = fields[4].toIntOrNull() ?: return "Package journal returned invalid progress"
-        return "${fields[7]} · ${jobStateName(state)} · $progress%\n${fields[8]}"
+        publishPackageJob(fields[7], operation, state, progress, fields[8])
+        return jobStatus
     }
 }

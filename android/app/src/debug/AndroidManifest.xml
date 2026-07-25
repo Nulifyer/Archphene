@@ -9,5 +9,8 @@
         <receiver
             android:name=".FolderGrantTestReceiver"
             android:exported="true" />
+        <receiver
+            android:name=".PackageJobTestReceiver"
+            android:exported="true" />
     </application>
 </manifest>

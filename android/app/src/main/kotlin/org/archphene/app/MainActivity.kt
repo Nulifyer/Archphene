@@ -41,6 +41,12 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private lateinit var catalogStatusView: TextView
     private lateinit var searchStatusView: TextView
     private lateinit var jobStatusView: TextView
+    private lateinit var packageJobTitleView: TextView
+    private lateinit var packageJobActivityView: TextView
+    private lateinit var packageJobProgressTrack: LinearLayout
+    private lateinit var packageJobProgressFill: View
+    private lateinit var packageJobProgressRemainder: View
+    private var packageJobRenderedProgress = 0
     private lateinit var commandStatusView: TextView
     private lateinit var storageStatusView: TextView
     private lateinit var folderStatusView: TextView
@@ -316,10 +322,49 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 setTextColor(getColor(R.color.archphene_on_surface))
                 textSize = 14f
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(16), dp(4), dp(16), dp(4))
+                setPadding(dp(16), 0, dp(16), dp(4))
                 setText(R.string.package_job_empty)
-                setBackgroundColor(getColor(R.color.archphene_surface_variant))
-                maxLines = 2
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+            }
+        packageJobTitleView =
+            TextView(this).apply {
+                setTextColor(getColor(R.color.archphene_on_surface))
+                textSize = 16f
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(16), 0, dp(8), 0)
+                setText(R.string.package_activity_heading)
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+            }
+        packageJobActivityView =
+            TextView(this).apply {
+                setTextColor(getColor(R.color.archphene_on_surface_muted))
+                textSize = 13f
+                gravity = Gravity.CENTER_VERTICAL or Gravity.END
+                setPadding(dp(8), 0, dp(8), 0)
+                maxLines = 1
+            }
+        packageJobProgressFill =
+            View(this).apply {
+                setBackgroundColor(getColor(R.color.archphene_primary))
+            }
+        packageJobProgressRemainder =
+            View(this).apply {
+                setBackgroundColor(getColor(R.color.archphene_surface))
+            }
+        packageJobProgressTrack =
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                visibility = View.INVISIBLE
+                addView(
+                    packageJobProgressFill,
+                    LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 0f),
+                )
+                addView(
+                    packageJobProgressRemainder,
+                    LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 100f),
+                )
             }
         cancelButton =
             Button(this).apply {
@@ -332,20 +377,55 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             }
         val jobRow =
             LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
+                orientation = LinearLayout.VERTICAL
+                setBackgroundColor(getColor(R.color.archphene_surface_variant))
                 addView(
-                    jobStatusView,
+                    LinearLayout(this@MainActivity).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        addView(
+                            packageJobTitleView,
+                            LinearLayout.LayoutParams(
+                                0,
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                1f,
+                            ),
+                        )
+                        addView(
+                            packageJobActivityView,
+                            LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.WRAP_CONTENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                            ),
+                        )
+                        addView(
+                            cancelButton,
+                            LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.WRAP_CONTENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                            ),
+                        )
+                    },
                     LinearLayout.LayoutParams(
-                        0,
                         ViewGroup.LayoutParams.MATCH_PARENT,
-                        1f,
+                        dp(48),
                     ),
                 )
                 addView(
-                    cancelButton,
+                    packageJobProgressTrack,
                     LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.WRAP_CONTENT,
                         ViewGroup.LayoutParams.MATCH_PARENT,
+                        dp(6),
+                    ).apply {
+                        marginStart = dp(16)
+                        marginEnd = dp(16)
+                    },
+                )
+                addView(
+                    jobStatusView,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        0,
+                        1f,
                     ),
                 )
             }
@@ -658,7 +738,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                                 jobRow,
                                 LinearLayout.LayoutParams(
                                     ViewGroup.LayoutParams.MATCH_PARENT,
-                                    dp(80),
+                                    dp(104),
                                 ),
                             )
                         },
@@ -705,7 +785,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                         jobRow,
                         LinearLayout.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT,
-                            dp(72),
+                            dp(104),
                         ),
                     )
                 }
@@ -1158,7 +1238,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             )
             setTextIfChanged(
                 jobStatusView,
-                runtimeBinder?.packageJobStatus ?: "Package operation unavailable",
+                packageJobDisplayMessage(),
             )
             setTextIfChanged(
                 commandStatusView,
@@ -1176,6 +1256,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     R.string.folder_grant_unavailable,
                 ),
             )
+            updatePackageActivity()
             updatePackageActions()
             return
         }
@@ -1197,7 +1278,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         )
         setTextIfChanged(
             jobStatusView,
-            runtimeBinder?.packageJobStatus ?: "Package operation unavailable",
+            packageJobDisplayMessage(),
         )
         setTextIfChanged(
             commandStatusView,
@@ -1222,6 +1303,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 R.string.folder_grant_unavailable,
             ),
         )
+        updatePackageActivity()
         updatePackageActions()
         maybeShowStorageOnboarding()
     }
@@ -1332,6 +1414,52 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         setTextIfChanged(folderMirrorButton, binder.folderMirrorActionLabel)
         folderMirrorButton.isEnabled = binder.folderMirrorAvailable
         folderDisconnectButton.isEnabled = binder.folderDisconnectAvailable
+    }
+
+    private fun updatePackageActivity() {
+        val binder = runtimeBinder
+        val packageName = binder?.packageJobName.orEmpty()
+        if (binder == null || packageName.isEmpty()) {
+            setTextIfChanged(packageJobTitleView, getString(R.string.package_activity_heading))
+            setTextIfChanged(packageJobActivityView, "")
+            if (packageJobProgressTrack.visibility != View.INVISIBLE) {
+                packageJobProgressTrack.visibility = View.INVISIBLE
+            }
+            if (packageJobRenderedProgress != 0) {
+                setPackageJobProgress(0)
+            }
+            return
+        }
+        setTextIfChanged(packageJobTitleView, packageName)
+        setTextIfChanged(packageJobActivityView, binder.packageJobActivityLabel)
+        setTextIfChanged(jobStatusView, binder.packageJobMessage)
+        if (packageJobProgressTrack.visibility != View.VISIBLE) {
+            packageJobProgressTrack.visibility = View.VISIBLE
+        }
+        val progress = binder.packageJobProgress.coerceIn(0, 100)
+        if (packageJobRenderedProgress != progress) {
+            setPackageJobProgress(progress)
+        }
+    }
+
+    private fun packageJobDisplayMessage(): String {
+        val binder = runtimeBinder ?: return "Package operation unavailable"
+        return if (binder.packageJobName.isEmpty()) {
+            binder.packageJobStatus
+        } else {
+            binder.packageJobMessage
+        }
+    }
+
+    private fun setPackageJobProgress(progress: Int) {
+        packageJobRenderedProgress = progress
+        (packageJobProgressFill.layoutParams as LinearLayout.LayoutParams).weight =
+            progress.toFloat()
+        (packageJobProgressRemainder.layoutParams as LinearLayout.LayoutParams).weight =
+            (100 - progress).toFloat()
+        packageJobProgressFill.requestLayout()
+        packageJobProgressRemainder.requestLayout()
+        packageJobProgressTrack.contentDescription = "$progress%"
     }
 
     private fun updateShellSelector(binder: ArchpheneRuntimeService.LocalBinder) {

@@ -51,6 +51,16 @@ settings, and proves the normal phone branch still passes. A physical Samsung
 DeX/external-display audit and populated package/active-shell visual audits
 remain planned; this clean-data pass did not download packages.
 
+The latest bounded Rust package-journal record is now exposed as stable Binder
+fields rather than reparsed UI text. Packages renders it as a recent-activity
+card with package name, operation, state, exact progress, message, a static
+two-view progress track, and the existing state-driven Cancel action. It does
+not allocate or rewrite unchanged text during status polls. Debug-only native
+journal fixtures prove a completed operation across manager restart and a
+durable failed operation on both exact ABIs with full-device screenshots and no
+network use. This is not yet the required installed/available package list, and
+live phase, retry, and recovery UX remains open.
+
 Visible files in the shared `/home/archphene` are now available to Android
 Files, system pickers, and explicitly granted Android consumers through an
 exported `DocumentsProvider` protected by Android's `MANAGE_DOCUMENTS`

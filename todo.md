@@ -234,6 +234,8 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
 
 - [ ] Make every install/update/remove operation appear in the app list immediately with persistent state and progress.
   - [x] The current exact-package details flow immediately shows persistent resolve, download, verify, install, complete, and failure state.
+  - [x] Replace the ambiguous transaction strip with a stable recent-activity card backed by the existing bounded Rust journal fields: package, operation, state, exact progress, message, static progress track, and state-driven Cancel. Prove durable Complete across manager restart and durable Failed on both exact ABIs with debug-only native journal fixtures, full-device screenshots, and no package downloads.
+  - [ ] Build the actual installed/available package list and insert a newly queued operation into it immediately; the recent-activity card is not yet the app list the product requires.
   - [ ] Show queued, resolving, downloading, verifying, building, installing, awaiting Android confirmation, completed, failed, and cancelled states.
   - [ ] Keep state correct across rotation, backgrounding, process death, reboot, and manager restart.
   - [ ] Provide actionable diagnostics, retry controls, and package-scoped failure isolation.
