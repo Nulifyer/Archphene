@@ -14,7 +14,9 @@ import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import android.provider.DocumentsContract
+import android.text.Editable
 import android.text.TextUtils
+import android.text.TextWatcher
 import android.util.Log
 import android.view.Choreographer
 import android.view.Gravity
@@ -291,6 +293,27 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     }
                 }
             }
+        searchInput.addTextChangedListener(
+            object : TextWatcher {
+                override fun beforeTextChanged(
+                    text: CharSequence?,
+                    start: Int,
+                    count: Int,
+                    after: Int,
+                ) = Unit
+
+                override fun onTextChanged(
+                    text: CharSequence?,
+                    start: Int,
+                    before: Int,
+                    count: Int,
+                ) = Unit
+
+                override fun afterTextChanged(text: Editable?) {
+                    updatePackageSelectionActions()
+                }
+            },
+        )
         searchInput.setOnEditorActionListener { _, actionId, _ ->
             if (actionId == EditorInfo.IME_ACTION_SEARCH) {
                 hideKeyboard(searchInput)
@@ -2006,9 +2029,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         updateShellPresentation(binder.sharedShellRunning)
         updateShellSelector(binder)
         setTextIfChanged(installButton, binder.packagePrimaryActionLabel)
-        installButton.isEnabled = binder.packagePrimaryActionAvailable
         setTextIfChanged(removeButton, binder.packageRemoveActionLabel)
-        removeButton.isEnabled = binder.packageRemoveAvailable
+        updatePackageSelectionActions()
         val packageActionAvailable =
             binder.packageCancellationAvailable || binder.packageRecoveryAvailable
         setTextIfChanged(cancelButton, binder.packageActivityActionLabel)
@@ -2027,6 +2049,15 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         setTextIfChanged(folderMirrorButton, binder.folderMirrorActionLabel)
         folderMirrorButton.isEnabled = binder.folderMirrorAvailable
         folderDisconnectButton.isEnabled = binder.folderDisconnectAvailable
+    }
+
+    private fun updatePackageSelectionActions() {
+        val binder = runtimeBinder
+        val exactSelection =
+            binder != null &&
+                packageSearchInput.text.toString().trim() == binder.resolvedPackageName
+        installButton.isEnabled = exactSelection && binder.packagePrimaryActionAvailable
+        removeButton.isEnabled = exactSelection && binder.packageRemoveAvailable
     }
 
     private fun updatePackageActivity() {

@@ -20,7 +20,12 @@ internal class PackageSearchTestReceiver : BroadcastReceiver() {
             return
         }
         val token = intent.getStringExtra(EXTRA_TOKEN)
-        if (token == null || !TOKEN.matches(token)) {
+        val workerHoldMillis = intent.getIntExtra(EXTRA_WORKER_HOLD_MILLIS, 0)
+        if (
+            token == null ||
+            !TOKEN.matches(token) ||
+            workerHoldMillis !in 0..MAX_WORKER_HOLD_MILLIS
+        ) {
             Log.e(TAG, "Rejected invalid package-search fixture")
             return
         }
@@ -62,6 +67,17 @@ internal class PackageSearchTestReceiver : BroadcastReceiver() {
                             ),
                         ),
                     )
+                    if (workerHoldMillis != 0) {
+                        check(
+                            context
+                                .getSharedPreferences(TEST_PREFERENCES, Context.MODE_PRIVATE)
+                                .edit()
+                                .putLong(TEST_WORKER_HOLD_MILLIS, workerHoldMillis.toLong())
+                                .commit(),
+                        ) {
+                            "could not save package-worker start gate"
+                        }
+                    }
                     Log.i(TAG, "Seeded package search token=$token")
                 } catch (error: Exception) {
                     Log.e(TAG, "Package-search fixture failed token=$token", error)
@@ -172,6 +188,10 @@ internal class PackageSearchTestReceiver : BroadcastReceiver() {
         private const val ACTION_SEED =
             "org.archphene.app.debug.action.SEED_PACKAGE_SEARCH"
         private const val EXTRA_TOKEN = "token"
+        private const val EXTRA_WORKER_HOLD_MILLIS = "worker-hold-ms"
+        private const val MAX_WORKER_HOLD_MILLIS = 5_000
+        private const val TEST_PREFERENCES = "package_job_test"
+        private const val TEST_WORKER_HOLD_MILLIS = "worker_hold_ms"
         private const val TAR_BLOCK_BYTES = 512
         private val TOKEN = Regex("[a-z0-9-]{1,48}")
     }

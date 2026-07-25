@@ -101,6 +101,9 @@ class ArchpheneRuntimeService : Service() {
         val packagePrimaryActionLabel: String
             get() = primaryActionLabel
 
+        val resolvedPackageName: String
+            get() = lastResolvedPackage
+
         val packagePrimaryActionAvailable: Boolean
             get() =
                 lastResolvedPackage.isNotEmpty() &&
@@ -726,6 +729,7 @@ class ArchpheneRuntimeService : Service() {
         private const val PACKAGE_RECOVERY_RESULT = "result"
         private const val PACKAGE_JOB_TEST_PREFERENCES = "package_job_test"
         private const val PACKAGE_JOB_TEST_CACHE_HOLD_MILLIS = "cache_hold_ms"
+        private const val PACKAGE_JOB_TEST_WORKER_HOLD_MILLIS = "worker_hold_ms"
         private const val MAX_PACKAGE_JOB_TEST_HOLD_MILLIS = 5_000L
         private const val SESSION_NOTIFICATION_ID = 0x4152
         private const val SESSION_NOTIFICATION_CHANNEL = "archphene_linux_sessions"
@@ -2802,6 +2806,7 @@ class ArchpheneRuntimeService : Service() {
                         recordedProgress = progress
                     }
                     try {
+                        holdDebugPackageWorker()
                         throwIfPackageCancelled()
                         record(
                             NativeRuntime.JOB_RESOLVING,
@@ -3311,18 +3316,26 @@ class ArchpheneRuntimeService : Service() {
     }
 
     private fun holdDebugPackageCacheCleanup() {
+        holdDebugPackageWork(PACKAGE_JOB_TEST_CACHE_HOLD_MILLIS)
+    }
+
+    private fun holdDebugPackageWorker() {
+        holdDebugPackageWork(PACKAGE_JOB_TEST_WORKER_HOLD_MILLIS)
+    }
+
+    private fun holdDebugPackageWork(preference: String) {
         if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0) {
             return
         }
         val preferences = getSharedPreferences(PACKAGE_JOB_TEST_PREFERENCES, MODE_PRIVATE)
         val holdMillis =
             preferences
-                .getLong(PACKAGE_JOB_TEST_CACHE_HOLD_MILLIS, 0L)
+                .getLong(preference, 0L)
                 .coerceIn(0L, MAX_PACKAGE_JOB_TEST_HOLD_MILLIS)
         if (holdMillis == 0L) {
             return
         }
-        preferences.edit().remove(PACKAGE_JOB_TEST_CACHE_HOLD_MILLIS).commit()
+        preferences.edit().remove(preference).commit()
         Thread.sleep(holdMillis)
     }
 
