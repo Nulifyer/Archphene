@@ -106,6 +106,21 @@ class ArchpheneRuntimeService : Service() {
         val packageCancellationAvailable: Boolean
             get() = packageOperationActive && packageOperationCancelable
 
+        val packageRecoveryAvailable: Boolean
+            get() =
+                jobPackage.isNotEmpty() &&
+                    (
+                        jobState == NativeRuntime.JOB_FAILED ||
+                            jobState == NativeRuntime.JOB_CANCELLED
+                    ) &&
+                    readyHandle != 0L &&
+                    !searchActive &&
+                    !packageOperationActive &&
+                    !commandActive
+
+        val packageActivityActionLabel: String
+            get() = if (packageCancellationAvailable) "Cancel" else "Review"
+
         val documentImportStatus: String
             get() = storageStatus
 

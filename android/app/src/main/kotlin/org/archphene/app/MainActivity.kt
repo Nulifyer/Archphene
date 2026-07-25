@@ -144,6 +144,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 installButton.isEnabled = false
                 removeButton.isEnabled = false
                 cancelButton.isEnabled = false
+                cancelButton.visibility = View.GONE
                 commandButton.isEnabled = false
                 ptyButton.isEnabled = false
                 importButton.isEnabled = false
@@ -524,9 +525,10 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             TextView(this).apply {
                 setTextColor(getColor(R.color.archphene_on_surface_muted))
                 textSize = 13f
-                gravity = Gravity.CENTER_VERTICAL or Gravity.END
-                setPadding(dp(8), 0, dp(8), 0)
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(16), 0, dp(8), 0)
                 maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
             }
         packageJobProgressFill =
             View(this).apply {
@@ -553,9 +555,22 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             Button(this).apply {
                 setText(R.string.cancel)
                 isEnabled = false
+                visibility = View.GONE
                 setOnClickListener {
-                    isEnabled = false
-                    runtimeBinder?.cancelPackageOperation()
+                    val binder = runtimeBinder ?: return@setOnClickListener
+                    when {
+                        binder.packageCancellationAvailable -> {
+                            isEnabled = false
+                            binder.cancelPackageOperation()
+                        }
+                        binder.packageRecoveryAvailable -> {
+                            val packageName = binder.packageJobName
+                            packageSearchInput.setText(packageName)
+                            packageSearchInput.setSelection(packageName.length)
+                            showPackageDetails()
+                            binder.resolvePackage(packageName)
+                        }
+                    }
                 }
             }
         val jobRow =
@@ -566,18 +581,29 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     LinearLayout(this@MainActivity).apply {
                         orientation = LinearLayout.HORIZONTAL
                         addView(
-                            packageJobTitleView,
+                            LinearLayout(this@MainActivity).apply {
+                                orientation = LinearLayout.VERTICAL
+                                addView(
+                                    packageJobTitleView,
+                                    LinearLayout.LayoutParams(
+                                        ViewGroup.LayoutParams.MATCH_PARENT,
+                                        0,
+                                        1f,
+                                    ),
+                                )
+                                addView(
+                                    packageJobActivityView,
+                                    LinearLayout.LayoutParams(
+                                        ViewGroup.LayoutParams.MATCH_PARENT,
+                                        0,
+                                        1f,
+                                    ),
+                                )
+                            },
                             LinearLayout.LayoutParams(
                                 0,
                                 ViewGroup.LayoutParams.MATCH_PARENT,
                                 1f,
-                            ),
-                        )
-                        addView(
-                            packageJobActivityView,
-                            LinearLayout.LayoutParams(
-                                ViewGroup.LayoutParams.WRAP_CONTENT,
-                                ViewGroup.LayoutParams.MATCH_PARENT,
                             ),
                         )
                         addView(
@@ -590,7 +616,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     },
                     LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
-                        dp(48),
+                        dp(64),
                     ),
                 )
                 addView(
@@ -1961,6 +1987,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             installButton.isEnabled = false
             removeButton.isEnabled = false
             cancelButton.isEnabled = false
+            cancelButton.visibility = View.GONE
             commandButton.isEnabled = false
             ptyButton.isEnabled = false
             importButton.isEnabled = false
@@ -1976,7 +2003,14 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         setTextIfChanged(installButton, binder.packagePrimaryActionLabel)
         installButton.isEnabled = binder.packagePrimaryActionAvailable
         removeButton.isEnabled = binder.packageRemoveAvailable
-        cancelButton.isEnabled = binder.packageCancellationAvailable
+        val packageActionAvailable =
+            binder.packageCancellationAvailable || binder.packageRecoveryAvailable
+        setTextIfChanged(cancelButton, binder.packageActivityActionLabel)
+        cancelButton.isEnabled = packageActionAvailable
+        setVisibilityIfChanged(
+            cancelButton,
+            if (packageActionAvailable) View.VISIBLE else View.GONE,
+        )
         setTextIfChanged(commandButton, binder.linuxInputActionLabel)
         commandButton.isEnabled = binder.linuxCommandAvailable
         setTextIfChanged(ptyButton, binder.sharedShellActionLabel)

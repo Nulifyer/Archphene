@@ -241,6 +241,9 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [ ] Show queued, resolving, downloading, verifying, building, installing, awaiting Android confirmation, completed, failed, and cancelled states.
   - [ ] Keep state correct across rotation, backgrounding, process death, reboot, and manager restart.
   - [ ] Provide actionable diagnostics, retry controls, and package-scoped failure isolation.
+    - [x] Replace the dead disabled Cancel control with no action for terminal success and a state-driven Review action for durable Failed/Cancelled jobs. Review prefills the exact package and performs a fresh signed-repository/installed-state resolution before enabling any retry or removal; it never replays stale transaction metadata.
+    - [x] Keep long package names, phase labels, and the Review/Cancel touch target readable in the fixed-height activity card by stacking name and phase in a flexible column; verify full-device captures on the emulator and Samsung.
+    - [ ] Add explicit Retry after successful review, richer failure diagnostics, and recovery actions for storage, trust, replacement, and partial-transaction failures.
   - [x] Show a state-driven Cancel action only before Linux package mutation and retain the durable Cancelled result across manager restart.
 - [x] Make the current package details and operation content responsive and scrollable; full-device emulator and Samsung audits show the complete `btop` closure with state-driven Install/Update/Verify and Remove actions.
 - [x] Profile and fix slow first launch after boot; retain the visible runtime-loading state while avoiding unchanged verification-keyring rebuilds.
@@ -253,7 +256,7 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [ ] Validate the adaptive branch on a real Samsung DeX or physical external display, including live display moves, keyboard/mouse focus, window resizing, and density changes; the current gate safely simulates the Android configurations on the emulator but is not physical-display evidence.
   - [x] Audit the populated installed-package list and durable terminal Complete/Failed cards in the new navigation on both exact ABIs, including light/dark full-device views, pagination, and manager restart.
   - [x] Audit populated available search rows, row-to-details selection, query/result recreation, and matching durable Failed state on both exact ABIs with generated local pacman databases.
-  - [ ] Audit full populated details, every live durable transaction phase, retry/recovery, and an active terminal in the new navigation.
+  - [ ] Audit full populated details, every live durable transaction phase, post-review Retry/recovery, and an active terminal in the new navigation.
 - [ ] Review Obtainium's source, license, screenshots, app-list structure, and update progress UI. Adapt suitable open-source patterns to Archphene's compact list, spinner, and richer phase strings without copying blindly.
 - [ ] Ensure search results distinguish graphical apps, CLI tools, libraries, installed packages, available updates, AUR results, unsupported packages, and compatibility status.
 - [ ] Add clear disk-use estimates and controls for package archives, shared runtime data, build caches, and user files.

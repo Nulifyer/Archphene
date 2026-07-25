@@ -80,7 +80,16 @@ archphene_wait_ui_exact_text \
 archphene_wait_ui_exact_text \
   "Network unavailable; retry is required" \
   "package-activity-failed-message-$serial" 15
+archphene_wait_ui_exact_text \
+  "Review" "package-activity-failed-review-$serial" 15
 archphene_adb_run exec-out screencap -p >"$output_dir/$serial-failed.png"
+
+archphene_tap_text "$ARCHPHENE_UI" "Review"
+archphene_wait_ui \
+  'text="activity-failed"[^>]*class="android.widget.EditText"' \
+  "package-activity-review-package-$serial" 15
+archphene_wait_ui_text \
+  "Package resolution failed:" "package-activity-review-resolution-$serial" 20
 
 fatal_log="$(archphene_adb_run logcat -d -v brief \
   -s AndroidRuntime:E libc:F '*:S' 2>/dev/null || true)"
@@ -90,5 +99,5 @@ fatal_log="$(archphene_adb_run logcat -d -v brief \
 trap - EXIT
 cleanup
 archphene_note "Archphene package activity passed on $serial"
-archphene_note "  Durable complete/restart and failed-state cards passed"
+archphene_note "  Durable complete/restart, failed state, and safe Review route passed"
 archphene_note "  Full-device screenshots: $output_dir/$serial-{complete,failed}.png"

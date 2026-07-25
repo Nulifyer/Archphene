@@ -96,6 +96,24 @@ Remove click returns. This avoids a worker racing through Queued before the
 matching/appended row and recent-activity card can render, without adding a
 sleep or delaying background work beyond one UI turn.
 
+The recent-activity action is now terminal-state aware. Complete has no dead
+disabled Cancel button; active pre-commit work exposes Cancel; and durable
+Failed or Cancelled work exposes Review. Review fills the exact package,
+switches to details, and requests a fresh bounded resolution against current
+signed catalogs and current installed state before Install, Update, Verify, or
+Remove can become available again. It deliberately does not replay stale
+closure metadata. The debug Failed fixture routes through this path with
+catalogs absent and proves the fail-closed resolution diagnostic without any
+network request; an explicit post-review Retry action and richer recovery
+classes remain planned.
+
+The same device gate exposed a narrow-screen header collision between the
+package name, phase label, and recovery action. The activity card now stacks
+the package name and phase in a flexible text column beside the action, with
+single-line end ellipsis only after the available column is exhausted. Fresh
+full-device emulator and Samsung captures verify the complete package name,
+phase, message, and touch target without increasing the fixed card height.
+
 Visible files in the shared `/home/archphene` are now available to Android
 Files, system pickers, and explicitly granted Android consumers through an
 exported `DocumentsProvider` protected by Android's `MANAGE_DOCUMENTS`
