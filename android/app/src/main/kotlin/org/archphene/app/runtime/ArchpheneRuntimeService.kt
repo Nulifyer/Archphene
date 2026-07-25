@@ -17,6 +17,8 @@ import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
+import android.system.Os
+import android.system.OsConstants
 import android.util.Log
 import java.io.File
 import java.nio.ByteBuffer
@@ -83,6 +85,17 @@ class ArchpheneRuntimeService : Service() {
 
         val folderDisconnectAvailable: Boolean
             get() = folderStateReady && folderConnected && !PROCESS_STORAGE_ACTIVE.get()
+
+        val folderMirrorAvailable: Boolean
+            get() =
+                folderStateReady &&
+                    folderConnected &&
+                    readyHandle != 0L &&
+                    folderMirrorPath.isEmpty() &&
+                    !PROCESS_STORAGE_ACTIVE.get()
+
+        val folderMirrorActionLabel: String
+            get() = if (folderMirrorPath.isEmpty()) "Mirror" else "Mirrored"
 
         val folderGrantRunning: Boolean
             get() = folderOperationActive
@@ -173,6 +186,8 @@ class ArchpheneRuntimeService : Service() {
 
         fun disconnectAndroidFolder(): Boolean = requestFolderDisconnect()
 
+        fun mirrorAndroidFolder(): Boolean = requestFolderMirror()
+
         fun submitLinuxInput(commandLine: String): Boolean =
             if (shellActive) {
                 requestShellInput(commandLine)
@@ -239,6 +254,10 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var folderOperationActive = false
     @Volatile private var folderStateReady = false
     @Volatile private var folderConnected = false
+    @Volatile private var folderWritable = false
+    @Volatile private var folderUri = ""
+    @Volatile private var folderLabel = ""
+    @Volatile private var folderMirrorPath = ""
     @Volatile private var folderStatus = "Loading Android folder access…"
     @Volatile private var shellActive = false
     @Volatile private var shellWasStarted = false
@@ -281,6 +300,16 @@ class ArchpheneRuntimeService : Service() {
         val label: String,
         val requestBytes: ByteArray,
     )
+
+    private data class MirrorDirectory(
+        val documentId: String,
+        val relativePath: String,
+    )
+
+    private class MirrorProgress {
+        var entries = 0
+        var bytes = 0L
+    }
 
     private class PackageIoScratch {
         val requestBuffer: ByteBuffer = ByteBuffer.allocateDirect(512)
@@ -537,6 +566,11 @@ class ArchpheneRuntimeService : Service() {
         private const val FOLDER_DISCONNECTED = "disconnected"
         private const val FOLDER_CONNECTED = "connected"
         private const val FOLDER_REVOKED = "revoked"
+        private const val FOLDER_MIRROR_URI = "folder_mirror_uri"
+        private const val FOLDER_MIRROR_NAME = "folder_mirror_name"
+        private const val MAX_MIRROR_ENTRIES = 10_000
+        private const val MAX_MIRROR_DEPTH = 64
+        private const val MAX_MIRROR_PATH_BYTES = 4 * 1024
         private const val MAX_STORAGE_URI_BYTES = 4 * 1024
         private const val MAX_STORAGE_REQUEST_BYTES = 4 * 1024
         private const val MAX_STORAGE_NAME_BYTES = 255
@@ -595,6 +629,10 @@ class ArchpheneRuntimeService : Service() {
         val state = preferences.getString(FOLDER_STATE, FOLDER_DISCONNECTED)
         if (savedUri == null) {
             folderConnected = false
+            folderWritable = false
+            folderUri = ""
+            folderLabel = savedLabel
+            folderMirrorPath = ""
             folderStatus =
                 if (state == FOLDER_REVOKED) {
                     "Access to $savedLabel was revoked. Connect it again."
@@ -610,10 +648,19 @@ class ArchpheneRuntimeService : Service() {
                 ?.let(::persistedFolderPermission)
         if (permission?.first == true) {
             folderConnected = true
-            folderStatus = connectedFolderStatus(savedLabel, permission.second)
+            folderWritable = permission.second
+            folderUri = savedUri
+            folderLabel = savedLabel
+            folderMirrorPath = restoredMirrorPath(preferences, savedUri)
+            folderStatus =
+                connectedFolderStatus(savedLabel, permission.second, folderMirrorPath)
             return
         }
         folderConnected = false
+        folderWritable = false
+        folderUri = ""
+        folderLabel = savedLabel
+        folderMirrorPath = ""
         folderStatus = "Access to $savedLabel was revoked. Connect it again."
         if (
             !preferences
@@ -624,6 +671,26 @@ class ArchpheneRuntimeService : Service() {
                 .commit()
         ) {
             Log.e(TAG, "Could not persist revoked Android folder state")
+        }
+    }
+
+    private fun restoredMirrorPath(
+        preferences: SharedPreferences,
+        activeUri: String,
+    ): String {
+        if (preferences.getString(FOLDER_MIRROR_URI, null) != activeUri) {
+            return ""
+        }
+        val name =
+            preferences.getString(FOLDER_MIRROR_NAME, null)
+                ?.takeIf(::safeFolderLabel)
+                ?: return ""
+        val path = File(filesDir, "arch-root/home/archphene/Projects/$name")
+        val mode = runCatching { Os.lstat(path.absolutePath).st_mode }.getOrNull() ?: return ""
+        return if (mode and OsConstants.S_IFMT == OsConstants.S_IFDIR) {
+            "~/Projects/$name"
+        } else {
+            ""
         }
     }
 
@@ -700,14 +767,17 @@ class ArchpheneRuntimeService : Service() {
                     ?.takeIf { it.first }
                     ?: throw SecurityException("Android did not persist read access")
             val label = queryFolderLabel(uri)
-            if (
-                !preferences
+            val encodedUri = uri.toString()
+            val editor =
+                preferences
                     .edit()
-                    .putString(FOLDER_URI, uri.toString())
+                    .putString(FOLDER_URI, encodedUri)
                     .putString(FOLDER_LABEL, label)
                     .putString(FOLDER_STATE, FOLDER_CONNECTED)
-                    .commit()
-            ) {
+            if (preferences.getString(FOLDER_MIRROR_URI, null) != encodedUri) {
+                editor.remove(FOLDER_MIRROR_URI).remove(FOLDER_MIRROR_NAME)
+            }
+            if (!editor.commit()) {
                 throw IllegalStateException("Could not save the Android folder grant")
             }
             if (previousUri != null && previousUri != uri) {
@@ -717,7 +787,12 @@ class ArchpheneRuntimeService : Service() {
                     }
             }
             folderConnected = true
-            folderStatus = connectedFolderStatus(label, permission.second)
+            folderWritable = permission.second
+            folderUri = encodedUri
+            folderLabel = label
+            folderMirrorPath = restoredMirrorPath(preferences, encodedUri)
+            folderStatus =
+                connectedFolderStatus(label, permission.second, folderMirrorPath)
             Log.i(
                 TAG,
                 "Android folder connected label=$label writable=${permission.second}",
@@ -732,6 +807,344 @@ class ArchpheneRuntimeService : Service() {
             throw error
         }
     }
+
+    @Synchronized
+    private fun requestFolderMirror(): Boolean {
+        val activeHandle = readyHandle
+        val activeUri =
+            folderUri
+                .takeIf(String::isNotEmpty)
+                ?.let { encoded -> runCatching { Uri.parse(encoded) }.getOrNull() }
+                ?.takeIf(::safeTreeUri)
+        val projectName = folderLabel.takeIf(::safeFolderLabel)
+        if (
+            activeHandle == 0L ||
+            !folderConnected ||
+            activeUri == null ||
+            projectName == null ||
+            folderMirrorPath.isNotEmpty()
+        ) {
+            return false
+        }
+        if (!PROCESS_STORAGE_ACTIVE.compareAndSet(false, true)) {
+            return false
+        }
+        folderOperationActive = true
+        folderStatus = "Preparing ~/Projects/$projectName…"
+        val worker =
+            Thread(
+                {
+                    var nativeStarted = false
+                    val preferences = getSharedPreferences(STORAGE_PREFERENCES, MODE_PRIVATE)
+                    try {
+                        if (
+                            !preferences
+                                .edit()
+                                .putString(FOLDER_MIRROR_URI, activeUri.toString())
+                                .putString(FOLDER_MIRROR_NAME, projectName)
+                                .commit()
+                        ) {
+                            throw IllegalStateException("Could not save the project mirror intent")
+                        }
+                        val request = ByteBuffer.allocateDirect(MAX_MIRROR_PATH_BYTES)
+                        val output = ByteBuffer.allocateDirect(NativeRuntime.STORAGE_OUTPUT_SIZE)
+                        val beginLength = putUtf8Request(request, projectName)
+                        val beginResult =
+                            NativeRuntime.nativeBeginProjectMirror(
+                                activeHandle,
+                                request,
+                                beginLength,
+                                output,
+                            )
+                        requireMirrorSuccess(beginResult.toLong(), output, "begin project mirror")
+                        nativeStarted = true
+                        val progress = MirrorProgress()
+                        val projection =
+                            arrayOf(
+                                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                                DocumentsContract.Document.COLUMN_MIME_TYPE,
+                                DocumentsContract.Document.COLUMN_SIZE,
+                            )
+                        mirrorDocumentChildren(
+                            activeHandle,
+                            activeUri,
+                            DocumentsContract.getTreeDocumentId(activeUri),
+                            "",
+                            0,
+                            projection,
+                            request,
+                            output,
+                            progress,
+                        )
+                        output.clear()
+                        val finishResult =
+                            NativeRuntime.nativeFinishProjectMirror(activeHandle, output)
+                        requireMirrorSuccess(
+                            finishResult.toLong(),
+                            output,
+                            "publish project mirror",
+                        )
+                        nativeStarted = false
+                        val report = readCString(output).split('\t')
+                        if (
+                            report.size != 2 ||
+                            report[0].toIntOrNull() != progress.entries ||
+                            report[1].toLongOrNull() != progress.bytes
+                        ) {
+                            throw IllegalStateException("Invalid native project mirror report")
+                        }
+                        folderMirrorPath = "~/Projects/$projectName"
+                        folderStatus =
+                            connectedFolderStatus(
+                                projectName,
+                                folderWritable,
+                                folderMirrorPath,
+                            )
+                        Log.i(
+                            TAG,
+                            "Android folder mirrored name=$projectName " +
+                                "entries=${progress.entries} bytes=${progress.bytes}",
+                        )
+                    } catch (error: Exception) {
+                        if (nativeStarted) {
+                            NativeRuntime.nativeAbortProjectMirror(activeHandle)
+                        }
+                        preferences
+                            .edit()
+                            .remove(FOLDER_MIRROR_URI)
+                            .remove(FOLDER_MIRROR_NAME)
+                            .commit()
+                        folderMirrorPath = ""
+                        folderStatus =
+                            "Mirror failed: ${error.message ?: error.javaClass.simpleName}"
+                        Log.e(TAG, "Android folder mirror failed", error)
+                    } finally {
+                        finishFolderOperation()
+                    }
+                },
+                "ArchpheneFolderMirror",
+            )
+        storageThread = worker
+        return try {
+            worker.start()
+            true
+        } catch (error: Exception) {
+            storageThread = null
+            folderOperationActive = false
+            PROCESS_STORAGE_ACTIVE.set(false)
+            folderStatus =
+                "Mirror failed: ${error.message ?: error.javaClass.simpleName}"
+            Log.e(TAG, "Could not start Android folder mirror", error)
+            false
+        }
+    }
+
+    private fun mirrorDocumentChildren(
+        activeHandle: Long,
+        treeUri: Uri,
+        parentDocumentId: String,
+        prefix: String,
+        depth: Int,
+        projection: Array<String>,
+        request: ByteBuffer,
+        output: ByteBuffer,
+        progress: MirrorProgress,
+    ) {
+        if (depth > MAX_MIRROR_DEPTH) {
+            throw SecurityException("Android project exceeds $MAX_MIRROR_DEPTH levels")
+        }
+        val childUri =
+            DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentDocumentId)
+        val directories = ArrayList<MirrorDirectory>()
+        val cursor =
+            contentResolver.query(childUri, projection, null, null, null)
+                ?: throw IllegalStateException("Android provider returned no folder listing")
+        cursor.use {
+            while (it.moveToNext()) {
+                if (Thread.interrupted()) {
+                    throw InterruptedException("Project mirror interrupted")
+                }
+                progress.entries++
+                if (progress.entries > MAX_MIRROR_ENTRIES) {
+                    throw SecurityException(
+                        "Android project exceeds $MAX_MIRROR_ENTRIES entries",
+                    )
+                }
+                val documentId =
+                    it.getString(0)
+                        ?.takeIf(String::isNotEmpty)
+                        ?: throw SecurityException("Android provider returned no document ID")
+                val name =
+                    it.getString(1)
+                        ?.takeIf(::safeProjectName)
+                        ?: throw SecurityException("Android provider returned an unsafe name")
+                val relativePath = if (prefix.isEmpty()) name else "$prefix/$name"
+                if (utf8Length(relativePath) > MAX_MIRROR_PATH_BYTES) {
+                    throw SecurityException("Android project path is too long")
+                }
+                val mime = it.getString(2) ?: "application/octet-stream"
+                if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
+                    val length = putUtf8Request(request, relativePath)
+                    output.clear()
+                    val result =
+                        NativeRuntime.nativeAddProjectMirrorDirectory(
+                            activeHandle,
+                            request,
+                            length,
+                            output,
+                        )
+                    requireMirrorSuccess(result.toLong(), output, "create mirror directory")
+                    directories.add(MirrorDirectory(documentId, relativePath))
+                } else {
+                    val expectedBytes =
+                        if (it.isNull(3) || it.getLong(3) < 0) {
+                            -1L
+                        } else {
+                            it.getLong(3)
+                        }
+                    val documentUri =
+                        DocumentsContract.buildDocumentUriUsingTree(treeUri, documentId)
+                    val descriptor =
+                        contentResolver.openFileDescriptor(documentUri, "r", null)
+                            ?: throw IllegalStateException(
+                                "Android provider returned no file descriptor",
+                            )
+                    val copied =
+                        descriptor.use {
+                            val length = putUtf8Request(request, relativePath)
+                            output.clear()
+                            NativeRuntime.nativeAddProjectMirrorFile(
+                                activeHandle,
+                                request,
+                                length,
+                                it.fd,
+                                expectedBytes,
+                                output,
+                            )
+                        }
+                    requireMirrorSuccess(copied, output, "copy mirror file")
+                    progress.bytes =
+                        Math.addExact(
+                            progress.bytes,
+                            copied,
+                        )
+                }
+                if (progress.entries % 25 == 0) {
+                    folderStatus =
+                        "Mirroring $projectNameForStatus: " +
+                            "${progress.entries} entries · ${formatStorageBytes(progress.bytes)}"
+                }
+            }
+        }
+        for (directory in directories) {
+            mirrorDocumentChildren(
+                activeHandle,
+                treeUri,
+                directory.documentId,
+                directory.relativePath,
+                depth + 1,
+                projection,
+                request,
+                output,
+                progress,
+            )
+        }
+    }
+
+    private val projectNameForStatus: String
+        get() = folderLabel.ifEmpty { "Android folder" }
+
+    private fun requireMirrorSuccess(
+        result: Long,
+        output: ByteBuffer,
+        operation: String,
+    ) {
+        if (result < 0) {
+            throw IllegalStateException(readCString(output).ifEmpty { "$operation failed ($result)" })
+        }
+    }
+
+    private fun putUtf8Request(
+        destination: ByteBuffer,
+        value: String,
+    ): Int {
+        destination.clear()
+        var index = 0
+        while (index < value.length) {
+            val codePoint = Character.codePointAt(value, index)
+            if (
+                codePoint in 0xD800..0xDFFF ||
+                !Character.isValidCodePoint(codePoint)
+            ) {
+                throw SecurityException("Project path is not valid Unicode")
+            }
+            when {
+                codePoint <= 0x7f -> destination.put(codePoint.toByte())
+                codePoint <= 0x7ff -> {
+                    destination.put((0xc0 or (codePoint shr 6)).toByte())
+                    destination.put((0x80 or (codePoint and 0x3f)).toByte())
+                }
+                codePoint <= 0xffff -> {
+                    destination.put((0xe0 or (codePoint shr 12)).toByte())
+                    destination.put((0x80 or ((codePoint shr 6) and 0x3f)).toByte())
+                    destination.put((0x80 or (codePoint and 0x3f)).toByte())
+                }
+                else -> {
+                    destination.put((0xf0 or (codePoint shr 18)).toByte())
+                    destination.put((0x80 or ((codePoint shr 12) and 0x3f)).toByte())
+                    destination.put((0x80 or ((codePoint shr 6) and 0x3f)).toByte())
+                    destination.put((0x80 or (codePoint and 0x3f)).toByte())
+                }
+            }
+            if (destination.position() > MAX_MIRROR_PATH_BYTES) {
+                throw SecurityException("Project path is too long")
+            }
+            index += Character.charCount(codePoint)
+        }
+        if (destination.position() == 0) {
+            throw SecurityException("Project path is empty")
+        }
+        return destination.position()
+    }
+
+    private fun utf8Length(value: String): Int {
+        var bytes = 0
+        var index = 0
+        while (index < value.length) {
+            val codePoint = Character.codePointAt(value, index)
+            bytes +=
+                when {
+                    codePoint <= 0x7f -> 1
+                    codePoint <= 0x7ff -> 2
+                    codePoint <= 0xffff -> 3
+                    else -> 4
+                }
+            if (bytes > MAX_MIRROR_PATH_BYTES) {
+                return bytes
+            }
+            index += Character.charCount(codePoint)
+        }
+        return bytes
+    }
+
+    private fun safeProjectName(name: String): Boolean =
+        name.isNotEmpty() &&
+            name != "." &&
+            name != ".." &&
+            utf8Length(name) <= MAX_STORAGE_NAME_BYTES &&
+            '/' !in name &&
+            '\\' !in name &&
+            '\u0000' !in name &&
+            '\t' !in name &&
+            name.none { character ->
+                character.isISOControl() ||
+                    character == '\u061c' ||
+                    character == '\u200e' ||
+                    character == '\u200f' ||
+                    character in '\u202a'..'\u202e' ||
+                    character in '\u2066'..'\u2069'
+            }
 
     @Synchronized
     private fun requestFolderDisconnect(): Boolean {
@@ -757,12 +1170,18 @@ class ArchpheneRuntimeService : Service() {
                                 .edit()
                                 .remove(FOLDER_URI)
                                 .remove(FOLDER_LABEL)
+                                .remove(FOLDER_MIRROR_URI)
+                                .remove(FOLDER_MIRROR_NAME)
                                 .putString(FOLDER_STATE, FOLDER_DISCONNECTED)
                                 .commit()
                         ) {
                             throw IllegalStateException("Could not save the disconnected state")
                         }
                         folderConnected = false
+                        folderWritable = false
+                        folderUri = ""
+                        folderLabel = ""
+                        folderMirrorPath = ""
                         folderStatus = "No Android folder connected"
                         Log.i(TAG, "Android folder disconnected")
                     } catch (error: Exception) {
@@ -875,12 +1294,16 @@ class ArchpheneRuntimeService : Service() {
     private fun connectedFolderStatus(
         label: String,
         writable: Boolean,
-    ): String =
-        if (writable) {
-            "Android folder: $label · read/write"
-        } else {
-            "Android folder: $label · read-only"
-        }
+        mirrorPath: String,
+    ): String {
+        val access =
+            if (writable) {
+                "Android folder: $label · read/write"
+            } else {
+                "Android folder: $label · read-only"
+            }
+        return if (mirrorPath.isEmpty()) access else "$access\nLinux: $mirrorPath"
+    }
 
     @Synchronized
     private fun requestDocumentImport(uri: Uri): Boolean {

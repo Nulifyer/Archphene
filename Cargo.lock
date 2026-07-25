@@ -50,6 +50,7 @@ dependencies = [
  "archphene-packages",
  "archphene-process",
  "archphene-root",
+ "archphene-storage",
 ]
 
 [[package]]

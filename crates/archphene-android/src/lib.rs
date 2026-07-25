@@ -441,6 +441,173 @@ mod android {
     }
 
     #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeBeginProjectMirror(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        request_buffer: JByteBuffer,
+        request_length: jint,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let Ok(handle) = u64::try_from(handle) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(output) = storage_output(&environment, &output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(request) = storage_request(&environment, &request_buffer, request_length, 1) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(mut registry) = registry().lock() else {
+            return ERROR_INTERNAL;
+        };
+        let Some(runtime) = registry.runtime_mut(handle) else {
+            return ERROR_INVALID_HANDLE;
+        };
+        runtime
+            .begin_mirror_import(&request[0])
+            .map_or_else(|error| copy_storage_error(&error, output), |_| 0)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeAddProjectMirrorDirectory(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        request_buffer: JByteBuffer,
+        request_length: jint,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let Ok(handle) = u64::try_from(handle) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(output) = storage_output(&environment, &output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(request) = storage_request(&environment, &request_buffer, request_length, 1) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(mut registry) = registry().lock() else {
+            return ERROR_INTERNAL;
+        };
+        let Some(runtime) = registry.runtime_mut(handle) else {
+            return ERROR_INVALID_HANDLE;
+        };
+        runtime
+            .add_mirror_directory(&request[0])
+            .map_or_else(|error| copy_storage_error(&error, output), |_| 0)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeAddProjectMirrorFile(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        request_buffer: JByteBuffer,
+        request_length: jint,
+        source_descriptor: jint,
+        expected_bytes: jlong,
+        output_buffer: JByteBuffer,
+    ) -> jlong {
+        let (Ok(handle), expected_bytes) = (
+            u64::try_from(handle),
+            if expected_bytes < 0 {
+                None
+            } else {
+                u64::try_from(expected_bytes).ok()
+            },
+        ) else {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        };
+        if source_descriptor < 0 {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        }
+        let Ok(output) = storage_output(&environment, &output_buffer) else {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        };
+        let Ok(request) = storage_request(&environment, &request_buffer, request_length, 1) else {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        };
+        let mut mirror = {
+            let Ok(mut registry) = registry().lock() else {
+                return i64::from(ERROR_INTERNAL);
+            };
+            let Some(runtime) = registry.runtime_mut(handle) else {
+                return i64::from(ERROR_INVALID_HANDLE);
+            };
+            let Ok(mirror) = runtime.take_mirror_import() else {
+                return i64::from(ERROR_INVALID_STATE);
+            };
+            mirror
+        };
+        let result = mirror.add_file_from_fd(&request[0], source_descriptor, expected_bytes);
+        let restored = {
+            let Ok(mut registry) = registry().lock() else {
+                return i64::from(ERROR_INTERNAL);
+            };
+            registry
+                .runtime_mut(handle)
+                .is_some_and(|runtime| runtime.restore_mirror_import(mirror).is_ok())
+        };
+        if !restored {
+            return i64::from(ERROR_INVALID_HANDLE);
+        }
+        result.map_or_else(
+            |error| i64::from(copy_storage_error(&error, output)),
+            |bytes| i64::try_from(bytes).unwrap_or(i64::from(ERROR_STORAGE)),
+        )
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeFinishProjectMirror(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let Ok(handle) = u64::try_from(handle) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(output) = storage_output(&environment, &output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(mut registry) = registry().lock() else {
+            return ERROR_INTERNAL;
+        };
+        let Some(runtime) = registry.runtime_mut(handle) else {
+            return ERROR_INVALID_HANDLE;
+        };
+        match runtime.finish_mirror_import() {
+            Ok(report) => {
+                copy_storage_value(&format!("{}\t{}", report.entries, report.bytes), output)
+            }
+            Err(error) => copy_storage_error(&error, output),
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeAbortProjectMirror(
+        _environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+    ) -> jboolean {
+        let Ok(handle) = u64::try_from(handle) else {
+            return JNI_FALSE;
+        };
+        let Ok(mut registry) = registry().lock() else {
+            return JNI_FALSE;
+        };
+        if registry
+            .runtime_mut(handle)
+            .is_some_and(|runtime| runtime.abort_mirror_import())
+        {
+            JNI_TRUE
+        } else {
+            JNI_FALSE
+        }
+    }
+
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeCreate(
         _environment: JNIEnv,
         _class: JClass,

@@ -1,6 +1,6 @@
 # Linux Home and Android Storage Policy
 
-Updated: 2026-07-24
+Updated: 2026-07-25
 
 Goal: give every Linux package one conventional shared Arch environment while
 crossing into Android storage only through Android-controlled capabilities.
@@ -93,9 +93,30 @@ instead of stale success. Connect, replacement, restart persistence,
 revocation, reconnect, read-only recovery, removal, and full-device visual
 gates pass on both exact-ABI targets.
 
-This capability is not yet presented to Linux as a directory. Exports,
-conflict-aware synchronization, drag-and-drop, progress/cancel, provider
-timeouts, and `/mnt/android` mirrors are still planned.
+A connected tree can now be materialized once into
+`/home/archphene/Projects/<folder>`. Kotlin walks the Android provider but
+passes each read-only file descriptor and bounded path metadata directly to
+Rust. Rust creates the recursive tree in private descriptor-relative staging,
+enforces entry, depth, path, file, and total-byte limits, syncs every file, and
+publishes the complete project with a non-replacing atomic rename. Dotfiles
+needed by development projects, including `.git`, are preserved; symlinks and
+unsafe paths are rejected. Interrupted staging is recovered without following
+a substituted symlink. The published private project remains available if the
+Android grant is later removed.
+
+This is deliberately an initial snapshot, not a live mount or completed
+synchronizer. Android-side edits made after publication and Linux-side edits
+are not yet reconciled or written back. The next storage slice must add an
+explicit manifest, change detection, conflict copies, deletion policy,
+progress/cancellation, and resumable pull/push before the UI calls this
+“Synced.” Exact recursive content, empty files, nested dotfiles, stale-stage
+recovery, restart persistence, grant removal, scoped logs, and visually
+inspected full-device gates pass on both exact-ABI targets.
+
+The SAF capability itself is never presented as a POSIX mount; Linux sees only
+the private initial snapshot today. Exports, conflict-aware synchronization,
+drag-and-drop, progress/cancel, provider timeouts, and `/mnt/android` status
+and convenience paths are still planned.
 
 ## Virtual Linux Layout
 

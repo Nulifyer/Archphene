@@ -2,11 +2,11 @@
 
 use std::ffi::{CString, OsStr};
 use std::fmt;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 mod sys {
     #![allow(unsafe_code)]
@@ -139,10 +139,16 @@ pub const MAX_DOCUMENT_ID_BYTES: usize = 1024;
 pub const MAX_DOCUMENT_DEPTH: usize = 32;
 pub const MAX_DOCUMENT_NAME_BYTES: usize = 255;
 pub const MAX_IMPORT_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+pub const MAX_MIRROR_ENTRIES: u32 = 10_000;
+pub const MAX_MIRROR_DEPTH: usize = 64;
+pub const MAX_MIRROR_PATH_BYTES: usize = 4 * 1024;
+pub const MAX_MIRROR_FILE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+pub const MAX_MIRROR_TOTAL_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
 const IMPORT_STAGING_DIRECTORY: &str = ".archphene-import";
 const IMPORT_STAGING_FILE: &str = "pending";
 const MAX_IMPORT_COLLISIONS: u32 = 999;
+const MIRROR_STAGING_DIRECTORY: &str = ".archphene-mirror-pending";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OpenMode {
@@ -160,6 +166,9 @@ pub enum StorageError {
     RootMutation,
     ImportTooLarge,
     ImportCollision,
+    MirrorBusy,
+    MirrorExists,
+    MirrorTooLarge,
     Io(io::Error),
 }
 
@@ -174,7 +183,182 @@ impl fmt::Display for StorageError {
             Self::ImportCollision => {
                 formatter.write_str("too many documents use this imported name")
             }
+            Self::MirrorBusy => formatter.write_str("another project mirror is incomplete"),
+            Self::MirrorExists => formatter.write_str("the Linux project path already exists"),
+            Self::MirrorTooLarge => formatter.write_str("Android project mirror exceeds its limit"),
             Self::Io(error) => write!(formatter, "Archphene document I/O error: {error}"),
+        }
+    }
+}
+
+pub struct MirrorImport {
+    staging_path: PathBuf,
+    projects: File,
+    staging: File,
+    target_name: CString,
+    entries: u32,
+    bytes: u64,
+    published: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MirrorImportReport {
+    pub entries: u32,
+    pub bytes: u64,
+}
+
+impl MirrorImport {
+    pub fn begin(home: &Path, project_name: &str) -> Result<Self, StorageError> {
+        validate_visible_name(project_name)?;
+        let projects = open_directory(home, &["Projects"])?;
+        let target_name = c_string(OsStr::new(project_name))?;
+        match sys::open_at(
+            projects.as_raw_fd(),
+            &target_name,
+            sys::O_RDONLY | sys::O_CLOEXEC | sys::O_NOFOLLOW | sys::O_NONBLOCK,
+            0,
+        ) {
+            Ok(_) => return Err(StorageError::MirrorExists),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+
+        let projects_path = home.join("Projects");
+        let staging_path = projects_path.join(MIRROR_STAGING_DIRECTORY);
+        recover_mirror_staging(&staging_path)?;
+        let staging_name = c_string(OsStr::new(MIRROR_STAGING_DIRECTORY))?;
+        match sys::mkdir_at(projects.as_raw_fd(), &staging_name, 0o700) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                return Err(StorageError::MirrorBusy);
+            }
+            Err(error) => return Err(error.into()),
+        }
+        projects.sync_all()?;
+        let staging = sys::open_at(
+            projects.as_raw_fd(),
+            &staging_name,
+            sys::O_RDONLY | sys::O_DIRECTORY | sys::O_CLOEXEC | sys::O_NOFOLLOW,
+            0,
+        )?;
+        Ok(Self {
+            staging_path,
+            projects,
+            staging,
+            target_name,
+            entries: 0,
+            bytes: 0,
+            published: false,
+        })
+    }
+
+    pub fn add_directory(&mut self, relative_path: &str) -> Result<(), StorageError> {
+        self.reserve_entry()?;
+        let segments = parse_mirror_path(relative_path)?;
+        let (parent, leaf) = open_mirror_parent(&self.staging, &segments)?;
+        match sys::mkdir_at(parent.as_raw_fd(), &leaf, 0o700) {
+            Ok(()) => {
+                parent.sync_all()?;
+                Ok(())
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn add_file_from_fd(
+        &mut self,
+        relative_path: &str,
+        source_descriptor: RawFd,
+        expected_bytes: Option<u64>,
+    ) -> Result<u64, StorageError> {
+        if source_descriptor < 0 || expected_bytes.is_some_and(|size| size > MAX_MIRROR_FILE_BYTES)
+        {
+            return Err(StorageError::InvalidDocument);
+        }
+        self.reserve_entry()?;
+        let segments = parse_mirror_path(relative_path)?;
+        let (parent, leaf) = open_mirror_parent(&self.staging, &segments)?;
+        let mut destination = sys::open_at(
+            parent.as_raw_fd(),
+            &leaf,
+            sys::O_WRONLY | sys::O_CREAT | sys::O_EXCL | sys::O_CLOEXEC | sys::O_NOFOLLOW,
+            0o600,
+        )?;
+        let mut source = sys::duplicate(source_descriptor)?;
+        let result = (|| {
+            let mut copied = 0_u64;
+            let mut buffer = [0_u8; 32 * 1024];
+            loop {
+                let count = source.read(&mut buffer)?;
+                if count == 0 {
+                    break;
+                }
+                copied = copied
+                    .checked_add(count as u64)
+                    .ok_or(StorageError::MirrorTooLarge)?;
+                if copied > MAX_MIRROR_FILE_BYTES {
+                    return Err(StorageError::MirrorTooLarge);
+                }
+                destination.write_all(&buffer[..count])?;
+            }
+            if expected_bytes.is_some_and(|expected| expected != copied) {
+                return Err(StorageError::InvalidDocument);
+            }
+            let new_total = self
+                .bytes
+                .checked_add(copied)
+                .ok_or(StorageError::MirrorTooLarge)?;
+            if new_total > MAX_MIRROR_TOTAL_BYTES {
+                return Err(StorageError::MirrorTooLarge);
+            }
+            destination.sync_all()?;
+            self.bytes = new_total;
+            Ok(copied)
+        })();
+        drop(destination);
+        if result.is_err() {
+            let _ = sys::unlink_at(parent.as_raw_fd(), &leaf, false);
+            let _ = parent.sync_all();
+        } else {
+            parent.sync_all()?;
+        }
+        result
+    }
+
+    pub fn finish(mut self) -> Result<MirrorImportReport, StorageError> {
+        self.staging.sync_all()?;
+        let staging_name = c_string(OsStr::new(MIRROR_STAGING_DIRECTORY))?;
+        sys::rename_noreplace_between(
+            self.projects.as_raw_fd(),
+            &staging_name,
+            self.projects.as_raw_fd(),
+            &self.target_name,
+        )?;
+        self.projects.sync_all()?;
+        self.published = true;
+        Ok(MirrorImportReport {
+            entries: self.entries,
+            bytes: self.bytes,
+        })
+    }
+
+    fn reserve_entry(&mut self) -> Result<(), StorageError> {
+        self.entries = self
+            .entries
+            .checked_add(1)
+            .ok_or(StorageError::MirrorTooLarge)?;
+        if self.entries > MAX_MIRROR_ENTRIES {
+            return Err(StorageError::MirrorTooLarge);
+        }
+        Ok(())
+    }
+}
+
+impl Drop for MirrorImport {
+    fn drop(&mut self) {
+        if !self.published {
+            let _ = fs::remove_dir_all(&self.staging_path);
+            let _ = self.projects.sync_all();
         }
     }
 }
@@ -428,6 +612,79 @@ fn parse_document_id(document_id: &str) -> Result<Vec<&str>, StorageError> {
     Ok(segments)
 }
 
+fn parse_mirror_path(relative_path: &str) -> Result<Vec<&str>, StorageError> {
+    if relative_path.is_empty() || relative_path.as_bytes().len() > MAX_MIRROR_PATH_BYTES {
+        return Err(StorageError::InvalidDocument);
+    }
+    let segments: Vec<&str> = relative_path.split('/').collect();
+    if segments.is_empty() || segments.len() > MAX_MIRROR_DEPTH {
+        return Err(StorageError::InvalidDocument);
+    }
+    for segment in &segments {
+        validate_project_name(segment)?;
+    }
+    Ok(segments)
+}
+
+fn validate_project_name(name: &str) -> Result<(), StorageError> {
+    let bytes = name.as_bytes();
+    if bytes.is_empty()
+        || bytes.len() > MAX_DOCUMENT_NAME_BYTES
+        || name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains('\0')
+        || name.contains('\t')
+        || name.chars().any(|character| {
+            character.is_control()
+                || matches!(
+                    character,
+                    '\u{061c}'
+                    | '\u{200e}'
+                    | '\u{200f}'
+                    | '\u{202a}'..='\u{202e}'
+                    | '\u{2066}'..='\u{2069}'
+                )
+        })
+    {
+        return Err(StorageError::InvalidDocument);
+    }
+    Ok(())
+}
+
+fn open_mirror_parent(staging: &File, segments: &[&str]) -> Result<(File, CString), StorageError> {
+    let Some((leaf, parents)) = segments.split_last() else {
+        return Err(StorageError::InvalidDocument);
+    };
+    let mut directory = staging.try_clone()?;
+    for segment in parents {
+        directory = sys::open_at(
+            directory.as_raw_fd(),
+            &c_string(OsStr::new(segment))?,
+            sys::O_RDONLY | sys::O_DIRECTORY | sys::O_CLOEXEC | sys::O_NOFOLLOW,
+            0,
+        )?;
+    }
+    Ok((directory, c_string(OsStr::new(leaf))?))
+}
+
+fn recover_mirror_staging(staging_path: &Path) -> Result<(), StorageError> {
+    match fs::symlink_metadata(staging_path) {
+        Ok(metadata) if metadata.is_dir() => {
+            fs::remove_dir_all(staging_path)?;
+            Ok(())
+        }
+        Ok(metadata) if metadata.file_type().is_symlink() || metadata.is_file() => {
+            fs::remove_file(staging_path)?;
+            Ok(())
+        }
+        Ok(_) => Err(StorageError::InvalidDocument),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn open_parent(root: &Path, segments: &[&str]) -> Result<(File, CString), StorageError> {
     let Some((leaf, parents)) = segments.split_last() else {
         return Err(StorageError::RootMutation);
@@ -660,6 +917,113 @@ mod tests {
                 .next()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn mirror_import_recursively_publishes_files_and_dot_directories() {
+        let home = TestDirectory::new();
+        let source = TestDirectory::new();
+        fs::create_dir(home.0.join("Projects")).expect("projects");
+        fs::write(source.0.join("config"), b"[core]\n").expect("source");
+        fs::write(source.0.join("main.rs"), b"fn main() {}\n").expect("source");
+        let config = File::open(source.0.join("config")).expect("config");
+        let main = File::open(source.0.join("main.rs")).expect("main");
+
+        let mut import = MirrorImport::begin(&home.0, "AndroidProject").expect("begin");
+        import.add_directory(".git").expect("dot directory");
+        assert_eq!(
+            import
+                .add_file_from_fd(".git/config", config.as_raw_fd(), Some(7))
+                .expect("config"),
+            7,
+        );
+        assert_eq!(
+            import
+                .add_file_from_fd("main.rs", main.as_raw_fd(), None)
+                .expect("main"),
+            13,
+        );
+        let report = import.finish().expect("finish");
+
+        assert_eq!(
+            report,
+            MirrorImportReport {
+                entries: 3,
+                bytes: 20,
+            },
+        );
+        assert_eq!(
+            fs::read(home.0.join("Projects/AndroidProject/.git/config")).expect("config result"),
+            b"[core]\n",
+        );
+        assert_eq!(
+            fs::read(home.0.join("Projects/AndroidProject/main.rs")).expect("main result"),
+            b"fn main() {}\n",
+        );
+        assert!(!home.0.join("Projects/.archphene-mirror-pending").exists());
+    }
+
+    #[test]
+    fn mirror_paths_reject_traversal_controls_and_backslashes() {
+        for path in [
+            "",
+            ".",
+            "..",
+            "src/../escape",
+            "src//empty",
+            "src\\misleading",
+            "src/new\nline",
+            "src/\u{202e}spoof",
+        ] {
+            assert!(parse_mirror_path(path).is_err(), "{path:?}");
+        }
+        assert!(parse_mirror_path(".git/objects").is_ok());
+    }
+
+    #[test]
+    fn mirror_import_is_non_replacing_and_cleans_failed_transactions() {
+        let home = TestDirectory::new();
+        let source = TestDirectory::new();
+        fs::create_dir(home.0.join("Projects")).expect("projects");
+        fs::create_dir(home.0.join("Projects/Existing")).expect("existing");
+        assert!(matches!(
+            MirrorImport::begin(&home.0, "Existing"),
+            Err(StorageError::MirrorExists),
+        ));
+
+        fs::write(source.0.join("changing"), b"short").expect("source");
+        let changing = File::open(source.0.join("changing")).expect("changing");
+        let mut import = MirrorImport::begin(&home.0, "Failed").expect("begin");
+        assert!(
+            import
+                .add_file_from_fd("changing", changing.as_raw_fd(), Some(99))
+                .is_err(),
+        );
+        drop(import);
+        assert!(!home.0.join("Projects/Failed").exists());
+        assert!(!home.0.join("Projects/.archphene-mirror-pending").exists());
+        assert!(home.0.join("Projects/Existing").is_dir());
+    }
+
+    #[test]
+    fn mirror_import_recovers_stale_staging_without_following_a_symlink() {
+        let home = TestDirectory::new();
+        let outside = TestDirectory::new();
+        fs::create_dir(home.0.join("Projects")).expect("projects");
+        fs::write(outside.0.join("sentinel"), b"outside").expect("sentinel");
+        symlink(
+            &outside.0,
+            home.0.join("Projects/.archphene-mirror-pending"),
+        )
+        .expect("stale symlink");
+
+        let import = MirrorImport::begin(&home.0, "Recovered").expect("recover");
+        drop(import);
+        assert_eq!(
+            fs::read(outside.0.join("sentinel")).expect("outside remains"),
+            b"outside",
+        );
+        assert!(!home.0.join("Projects/.archphene-mirror-pending").exists());
     }
 
     #[test]

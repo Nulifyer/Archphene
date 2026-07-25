@@ -1,6 +1,6 @@
 # Project status
 
-Updated: 2026-07-24
+Updated: 2026-07-25
 
 This page separates validated behavior from planned platform work. Package search does not imply package compatibility.
 
@@ -49,10 +49,19 @@ records a replacement before releasing the old grant, and exposes explicit
 Connect, Change, and Remove actions. Exact-ABI emulator and Samsung gates prove
 connect, replacement, process-restart persistence, external revocation,
 reconnect, read-only recovery, removal, scoped logs, cleanup, and visually
-inspected full-device screenshots. The grant remains Android-owned capability
-state; `/mnt/android` mirrors, Android-to-Linux synchronization,
-Linux-to-Android export/share, conflict handling, and guided first-run storage
-setup remain open.
+inspected full-device screenshots.
+
+The connected tree can also be materialized as one initial
+`~/Projects/<folder>` snapshot. Kotlin traverses SAF while Rust streams the
+provider descriptors into bounded descriptor-relative staging, preserves
+nested directories and development dotfiles, syncs the contents, and
+atomically publishes a non-replacing project. Exact recursive content, empty
+files, `.git/config`, stale-stage recovery, process-restart persistence, grant
+removal with retained Linux content, scoped logs, cleanup, and full-device
+visuals pass on both exact-ABI targets. It is not yet a live or conflict-safe
+synchronizer: subsequent pull/push, change manifests, conflict copies,
+deletion policy, progress/cancel, `/mnt/android`, export/share, and guided
+first-run storage setup remain open.
 
 Single Android documents can now enter the shared environment from the system
 picker, Open With, or Share. Android passes one read-only content descriptor;

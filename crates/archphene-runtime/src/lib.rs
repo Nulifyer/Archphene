@@ -14,6 +14,7 @@ use archphene_packages::{
 };
 use archphene_process::{PtyRegistry, PtyWaiter};
 use archphene_root::{ArchRoot, BootstrapReport, RootError};
+use archphene_storage::{MirrorImport, MirrorImportReport, StorageError};
 
 pub const STATUS_ARCH_ROOT_READY: u32 = 1 << 0;
 pub const STATUS_JOB_STORE_READY: u32 = 1 << 1;
@@ -33,6 +34,7 @@ pub struct RuntimeHost {
     package_download: Option<PackagePayloadDownload>,
     pty_sessions: PtyRegistry,
     session_marker: Option<PathBuf>,
+    mirror_import: Option<MirrorImport>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -89,6 +91,7 @@ impl RuntimeHost {
             package_download: None,
             pty_sessions: PtyRegistry::new(),
             session_marker: None,
+            mirror_import: None,
         }
     }
 
@@ -133,6 +136,62 @@ impl RuntimeHost {
 
     pub fn arch_root(&self) -> Option<&Path> {
         self.arch_root.as_ref().map(ArchRoot::path)
+    }
+
+    pub fn begin_mirror_import(&mut self, project_name: &str) -> Result<(), StorageError> {
+        if self.mirror_import.is_some() {
+            return Err(StorageError::MirrorBusy);
+        }
+        let home = self
+            .arch_root
+            .as_ref()
+            .ok_or(StorageError::InvalidRoot)?
+            .path()
+            .join("home/archphene");
+        self.mirror_import = Some(MirrorImport::begin(&home, project_name)?);
+        Ok(())
+    }
+
+    pub fn add_mirror_directory(&mut self, relative_path: &str) -> Result<(), StorageError> {
+        self.mirror_import
+            .as_mut()
+            .ok_or(StorageError::MirrorBusy)?
+            .add_directory(relative_path)
+    }
+
+    pub fn add_mirror_file(
+        &mut self,
+        relative_path: &str,
+        source_descriptor: i32,
+        expected_bytes: Option<u64>,
+    ) -> Result<u64, StorageError> {
+        self.mirror_import
+            .as_mut()
+            .ok_or(StorageError::MirrorBusy)?
+            .add_file_from_fd(relative_path, source_descriptor, expected_bytes)
+    }
+
+    pub fn take_mirror_import(&mut self) -> Result<MirrorImport, StorageError> {
+        self.mirror_import.take().ok_or(StorageError::MirrorBusy)
+    }
+
+    pub fn restore_mirror_import(&mut self, mirror: MirrorImport) -> Result<(), StorageError> {
+        if self.mirror_import.is_some() {
+            return Err(StorageError::MirrorBusy);
+        }
+        self.mirror_import = Some(mirror);
+        Ok(())
+    }
+
+    pub fn finish_mirror_import(&mut self) -> Result<MirrorImportReport, StorageError> {
+        self.mirror_import
+            .take()
+            .ok_or(StorageError::MirrorBusy)?
+            .finish()
+    }
+
+    pub fn abort_mirror_import(&mut self) -> bool {
+        self.mirror_import.take().is_some()
     }
 
     pub fn prepare_package_runtime(

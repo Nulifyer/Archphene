@@ -53,6 +53,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private lateinit var ptyButton: Button
     private lateinit var importButton: Button
     private lateinit var folderButton: Button
+    private lateinit var folderMirrorButton: Button
     private lateinit var folderDisconnectButton: Button
     private lateinit var shellSpinner: Spinner
     private lateinit var shellAdapter: ArrayAdapter<String>
@@ -97,6 +98,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 ptyButton.isEnabled = false
                 importButton.isEnabled = false
                 folderButton.isEnabled = false
+                folderMirrorButton.isEnabled = false
                 folderDisconnectButton.isEnabled = false
                 shellSpinner.isEnabled = false
                 updateShellPresentation(false)
@@ -375,6 +377,15 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     runtimeBinder?.disconnectAndroidFolder()
                 }
             }
+        folderMirrorButton =
+            Button(this).apply {
+                setText(R.string.mirror_folder)
+                isEnabled = false
+                setOnClickListener {
+                    isEnabled = false
+                    runtimeBinder?.mirrorAndroidFolder()
+                }
+            }
         val folderRow =
             LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
@@ -393,6 +404,13 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                         gravity = Gravity.END
                         addView(
                             folderButton,
+                            LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.WRAP_CONTENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                            ),
+                        )
+                        addView(
+                            folderMirrorButton,
                             LinearLayout.LayoutParams(
                                 ViewGroup.LayoutParams.WRAP_CONTENT,
                                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -875,6 +893,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             ptyButton.isEnabled = false
             importButton.isEnabled = false
             folderButton.isEnabled = false
+            folderMirrorButton.isEnabled = false
             folderDisconnectButton.isEnabled = false
             shellSpinner.isEnabled = false
             updateShellPresentation(false)
@@ -893,6 +912,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         importButton.isEnabled = binder.documentImportAvailable && pendingImportUri == null
         setTextIfChanged(folderButton, binder.folderGrantActionLabel)
         folderButton.isEnabled = binder.folderGrantAvailable && pendingFolderUri == null
+        setTextIfChanged(folderMirrorButton, binder.folderMirrorActionLabel)
+        folderMirrorButton.isEnabled = binder.folderMirrorAvailable
         folderDisconnectButton.isEnabled = binder.folderDisconnectAvailable
     }
 

@@ -14,3 +14,4 @@ archphene-jobs = { path = "../archphene-jobs" }
 archphene-packages = { path = "../archphene-packages" }
 archphene-process = { path = "../archphene-process" }
 archphene-root = { path = "../archphene-root" }
+archphene-storage = { path = "../archphene-storage" }

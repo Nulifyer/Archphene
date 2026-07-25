@@ -5,6 +5,9 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.util.Log
+import java.io.File
+import java.nio.charset.StandardCharsets
+import java.nio.file.Files
 
 internal class FolderGrantTestReceiver : BroadcastReceiver() {
     override fun onReceive(
@@ -17,7 +20,10 @@ internal class FolderGrantTestReceiver : BroadcastReceiver() {
             intent.action != ACTION_VERIFY_ABSENT &&
             intent.action != ACTION_DOWNGRADE &&
             intent.action != ACTION_REVOKE &&
-            intent.action != ACTION_CLEAN
+            intent.action != ACTION_CLEAN &&
+            intent.action != ACTION_PREPARE_MIRROR &&
+            intent.action != ACTION_VERIFY_MIRROR &&
+            intent.action != ACTION_CLEAN_MIRROR
         ) {
             return
         }
@@ -37,6 +43,9 @@ internal class FolderGrantTestReceiver : BroadcastReceiver() {
                         ACTION_DOWNGRADE -> downgrade(context, token)
                         ACTION_REVOKE -> revoke(context, token)
                         ACTION_CLEAN -> clean(context, token)
+                        ACTION_PREPARE_MIRROR -> prepareMirror(context, token)
+                        ACTION_VERIFY_MIRROR -> verifyMirror(context, token)
+                        ACTION_CLEAN_MIRROR -> cleanMirror(context, token)
                     }
                     Log.i(TAG, "Folder grant ${intent.action} passed token=$token")
                 } catch (error: Exception) {
@@ -167,6 +176,83 @@ internal class FolderGrantTestReceiver : BroadcastReceiver() {
         }
     }
 
+    private fun prepareMirror(
+        context: Context,
+        token: String,
+    ) {
+        cleanMirror(context, token)
+        val staging = File(projectsRoot(context), STAGING_NAME)
+        check(staging.mkdir()) { "could not create stale mirror staging" }
+        File(staging, "partial").writeText("stale-$token", StandardCharsets.UTF_8)
+    }
+
+    private fun verifyMirror(
+        context: Context,
+        token: String,
+    ) {
+        val project = File(projectsRoot(context), mirrorName(token))
+        check(project.isDirectory && !Files.isSymbolicLink(project.toPath())) {
+            "project mirror is unavailable or symbolic"
+        }
+        check(File(project, "main.txt").readText(StandardCharsets.UTF_8) == "root-$token") {
+            "root mirror content differs"
+        }
+        check(
+            File(project, "src/nested.txt").readText(StandardCharsets.UTF_8) ==
+                "nested-$token",
+        ) {
+            "nested mirror content differs"
+        }
+        check(
+            File(project, ".git/config").readText(StandardCharsets.UTF_8) ==
+                "git-$token",
+        ) {
+            "hidden mirror content differs"
+        }
+        check(File(project, "empty.bin").length() == 0L) { "empty mirror file differs" }
+        check(!File(projectsRoot(context), STAGING_NAME).exists()) {
+            "mirror staging remains after publication"
+        }
+    }
+
+    private fun cleanMirror(
+        context: Context,
+        token: String,
+    ) {
+        deleteFixture(File(projectsRoot(context), mirrorName(token)))
+        deleteFixture(File(projectsRoot(context), STAGING_NAME))
+        val preferences =
+            context.getSharedPreferences(STORAGE_PREFERENCES, Context.MODE_PRIVATE)
+        if (
+            preferences.getString(FOLDER_MIRROR_NAME, null) == mirrorName(token)
+        ) {
+            check(
+                preferences
+                    .edit()
+                    .remove(FOLDER_MIRROR_URI)
+                    .remove(FOLDER_MIRROR_NAME)
+                    .commit(),
+            ) {
+                "could not clear mirror test state"
+            }
+        }
+    }
+
+    private fun projectsRoot(context: Context): File =
+        File(context.filesDir, "arch-root/home/archphene/Projects")
+
+    private fun deleteFixture(file: File) {
+        if (!file.exists() && !Files.isSymbolicLink(file.toPath())) {
+            return
+        }
+        check(!Files.isSymbolicLink(file.toPath())) { "refusing to clean symbolic test fixture" }
+        if (file.isDirectory) {
+            file.listFiles()?.forEach(::deleteFixture)
+                ?: error("could not list mirror test fixture")
+        }
+        check(file.delete()) { "could not delete mirror test fixture" }
+    }
+
     private fun release(
         context: Context,
         uri: Uri,
@@ -198,11 +284,22 @@ internal class FolderGrantTestReceiver : BroadcastReceiver() {
             "org.archphene.app.debug.action.REVOKE_FOLDER_GRANT"
         private const val ACTION_CLEAN =
             "org.archphene.app.debug.action.CLEAN_FOLDER_GRANT"
+        private const val ACTION_PREPARE_MIRROR =
+            "org.archphene.app.debug.action.PREPARE_FOLDER_MIRROR"
+        private const val ACTION_VERIFY_MIRROR =
+            "org.archphene.app.debug.action.VERIFY_FOLDER_MIRROR"
+        private const val ACTION_CLEAN_MIRROR =
+            "org.archphene.app.debug.action.CLEAN_FOLDER_MIRROR"
         private const val EXTRA_TOKEN = "token"
         private const val STORAGE_PREFERENCES = "storage"
         private const val FOLDER_URI = "folder_tree_uri"
         private const val FOLDER_LABEL = "folder_label"
         private const val FOLDER_STATE = "folder_state"
+        private const val FOLDER_MIRROR_URI = "folder_mirror_uri"
+        private const val FOLDER_MIRROR_NAME = "folder_mirror_name"
+        private const val STAGING_NAME = ".archphene-mirror-pending"
         private val TOKEN = Regex("[a-f0-9]{8}")
+
+        private fun mirrorName(token: String): String = "Archphene-Mirror-$token"
     }
 }

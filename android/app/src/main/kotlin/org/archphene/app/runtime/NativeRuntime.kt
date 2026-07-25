@@ -77,6 +77,31 @@ internal object NativeRuntime {
         sourceDescriptor: Int,
         outputBuffer: ByteBuffer,
     ): Int
+    external fun nativeBeginProjectMirror(
+        handle: Long,
+        requestBuffer: ByteBuffer,
+        requestLength: Int,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeAddProjectMirrorDirectory(
+        handle: Long,
+        requestBuffer: ByteBuffer,
+        requestLength: Int,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeAddProjectMirrorFile(
+        handle: Long,
+        requestBuffer: ByteBuffer,
+        requestLength: Int,
+        sourceDescriptor: Int,
+        expectedBytes: Long,
+        outputBuffer: ByteBuffer,
+    ): Long
+    external fun nativeFinishProjectMirror(
+        handle: Long,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeAbortProjectMirror(handle: Long): Boolean
     external fun nativeCreate(): Long
     external fun nativeDestroy(handle: Long): Boolean
     external fun nativeTransition(handle: Long, lifecycle: Int): Int

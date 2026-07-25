@@ -1,6 +1,6 @@
 # Archphene TODO
 
-Updated: 2026-07-24
+Updated: 2026-07-25
 
 This file is the remaining prioritized work, not a history of completed tests. Validated behavior belongs in `docs/project-status.md`, `docs/compatibility-matrix.md`, and `research/experiments/`.
 
@@ -141,7 +141,8 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
     - [x] Expose visible regular files/directories from shared `/home/archphene` through a scoped Android `DocumentsProvider`; reject dotfiles, symlinks, traversal, spoofing controls, replacement rename, and root mutation through a Rust directory-descriptor broker.
     - [x] Import one Android document from the system picker, Open With, or Share directly into `~/Downloads` through a bounded Rust descriptor transaction; fsync before non-replacing publication, recover interrupted staging, number collisions, and retain coarse status across manager restart.
     - [x] Persist exactly one user-selected Android folder capability with explicit Connect/Change/Remove UX, read/write versus read-only status, process-restart validation, safe replacement ordering, and revoked-grant recovery.
-    - [ ] Broker the persisted tree through a conflict-safe synchronized POSIX mirror, then add drag-and-drop, exports, familiar home links, and `/mnt/android` sync/error status.
+    - [x] Materialize one connected Android tree as an initial atomic, non-replacing `~/Projects/<folder>` snapshot. Stream provider descriptors into Rust-owned bounded staging, preserve nested folders and dotfiles, reject unsafe paths/symlinks, recover stale staging, retain the published project after grant removal, and pass exact recursive/restart/full-device gates on both targets.
+    - [ ] Evolve the initial snapshot into a conflict-safe synchronized POSIX mirror, then add drag-and-drop, exports, familiar home links, and `/mnt/android` sync/error status.
   - [ ] Launcher wrapper generation and runtime-service binding
   - [ ] Qt, GTK, native Wayland, SDL, Electron, and XWayland adaptation
   - [ ] Audio, camera, printing, notifications, URLs, secrets, and accessibility
@@ -187,10 +188,10 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   /mnt/android/shared
   ```
 
-  - [ ] Use Android's Storage Access Framework for user-selected folders and persist grants across restarts.
+  - [x] Use Android's Storage Access Framework for user-selected folders and persist grants across restarts.
   - [ ] Add familiar home links such as `~/Downloads` and `~/Documents`.
   - [ ] Clearly show unavailable, revoked, read-only, syncing, conflict, and error states instead of silently failing.
-  - [ ] Decide and document where a synchronized POSIX mirror is required because SAF is not a mountable POSIX filesystem.
+  - [x] Keep working project trees in private `~/Projects` POSIX storage and treat each selected SAF tree as an explicitly synchronized Android endpoint, never as a mount.
   - [ ] Keep package databases, builds, symlinks, executables, sockets, and other POSIX-dependent data in private Arch storage.
 - [ ] Add a first-run storage flow: explain the model, let the user grant a folder, and allow skipping or changing it later.
 - [x] Expose visible files in shared `/home/archphene` through a `DocumentsProvider` so Android Files, pickers, share sheets, browsers, and other apps can open and save them.
