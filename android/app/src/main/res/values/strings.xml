@@ -22,6 +22,13 @@
     <string name="document_import_queued">Waiting for the shared Linux home…</string>
     <string name="document_import_already_queued">One file import is already waiting</string>
     <string name="document_import_content_only">Choose a file supplied by Android Files</string>
+    <string name="folder_grant_disconnected">No Android folder connected</string>
+    <string name="folder_grant_unavailable">Android folder access unavailable</string>
+    <string name="folder_grant_invalid">Choose a folder that allows persistent read access</string>
+    <string name="folder_grant_queued">Waiting to connect the selected Android folder…</string>
+    <string name="folder_grant_already_queued">One Android folder is already waiting</string>
+    <string name="connect_folder">Connect</string>
+    <string name="disconnect_folder">Remove</string>
     <string name="linux_session_display">Linux session display</string>
     <string name="terminal_accessibility_dimensions">Linux terminal, %1$d columns by %2$d rows</string>
     <string name="terminal_text_smaller">Text smaller</string>

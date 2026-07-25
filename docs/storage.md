@@ -83,9 +83,19 @@ destination. Duplicate names receive numbered variants and interrupted
 staging is discarded explicitly on the next attempt. The exact content,
 collision, restart-status, and system-picker gates pass on both targets.
 
-Exports, persisted external trees, conflict-aware synchronization,
-drag-and-drop, progress/cancel, provider timeouts, and `/mnt/android` mirrors
-are still planned.
+The manager can now connect exactly one user-selected Android folder through
+`ACTION_OPEN_DOCUMENT_TREE`. It persists only Android's scoped URI capability,
+shows whether the provider granted read/write or read-only access, keeps the
+old capability until a replacement is durably recorded, and offers explicit
+Change and Remove actions. On process restart it checks Android's actual
+persisted permissions; a removed permission becomes a visible revoked state
+instead of stale success. Connect, replacement, restart persistence,
+revocation, reconnect, read-only recovery, removal, and full-device visual
+gates pass on both exact-ABI targets.
+
+This capability is not yet presented to Linux as a directory. Exports,
+conflict-aware synchronization, drag-and-drop, progress/cancel, provider
+timeouts, and `/mnt/android` mirrors are still planned.
 
 ## Virtual Linux Layout
 
@@ -128,8 +138,9 @@ brokered Android content URI.
 
 `~/Documents` and `~/Downloads` are created as conventional private
 directories today. Single-document imports land in `~/Downloads`. They do not
-yet masquerade as live Android shared-storage mounts; later folder grants will
-add explicit mirror/link state instead.
+yet masquerade as live Android shared-storage mounts. The manager-held folder
+capability likewise has no POSIX path until explicit mirror/link state is
+implemented.
 
 ## Permission Table
 
@@ -143,8 +154,8 @@ add explicit mirror/link state instead.
 | Visible `/home/archphene` files in Android | Archphene `DocumentsProvider` | Android URI grant | Android DocumentsUI |
 | `Open File` | content URI from `ACTION_OPEN_DOCUMENT` | prompt per document unless persisted | Android DocumentsUI |
 | `Save As` or export | content URI from `ACTION_CREATE_DOCUMENT` | prompt per target | Android DocumentsUI |
-| Project folder | local mirror plus persisted tree URI from `ACTION_OPEN_DOCUMENT_TREE` | prompt once per folder | Android DocumentsUI and explicit sync |
-| Background project file read/write | `$HOME/Projects/<name>` local mirror | no repeat prompt | Archphene sandbox; bridge sync uses persisted URI permission |
+| Connected Android folder | one persisted tree URI from `ACTION_OPEN_DOCUMENT_TREE`; POSIX mirror pending | prompt once, again after removal/revocation | Android DocumentsUI |
+| Background project file read/write | planned `$HOME/Projects/<name>` local mirror | no repeat prompt after sync setup | Archphene sandbox; bridge sync will use persisted URI permission |
 | Camera, mic, notifications, contacts | Android runtime permissions | prompt through Android permission APIs | Android PermissionController |
 
 ## Home Folder Rule

@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.ServiceInfo
 import android.net.Uri
 import android.os.Build
@@ -14,6 +15,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.ParcelFileDescriptor
+import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import android.util.Log
 import java.io.File
@@ -65,10 +67,25 @@ class ArchpheneRuntimeService : Service() {
             get() = storageStatus
 
         val documentImportAvailable: Boolean
-            get() = readyHandle != 0L && !PROCESS_IMPORT_ACTIVE.get()
+            get() = readyHandle != 0L && !PROCESS_STORAGE_ACTIVE.get()
 
         val documentImportRunning: Boolean
             get() = storageImportActive
+
+        val folderGrantStatus: String
+            get() = folderStatus
+
+        val folderGrantActionLabel: String
+            get() = if (folderConnected) "Change" else "Connect"
+
+        val folderGrantAvailable: Boolean
+            get() = folderStateReady && !PROCESS_STORAGE_ACTIVE.get()
+
+        val folderDisconnectAvailable: Boolean
+            get() = folderStateReady && folderConnected && !PROCESS_STORAGE_ACTIVE.get()
+
+        val folderGrantRunning: Boolean
+            get() = folderOperationActive
 
         val linuxCommandStatus: String
             get() =
@@ -149,6 +166,13 @@ class ArchpheneRuntimeService : Service() {
 
         fun importAndroidDocument(uri: Uri): Boolean = requestDocumentImport(uri)
 
+        fun connectAndroidFolder(
+            uri: Uri,
+            flags: Int,
+        ): Boolean = requestFolderGrant(uri, flags)
+
+        fun disconnectAndroidFolder(): Boolean = requestFolderDisconnect()
+
         fun submitLinuxInput(commandLine: String): Boolean =
             if (shellActive) {
                 requestShellInput(commandLine)
@@ -212,6 +236,10 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var commandActive = false
     @Volatile private var storageImportActive = false
     @Volatile private var storageStatus = "Import an Android file into ~/Downloads"
+    @Volatile private var folderOperationActive = false
+    @Volatile private var folderStateReady = false
+    @Volatile private var folderConnected = false
+    @Volatile private var folderStatus = "Loading Android folder access…"
     @Volatile private var shellActive = false
     @Volatile private var shellWasStarted = false
     @Volatile private var shellStopRequested = false
@@ -440,7 +468,7 @@ class ArchpheneRuntimeService : Service() {
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        if (!shellActive && !storageImportActive) {
+        if (!shellActive && !storageImportActive && !folderOperationActive) {
             stopSelf()
         }
         super.onTaskRemoved(rootIntent)
@@ -503,11 +531,18 @@ class ArchpheneRuntimeService : Service() {
         private const val STORAGE_RUNNING = "running"
         private const val STORAGE_COMPLETE = "complete"
         private const val STORAGE_FAILED = "failed"
+        private const val FOLDER_URI = "folder_tree_uri"
+        private const val FOLDER_LABEL = "folder_label"
+        private const val FOLDER_STATE = "folder_state"
+        private const val FOLDER_DISCONNECTED = "disconnected"
+        private const val FOLDER_CONNECTED = "connected"
+        private const val FOLDER_REVOKED = "revoked"
         private const val MAX_STORAGE_URI_BYTES = 4 * 1024
         private const val MAX_STORAGE_REQUEST_BYTES = 4 * 1024
         private const val MAX_STORAGE_NAME_BYTES = 255
+        private const val MAX_FOLDER_LABEL_BYTES = 128
         private const val MAX_STORAGE_IMPORT_BYTES = 16L * 1024 * 1024 * 1024
-        private val PROCESS_IMPORT_ACTIVE = AtomicBoolean()
+        private val PROCESS_STORAGE_ACTIVE = AtomicBoolean()
     }
 
     private fun restoreStorageStatus() {
@@ -528,6 +563,15 @@ class ArchpheneRuntimeService : Service() {
         } else {
             storageStatus = message
         }
+        try {
+            restoreFolderGrant(preferences)
+        } catch (error: Exception) {
+            folderConnected = false
+            folderStatus = "Could not validate Android folder access. Connect it again."
+            Log.e(TAG, "Could not restore Android folder state", error)
+        } finally {
+            folderStateReady = true
+        }
     }
 
     private fun persistStorageStatus(
@@ -541,6 +585,302 @@ class ArchpheneRuntimeService : Service() {
             .putString(STORAGE_MESSAGE, message)
             .commit()
     }
+
+    private fun restoreFolderGrant(preferences: SharedPreferences) {
+        val savedLabel =
+            preferences.getString(FOLDER_LABEL, null)
+                ?.takeIf(::safeFolderLabel)
+                ?: "selected folder"
+        val savedUri = preferences.getString(FOLDER_URI, null)
+        val state = preferences.getString(FOLDER_STATE, FOLDER_DISCONNECTED)
+        if (savedUri == null) {
+            folderConnected = false
+            folderStatus =
+                if (state == FOLDER_REVOKED) {
+                    "Access to $savedLabel was revoked. Connect it again."
+                } else {
+                    "No Android folder connected"
+                }
+            return
+        }
+        val uri = runCatching { Uri.parse(savedUri) }.getOrNull()
+        val permission =
+            uri
+                ?.takeIf(::safeTreeUri)
+                ?.let(::persistedFolderPermission)
+        if (permission?.first == true) {
+            folderConnected = true
+            folderStatus = connectedFolderStatus(savedLabel, permission.second)
+            return
+        }
+        folderConnected = false
+        folderStatus = "Access to $savedLabel was revoked. Connect it again."
+        if (
+            !preferences
+                .edit()
+                .remove(FOLDER_URI)
+                .putString(FOLDER_LABEL, savedLabel)
+                .putString(FOLDER_STATE, FOLDER_REVOKED)
+                .commit()
+        ) {
+            Log.e(TAG, "Could not persist revoked Android folder state")
+        }
+    }
+
+    @Synchronized
+    private fun requestFolderGrant(
+        uri: Uri,
+        resultFlags: Int,
+    ): Boolean {
+        val persistable =
+            resultFlags and Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION != 0
+        val requestedFlags =
+            resultFlags and
+                (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        if (
+            !safeTreeUri(uri) ||
+            !persistable ||
+            requestedFlags and Intent.FLAG_GRANT_READ_URI_PERMISSION == 0
+        ) {
+            folderStatus = "Choose an Android folder that allows persistent read access"
+            return false
+        }
+        if (!PROCESS_STORAGE_ACTIVE.compareAndSet(false, true)) {
+            return false
+        }
+        folderOperationActive = true
+        folderStatus = "Connecting the selected Android folder…"
+        val worker =
+            Thread(
+                {
+                    try {
+                        connectFolderGrant(uri, requestedFlags)
+                    } catch (error: Exception) {
+                        folderStatus =
+                            "Folder connection failed: " +
+                                (error.message ?: error.javaClass.simpleName)
+                        Log.e(TAG, "Android folder connection failed", error)
+                    } finally {
+                        finishFolderOperation()
+                    }
+                },
+                "ArchpheneFolderGrant",
+            )
+        storageThread = worker
+        return try {
+            worker.start()
+            true
+        } catch (error: Exception) {
+            storageThread = null
+            folderOperationActive = false
+            PROCESS_STORAGE_ACTIVE.set(false)
+            folderStatus =
+                "Folder connection failed: ${error.message ?: error.javaClass.simpleName}"
+            Log.e(TAG, "Could not start Android folder connection", error)
+            false
+        }
+    }
+
+    private fun connectFolderGrant(
+        uri: Uri,
+        requestedFlags: Int,
+    ) {
+        val preferences = getSharedPreferences(STORAGE_PREFERENCES, MODE_PRIVATE)
+        val previousUri =
+            preferences
+                .getString(FOLDER_URI, null)
+                ?.let { encoded -> runCatching { Uri.parse(encoded) }.getOrNull() }
+                ?.takeIf(::safeTreeUri)
+        var acquired = false
+        try {
+            contentResolver.takePersistableUriPermission(uri, requestedFlags)
+            acquired = true
+            val permission =
+                persistedFolderPermission(uri)
+                    ?.takeIf { it.first }
+                    ?: throw SecurityException("Android did not persist read access")
+            val label = queryFolderLabel(uri)
+            if (
+                !preferences
+                    .edit()
+                    .putString(FOLDER_URI, uri.toString())
+                    .putString(FOLDER_LABEL, label)
+                    .putString(FOLDER_STATE, FOLDER_CONNECTED)
+                    .commit()
+            ) {
+                throw IllegalStateException("Could not save the Android folder grant")
+            }
+            if (previousUri != null && previousUri != uri) {
+                runCatching { releaseFolderPermission(previousUri) }
+                    .onFailure { error ->
+                        Log.w(TAG, "Could not release replaced Android folder grant", error)
+                    }
+            }
+            folderConnected = true
+            folderStatus = connectedFolderStatus(label, permission.second)
+            Log.i(
+                TAG,
+                "Android folder connected label=$label writable=${permission.second}",
+            )
+        } catch (error: Exception) {
+            if (acquired && previousUri != uri) {
+                runCatching { releaseFolderPermission(uri) }
+                    .onFailure { cleanupError ->
+                        Log.e(TAG, "Could not release failed Android folder grant", cleanupError)
+                    }
+            }
+            throw error
+        }
+    }
+
+    @Synchronized
+    private fun requestFolderDisconnect(): Boolean {
+        if (!folderConnected || !PROCESS_STORAGE_ACTIVE.compareAndSet(false, true)) {
+            return false
+        }
+        folderOperationActive = true
+        folderStatus = "Disconnecting the Android folder…"
+        val worker =
+            Thread(
+                {
+                    try {
+                        val preferences = getSharedPreferences(STORAGE_PREFERENCES, MODE_PRIVATE)
+                        val uri =
+                            preferences
+                                .getString(FOLDER_URI, null)
+                                ?.let { encoded -> runCatching { Uri.parse(encoded) }.getOrNull() }
+                                ?.takeIf(::safeTreeUri)
+                                ?: throw IllegalStateException("Saved folder grant is invalid")
+                        releaseFolderPermission(uri)
+                        if (
+                            !preferences
+                                .edit()
+                                .remove(FOLDER_URI)
+                                .remove(FOLDER_LABEL)
+                                .putString(FOLDER_STATE, FOLDER_DISCONNECTED)
+                                .commit()
+                        ) {
+                            throw IllegalStateException("Could not save the disconnected state")
+                        }
+                        folderConnected = false
+                        folderStatus = "No Android folder connected"
+                        Log.i(TAG, "Android folder disconnected")
+                    } catch (error: Exception) {
+                        val permission =
+                            getSharedPreferences(STORAGE_PREFERENCES, MODE_PRIVATE)
+                                .getString(FOLDER_URI, null)
+                                ?.let { encoded -> runCatching { Uri.parse(encoded) }.getOrNull() }
+                                ?.let(::persistedFolderPermission)
+                        folderConnected = permission?.first == true
+                        folderStatus =
+                            "Folder disconnect failed: " +
+                                (error.message ?: error.javaClass.simpleName)
+                        Log.e(TAG, "Android folder disconnect failed", error)
+                    } finally {
+                        finishFolderOperation()
+                    }
+                },
+                "ArchpheneFolderDisconnect",
+            )
+        storageThread = worker
+        return try {
+            worker.start()
+            true
+        } catch (error: Exception) {
+            storageThread = null
+            folderOperationActive = false
+            PROCESS_STORAGE_ACTIVE.set(false)
+            folderStatus =
+                "Folder disconnect failed: ${error.message ?: error.javaClass.simpleName}"
+            Log.e(TAG, "Could not start Android folder disconnect", error)
+            false
+        }
+    }
+
+    private fun finishFolderOperation() {
+        folderOperationActive = false
+        PROCESS_STORAGE_ACTIVE.set(false)
+        storageThread = null
+        mainHandler.post {
+            if (!shellActive && boundClients == 0) {
+                stopSelf()
+            }
+        }
+    }
+
+    private fun safeTreeUri(uri: Uri): Boolean {
+        val encoded = uri.toString().toByteArray(StandardCharsets.UTF_8)
+        return uri.scheme == "content" &&
+            encoded.isNotEmpty() &&
+            encoded.size <= MAX_STORAGE_URI_BYTES &&
+            DocumentsContract.isTreeUri(uri)
+    }
+
+    private fun persistedFolderPermission(uri: Uri): Pair<Boolean, Boolean>? =
+        contentResolver.persistedUriPermissions
+            .firstOrNull { permission -> permission.uri == uri }
+            ?.let { permission ->
+                Pair(permission.isReadPermission, permission.isWritePermission)
+            }
+
+    private fun releaseFolderPermission(uri: Uri) {
+        val permission = persistedFolderPermission(uri) ?: return
+        var flags = 0
+        if (permission.first) {
+            flags = flags or Intent.FLAG_GRANT_READ_URI_PERMISSION
+        }
+        if (permission.second) {
+            flags = flags or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+        }
+        if (flags != 0) {
+            contentResolver.releasePersistableUriPermission(uri, flags)
+        }
+    }
+
+    private fun queryFolderLabel(uri: Uri): String {
+        val queried =
+            runCatching {
+                contentResolver
+                    .query(
+                        uri,
+                        arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME),
+                        null,
+                        null,
+                        null,
+                    )?.use { cursor ->
+                        if (cursor.moveToFirst() && !cursor.isNull(0)) {
+                            cursor.getString(0)
+                        } else {
+                            null
+                        }
+                    }
+            }.getOrNull()
+        if (queried?.let(::safeFolderLabel) == true) {
+            return queried
+        }
+        val documentLabel =
+            runCatching {
+                DocumentsContract
+                    .getTreeDocumentId(uri)
+                    .substringAfterLast('/')
+                    .substringAfterLast(':')
+            }.getOrNull()
+        return documentLabel?.takeIf(::safeFolderLabel) ?: "Selected Android folder"
+    }
+
+    private fun safeFolderLabel(label: String): Boolean =
+        label.toByteArray(StandardCharsets.UTF_8).size <= MAX_FOLDER_LABEL_BYTES &&
+            safeVisibleName(label)
+
+    private fun connectedFolderStatus(
+        label: String,
+        writable: Boolean,
+    ): String =
+        if (writable) {
+            "Android folder: $label · read/write"
+        } else {
+            "Android folder: $label · read-only"
+        }
 
     @Synchronized
     private fun requestDocumentImport(uri: Uri): Boolean {
@@ -557,7 +897,7 @@ class ArchpheneRuntimeService : Service() {
             }
             return false
         }
-        if (!PROCESS_IMPORT_ACTIVE.compareAndSet(false, true)) {
+        if (!PROCESS_STORAGE_ACTIVE.compareAndSet(false, true)) {
             return false
         }
         storageImportActive = true
@@ -634,7 +974,7 @@ class ArchpheneRuntimeService : Service() {
                         Log.e(TAG, "Android document import failed", error)
                     } finally {
                         storageImportActive = false
-                        PROCESS_IMPORT_ACTIVE.set(false)
+                        PROCESS_STORAGE_ACTIVE.set(false)
                         storageThread = null
                         mainHandler.post {
                             if (!shellActive && boundClients == 0) {
@@ -652,7 +992,7 @@ class ArchpheneRuntimeService : Service() {
         } catch (error: Exception) {
             storageThread = null
             storageImportActive = false
-            PROCESS_IMPORT_ACTIVE.set(false)
+            PROCESS_STORAGE_ACTIVE.set(false)
             storageStatus = "Import failed: ${error.message ?: error.javaClass.simpleName}"
             Log.e(TAG, "Could not start Android document import", error)
             false

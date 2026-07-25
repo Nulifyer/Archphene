@@ -41,9 +41,18 @@ AArch64 Samsung. Each exercises framework create, exact read/write, child
 relationships, rename collision preservation, delete and cleanup; directly
 attacks dotfiles, `..`, and a live symlink; then browses the retained visible
 fixture through Android DocumentsUI and captures a full-device screenshot.
-Persisted external folder grants, `/mnt/android` mirrors, Android-to-Linux
-folder synchronization, Linux-to-Android export/share, revocation/conflict
-handling, and first-run storage UX remain open.
+
+The manager now owns exactly one persisted Android tree capability selected
+through DocumentsUI. Its Service validates the real persisted read/write flags
+off the main thread after restart, reports read-only and revoked states,
+records a replacement before releasing the old grant, and exposes explicit
+Connect, Change, and Remove actions. Exact-ABI emulator and Samsung gates prove
+connect, replacement, process-restart persistence, external revocation,
+reconnect, read-only recovery, removal, scoped logs, cleanup, and visually
+inspected full-device screenshots. The grant remains Android-owned capability
+state; `/mnt/android` mirrors, Android-to-Linux synchronization,
+Linux-to-Android export/share, conflict handling, and guided first-run storage
+setup remain open.
 
 Single Android documents can now enter the shared environment from the system
 picker, Open With, or Share. Android passes one read-only content descriptor;

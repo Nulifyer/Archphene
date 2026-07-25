@@ -140,7 +140,8 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [ ] Android file integration and `/mnt/android`
     - [x] Expose visible regular files/directories from shared `/home/archphene` through a scoped Android `DocumentsProvider`; reject dotfiles, symlinks, traversal, spoofing controls, replacement rename, and root mutation through a Rust directory-descriptor broker.
     - [x] Import one Android document from the system picker, Open With, or Share directly into `~/Downloads` through a bounded Rust descriptor transaction; fsync before non-replacing publication, recover interrupted staging, number collisions, and retain coarse status across manager restart.
-    - [ ] Add Android folder grants, synchronized POSIX mirrors, drag-and-drop, exports, familiar home links, and `/mnt/android` status.
+    - [x] Persist exactly one user-selected Android folder capability with explicit Connect/Change/Remove UX, read/write versus read-only status, process-restart validation, safe replacement ordering, and revoked-grant recovery.
+    - [ ] Broker the persisted tree through a conflict-safe synchronized POSIX mirror, then add drag-and-drop, exports, familiar home links, and `/mnt/android` sync/error status.
   - [ ] Launcher wrapper generation and runtime-service binding
   - [ ] Qt, GTK, native Wayland, SDL, Electron, and XWayland adaptation
   - [ ] Audio, camera, printing, notifications, URLs, secrets, and accessibility

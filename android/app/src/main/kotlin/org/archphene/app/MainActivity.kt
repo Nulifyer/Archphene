@@ -12,6 +12,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import android.provider.DocumentsContract
 import android.text.TextUtils
 import android.util.Log
 import android.view.Choreographer
@@ -41,6 +42,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private lateinit var jobStatusView: TextView
     private lateinit var commandStatusView: TextView
     private lateinit var storageStatusView: TextView
+    private lateinit var folderStatusView: TextView
     private lateinit var runtimeSurface: RuntimeSurfaceView
     private lateinit var managerPanel: LinearLayout
     private lateinit var runtimePanel: FrameLayout
@@ -50,6 +52,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private lateinit var commandButton: Button
     private lateinit var ptyButton: Button
     private lateinit var importButton: Button
+    private lateinit var folderButton: Button
+    private lateinit var folderDisconnectButton: Button
     private lateinit var shellSpinner: Spinner
     private lateinit var shellAdapter: ArrayAdapter<String>
     private val snapshot = RuntimeSnapshot()
@@ -61,6 +65,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private var keepServiceAfterFinish = false
     private var shellCatalogRevision = Int.MIN_VALUE
     private var pendingImportUri: Uri? = null
+    private var pendingFolderUri: Uri? = null
+    private var pendingFolderFlags = 0
 
     private val serviceConnection =
         object : ServiceConnection {
@@ -71,6 +77,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 }
                 runtimeSurface.synchronizeTerminalSize(runtimeBinder)
                 dispatchPendingImport()
+                dispatchPendingFolderGrant()
                 updateStatus()
             }
 
@@ -82,12 +89,15 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 jobStatusView.setText(R.string.package_job_unavailable)
                 commandStatusView.setText(R.string.linux_command_unavailable)
                 storageStatusView.setText(R.string.document_import_unavailable)
+                folderStatusView.setText(R.string.folder_grant_unavailable)
                 installButton.isEnabled = false
                 removeButton.isEnabled = false
                 cancelButton.isEnabled = false
                 commandButton.isEnabled = false
                 ptyButton.isEnabled = false
                 importButton.isEnabled = false
+                folderButton.isEnabled = false
+                folderDisconnectButton.isEnabled = false
                 shellSpinner.isEnabled = false
                 updateShellPresentation(false)
             }
@@ -340,6 +350,68 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     ),
                 )
             }
+        folderStatusView =
+            TextView(this).apply {
+                setTextColor(Color.WHITE)
+                textSize = 14f
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(16), dp(4), dp(8), dp(4))
+                setText(R.string.folder_grant_disconnected)
+                setBackgroundColor(Color.rgb(31, 35, 38))
+                maxLines = 2
+                ellipsize = TextUtils.TruncateAt.END
+            }
+        folderButton =
+            Button(this).apply {
+                setText(R.string.connect_folder)
+                setOnClickListener { openAndroidFolder() }
+            }
+        folderDisconnectButton =
+            Button(this).apply {
+                setText(R.string.disconnect_folder)
+                isEnabled = false
+                setOnClickListener {
+                    isEnabled = false
+                    runtimeBinder?.disconnectAndroidFolder()
+                }
+            }
+        val folderRow =
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setBackgroundColor(Color.rgb(31, 35, 38))
+                addView(
+                    folderStatusView,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        0,
+                        1f,
+                    ),
+                )
+                addView(
+                    LinearLayout(this@MainActivity).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.END
+                        addView(
+                            folderButton,
+                            LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.WRAP_CONTENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                            ),
+                        )
+                        addView(
+                            folderDisconnectButton,
+                            LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.WRAP_CONTENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                            ),
+                        )
+                    },
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        dp(48),
+                    ),
+                )
+            }
         shellAdapter =
             ArrayAdapter<String>(this, R.layout.shell_spinner_item).apply {
                 setDropDownViewResource(R.layout.shell_spinner_dropdown_item)
@@ -517,6 +589,13 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                         dp(64),
                     ),
                 )
+                addView(
+                    folderRow,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        dp(104),
+                    ),
+                )
             }
         val layout =
             LinearLayout(this).apply {
@@ -578,6 +657,16 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         } else {
             queueIncomingImport(intent)
         }
+        val restoredFolder =
+            savedInstanceState
+                ?.getString(PENDING_FOLDER_URI_STATE)
+                ?.let(Uri::parse)
+        if (restoredFolder != null) {
+            queueFolderGrant(
+                restoredFolder,
+                savedInstanceState.getInt(PENDING_FOLDER_FLAGS_STATE),
+            )
+        }
     }
 
     override fun onStart() {
@@ -607,7 +696,9 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     override fun onStop() {
         keepServiceAfterFinish =
             runtimeBinder?.let { binder ->
-                binder.sharedShellRunning || binder.documentImportRunning
+                binder.sharedShellRunning ||
+                    binder.documentImportRunning ||
+                    binder.folderGrantRunning
             } == true
         if (serviceBound) {
             unbindService(serviceConnection)
@@ -634,6 +725,10 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         pendingImportUri?.let { uri ->
             outState.putString(PENDING_IMPORT_URI_STATE, uri.toString())
         }
+        pendingFolderUri?.let { uri ->
+            outState.putString(PENDING_FOLDER_URI_STATE, uri.toString())
+            outState.putInt(PENDING_FOLDER_FLAGS_STATE, pendingFolderFlags)
+        }
         super.onSaveInstanceState(outState)
     }
 
@@ -644,8 +739,15 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         data: Intent?,
     ) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == IMPORT_DOCUMENT_REQUEST && resultCode == RESULT_OK) {
-            data?.data?.let(::queueDocumentImport)
+        if (resultCode != RESULT_OK) {
+            return
+        }
+        when (requestCode) {
+            IMPORT_DOCUMENT_REQUEST -> data?.data?.let(::queueDocumentImport)
+            FOLDER_GRANT_REQUEST -> {
+                val uri = data?.data ?: return
+                queueFolderGrant(uri, data.flags)
+            }
         }
     }
 
@@ -667,6 +769,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
 
     private fun updateStatus() {
         dispatchPendingImport()
+        dispatchPendingFolderGrant()
         val handle = runtimeBinder?.runtimeHandle ?: 0L
         if (!snapshot.read(handle)) {
             setTextIfChanged(statusView, getString(R.string.runtime_starting))
@@ -690,6 +793,12 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 storageStatusView,
                 runtimeBinder?.documentImportStatus ?: getString(
                     R.string.document_import_unavailable,
+                ),
+            )
+            setTextIfChanged(
+                folderStatusView,
+                runtimeBinder?.folderGrantStatus ?: getString(
+                    R.string.folder_grant_unavailable,
                 ),
             )
             updatePackageActions()
@@ -747,6 +856,12 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 R.string.document_import_unavailable,
             ),
         )
+        setTextIfChanged(
+            folderStatusView,
+            runtimeBinder?.folderGrantStatus ?: getString(
+                R.string.folder_grant_unavailable,
+            ),
+        )
         updatePackageActions()
     }
 
@@ -759,6 +874,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             commandButton.isEnabled = false
             ptyButton.isEnabled = false
             importButton.isEnabled = false
+            folderButton.isEnabled = false
+            folderDisconnectButton.isEnabled = false
             shellSpinner.isEnabled = false
             updateShellPresentation(false)
             return
@@ -774,6 +891,9 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         setTextIfChanged(ptyButton, binder.sharedShellActionLabel)
         ptyButton.isEnabled = binder.sharedShellActionAvailable
         importButton.isEnabled = binder.documentImportAvailable && pendingImportUri == null
+        setTextIfChanged(folderButton, binder.folderGrantActionLabel)
+        folderButton.isEnabled = binder.folderGrantAvailable && pendingFolderUri == null
+        folderDisconnectButton.isEnabled = binder.folderDisconnectAvailable
     }
 
     private fun updateShellSelector(binder: ArchpheneRuntimeService.LocalBinder) {
@@ -829,6 +949,67 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             }
         @Suppress("DEPRECATION")
         startActivityForResult(picker, IMPORT_DOCUMENT_REQUEST)
+    }
+
+    private fun openAndroidFolder() {
+        val picker =
+            Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+                addFlags(
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                        Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or
+                        Intent.FLAG_GRANT_PREFIX_URI_PERMISSION,
+                )
+            }
+        @Suppress("DEPRECATION")
+        startActivityForResult(picker, FOLDER_GRANT_REQUEST)
+    }
+
+    private fun queueFolderGrant(
+        uri: Uri,
+        resultFlags: Int,
+    ) {
+        val encodedBytes = uri.toString().toByteArray(Charsets.UTF_8).size
+        val grantedFlags =
+            resultFlags and
+                (
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                        Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+                )
+        if (
+            uri.scheme != "content" ||
+            encodedBytes !in 1..MAX_FOLDER_URI_BYTES ||
+            !DocumentsContract.isTreeUri(uri) ||
+            grantedFlags and Intent.FLAG_GRANT_READ_URI_PERMISSION == 0 ||
+            grantedFlags and Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION == 0
+        ) {
+            setTextIfChanged(
+                folderStatusView,
+                getString(R.string.folder_grant_invalid),
+            )
+            return
+        }
+        if (pendingFolderUri != null) {
+            setTextIfChanged(
+                folderStatusView,
+                getString(R.string.folder_grant_already_queued),
+            )
+            return
+        }
+        pendingFolderUri = uri
+        pendingFolderFlags = grantedFlags
+        setTextIfChanged(folderStatusView, getString(R.string.folder_grant_queued))
+        dispatchPendingFolderGrant()
+    }
+
+    private fun dispatchPendingFolderGrant() {
+        val uri = pendingFolderUri ?: return
+        val binder = runtimeBinder ?: return
+        if (binder.connectAndroidFolder(uri, pendingFolderFlags)) {
+            pendingFolderUri = null
+            pendingFolderFlags = 0
+        }
     }
 
     private fun queueIncomingImport(source: Intent) {
@@ -932,7 +1113,11 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         private const val STATUS_FRAME_INTERVAL = 30
         private const val SESSION_NOTIFICATION_PERMISSION_REQUEST = 0x4152
         private const val IMPORT_DOCUMENT_REQUEST = 0x4153
+        private const val FOLDER_GRANT_REQUEST = 0x4154
         private const val PENDING_IMPORT_URI_STATE = "pending_import_uri"
+        private const val PENDING_FOLDER_URI_STATE = "pending_folder_uri"
+        private const val PENDING_FOLDER_FLAGS_STATE = "pending_folder_flags"
+        private const val MAX_FOLDER_URI_BYTES = 4 * 1024
         private var activityGeneration = 0
     }
 }
