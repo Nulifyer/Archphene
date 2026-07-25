@@ -278,6 +278,11 @@ class ArchpheneRuntimeService : Service() {
 
         fun clearPackageCache(): Boolean = requestPackageCacheCleanup()
 
+        fun startDebugPackagePhaseFixture(
+            packageName: String,
+            holdMillis: Long,
+        ): Boolean = requestDebugPackagePhaseFixture(packageName, holdMillis)
+
         fun releaseWhenIdle() {
             stopWhenUnobservedRequested = true
         }
@@ -731,6 +736,7 @@ class ArchpheneRuntimeService : Service() {
         private const val PACKAGE_JOB_TEST_CACHE_HOLD_MILLIS = "cache_hold_ms"
         private const val PACKAGE_JOB_TEST_WORKER_HOLD_MILLIS = "worker_hold_ms"
         private const val MAX_PACKAGE_JOB_TEST_HOLD_MILLIS = 5_000L
+        private const val MIN_PACKAGE_PHASE_TEST_HOLD_MILLIS = 750L
         private const val SESSION_NOTIFICATION_ID = 0x4152
         private const val SESSION_NOTIFICATION_CHANNEL = "archphene_linux_sessions"
         private const val ACTION_STOP_SHELL = "org.archphene.app.action.STOP_SHARED_SHELL"
@@ -3340,6 +3346,161 @@ class ArchpheneRuntimeService : Service() {
     }
 
     @Synchronized
+    private fun requestDebugPackagePhaseFixture(
+        packageName: String,
+        holdMillis: Long,
+    ): Boolean {
+        val normalized = packageName.trim()
+        val activeHandle = readyHandle
+        if (
+            applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0 ||
+            normalized.isEmpty() ||
+            normalized.length > 96 ||
+            !normalized.all { character ->
+                character.isLowerCase() ||
+                    character.isDigit() ||
+                    character in "@._+-"
+            } ||
+            holdMillis !in
+                MIN_PACKAGE_PHASE_TEST_HOLD_MILLIS..MAX_PACKAGE_JOB_TEST_HOLD_MILLIS ||
+            activeHandle == 0L ||
+            catalogRefreshActive ||
+            searchActive ||
+            packageOperationActive ||
+            commandActive
+        ) {
+            return false
+        }
+        val outputBuffer = ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
+        val requestBytes = "extra\t$normalized".toByteArray(StandardCharsets.UTF_8)
+        val requestBuffer = ByteBuffer.allocateDirect(requestBytes.size).put(requestBytes)
+        val jobId =
+            NativeRuntime.nativeQueuePackageJob(
+                activeHandle,
+                NativeRuntime.JOB_OPERATION_INSTALL,
+                requestBuffer,
+                requestBytes.size,
+                System.currentTimeMillis(),
+                outputBuffer,
+            )
+        if (jobId <= 0L) {
+            return false
+        }
+        jobPersistentId = jobId
+        packageCancellationRequested = false
+        packageOperationCancelable = true
+        packageOperationActive = true
+        publishPackageJob(
+            normalized,
+            NativeRuntime.JOB_OPERATION_INSTALL,
+            NativeRuntime.JOB_QUEUED,
+            0,
+            "Queued",
+        )
+        val worker =
+            Thread(
+                {
+                    val scratch = PackageIoScratch()
+                    var recordedPhase = 0
+                    var recordedProgress = 0
+                    try {
+                        Thread.sleep(holdMillis)
+                        val states =
+                            intArrayOf(
+                                NativeRuntime.JOB_RESOLVING,
+                                NativeRuntime.JOB_DOWNLOADING,
+                                NativeRuntime.JOB_VERIFYING,
+                                NativeRuntime.JOB_BUILDING,
+                                NativeRuntime.JOB_PUBLISHING,
+                                NativeRuntime.JOB_INSTALLING,
+                                NativeRuntime.JOB_AWAITING_CONFIRMATION,
+                                NativeRuntime.JOB_COMPLETE,
+                            )
+                        val progress = intArrayOf(5, 25, 50, 65, 78, 88, 95, 100)
+                        val messages =
+                            arrayOf(
+                                "Resolving signed dependency closure",
+                                "Downloading verified package archives",
+                                "Verifying package signatures",
+                                "Building Android launcher",
+                                "Publishing verified runtime pack",
+                                "Installing Linux package transaction",
+                                "Awaiting Android installation confirmation",
+                                "Installed $normalized 1.0.0",
+                            )
+                        states.indices.forEach { index ->
+                            throwIfPackageCancelled()
+                            if (states[index] == NativeRuntime.JOB_INSTALLING) {
+                                packageOperationCancelable = false
+                            }
+                            updatePackageJob(
+                                activeHandle,
+                                jobId,
+                                states[index],
+                                index + 1,
+                                progress[index],
+                                messages[index],
+                                normalized,
+                                scratch,
+                            )
+                            recordedPhase = index + 1
+                            recordedProgress = progress[index]
+                            Log.i(TAG, "Debug package phase ${jobStateName(states[index])}")
+                            if (states[index] != NativeRuntime.JOB_COMPLETE) {
+                                Thread.sleep(holdMillis)
+                            }
+                        }
+                    } catch (error: Exception) {
+                        val cancelled =
+                            error is InterruptedException || packageCancellationRequested
+                        if (cancelled) {
+                            try {
+                                updatePackageJob(
+                                    activeHandle,
+                                    jobId,
+                                    NativeRuntime.JOB_CANCELLED,
+                                    recordedPhase,
+                                    recordedProgress,
+                                    "Cancelled before package mutation",
+                                    normalized,
+                                    scratch,
+                                )
+                            } catch (updateError: Exception) {
+                                Log.e(TAG, "Debug package phase cancellation failed", updateError)
+                            }
+                        } else {
+                            try {
+                                updatePackageJob(
+                                    activeHandle,
+                                    jobId,
+                                    NativeRuntime.JOB_FAILED,
+                                    recordedPhase,
+                                    recordedProgress,
+                                    "Phase presentation fixture failed",
+                                    normalized,
+                                    scratch,
+                                )
+                            } catch (updateError: Exception) {
+                                Log.e(TAG, "Debug package phase journal failed", updateError)
+                            }
+                            Log.e(TAG, "Debug package phase fixture failed", error)
+                        }
+                    } finally {
+                        packageOperationCancelable = false
+                        packageCancellationRequested = false
+                        packageOperationActive = false
+                        packageThread = null
+                        stopWhenUnobservedAndIdle()
+                    }
+                },
+                "ArchphenePackagePhases",
+            )
+        schedulePackageWorker(worker, activeHandle)
+        promoteWorkToForeground()
+        return true
+    }
+
+    @Synchronized
     private fun requestPackageCancellation(): Boolean {
         if (!packageOperationActive || !packageOperationCancelable) {
             return false
@@ -3472,7 +3633,10 @@ class ArchpheneRuntimeService : Service() {
             NativeRuntime.JOB_RESOLVING -> "Resolving"
             NativeRuntime.JOB_DOWNLOADING -> "Downloading"
             NativeRuntime.JOB_VERIFYING -> "Verifying"
+            NativeRuntime.JOB_PUBLISHING -> "Publishing"
+            NativeRuntime.JOB_BUILDING -> "Building"
             NativeRuntime.JOB_INSTALLING -> "Installing"
+            NativeRuntime.JOB_AWAITING_CONFIRMATION -> "Awaiting Android confirmation"
             NativeRuntime.JOB_COMPLETE -> "Complete"
             NativeRuntime.JOB_FAILED -> "Failed"
             NativeRuntime.JOB_CANCELLED -> "Cancelled"

@@ -36,6 +36,9 @@ internal object NativeRuntime {
     const val JOB_COMPLETE = 6
     const val JOB_FAILED = 7
     const val JOB_CANCELLED = 8
+    const val JOB_PUBLISHING = 9
+    const val JOB_BUILDING = 10
+    const val JOB_AWAITING_CONFIRMATION = 11
     const val PTY_EVENT_READABLE = 1
     const val PTY_EVENT_WRITABLE = 1 shl 1
     const val PTY_EVENT_HANGUP = 1 shl 2

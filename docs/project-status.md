@@ -97,8 +97,23 @@ cache/network/mutation, cold-restored Cancelled/Review, scoped fatal logs, and
 visually inspected full-device screenshots. Release builds cannot arm the
 gate. Returning to a broad search query also disables Install/Remove
 immediately; those actions no longer remain misleadingly enabled for a
-previously resolved exact package. Full populated details and every live phase
-still require their own deterministic gates.
+previously resolved exact package. Full populated package details still require
+their own focused deterministic gate.
+
+The durable journal now also represents the future launcher pipeline's
+Building, Publishing, and Awaiting Android confirmation states without
+renumbering any existing v1 value. Rust treats them as active, enforces a
+forward transition graph, recovers them after interruption, and retains the
+warmed zero-allocation update path. A debug-only Service-bound presentation
+fixture advances one real native journal job through Queued, Resolving,
+Downloading, Verifying, Building, Publishing, Installing, Awaiting Android
+confirmation, and Complete. Both exact ABIs render every exact percentage and
+message, expose Cancel only before the mutation boundary, retain Complete
+after a cold restart, leave the cache and pacman database untouched, emit no
+fatal logs, and pass visually inspected full-device screenshots. Existing
+device gates separately cover durable Failed and Cancelled. This validates the
+manager state model and presentation, not the still-pending real launcher
+builder and PackageInstaller handoff.
 
 The recent-activity action is now terminal-state aware. Complete has no dead
 disabled Cancel button; active pre-commit work exposes Cancel; and durable

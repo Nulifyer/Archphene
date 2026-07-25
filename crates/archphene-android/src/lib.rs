@@ -272,6 +272,9 @@ mod android {
             6 => Some(JobState::Complete),
             7 => Some(JobState::Failed),
             8 => Some(JobState::Cancelled),
+            9 => Some(JobState::Publishing),
+            10 => Some(JobState::Building),
+            11 => Some(JobState::AwaitingConfirmation),
             _ => None,
         }
     }

@@ -51,6 +51,9 @@ pub enum JobState {
     Complete = 6,
     Failed = 7,
     Cancelled = 8,
+    Publishing = 9,
+    Building = 10,
+    AwaitingConfirmation = 11,
 }
 
 impl JobState {
@@ -64,6 +67,9 @@ impl JobState {
             6 => Some(Self::Complete),
             7 => Some(Self::Failed),
             8 => Some(Self::Cancelled),
+            9 => Some(Self::Publishing),
+            10 => Some(Self::Building),
+            11 => Some(Self::AwaitingConfirmation),
             _ => None,
         }
     }
@@ -71,7 +77,14 @@ impl JobState {
     pub fn is_active(self) -> bool {
         matches!(
             self,
-            Self::Queued | Self::Resolving | Self::Downloading | Self::Verifying | Self::Installing
+            Self::Queued
+                | Self::Resolving
+                | Self::Downloading
+                | Self::Verifying
+                | Self::Publishing
+                | Self::Building
+                | Self::Installing
+                | Self::AwaitingConfirmation
         )
     }
 
@@ -89,9 +102,36 @@ impl JobState {
                 matches!(next, Self::Verifying | Self::Cancelled | Self::Failed)
             }
             Self::Verifying => {
-                matches!(next, Self::Installing | Self::Cancelled | Self::Failed)
+                matches!(
+                    next,
+                    Self::Publishing
+                        | Self::Building
+                        | Self::Installing
+                        | Self::Cancelled
+                        | Self::Failed
+                )
             }
-            Self::Installing => matches!(next, Self::Complete | Self::Failed),
+            Self::Publishing => matches!(
+                next,
+                Self::Installing | Self::AwaitingConfirmation | Self::Cancelled | Self::Failed
+            ),
+            Self::Building => matches!(
+                next,
+                Self::Publishing
+                    | Self::Installing
+                    | Self::AwaitingConfirmation
+                    | Self::Cancelled
+                    | Self::Failed
+            ),
+            Self::Installing => {
+                matches!(
+                    next,
+                    Self::AwaitingConfirmation | Self::Complete | Self::Failed
+                )
+            }
+            Self::AwaitingConfirmation => {
+                matches!(next, Self::Complete | Self::Cancelled | Self::Failed)
+            }
             Self::Complete | Self::Failed | Self::Cancelled => false,
         }
     }
@@ -732,6 +772,38 @@ mod tests {
             jobs.update(job.id, JobState::Complete, 0, 100, "Done", 3),
             Err(JobError::InvalidTransition)
         ));
+    }
+
+    #[test]
+    fn launcher_phases_are_active_and_follow_a_durable_forward_path() {
+        let mut jobs = PackageJobs::new();
+        let job = jobs
+            .begin(JobOperation::Install, "extra", "kate", 1)
+            .expect("queue launcher job");
+        let phases = [
+            (JobState::Resolving, "Resolving"),
+            (JobState::Downloading, "Downloading"),
+            (JobState::Verifying, "Verifying"),
+            (JobState::Building, "Building"),
+            (JobState::Publishing, "Publishing"),
+            (JobState::Installing, "Installing"),
+            (JobState::AwaitingConfirmation, "Awaiting confirmation"),
+        ];
+        for (index, (state, message)) in phases.into_iter().enumerate() {
+            assert!(state.is_active());
+            jobs.update(
+                job.id,
+                state,
+                u8::try_from(index + 1).expect("phase"),
+                u8::try_from((index + 1) * 10).expect("progress"),
+                message,
+                u64::try_from(index + 2).expect("time"),
+            )
+            .expect("forward launcher phase");
+        }
+        jobs.update(job.id, JobState::Complete, 8, 100, "Complete", 10)
+            .expect("complete launcher job");
+        assert!(!jobs.latest().expect("latest job").state.is_active());
     }
 
     #[test]

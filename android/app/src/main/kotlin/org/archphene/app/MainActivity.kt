@@ -1881,8 +1881,18 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         private fun appendActiveJob(): Boolean =
             jobPackage.isNotEmpty() &&
                 jobPackageIndex < 0 &&
-                jobState in NativeRuntime.JOB_QUEUED..NativeRuntime.JOB_INSTALLING
+                isActivePackageJobState(jobState)
     }
+
+    private fun isActivePackageJobState(state: Int): Boolean =
+        state == NativeRuntime.JOB_QUEUED ||
+            state == NativeRuntime.JOB_RESOLVING ||
+            state == NativeRuntime.JOB_DOWNLOADING ||
+            state == NativeRuntime.JOB_VERIFYING ||
+            state == NativeRuntime.JOB_PUBLISHING ||
+            state == NativeRuntime.JOB_BUILDING ||
+            state == NativeRuntime.JOB_INSTALLING ||
+            state == NativeRuntime.JOB_AWAITING_CONFIRMATION
 
     private inner class InstalledPackageAdapter : BaseAdapter() {
         private var packages: InstalledPackageSnapshot? = null
