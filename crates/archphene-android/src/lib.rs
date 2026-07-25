@@ -113,6 +113,7 @@ mod android {
     const ERROR_PACKAGE_RUNTIME: jint = -7;
     const ERROR_PROCESS: jint = -8;
     const ERROR_STORAGE: jint = -9;
+    const ERROR_LAUNCHER: jint = -10;
     const MAX_STORAGE_REQUEST_BYTES: usize = 4 * 1024;
     const PTY_EVENT_READABLE: jint = 1;
     const PTY_EVENT_WRITABLE: jint = 1 << 1;
@@ -1246,6 +1247,248 @@ mod android {
         let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
         destination[..encoded.len()].copy_from_slice(encoded.as_bytes());
         i32::try_from(encoded.len()).unwrap_or(i32::MAX)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeLauncherRegistryPage(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        offset: jint,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let (Ok(handle), Ok(offset)) = (u64::try_from(handle), usize::try_from(offset)) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(output_capacity) = environment.get_direct_buffer_capacity(&output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if output_capacity < 1024 {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let Ok(output_address) = environment.get_direct_buffer_address(&output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if output_address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let encoded = {
+            let Ok(mut registry) = registry().lock() else {
+                return ERROR_INTERNAL;
+            };
+            let Some(runtime) = registry.runtime_mut(handle) else {
+                return ERROR_INVALID_HANDLE;
+            };
+            let Some(launchers) = runtime.launcher_registry() else {
+                return ERROR_INVALID_STATE;
+            };
+            if offset > launchers.descriptors().len() {
+                return ERROR_INVALID_ARGUMENT;
+            }
+            let end = offset.saturating_add(8).min(launchers.descriptors().len());
+            let mut encoded = format!("P1\t{}\t{}\n", end, launchers.descriptors().len());
+            for descriptor in &launchers.descriptors()[offset..end] {
+                let descriptor_id = descriptor.descriptor_id_hex();
+                let descriptor_id =
+                    str::from_utf8(&descriptor_id).expect("hex launcher descriptor");
+                encoded.push_str(&format!(
+                    "{}\t{}\t{}\t{}\t{}\t{}\n",
+                    descriptor.android_package,
+                    descriptor_id,
+                    descriptor.desired_generation,
+                    descriptor.published_generation,
+                    descriptor.pending_generation,
+                    descriptor.status as u8,
+                ));
+            }
+            encoded
+        };
+        if encoded.len() > output_capacity {
+            return ERROR_INTERNAL;
+        }
+        let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
+        destination[..encoded.len()].copy_from_slice(encoded.as_bytes());
+        i32::try_from(encoded.len()).unwrap_or(i32::MAX)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeClaimLauncherPublish(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let Ok(handle) = u64::try_from(handle) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(output_capacity) = environment.get_direct_buffer_capacity(&output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if output_capacity < 1024 {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let Ok(output_address) = environment.get_direct_buffer_address(&output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if output_address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let work = {
+            let Ok(mut registry) = registry().lock() else {
+                return ERROR_INTERNAL;
+            };
+            let Some(runtime) = registry.runtime_mut(handle) else {
+                return ERROR_INVALID_HANDLE;
+            };
+            match runtime.claim_launcher_publish() {
+                Ok(work) => work,
+                Err(_) => return ERROR_LAUNCHER,
+            }
+        };
+        let Some(work) = work else {
+            return 0;
+        };
+        let descriptor_id = str::from_utf8(&work.descriptor_id_hex).expect("hex descriptor");
+        let encoded = format!(
+            "W1\t{}\t{}\t{}\t{}\n",
+            work.android_package, descriptor_id, work.generation, work.label,
+        );
+        if encoded.len() > output_capacity {
+            return ERROR_INTERNAL;
+        }
+        let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
+        destination[..encoded.len()].copy_from_slice(encoded.as_bytes());
+        i32::try_from(encoded.len()).unwrap_or(i32::MAX)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeClaimLauncherRemoval(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let Ok(handle) = u64::try_from(handle) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(output_capacity) = environment.get_direct_buffer_capacity(&output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if output_capacity < 128 {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let Ok(output_address) = environment.get_direct_buffer_address(&output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if output_address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let work = {
+            let Ok(mut registry) = registry().lock() else {
+                return ERROR_INTERNAL;
+            };
+            let Some(runtime) = registry.runtime_mut(handle) else {
+                return ERROR_INVALID_HANDLE;
+            };
+            match runtime.claim_launcher_removal() {
+                Ok(work) => work,
+                Err(_) => return ERROR_LAUNCHER,
+            }
+        };
+        let Some(work) = work else {
+            return 0;
+        };
+        let encoded = format!("R1\t{}\t{}\n", work.android_package, work.generation);
+        if encoded.len() > output_capacity {
+            return ERROR_INTERNAL;
+        }
+        let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
+        destination[..encoded.len()].copy_from_slice(encoded.as_bytes());
+        i32::try_from(encoded.len()).unwrap_or(i32::MAX)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeLauncherTransition(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        request_buffer: JByteBuffer,
+        request_length: jint,
+    ) -> jint {
+        let (Ok(handle), Ok(request_length)) =
+            (u64::try_from(handle), usize::try_from(request_length))
+        else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(request_capacity) = environment.get_direct_buffer_capacity(&request_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if request_length == 0 || request_length > request_capacity || request_length > 160 {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let Ok(request_address) = environment.get_direct_buffer_address(&request_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if request_address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let request =
+            unsafe { slice::from_raw_parts(request_address.cast_const(), request_length) };
+        let Ok(request) = str::from_utf8(request) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Some(request) = request.strip_suffix('\n') else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let mut fields = request.split('\t');
+        if fields.next() != Some("T1") {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let (Some(action), Some(android_package), Some(generation), None) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if android_package.len() != 53
+            || !android_package.starts_with("org.archphene.linux.p")
+            || !android_package
+                .bytes()
+                .skip(21)
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let Ok(generation) = generation.parse::<u64>() else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let result = {
+            let Ok(mut registry) = registry().lock() else {
+                return ERROR_INTERNAL;
+            };
+            let Some(runtime) = registry.runtime_mut(handle) else {
+                return ERROR_INVALID_HANDLE;
+            };
+            match action {
+                "awaiting-install" => {
+                    runtime.launcher_awaiting_install(android_package, generation)
+                }
+                "installed" => runtime.launcher_confirm_installed(android_package, generation),
+                "failed" => runtime.launcher_publish_failed(android_package, generation),
+                "removed" => runtime.launcher_confirm_removed(android_package),
+                "quarantined" if generation == 0 => runtime.launcher_quarantine(android_package),
+                "absent" if generation == 0 => {
+                    runtime.reconcile_android_launcher(android_package, None)
+                }
+                "present" if generation != 0 => {
+                    runtime.reconcile_android_launcher(android_package, Some(generation))
+                }
+                _ => return ERROR_INVALID_ARGUMENT,
+            }
+        };
+        match result {
+            Ok(()) => 0,
+            Err(_) => ERROR_LAUNCHER,
+        }
     }
 
     #[unsafe(no_mangle)]

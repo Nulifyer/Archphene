@@ -19,6 +19,9 @@
             android:name=".DesktopEntriesTestReceiver"
             android:exported="true" />
         <receiver
+            android:name=".LauncherApkTestReceiver"
+            android:exported="true" />
+        <receiver
             android:name=".PackageSearchTestReceiver"
             android:exported="true" />
         <receiver

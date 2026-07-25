@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="launcher_opening">Opening %1$s…</string>
+    <string name="launcher_connected">Starting %1$s…</string>
+    <string name="launcher_disconnected">Archphene stopped the Linux session.</string>
+    <string name="launcher_invalid">This launcher has invalid Archphene metadata.</string>
+    <string name="launcher_unavailable">Open Archphene, then try this Linux app again.</string>
+</resources>

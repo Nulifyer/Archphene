@@ -1,7 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
+    <!-- Dynamic launcher package names cannot be enumerated through <queries>.
+         Archphene is the package manager that creates and reconciles them. -->
+    <uses-permission
+        android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -45,6 +54,18 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Keeps user-started Linux package, command, file, and interactive session work running while the Archphene UI is not visible" />
         </service>
+
+        <service
+            android:name=".launcher.LauncherSessionService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="org.archphene.action.BIND_LAUNCHER" />
+            </intent-filter>
+        </service>
+
+        <receiver
+            android:name=".launcher.LauncherInstallResultReceiver"
+            android:exported="false" />
 
         <provider
             android:name=".storage.ArchpheneDocumentsProvider"

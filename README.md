@@ -39,10 +39,13 @@ physical Samsung coverage for:
   manager navigation, and every planned package/launcher state;
 - bounded shared-root desktop discovery and an atomic manager-owned launcher
   registry with package ownership, stable Android identities, and durable
-  publication/removal generations.
+  publication/removal generations;
+- deterministic thin launcher APK assembly, Android Keystore signing,
+  PackageInstaller confirmation, cold-start reconciliation, and
+  launcher-only removal.
 
-Icon/capability derivation, wrapper generation/signing, Android installer
-reconciliation, and the cross-process launcher Surface protocol remain open.
+Icon/capability derivation and the authenticated cross-process launcher
+Surface/session protocol remain open.
 
 ## Historical bridge evidence
 

@@ -69,6 +69,18 @@ pub struct LauncherDescriptor {
     content_digest: [u8; 32],
 }
 
+impl LauncherDescriptor {
+    pub fn descriptor_id_hex(&self) -> [u8; 64] {
+        let mut output = [0_u8; 64];
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        for (index, byte) in self.descriptor_id.iter().copied().enumerate() {
+            output[index * 2] = HEX[usize::from(byte >> 4)];
+            output[index * 2 + 1] = HEX[usize::from(byte & 0x0f)];
+        }
+        output
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LauncherRegistry {
     generation: u64,
@@ -538,6 +550,30 @@ impl LauncherRegistry {
         } else {
             self.advance_and_store(arch_root)
         }
+    }
+
+    /// Stops automatic publication for a deterministic package identity when
+    /// Android reports an installed package whose signer or Archphene metadata
+    /// cannot be trusted. The package is deliberately not adopted or removed.
+    pub fn quarantine_android_package(
+        &mut self,
+        arch_root: &Path,
+        android_package: &str,
+    ) -> Result<(), LauncherRegistryError> {
+        let descriptor = self
+            .descriptors
+            .iter_mut()
+            .find(|descriptor| descriptor.android_package == android_package)
+            .ok_or(LauncherRegistryError::InvalidTransition)?;
+        if !descriptor.desired_present && descriptor.published_generation == 0 {
+            return Err(LauncherRegistryError::InvalidTransition);
+        }
+        if descriptor.status == WrapperStatus::Failed && descriptor.pending_generation == 0 {
+            return Ok(());
+        }
+        descriptor.pending_generation = 0;
+        descriptor.status = WrapperStatus::Failed;
+        self.advance_and_store(arch_root)
     }
 
     fn transition(
@@ -1418,6 +1454,12 @@ mod tests {
         assert_eq!(descriptor.published_generation, 0);
         assert!(descriptor.android_package.starts_with(PACKAGE_PREFIX));
         assert_eq!(descriptor.android_package.len(), PACKAGE_PREFIX.len() + 32);
+        let descriptor_hex = descriptor.descriptor_id_hex();
+        assert!(descriptor_hex.iter().all(u8::is_ascii_hexdigit));
+        assert_eq!(
+            &descriptor.android_package.as_bytes()[PACKAGE_PREFIX.len()..],
+            &descriptor_hex[..32],
+        );
         assert_eq!(
             fs::metadata(root.path.join(REGISTRY_DIRECTORY).join(REGISTRY_FILE))
                 .expect("registry metadata")
@@ -1650,6 +1692,27 @@ mod tests {
             .retry_failed(&root.path, &package)
             .expect("retry removal");
         assert_eq!(registry.descriptors[0].status, WrapperStatus::NeedsRemoval);
+    }
+
+    #[test]
+    fn untrusted_android_package_is_quarantined_without_being_adopted() {
+        let root = TestRoot::new();
+        let source = catalog(vec![entry("org.kde.kate.desktop", "Kate")]);
+        let (mut registry, _) =
+            LauncherRegistry::reconcile(&root.path, &source).expect("initial reconcile");
+        let package = registry.descriptors[0].android_package.clone();
+        registry
+            .quarantine_android_package(&root.path, &package)
+            .expect("quarantine");
+        assert_eq!(registry.descriptors[0].status, WrapperStatus::Failed);
+        assert_eq!(registry.descriptors[0].published_generation, 0);
+        assert_eq!(registry.descriptors[0].pending_generation, 0);
+        assert!(
+            registry
+                .reconcile_android_package(&root.path, &package, Some(1))
+                .is_ok()
+        );
+        assert_eq!(registry.descriptors[0].status, WrapperStatus::Current);
     }
 
     #[test]

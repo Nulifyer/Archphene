@@ -36,3 +36,10 @@ tasks.register<Exec>("stageArchphenePackageRuntime") {
     )
     outputs.dir("android/app/build/generated/packageRuntime")
 }
+
+tasks.register<Sync>("stageArchpheneLauncherTemplate") {
+    dependsOn(":android:launcher-template:assembleRelease")
+    from("android/launcher-template/build/outputs/apk/release/launcher-template-release-unsigned.apk")
+    into("android/app/build/generated/launcherTemplate/assets/launcher")
+    rename { "launcher-template.apk" }
+}

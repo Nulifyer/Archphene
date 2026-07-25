@@ -73,6 +73,22 @@ them with one persistent non-exportable Android Keystore identity, verifies the
 generated APK, and hands it to PackageInstaller. Android confirmation remains
 mandatory. Updates retain package name and signer; a desktop-entry identity
 change is explicit rather than silently retargeting an installed launcher.
+The current implementation uses a minimized release template and patches only
+bounded binary-manifest placeholders. It strips template signatures, preserves
+the reviewed entry set and content digests, signs with one RSA-3072 APK v3
+identity, and verifies the signer, package, version, label, manager,
+descriptor, generation, and archive contents. PackageInstaller receives the
+APK only while its streamed SHA-256 still matches the verified output.
+
+Because generated package names are dynamic, they cannot be declared through a
+finite Android `<queries>` list. The manager therefore declares
+`QUERY_ALL_PACKAGES` for its app-store role and uses the visibility only to
+reconcile its registry identities. It asks the user to allow launcher
+installation before claiming publication work, then retains Android's
+per-launcher install and uninstall confirmations. Interrupted installer
+sessions are abandoned and requeued on manager restart; installed packages are
+adopted only after signer and embedded metadata verification. A conflicting or
+untrusted package is quarantined rather than replaced or silently removed.
 
 The wrapper signing certificate is intentionally different from the manager's
 release certificate. The exported launcher Service therefore cannot rely on a

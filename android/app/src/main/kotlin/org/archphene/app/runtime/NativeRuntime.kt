@@ -175,6 +175,24 @@ internal object NativeRuntime {
         handle: Long,
         outputBuffer: ByteBuffer,
     ): Int
+    external fun nativeLauncherRegistryPage(
+        handle: Long,
+        offset: Int,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeClaimLauncherPublish(
+        handle: Long,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeClaimLauncherRemoval(
+        handle: Long,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeLauncherTransition(
+        handle: Long,
+        requestBuffer: ByteBuffer,
+        requestLength: Int,
+    ): Int
     external fun nativeRunCommand(
         handle: Long,
         requestBuffer: ByteBuffer,

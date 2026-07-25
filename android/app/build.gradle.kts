@@ -7,6 +7,13 @@ require(archpheneAbi == null || archpheneAbi in setOf("x86_64", "arm64-v8a")) {
     "archpheneAbi must be x86_64 or arm64-v8a"
 }
 
+dependencies {
+    // AGP already resolves this checksum-pinned artifact for its own signing
+    // work. Use the valid library jar rather than Build Tools 36's malformed
+    // command-line apksigner bundle, whose manifest CRC breaks R8 transforms.
+    implementation("com.android.tools.build:apksig:9.3.0")
+}
+
 android {
     namespace = "org.archphene.app"
     compileSdk = 36
@@ -36,6 +43,7 @@ android {
             jniLibs.directories.add("build/generated/jniLibs")
             jniLibs.directories.add("build/generated/packageRuntime/jniLibs")
             assets.directories.add("build/generated/packageRuntime/assets")
+            assets.directories.add("build/generated/launcherTemplate/assets")
         }
     }
 
@@ -68,4 +76,5 @@ android {
 tasks.named("preBuild").configure {
     dependsOn(rootProject.tasks.named("buildArchpheneRust"))
     dependsOn(rootProject.tasks.named("stageArchphenePackageRuntime"))
+    dependsOn(rootProject.tasks.named("stageArchpheneLauncherTemplate"))
 }

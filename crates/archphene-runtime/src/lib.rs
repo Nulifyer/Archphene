@@ -60,6 +60,20 @@ pub struct LauncherRegistrySummary {
     pub failed: u16,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LauncherPublishWork {
+    pub android_package: String,
+    pub descriptor_id_hex: [u8; 64],
+    pub generation: u64,
+    pub label: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LauncherRemovalWork {
+    pub android_package: String,
+    pub generation: u64,
+}
+
 #[derive(Debug)]
 pub enum RuntimeBootstrapError {
     Root(RootError),
@@ -428,6 +442,148 @@ impl RuntimeHost {
             }
         }
         Some(summary)
+    }
+
+    pub fn claim_launcher_publish(
+        &mut self,
+    ) -> Result<Option<LauncherPublishWork>, LauncherRegistryError> {
+        let registry = self
+            .launcher_registry
+            .as_mut()
+            .ok_or(LauncherRegistryError::InvalidTransition)?;
+        let Some(descriptor) = registry
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.status == WrapperStatus::NeedsPublish)
+        else {
+            return Ok(None);
+        };
+        let work = LauncherPublishWork {
+            android_package: descriptor.android_package.clone(),
+            descriptor_id_hex: descriptor.descriptor_id_hex(),
+            generation: descriptor.desired_generation,
+            label: descriptor.name.clone(),
+        };
+        let arch_root = self
+            .arch_root
+            .as_ref()
+            .ok_or(LauncherRegistryError::InvalidRoot)?;
+        registry.mark_building(arch_root.path(), &work.android_package, work.generation)?;
+        Ok(Some(work))
+    }
+
+    pub fn claim_launcher_removal(
+        &mut self,
+    ) -> Result<Option<LauncherRemovalWork>, LauncherRegistryError> {
+        let registry = self
+            .launcher_registry
+            .as_mut()
+            .ok_or(LauncherRegistryError::InvalidTransition)?;
+        let Some(descriptor) = registry
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.status == WrapperStatus::NeedsRemoval)
+        else {
+            return Ok(None);
+        };
+        let work = LauncherRemovalWork {
+            android_package: descriptor.android_package.clone(),
+            generation: descriptor.desired_generation,
+        };
+        let arch_root = self
+            .arch_root
+            .as_ref()
+            .ok_or(LauncherRegistryError::InvalidRoot)?;
+        registry.mark_awaiting_removal(arch_root.path(), &work.android_package)?;
+        Ok(Some(work))
+    }
+
+    pub fn launcher_awaiting_install(
+        &mut self,
+        android_package: &str,
+        generation: u64,
+    ) -> Result<(), LauncherRegistryError> {
+        let arch_root = self
+            .arch_root
+            .as_ref()
+            .ok_or(LauncherRegistryError::InvalidRoot)?;
+        self.launcher_registry
+            .as_mut()
+            .ok_or(LauncherRegistryError::InvalidTransition)?
+            .mark_awaiting_install(arch_root.path(), android_package, generation)
+    }
+
+    pub fn launcher_confirm_installed(
+        &mut self,
+        android_package: &str,
+        generation: u64,
+    ) -> Result<(), LauncherRegistryError> {
+        let arch_root = self
+            .arch_root
+            .as_ref()
+            .ok_or(LauncherRegistryError::InvalidRoot)?;
+        self.launcher_registry
+            .as_mut()
+            .ok_or(LauncherRegistryError::InvalidTransition)?
+            .confirm_installed(arch_root.path(), android_package, generation)
+    }
+
+    pub fn launcher_publish_failed(
+        &mut self,
+        android_package: &str,
+        generation: u64,
+    ) -> Result<(), LauncherRegistryError> {
+        let arch_root = self
+            .arch_root
+            .as_ref()
+            .ok_or(LauncherRegistryError::InvalidRoot)?;
+        self.launcher_registry
+            .as_mut()
+            .ok_or(LauncherRegistryError::InvalidTransition)?
+            .mark_failed(arch_root.path(), android_package, generation)
+    }
+
+    pub fn launcher_confirm_removed(
+        &mut self,
+        android_package: &str,
+    ) -> Result<(), LauncherRegistryError> {
+        let arch_root = self
+            .arch_root
+            .as_ref()
+            .ok_or(LauncherRegistryError::InvalidRoot)?;
+        self.launcher_registry
+            .as_mut()
+            .ok_or(LauncherRegistryError::InvalidTransition)?
+            .confirm_removed(arch_root.path(), android_package)
+    }
+
+    pub fn launcher_quarantine(
+        &mut self,
+        android_package: &str,
+    ) -> Result<(), LauncherRegistryError> {
+        let arch_root = self
+            .arch_root
+            .as_ref()
+            .ok_or(LauncherRegistryError::InvalidRoot)?;
+        self.launcher_registry
+            .as_mut()
+            .ok_or(LauncherRegistryError::InvalidTransition)?
+            .quarantine_android_package(arch_root.path(), android_package)
+    }
+
+    pub fn reconcile_android_launcher(
+        &mut self,
+        android_package: &str,
+        installed_generation: Option<u64>,
+    ) -> Result<(), LauncherRegistryError> {
+        let arch_root = self
+            .arch_root
+            .as_ref()
+            .ok_or(LauncherRegistryError::InvalidRoot)?;
+        self.launcher_registry
+            .as_mut()
+            .ok_or(LauncherRegistryError::InvalidTransition)?
+            .reconcile_android_package(arch_root.path(), android_package, installed_generation)
     }
 
     pub fn begin_package_job(

@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="false"
+        android:icon="@drawable/ic_linux_app"
+        android:label="Archphene Linux App"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.ArchpheneLauncher">
+        <meta-data
+            android:name="org.archphene.launcher.DESCRIPTOR_ID"
+            android:value="d:0000000000000000000000000000000000000000000000000000000000000000" />
+        <meta-data
+            android:name="org.archphene.launcher.GENERATION"
+            android:value="g:00000000000000000001" />
+        <meta-data
+            android:name="org.archphene.launcher.MANAGER_PACKAGE"
+            android:value="org.archphene.app.template" />
+
+        <activity
+            android:name="org.archphene.launcher.LauncherActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:resizeableActivity="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

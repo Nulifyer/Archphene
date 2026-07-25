@@ -52,6 +52,10 @@
     <string name="storage_onboarding_message">Archphene keeps Linux packages, projects, and tools in private app storage so they have normal Linux filesystem behavior. You can optionally choose an Android folder and copy it into ~/Projects. This is an initial snapshot, not live synchronization yet, and does not require broad access to all files. You can connect or change the folder later.</string>
     <string name="storage_onboarding_choose">Choose folder</string>
     <string name="storage_onboarding_skip">Not now</string>
+    <string name="launcher_permission_title">Allow Linux app launchers?</string>
+    <string name="launcher_permission_message">Android requires one approval before Archphene can add Linux apps to your app drawer. Archphene will still show each Android install confirmation.</string>
+    <string name="launcher_permission_settings">Open settings</string>
+    <string name="launcher_permission_later">Not now</string>
     <string name="linux_session_display">Linux session display</string>
     <string name="terminal_accessibility_dimensions">Linux terminal, %1$d columns by %2$d rows</string>
     <string name="terminal_text_smaller">Text smaller</string>

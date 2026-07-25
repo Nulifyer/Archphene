@@ -150,7 +150,8 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
     - [x] Discover launchable shared-root desktop entries through a bounded Rust parser: accept safe structured `Exec` arguments without a shell, validate executable containment and modes, isolate malformed/symlink entries, cap files/bytes/results, page one immutable snapshot through coarse JNI, and surface scan status in the manager. Exact-ABI cold/restart and light/dark full-device gates pass on the emulator and Samsung.
     - [x] Reconcile complete discovery snapshots into a checksum-protected atomic manager-owned registry. Derive bounded pacman ownership, stable collision-checked Android identities, full launch/icon inputs, desired/published/pending generations, retryable build/install/removal states, and safe process-death/external-package reconciliation. Refuse incomplete catalogs and unsafe/corrupt paths. Host lifecycle tests plus exact-ABI cold-restart, cleanup, logs, and full-device gates pass on the emulator and Samsung.
     - [ ] Resolve and normalize package-owned icons, derive reviewed Android capability declarations from the verified package closure, and expose actionable per-launcher compatibility failures.
-    - [ ] Generate and sign thin launcher APKs, hand them to `PackageInstaller`, retain Android confirmation state, and update/remove wrappers without touching shared Linux package or user data.
+    - [x] Generate deterministic minimized thin launcher APKs, patch bounded binary-manifest identities, sign with one non-exportable RSA-3072 Android Keystore key using APK v3, and reverify signer/package/version/metadata plus the complete entry set and content digests before handoff.
+    - [x] Stream only the verified APK digest into normal `PackageInstaller` sessions, preflight Android's unknown-source approval without stranding work, retain per-launcher install/uninstall confirmation, reconcile verified packages after process death, abandon and requeue interrupted sessions, quarantine identity conflicts, and remove wrappers without touching shared Linux package or user data. Exact fresh-install, denied-permission recovery, cold-restart, launch, and removal gates pass on the Android 16 x86_64 emulator and Android 15 AArch64 Samsung using full-device captures.
     - [ ] Authenticate wrapper Binder callers and run manager-owned Surface/input/lifecycle sessions against registry descriptors.
   - [ ] Qt, GTK, native Wayland, SDL, Electron, and XWayland adaptation
   - [ ] Audio, camera, printing, notifications, URLs, secrets, and accessibility
@@ -227,7 +228,7 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [ ] Show source, PKGBUILD, maintainer, signatures/checksums, build steps, permissions, and disk impact before installation.
   - [ ] Run builds as an unprivileged Linux user and clearly communicate that installed Arch/AUR packages share one trust domain.
 - [ ] Make installed commands, libraries, desktop files, MIME handlers, fonts, themes, and services immediately discoverable across all Linux apps.
-- [ ] Generate, update, and remove Android launcher wrappers from desktop entries without deleting shared package or user state incorrectly.
+- [x] Generate, update, reconcile, and remove Android launcher wrappers from desktop entries without deleting shared package or user state incorrectly.
 - [ ] Define ownership when several packages provide desktop entries or depend on the same files.
 - [ ] Handle package upgrades, downgrades, replacements, hooks, interrupted transactions, rollback, orphan cleanup, and low-storage failures.
 - [ ] Decide the bounded policy for publishing dependency commands to app processes; do not add package-specific exceptions.

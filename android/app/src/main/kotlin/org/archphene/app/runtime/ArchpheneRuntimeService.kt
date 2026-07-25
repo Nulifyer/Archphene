@@ -8,6 +8,7 @@ import android.app.Service
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.net.Uri
 import android.os.Build
@@ -26,11 +27,16 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.charset.StandardCharsets
 import java.net.URL
+import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.net.ssl.HttpsURLConnection
 import org.archphene.app.MainActivity
 import org.archphene.app.R
+import org.archphene.app.launcher.LauncherApkAssembler
+import org.archphene.app.launcher.LauncherApkRequest
+import org.archphene.app.launcher.LauncherApkSigner
+import org.archphene.app.launcher.LauncherPackageInstaller
 
 internal class InstalledPackageSnapshot(
     val names: Array<String>,
@@ -58,6 +64,13 @@ internal class AvailablePackageSnapshot(
     val descriptions: Array<String>,
     val status: String,
     val revision: Int,
+)
+
+private data class LauncherRegistryRow(
+    val androidPackage: String,
+    val descriptorIdHex: String,
+    val desiredGeneration: Long,
+    val status: Int,
 )
 
 class ArchpheneRuntimeService : Service() {
@@ -111,6 +124,22 @@ class ArchpheneRuntimeService : Service() {
 
         val serviceRetentionRequired: Boolean
             get() = hasActiveRuntimeWork()
+
+        val launcherInstallPermissionRequired: Boolean
+            get() = launcherPermissionRequired
+
+        fun resumeLauncherPublisher(): Boolean {
+            val activeHandle = readyHandle
+            if (activeHandle == 0L) {
+                return false
+            }
+            if (!packageManager.canRequestPackageInstalls()) {
+                return false
+            }
+            launcherPermissionRequired = false
+            startLauncherPublisher(activeHandle)
+            return true
+        }
 
         val packagePrimaryActionLabel: String
             get() = primaryActionLabel
@@ -370,6 +399,11 @@ class ArchpheneRuntimeService : Service() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var handle = 0L
     @Volatile private var readyHandle = 0L
+    private val launcherPublisherActive = AtomicBoolean(false)
+    @Volatile private var launcherPermissionRequired = false
+    @Volatile private var pendingLauncherResultPackage = ""
+    @Volatile private var pendingLauncherResultGeneration = 0L
+    @Volatile private var pendingLauncherResultAction = ""
     private var bootstrapThread: Thread? = null
     @Volatile private var bootstrapActive = false
     private var catalogThread: Thread? = null
@@ -683,6 +717,24 @@ class ArchpheneRuntimeService : Service() {
     ): Int {
         if (intent?.action == ACTION_STOP_SHELL) {
             stopSharedShell(waitForWorker = false)
+        } else if (
+            intent?.action == ACTION_LAUNCHER_INSTALLED ||
+            intent?.action == ACTION_LAUNCHER_REMOVED ||
+            intent?.action == ACTION_LAUNCHER_FAILED
+        ) {
+            val androidPackage = intent.getStringExtra(EXTRA_LAUNCHER_PACKAGE).orEmpty()
+            val generation = intent.getLongExtra(EXTRA_LAUNCHER_GENERATION, 0)
+            if (
+                LAUNCHER_PACKAGE.matches(androidPackage) &&
+                generation in 1..Int.MAX_VALUE.toLong()
+            ) {
+                pendingLauncherResultPackage = androidPackage
+                pendingLauncherResultGeneration = generation
+                pendingLauncherResultAction = intent.action.orEmpty()
+                processPendingLauncherResult()
+            } else {
+                Log.e(TAG, "Rejected invalid launcher result")
+            }
         }
         return START_NOT_STICKY
     }
@@ -720,6 +772,7 @@ class ArchpheneRuntimeService : Service() {
         bootstrapThread?.interrupt()
         bootstrapThread = null
         bootstrapActive = false
+        launcherPublisherActive.set(false)
         catalogThread?.interrupt()
         catalogThread = null
         packageCancellationRequested = true
@@ -778,6 +831,18 @@ class ArchpheneRuntimeService : Service() {
         private const val SESSION_NOTIFICATION_ID = 0x4152
         private const val SESSION_NOTIFICATION_CHANNEL = "archphene_linux_sessions"
         private const val ACTION_STOP_SHELL = "org.archphene.app.action.STOP_SHARED_SHELL"
+        const val ACTION_LAUNCHER_INSTALLED =
+            "org.archphene.app.action.LAUNCHER_INSTALLED"
+        const val ACTION_LAUNCHER_REMOVED =
+            "org.archphene.app.action.LAUNCHER_REMOVED"
+        const val ACTION_LAUNCHER_FAILED =
+            "org.archphene.app.action.LAUNCHER_FAILED"
+        const val EXTRA_LAUNCHER_PACKAGE = "launcherPackage"
+        const val EXTRA_LAUNCHER_GENERATION = "launcherGeneration"
+        private val LAUNCHER_PACKAGE =
+            Regex("org\\.archphene\\.linux\\.p[0-9a-f]{32}")
+        private val LAUNCHER_DESCRIPTOR = Regex("[0-9a-f]{64}")
+        private const val LAUNCHER_STATUS_AWAITING_INSTALL = 3
         private const val STORAGE_PREFERENCES = "storage"
         private const val STORAGE_STATE = "import_state"
         private const val STORAGE_MESSAGE = "import_message"
@@ -1913,6 +1978,8 @@ class ArchpheneRuntimeService : Service() {
                         }
                         val packageVersion = preparePackageRuntime(activeHandle)
                         refreshPackageInventory(activeHandle)
+                        reconcileInstalledLaunchers(activeHandle)
+                        refreshDesktopEntries(activeHandle)
                         refreshShellChoices(activeHandle)
                         jobStatus = readLatestPackageJob(activeHandle)
                         restorePackageCacheRecovery()
@@ -1931,6 +1998,8 @@ class ArchpheneRuntimeService : Service() {
                                 return@post
                             }
                             readyHandle = activeHandle
+                            processPendingLauncherResult()
+                            startLauncherPublisher(activeHandle)
                             Log.i(TAG, "Package runtime ready: $packageVersion")
                             Log.i(
                                 TAG,
@@ -2422,6 +2491,399 @@ class ArchpheneRuntimeService : Service() {
         val installedPackagesReady = refreshInstalledPackages(activeHandle)
         refreshDesktopEntries(activeHandle)
         return installedPackagesReady
+    }
+
+    private fun startLauncherPublisher(activeHandle: Long) {
+        if (
+            readyHandle != activeHandle ||
+            !launcherPublisherActive.compareAndSet(false, true)
+        ) {
+            return
+        }
+        Thread(
+            {
+                var claimedPackage = ""
+                var claimedGeneration = 0L
+                try {
+                    val output = ByteBuffer.allocateDirect(1024)
+                    val bytes = ByteArray(1024)
+                    val removalLength =
+                        NativeRuntime.nativeClaimLauncherRemoval(
+                            activeHandle,
+                            output,
+                        )
+                    if (removalLength != 0) {
+                        check(removalLength in 1..bytes.size) {
+                            "Could not claim launcher removal: $removalLength"
+                        }
+                        output.position(0)
+                        output.get(bytes, 0, removalLength)
+                        val removal =
+                            String(bytes, 0, removalLength, StandardCharsets.US_ASCII)
+                                .trimEnd('\n')
+                                .split('\t')
+                        check(
+                            removal.size == 3 &&
+                                removal[0] == "R1" &&
+                                LAUNCHER_PACKAGE.matches(removal[1]),
+                        ) {
+                            "Invalid native launcher removal"
+                        }
+                        val generation = removal[2].toLongOrNull()
+                        check(generation != null && generation in 1..Int.MAX_VALUE.toLong()) {
+                            "Invalid native launcher removal generation"
+                        }
+                        claimedPackage = removal[1]
+                        claimedGeneration = generation
+                        LauncherPackageInstaller.uninstall(
+                            this,
+                            claimedPackage,
+                            claimedGeneration,
+                        )
+                        Log.i(
+                            TAG,
+                            "Submitted launcher removal package=$claimedPackage " +
+                                "generation=$claimedGeneration",
+                        )
+                        return@Thread
+                    }
+                    val summary = readLauncherSummary(activeHandle)
+                    if (summary == null || summary.needsPublish == 0) {
+                        launcherPublisherActive.set(false)
+                        return@Thread
+                    }
+                    if (!packageManager.canRequestPackageInstalls()) {
+                        launcherPermissionRequired = true
+                        launcherPublisherActive.set(false)
+                        mainHandler.post { stopIfUnobservedAndIdle() }
+                        return@Thread
+                    }
+                    launcherPermissionRequired = false
+                    output.clear()
+                    val length =
+                        NativeRuntime.nativeClaimLauncherPublish(
+                            activeHandle,
+                            output,
+                        )
+                    if (length == 0) {
+                        launcherPublisherActive.set(false)
+                        return@Thread
+                    }
+                    check(length in 1..bytes.size) {
+                        "Could not claim launcher publication: $length"
+                    }
+                    output.position(0)
+                    output.get(bytes, 0, length)
+                    val fields =
+                        String(bytes, 0, length, StandardCharsets.UTF_8)
+                            .trimEnd('\n')
+                            .split('\t', limit = 5)
+                    check(
+                        fields.size == 5 &&
+                            fields[0] == "W1" &&
+                            LAUNCHER_PACKAGE.matches(fields[1]) &&
+                            LAUNCHER_DESCRIPTOR.matches(fields[2]),
+                    ) {
+                        "Invalid native launcher publication"
+                    }
+                    val generation = fields[3].toLongOrNull()
+                    check(generation != null && generation in 1..Int.MAX_VALUE.toLong()) {
+                        "Invalid native launcher generation"
+                    }
+                    claimedPackage = fields[1]
+                    claimedGeneration = generation
+                    val generated =
+                        LauncherApkAssembler.assembleAndSign(
+                            this,
+                            LauncherApkRequest(
+                                claimedPackage,
+                                fields[2],
+                                claimedGeneration,
+                                fields[4],
+                            ),
+                        )
+                    check(
+                        launcherTransition(
+                            activeHandle,
+                            "awaiting-install",
+                            claimedPackage,
+                            claimedGeneration,
+                        ),
+                    ) {
+                        "Could not persist launcher installer handoff"
+                    }
+                    val session = LauncherPackageInstaller.submit(this, generated)
+                    Log.i(
+                        TAG,
+                        "Submitted launcher package=$claimedPackage " +
+                            "generation=$claimedGeneration session=$session",
+                    )
+                } catch (error: Exception) {
+                    if (claimedPackage.isNotEmpty() && claimedGeneration != 0L) {
+                        launcherTransition(
+                            activeHandle,
+                            "failed",
+                            claimedPackage,
+                            claimedGeneration,
+                        )
+                    }
+                    launcherPublisherActive.set(false)
+                    Log.e(TAG, "Launcher publication failed", error)
+                }
+            },
+            "ArchpheneLauncherPublisher",
+        ).start()
+    }
+
+    private fun processPendingLauncherResult() {
+        val activeHandle = readyHandle
+        val androidPackage = pendingLauncherResultPackage
+        val generation = pendingLauncherResultGeneration
+        if (
+            activeHandle == 0L ||
+            androidPackage.isEmpty() ||
+            generation == 0L
+        ) {
+            return
+        }
+        pendingLauncherResultPackage = ""
+        pendingLauncherResultGeneration = 0
+        val action = pendingLauncherResultAction
+        pendingLauncherResultAction = ""
+        Thread(
+            {
+                val transition =
+                    when (action) {
+                        ACTION_LAUNCHER_INSTALLED -> "installed"
+                        ACTION_LAUNCHER_REMOVED -> "removed"
+                        else -> "failed"
+                    }
+                val transitioned =
+                    launcherTransition(
+                        activeHandle,
+                        transition,
+                        androidPackage,
+                        generation,
+                    )
+                launcherPublisherActive.set(false)
+                if (transitioned) {
+                    refreshDesktopEntries(activeHandle)
+                    Log.i(
+                        TAG,
+                        "Launcher package=$androidPackage generation=$generation " +
+                            transition,
+                    )
+                    startLauncherPublisher(activeHandle)
+                } else {
+                    Log.e(TAG, "Could not persist launcher install result")
+                }
+            },
+            "ArchpheneLauncherResult",
+        ).start()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun reconcileInstalledLaunchers(activeHandle: Long) {
+        val rows = readLauncherRegistryRows(activeHandle)
+        if (rows.isEmpty()) {
+            return
+        }
+        val signer = LauncherApkSigner.signerSha256()
+        val activeInstallerSessions =
+            runCatching {
+                packageManager.packageInstaller.mySessions
+            }.getOrElse { error ->
+                Log.w(TAG, "Could not inspect active launcher installer sessions", error)
+                emptyList()
+            }
+        for (row in rows) {
+            val generation =
+                try {
+                    val flags =
+                        PackageManager.GET_META_DATA or
+                            PackageManager.GET_SIGNING_CERTIFICATES
+                    val info = packageManager.getPackageInfo(row.androidPackage, flags)
+                    val application = info.applicationInfo
+                        ?: error("launcher application metadata is missing")
+                    val metadata = application.metaData
+                        ?: error("launcher metadata is missing")
+                    val generationValue =
+                        metadata
+                            .getString("org.archphene.launcher.GENERATION")
+                            ?.takeIf { value ->
+                                value.length == 22 &&
+                                    value.startsWith("g:") &&
+                                    value.drop(2).all(Char::isDigit)
+                            }?.drop(2)
+                            ?.toLongOrNull()
+                        ?: error("launcher generation metadata is invalid")
+                    val certificates =
+                        info.signingInfo?.apkContentsSigners
+                            ?: error("launcher signer is missing")
+                    check(
+                        info.packageName == row.androidPackage &&
+                            generationValue <= row.desiredGeneration &&
+                            info.longVersionCode == generationValue &&
+                            metadata.getString("org.archphene.launcher.DESCRIPTOR_ID") ==
+                            "d:${row.descriptorIdHex}" &&
+                            metadata.getString("org.archphene.launcher.MANAGER_PACKAGE") ==
+                            packageName &&
+                            certificates.size == 1 &&
+                            MessageDigest.isEqual(
+                                MessageDigest
+                                    .getInstance("SHA-256")
+                                    .digest(certificates.single().toByteArray()),
+                                signer,
+                            ),
+                    ) {
+                        "launcher identity or signer changed"
+                    }
+                    generationValue
+                } catch (_: PackageManager.NameNotFoundException) {
+                    -1L
+                } catch (error: Exception) {
+                    Log.e(
+                        TAG,
+                        "Refusing untrusted launcher package=${row.androidPackage}",
+                        error,
+                    )
+                    0L
+                }
+            val transitioned =
+                when {
+                    generation > 0 ->
+                        launcherTransition(
+                            activeHandle,
+                            "present",
+                            row.androidPackage,
+                            generation,
+                        )
+                    generation == -1L &&
+                        row.status == LAUNCHER_STATUS_AWAITING_INSTALL -> {
+                        for (
+                            session in
+                                activeInstallerSessions.filter { session ->
+                                    session.appPackageName == row.androidPackage
+                                }
+                        ) {
+                            runCatching {
+                                packageManager.packageInstaller.abandonSession(session.sessionId)
+                            }.onFailure { error ->
+                                Log.w(
+                                    TAG,
+                                    "Could not abandon interrupted launcher session=" +
+                                        session.sessionId,
+                                    error,
+                                )
+                            }
+                        }
+                        launcherTransition(activeHandle, "absent", row.androidPackage, 0)
+                    }
+                    generation == -1L ->
+                        launcherTransition(activeHandle, "absent", row.androidPackage, 0)
+                    else ->
+                        launcherTransition(activeHandle, "quarantined", row.androidPackage, 0)
+                }
+            check(transitioned) {
+                "Could not reconcile Android launcher ${row.androidPackage}"
+            }
+        }
+    }
+
+    private fun readLauncherRegistryRows(activeHandle: Long): List<LauncherRegistryRow> {
+        val rows = ArrayList<LauncherRegistryRow>()
+        val output = ByteBuffer.allocateDirect(4096)
+        val bytes = ByteArray(4096)
+        var offset = 0
+        var expectedTotal = -1
+        while (true) {
+            output.clear()
+            val length =
+                NativeRuntime.nativeLauncherRegistryPage(
+                    activeHandle,
+                    offset,
+                    output,
+                )
+            check(length in 1..bytes.size) {
+                "Could not read launcher registry: $length"
+            }
+            output.position(0)
+            output.get(bytes, 0, length)
+            val lines =
+                String(bytes, 0, length, StandardCharsets.US_ASCII)
+                    .trimEnd('\n')
+                    .split('\n')
+            val header = lines.first().split('\t')
+            check(header.size == 3 && header[0] == "P1") {
+                "Invalid launcher registry page"
+            }
+            val next = header[1].toInt()
+            val total = header[2].toInt()
+            check(
+                total in 0..NativeRuntime.DESKTOP_ENTRY_LIMIT &&
+                    next in offset..total &&
+                    lines.size - 1 == next - offset &&
+                    (expectedTotal == -1 || expectedTotal == total),
+            ) {
+                "Inconsistent launcher registry page"
+            }
+            expectedTotal = total
+            for (line in lines.drop(1)) {
+                val fields = line.split('\t')
+                check(
+                    fields.size == 6 &&
+                        LAUNCHER_PACKAGE.matches(fields[0]) &&
+                        LAUNCHER_DESCRIPTOR.matches(fields[1]),
+                ) {
+                    "Invalid launcher registry row"
+                }
+                val desired = fields[2].toLong()
+                val published = fields[3].toLong()
+                val pending = fields[4].toLong()
+                val status = fields[5].toInt()
+                check(
+                    desired in 1..Int.MAX_VALUE.toLong() &&
+                        published in 0..desired &&
+                        pending in 0..desired &&
+                        status in 1..7,
+                ) {
+                    "Invalid launcher registry state"
+                }
+                rows.add(
+                    LauncherRegistryRow(
+                        fields[0],
+                        fields[1],
+                        desired,
+                        status,
+                    ),
+                )
+            }
+            offset = next
+            if (offset == total) {
+                return rows
+            }
+        }
+    }
+
+    private fun launcherTransition(
+        activeHandle: Long,
+        action: String,
+        androidPackage: String,
+        generation: Long,
+    ): Boolean {
+        val request =
+            "T1\t$action\t$androidPackage\t$generation\n"
+                .toByteArray(StandardCharsets.US_ASCII)
+        if (request.size > 160) {
+            return false
+        }
+        val buffer = ByteBuffer.allocateDirect(160)
+        buffer.put(request)
+        return NativeRuntime.nativeLauncherTransition(
+            activeHandle,
+            buffer,
+            request.size,
+        ) == 0
     }
 
     private fun readLauncherSummary(activeHandle: Long): LauncherSummary? {
@@ -4694,6 +5156,7 @@ class ArchpheneRuntimeService : Service() {
 
     private fun hasActiveRuntimeWork(): Boolean =
         bootstrapActive ||
+            launcherPublisherActive.get() ||
             catalogRefreshActive ||
             searchActive ||
             packageOperationActive ||

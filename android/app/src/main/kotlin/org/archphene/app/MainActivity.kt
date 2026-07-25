@@ -14,6 +14,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import android.provider.DocumentsContract
+import android.provider.Settings
 import android.text.Editable
 import android.text.TextUtils
 import android.text.TextWatcher
@@ -109,6 +110,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private var availablePackageRevision = Int.MIN_VALUE
     private var packageJobListRevision = Int.MIN_VALUE
     private var storageOnboardingDialog: AlertDialog? = null
+    private var launcherPermissionDialog: AlertDialog? = null
+    private var launcherPermissionDeferred = false
     private var pendingImportUri: Uri? = null
     private var pendingFolderUri: Uri? = null
     private var pendingFolderFlags = 0
@@ -128,6 +131,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 runtimeSurface.synchronizeTerminalSize(runtimeBinder)
                 dispatchPendingImport()
                 dispatchPendingFolderGrant()
+                runtimeBinder?.resumeLauncherPublisher()
                 updateStatus()
             }
 
@@ -1403,6 +1407,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     override fun onResume() {
         super.onResume()
         frameCallbackActive = true
+        runtimeBinder?.resumeLauncherPublisher()
         transitionRuntime(NativeRuntime.LIFECYCLE_RUNNING)
         Choreographer.getInstance().postFrameCallback(this)
     }
@@ -1432,6 +1437,9 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         storageOnboardingDialog?.setOnDismissListener(null)
         storageOnboardingDialog?.dismiss()
         storageOnboardingDialog = null
+        launcherPermissionDialog?.setOnDismissListener(null)
+        launcherPermissionDialog?.dismiss()
+        launcherPermissionDialog = null
         if (isFinishing && !keepServiceAfterFinish) {
             stopService(Intent(this, ArchpheneRuntimeService::class.java))
         }
@@ -1583,6 +1591,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         updatePackageActivity()
         updatePackageActions()
         maybeShowStorageOnboarding()
+        maybeShowLauncherPermission()
     }
 
     private fun updateDebugRuntimeEvidence() {
@@ -1656,6 +1665,44 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             }
         }
         storageOnboardingDialog = dialog
+        dialog.show()
+    }
+
+    private fun maybeShowLauncherPermission() {
+        val binder = runtimeBinder ?: return
+        if (
+            !binder.launcherInstallPermissionRequired ||
+            launcherPermissionDialog != null ||
+            launcherPermissionDeferred ||
+            storageOnboardingDialog != null ||
+            isFinishing ||
+            isDestroyed
+        ) {
+            return
+        }
+        val dialog =
+            AlertDialog
+                .Builder(this)
+                .setTitle(R.string.launcher_permission_title)
+                .setMessage(R.string.launcher_permission_message)
+                .setPositiveButton(R.string.launcher_permission_settings) { _, _ ->
+                    launcherPermissionDeferred = true
+                    startActivity(
+                        Intent(
+                            Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                            Uri.parse("package:$packageName"),
+                        ),
+                    )
+                }.setNegativeButton(R.string.launcher_permission_later) { _, _ ->
+                    launcherPermissionDeferred = true
+                }
+                .create()
+        dialog.setOnDismissListener {
+            if (launcherPermissionDialog === dialog) {
+                launcherPermissionDialog = null
+            }
+        }
+        launcherPermissionDialog = dialog
         dialog.show()
     }
 
