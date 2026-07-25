@@ -6,6 +6,12 @@
     <string name="runtime_unavailable">Shared Arch runtime unavailable</string>
     <string name="packages">Packages</string>
     <string name="package_results_heading">Package results and activity</string>
+    <string name="installed_packages">Installed</string>
+    <string name="search_results">Search results</string>
+    <string name="installed_packages_loading">Loading installed packages…</string>
+    <string name="installed_packages_unavailable">Installed packages unavailable</string>
+    <string name="package_reason_explicit">Explicit</string>
+    <string name="package_reason_dependency">Dependency</string>
     <string name="files">Files</string>
     <string name="terminal">Terminal</string>
     <string name="files_heading">Android and Linux files</string>

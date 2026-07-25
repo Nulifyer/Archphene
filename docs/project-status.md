@@ -58,8 +58,23 @@ two-view progress track, and the existing state-driven Cancel action. It does
 not allocate or rewrite unchanged text during status polls. Debug-only native
 journal fixtures prove a completed operation across manager restart and a
 durable failed operation on both exact ABIs with full-device screenshots and no
-network use. This is not yet the required installed/available package list, and
-live phase, retry, and recovery UX remains open.
+network use.
+
+Packages now opens on a real installed-package list derived directly from
+pacman's local database. Rust validates and sorts at most 4,096 bounded regular
+database entries once, caches that immutable snapshot in the runtime, and pages
+60 compact records at a time through a coarse direct-buffer JNI call. Kotlin
+publishes one revisioned snapshot after bootstrap and package mutation; the
+Activity checks only its revision during status polls and uses recycled native
+Android list rows for name, exact version, and explicit/dependency reason.
+Installed and Search results are distinct retained modes, selecting an
+installed row routes to exact package details, and a changed installed count
+returns to the installed view. A debug-only 67-package local-database fixture
+proves the second native page, virtualized scrolling, result-mode switching,
+light/dark appearance, manager restart, scoped logs, and visually inspected
+full-device screenshots on the emulator and Samsung without package downloads.
+Structured available-package rows, merging a newly queued operation into its
+row, live phases, retry, and recovery UX remain open.
 
 Visible files in the shared `/home/archphene` are now available to Android
 Files, system pickers, and explicitly granted Android consumers through an

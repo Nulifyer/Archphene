@@ -12,5 +12,8 @@
         <receiver
             android:name=".PackageJobTestReceiver"
             android:exported="true" />
+        <receiver
+            android:name=".InstalledPackagesTestReceiver"
+            android:exported="true" />
     </application>
 </manifest>

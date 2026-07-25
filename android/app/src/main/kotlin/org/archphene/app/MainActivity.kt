@@ -25,14 +25,17 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
+import android.widget.BaseAdapter
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.ListView
 import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
 import org.archphene.app.runtime.ArchpheneRuntimeService
+import org.archphene.app.runtime.InstalledPackageSnapshot
 import org.archphene.app.runtime.NativeRuntime
 import org.archphene.app.runtime.RuntimeSnapshot
 
@@ -40,6 +43,13 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private lateinit var statusView: TextView
     private lateinit var catalogStatusView: TextView
     private lateinit var searchStatusView: TextView
+    private lateinit var packageSearchResults: ScrollView
+    private lateinit var installedPackagePanel: LinearLayout
+    private lateinit var installedPackageStatusView: TextView
+    private lateinit var installedPackageList: ListView
+    private lateinit var installedPackageAdapter: InstalledPackageAdapter
+    private lateinit var installedPackagesButton: Button
+    private lateinit var searchResultsButton: Button
     private lateinit var jobStatusView: TextView
     private lateinit var packageJobTitleView: TextView
     private lateinit var packageJobActivityView: TextView
@@ -86,12 +96,14 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private var statusFrameCountdown = 0
     private var keepServiceAfterFinish = false
     private var shellCatalogRevision = Int.MIN_VALUE
+    private var installedPackageRevision = Int.MIN_VALUE
     private var storageOnboardingDialog: AlertDialog? = null
     private var pendingImportUri: Uri? = null
     private var pendingFolderUri: Uri? = null
     private var pendingFolderFlags = 0
     private var selectedManagerSection = MANAGER_SECTION_PACKAGES
     private var wideManagerLayout = false
+    private var showingInstalledPackages = true
 
     private val serviceConnection =
         object : ServiceConnection {
@@ -113,6 +125,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 statusView.setText(R.string.runtime_unavailable)
                 catalogStatusView.setText(R.string.package_catalog_unavailable)
                 searchStatusView.setText(R.string.package_search_unavailable)
+                installedPackageStatusView.setText(R.string.installed_packages_unavailable)
                 jobStatusView.setText(R.string.package_job_unavailable)
                 commandStatusView.setText(R.string.linux_command_unavailable)
                 storageStatusView.setText(R.string.document_import_unavailable)
@@ -141,6 +154,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     MANAGER_SECTION_PACKAGES,
                 ) ?: MANAGER_SECTION_PACKAGES
             ).coerceIn(MANAGER_SECTION_PACKAGES, MANAGER_SECTION_TERMINAL)
+        showingInstalledPackages =
+            savedInstanceState?.getBoolean(PACKAGE_RESULT_MODE_STATE, true) ?: true
         wideManagerLayout =
             resources.configuration.screenWidthDp >= WIDE_MANAGER_BREAKPOINT_DP
         debugRuntimeEvidenceEnabled =
@@ -219,6 +234,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 setText(R.string.search)
                 setOnClickListener {
                     hideKeyboard(searchInput)
+                    showPackageResultMode(false)
                     runtimeBinder?.searchPackages(searchInput.text.toString())
                 }
             }
@@ -227,6 +243,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 setText(R.string.details)
                 setOnClickListener {
                     hideKeyboard(searchInput)
+                    showPackageResultMode(false)
                     runtimeBinder?.resolvePackage(searchInput.text.toString())
                 }
             }
@@ -255,6 +272,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         searchInput.setOnEditorActionListener { _, actionId, _ ->
             if (actionId == EditorInfo.IME_ACTION_SEARCH) {
                 hideKeyboard(searchInput)
+                showPackageResultMode(false)
                 runtimeBinder?.searchPackages(searchInput.text.toString())
                 true
             } else {
@@ -306,7 +324,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 setTextIsSelectable(true)
                 setBackgroundColor(getColor(R.color.archphene_surface))
             }
-        val searchResults =
+        packageSearchResults =
             ScrollView(this).apply {
                 isFillViewport = true
                 addView(
@@ -314,6 +332,96 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     ViewGroup.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ),
+                )
+            }
+        installedPackageStatusView =
+            TextView(this).apply {
+                setTextColor(getColor(R.color.archphene_on_surface_muted))
+                textSize = 14f
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(16), 0, dp(16), 0)
+                setText(R.string.installed_packages_loading)
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+            }
+        installedPackageAdapter = InstalledPackageAdapter()
+        installedPackageList =
+            ListView(this).apply {
+                adapter = installedPackageAdapter
+                dividerHeight = 1
+                setBackgroundColor(getColor(R.color.archphene_surface))
+                setOnItemClickListener { _, _, position, _ ->
+                    val packageName = installedPackageAdapter.packageName(position) ?: return@setOnItemClickListener
+                    searchInput.setText(packageName)
+                    searchInput.setSelection(packageName.length)
+                    showPackageResultMode(false)
+                    runtimeBinder?.resolvePackage(packageName)
+                }
+            }
+        installedPackagePanel =
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(
+                    installedPackageStatusView,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        dp(40),
+                    ),
+                )
+                addView(
+                    installedPackageList,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        0,
+                        1f,
+                    ),
+                )
+            }
+        installedPackagesButton =
+            Button(this).apply {
+                setText(R.string.installed_packages)
+                setOnClickListener { showPackageResultMode(true) }
+            }
+        searchResultsButton =
+            Button(this).apply {
+                setText(R.string.search_results)
+                setOnClickListener { showPackageResultMode(false) }
+            }
+        val resultModeRow =
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                addView(
+                    installedPackagesButton,
+                    LinearLayout.LayoutParams(
+                        0,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        1f,
+                    ),
+                )
+                addView(
+                    searchResultsButton,
+                    LinearLayout.LayoutParams(
+                        0,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        1f,
+                    ),
+                )
+            }
+        val packageResultSurface =
+            FrameLayout(this).apply {
+                addView(
+                    packageSearchResults,
+                    FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                    ),
+                )
+                addView(
+                    installedPackagePanel,
+                    FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
                     ),
                 )
             }
@@ -727,7 +835,14 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                                 ),
                             )
                             addView(
-                                searchResults,
+                                resultModeRow,
+                                LinearLayout.LayoutParams(
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                    dp(48),
+                                ),
+                            )
+                            addView(
+                                packageResultSurface,
                                 LinearLayout.LayoutParams(
                                     ViewGroup.LayoutParams.MATCH_PARENT,
                                     0,
@@ -774,7 +889,14 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                         ),
                     )
                     addView(
-                        searchResults,
+                        resultModeRow,
+                        LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            dp(48),
+                        ),
+                    )
+                    addView(
+                        packageResultSurface,
                         LinearLayout.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             0,
@@ -790,6 +912,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     )
                 }
             }
+        showPackageResultMode(showingInstalledPackages)
         filesPanel =
             ScrollView(this).apply {
                 isFillViewport = true
@@ -1175,6 +1298,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
 
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putInt(MANAGER_SECTION_STATE, selectedManagerSection)
+        outState.putBoolean(PACKAGE_RESULT_MODE_STATE, showingInstalledPackages)
         pendingImportUri?.let { uri ->
             outState.putString(PENDING_IMPORT_URI_STATE, uri.toString())
         }
@@ -1223,6 +1347,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private fun updateStatus() {
         dispatchPendingImport()
         dispatchPendingFolderGrant()
+        updateInstalledPackages(runtimeBinder)
         val handle = runtimeBinder?.runtimeHandle ?: 0L
         if (!snapshot.read(handle)) {
             statusView.contentDescription = null
@@ -1381,6 +1506,174 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         storageOnboardingDialog = dialog
         dialog.show()
     }
+
+    private fun showPackageResultMode(installedPackages: Boolean) {
+        showingInstalledPackages = installedPackages
+        installedPackagePanel.visibility =
+            if (installedPackages) View.VISIBLE else View.GONE
+        packageSearchResults.visibility =
+            if (installedPackages) View.GONE else View.VISIBLE
+        installedPackagesButton.isSelected = installedPackages
+        searchResultsButton.isSelected = !installedPackages
+        installedPackagesButton.setTextColor(
+            getColor(
+                if (installedPackages) {
+                    R.color.archphene_primary
+                } else {
+                    R.color.archphene_on_surface
+                },
+            ),
+        )
+        searchResultsButton.setTextColor(
+            getColor(
+                if (installedPackages) {
+                    R.color.archphene_on_surface
+                } else {
+                    R.color.archphene_primary
+                },
+            ),
+        )
+    }
+
+    private fun updateInstalledPackages(binder: ArchpheneRuntimeService.LocalBinder?) {
+        if (binder == null) {
+            setTextIfChanged(
+                installedPackageStatusView,
+                getString(R.string.installed_packages_unavailable),
+            )
+            return
+        }
+        val packages = binder.installedPackages
+        setTextIfChanged(installedPackageStatusView, packages.status)
+        if (packages.revision == installedPackageRevision) {
+            return
+        }
+        val previousCount = installedPackageAdapter.count
+        val hadSnapshot = installedPackageRevision != Int.MIN_VALUE
+        installedPackageRevision = packages.revision
+        installedPackageAdapter.submit(packages)
+        if (hadSnapshot && previousCount != packages.names.size) {
+            showPackageResultMode(true)
+        }
+    }
+
+    private inner class InstalledPackageAdapter : BaseAdapter() {
+        private var packages: InstalledPackageSnapshot? = null
+
+        fun submit(snapshot: InstalledPackageSnapshot) {
+            packages = snapshot
+            notifyDataSetChanged()
+        }
+
+        fun packageName(position: Int): String? =
+            packages?.names?.getOrNull(position)
+
+        override fun getCount(): Int = packages?.names?.size ?: 0
+
+        override fun getItem(position: Int): Any? = packageName(position)
+
+        override fun getItemId(position: Int): Long = position.toLong()
+
+        override fun getView(
+            position: Int,
+            convertView: View?,
+            parent: ViewGroup,
+        ): View {
+            val row: LinearLayout
+            val views: InstalledPackageRowViews
+            if (convertView is LinearLayout && convertView.tag is InstalledPackageRowViews) {
+                row = convertView
+                views = convertView.tag as InstalledPackageRowViews
+            } else {
+                val name =
+                    TextView(this@MainActivity).apply {
+                        setTextColor(getColor(R.color.archphene_on_surface))
+                        textSize = 16f
+                        maxLines = 1
+                        ellipsize = TextUtils.TruncateAt.END
+                    }
+                val version =
+                    TextView(this@MainActivity).apply {
+                        setTextColor(getColor(R.color.archphene_on_surface_muted))
+                        textSize = 13f
+                        maxLines = 1
+                        ellipsize = TextUtils.TruncateAt.END
+                    }
+                val reason =
+                    TextView(this@MainActivity).apply {
+                        setTextColor(getColor(R.color.archphene_on_surface_muted))
+                        textSize = 13f
+                        gravity = Gravity.CENTER_VERTICAL or Gravity.END
+                        maxLines = 1
+                    }
+                row =
+                    LinearLayout(this@MainActivity).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        minimumHeight = dp(64)
+                        setPadding(dp(16), dp(6), dp(16), dp(6))
+                        setBackgroundColor(getColor(R.color.archphene_surface))
+                        addView(
+                            LinearLayout(this@MainActivity).apply {
+                                orientation = LinearLayout.VERTICAL
+                                gravity = Gravity.CENTER_VERTICAL
+                                addView(
+                                    name,
+                                    LinearLayout.LayoutParams(
+                                        ViewGroup.LayoutParams.MATCH_PARENT,
+                                        0,
+                                        1f,
+                                    ),
+                                )
+                                addView(
+                                    version,
+                                    LinearLayout.LayoutParams(
+                                        ViewGroup.LayoutParams.MATCH_PARENT,
+                                        0,
+                                        1f,
+                                    ),
+                                )
+                            },
+                            LinearLayout.LayoutParams(
+                                0,
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                1f,
+                            ),
+                        )
+                        addView(
+                            reason,
+                            LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.WRAP_CONTENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                            ).apply {
+                                marginStart = dp(12)
+                            },
+                        )
+                    }
+                views = InstalledPackageRowViews(name, version, reason)
+                row.tag = views
+            }
+            val snapshot = packages
+            if (snapshot != null && position in snapshot.names.indices) {
+                setTextIfChanged(views.name, snapshot.names[position])
+                setTextIfChanged(views.version, snapshot.versions[position])
+                views.reason.setText(
+                    if (snapshot.explicitlyInstalled[position]) {
+                        R.string.package_reason_explicit
+                    } else {
+                        R.string.package_reason_dependency
+                    },
+                )
+            }
+            return row
+        }
+    }
+
+    private class InstalledPackageRowViews(
+        val name: TextView,
+        val version: TextView,
+        val reason: TextView,
+    )
 
     private fun updatePackageActions() {
         val binder = runtimeBinder
@@ -1758,6 +2051,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         private const val PENDING_FOLDER_URI_STATE = "pending_folder_uri"
         private const val PENDING_FOLDER_FLAGS_STATE = "pending_folder_flags"
         private const val MANAGER_SECTION_STATE = "manager_section"
+        private const val PACKAGE_RESULT_MODE_STATE = "package_result_mode"
         private const val MANAGER_SECTION_PACKAGES = 0
         private const val MANAGER_SECTION_FILES = 1
         private const val MANAGER_SECTION_TERMINAL = 2

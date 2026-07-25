@@ -7,6 +7,8 @@ internal object NativeRuntime {
     const val SNAPSHOT_SIZE = 64
     const val PACKAGE_MANIFEST_LIMIT = 32 * 1024
     const val PACKAGE_OUTPUT_SIZE = 16 * 1024
+    const val INSTALLED_PACKAGE_PAGE_SIZE = 60
+    const val INSTALLED_PACKAGE_LIMIT = 4096
     const val COMMAND_REQUEST_LIMIT = 16 * 1024
     const val TERMINAL_DAMAGE_SIZE = 6_080_040
 
@@ -153,6 +155,11 @@ internal object NativeRuntime {
         action: Int,
         packageBuffer: ByteBuffer,
         packageLength: Int,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeListInstalledPackages(
+        handle: Long,
+        offset: Int,
         outputBuffer: ByteBuffer,
     ): Int
     external fun nativeRunCommand(

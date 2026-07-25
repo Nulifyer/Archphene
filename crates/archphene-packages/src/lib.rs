@@ -16,6 +16,7 @@ use archphene_process::{CommandEnvironment, ProcessError};
 pub const MAX_MANIFEST_BYTES: usize = 32 * 1024;
 pub const MAX_MANIFEST_ENTRIES: usize = 128;
 pub const MAX_TOOL_OUTPUT_BYTES: usize = 16 * 1024;
+pub const INSTALLED_PACKAGE_PAGE_SIZE: usize = 60;
 
 const MANIFEST_HEADER: &str = "# org.archphene.package-runtime.v1";
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
@@ -281,6 +282,10 @@ pub struct ToolOutput {
     length: usize,
 }
 
+pub struct InstalledPackageCatalog {
+    packages: Vec<(String, String, bool)>,
+}
+
 impl ToolOutput {
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes[..self.length]
@@ -301,6 +306,31 @@ impl ToolOutput {
         self.bytes[self.length..end].copy_from_slice(bytes);
         self.length = end;
         Ok(())
+    }
+}
+
+impl InstalledPackageCatalog {
+    pub fn page(&self, offset: usize) -> Result<ToolOutput, PackageRuntimeError> {
+        if offset > self.packages.len() {
+            return Err(PackageRuntimeError::InvalidQuery);
+        }
+        let mut output = empty_tool_output();
+        for (name, version, explicitly_installed) in self
+            .packages
+            .iter()
+            .skip(offset)
+            .take(INSTALLED_PACKAGE_PAGE_SIZE)
+        {
+            output.push(name.as_bytes())?;
+            output.push(b"\t")?;
+            output.push(version.as_bytes())?;
+            output.push(if *explicitly_installed {
+                b"\t1\n"
+            } else {
+                b"\t0\n"
+            })?;
+        }
+        Ok(output)
     }
 }
 
@@ -636,6 +666,87 @@ impl PackageRuntime {
             }
             Err(error) => Err(error),
         }
+    }
+
+    pub fn installed_package_catalog(
+        &self,
+    ) -> Result<InstalledPackageCatalog, PackageRuntimeError> {
+        let local = self.arch_root.join("var/lib/pacman/local");
+        let metadata = match fs::symlink_metadata(&local) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(InstalledPackageCatalog {
+                    packages: Vec::new(),
+                });
+            }
+            Err(error) => return Err(PackageRuntimeError::Io(error)),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(PackageRuntimeError::UnsafeEntry(local));
+        }
+
+        let mut packages = Vec::new();
+        let mut contents = String::with_capacity(4096);
+        for entry in fs::read_dir(&local)? {
+            if packages.len() >= LOCAL_DATABASE_ENTRY_LIMIT {
+                return Err(PackageRuntimeError::OutputLimit);
+            }
+            let entry = entry?;
+            let entry_path = entry.path();
+            let metadata = fs::symlink_metadata(&entry_path)?;
+            if entry.file_name() == "ALPM_DB_VERSION"
+                && metadata.is_file()
+                && !metadata.file_type().is_symlink()
+                && metadata.len() > 0
+                && metadata.len() <= 64
+            {
+                continue;
+            }
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(PackageRuntimeError::UnsafeEntry(entry_path));
+            }
+            let description = entry_path.join("desc");
+            let metadata = fs::symlink_metadata(&description)?;
+            if metadata.file_type().is_symlink()
+                || !metadata.is_file()
+                || metadata.len() == 0
+                || metadata.len() > LOCAL_DESCRIPTION_LIMIT
+            {
+                return Err(PackageRuntimeError::UnsafeEntry(description));
+            }
+            contents.clear();
+            File::open(&description)?
+                .take(LOCAL_DESCRIPTION_LIMIT + 1)
+                .read_to_string(&mut contents)?;
+            if u64::try_from(contents.len()).map_err(|_| PackageRuntimeError::OutputLimit)?
+                != metadata.len()
+            {
+                return Err(PackageRuntimeError::SizeMismatch);
+            }
+            let name = local_description_field(&contents, "%NAME%")?
+                .filter(|name| safe_logical_name(name))
+                .ok_or(PackageRuntimeError::InvalidResolution)?;
+            let version = local_description_field(&contents, "%VERSION%")?
+                .filter(|version| {
+                    !version.is_empty()
+                        && version.len() <= 128
+                        && version
+                            .bytes()
+                            .all(|byte| !byte.is_ascii_whitespace() && !byte.is_ascii_control())
+                })
+                .ok_or(PackageRuntimeError::InvalidResolution)?;
+            let explicitly_installed = match local_description_field(&contents, "%REASON%")? {
+                None | Some("0") => true,
+                Some("1") => false,
+                Some(_) => return Err(PackageRuntimeError::InvalidResolution),
+            };
+            packages.push((name.to_owned(), version.to_owned(), explicitly_installed));
+        }
+        packages.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        if packages.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        Ok(InstalledPackageCatalog { packages })
     }
 
     pub fn install(&self, package: &str) -> Result<ToolOutput, PackageRuntimeError> {
@@ -2530,6 +2641,85 @@ extra\tdotnet-sdk-8.0\t8.0.29.sdk129-1\tThe .NET Core SDK\n"
         assert!(matches!(
             local_description_field("%REASON%\n1\n%REASON%\n0\n", "%REASON%"),
             Err(PackageRuntimeError::InvalidResolution)
+        ));
+    }
+
+    #[test]
+    fn installed_package_pages_are_sorted_bounded_and_safe() {
+        let tree = TestTree::new();
+        tree.file("libarchphene_pkg_111111111111111111111111.so", b"loader");
+        tree.file("libarchphene_pkg_222222222222222222222222.so", b"pacman");
+        tree.file("libarchphene_pkg_444444444444444444444444.so", b"keyring");
+        tree.file("libarchphene_pkg_555555555555555555555555.so", b"bridge");
+        tree.file("libarchphene_pkg_666666666666666666666666.so", b"trust");
+        let manifest = b"# org.archphene.package-runtime.v1\n\
+loader\t@loader\tlibarchphene_pkg_111111111111111111111111.so\t6\n\
+tool\t@pacman\tlibarchphene_pkg_222222222222222222222222.so\t6\n\
+keyring\t@keyring\tlibarchphene_pkg_444444444444444444444444.so\t7\n\
+ownertrust\t@ownertrust\tlibarchphene_pkg_666666666666666666666666.so\t5\n\
+library\tlibarchphene_path_bridge.so\tlibarchphene_pkg_555555555555555555555555.so\t6\n";
+        let runtime = PackageRuntime::prepare(
+            &tree.root,
+            &tree.native,
+            manifest,
+            RepositoryArchitecture::X86_64,
+        )
+        .expect("package runtime");
+        let local = tree.root.join("var/lib/pacman/local");
+        fs::create_dir_all(&local).expect("local database");
+        fs::write(local.join("ALPM_DB_VERSION"), b"9\n").expect("database version");
+        for index in (0..66).rev() {
+            let name = format!("fixture-{index:03}");
+            let directory = local.join(format!("{name}-1.0.0-1"));
+            fs::create_dir(&directory).expect("package database entry");
+            fs::write(
+                directory.join("desc"),
+                format!(
+                    "%NAME%\n{name}\n\n%VERSION%\n1.0.{index}-1\n\n%REASON%\n{}\n",
+                    index % 2
+                ),
+            )
+            .expect("package description");
+        }
+
+        let catalog = runtime
+            .installed_package_catalog()
+            .expect("installed package catalog");
+        let first = catalog.page(0).expect("first page");
+        let first = first.as_str().expect("first page UTF-8");
+        assert_eq!(first.lines().count(), INSTALLED_PACKAGE_PAGE_SIZE);
+        assert!(first.starts_with("fixture-000\t1.0.0-1\t1\n"));
+        assert!(first.ends_with("fixture-059\t1.0.59-1\t0\n"));
+        let second = catalog
+            .page(INSTALLED_PACKAGE_PAGE_SIZE)
+            .expect("second page");
+        assert_eq!(
+            second.as_str().expect("second page UTF-8"),
+            "fixture-060\t1.0.60-1\t1\nfixture-061\t1.0.61-1\t0\n\
+fixture-062\t1.0.62-1\t1\nfixture-063\t1.0.63-1\t0\n\
+fixture-064\t1.0.64-1\t1\nfixture-065\t1.0.65-1\t0\n",
+        );
+        assert!(catalog.page(66).expect("empty page").as_bytes().is_empty());
+
+        let duplicate = local.join("duplicate-entry");
+        fs::create_dir(&duplicate).expect("duplicate directory");
+        fs::write(
+            duplicate.join("desc"),
+            b"%NAME%\nfixture-000\n\n%VERSION%\n2.0-1\n\n%REASON%\n0\n",
+        )
+        .expect("duplicate description");
+        assert!(matches!(
+            runtime.installed_package_catalog(),
+            Err(PackageRuntimeError::InvalidResolution)
+        ));
+        fs::remove_dir_all(&duplicate).expect("remove duplicate");
+
+        let unsafe_description = local.join("fixture-000-1.0.0-1/desc");
+        fs::remove_file(&unsafe_description).expect("remove description");
+        symlink("/system/build.prop", &unsafe_description).expect("unsafe description");
+        assert!(matches!(
+            runtime.installed_package_catalog(),
+            Err(PackageRuntimeError::UnsafeEntry(_))
         ));
     }
 

@@ -31,6 +31,14 @@ import javax.net.ssl.HttpsURLConnection
 import org.archphene.app.MainActivity
 import org.archphene.app.R
 
+internal class InstalledPackageSnapshot(
+    val names: Array<String>,
+    val versions: Array<String>,
+    val explicitlyInstalled: BooleanArray,
+    val status: String,
+    val revision: Int,
+)
+
 class ArchpheneRuntimeService : Service() {
     inner class LocalBinder : Binder() {
         val runtimeHandle: Long
@@ -41,6 +49,9 @@ class ArchpheneRuntimeService : Service() {
 
         val packageSearchStatus: String
             get() = searchStatus
+
+        internal val installedPackages: InstalledPackageSnapshot
+            get() = installedPackageSnapshot
 
         val packageJobStatus: String
             get() = jobStatus
@@ -280,6 +291,15 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var catalogStatus = "Package catalog not downloaded"
     @Volatile private var searchActive = false
     @Volatile private var searchStatus = "Search the official Arch repositories"
+    @Volatile
+    private var installedPackageSnapshot =
+        InstalledPackageSnapshot(
+            emptyArray(),
+            emptyArray(),
+            BooleanArray(0),
+            "Loading installed packages…",
+            0,
+        )
     @Volatile private var packageOperationActive = false
     @Volatile private var packageOperationCancelable = false
     @Volatile private var packageCancellationRequested = false
@@ -324,6 +344,9 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var commandStatus = "Run an installed Linux command"
     private val shellOutput = BoundedByteRing(SHELL_SCROLLBACK_BYTES)
     private val shellInput = FixedByteQueue(SHELL_INPUT_BYTES)
+    private val installedPackageOutputBuffer =
+        ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
+    private val installedPackageOutputBytes = ByteArray(NativeRuntime.PACKAGE_OUTPUT_SIZE)
     private val shellTerminalDamageBuffer: ByteBuffer by lazy(LazyThreadSafetyMode.NONE) {
         ByteBuffer
             .allocateDirect(NativeRuntime.TERMINAL_DAMAGE_SIZE)
@@ -1669,6 +1692,7 @@ class ArchpheneRuntimeService : Service() {
                             )
                         }
                         val packageVersion = preparePackageRuntime(activeHandle)
+                        refreshInstalledPackages(activeHandle)
                         refreshShellChoices(activeHandle)
                         jobStatus = readLatestPackageJob(activeHandle)
                         mainHandler.post {
@@ -1777,6 +1801,135 @@ class ArchpheneRuntimeService : Service() {
             .map(String::trim)
             .firstOrNull { line -> line.contains("Pacman v") }
             ?: throw IllegalStateException("Package-runtime probe returned no pacman version")
+    }
+
+    private fun refreshInstalledPackages(activeHandle: Long) {
+        val names = ArrayList<String>()
+        val versions = ArrayList<String>()
+        val explicitFlags = BooleanArray(NativeRuntime.INSTALLED_PACKAGE_LIMIT)
+        var offset = 0
+        var previousName = ""
+        try {
+            while (offset <= NativeRuntime.INSTALLED_PACKAGE_LIMIT) {
+                installedPackageOutputBuffer.clear()
+                val outputLength =
+                    NativeRuntime.nativeListInstalledPackages(
+                        activeHandle,
+                        offset,
+                        installedPackageOutputBuffer,
+                    )
+                if (outputLength < 0) {
+                    throw IllegalStateException(
+                        readNativeMessage(installedPackageOutputBuffer, outputLength),
+                    )
+                }
+                if (outputLength == 0) {
+                    break
+                }
+                if (outputLength > installedPackageOutputBytes.size) {
+                    throw IllegalStateException("Installed package page exceeds its output buffer")
+                }
+                installedPackageOutputBuffer.position(0)
+                installedPackageOutputBuffer.get(installedPackageOutputBytes, 0, outputLength)
+                var rowStart = 0
+                var pageRows = 0
+                while (rowStart < outputLength) {
+                    var firstTab = -1
+                    var secondTab = -1
+                    var rowEnd = -1
+                    var index = rowStart
+                    while (index < outputLength) {
+                        when (installedPackageOutputBytes[index]) {
+                            '\t'.code.toByte() -> {
+                                if (firstTab < 0) {
+                                    firstTab = index
+                                } else if (secondTab < 0) {
+                                    secondTab = index
+                                } else {
+                                    throw IllegalStateException("Invalid installed package row")
+                                }
+                            }
+                            '\n'.code.toByte() -> {
+                                rowEnd = index
+                                break
+                            }
+                        }
+                        index++
+                    }
+                    if (
+                        firstTab <= rowStart ||
+                        secondTab <= firstTab + 1 ||
+                        rowEnd != secondTab + 2
+                    ) {
+                        throw IllegalStateException("Invalid installed package row")
+                    }
+                    val name =
+                        String(
+                            installedPackageOutputBytes,
+                            rowStart,
+                            firstTab - rowStart,
+                            StandardCharsets.UTF_8,
+                        )
+                    val version =
+                        String(
+                            installedPackageOutputBytes,
+                            firstTab + 1,
+                            secondTab - firstTab - 1,
+                            StandardCharsets.UTF_8,
+                        )
+                    if (previousName.isNotEmpty() && name <= previousName) {
+                        throw IllegalStateException("Installed packages are not strictly ordered")
+                    }
+                    val explicitlyInstalled =
+                        when (installedPackageOutputBytes[secondTab + 1]) {
+                            '1'.code.toByte() -> true
+                            '0'.code.toByte() -> false
+                            else -> throw IllegalStateException("Invalid package install reason")
+                        }
+                    explicitFlags[names.size] = explicitlyInstalled
+                    names.add(name)
+                    versions.add(version)
+                    previousName = name
+                    pageRows++
+                    rowStart = rowEnd + 1
+                }
+                if (
+                    pageRows == 0 ||
+                    pageRows > NativeRuntime.INSTALLED_PACKAGE_PAGE_SIZE ||
+                    names.size > NativeRuntime.INSTALLED_PACKAGE_LIMIT
+                ) {
+                    throw IllegalStateException("Invalid installed package page size")
+                }
+                offset += pageRows
+                if (pageRows < NativeRuntime.INSTALLED_PACKAGE_PAGE_SIZE) {
+                    break
+                }
+            }
+            val previousRevision = installedPackageSnapshot.revision
+            installedPackageSnapshot =
+                InstalledPackageSnapshot(
+                    names.toTypedArray(),
+                    versions.toTypedArray(),
+                    explicitFlags.copyOf(names.size),
+                    if (names.isEmpty()) {
+                        "No Linux packages installed"
+                    } else {
+                        "${names.size} Linux packages installed"
+                    },
+                    previousRevision + 1,
+                )
+        } catch (error: Exception) {
+            val previous = installedPackageSnapshot
+            installedPackageSnapshot =
+                InstalledPackageSnapshot(
+                    previous.names,
+                    previous.versions,
+                    previous.explicitlyInstalled,
+                    "Installed package list unavailable",
+                    previous.revision + 1,
+                )
+            Log.w(TAG, "Could not refresh installed package list", error)
+        }
     }
 
     @Synchronized
@@ -2436,6 +2589,7 @@ class ArchpheneRuntimeService : Service() {
                             normalized,
                             scratch,
                         )
+                        refreshInstalledPackages(activeHandle)
                         refreshShellChoices(activeHandle)
                         record(
                             NativeRuntime.JOB_COMPLETE,
@@ -2643,6 +2797,7 @@ class ArchpheneRuntimeService : Service() {
                             normalized,
                             scratch,
                         )
+                        refreshInstalledPackages(activeHandle)
                         refreshShellChoices(activeHandle)
                         lastResolvedInstalledVersion = ""
                         primaryActionLabel = "Install"

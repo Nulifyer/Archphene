@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use archphene_core::{Lifecycle, Runtime, RuntimeError};
 use archphene_jobs::{JobError, JobOperation, JobState, PackageJob, PackageJobStore};
 use archphene_packages::{
-    CatalogDownload, PackagePayloadDownload, PackageRuntime, PackageRuntimeError, PackageTool,
-    Repository, RepositoryArchitecture, ToolOutput,
+    CatalogDownload, InstalledPackageCatalog, PackagePayloadDownload, PackageRuntime,
+    PackageRuntimeError, PackageTool, Repository, RepositoryArchitecture, ToolOutput,
 };
 use archphene_process::{PtyRegistry, PtyWaiter};
 use archphene_root::{ArchRoot, BootstrapReport, RootError};
@@ -30,6 +30,7 @@ pub struct RuntimeHost {
     arch_root: Option<ArchRoot>,
     package_jobs: Option<PackageJobStore>,
     package_runtime: Option<PackageRuntime>,
+    installed_packages: Option<InstalledPackageCatalog>,
     catalog_download: Option<CatalogDownload>,
     package_download: Option<PackagePayloadDownload>,
     pty_sessions: PtyRegistry,
@@ -88,6 +89,7 @@ impl RuntimeHost {
             arch_root: None,
             package_jobs: None,
             package_runtime: None,
+            installed_packages: None,
             catalog_download: None,
             package_download: None,
             pty_sessions: PtyRegistry::new(),
@@ -229,6 +231,7 @@ impl RuntimeHost {
         let version = package_runtime.run(PackageTool::Pacman, &["--version"])?;
         let catalogs_ready = package_runtime.catalogs_ready();
         self.package_runtime = Some(package_runtime);
+        self.installed_packages = None;
         let mut status_flags =
             STATUS_ARCH_ROOT_READY | STATUS_JOB_STORE_READY | STATUS_PACKAGE_RUNTIME_READY;
         if catalogs_ready {
@@ -291,6 +294,23 @@ impl RuntimeHost {
             .as_ref()
             .ok_or(PackageRuntimeError::InvalidPath)?
             .discover_shells()
+    }
+
+    pub fn refresh_installed_packages(&mut self) -> Result<(), PackageRuntimeError> {
+        self.installed_packages = Some(
+            self.package_runtime
+                .as_ref()
+                .ok_or(PackageRuntimeError::InvalidPath)?
+                .installed_package_catalog()?,
+        );
+        Ok(())
+    }
+
+    pub fn installed_package_page(&self, offset: usize) -> Result<ToolOutput, PackageRuntimeError> {
+        self.installed_packages
+            .as_ref()
+            .ok_or(PackageRuntimeError::InvalidPath)?
+            .page(offset)
     }
 
     pub fn begin_package_job(

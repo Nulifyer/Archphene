@@ -56,8 +56,11 @@ archphene_skip_storage_onboarding "manager-navigation-onboarding-$serial"
 archphene_wait_ui \
   'text="Packages"[^>]*class="android\.widget\.Button"[^>]*selected="true"' \
   "manager-navigation-packages-default-$serial" 15
+archphene_wait_ui \
+  'text="Installed"[^>]*class="android\.widget\.Button"[^>]*selected="true"' \
+  "manager-navigation-installed-default-$serial" 15
 archphene_wait_ui_exact_text \
-  "Search the official Arch repositories" \
+  "No Linux packages installed" \
   "manager-navigation-packages-content-$serial" 15
 archphene_adb_run exec-out screencap -p >"$output_dir/$serial-packages.png"
 
