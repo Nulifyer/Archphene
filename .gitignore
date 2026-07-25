@@ -146,6 +146,7 @@ window.xml
 !docs/**/*.jpg
 !docs/**/*.jpeg
 !docs/**/*.webp
+!android/launcher-template/src/main/res/drawable-nodpi/launcher_icon.png
 
 # Reviewed precompiled bridge inputs used by release CI
 !/prebuilt/

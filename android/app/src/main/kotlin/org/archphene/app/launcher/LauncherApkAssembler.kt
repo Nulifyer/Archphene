@@ -22,6 +22,8 @@ internal data class LauncherApkRequest(
     val descriptorIdHex: String,
     val generation: Long,
     val label: String,
+    val iconPng: ByteArray? = null,
+    val iconSha256: ByteArray? = null,
 )
 
 internal data class GeneratedLauncherApk(
@@ -42,16 +44,32 @@ internal object LauncherApkAssembler {
     private const val TEMPLATE_LABEL = "Archphene Linux App"
     private const val TEMPLATE_SHA256 =
         "h:0000000000000000000000000000000000000000000000000000000000000000"
+    private const val TEMPLATE_ICON_SHA256 =
+        "2babc12a8af9fa0f7018a7d20110f4436e128ddac876d6276b519daefeea0a56"
     private const val MANIFEST = "AndroidManifest.xml"
     private const val ZIP_EPOCH_MILLIS = 1_577_836_800_000L
     private const val ENTRY_LIMIT = 4 * 1024 * 1024
     private const val ARCHIVE_LIMIT = 8 * 1024 * 1024
     private const val ENTRY_COUNT_LIMIT = 64
+    private const val ICON_BYTES_LIMIT = 1024 * 1024
+    private const val ICON_DIMENSION_LIMIT = 2048
+    private const val ICON_PIXEL_LIMIT = 4 * 1024 * 1024
     private val PACKAGE =
         Regex("org\\.archphene\\.linux\\.p[0-9a-f]{32}")
     private val DESCRIPTOR = Regex("[0-9a-f]{64}")
     private val MANAGER_PACKAGE =
         Regex("[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*){2,7}")
+    private val PNG_SIGNATURE =
+        byteArrayOf(
+            0x89.toByte(),
+            0x50,
+            0x4e,
+            0x47,
+            0x0d,
+            0x0a,
+            0x1a,
+            0x0a,
+        )
     @Volatile private var cachedTemplateDigestHex: String? = null
 
     @Synchronized
@@ -133,6 +151,17 @@ internal object LauncherApkAssembler {
         require(validLabel(request.label)) {
             "Invalid launcher label"
         }
+        require(
+            (request.iconPng == null && request.iconSha256 == null) ||
+                (
+                    request.iconPng != null &&
+                        request.iconSha256?.size == 32 &&
+                        validPng(request.iconPng) &&
+                        MessageDigest.isEqual(sha256(request.iconPng), request.iconSha256)
+                ),
+        ) {
+            "Invalid launcher icon"
+        }
         require(MANAGER_PACKAGE.matches(context.packageName)) {
             "Invalid manager package"
         }
@@ -165,6 +194,7 @@ internal object LauncherApkAssembler {
         var total = 0
         var entries = 0
         var manifestFound = false
+        var iconFound = false
         val templateDigest = templateDigestHex(context)
         try {
             ZipInputStream(context.assets.open(TEMPLATE_ASSET)).use { input ->
@@ -182,10 +212,6 @@ internal object LauncherApkAssembler {
                             "Launcher template exceeds its entry limit"
                         }
                         var value = readBounded(input)
-                        total = Math.addExact(total, value.size)
-                        check(total <= ARCHIVE_LIMIT) {
-                            "Launcher template exceeds its size limit"
-                        }
                         if (name == MANIFEST) {
                             value =
                                 BinaryAndroidManifest(value)
@@ -203,6 +229,20 @@ internal object LauncherApkAssembler {
                                     .setVersionCode(request.generation.toInt())
                                     .bytes
                             manifestFound = true
+                        }
+                        if (
+                            name.endsWith(".png") &&
+                            digestHex(sha256(value)) == TEMPLATE_ICON_SHA256
+                        ) {
+                            check(!iconFound) {
+                                "Launcher template repeats its icon resource"
+                            }
+                            iconFound = true
+                            request.iconPng?.let { icon -> value = icon.copyOf() }
+                        }
+                        total = Math.addExact(total, value.size)
+                        check(total <= ARCHIVE_LIMIT) {
+                            "Launcher template exceeds its size limit"
                         }
                         expected[name] = sha256(value)
                         val target = ZipEntry(name)
@@ -230,10 +270,49 @@ internal object LauncherApkAssembler {
         } finally {
             fileOutput.close()
         }
-        check(manifestFound && output.length() in 1..ARCHIVE_LIMIT.toLong()) {
-            "Launcher template manifest is missing"
+        check(manifestFound && iconFound && output.length() in 1..ARCHIVE_LIMIT.toLong()) {
+            "Launcher template manifest or icon is missing"
         }
         return expected
+    }
+
+    private fun validPng(value: ByteArray): Boolean {
+        if (
+            value.size !in 33..ICON_BYTES_LIMIT ||
+            PNG_SIGNATURE.indices.any { index -> value[index] != PNG_SIGNATURE[index] } ||
+            bigEndianInt(value, 8) != 13 ||
+            value[12] != 'I'.code.toByte() ||
+            value[13] != 'H'.code.toByte() ||
+            value[14] != 'D'.code.toByte() ||
+            value[15] != 'R'.code.toByte()
+        ) {
+            return false
+        }
+        val width = bigEndianInt(value, 16)
+        val height = bigEndianInt(value, 20)
+        return width in 1..ICON_DIMENSION_LIMIT &&
+            height in 1..ICON_DIMENSION_LIMIT &&
+            width.toLong() * height.toLong() <= ICON_PIXEL_LIMIT
+    }
+
+    private fun bigEndianInt(
+        value: ByteArray,
+        offset: Int,
+    ): Int =
+        ((value[offset].toInt() and 0xff) shl 24) or
+            ((value[offset + 1].toInt() and 0xff) shl 16) or
+            ((value[offset + 2].toInt() and 0xff) shl 8) or
+            (value[offset + 3].toInt() and 0xff)
+
+    private fun digestHex(value: ByteArray): String {
+        val hex = "0123456789abcdef"
+        return CharArray(value.size * 2).also { output ->
+            for (index in value.indices) {
+                val byte = value[index].toInt() and 0xff
+                output[index * 2] = hex[byte ushr 4]
+                output[index * 2 + 1] = hex[byte and 0x0f]
+            }
+        }.concatToString()
     }
 
     private fun verifyArchiveEntries(
@@ -299,6 +378,10 @@ internal object LauncherApkAssembler {
             application.loadLabel(context.packageManager).toString() == request.label,
         ) {
             "Generated launcher label changed"
+        }
+        val icon = application.loadIcon(context.packageManager)
+        check(icon.intrinsicWidth > 0 && icon.intrinsicHeight > 0) {
+            "Generated launcher icon is not loadable"
         }
         val metadata = application.metaData ?: error("Generated launcher metadata is missing")
         check(

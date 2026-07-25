@@ -24,6 +24,17 @@ archphene_require_file "$apk"
 if unzip -Z1 "$apk" | grep -qx 'META-INF/version-control-info.textproto'; then
   archphene_die "launcher template contains repository-wide VCS metadata"
 fi
+template_icon_sha256=2babc12a8af9fa0f7018a7d20110f4436e128ddac876d6276b519daefeea0a56
+template_icon_matches=0
+while IFS= read -r entry; do
+  [[ "$entry" == *.png ]] || continue
+  read -r entry_sha256 _ < <(unzip -p "$apk" "$entry" | sha256sum)
+  if [[ "$entry_sha256" == "$template_icon_sha256" ]]; then
+    template_icon_matches=$((template_icon_matches + 1))
+  fi
+done < <(unzip -Z1 "$apk")
+[[ "$template_icon_matches" -eq 1 ]] ||
+  archphene_die "launcher template does not contain exactly one replaceable icon"
 first_hash="$(archphene_sha256_file "$apk")"
 
 (

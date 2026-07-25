@@ -36,7 +36,10 @@ android {
                 include = false
             }
             isMinifyEnabled = true
-            isShrinkResources = true
+            // LauncherApkAssembler replaces the stable package-owned icon
+            // entry after resource linking. Keep resource paths stable so the
+            // generated wrapper never has to patch resources.arsc.
+            isShrinkResources = false
             proguardFiles("proguard-rules.pro")
         }
     }

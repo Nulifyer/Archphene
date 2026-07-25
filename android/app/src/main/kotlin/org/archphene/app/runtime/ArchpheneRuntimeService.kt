@@ -10,6 +10,7 @@ import android.content.SharedPreferences
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
 import android.os.Binder
@@ -1051,6 +1052,11 @@ class ArchpheneRuntimeService : Service() {
             Regex("org\\.archphene\\.linux\\.p[0-9a-f]{32}")
         private val LAUNCHER_DESCRIPTOR = Regex("[0-9a-f]{64}")
         private const val LAUNCHER_STATUS_AWAITING_INSTALL = 3
+        private const val LAUNCHER_STATUS_NEEDS_REMOVAL = 5
+        private const val LAUNCHER_STATUS_AWAITING_REMOVAL = 6
+        private const val LAUNCHER_ICON_BYTES_LIMIT = 1024 * 1024
+        private const val LAUNCHER_ICON_DIMENSION_LIMIT = 2048
+        private const val LAUNCHER_ICON_PIXEL_LIMIT = 4L * 1024 * 1024
         private const val STORAGE_PREFERENCES = "storage"
         private const val STORAGE_STATE = "import_state"
         private const val STORAGE_MESSAGE = "import_message"
@@ -2785,10 +2791,10 @@ class ArchpheneRuntimeService : Service() {
                     val fields =
                         String(bytes, 0, length, StandardCharsets.UTF_8)
                             .trimEnd('\n')
-                            .split('\t', limit = 5)
+                            .split('\t', limit = 7)
                     check(
-                        fields.size == 5 &&
-                            fields[0] == "W1" &&
+                        fields.size == 7 &&
+                            fields[0] == "W2" &&
                             LAUNCHER_PACKAGE.matches(fields[1]) &&
                             LAUNCHER_DESCRIPTOR.matches(fields[2]),
                     ) {
@@ -2800,6 +2806,24 @@ class ArchpheneRuntimeService : Service() {
                     }
                     claimedPackage = fields[1]
                     claimedGeneration = generation
+                    val iconDigest = decodeSha256(fields[6])
+                    check(
+                        (fields[5].isEmpty() && fields[6].isEmpty()) ||
+                            (
+                                fields[5].startsWith('/') &&
+                                    fields[5].length <= 240 &&
+                                    iconDigest != null
+                            ),
+                    ) {
+                        "Invalid native launcher icon"
+                    }
+                    val iconPng =
+                        if (iconDigest == null) {
+                            null
+                        } else {
+                            loadLauncherIcon(fields[5], iconDigest)
+                                ?: error("Package launcher icon changed or is unsupported")
+                        }
                     val generated =
                         LauncherApkAssembler.assembleAndSign(
                             this,
@@ -2808,6 +2832,8 @@ class ArchpheneRuntimeService : Service() {
                                 fields[2],
                                 claimedGeneration,
                                 fields[4],
+                                iconPng,
+                                iconDigest,
                             ),
                         )
                     check(
@@ -2841,6 +2867,92 @@ class ArchpheneRuntimeService : Service() {
             },
             "ArchpheneLauncherPublisher",
         ).start()
+    }
+
+    private fun loadLauncherIcon(
+        logicalPath: String,
+        expectedSha256: ByteArray,
+    ): ByteArray? {
+        val root = File(filesDir, "arch-root").canonicalFile
+        val relative = logicalPath.removePrefix("/")
+        if (
+            relative.isEmpty() ||
+            relative.split('/').any { part -> part.isEmpty() || part == "." || part == ".." }
+        ) {
+            return null
+        }
+        val icon = File(root, relative).canonicalFile
+        if (icon == root || !icon.path.startsWith("${root.path}${File.separator}")) {
+            return null
+        }
+        val descriptor =
+            try {
+                Os.open(
+                    icon.path,
+                    OsConstants.O_RDONLY or OsConstants.O_CLOEXEC or OsConstants.O_NOFOLLOW,
+                    0,
+                )
+            } catch (_: Exception) {
+                return null
+            }
+        try {
+            val stat = Os.fstat(descriptor)
+            if (
+                !OsConstants.S_ISREG(stat.st_mode) ||
+                stat.st_mode and 18 != 0 ||
+                stat.st_size !in 33..LAUNCHER_ICON_BYTES_LIMIT.toLong()
+            ) {
+                return null
+            }
+            val bounds =
+                BitmapFactory.Options().apply {
+                    inJustDecodeBounds = true
+                }
+            BitmapFactory.decodeFileDescriptor(descriptor, null, bounds)
+            if (
+                bounds.outMimeType != "image/png" ||
+                bounds.outWidth !in 1..LAUNCHER_ICON_DIMENSION_LIMIT ||
+                bounds.outHeight !in 1..LAUNCHER_ICON_DIMENSION_LIMIT ||
+                bounds.outWidth.toLong() * bounds.outHeight.toLong() >
+                LAUNCHER_ICON_PIXEL_LIMIT
+            ) {
+                return null
+            }
+            Os.lseek(descriptor, 0, OsConstants.SEEK_SET)
+            val bytes = ByteArray(stat.st_size.toInt())
+            var offset = 0
+            while (offset < bytes.size) {
+                val read = Os.read(descriptor, bytes, offset, bytes.size - offset)
+                if (read <= 0) {
+                    return null
+                }
+                offset += read
+            }
+            return bytes.takeIf { value ->
+                MessageDigest.isEqual(
+                    MessageDigest.getInstance("SHA-256").digest(value),
+                    expectedSha256,
+                )
+            }
+        } finally {
+            Os.close(descriptor)
+        }
+    }
+
+    private fun decodeSha256(value: String): ByteArray? {
+        if (value.isEmpty()) {
+            return null
+        }
+        if (value.length != 64) {
+            return null
+        }
+        return ByteArray(32).also { output ->
+            for (index in output.indices) {
+                val high = value[index * 2].digitToIntOrNull(16) ?: return null
+                val low = value[index * 2 + 1].digitToIntOrNull(16) ?: return null
+                output[index] = ((high shl 4) or low).toByte()
+            }
+        }
     }
 
     private fun processPendingLauncherResult() {
@@ -2949,6 +3061,8 @@ class ArchpheneRuntimeService : Service() {
                     }
                     if (
                         generationValue == row.desiredGeneration &&
+                        row.status != LAUNCHER_STATUS_NEEDS_REMOVAL &&
+                        row.status != LAUNCHER_STATUS_AWAITING_REMOVAL &&
                         metadata.getString("org.archphene.launcher.TEMPLATE_SHA256") !=
                         "h:$templateDigest"
                     ) {

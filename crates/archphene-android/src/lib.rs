@@ -1647,9 +1647,23 @@ mod android {
             return 0;
         };
         let descriptor_id = str::from_utf8(&work.descriptor_id_hex).expect("hex descriptor");
+        let icon_sha256 = work.icon_sha256.map(|digest| {
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            let mut encoded = String::with_capacity(64);
+            for byte in digest {
+                encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+                encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+            }
+            encoded
+        });
         let encoded = format!(
-            "W1\t{}\t{}\t{}\t{}\n",
-            work.android_package, descriptor_id, work.generation, work.label,
+            "W2\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            work.android_package,
+            descriptor_id,
+            work.generation,
+            work.label,
+            work.icon_path.as_deref().unwrap_or(""),
+            icon_sha256.as_deref().unwrap_or(""),
         );
         if encoded.len() > output_capacity {
             return ERROR_INTERNAL;

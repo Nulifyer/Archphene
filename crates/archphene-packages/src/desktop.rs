@@ -1,9 +1,10 @@
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, VecDeque};
+use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::Read;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 pub const MAX_DESKTOP_ENTRY_BYTES: usize = 512 * 1024;
 pub const MAX_DESKTOP_ID_BYTES: usize = 240;
@@ -17,6 +18,7 @@ pub const MAX_DESKTOP_DIRECTORY_ENTRIES: usize = 4096;
 pub const MAX_DESKTOP_TOTAL_BYTES: usize = 4 * 1024 * 1024;
 
 const APPLICATION_DIRECTORY: &str = "usr/share/applications";
+const MAX_ROOT_SYMLINKS: usize = 16;
 const O_NOFOLLOW: i32 = 0o400000;
 const O_CLOEXEC: i32 = 0o2000000;
 
@@ -181,6 +183,50 @@ pub fn discover_desktop_entries(arch_root: &Path) -> Result<DesktopCatalog, Desk
         rejected,
         truncated,
     })
+}
+
+pub fn resolve_desktop_icon(arch_root: &Path, icon: &str) -> Option<String> {
+    let root = canonical_directory(arch_root).ok()?;
+    if icon.starts_with('/') {
+        return resolve_root_regular_file(&root, Path::new(icon), false);
+    }
+    if icon.is_empty()
+        || icon.len() > 240
+        || icon.contains(['/', '\\'])
+        || icon.chars().any(char::is_control)
+    {
+        return None;
+    }
+
+    let has_extension = [".png", ".svg", ".xpm"]
+        .iter()
+        .any(|extension| icon.ends_with(extension));
+    let extensions: &[&str] = if has_extension {
+        &[""]
+    } else {
+        &[".png", ".svg", ".xpm"]
+    };
+    let icon_directories = [
+        "512x512", "256x256", "192x192", "128x128", "96x96", "64x64", "48x48", "32x32", "24x24",
+        "22x22", "16x16", "scalable", "symbolic",
+    ];
+    for extension in extensions {
+        let file_name = format!("{icon}{extension}");
+        for directory in icon_directories {
+            let candidate = Path::new("/usr/share/icons/hicolor")
+                .join(directory)
+                .join("apps")
+                .join(&file_name);
+            if let Some(resolved) = resolve_root_regular_file(&root, &candidate, false) {
+                return Some(resolved);
+            }
+        }
+        let candidate = Path::new("/usr/share/pixmaps").join(file_name);
+        if let Some(resolved) = resolve_root_regular_file(&root, &candidate, false) {
+            return Some(resolved);
+        }
+    }
+    None
 }
 
 pub fn parse_desktop_entry<F>(
@@ -573,21 +619,72 @@ fn resolve_executable(root: &Path, program: &str) -> Option<String> {
         }
     }
     for candidate in candidates {
-        let Ok(canonical) = candidate.canonicalize() else {
-            continue;
-        };
-        let Ok(metadata) = fs::metadata(&canonical) else {
-            continue;
-        };
-        if inside(root, &canonical)
-            && metadata.is_file()
-            && metadata.permissions().mode() & 0o111 != 0
-        {
-            let relative = canonical.strip_prefix(root).ok()?.to_str()?;
-            return Some(format!("/{relative}"));
+        if let Some(resolved) = resolve_root_regular_file(root, &candidate, true) {
+            return Some(resolved);
         }
     }
     None
+}
+
+fn resolve_root_regular_file(root: &Path, path: &Path, executable: bool) -> Option<String> {
+    let relative = path
+        .strip_prefix(root)
+        .ok()
+        .or_else(|| path.strip_prefix("/").ok())?;
+    let mut remaining = normalized_components(relative)?;
+    let mut resolved = PathBuf::new();
+    let mut followed = 0_usize;
+    while let Some(component) = remaining.pop_front() {
+        let candidate = root.join(&resolved).join(&component);
+        let metadata = fs::symlink_metadata(&candidate).ok()?;
+        if metadata.file_type().is_symlink() {
+            followed = followed.checked_add(1)?;
+            if followed > MAX_ROOT_SYMLINKS {
+                return None;
+            }
+            let target = fs::read_link(&candidate).ok()?;
+            let mut replacement = if target.is_absolute() {
+                target.strip_prefix("/").ok()?.to_path_buf()
+            } else {
+                resolved.join(target)
+            };
+            replacement.extend(remaining.drain(..));
+            remaining = normalized_components(&replacement)?;
+            resolved.clear();
+            continue;
+        }
+        if !remaining.is_empty() && !metadata.is_dir() {
+            return None;
+        }
+        resolved.push(component);
+    }
+    let metadata = fs::symlink_metadata(root.join(&resolved)).ok()?;
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.permissions().mode() & 0o022 != 0
+        || (executable && metadata.permissions().mode() & 0o111 == 0)
+    {
+        return None;
+    }
+    Some(format!("/{}", resolved.to_str()?))
+}
+
+fn normalized_components(path: &Path) -> Option<VecDeque<OsString>> {
+    let mut normalized = Vec::<OsString>::with_capacity(path.components().count());
+    for component in path.components() {
+        match component {
+            Component::Normal(value) => normalized.push(value.to_os_string()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop()?;
+            }
+            Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    if normalized.is_empty() {
+        return None;
+    }
+    Some(normalized.into())
 }
 
 fn inside(root: &Path, candidate: &Path) -> bool {
@@ -622,6 +719,12 @@ mod tests {
             let path = self.path.join("usr/bin").join(name);
             fs::write(&path, b"\x7fELF fixture").expect("executable");
             fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("executable mode");
+        }
+
+        fn regular_file(&self, relative: &str, contents: &[u8]) {
+            let path = self.path.join(relative);
+            fs::create_dir_all(path.parent().expect("file parent")).expect("file directory");
+            fs::write(path, contents).expect("regular file");
         }
 
         fn desktop(&self, name: &str, contents: &str) {
@@ -845,6 +948,89 @@ Icon=/usr/share/pixmaps/My\\sEditor.png\n",
         let catalog = discover_desktop_entries(&root.path).expect("desktop catalog");
         assert_eq!(catalog.entries.len(), 1);
         assert_eq!(catalog.entries[0].executable, "/usr/bin/real-editor");
+    }
+
+    #[test]
+    fn executable_resolution_follows_root_absolute_package_links() {
+        let root = TestRoot::new();
+        root.regular_file("usr/lib/editor/editor", b"\x7fELF fixture");
+        fs::set_permissions(
+            root.path.join("usr/lib/editor/editor"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .expect("executable mode");
+        std::os::unix::fs::symlink("/usr/lib/editor/editor", root.path.join("usr/bin/editor"))
+            .expect("root-absolute executable link");
+        root.desktop(
+            "editor.desktop",
+            "[Desktop Entry]\nType=Application\nName=Editor\nExec=editor\n",
+        );
+        let catalog = discover_desktop_entries(&root.path).expect("desktop catalog");
+        assert_eq!(catalog.entries.len(), 1);
+        assert_eq!(catalog.entries[0].executable, "/usr/lib/editor/editor");
+    }
+
+    #[test]
+    fn icon_resolution_prefers_hicolor_png_and_normalizes_package_links() {
+        let root = TestRoot::new();
+        root.regular_file("usr/lib/editor/resources/editor.png", b"png fixture");
+        root.regular_file(
+            "usr/share/icons/hicolor/scalable/apps/editor.svg",
+            b"svg fixture",
+        );
+        fs::create_dir_all(root.path.join("usr/share/icons/hicolor/256x256/apps"))
+            .expect("icon directory");
+        std::os::unix::fs::symlink(
+            "/usr/lib/editor/resources/editor.png",
+            root.path
+                .join("usr/share/icons/hicolor/256x256/apps/editor.png"),
+        )
+        .expect("root-absolute icon link");
+
+        assert_eq!(
+            resolve_desktop_icon(&root.path, "editor").as_deref(),
+            Some("/usr/lib/editor/resources/editor.png"),
+        );
+        assert_eq!(
+            resolve_desktop_icon(
+                &root.path,
+                "/usr/share/icons/hicolor/256x256/apps/editor.png",
+            )
+            .as_deref(),
+            Some("/usr/lib/editor/resources/editor.png"),
+        );
+    }
+
+    #[test]
+    fn icon_resolution_rejects_escapes_loops_and_writable_files() {
+        let root = TestRoot::new();
+        fs::create_dir_all(root.path.join("usr/share/pixmaps")).expect("pixmap directory");
+        std::os::unix::fs::symlink(
+            "../../../../../../system/icon.png",
+            root.path.join("usr/share/pixmaps/escape.png"),
+        )
+        .expect("escaping icon link");
+        std::os::unix::fs::symlink(
+            "/usr/share/pixmaps/loop-b.png",
+            root.path.join("usr/share/pixmaps/loop-a.png"),
+        )
+        .expect("first icon loop");
+        std::os::unix::fs::symlink(
+            "/usr/share/pixmaps/loop-a.png",
+            root.path.join("usr/share/pixmaps/loop-b.png"),
+        )
+        .expect("second icon loop");
+        root.regular_file("usr/share/pixmaps/writable.png", b"writable");
+        fs::set_permissions(
+            root.path.join("usr/share/pixmaps/writable.png"),
+            fs::Permissions::from_mode(0o666),
+        )
+        .expect("writable icon mode");
+
+        assert_eq!(resolve_desktop_icon(&root.path, "escape"), None);
+        assert_eq!(resolve_desktop_icon(&root.path, "loop-a"), None);
+        assert_eq!(resolve_desktop_icon(&root.path, "writable"), None);
+        assert_eq!(resolve_desktop_icon(&root.path, "../escape"), None);
     }
 
     #[test]

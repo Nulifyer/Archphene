@@ -41,8 +41,8 @@ physical Samsung coverage for:
   registry with package ownership, stable Android identities, and durable
   publication/removal generations;
 - deterministic thin launcher APK assembly, Android Keystore signing,
-  PackageInstaller confirmation, cold-start reconciliation, and
-  launcher-only removal;
+  root-safe package icon normalization, PackageInstaller confirmation,
+  cold-start reconciliation, and launcher-only removal;
 - an authenticated generated launcher running package-installed Foot from the
   shared AArch64 root, with private Wayland, density-aware logical output,
   physical-resolution subsurface composition, safe Android insets, Samsung IME
@@ -51,7 +51,7 @@ physical Samsung coverage for:
   verified package-owned nested executables under paths such as
   `/usr/lib/<app>`, with real ELF and physical Samsung coverage.
 
-Icon/capability derivation, x86_64 repetition of the real-client gate,
+Capability derivation, x86_64 repetition of the real-client gate,
 zero-copy/dmabuf presentation, broader toolkit coverage, and the remaining
 production launcher capabilities are still open.
 

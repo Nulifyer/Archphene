@@ -3,7 +3,9 @@ package org.archphene.app
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.util.Base64
 import android.util.Log
+import java.security.MessageDigest
 import org.archphene.app.launcher.LauncherApkAssembler
 import org.archphene.app.launcher.LauncherApkRequest
 
@@ -20,6 +22,7 @@ internal class LauncherApkTestReceiver : BroadcastReceiver() {
         Thread(
             {
                 try {
+                    val icon = Base64.decode(ICON_PNG_BASE64, Base64.DEFAULT)
                     val generated =
                         LauncherApkAssembler.assembleAndSign(
                             context,
@@ -28,6 +31,8 @@ internal class LauncherApkTestReceiver : BroadcastReceiver() {
                                 "2222222222222222222222222222222222222222222222222222222222222222",
                                 7,
                                 "Archphene Fixture",
+                                icon,
+                                MessageDigest.getInstance("SHA-256").digest(icon),
                             ),
                         )
                     Log.i(
@@ -50,5 +55,8 @@ internal class LauncherApkTestReceiver : BroadcastReceiver() {
         private const val ACTION_BUILD = "org.archphene.app.debug.action.BUILD_LAUNCHER_APK"
         private const val EXTRA_TOKEN = "token"
         private const val TOKEN = "launcher-apk-gate"
+        private const val ICON_PNG_BASE64 =
+            "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAIAQMAAAD+wSzIAAAAA1BMVEX/AP804Oa6" +
+                "AAAAC0lEQVQI12NgQAUAABAAAaHFIcEAAAAASUVORK5CYII="
     }
 }

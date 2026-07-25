@@ -138,10 +138,33 @@ mode-0600 atomic file, rejects incomplete catalogs and unsafe/corrupt paths,
 preserves late PackageInstaller confirmations across desktop changes, and
 provides a verified-PackageManager reconciliation boundary for manager death or
 external wrapper removal. Host lifecycle/safety tests pass. Exact-ABI cold
-restarts preserve byte-identical 640-byte registries on the emulator and
-Samsung; fixture removal reconciles both to the same 56-byte empty registry and
-the manager reports zero packages/apps without fatal logs. Package-owned icon
-normalization and capability derivation remain pending.
+restarts preserve byte-identical registries on the emulator and Samsung;
+fixture removal reconciles cleanly and the manager reports the exact remaining
+catalog without fatal logs.
+
+Package icons now cross the complete generic launcher pipeline. Rust resolves
+absolute icon paths and freedesktop hicolor/pixmaps names within the shared
+Arch root, expands relative and fake-root absolute symlinks with a fixed
+limit, rejects escapes, loops, writable/non-regular files, and publishes a
+normalized root path. The launcher registry fingerprints bounded icon bytes
+with corrected v2 descriptor framing, migrates v1 registries without changing
+their installed Android package identities, and republishes a wrapper when
+the icon content changes. Kotlin reopens the normalized path without following
+the final link, bounds PNG size/dimensions/pixels, checks the expected SHA-256,
+and substitutes exactly one manifest-referenced resource before signing.
+Android then parses and decodes the generated icon during final APK
+verification. Missing or unsupported icons use the Archphene mark.
+
+Host tests cover hicolor preference, absolute package links into `/usr/lib`,
+escape/loop/writable rejection, icon-content updates, and v1 migration. A
+debug-only signed wrapper proved exact custom PNG replacement on Samsung.
+The physical manager then migrated three real Foot launchers through normal
+Android confirmation; the system installer and full-device app drawer showed
+the package Foot icon, a cold restart settled at three current launchers, and
+Foot still produced a real Wayland frame. The run also fixed stale-template
+reconciliation for a wrapper already awaiting removal and removed the two
+debug desktop fixtures without touching Linux user data. Capability
+declaration derivation and per-launcher compatibility diagnostics remain open.
 
 The manager now builds minimized launcher wrappers from one staged template,
 patches bounded manifest identity fields, signs each APK with a persistent
@@ -283,7 +306,7 @@ which correctly triggered stale-wrapper reconciliation but needlessly asked
 the user to update every launcher. Template release builds now disable VCS
 metadata at the supported per-build-type DSL boundary. A dedicated gate rejects
 the entry and forces two complete launcher rebuilds; both produce the same
-`1a4d9e7ccaf2862a6dccf051bd64692e28d05328ec7b4978b866185126ab4be0`
+`3db705420d7e923e8f91a770a086a8806248e136de47c6bfd90517e50608fcd3`
 SHA-256.
 
 The equivalent real-client gate remains open on the x86_64 emulator, which is
@@ -954,11 +977,13 @@ override, real Material You widget pixels, and stable-process Mousepad changes
 from 100%/18 dp to 200%/22 dp with independent 32/48 dp interaction targets.
 
 The first real Code-OSS transaction resolved, signature-verified, extracted,
-and classified its 36-package closure. It then failed closed before wrapper
-creation on an absolute icon symlink into `/usr/lib/code`. This exposes the
-generic Electron package-model gap: runtime packs do not yet publish package-owned
-`/usr/lib/<app>` trees or dependency executables such as `electron42`. Code must
-not receive an application-specific bypass.
+and classified its 36-package closure, but its original attempt failed closed
+before wrapper creation on an absolute icon symlink into `/usr/lib/code`.
+That generic blocker is now addressed without a Code-specific bypass:
+root-contained `/usr/lib/<app>` executables, scripts, and fake-root symlinks
+are launchable through the verified loader, while package icon symlinks are
+normalized and embedded in the Android wrapper. The complete Code transaction
+and Electron/Chromium runtime still need to be rerun and validated end to end.
 
 ## Validated
 

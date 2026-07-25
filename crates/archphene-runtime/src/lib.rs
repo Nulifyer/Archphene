@@ -67,6 +67,8 @@ pub struct LauncherPublishWork {
     pub descriptor_id_hex: [u8; 64],
     pub generation: u64,
     pub label: String,
+    pub icon_path: Option<String>,
+    pub icon_sha256: Option<[u8; 32]>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -608,11 +610,21 @@ impl RuntimeHost {
         else {
             return Ok(None);
         };
+        let icon_sha256 = descriptor.icon_digest();
+        let icon_path = icon_sha256.and_then(|_| {
+            descriptor.icon.as_deref().and_then(|icon| {
+                self.arch_root.as_ref().and_then(|root| {
+                    archphene_packages::desktop::resolve_desktop_icon(root.path(), icon)
+                })
+            })
+        });
         let work = LauncherPublishWork {
             android_package: descriptor.android_package.clone(),
             descriptor_id_hex: descriptor.descriptor_id_hex(),
             generation: descriptor.desired_generation,
             label: descriptor.name.clone(),
+            icon_path,
+            icon_sha256,
         };
         let arch_root = self
             .arch_root

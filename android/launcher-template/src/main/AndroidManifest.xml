@@ -4,7 +4,7 @@
         android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="false"
-        android:icon="@drawable/ic_linux_app"
+        android:icon="@drawable/launcher_icon"
         android:label="Archphene Linux App"
         android:supportsRtl="true"
         android:theme="@style/Theme.ArchpheneLauncher">
