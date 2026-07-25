@@ -29,6 +29,12 @@ android {
             isDebuggable = false
         }
         getByName("release") {
+            // The template identity is a function of launcher inputs, not the
+            // parent repository commit or dirty state. Otherwise every
+            // unrelated manager change forces user-confirmed launcher updates.
+            vcsInfo {
+                include = false
+            }
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles("proguard-rules.pro")

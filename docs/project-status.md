@@ -276,6 +276,16 @@ complete `/usr/bin` wrapper → `/usr/lib` script → absolute root-internal sym
 full-device capture without a fatal log. The x86_64 device repetition remains
 open.
 
+The launcher template no longer embeds AGP's repository-wide
+`META-INF/version-control-info.textproto`. That metadata made the authenticated
+template digest change after unrelated manager commits or dirty-tree changes,
+which correctly triggered stale-wrapper reconciliation but needlessly asked
+the user to update every launcher. Template release builds now disable VCS
+metadata at the supported per-build-type DSL boundary. A dedicated gate rejects
+the entry and forces two complete launcher rebuilds; both produce the same
+`1a4d9e7ccaf2862a6dccf051bd64692e28d05328ec7b4978b866185126ab4be0`
+SHA-256.
+
 The equivalent real-client gate remains open on the x86_64 emulator, which is
 not currently attached. HOME/resume, deliberate client crash/descendant
 cleanup, non-Latin composing input, non-text clipboard, pointer lock, and

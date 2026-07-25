@@ -79,6 +79,15 @@ scripts directly on Ubuntu. Release builds force both APKs non-debuggable. The o
 `prototypes/linux-app-manager-stub/out-linux/archphene.apk` and the companion
 `prototypes/archphene-terminal-app/out-linux/archphene-terminal.apk`; the latter is also embedded in the manager.
 
+The greenfield launcher-template release intentionally omits AGP VCS metadata:
+its authenticated identity depends only on launcher inputs, not the parent
+repository commit or dirty state. Verify both the omitted metadata and
+byte-identical forced rebuilds with:
+
+```bash
+./scripts/test-launcher-template-reproducibility.sh
+```
+
 ### Qt platform theme
 
 Rebuild the exact-ABI Qt appearance plugin and refresh its prebuilt checksums:
