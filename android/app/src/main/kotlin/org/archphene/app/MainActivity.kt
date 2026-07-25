@@ -2002,6 +2002,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         updateShellSelector(binder)
         setTextIfChanged(installButton, binder.packagePrimaryActionLabel)
         installButton.isEnabled = binder.packagePrimaryActionAvailable
+        setTextIfChanged(removeButton, binder.packageRemoveActionLabel)
         removeButton.isEnabled = binder.packageRemoveAvailable
         val packageActionAvailable =
             binder.packageCancellationAvailable || binder.packageRecoveryAvailable

@@ -103,6 +103,18 @@ archphene_wait_ui \
 archphene_wait_ui \
   'text="Search results"[^>]*class="android.widget.Button"[^>]*selected="true"' \
   "available-packages-details-mode-$serial" 15
+archphene_wait_ui_text \
+  "extra/dotnet-sdk 10.0.100.sdk100-1" \
+  "available-packages-reviewed-resolution-$serial" 20
+archphene_wait_ui \
+  'text="Retry"[^>]*class="android.widget.Button"[^>]*enabled="true"' \
+  "available-packages-retry-$serial" 15
+ui="$ARCHPHENE_UI"
+if archphene_regex_contains \
+  "$ui" 'text="Review"[^>]*class="android.widget.Button"[^>]*enabled="true"'; then
+  archphene_die "Review remained actionable after the exact failed job revision resolved"
+fi
+archphene_adb_run exec-out screencap -p >"$output_dir/$serial-retry.png"
 ui="$ARCHPHENE_UI"
 archphene_tap_ui_pattern \
   "$ui" 'text="Search results"[^>]*class="android.widget.Button"' "Search results"
@@ -127,5 +139,5 @@ fatal_log="$(archphene_adb_run logcat -d -v brief \
 trap - EXIT
 cleanup
 archphene_note "Archphene available package list passed on $serial"
-archphene_note "  Real local pacman search, structured rows, selection, recreation, and theme passed"
-archphene_note "  Full-device screenshots: $output_dir/$serial-{light,dark}.png"
+archphene_note "  Real local pacman search, revision-gated Retry, recreation, and theme passed"
+archphene_note "  Full-device screenshots: $output_dir/$serial-{light,retry,dark}.png"

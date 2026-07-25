@@ -114,6 +114,18 @@ single-line end ellipsis only after the available column is exhausted. Fresh
 full-device emulator and Samsung captures verify the complete package name,
 phase, message, and touch target without increasing the fixed card height.
 
+Retry is now gated by the durable job revision rather than merely by a matching
+package name. Install/Update failures and cancellations expose the primary
+action as Retry only after the exact terminal revision has resolved
+successfully against the current signed catalogs and installed database; failed
+removals use the same rule on Remove. A later failed attempt advances the
+revision, disables the stale action, and exposes Review again. Catalog refresh
+also locks Review, Retry, and Remove consistently with the executor. The
+generated debug pacman catalog now contains sufficient real metadata for
+`pacman --print` resolution, and the exact APK passes the successful no-download
+Retry gate plus the fail-closed missing-catalog Review gate on both the emulator
+and Samsung.
+
 Visible files in the shared `/home/archphene` are now available to Android
 Files, system pickers, and explicitly granted Android consumers through an
 exported `DocumentsProvider` protected by Android's `MANAGE_DOCUMENTS`

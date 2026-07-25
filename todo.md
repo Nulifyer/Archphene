@@ -243,7 +243,8 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [ ] Provide actionable diagnostics, retry controls, and package-scoped failure isolation.
     - [x] Replace the dead disabled Cancel control with no action for terminal success and a state-driven Review action for durable Failed/Cancelled jobs. Review prefills the exact package and performs a fresh signed-repository/installed-state resolution before enabling any retry or removal; it never replays stale transaction metadata.
     - [x] Keep long package names, phase labels, and the Review/Cancel touch target readable in the fixed-height activity card by stacking name and phase in a flexible column; verify full-device captures on the emulator and Samsung.
-    - [ ] Add explicit Retry after successful review, richer failure diagnostics, and recovery actions for storage, trust, replacement, and partial-transaction failures.
+    - [x] Add explicit Retry only after the exact durable failure/cancellation revision resolves successfully against current catalogs and installed state. A subsequent failure creates a new revision and requires Review again; catalog refresh locks Review, Retry, and Remove consistently with the executor.
+    - [ ] Add richer failure diagnostics and recovery actions for storage, trust, replacement, and partial-transaction failures.
   - [x] Show a state-driven Cancel action only before Linux package mutation and retain the durable Cancelled result across manager restart.
 - [x] Make the current package details and operation content responsive and scrollable; full-device emulator and Samsung audits show the complete `btop` closure with state-driven Install/Update/Verify and Remove actions.
 - [x] Profile and fix slow first launch after boot; retain the visible runtime-loading state while avoiding unchanged verification-keyring rebuilds.

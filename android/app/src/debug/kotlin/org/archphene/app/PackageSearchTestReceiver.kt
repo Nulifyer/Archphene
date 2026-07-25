@@ -90,6 +90,11 @@ internal class PackageSearchTestReceiver : BroadcastReceiver() {
                         append("\n\n%DESC%\n")
                         append(packageRecord.description)
                         append("\n\n%CSIZE%\n1\n\n%ISIZE%\n1\n\n%ARCH%\nany\n")
+                        append("\n%FILENAME%\n")
+                        append(packageRecord.name)
+                        append('-')
+                        append(packageRecord.version)
+                        append("-any.pkg.tar.zst\n")
                     }.toByteArray(StandardCharsets.UTF_8)
                 writeTarFile(
                     output,

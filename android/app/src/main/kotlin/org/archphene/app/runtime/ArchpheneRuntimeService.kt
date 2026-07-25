@@ -92,16 +92,23 @@ class ArchpheneRuntimeService : Service() {
         val packagePrimaryActionAvailable: Boolean
             get() =
                 lastResolvedPackage.isNotEmpty() &&
+                    !catalogRefreshActive &&
                     !searchActive &&
                     !packageOperationActive &&
-                    !commandActive
+                    !commandActive &&
+                    !terminalJobRequiresReview(lastResolvedPackage)
 
         val packageRemoveAvailable: Boolean
             get() =
                 removeAvailable &&
+                    !catalogRefreshActive &&
                     !searchActive &&
                     !packageOperationActive &&
-                    !commandActive
+                    !commandActive &&
+                    !terminalJobRequiresReview(lastResolvedPackage)
+
+        val packageRemoveActionLabel: String
+            get() = removeActionLabel
 
         val packageCancellationAvailable: Boolean
             get() = packageOperationActive && packageOperationCancelable
@@ -114,9 +121,11 @@ class ArchpheneRuntimeService : Service() {
                             jobState == NativeRuntime.JOB_CANCELLED
                     ) &&
                     readyHandle != 0L &&
+                    !catalogRefreshActive &&
                     !searchActive &&
                     !packageOperationActive &&
-                    !commandActive
+                    !commandActive &&
+                    recoveryReviewedJobRevision != jobRevision
 
         val packageActivityActionLabel: String
             get() = if (packageCancellationAvailable) "Cancel" else "Review"
@@ -385,7 +394,9 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var lastResolvedInstalledVersion = ""
     @Volatile private var lastResolvedAvailableVersion = ""
     @Volatile private var primaryActionLabel = "Install"
+    @Volatile private var removeActionLabel = "Remove"
     @Volatile private var removeAvailable = false
+    @Volatile private var recoveryReviewedJobRevision = Int.MIN_VALUE
     @Volatile private var commandStatus = "Run an installed Linux command"
     private val shellOutput = BoundedByteRing(SHELL_SCROLLBACK_BYTES)
     private val shellInput = FixedByteQueue(SHELL_INPUT_BYTES)
@@ -2301,6 +2312,7 @@ class ArchpheneRuntimeService : Service() {
         lastResolvedInstalledVersion = ""
         lastResolvedAvailableVersion = ""
         primaryActionLabel = "Install"
+        removeActionLabel = "Remove"
         removeAvailable = false
         searchStatus = "Resolving $normalized and its dependencies"
         Thread(
@@ -2330,13 +2342,39 @@ class ArchpheneRuntimeService : Service() {
                     lastResolvedRepository = resolvedTarget.repository
                     lastResolvedInstalledVersion = installedVersion
                     lastResolvedAvailableVersion = resolvedTarget.version
+                    val recoveryOperation =
+                        if (
+                            normalized == jobPackage &&
+                            (
+                                jobState == NativeRuntime.JOB_FAILED ||
+                                    jobState == NativeRuntime.JOB_CANCELLED
+                            )
+                        ) {
+                            jobOperation
+                        } else {
+                            0
+                        }
                     primaryActionLabel =
                         when {
+                            recoveryOperation == NativeRuntime.JOB_OPERATION_INSTALL ||
+                                recoveryOperation == NativeRuntime.JOB_OPERATION_UPDATE -> "Retry"
                             installedVersion.isEmpty() -> "Install"
                             installedVersion == resolvedTarget.version -> "Verify"
                             else -> "Update"
                         }
                     removeAvailable = installedVersion.isNotEmpty()
+                    removeActionLabel =
+                        if (
+                            removeAvailable &&
+                            recoveryOperation == NativeRuntime.JOB_OPERATION_REMOVE
+                        ) {
+                            "Retry"
+                        } else {
+                            "Remove"
+                        }
+                    if (recoveryOperation != 0) {
+                        recoveryReviewedJobRevision = jobRevision
+                    }
                     val mebibytes = (totalBytes + (1024 * 1024 - 1)) / (1024 * 1024)
                     searchStatus =
                         buildString {
@@ -2356,7 +2394,7 @@ class ArchpheneRuntimeService : Service() {
                             append('\n')
                             append("Dependency closure: ")
                             append(packages.size)
-                            append(" packages · ")
+                            append(if (packages.size == 1) " package · " else " packages · ")
                             append(mebibytes)
                             append(" MiB download")
                             append("\n\nPackages\n")
@@ -2715,6 +2753,7 @@ class ArchpheneRuntimeService : Service() {
                         lastResolvedInstalledVersion = target.version
                         lastResolvedAvailableVersion = target.version
                         primaryActionLabel = "Verify"
+                        removeActionLabel = "Remove"
                         removeAvailable = true
                         searchStatus = withInstalledStatus(searchStatus, target.version)
                         Log.i(
@@ -2911,6 +2950,7 @@ class ArchpheneRuntimeService : Service() {
                         refreshShellChoices(activeHandle)
                         lastResolvedInstalledVersion = ""
                         primaryActionLabel = "Install"
+                        removeActionLabel = "Remove"
                         removeAvailable = false
                         searchStatus = withInstalledStatus(searchStatus, "")
                         record(
@@ -3127,6 +3167,14 @@ class ArchpheneRuntimeService : Service() {
             NativeRuntime.JOB_OPERATION_REMOVE -> "Remove"
             else -> "Package"
         }
+
+    private fun terminalJobRequiresReview(packageName: String): Boolean =
+        packageName == jobPackage &&
+            (
+                jobState == NativeRuntime.JOB_FAILED ||
+                    jobState == NativeRuntime.JOB_CANCELLED
+            ) &&
+            recoveryReviewedJobRevision != jobRevision
 
     private fun downloadPackagePayload(
         activeHandle: Long,
