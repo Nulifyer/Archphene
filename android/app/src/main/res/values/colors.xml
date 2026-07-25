@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="archphene_background">#F4F7F8</color>
+    <color name="archphene_surface">#FFFFFF</color>
+    <color name="archphene_surface_variant">#E7EEF1</color>
+    <color name="archphene_primary">#007FA8</color>
+    <color name="archphene_on_primary">#FFFFFF</color>
+    <color name="archphene_on_surface">#172126</color>
+    <color name="archphene_on_surface_muted">#53636B</color>
+    <color name="archphene_terminal">#111416</color>
+</resources>

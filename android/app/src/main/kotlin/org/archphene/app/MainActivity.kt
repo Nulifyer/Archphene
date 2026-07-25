@@ -7,8 +7,8 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
-import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -60,6 +60,13 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private lateinit var shellAdapter: ArrayAdapter<String>
     private val snapshot = RuntimeSnapshot()
     private val statusText = StringBuilder(128)
+    private var debugRuntimeEvidenceEnabled = false
+    private var debugStatusGeneration = Long.MIN_VALUE
+    private var debugStatusLifecycle = Int.MIN_VALUE
+    private var debugStatusRootReady = false
+    private var debugStatusJobsReady = false
+    private var debugStatusPacmanReady = false
+    private var debugStatusDrainedEvents = Long.MIN_VALUE
     private var runtimeBinder: ArchpheneRuntimeService.LocalBinder? = null
     private var serviceBound = false
     private var frameCallbackActive = false
@@ -86,6 +93,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
 
             override fun onServiceDisconnected(name: ComponentName) {
                 runtimeBinder = null
+                statusView.contentDescription = null
+                debugStatusGeneration = Long.MIN_VALUE
                 statusView.setText(R.string.runtime_unavailable)
                 catalogStatusView.setText(R.string.package_catalog_unavailable)
                 searchStatusView.setText(R.string.package_search_unavailable)
@@ -110,16 +119,18 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         activityGeneration++
+        debugRuntimeEvidenceEnabled =
+            applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
         Log.i(TAG, "Activity created generation=$activityGeneration")
         statusView =
             TextView(this).apply {
                 setText(R.string.runtime_starting)
-                setTextColor(Color.WHITE)
-                textSize = 14f
+                setTextColor(getColor(R.color.archphene_on_primary))
+                textSize = 18f
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(16), dp(4), dp(16), dp(4))
-                setBackgroundColor(Color.rgb(7, 152, 209))
-                maxLines = 3
+                setPadding(dp(20), dp(4), dp(20), dp(4))
+                setBackgroundColor(getColor(R.color.archphene_primary))
+                maxLines = 1
             }
         runtimeSurface = RuntimeSurfaceView(this)
         runtimeSurface.onTerminalSizeChanged = { rows, columns ->
@@ -138,7 +149,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             }
         catalogStatusView =
             TextView(this).apply {
-                setTextColor(Color.WHITE)
+                setTextColor(getColor(R.color.archphene_on_surface))
                 textSize = 14f
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(dp(8), 0, dp(8), 0)
@@ -156,7 +167,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         val catalogRow =
             LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
-                setBackgroundColor(Color.rgb(31, 35, 38))
+                setBackgroundColor(getColor(R.color.archphene_surface_variant))
                 addView(
                     refreshCatalogButton,
                     LinearLayout.LayoutParams(
@@ -264,12 +275,12 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             }
         searchStatusView =
             TextView(this).apply {
-                setTextColor(Color.WHITE)
+                setTextColor(getColor(R.color.archphene_on_surface))
                 textSize = 14f
                 setPadding(dp(16), dp(8), dp(16), dp(8))
                 setText(R.string.package_search_prompt)
                 setTextIsSelectable(true)
-                setBackgroundColor(Color.rgb(24, 28, 31))
+                setBackgroundColor(getColor(R.color.archphene_surface))
             }
         val searchResults =
             ScrollView(this).apply {
@@ -284,12 +295,12 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             }
         jobStatusView =
             TextView(this).apply {
-                setTextColor(Color.WHITE)
+                setTextColor(getColor(R.color.archphene_on_surface))
                 textSize = 14f
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(dp(16), dp(4), dp(16), dp(4))
                 setText(R.string.package_job_empty)
-                setBackgroundColor(Color.rgb(31, 35, 38))
+                setBackgroundColor(getColor(R.color.archphene_surface_variant))
                 maxLines = 2
             }
         cancelButton =
@@ -322,12 +333,12 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             }
         storageStatusView =
             TextView(this).apply {
-                setTextColor(Color.WHITE)
+                setTextColor(getColor(R.color.archphene_on_surface))
                 textSize = 14f
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(dp(16), dp(4), dp(8), dp(4))
                 setText(R.string.document_import_prompt)
-                setBackgroundColor(Color.rgb(24, 28, 31))
+                setBackgroundColor(getColor(R.color.archphene_surface))
                 maxLines = 2
             }
         importButton =
@@ -356,12 +367,12 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             }
         folderStatusView =
             TextView(this).apply {
-                setTextColor(Color.WHITE)
+                setTextColor(getColor(R.color.archphene_on_surface))
                 textSize = 14f
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(dp(16), dp(4), dp(8), dp(4))
                 setText(R.string.folder_grant_disconnected)
-                setBackgroundColor(Color.rgb(31, 35, 38))
+                setBackgroundColor(getColor(R.color.archphene_surface_variant))
                 maxLines = 2
                 ellipsize = TextUtils.TruncateAt.END
             }
@@ -390,7 +401,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         val folderRow =
             LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
-                setBackgroundColor(Color.rgb(31, 35, 38))
+                setBackgroundColor(getColor(R.color.archphene_surface_variant))
                 addView(
                     folderStatusView,
                     LinearLayout.LayoutParams(
@@ -462,11 +473,11 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setBackgroundColor(Color.rgb(31, 35, 38))
+                setBackgroundColor(getColor(R.color.archphene_surface_variant))
                 addView(
                     TextView(this@MainActivity).apply {
                         setText(R.string.installed_shell)
-                        setTextColor(Color.WHITE)
+                        setTextColor(getColor(R.color.archphene_on_surface))
                         textSize = 14f
                         gravity = Gravity.CENTER_VERTICAL
                         setPadding(dp(16), 0, dp(8), 0)
@@ -553,18 +564,19 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             }
         commandStatusView =
             TextView(this).apply {
-                setTextColor(Color.WHITE)
+                setTextColor(getColor(R.color.archphene_on_surface))
                 textSize = 14f
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(dp(16), dp(4), dp(16), dp(4))
                 setText(R.string.linux_command_unavailable)
-                setBackgroundColor(Color.rgb(24, 28, 31))
+                setBackgroundColor(getColor(R.color.archphene_surface))
                 maxLines = 2
                 setTextIsSelectable(true)
             }
         managerPanel =
             LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
+                setBackgroundColor(getColor(R.color.archphene_background))
                 addView(
                     catalogRow,
                     LinearLayout.LayoutParams(
@@ -623,7 +635,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     statusView,
                     LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
-                        dp(72),
+                        dp(64),
                     ),
                 )
                 addView(
@@ -794,6 +806,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         dispatchPendingFolderGrant()
         val handle = runtimeBinder?.runtimeHandle ?: 0L
         if (!snapshot.read(handle)) {
+            statusView.contentDescription = null
+            debugStatusGeneration = Long.MIN_VALUE
             setTextIfChanged(statusView, getString(R.string.runtime_starting))
             setTextIfChanged(
                 catalogStatusView,
@@ -826,23 +840,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             updatePackageActions()
             return
         }
-        statusText.setLength(0)
-        statusText
-            .append("Rust runtime ")
-            .append(snapshot.generation)
-            .append(" · state ")
-            .append(snapshot.lifecycle)
-            .append('\n')
-            .append("Root ")
-            .append(if (snapshot.archRootReady) "ready" else "pending")
-            .append(" · jobs ")
-            .append(if (snapshot.jobStoreReady) "ready" else "pending")
-            .append('\n')
-            .append("Pacman ")
-            .append(if (snapshot.packageRuntimeReady) "ready" else "pending")
-            .append(" · events ")
-            .append(snapshot.drainedEvents)
-        setTextIfChanged(statusView, statusText)
+        updateDebugRuntimeEvidence()
+        setTextIfChanged(statusView, getString(R.string.runtime_ready))
         setTextIfChanged(
             catalogStatusView,
             runtimeBinder?.packageCatalogStatus?.let { status ->
@@ -886,6 +885,48 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         )
         updatePackageActions()
         maybeShowStorageOnboarding()
+    }
+
+    private fun updateDebugRuntimeEvidence() {
+        if (!debugRuntimeEvidenceEnabled) {
+            return
+        }
+        val rootReady = snapshot.archRootReady
+        val jobsReady = snapshot.jobStoreReady
+        val pacmanReady = snapshot.packageRuntimeReady
+        if (
+            debugStatusGeneration == snapshot.generation &&
+            debugStatusLifecycle == snapshot.lifecycle &&
+            debugStatusRootReady == rootReady &&
+            debugStatusJobsReady == jobsReady &&
+            debugStatusPacmanReady == pacmanReady &&
+            debugStatusDrainedEvents == snapshot.drainedEvents
+        ) {
+            return
+        }
+        statusText.setLength(0)
+        statusText
+            .append("Rust runtime ")
+            .append(snapshot.generation)
+            .append(" · state ")
+            .append(snapshot.lifecycle)
+            .append('\n')
+            .append("Root ")
+            .append(if (rootReady) "ready" else "pending")
+            .append(" · jobs ")
+            .append(if (jobsReady) "ready" else "pending")
+            .append('\n')
+            .append("Pacman ")
+            .append(if (pacmanReady) "ready" else "pending")
+            .append(" · events ")
+            .append(snapshot.drainedEvents)
+        statusView.contentDescription = statusText.toString()
+        debugStatusGeneration = snapshot.generation
+        debugStatusLifecycle = snapshot.lifecycle
+        debugStatusRootReady = rootReady
+        debugStatusJobsReady = jobsReady
+        debugStatusPacmanReady = pacmanReady
+        debugStatusDrainedEvents = snapshot.drainedEvents
     }
 
     private fun maybeShowStorageOnboarding() {

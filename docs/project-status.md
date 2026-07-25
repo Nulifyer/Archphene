@@ -25,6 +25,16 @@ restart. The private root currently establishes conventional `/usr`, `/etc`,
 not yet contain a complete base userspace, but verified package closures now
 populate it incrementally through pacman's normal local database.
 
+The greenfield manager now has a dependency-free theme baseline: all surfaces,
+text, selectors, system bars, and action states use paired Android light/dark
+resources; native actions use sentence case; and the visible header reports
+user-facing readiness rather than internal native handles. Debug builds retain
+the bounded runtime evidence used by lifecycle gates without placing it in the
+visible header. Reversible light/dark semantic and full-device visual gates,
+plus clean-data lifecycle gates, pass on the emulator and Samsung. The dense
+single-screen manager layout is still a scaffold and remains scheduled for
+responsive Packages, Files, and Terminal navigation.
+
 Visible files in the shared `/home/archphene` are now available to Android
 Files, system pickers, and explicitly granted Android consumers through an
 exported `DocumentsProvider` protected by Android's `MANAGE_DOCUMENTS`

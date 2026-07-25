@@ -8,5 +8,5 @@
     android:maxLines="1"
     android:paddingStart="12dp"
     android:paddingEnd="36dp"
-    android:textColor="#FFFFFF"
+    android:textColor="@color/archphene_on_surface"
     android:textSize="16sp" />

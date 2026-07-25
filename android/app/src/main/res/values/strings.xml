@@ -2,6 +2,7 @@
 <resources>
     <string name="app_name">Archphene</string>
     <string name="runtime_starting">Starting the shared Arch runtime…</string>
+    <string name="runtime_ready">Archphene is ready</string>
     <string name="runtime_unavailable">Shared Arch runtime unavailable</string>
     <string name="package_catalog_unavailable">Package catalog unavailable</string>
     <string name="package_search_unavailable">Package search unavailable</string>

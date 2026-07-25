@@ -2,10 +2,18 @@
 <resources>
     <style name="Theme.Archphene" parent="@android:style/Theme.Material.Light.NoActionBar">
         <item name="android:fontFamily">sans</item>
+        <item name="android:buttonStyle">@style/Widget.Archphene.Button</item>
+        <item name="android:colorAccent">@color/archphene_primary</item>
         <item name="android:windowActionModeOverlay">true</item>
         <item name="android:windowLightStatusBar">true</item>
-        <item name="android:navigationBarColor">#F5F7F8</item>
-        <item name="android:statusBarColor">#F5F7F8</item>
-        <item name="android:windowBackground">#F5F7F8</item>
+        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:navigationBarColor">@color/archphene_background</item>
+        <item name="android:statusBarColor">@color/archphene_background</item>
+        <item name="android:windowBackground">@color/archphene_background</item>
+    </style>
+
+    <style name="Widget.Archphene.Button" parent="@android:style/Widget.Material.Button">
+        <item name="android:textAllCaps">false</item>
+        <item name="android:minHeight">48dp</item>
     </style>
 </resources>

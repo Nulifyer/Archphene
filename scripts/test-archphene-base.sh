@@ -79,11 +79,11 @@ fi
 
 first_pid="$(archphene_android_pid "$package")"
 [[ -n "$first_pid" ]] || archphene_die "base app process is missing after launch"
-archphene_wait_ui 'Rust runtime [0-9]+.*state 2.*Root ready.*jobs ready.*Pacman ready.*events [0-9]+' \
+archphene_wait_ui 'content-desc="Rust runtime [0-9]+.*state 2.*Root ready.*jobs ready.*Pacman ready.*events [0-9]+"' \
   "archphene-base-$serial" 15
 first_generation="$(python3 -c '
 import re, sys
-match = re.search(r"text=\"Rust runtime ([0-9]+)", sys.stdin.read())
+match = re.search(r"content-desc=\"Rust runtime ([0-9]+)", sys.stdin.read())
 if match is None:
     raise SystemExit("missing first runtime generation")
 print(match.group(1))
@@ -138,11 +138,11 @@ fi
 rotation_changed=true
 archphene_adb_run shell settings put system accelerometer_rotation 0 >/dev/null
 archphene_adb_run shell settings put system user_rotation "$test_rotation" >/dev/null
-archphene_wait_ui 'Rust runtime [0-9]+.*state 2.*Root ready.*jobs ready.*Pacman ready.*events [0-9]+' \
+archphene_wait_ui 'content-desc="Rust runtime [0-9]+.*state 2.*Root ready.*jobs ready.*Pacman ready.*events [0-9]+"' \
   "archphene-base-rotation-$serial" 15
 rotation_generation="$(python3 -c '
 import re, sys
-match = re.search(r"text=\"Rust runtime ([0-9]+)", sys.stdin.read())
+match = re.search(r"content-desc=\"Rust runtime ([0-9]+)", sys.stdin.read())
 if match is None:
     raise SystemExit("missing rotated runtime generation")
 print(match.group(1))
@@ -157,7 +157,7 @@ archphene_adb_run shell settings put system accelerometer_rotation \
   "$initial_accelerometer_rotation" >/dev/null
 archphene_adb_run shell settings put system user_rotation "$initial_user_rotation" >/dev/null
 rotation_changed=false
-archphene_wait_ui 'Rust runtime [0-9]+.*state 2.*Root ready.*jobs ready.*Pacman ready.*events [0-9]+' \
+archphene_wait_ui 'content-desc="Rust runtime [0-9]+.*state 2.*Root ready.*jobs ready.*Pacman ready.*events [0-9]+"' \
   "archphene-base-rotation-restored-$serial" 15
 
 archphene_adb_run exec-out screencap -p >"$output_dir/$serial.png"
@@ -175,11 +175,11 @@ archphene_adb_run shell input keyevent KEYCODE_HOME >/dev/null
 sleep 0.5
 resume="$(archphene_adb_run shell am start -W -n "$activity" | tr -d '\r')"
 [[ "$resume" == *"Status: ok"* ]] || archphene_die "base app did not resume: $resume"
-archphene_wait_ui 'Rust runtime [0-9]+.*state 2.*Root ready.*jobs ready.*Pacman ready.*events [0-9]+' \
+archphene_wait_ui 'content-desc="Rust runtime [0-9]+.*state 2.*Root ready.*jobs ready.*Pacman ready.*events [0-9]+"' \
   "archphene-base-resume-$serial" 15
 second_generation="$(python3 -c '
 import re, sys
-match = re.search(r"text=\"Rust runtime ([0-9]+)", sys.stdin.read())
+match = re.search(r"content-desc=\"Rust runtime ([0-9]+)", sys.stdin.read())
 if match is None:
     raise SystemExit("missing resumed runtime generation")
 print(match.group(1))
@@ -197,7 +197,7 @@ restart="$(archphene_adb_run shell am start -W -n "$activity" | tr -d '\r')"
   archphene_die "base app did not restart for root reuse: $restart"
 archphene_wait_log 'root directories created=0' 15 >/dev/null
 archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 15 >/dev/null
-archphene_wait_ui 'Rust runtime [0-9]+.*state 2.*Root ready.*jobs ready.*Pacman ready.*events [0-9]+' \
+archphene_wait_ui 'content-desc="Rust runtime [0-9]+.*state 2.*Root ready.*jobs ready.*Pacman ready.*events [0-9]+"' \
   "archphene-base-root-reuse-$serial" 15
 archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null
 archphene_wait_log 'Shared Rust runtime stopped' 15 >/dev/null

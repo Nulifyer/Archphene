@@ -3,11 +3,11 @@
     android:id="@android:id/text1"
     android:layout_width="match_parent"
     android:layout_height="48dp"
-    android:background="#1F2326"
+    android:background="@color/archphene_surface_variant"
     android:ellipsize="end"
     android:gravity="center_vertical"
     android:maxLines="1"
     android:paddingStart="16dp"
     android:paddingEnd="16dp"
-    android:textColor="#FFFFFF"
+    android:textColor="@color/archphene_on_surface"
     android:textSize="16sp" />
