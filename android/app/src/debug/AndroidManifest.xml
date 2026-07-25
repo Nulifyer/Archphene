@@ -15,5 +15,8 @@
         <receiver
             android:name=".InstalledPackagesTestReceiver"
             android:exported="true" />
+        <receiver
+            android:name=".PackageSearchTestReceiver"
+            android:exported="true" />
     </application>
 </manifest>

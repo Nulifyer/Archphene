@@ -39,6 +39,15 @@ internal class InstalledPackageSnapshot(
     val revision: Int,
 )
 
+internal class AvailablePackageSnapshot(
+    val repositories: Array<String>,
+    val names: Array<String>,
+    val versions: Array<String>,
+    val descriptions: Array<String>,
+    val status: String,
+    val revision: Int,
+)
+
 class ArchpheneRuntimeService : Service() {
     inner class LocalBinder : Binder() {
         val runtimeHandle: Long
@@ -53,6 +62,9 @@ class ArchpheneRuntimeService : Service() {
         internal val installedPackages: InstalledPackageSnapshot
             get() = installedPackageSnapshot
 
+        internal val availablePackages: AvailablePackageSnapshot
+            get() = availablePackageSnapshot
+
         val packageJobStatus: String
             get() = jobStatus
 
@@ -61,6 +73,12 @@ class ArchpheneRuntimeService : Service() {
 
         val packageJobProgress: Int
             get() = jobProgress
+
+        val packageJobState: Int
+            get() = jobState
+
+        val packageJobRevision: Int
+            get() = jobRevision
 
         val packageJobMessage: String
             get() = jobMessage
@@ -300,6 +318,16 @@ class ArchpheneRuntimeService : Service() {
             "Loading installed packages…",
             0,
         )
+    @Volatile
+    private var availablePackageSnapshot =
+        AvailablePackageSnapshot(
+            emptyArray(),
+            emptyArray(),
+            emptyArray(),
+            emptyArray(),
+            "Search the official Arch repositories",
+            0,
+        )
     @Volatile private var packageOperationActive = false
     @Volatile private var packageOperationCancelable = false
     @Volatile private var packageCancellationRequested = false
@@ -332,7 +360,9 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var jobStatus = "No package transaction"
     @Volatile private var jobPackage = ""
     @Volatile private var jobOperation = 0
+    @Volatile private var jobState = 0
     @Volatile private var jobProgress = 0
+    @Volatile private var jobRevision = 0
     @Volatile private var jobMessage = ""
     @Volatile private var jobActivityLabel = ""
     @Volatile private var lastResolvedPackage = ""
@@ -618,6 +648,7 @@ class ArchpheneRuntimeService : Service() {
         private const val MAX_SHELL_COLUMNS = 400
         private const val SHELL_CHOICE_LIMIT = 8
         private const val SHELL_FIELD_LIMIT = 64
+        private const val AVAILABLE_PACKAGE_LIMIT = 100
         private const val SHELL_PREFERENCES = "terminal"
         private const val SHELL_PREFERENCE_ID = "shared_shell_id"
         private const val SESSION_NOTIFICATION_ID = 0x4152
@@ -2110,10 +2141,12 @@ class ArchpheneRuntimeService : Service() {
             }
         ) {
             searchStatus = "Enter 2–128 package-name characters"
+            publishAvailablePackageStatus(searchStatus)
             return false
         }
         searchActive = true
         searchStatus = "Searching for $normalized"
+        publishAvailablePackageStatus(searchStatus)
         Thread(
             {
                 try {
@@ -2136,27 +2169,18 @@ class ArchpheneRuntimeService : Service() {
                     }
                     if (outputLength == 0) {
                         searchStatus = "No official packages match $normalized"
+                        publishAvailablePackageStatus(searchStatus)
                     } else {
                         val bytes = ByteArray(outputLength)
                         outputBuffer.position(0)
                         outputBuffer.get(bytes)
-                        searchStatus =
-                            String(bytes, StandardCharsets.UTF_8)
-                                .lineSequence()
-                                .mapNotNull { line ->
-                                    val fields = line.split('\t', limit = 4)
-                                    if (fields.size != 4) {
-                                        null
-                                    } else {
-                                        "${fields[0]}/${fields[1]} ${fields[2]}\n" +
-                                            "  ${fields[3]}"
-                                    }
-                                }.joinToString("\n")
-                                .ifEmpty { "No official packages match $normalized" }
+                        publishAvailablePackages(bytes, normalized)
+                        searchStatus = availablePackageSnapshot.status
                     }
                 } catch (error: Exception) {
                     searchStatus =
                         "Package search failed: ${error.message ?: error.javaClass.simpleName}"
+                    publishAvailablePackageStatus(searchStatus)
                     Log.e(TAG, "Package search failed", error)
                 } finally {
                     searchActive = false
@@ -2165,6 +2189,76 @@ class ArchpheneRuntimeService : Service() {
             "ArchpheneSearch",
         ).start()
         return true
+    }
+
+    private fun publishAvailablePackageStatus(status: String) {
+        val previousRevision = availablePackageSnapshot.revision
+        availablePackageSnapshot =
+            AvailablePackageSnapshot(
+                emptyArray(),
+                emptyArray(),
+                emptyArray(),
+                emptyArray(),
+                status,
+                previousRevision + 1,
+            )
+    }
+
+    private fun publishAvailablePackages(
+        bytes: ByteArray,
+        query: String,
+    ) {
+        val repositories = ArrayList<String>()
+        val names = ArrayList<String>()
+        val versions = ArrayList<String>()
+        val descriptions = ArrayList<String>()
+        String(bytes, StandardCharsets.UTF_8)
+            .trimEnd('\n')
+            .lineSequence()
+            .forEach { line ->
+                val fields = line.split('\t', limit = 4)
+                if (
+                    fields.size != 4 ||
+                    (fields[0] != "core" && fields[0] != "extra") ||
+                    fields[1].isEmpty() ||
+                    fields[1].length > 128 ||
+                    fields[1].any { character ->
+                        character.code > 0x7f ||
+                            (!character.isLetterOrDigit() && character !in "@._+-")
+                    } ||
+                    fields[2].isEmpty() ||
+                    fields[2].length > 128 ||
+                    fields[2].any(Char::isWhitespace) ||
+                    fields[3].length > 512 ||
+                    fields[3].any { character ->
+                        character == '\u0000' || character == '\r'
+                    } ||
+                    names.contains(fields[1]) ||
+                    names.size >= AVAILABLE_PACKAGE_LIMIT
+                ) {
+                    throw IllegalStateException("Invalid native package-search response")
+                }
+                repositories.add(fields[0])
+                names.add(fields[1])
+                versions.add(fields[2])
+                descriptions.add(fields[3])
+            }
+        val previousRevision = availablePackageSnapshot.revision
+        val status =
+            if (names.isEmpty()) {
+                "No official packages match $query"
+            } else {
+                "${names.size} official packages match $query"
+            }
+        availablePackageSnapshot =
+            AvailablePackageSnapshot(
+                repositories.toTypedArray(),
+                names.toTypedArray(),
+                versions.toTypedArray(),
+                descriptions.toTypedArray(),
+                status,
+                previousRevision + 1,
+            )
     }
 
     @Synchronized
@@ -2950,11 +3044,13 @@ class ArchpheneRuntimeService : Service() {
     ) {
         jobPackage = packageName
         jobOperation = operation
+        jobState = state
         jobProgress = progress.coerceIn(0, 100)
         jobMessage = message
         jobActivityLabel =
             "${jobOperationName(operation)} · ${jobStateName(state)} · $jobProgress%"
         jobStatus = "$packageName · ${jobStateName(state)} · $jobProgress%\n$message"
+        jobRevision++
     }
 
     private fun boundedJobMessage(message: String): String {
@@ -3666,9 +3762,11 @@ class ArchpheneRuntimeService : Service() {
         if (length == 0) {
             jobPackage = ""
             jobOperation = 0
+            jobState = 0
             jobProgress = 0
             jobMessage = ""
             jobActivityLabel = ""
+            jobRevision++
             return "No package transaction"
         }
         val bytes = ByteArray(length)

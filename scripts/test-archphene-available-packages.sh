@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source "$(dirname "$0")/lib/android-test.sh"
+
+serial=
+apk=
+while (($#)); do
+  case "$1" in
+    --serial) serial="${2:?missing value for --serial}"; shift 2 ;;
+    --apk) apk="${2:?missing value for --apk}"; shift 2 ;;
+    -h|--help)
+      echo "usage: $0 --serial SERIAL --apk PATH"
+      exit 0
+      ;;
+    *) archphene_die "unknown argument: $1" ;;
+  esac
+done
+[[ -n "$serial" ]] || archphene_die "--serial is required"
+[[ -n "$apk" ]] || archphene_die "--apk is required"
+
+archphene_test_init "$serial"
+archphene_require_file "$apk"
+package=org.archphene.app.debug
+activity="$package/org.archphene.app.MainActivity"
+receiver="$package/org.archphene.app.PackageSearchTestReceiver"
+action=org.archphene.app.debug.action.SEED_PACKAGE_SEARCH
+job_receiver="$package/org.archphene.app.PackageJobTestReceiver"
+job_action=org.archphene.app.debug.action.SEED_PACKAGE_JOB
+output_dir="$ARCHPHENE_ROOT/tooling/build/available-packages"
+mkdir -p "$output_dir"
+serial_slug="${serial,,}"
+serial_slug="${serial_slug//[^a-z0-9]/-}"
+initial_mode="$(
+  archphene_adb_run shell cmd uimode night |
+    sed -n 's/^Night mode: //p' |
+    tr -d '\r'
+)"
+[[ "$initial_mode" =~ ^(yes|no|auto|custom_schedule|custom_bedtime)$ ]] ||
+  archphene_die "could not determine the original Android night mode: $initial_mode"
+
+cleanup() {
+  archphene_adb_run shell cmd uimode night "$initial_mode" >/dev/null 2>&1 || true
+  archphene_adb_run shell am force-stop "$package" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+archphene_adb_run install -r "$apk" >/dev/null
+archphene_adb_run shell am force-stop "$package" >/dev/null
+archphene_adb_run shell pm clear "$package" >/dev/null
+archphene_adb_run logcat -c
+archphene_adb_run shell am broadcast \
+  -f 0x20 \
+  -n "$receiver" \
+  -a "$action" \
+  --es token "search-$serial_slug" >/dev/null
+archphene_wait_log \
+  "Seeded package search token=search-$serial_slug" 20 \
+  "ArchphenePackageSearchProbe:V *:S" >/dev/null
+archphene_adb_run shell am broadcast \
+  -f 0x20 \
+  -n "$job_receiver" \
+  -a "$job_action" \
+  --es token "search-job-$serial_slug" \
+  --es package dotnet-sdk \
+  --es state failed >/dev/null
+archphene_wait_log \
+  "Seeded package job state=failed token=search-job-$serial_slug" 20 \
+  "ArchphenePackageJobProbe:V *:S" >/dev/null
+
+archphene_adb_run shell am start -W -n "$activity" >/dev/null
+archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 20 >/dev/null
+archphene_skip_storage_onboarding "available-packages-onboarding-$serial"
+ui="$ARCHPHENE_UI"
+archphene_tap_ui_pattern \
+  "$ui" 'text="Package name"[^>]*class="android.widget.EditText"' "Package name"
+archphene_adb_run shell input text dotnet
+ui="$(archphene_capture_ui "available-packages-query-$serial")"
+archphene_tap_ui_pattern \
+  "$ui" 'text="Search"[^>]*class="android.widget.Button"' Search
+
+archphene_wait_ui_exact_text \
+  "3 official packages match dotnet" "available-packages-count-$serial" 20
+archphene_wait_ui_exact_text \
+  "dotnet-runtime" "available-packages-runtime-$serial" 15
+archphene_wait_ui_exact_text \
+  "dotnet-sdk" "available-packages-sdk-$serial" 15
+archphene_wait_ui_exact_text \
+  "dotnet-sdk-preview" "available-packages-preview-$serial" 15
+archphene_wait_ui_exact_text \
+  "The .NET SDK" "available-packages-description-$serial" 15
+archphene_wait_ui_exact_text \
+  "extra" "available-packages-repository-$serial" 15
+archphene_wait_ui_exact_text \
+  "Install · Failed · 0%" "available-packages-job-state-$serial" 15
+archphene_adb_run exec-out screencap -p >"$output_dir/$serial-light.png"
+
+ui="$ARCHPHENE_UI"
+archphene_tap_ui_pattern \
+  "$ui" 'text="dotnet-sdk"[^>]*class="android.widget.TextView"' "dotnet-sdk"
+archphene_wait_ui \
+  'text="dotnet-sdk"[^>]*class="android.widget.EditText"' \
+  "available-packages-selected-$serial" 15
+archphene_wait_ui \
+  'text="Search results"[^>]*class="android.widget.Button"[^>]*selected="true"' \
+  "available-packages-details-mode-$serial" 15
+ui="$ARCHPHENE_UI"
+archphene_tap_ui_pattern \
+  "$ui" 'text="Search results"[^>]*class="android.widget.Button"' "Search results"
+archphene_wait_ui_exact_text \
+  "3 official packages match dotnet" "available-packages-return-$serial" 15
+
+archphene_adb_run shell cmd uimode night yes >/dev/null
+archphene_wait_ui_exact_text \
+  "3 official packages match dotnet" "available-packages-dark-$serial" 20
+archphene_wait_ui_exact_text \
+  "dotnet-sdk" "available-packages-dark-sdk-$serial" 15
+archphene_wait_ui \
+  'text="dotnet"[^>]*class="android.widget.EditText"' \
+  "available-packages-dark-query-$serial" 15
+archphene_adb_run exec-out screencap -p >"$output_dir/$serial-dark.png"
+
+fatal_log="$(archphene_adb_run logcat -d -v brief \
+  -s AndroidRuntime:E libc:F '*:S' 2>/dev/null || true)"
+[[ "$fatal_log" != *"FATAL EXCEPTION"* && "$fatal_log" != *"Fatal signal"* ]] ||
+  archphene_die "Available package list emitted a fatal runtime error: $fatal_log"
+
+trap - EXIT
+cleanup
+archphene_note "Archphene available package list passed on $serial"
+archphene_note "  Real local pacman search, structured rows, selection, recreation, and theme passed"
+archphene_note "  Full-device screenshots: $output_dir/$serial-{light,dark}.png"

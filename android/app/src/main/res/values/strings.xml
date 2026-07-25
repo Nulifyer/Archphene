@@ -10,6 +10,7 @@
     <string name="search_results">Search results</string>
     <string name="installed_packages_loading">Loading installed packages…</string>
     <string name="installed_packages_unavailable">Installed packages unavailable</string>
+    <string name="available_packages_unavailable">Package search unavailable</string>
     <string name="package_reason_explicit">Explicit</string>
     <string name="package_reason_dependency">Dependency</string>
     <string name="files">Files</string>

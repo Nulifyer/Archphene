@@ -73,8 +73,22 @@ returns to the installed view. A debug-only 67-package local-database fixture
 proves the second native page, virtualized scrolling, result-mode switching,
 light/dark appearance, manager restart, scoped logs, and visually inspected
 full-device screenshots on the emulator and Samsung without package downloads.
-Structured available-package rows, merging a newly queued operation into its
-row, live phases, retry, and recovery UX remain open.
+
+Official search results now use a separate revisioned Binder snapshot and
+virtualized Android list rather than joining the bounded Rust response into one
+large TextView. Repository, name, exact version, and description remain
+separate fields; selecting a row fills the exact package and opens details,
+while returning to Search results restores the submitted query. Matching
+durable package activity replaces the row's repository label with its operation
+and state, and the adapter can append an unmatched active job immediately from
+the existing journal fields without reparsing display strings. A debug-only
+dependency-free tar/gzip writer generates minimal real core/extra pacman
+databases inside app storage. Pacman itself searches those catalogs, and both
+exact ABIs pass three-result `dotnet` rows, row selection, retained query and
+results across theme recreation, durable Failed overlay, scoped fatal logs, and
+visually inspected full-device light/dark screenshots without network access.
+The live Queued timing path, full populated details, every phase, and
+retry/recovery actions still require their own deterministic gate.
 
 Visible files in the shared `/home/archphene` are now available to Android
 Files, system pickers, and explicitly granted Android consumers through an
