@@ -7,8 +7,11 @@ loader_path="$(readlink -f /bin/echo)"
 rm -rf "$root"
 mkdir -p "$root/usr/share/archphene-test"
 mkdir -p "$root/usr/lib/locale/C.utf8"
+mkdir -p "$root/usr/lib/archphene-example"
 printf expected > "$root/usr/share/archphene-test/value"
 printf expected-locale > "$root/usr/lib/locale/C.utf8/LC_CTYPE"
+printf nested-executable > "$root/usr/lib/archphene-example/example"
+chmod 500 "$root/usr/lib/archphene-example/example"
 
 gcc -shared -fPIC -O2 -Wall -Wextra -Werror \
   -o "$output" native/archphene-glibc-path-bridge/path_bridge.c -ldl
@@ -95,6 +98,62 @@ spawn_path_output="$(
   "$root/exec-probe" --spawn-path cat
 )"
 test "$spawn_path_output" = "--library-path /lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu --argv0 cat $root/commands/cat bridge-arg"
+nested_access_output="$(
+  ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+  "$root/exec-probe" --access /usr/lib/archphene-example/example
+)"
+test "$nested_access_output" = runtime-command-accessible
+nested_exec_output="$(
+  ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+  ARCHPHENE_RUNTIME_LOADER="$loader_path" \
+  ARCHPHENE_RUNTIME_LIB=/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu \
+  "$root/exec-probe" --direct /usr/lib/archphene-example/example
+)"
+test "$nested_exec_output" = "--library-path /lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu --argv0 example $root/usr/lib/archphene-example/example bridge-arg"
+nested_spawn_output="$(
+  ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+  ARCHPHENE_RUNTIME_LOADER="$loader_path" \
+  ARCHPHENE_RUNTIME_LIB=/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu \
+  "$root/exec-probe" --spawn-path /usr/lib/archphene-example/example
+)"
+test "$nested_spawn_output" = "--library-path /lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu --argv0 example $root/usr/lib/archphene-example/example bridge-arg"
+host_loader="$(gcc -print-file-name=ld-linux-x86-64.so.2)"
+host_libc="$(gcc -print-file-name=libc.so.6)"
+test -f "$host_loader"
+test -f "$host_libc"
+cp "$(readlink -f /bin/echo)" "$root/usr/lib/archphene-example/real-example"
+chmod 500 "$root/usr/lib/archphene-example/real-example"
+real_nested_output="$(
+  ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+  ARCHPHENE_RUNTIME_LOADER="$host_loader" \
+  ARCHPHENE_RUNTIME_LIB="$(dirname "$host_libc")" \
+  "$root/exec-probe" --direct /usr/lib/archphene-example/real-example
+)"
+test "$real_nested_output" = bridge-arg
+ln -s /bin/sh "$root/usr/lib/archphene-example/escape"
+set +e
+ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+ARCHPHENE_RUNTIME_LOADER="$loader_path" \
+ARCHPHENE_RUNTIME_LIB=/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu \
+  "$root/exec-probe" --direct /usr/lib/archphene-example/escape \
+  >"$root/escaped-nested-command.out" 2>&1
+escaped_nested_status=$?
+set -e
+test "$escaped_nested_status" -eq 2
+grep -qx 'execlp: No such file or directory' "$root/escaped-nested-command.out"
+cp "$root/usr/lib/archphene-example/example" \
+  "$root/usr/lib/archphene-example/writable"
+chmod 520 "$root/usr/lib/archphene-example/writable"
+set +e
+ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+ARCHPHENE_RUNTIME_LOADER="$loader_path" \
+ARCHPHENE_RUNTIME_LIB=/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu \
+  "$root/exec-probe" --direct /usr/lib/archphene-example/writable \
+  >"$root/writable-nested-command.out" 2>&1
+writable_nested_status=$?
+set -e
+test "$writable_nested_status" -eq 2
+grep -qx 'execlp: No such file or directory' "$root/writable-nested-command.out"
 set +e
 ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
 ARCHPHENE_RUNTIME_LOADER="$loader_path" \

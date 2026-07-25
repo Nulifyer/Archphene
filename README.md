@@ -46,11 +46,15 @@ physical Samsung coverage for:
 - an authenticated generated launcher running package-installed Foot from the
   shared AArch64 root, with private Wayland, density-aware logical output,
   physical-resolution subsurface composition, safe Android insets, Samsung IME
-  text, clipboard, and live portrait/landscape Surface replacement.
+  text, clipboard, and live portrait/landscape Surface replacement;
+- generic shared-root command resolution for installed `/usr/bin` tools and
+  verified package-owned nested executables under paths such as
+  `/usr/lib/<app>`, with real ELF and physical Samsung coverage.
 
 Icon/capability derivation, x86_64 repetition of the real-client gate,
-zero-copy/dmabuf presentation, broader toolkit coverage, and the remaining
-production launcher capabilities are still open.
+fake-root absolute-symlink and nested-script handling, zero-copy/dmabuf
+presentation, broader toolkit coverage, and the remaining production launcher
+capabilities are still open.
 
 ## Historical bridge evidence
 

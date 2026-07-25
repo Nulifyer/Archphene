@@ -252,8 +252,10 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
 - [x] Generate, update, reconcile, and remove Android launcher wrappers from desktop entries without deleting shared package or user state incorrectly.
 - [ ] Define ownership when several packages provide desktop entries or depend on the same files.
 - [ ] Handle package upgrades, downgrades, replacements, hooks, interrupted transactions, rollback, orphan cleanup, and low-storage failures.
-- [ ] Decide the bounded policy for publishing dependency commands to app processes; do not add package-specific exceptions.
-- [ ] Extend the verified runtime model to package-owned `/usr/lib/<app>` trees, data, executables, and valid symlinks. This currently blocks Code/Electron.
+- [x] Use one generic command policy instead of publishing package-specific exceptions: PATH lookup resolves installed shared-root `/usr/bin` commands, while exact absolute execution may resolve a verified package-owned executable anywhere inside the shared Arch root. Android host commands and root escapes remain unavailable.
+- [ ] Complete the verified runtime model for package-owned `/usr/lib/<app>` trees, data, scripts, and valid symlinks.
+  - [x] Resolve regular nested executables through the verified loader only when their canonical path remains inside the shared root, their executable mode is present, and they are not group/world writable. Host tests cover real ELF execution, spawn, access, escape, and writable-file rejection; a full-device Samsung gate proves a package-owned `/usr/bin` Bash wrapper launching an unmodified ELF from `/usr/lib`.
+  - [ ] Resolve valid fake-root absolute symlinks without interpreting them against Android's host root, support bounded nested shebang programs, and repeat the gate on the x86_64 emulator.
 - [ ] Cache unchanged closure analysis and wrapper inputs so repeat installs do not rescan large package trees.
 - [ ] Complete and validate the separate 16 KB-aligned x86_64 package/runtime strategy before enabling transactions there.
 

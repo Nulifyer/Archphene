@@ -249,6 +249,20 @@ workspace, 48 compositor tests, glibc path/exec/socket/identity probes, runtime
 source contract, exact AArch64 build/install, scoped fatal-log check, and
 full-device portrait/IME/landscape inspection pass.
 
+The shared command boundary now applies one package-independent policy to
+dependency programs. Bare command lookup resolves the installed shared-root
+`/usr/bin`; exact absolute execution may resolve a regular executable anywhere
+inside the shared Arch root. The bridge canonicalizes the target, rejects root
+escape and parent traversal, requires executable package mode, and rejects
+group/world-writable files before invoking the verified loader. Host probes
+cover access, exec, spawn, a real nested ELF, escaping symlinks, and writable
+targets. Both exact-ABI APKs build with the refreshed bridge. On the physical
+AArch64 Samsung, a root-contained Bash wrapper under `/usr/bin` launched an
+unmodified Bash ELF copied to `/usr/lib/archphene-bridge-test`, returned its
+real AArch64 version through the manager UI, emitted no fatal log, and left no
+fixture behind. Fake-root absolute symlinks, nested shebang programs, and the
+x86_64 device repetition remain open.
+
 The equivalent real-client gate remains open on the x86_64 emulator, which is
 not currently attached. HOME/resume, deliberate client crash/descendant
 cleanup, non-Latin composing input, non-text clipboard, pointer lock, and
