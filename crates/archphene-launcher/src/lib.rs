@@ -340,6 +340,26 @@ impl LauncherRegistry {
             .find(|descriptor| descriptor.android_package == android_package)
     }
 
+    pub fn authorize_published(
+        &self,
+        android_package: &str,
+        descriptor_id_hex: &str,
+        generation: u64,
+    ) -> Option<&LauncherDescriptor> {
+        let descriptor = self.descriptor_for_package(android_package)?;
+        let expected_id = descriptor.descriptor_id_hex();
+        if descriptor.status != WrapperStatus::Current
+            || !descriptor.desired_present
+            || descriptor.desired_generation != generation
+            || descriptor.published_generation != generation
+            || descriptor.pending_generation != 0
+            || descriptor_id_hex.as_bytes() != expected_id
+        {
+            return None;
+        }
+        Some(descriptor)
+    }
+
     pub fn mark_building(
         &mut self,
         arch_root: &Path,
@@ -474,6 +494,38 @@ impl LauncherRegistry {
             self.descriptors[index].pending_generation = 0;
             self.descriptors[index].status = WrapperStatus::Failed;
         }
+        self.advance_and_store(arch_root)
+    }
+
+    pub fn mark_template_stale(
+        &mut self,
+        arch_root: &Path,
+        android_package: &str,
+        installed_generation: u64,
+    ) -> Result<(), LauncherRegistryError> {
+        let replacement_generation = self
+            .generation
+            .checked_add(1)
+            .filter(|generation| *generation <= i32::MAX as u64)
+            .ok_or(LauncherRegistryError::LimitExceeded)?;
+        let descriptor = self
+            .descriptors
+            .iter_mut()
+            .find(|descriptor| descriptor.android_package == android_package)
+            .ok_or(LauncherRegistryError::InvalidTransition)?;
+        if !descriptor.desired_present
+            || descriptor.desired_generation != installed_generation
+            || descriptor.published_generation != installed_generation
+            || matches!(
+                descriptor.status,
+                WrapperStatus::NeedsRemoval | WrapperStatus::AwaitingRemoval
+            )
+        {
+            return Err(LauncherRegistryError::InvalidTransition);
+        }
+        descriptor.desired_generation = replacement_generation;
+        descriptor.pending_generation = 0;
+        descriptor.status = WrapperStatus::NeedsPublish;
         self.advance_and_store(arch_root)
     }
 
@@ -1502,7 +1554,24 @@ mod tests {
             .expect("installed");
         assert_eq!(registry.descriptors[0].status, WrapperStatus::Current);
         assert_eq!(registry.descriptors[0].published_generation, 1);
-
+        let descriptor_id = registry.descriptors[0].descriptor_id_hex();
+        let descriptor_id = std::str::from_utf8(&descriptor_id).expect("descriptor hex");
+        assert_eq!(
+            registry
+                .authorize_published(&package, descriptor_id, 1)
+                .map(|descriptor| descriptor.name.as_str()),
+            Some("Kate"),
+        );
+        assert!(
+            registry
+                .authorize_published(&package, descriptor_id, 2)
+                .is_none()
+        );
+        assert!(
+            registry
+                .authorize_published(&package, &"0".repeat(64), 1)
+                .is_none()
+        );
         let changed = catalog(vec![entry("org.kde.kate.desktop", "Kate Editor")]);
         let (mut registry, report) =
             LauncherRegistry::reconcile(&root.path, &changed).expect("changed reconcile");
@@ -1511,6 +1580,11 @@ mod tests {
         assert_eq!(registry.descriptors[0].desired_generation, 2);
         assert_eq!(registry.descriptors[0].published_generation, 1);
         assert_eq!(registry.descriptors[0].status, WrapperStatus::NeedsPublish);
+        assert!(
+            registry
+                .authorize_published(&package, descriptor_id, 1)
+                .is_none()
+        );
         registry
             .mark_building(&root.path, &package, 2)
             .expect("updated build");
@@ -1538,6 +1612,53 @@ mod tests {
                 .expect("load empty registry")
                 .descriptors
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn stale_wrapper_template_is_republished_at_a_higher_android_version() {
+        let root = TestRoot::new();
+        let source = catalog(vec![entry("org.kde.kate.desktop", "Kate")]);
+        let (mut registry, _) =
+            LauncherRegistry::reconcile(&root.path, &source).expect("initial reconcile");
+        let package = registry.descriptors[0].android_package.clone();
+        registry
+            .mark_building(&root.path, &package, 1)
+            .expect("building");
+        registry
+            .mark_awaiting_install(&root.path, &package, 1)
+            .expect("awaiting install");
+        registry
+            .confirm_installed(&root.path, &package, 1)
+            .expect("installed");
+        let descriptor_id = registry.descriptors[0].descriptor_id_hex();
+        let descriptor_id = std::str::from_utf8(&descriptor_id).expect("descriptor hex");
+
+        registry
+            .mark_template_stale(&root.path, &package, 1)
+            .expect("stale launcher template");
+        let replacement_generation = registry.descriptors[0].desired_generation;
+        assert!(replacement_generation > 1);
+        assert_eq!(registry.descriptors[0].published_generation, 1);
+        assert_eq!(registry.descriptors[0].status, WrapperStatus::NeedsPublish);
+        assert!(
+            registry
+                .authorize_published(&package, descriptor_id, 1)
+                .is_none()
+        );
+        registry
+            .mark_building(&root.path, &package, replacement_generation)
+            .expect("replacement template build");
+        registry
+            .mark_awaiting_install(&root.path, &package, replacement_generation)
+            .expect("replacement template install");
+        registry
+            .confirm_installed(&root.path, &package, replacement_generation)
+            .expect("replacement template current");
+        assert!(
+            registry
+                .authorize_published(&package, descriptor_id, replacement_generation)
+                .is_some()
         );
     }
 

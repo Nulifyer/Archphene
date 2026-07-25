@@ -1312,6 +1312,104 @@ mod android {
     }
 
     #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeAuthorizeLauncher(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        request_buffer: JByteBuffer,
+        request_length: jint,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let (Ok(handle), Ok(request_length)) =
+            (u64::try_from(handle), usize::try_from(request_length))
+        else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let (Ok(request_capacity), Ok(output_capacity)) = (
+            environment.get_direct_buffer_capacity(&request_buffer),
+            environment.get_direct_buffer_capacity(&output_buffer),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if request_length == 0
+            || request_length > request_capacity
+            || request_length > 192
+            || output_capacity < 512
+        {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let (Ok(request_address), Ok(output_address)) = (
+            environment.get_direct_buffer_address(&request_buffer),
+            environment.get_direct_buffer_address(&output_buffer),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if request_address.is_null() || output_address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let request =
+            unsafe { slice::from_raw_parts(request_address.cast_const(), request_length) };
+        let Ok(request) = str::from_utf8(request) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Some(request) = request.strip_suffix('\n') else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let mut fields = request.split('\t');
+        let (Some("A1"), Some(android_package), Some(descriptor_id), Some(generation), None) = (
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if android_package.len() != 53
+            || !android_package.starts_with("org.archphene.linux.p")
+            || !android_package
+                .bytes()
+                .skip(21)
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+            || descriptor_id.len() != 64
+            || !descriptor_id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let Ok(generation) = generation.parse::<u64>() else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let authorization = {
+            let Ok(mut registry) = registry().lock() else {
+                return ERROR_INTERNAL;
+            };
+            let Some(runtime) = registry.runtime_mut(handle) else {
+                return ERROR_INVALID_HANDLE;
+            };
+            runtime.authorize_launcher(android_package, descriptor_id, generation)
+        };
+        let Some(authorization) = authorization else {
+            return ERROR_LAUNCHER;
+        };
+        if authorization.label.contains(['\t', '\n', '\r', '\0']) {
+            return ERROR_INTERNAL;
+        }
+        let encoded = format!(
+            "A1\t{}\t{}\n",
+            u8::from(authorization.terminal),
+            authorization.label,
+        );
+        if encoded.len() > output_capacity {
+            return ERROR_INTERNAL;
+        }
+        let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
+        destination[..encoded.len()].copy_from_slice(encoded.as_bytes());
+        i32::try_from(encoded.len()).unwrap_or(i32::MAX)
+    }
+
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeClaimLauncherPublish(
         environment: JNIEnv,
         _class: JClass,
@@ -1474,6 +1572,9 @@ mod android {
                 }
                 "installed" => runtime.launcher_confirm_installed(android_package, generation),
                 "failed" => runtime.launcher_publish_failed(android_package, generation),
+                "template-stale" if generation != 0 => {
+                    runtime.launcher_template_stale(android_package, generation)
+                }
                 "removed" => runtime.launcher_confirm_removed(android_package),
                 "quarantined" if generation == 0 => runtime.launcher_quarantine(android_package),
                 "absent" if generation == 0 => {

@@ -180,6 +180,12 @@ internal object NativeRuntime {
         offset: Int,
         outputBuffer: ByteBuffer,
     ): Int
+    external fun nativeAuthorizeLauncher(
+        handle: Long,
+        requestBuffer: ByteBuffer,
+        requestLength: Int,
+        outputBuffer: ByteBuffer,
+    ): Int
     external fun nativeClaimLauncherPublish(
         handle: Long,
         outputBuffer: ByteBuffer,

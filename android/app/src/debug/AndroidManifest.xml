@@ -22,6 +22,9 @@
             android:name=".LauncherApkTestReceiver"
             android:exported="true" />
         <receiver
+            android:name=".LauncherSessionTestReceiver"
+            android:exported="true" />
+        <receiver
             android:name=".PackageSearchTestReceiver"
             android:exported="true" />
         <receiver

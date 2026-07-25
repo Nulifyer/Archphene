@@ -74,6 +74,12 @@ pub struct LauncherRemovalWork {
     pub generation: u64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LauncherAuthorization {
+    pub label: String,
+    pub terminal: bool,
+}
+
 #[derive(Debug)]
 pub enum RuntimeBootstrapError {
     Root(RootError),
@@ -444,6 +450,23 @@ impl RuntimeHost {
         Some(summary)
     }
 
+    pub fn authorize_launcher(
+        &self,
+        android_package: &str,
+        descriptor_id_hex: &str,
+        generation: u64,
+    ) -> Option<LauncherAuthorization> {
+        let descriptor = self.launcher_registry.as_ref()?.authorize_published(
+            android_package,
+            descriptor_id_hex,
+            generation,
+        )?;
+        Some(LauncherAuthorization {
+            label: descriptor.name.clone(),
+            terminal: descriptor.terminal,
+        })
+    }
+
     pub fn claim_launcher_publish(
         &mut self,
     ) -> Result<Option<LauncherPublishWork>, LauncherRegistryError> {
@@ -541,6 +564,21 @@ impl RuntimeHost {
             .as_mut()
             .ok_or(LauncherRegistryError::InvalidTransition)?
             .mark_failed(arch_root.path(), android_package, generation)
+    }
+
+    pub fn launcher_template_stale(
+        &mut self,
+        android_package: &str,
+        generation: u64,
+    ) -> Result<(), LauncherRegistryError> {
+        let arch_root = self
+            .arch_root
+            .as_ref()
+            .ok_or(LauncherRegistryError::InvalidRoot)?;
+        self.launcher_registry
+            .as_mut()
+            .ok_or(LauncherRegistryError::InvalidTransition)?
+            .mark_template_stale(arch_root.path(), android_package, generation)
     }
 
     pub fn launcher_confirm_removed(

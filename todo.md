@@ -152,7 +152,13 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
     - [ ] Resolve and normalize package-owned icons, derive reviewed Android capability declarations from the verified package closure, and expose actionable per-launcher compatibility failures.
     - [x] Generate deterministic minimized thin launcher APKs, patch bounded binary-manifest identities, sign with one non-exportable RSA-3072 Android Keystore key using APK v3, and reverify signer/package/version/metadata plus the complete entry set and content digests before handoff.
     - [x] Stream only the verified APK digest into normal `PackageInstaller` sessions, preflight Android's unknown-source approval without stranding work, retain per-launcher install/uninstall confirmation, reconcile verified packages after process death, abandon and requeue interrupted sessions, quarantine identity conflicts, and remove wrappers without touching shared Linux package or user data. Exact fresh-install, denied-permission recovery, cold-restart, launch, and removal gates pass on the Android 16 x86_64 emulator and Android 15 AArch64 Samsung using full-device captures.
-    - [ ] Authenticate wrapper Binder callers and run manager-owned Surface/input/lifecycle sessions against registry descriptors.
+    - [ ] Run manager-owned Surface/input/lifecycle sessions against authenticated registry descriptors.
+      - [x] Authenticate every wrapper Binder transaction from the kernel caller UID, exact installed package, persistent wrapper signer, bounded manifest identity, current Rust registry descriptor, generation, and exact launcher-template digest.
+      - [x] Use a bounded versioned Binder protocol with a generation-checked session, client death token, cold-runtime retry, and real cross-process `Surface` attach/replace/detach/close ownership. Reject an untrusted manager-UID probe and malformed protocol input.
+      - [x] Detect manager-signed wrappers built from an older template, advance their Android version monotonically, and republish them through normal user-confirmed PackageInstaller updates instead of quarantining them.
+      - [x] Pass cold manager start, light/dark full-device Surface presentation, exact physical dimensions, and Binder-death cleanup on the AArch64 Samsung. Repeat this gate on the x86_64 emulator when it is attached again.
+      - [ ] Replace the authenticated diagnostic frame with a manager-owned private Wayland compositor and Linux process group selected only from the authorized descriptor.
+      - [ ] Submit bounded pointer, touch, hardware-key, and IME batches; prove exact coordinates, rotation/resize rebind, background policy, crash reporting, and descendant cleanup on both targets.
   - [ ] Qt, GTK, native Wayland, SDL, Electron, and XWayland adaptation
   - [ ] Audio, camera, printing, notifications, URLs, secrets, and accessibility
   - [ ] GPU acceleration, external displays, and secondary windows

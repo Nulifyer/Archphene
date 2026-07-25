@@ -137,12 +137,36 @@ update, removal, failure, and retry states. It uses a checksum-protected,
 mode-0600 atomic file, rejects incomplete catalogs and unsafe/corrupt paths,
 preserves late PackageInstaller confirmations across desktop changes, and
 provides a verified-PackageManager reconciliation boundary for manager death or
-external wrapper removal. Ten host lifecycle/safety tests pass. Exact-ABI cold
+external wrapper removal. Host lifecycle/safety tests pass. Exact-ABI cold
 restarts preserve byte-identical 640-byte registries on the emulator and
 Samsung; fixture removal reconciles both to the same 56-byte empty registry and
 the manager reports zero packages/apps without fatal logs. Package-owned icon
-normalization, capability derivation, wrapper generation/signing/installation,
-and the authenticated Surface session remain pending.
+normalization and capability derivation remain pending.
+
+The manager now builds minimized launcher wrappers from one staged template,
+patches bounded manifest identity fields, signs each APK with a persistent
+non-exportable RSA-3072 Android Keystore key, re-verifies its signer and exact
+entry digests, and streams the verified result through normal user-confirmed
+PackageInstaller sessions. A wrapper binds only to the exported launcher
+session Service. Every transaction revalidates the kernel-supplied caller UID,
+its single exact installed package, signer, descriptor, generation, manager
+identity, and SHA-256 of the template from which it was built before consulting
+the current Rust registry. A bounded raw Binder v1 session accepts a death
+token and real cross-process Surface, releases replaced or detached surfaces,
+and retries while the shared runtime is still starting.
+
+The physical AArch64 Samsung passes untrusted-caller and malformed-version
+rejection, cold manager start, exact 1080x2316 Surface attachment,
+full-device light/dark presentation, explicit close, and abrupt wrapper
+Binder-death cleanup. It also exposed and fixed a Samsung-only decor-insets
+ordering crash. Installing a manager with a changed launcher template now
+detects manager-signed stale wrappers, advances their Android versions, and
+republishes normal user-confirmed updates; installed Foot and Kate wrappers
+were advanced to generations 53 and 54 and reauthenticated. The x86_64
+emulator was offline during the final gate and remains to be repeated. The
+Surface still displays an authenticated manager diagnostic frame: a
+manager-owned Wayland compositor, descriptor-selected Linux process group,
+input batching, resize/rebind, and descendant cleanup are the next slice.
 
 The recent-activity action is now terminal-state aware. Complete has no dead
 disabled Cancel button; active pre-commit work exposes Cancel; and durable

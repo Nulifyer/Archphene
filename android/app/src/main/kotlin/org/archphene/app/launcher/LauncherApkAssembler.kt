@@ -40,6 +40,8 @@ internal object LauncherApkAssembler {
     private const val TEMPLATE_GENERATION = "g:00000000000000000001"
     private const val TEMPLATE_MANAGER = "org.archphene.app.template"
     private const val TEMPLATE_LABEL = "Archphene Linux App"
+    private const val TEMPLATE_SHA256 =
+        "h:0000000000000000000000000000000000000000000000000000000000000000"
     private const val MANIFEST = "AndroidManifest.xml"
     private const val ZIP_EPOCH_MILLIS = 1_577_836_800_000L
     private const val ENTRY_LIMIT = 4 * 1024 * 1024
@@ -50,6 +52,36 @@ internal object LauncherApkAssembler {
     private val DESCRIPTOR = Regex("[0-9a-f]{64}")
     private val MANAGER_PACKAGE =
         Regex("[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*){2,7}")
+    @Volatile private var cachedTemplateDigestHex: String? = null
+
+    @Synchronized
+    fun templateDigestHex(context: Context): String {
+        cachedTemplateDigestHex?.let { digest -> return digest }
+        val digest =
+            context.assets.open(TEMPLATE_ASSET).use { input ->
+                val messageDigest = MessageDigest.getInstance("SHA-256")
+                val buffer = ByteArray(32 * 1024)
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read < 0) {
+                        break
+                    }
+                    messageDigest.update(buffer, 0, read)
+                }
+                messageDigest.digest()
+            }
+        val hex = "0123456789abcdef"
+        val encoded =
+            CharArray(digest.size * 2).also { output ->
+                for (index in digest.indices) {
+                    val value = digest[index].toInt() and 0xff
+                    output[index * 2] = hex[value ushr 4]
+                    output[index * 2 + 1] = hex[value and 0x0f]
+                }
+            }.concatToString()
+        cachedTemplateDigestHex = encoded
+        return encoded
+    }
 
     @Synchronized
     fun assembleAndSign(
@@ -133,6 +165,7 @@ internal object LauncherApkAssembler {
         var total = 0
         var entries = 0
         var manifestFound = false
+        val templateDigest = templateDigestHex(context)
         try {
             ZipInputStream(context.assets.open(TEMPLATE_ASSET)).use { input ->
                 ZipOutputStream(counted).use { zip ->
@@ -166,6 +199,7 @@ internal object LauncherApkAssembler {
                                         "g:${request.generation.toString().padStart(20, '0')}",
                                     ).replaceString(TEMPLATE_MANAGER, context.packageName)
                                     .replaceString(TEMPLATE_LABEL, request.label)
+                                    .replaceString(TEMPLATE_SHA256, "h:$templateDigest")
                                     .setVersionCode(request.generation.toInt())
                                     .bytes
                             manifestFound = true
@@ -273,7 +307,9 @@ internal object LauncherApkAssembler {
                 metadata.getString("org.archphene.launcher.GENERATION") ==
                 "g:${request.generation.toString().padStart(20, '0')}" &&
                 metadata.getString("org.archphene.launcher.MANAGER_PACKAGE") ==
-                context.packageName,
+                context.packageName &&
+                metadata.getString("org.archphene.launcher.TEMPLATE_SHA256") ==
+                "h:${templateDigestHex(context)}",
         ) {
             "Generated launcher metadata changed"
         }

@@ -126,9 +126,13 @@ process never crosses into the wrapper UID. Binder death, wrapper force-stop,
 or an explicit close detaches the surface and applies the documented
 background/termination policy to the manager-owned process group.
 
-The first implementation gate must prove caller rejection, real cross-process
-Surface presentation, touch/key coordinates, rotation/rebind, wrapper death,
-and descendant cleanup before the protocol is used for generated launchers.
+The first implementation slice now proves caller rejection, real
+cross-process Surface ownership, cold-runtime retry, wrapper-template
+invalidation, full-device light/dark presentation, and wrapper-death cleanup
+on the physical AArch64 target. The transferred Surface currently contains an
+authenticated manager diagnostic frame. Manager-owned Wayland presentation,
+input batches, rotation/rebind, and Linux descendant cleanup remain required
+before this session is a production Linux application host.
 
 ### Wayland and graphics bridge
 

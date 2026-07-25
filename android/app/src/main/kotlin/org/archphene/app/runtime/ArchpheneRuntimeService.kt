@@ -66,6 +66,11 @@ internal class AvailablePackageSnapshot(
     val revision: Int,
 )
 
+internal data class LauncherAuthorization(
+    val label: String,
+    val terminal: Boolean,
+)
+
 private data class LauncherRegistryRow(
     val androidPackage: String,
     val descriptorIdHex: String,
@@ -140,6 +145,17 @@ class ArchpheneRuntimeService : Service() {
             startLauncherPublisher(activeHandle)
             return true
         }
+
+        internal fun authorizeLauncher(
+            androidPackage: String,
+            descriptorIdHex: String,
+            generation: Long,
+        ): LauncherAuthorization? =
+            this@ArchpheneRuntimeService.authorizeLauncher(
+                androidPackage,
+                descriptorIdHex,
+                generation,
+            )
 
         val packagePrimaryActionLabel: String
             get() = primaryActionLabel
@@ -506,6 +522,9 @@ class ArchpheneRuntimeService : Service() {
     private val desktopEntryOutputBuffer =
         ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
     private val desktopEntryOutputBytes = ByteArray(NativeRuntime.PACKAGE_OUTPUT_SIZE)
+    private val launcherAuthorizationRequestBuffer = ByteBuffer.allocateDirect(192)
+    private val launcherAuthorizationOutputBuffer = ByteBuffer.allocateDirect(512)
+    private val launcherAuthorizationOutputBytes = ByteArray(512)
     private val shellTerminalDamageBuffer: ByteBuffer by lazy(LazyThreadSafetyMode.NONE) {
         ByteBuffer
             .allocateDirect(NativeRuntime.TERMINAL_DAMAGE_SIZE)
@@ -708,6 +727,61 @@ class ArchpheneRuntimeService : Service() {
             return
         }
         startBootstrap(handle)
+    }
+
+    @Synchronized
+    private fun authorizeLauncher(
+        androidPackage: String,
+        descriptorIdHex: String,
+        generation: Long,
+    ): LauncherAuthorization? {
+        val activeHandle = readyHandle
+        if (
+            activeHandle == 0L ||
+            androidPackage.length != 53 ||
+            descriptorIdHex.length != 64 ||
+            generation !in 1..Int.MAX_VALUE.toLong()
+        ) {
+            return null
+        }
+        val request = "A1\t$androidPackage\t$descriptorIdHex\t$generation\n"
+        val requestBytes = request.toByteArray(StandardCharsets.US_ASCII)
+        if (requestBytes.size > launcherAuthorizationRequestBuffer.capacity()) {
+            return null
+        }
+        launcherAuthorizationRequestBuffer.clear()
+        launcherAuthorizationRequestBuffer.put(requestBytes)
+        launcherAuthorizationOutputBuffer.clear()
+        val length =
+            NativeRuntime.nativeAuthorizeLauncher(
+                activeHandle,
+                launcherAuthorizationRequestBuffer,
+                requestBytes.size,
+                launcherAuthorizationOutputBuffer,
+            )
+        if (length <= 0 || length > launcherAuthorizationOutputBytes.size) {
+            return null
+        }
+        launcherAuthorizationOutputBuffer.position(0)
+        launcherAuthorizationOutputBuffer.get(launcherAuthorizationOutputBytes, 0, length)
+        val response =
+            String(
+                launcherAuthorizationOutputBytes,
+                0,
+                length,
+                StandardCharsets.UTF_8,
+            )
+        val fields = response.removeSuffix("\n").split('\t', limit = 3)
+        if (
+            fields.size != 3 ||
+            fields[0] != "A1" ||
+            fields[1] !in setOf("0", "1") ||
+            fields[2].isEmpty() ||
+            fields[2].length > 256
+        ) {
+            return null
+        }
+        return LauncherAuthorization(fields[2], fields[1] == "1")
     }
 
     override fun onStartCommand(
@@ -2689,6 +2763,7 @@ class ArchpheneRuntimeService : Service() {
             return
         }
         val signer = LauncherApkSigner.signerSha256()
+        val templateDigest = LauncherApkAssembler.templateDigestHex(this)
         val activeInstallerSessions =
             runCatching {
                 packageManager.packageInstaller.mySessions
@@ -2738,7 +2813,15 @@ class ArchpheneRuntimeService : Service() {
                     ) {
                         "launcher identity or signer changed"
                     }
-                    generationValue
+                    if (
+                        generationValue == row.desiredGeneration &&
+                        metadata.getString("org.archphene.launcher.TEMPLATE_SHA256") !=
+                        "h:$templateDigest"
+                    ) {
+                        -2L
+                    } else {
+                        generationValue
+                    }
                 } catch (_: PackageManager.NameNotFoundException) {
                     -1L
                 } catch (error: Exception) {
@@ -2751,6 +2834,13 @@ class ArchpheneRuntimeService : Service() {
                 }
             val transitioned =
                 when {
+                    generation == -2L ->
+                        launcherTransition(
+                            activeHandle,
+                            "template-stale",
+                            row.androidPackage,
+                            row.desiredGeneration,
+                        )
                     generation > 0 ->
                         launcherTransition(
                             activeHandle,

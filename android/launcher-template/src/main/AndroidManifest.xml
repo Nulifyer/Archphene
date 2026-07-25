@@ -17,6 +17,9 @@
         <meta-data
             android:name="org.archphene.launcher.MANAGER_PACKAGE"
             android:value="org.archphene.app.template" />
+        <meta-data
+            android:name="org.archphene.launcher.TEMPLATE_SHA256"
+            android:value="h:0000000000000000000000000000000000000000000000000000000000000000" />
 
         <activity
             android:name="org.archphene.launcher.LauncherActivity"
