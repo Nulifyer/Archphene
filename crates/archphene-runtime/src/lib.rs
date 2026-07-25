@@ -14,7 +14,7 @@ use archphene_packages::{
 };
 use archphene_process::{PtyRegistry, PtyWaiter};
 use archphene_root::{ArchRoot, BootstrapReport, RootError};
-use archphene_storage::{MirrorImport, MirrorImportReport, StorageError};
+use archphene_storage::{MirrorCancellation, MirrorImport, MirrorImportReport, StorageError};
 
 pub const STATUS_ARCH_ROOT_READY: u32 = 1 << 0;
 pub const STATUS_JOB_STORE_READY: u32 = 1 << 1;
@@ -35,6 +35,7 @@ pub struct RuntimeHost {
     pty_sessions: PtyRegistry,
     session_marker: Option<PathBuf>,
     mirror_import: Option<MirrorImport>,
+    mirror_cancellation: Option<MirrorCancellation>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -92,6 +93,7 @@ impl RuntimeHost {
             pty_sessions: PtyRegistry::new(),
             session_marker: None,
             mirror_import: None,
+            mirror_cancellation: None,
         }
     }
 
@@ -139,7 +141,7 @@ impl RuntimeHost {
     }
 
     pub fn begin_mirror_import(&mut self, project_name: &str) -> Result<(), StorageError> {
-        if self.mirror_import.is_some() {
+        if self.mirror_import.is_some() || self.mirror_cancellation.is_some() {
             return Err(StorageError::MirrorBusy);
         }
         let home = self
@@ -148,7 +150,9 @@ impl RuntimeHost {
             .ok_or(StorageError::InvalidRoot)?
             .path()
             .join("home/archphene");
-        self.mirror_import = Some(MirrorImport::begin(&home, project_name)?);
+        let mirror = MirrorImport::begin(&home, project_name)?;
+        self.mirror_cancellation = Some(mirror.cancellation());
+        self.mirror_import = Some(mirror);
         Ok(())
     }
 
@@ -184,14 +188,29 @@ impl RuntimeHost {
     }
 
     pub fn finish_mirror_import(&mut self) -> Result<MirrorImportReport, StorageError> {
-        self.mirror_import
+        let result = self
+            .mirror_import
             .take()
             .ok_or(StorageError::MirrorBusy)?
-            .finish()
+            .finish();
+        self.mirror_cancellation = None;
+        result
     }
 
     pub fn abort_mirror_import(&mut self) -> bool {
+        if let Some(cancellation) = self.mirror_cancellation.take() {
+            cancellation.cancel();
+        }
         self.mirror_import.take().is_some()
+    }
+
+    pub fn cancel_mirror_import(&self) -> bool {
+        self.mirror_cancellation
+            .as_ref()
+            .is_some_and(|cancellation| {
+                cancellation.cancel();
+                true
+            })
     }
 
     pub fn prepare_package_runtime(
@@ -553,6 +572,38 @@ mod tests {
         let error = session_marker_active(&marker).expect_err("corrupt marker must fail closed");
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
 
+        fs::remove_dir_all(path).expect("test cleanup");
+    }
+
+    #[test]
+    fn mirror_cancellation_reaches_an_import_outside_the_registry_lock() {
+        let id = TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "archphene-runtime-mirror-test-{}-{id}",
+            std::process::id()
+        ));
+        let mut runtime = RuntimeHost::new(1);
+        runtime
+            .bootstrap_arch_root(&path, 1)
+            .expect("root bootstrap");
+        runtime
+            .begin_mirror_import("Cancelled")
+            .expect("begin mirror");
+        let mut mirror = runtime.take_mirror_import().expect("take mirror");
+        assert!(runtime.cancel_mirror_import());
+        assert!(matches!(
+            mirror.add_directory("directory"),
+            Err(StorageError::MirrorCancelled),
+        ));
+        runtime
+            .restore_mirror_import(mirror)
+            .expect("restore mirror");
+        assert!(runtime.abort_mirror_import());
+        assert!(
+            !path
+                .join("home/archphene/Projects/.archphene-mirror-pending")
+                .exists()
+        );
         fs::remove_dir_all(path).expect("test cleanup");
     }
 }

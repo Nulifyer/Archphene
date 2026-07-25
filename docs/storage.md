@@ -108,10 +108,18 @@ This is deliberately an initial snapshot, not a live mount or completed
 synchronizer. Android-side edits made after publication and Linux-side edits
 are not yet reconciled or written back. The next storage slice must add an
 explicit manifest, change detection, conflict copies, deletion policy,
-progress/cancellation, and resumable pull/push before the UI calls this
+resumable pull/push, and sync-plan cancellation before the UI calls this
 “Synced.” Exact recursive content, empty files, nested dotfiles, stale-stage
 recovery, restart persistence, grant removal, scoped logs, and visually
 inspected full-device gates pass on both exact-ABI targets.
+
+The initial snapshot itself is cancellable. The Service exposes the same folder
+action as Cancel while work is active, interrupts provider traversal, and
+signals a shared Rust token even while the file transaction is outside the
+global runtime lock. Rust checks that token before and after every fixed 32 KiB
+read, rejects publication after cancellation, and discards partial staging.
+Cancel, exact absence, retry, normal publication, scoped logs, and full-device
+regressions pass on the emulator and Samsung.
 
 Synchronization uses a three-way decision, never “newest timestamp wins.”
 For each bounded relative path, Archphene compares the last common fingerprint

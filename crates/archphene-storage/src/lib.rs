@@ -7,6 +7,8 @@ use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 mod sys {
     #![allow(unsafe_code)]
@@ -204,6 +206,7 @@ pub enum StorageError {
     MirrorBusy,
     MirrorExists,
     MirrorTooLarge,
+    MirrorCancelled,
     InvalidManifest,
     ManifestTooLarge,
     Io(io::Error),
@@ -223,6 +226,7 @@ impl fmt::Display for StorageError {
             Self::MirrorBusy => formatter.write_str("another project mirror is incomplete"),
             Self::MirrorExists => formatter.write_str("the Linux project path already exists"),
             Self::MirrorTooLarge => formatter.write_str("Android project mirror exceeds its limit"),
+            Self::MirrorCancelled => formatter.write_str("Android project mirror was cancelled"),
             Self::InvalidManifest => formatter.write_str("project sync manifest is invalid"),
             Self::ManifestTooLarge => {
                 formatter.write_str("project sync manifest exceeds its limit")
@@ -240,12 +244,26 @@ pub struct MirrorImport {
     entries: u32,
     bytes: u64,
     published: bool,
+    cancellation: MirrorCancellation,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MirrorImportReport {
     pub entries: u32,
     pub bytes: u64,
+}
+
+#[derive(Clone)]
+pub struct MirrorCancellation(Arc<AtomicBool>);
+
+impl MirrorCancellation {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -713,10 +731,16 @@ impl MirrorImport {
             entries: 0,
             bytes: 0,
             published: false,
+            cancellation: MirrorCancellation(Arc::new(AtomicBool::new(false))),
         })
     }
 
+    pub fn cancellation(&self) -> MirrorCancellation {
+        self.cancellation.clone()
+    }
+
     pub fn add_directory(&mut self, relative_path: &str) -> Result<(), StorageError> {
+        self.check_cancelled()?;
         self.reserve_entry()?;
         let segments = parse_mirror_path(relative_path)?;
         let (parent, leaf) = open_mirror_parent(&self.staging, &segments)?;
@@ -735,6 +759,7 @@ impl MirrorImport {
         source_descriptor: RawFd,
         expected_bytes: Option<u64>,
     ) -> Result<u64, StorageError> {
+        self.check_cancelled()?;
         if source_descriptor < 0 || expected_bytes.is_some_and(|size| size > MAX_MIRROR_FILE_BYTES)
         {
             return Err(StorageError::InvalidDocument);
@@ -753,10 +778,12 @@ impl MirrorImport {
             let mut copied = 0_u64;
             let mut buffer = [0_u8; 32 * 1024];
             loop {
+                self.check_cancelled()?;
                 let count = source.read(&mut buffer)?;
                 if count == 0 {
                     break;
                 }
+                self.check_cancelled()?;
                 copied = copied
                     .checked_add(count as u64)
                     .ok_or(StorageError::MirrorTooLarge)?;
@@ -790,7 +817,9 @@ impl MirrorImport {
     }
 
     pub fn finish(mut self) -> Result<MirrorImportReport, StorageError> {
+        self.check_cancelled()?;
         self.staging.sync_all()?;
+        self.check_cancelled()?;
         let staging_name = c_string(OsStr::new(MIRROR_STAGING_DIRECTORY))?;
         sys::rename_noreplace_between(
             self.projects.as_raw_fd(),
@@ -815,6 +844,14 @@ impl MirrorImport {
             return Err(StorageError::MirrorTooLarge);
         }
         Ok(())
+    }
+
+    fn check_cancelled(&self) -> Result<(), StorageError> {
+        if self.cancellation.is_cancelled() {
+            Err(StorageError::MirrorCancelled)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -1763,6 +1800,25 @@ mod tests {
             fs::read(outside.0.join("sentinel")).expect("outside remains"),
             b"outside",
         );
+        assert!(!home.0.join("Projects/.archphene-mirror-pending").exists());
+    }
+
+    #[test]
+    fn mirror_cancellation_stops_work_and_discards_staging() {
+        let home = TestDirectory::new();
+        let source = TestDirectory::new();
+        fs::create_dir(home.0.join("Projects")).expect("projects");
+        fs::write(source.0.join("file"), [7; 64 * 1024]).expect("source");
+        let file = File::open(source.0.join("file")).expect("file");
+        let mut import = MirrorImport::begin(&home.0, "Cancelled").expect("begin");
+        let cancellation = import.cancellation();
+        cancellation.cancel();
+        assert!(matches!(
+            import.add_file_from_fd("file", file.as_raw_fd(), None),
+            Err(StorageError::MirrorCancelled),
+        ));
+        drop(import);
+        assert!(!home.0.join("Projects/Cancelled").exists());
         assert!(!home.0.join("Projects/.archphene-mirror-pending").exists());
     }
 

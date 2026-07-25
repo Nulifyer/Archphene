@@ -88,14 +88,22 @@ class ArchpheneRuntimeService : Service() {
 
         val folderMirrorAvailable: Boolean
             get() =
-                folderStateReady &&
-                    folderConnected &&
-                    readyHandle != 0L &&
-                    folderMirrorPath.isEmpty() &&
-                    !PROCESS_STORAGE_ACTIVE.get()
+                folderMirrorRunning ||
+                    (
+                        folderStateReady &&
+                            folderConnected &&
+                            readyHandle != 0L &&
+                            folderMirrorPath.isEmpty() &&
+                            !PROCESS_STORAGE_ACTIVE.get()
+                    )
 
         val folderMirrorActionLabel: String
-            get() = if (folderMirrorPath.isEmpty()) "Mirror" else "Mirrored"
+            get() =
+                when {
+                    folderMirrorRunning -> "Cancel"
+                    folderMirrorPath.isEmpty() -> "Mirror"
+                    else -> "Mirrored"
+                }
 
         val folderGrantRunning: Boolean
             get() = folderOperationActive
@@ -186,7 +194,12 @@ class ArchpheneRuntimeService : Service() {
 
         fun disconnectAndroidFolder(): Boolean = requestFolderDisconnect()
 
-        fun mirrorAndroidFolder(): Boolean = requestFolderMirror()
+        fun mirrorAndroidFolder(): Boolean =
+            if (folderMirrorRunning) {
+                requestFolderMirrorCancellation()
+            } else {
+                requestFolderMirror()
+            }
 
         fun submitLinuxInput(commandLine: String): Boolean =
             if (shellActive) {
@@ -258,6 +271,8 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var folderUri = ""
     @Volatile private var folderLabel = ""
     @Volatile private var folderMirrorPath = ""
+    @Volatile private var folderMirrorRunning = false
+    @Volatile private var folderMirrorCancellationRequested = false
     @Volatile private var folderStatus = "Loading Android folder access…"
     @Volatile private var shellActive = false
     @Volatile private var shellWasStarted = false
@@ -519,6 +534,9 @@ class ArchpheneRuntimeService : Service() {
         packageThread = null
         commandThread?.interrupt()
         commandThread = null
+        if (folderMirrorRunning && activeHandle != 0L) {
+            NativeRuntime.nativeCancelProjectMirror(activeHandle)
+        }
         storageThread?.interrupt()
         storageThread = null
         if (activeHandle != 0L) {
@@ -830,6 +848,8 @@ class ArchpheneRuntimeService : Service() {
             return false
         }
         folderOperationActive = true
+        folderMirrorRunning = true
+        folderMirrorCancellationRequested = false
         folderStatus = "Preparing ~/Projects/$projectName…"
         val worker =
             Thread(
@@ -846,6 +866,7 @@ class ArchpheneRuntimeService : Service() {
                         ) {
                             throw IllegalStateException("Could not save the project mirror intent")
                         }
+                        checkFolderMirrorCancellation()
                         val request = ByteBuffer.allocateDirect(MAX_MIRROR_PATH_BYTES)
                         val output = ByteBuffer.allocateDirect(NativeRuntime.STORAGE_OUTPUT_SIZE)
                         val beginLength = putUtf8Request(request, projectName)
@@ -858,6 +879,7 @@ class ArchpheneRuntimeService : Service() {
                             )
                         requireMirrorSuccess(beginResult.toLong(), output, "begin project mirror")
                         nativeStarted = true
+                        checkFolderMirrorCancellation()
                         val progress = MirrorProgress()
                         val projection =
                             arrayOf(
@@ -877,6 +899,7 @@ class ArchpheneRuntimeService : Service() {
                             output,
                             progress,
                         )
+                        checkFolderMirrorCancellation()
                         output.clear()
                         val finishResult =
                             NativeRuntime.nativeFinishProjectMirror(activeHandle, output)
@@ -894,6 +917,8 @@ class ArchpheneRuntimeService : Service() {
                         ) {
                             throw IllegalStateException("Invalid native project mirror report")
                         }
+                        folderMirrorRunning = false
+                        folderMirrorCancellationRequested = false
                         folderMirrorPath = "~/Projects/$projectName"
                         folderStatus =
                             connectedFolderStatus(
@@ -916,9 +941,14 @@ class ArchpheneRuntimeService : Service() {
                             .remove(FOLDER_MIRROR_NAME)
                             .commit()
                         folderMirrorPath = ""
-                        folderStatus =
-                            "Mirror failed: ${error.message ?: error.javaClass.simpleName}"
-                        Log.e(TAG, "Android folder mirror failed", error)
+                        if (folderMirrorCancellationRequested) {
+                            folderStatus = "Project mirror cancelled"
+                            Log.i(TAG, "Android folder mirror cancelled name=$projectName")
+                        } else {
+                            folderStatus =
+                                "Mirror failed: ${error.message ?: error.javaClass.simpleName}"
+                            Log.e(TAG, "Android folder mirror failed", error)
+                        }
                     } finally {
                         finishFolderOperation()
                     }
@@ -932,12 +962,29 @@ class ArchpheneRuntimeService : Service() {
         } catch (error: Exception) {
             storageThread = null
             folderOperationActive = false
+            folderMirrorRunning = false
+            folderMirrorCancellationRequested = false
             PROCESS_STORAGE_ACTIVE.set(false)
             folderStatus =
                 "Mirror failed: ${error.message ?: error.javaClass.simpleName}"
             Log.e(TAG, "Could not start Android folder mirror", error)
             false
         }
+    }
+
+    @Synchronized
+    private fun requestFolderMirrorCancellation(): Boolean {
+        if (!folderMirrorRunning) {
+            return false
+        }
+        folderMirrorCancellationRequested = true
+        folderStatus = "Cancelling the project mirror…"
+        val activeHandle = readyHandle
+        if (activeHandle != 0L) {
+            NativeRuntime.nativeCancelProjectMirror(activeHandle)
+        }
+        storageThread?.interrupt()
+        return true
     }
 
     private fun mirrorDocumentChildren(
@@ -951,6 +998,7 @@ class ArchpheneRuntimeService : Service() {
         output: ByteBuffer,
         progress: MirrorProgress,
     ) {
+        checkFolderMirrorCancellation()
         if (depth > MAX_MIRROR_DEPTH) {
             throw SecurityException("Android project exceeds $MAX_MIRROR_DEPTH levels")
         }
@@ -962,9 +1010,7 @@ class ArchpheneRuntimeService : Service() {
                 ?: throw IllegalStateException("Android provider returned no folder listing")
         cursor.use {
             while (it.moveToNext()) {
-                if (Thread.interrupted()) {
-                    throw InterruptedException("Project mirror interrupted")
-                }
+                checkFolderMirrorCancellation()
                 progress.entries++
                 if (progress.entries > MAX_MIRROR_ENTRIES) {
                     throw SecurityException(
@@ -1049,6 +1095,12 @@ class ArchpheneRuntimeService : Service() {
                 output,
                 progress,
             )
+        }
+    }
+
+    private fun checkFolderMirrorCancellation() {
+        if (folderMirrorCancellationRequested || Thread.currentThread().isInterrupted) {
+            throw InterruptedException("Project mirror cancelled")
         }
     }
 
@@ -1218,6 +1270,8 @@ class ArchpheneRuntimeService : Service() {
 
     private fun finishFolderOperation() {
         folderOperationActive = false
+        folderMirrorRunning = false
+        folderMirrorCancellationRequested = false
         PROCESS_STORAGE_ACTIVE.set(false)
         storageThread = null
         mainHandler.post {

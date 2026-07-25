@@ -23,6 +23,7 @@ internal class FolderGrantTestReceiver : BroadcastReceiver() {
             intent.action != ACTION_CLEAN &&
             intent.action != ACTION_PREPARE_MIRROR &&
             intent.action != ACTION_VERIFY_MIRROR &&
+            intent.action != ACTION_VERIFY_MIRROR_ABSENT &&
             intent.action != ACTION_CLEAN_MIRROR
         ) {
             return
@@ -45,6 +46,7 @@ internal class FolderGrantTestReceiver : BroadcastReceiver() {
                         ACTION_CLEAN -> clean(context, token)
                         ACTION_PREPARE_MIRROR -> prepareMirror(context, token)
                         ACTION_VERIFY_MIRROR -> verifyMirror(context, token)
+                        ACTION_VERIFY_MIRROR_ABSENT -> verifyMirrorAbsent(context, token)
                         ACTION_CLEAN_MIRROR -> cleanMirror(context, token)
                     }
                     Log.i(TAG, "Folder grant ${intent.action} passed token=$token")
@@ -238,6 +240,18 @@ internal class FolderGrantTestReceiver : BroadcastReceiver() {
         }
     }
 
+    private fun verifyMirrorAbsent(
+        context: Context,
+        token: String,
+    ) {
+        check(!File(projectsRoot(context), mirrorName(token)).exists()) {
+            "cancelled project mirror was published"
+        }
+        check(!File(projectsRoot(context), STAGING_NAME).exists()) {
+            "cancelled project mirror retained staging"
+        }
+    }
+
     private fun projectsRoot(context: Context): File =
         File(context.filesDir, "arch-root/home/archphene/Projects")
 
@@ -288,6 +302,8 @@ internal class FolderGrantTestReceiver : BroadcastReceiver() {
             "org.archphene.app.debug.action.PREPARE_FOLDER_MIRROR"
         private const val ACTION_VERIFY_MIRROR =
             "org.archphene.app.debug.action.VERIFY_FOLDER_MIRROR"
+        private const val ACTION_VERIFY_MIRROR_ABSENT =
+            "org.archphene.app.debug.action.VERIFY_FOLDER_MIRROR_ABSENT"
         private const val ACTION_CLEAN_MIRROR =
             "org.archphene.app.debug.action.CLEAN_FOLDER_MIRROR"
         private const val EXTRA_TOKEN = "token"

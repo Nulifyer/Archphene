@@ -382,7 +382,6 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 setText(R.string.mirror_folder)
                 isEnabled = false
                 setOnClickListener {
-                    isEnabled = false
                     runtimeBinder?.mirrorAndroidFolder()
                 }
             }

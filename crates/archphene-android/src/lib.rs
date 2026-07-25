@@ -608,6 +608,28 @@ mod android {
     }
 
     #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeCancelProjectMirror(
+        _environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+    ) -> jboolean {
+        let Ok(handle) = u64::try_from(handle) else {
+            return JNI_FALSE;
+        };
+        let Ok(mut registry) = registry().lock() else {
+            return JNI_FALSE;
+        };
+        if registry
+            .runtime_mut(handle)
+            .is_some_and(|runtime| runtime.cancel_mirror_import())
+        {
+            JNI_TRUE
+        } else {
+            JNI_FALSE
+        }
+    }
+
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeCreate(
         _environment: JNIEnv,
         _class: JClass,

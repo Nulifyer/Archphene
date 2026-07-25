@@ -102,6 +102,7 @@ internal object NativeRuntime {
         outputBuffer: ByteBuffer,
     ): Int
     external fun nativeAbortProjectMirror(handle: Long): Boolean
+    external fun nativeCancelProjectMirror(handle: Long): Boolean
     external fun nativeCreate(): Long
     external fun nativeDestroy(handle: Long): Boolean
     external fun nativeTransition(handle: Long, lifecycle: Int): Int

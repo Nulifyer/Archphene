@@ -28,6 +28,7 @@ folder="Archphene-Mirror-$token"
 remote="/sdcard/Download/$folder"
 action_prepare=org.archphene.app.debug.action.PREPARE_FOLDER_MIRROR
 action_verify=org.archphene.app.debug.action.VERIFY_FOLDER_MIRROR
+action_verify_absent=org.archphene.app.debug.action.VERIFY_FOLDER_MIRROR_ABSENT
 action_clean_mirror=org.archphene.app.debug.action.CLEAN_FOLDER_MIRROR
 action_clean_grant=org.archphene.app.debug.action.CLEAN_FOLDER_GRANT
 output_dir="$ARCHPHENE_ROOT/tooling/build/folder-mirror"
@@ -90,7 +91,7 @@ select_folder() {
 
 archphene_adb_run shell mkdir "$remote" "$remote/src" "$remote/.git" >/dev/null
 archphene_adb_run shell sh -c \
-  "'printf root-$token > $remote/main.txt; printf nested-$token > $remote/src/nested.txt; printf git-$token > $remote/.git/config; : > $remote/empty.bin'"
+  "'printf root-$token > $remote/main.txt; printf nested-$token > $remote/src/nested.txt; printf git-$token > $remote/.git/config; : > $remote/empty.bin; truncate -s 134217728 $remote/cancel.bin'"
 archphene_adb_run install -r "$apk" >/dev/null
 archphene_adb_run shell am force-stop "$package" >/dev/null
 archphene_adb_run shell am force-stop com.google.android.documentsui >/dev/null 2>&1 || true
@@ -111,8 +112,24 @@ archphene_wait_ui_unwrapped \
 
 archphene_wait_ui 'text="(?:MIRROR|Mirror)"[^>]*enabled="true"' \
   "folder-mirror-action-$serial" 20
+mirror_ui="$ARCHPHENE_UI"
 archphene_tap_ui_pattern \
-  "$ARCHPHENE_UI" 'text="(?:MIRROR|Mirror)"[^>]*enabled="true"' "Mirror folder"
+  "$mirror_ui" 'text="(?:MIRROR|Mirror)"[^>]*enabled="true"' "Mirror folder"
+# The operation may complete between UI-automation polls on fast storage.
+# The action remains enabled and switches semantics synchronously, so tap the
+# same verified control bounds immediately to exercise cancellation reliably.
+archphene_tap_ui_pattern \
+  "$mirror_ui" 'text="(?:MIRROR|Mirror)"[^>]*enabled="true"' "Cancel mirror"
+archphene_wait_ui_exact_text \
+  "Project mirror cancelled" \
+  "folder-mirror-cancelled-$serial" 20
+wait_receiver "$action_verify_absent" "Cancelled mirror staging discarded"
+archphene_adb_run shell rm "$remote/cancel.bin" >/dev/null
+
+archphene_wait_ui 'text="(?:MIRROR|Mirror)"[^>]*enabled="true"' \
+  "folder-mirror-retry-$serial" 20
+archphene_tap_ui_pattern \
+  "$ARCHPHENE_UI" 'text="(?:MIRROR|Mirror)"[^>]*enabled="true"' "Retry mirror"
 archphene_wait_ui_unwrapped \
   "Linux: ~/Projects/$folder" \
   "folder-mirror-complete-$serial" 40
@@ -146,5 +163,5 @@ fatal_log="$(archphene_adb_run logcat -d -v brief \
 trap - EXIT
 cleanup
 archphene_note "Archphene initial folder mirror passed on $serial"
-archphene_note "  Recursive files, .git, empty files, stale recovery, atomic publication, restart, and retained local project passed"
+archphene_note "  Cancel/cleanup/retry, recursive files, .git, empty files, stale recovery, atomic publication, restart, and retained local project passed"
 archphene_note "  Full-device screenshots: $output_dir/$serial-{connected,detached}.png"
