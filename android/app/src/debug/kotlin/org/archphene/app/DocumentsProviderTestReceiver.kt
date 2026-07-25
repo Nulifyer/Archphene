@@ -15,7 +15,13 @@ internal class DocumentsProviderTestReceiver : BroadcastReceiver() {
         context: Context,
         intent: Intent,
     ) {
-        if (intent.action != ACTION_RUN && intent.action != ACTION_CLEAN) {
+        if (
+            intent.action != ACTION_RUN &&
+            intent.action != ACTION_CLEAN &&
+            intent.action != ACTION_CREATE_IMPORT_SOURCE &&
+            intent.action != ACTION_CLEAN_IMPORT_SOURCE &&
+            intent.action != ACTION_VERIFY_IMPORTS
+        ) {
             return
         }
         val token = intent.getStringExtra(EXTRA_TOKEN)
@@ -27,16 +33,31 @@ internal class DocumentsProviderTestReceiver : BroadcastReceiver() {
         Thread(
             {
                 try {
-                    if (intent.action == ACTION_CLEAN) {
-                        cleanFixture(context, token)
-                        Log.i(TAG, "DocumentsProvider cleanup passed token=$token")
-                    } else {
-                        runProbe(
-                            context,
-                            token,
-                            intent.getBooleanExtra(EXTRA_RETAIN_VISUAL, false),
-                        )
-                        Log.i(TAG, "DocumentsProvider probe passed token=$token")
+                    when (intent.action) {
+                        ACTION_CLEAN -> {
+                            cleanFixture(context, token)
+                            Log.i(TAG, "DocumentsProvider cleanup passed token=$token")
+                        }
+                        ACTION_CREATE_IMPORT_SOURCE -> {
+                            val uri = createImportSource(context, token)
+                            Log.i(TAG, "Document import source ready token=$token uri=$uri")
+                        }
+                        ACTION_CLEAN_IMPORT_SOURCE -> {
+                            cleanImportSource(context, token)
+                            Log.i(TAG, "Document import cleanup passed token=$token")
+                        }
+                        ACTION_VERIFY_IMPORTS -> {
+                            verifyImports(context, token)
+                            Log.i(TAG, "Document imports verified token=$token")
+                        }
+                        else -> {
+                            runProbe(
+                                context,
+                                token,
+                                intent.getBooleanExtra(EXTRA_RETAIN_VISUAL, false),
+                            )
+                            Log.i(TAG, "DocumentsProvider probe passed token=$token")
+                        }
                     }
                 } catch (error: Exception) {
                     Log.e(TAG, "DocumentsProvider probe failed token=$token", error)
@@ -247,6 +268,84 @@ internal class DocumentsProviderTestReceiver : BroadcastReceiver() {
         }
     }
 
+    private fun createImportSource(
+        context: Context,
+        token: String,
+    ): Uri {
+        cleanImportSource(context, token)
+        val directory =
+            File(context.filesDir, "$HOME_RELATIVE_PATH/$IMPORT_SOURCE_PREFIX$token")
+        check(directory.mkdir()) { "could not create import source directory" }
+        val source = File(directory, importName(token))
+        source.outputStream().buffered().use { output ->
+            repeat(IMPORT_MARKER_REPETITIONS) {
+                output.write(IMPORT_MARKER)
+            }
+        }
+        val authority = "${context.packageName}.documents"
+        return DocumentsContract.buildDocumentUri(
+            authority,
+            "home/$IMPORT_SOURCE_PREFIX$token/${importName(token)}",
+        )
+    }
+
+    private fun cleanImportSource(
+        context: Context,
+        token: String,
+    ) {
+        val home = File(context.filesDir, HOME_RELATIVE_PATH)
+        val sourceDirectory = File(home, "$IMPORT_SOURCE_PREFIX$token")
+        val source = File(sourceDirectory, importName(token))
+        if (source.exists()) {
+            check(source.delete()) { "could not delete import source" }
+        }
+        if (sourceDirectory.exists()) {
+            check(sourceDirectory.delete()) { "could not delete import source directory" }
+        }
+        val downloads = File(home, "Downloads")
+        for (
+            name in
+            arrayOf(
+                importName(token),
+                importCollisionName(token),
+                importThirdName(token),
+            )
+        ) {
+            val imported = File(downloads, name)
+            if (imported.exists()) {
+                check(imported.delete()) { "could not delete imported file $name" }
+            }
+        }
+        context.getSharedPreferences("storage", Context.MODE_PRIVATE).edit().clear().commit()
+    }
+
+    private fun verifyImports(
+        context: Context,
+        token: String,
+    ) {
+        val downloads = File(context.filesDir, "$HOME_RELATIVE_PATH/Downloads")
+        for (name in arrayOf(importName(token), importCollisionName(token))) {
+            File(downloads, name).inputStream().buffered().use { input ->
+                val buffer = ByteArray(IMPORT_MARKER.size)
+                repeat(IMPORT_MARKER_REPETITIONS) {
+                    var offset = 0
+                    while (offset < buffer.size) {
+                        val count = input.read(buffer, offset, buffer.size - offset)
+                        check(count > 0) { "imported file ended early: $name" }
+                        offset += count
+                    }
+                    check(buffer.contentEquals(IMPORT_MARKER)) {
+                        "imported file content differs: $name"
+                    }
+                }
+                check(input.read() == -1) { "imported file has trailing content: $name" }
+            }
+        }
+        check(!File(downloads, importThirdName(token)).exists()) {
+            "incoming import intent was replayed"
+        }
+    }
+
     private fun File.isSymbolicLink(): Boolean =
         runCatching { android.system.Os.readlink(absolutePath) }.isSuccess
 
@@ -283,6 +382,12 @@ internal class DocumentsProviderTestReceiver : BroadcastReceiver() {
             "org.archphene.app.debug.action.RUN_DOCUMENTS_PROVIDER_TEST"
         private const val ACTION_CLEAN =
             "org.archphene.app.debug.action.CLEAN_DOCUMENTS_PROVIDER_TEST"
+        private const val ACTION_CREATE_IMPORT_SOURCE =
+            "org.archphene.app.debug.action.CREATE_DOCUMENT_IMPORT_SOURCE"
+        private const val ACTION_CLEAN_IMPORT_SOURCE =
+            "org.archphene.app.debug.action.CLEAN_DOCUMENT_IMPORT_SOURCE"
+        private const val ACTION_VERIFY_IMPORTS =
+            "org.archphene.app.debug.action.VERIFY_DOCUMENT_IMPORTS"
         private const val EXTRA_TOKEN = "token"
         private const val EXTRA_RETAIN_VISUAL = "retain_visual"
         private const val HOME_ID = "home"
@@ -293,11 +398,21 @@ internal class DocumentsProviderTestReceiver : BroadcastReceiver() {
         private const val COLLISION_NAME = "existing.txt"
         private const val SYMLINK_NAME = "private-link"
         private const val VISUAL_NAME = "Welcome.txt"
+        private const val IMPORT_SOURCE_PREFIX = "Archphene-Import-Source-"
+        private const val IMPORT_MARKER_REPETITIONS = 2048
         private val TOKEN = Regex("[a-f0-9]{8}")
         private val MARKER = "Archphene provider exact read/write\n".toByteArray(StandardCharsets.UTF_8)
         private val COLLISION_MARKER =
             "Archphene existing destination\n".toByteArray(StandardCharsets.UTF_8)
         private val VISUAL_MARKER =
             "This file is shared from Archphene Home.\n".toByteArray(StandardCharsets.UTF_8)
+        private val IMPORT_MARKER =
+            "Android-to-Archphene import payload\n".toByteArray(StandardCharsets.UTF_8)
+
+        private fun importName(token: String): String = "Android-$token.txt"
+
+        private fun importCollisionName(token: String): String = "Android-$token (2).txt"
+
+        private fun importThirdName(token: String): String = "Android-$token (3).txt"
     }
 }

@@ -189,6 +189,15 @@ mod android {
         ERROR_STORAGE
     }
 
+    fn copy_storage_value(value: &str, destination: &mut [u8]) -> jint {
+        if value.len() >= destination.len() {
+            return ERROR_STORAGE;
+        }
+        destination[..value.len()].copy_from_slice(value.as_bytes());
+        destination[value.len()] = 0;
+        jint::try_from(value.len()).unwrap_or(ERROR_STORAGE)
+    }
+
     fn storage_request(
         environment: &JNIEnv,
         request_buffer: &JByteBuffer,
@@ -395,6 +404,38 @@ mod android {
         };
         match archphene_storage::rename_document(Path::new(&request[0]), &request[1], &request[2]) {
             Ok(()) => 0,
+            Err(error) => copy_storage_error(&error, output),
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeImportHomeDocument(
+        environment: JNIEnv,
+        _class: JClass,
+        request_buffer: JByteBuffer,
+        request_length: jint,
+        source_descriptor: jint,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        if source_descriptor < 0 {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let Ok(output) = storage_output(&environment, &output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(request) = storage_request(&environment, &request_buffer, request_length, 3) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        match archphene_storage::import_document_from_fd(
+            Path::new(&request[0]),
+            &request[1],
+            &request[2],
+            source_descriptor,
+        ) {
+            Ok(report) => copy_storage_value(
+                &format!("{}\t{}", report.display_name, report.bytes),
+                output,
+            ),
             Err(error) => copy_storage_error(&error, output),
         }
     }

@@ -139,7 +139,8 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [ ] Pointer, touch, keyboard, IME, clipboard, and drag-and-drop
   - [ ] Android file integration and `/mnt/android`
     - [x] Expose visible regular files/directories from shared `/home/archphene` through a scoped Android `DocumentsProvider`; reject dotfiles, symlinks, traversal, spoofing controls, replacement rename, and root mutation through a Rust directory-descriptor broker.
-    - [ ] Add Android folder grants, synchronized POSIX mirrors, imports/exports, familiar home links, and `/mnt/android` status.
+    - [x] Import one Android document from the system picker, Open With, or Share directly into `~/Downloads` through a bounded Rust descriptor transaction; fsync before non-replacing publication, recover interrupted staging, number collisions, and retain coarse status across manager restart.
+    - [ ] Add Android folder grants, synchronized POSIX mirrors, drag-and-drop, exports, familiar home links, and `/mnt/android` status.
   - [ ] Launcher wrapper generation and runtime-service binding
   - [ ] Qt, GTK, native Wayland, SDL, Electron, and XWayland adaptation
   - [ ] Audio, camera, printing, notifications, URLs, secrets, and accessibility
@@ -195,6 +196,10 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [x] Use `MANAGE_DOCUMENTS` plus Android URI grants rather than broad storage permission; keep dotfiles, symlinks, package/runtime trees, and unsupported file types private.
   - [x] Pass exact framework create/read/write/non-replacing-rename/delete, child, collision, traversal, bidi-spoof, and symlink gates plus visually inspected full-device DocumentsUI browsing on the emulator and Samsung.
 - [ ] Support Android-to-Archphene import through Open With, Share, drag-and-drop, and file-picker flows.
+  - [x] Stream a single picker, Open With, or Share document descriptor into `~/Downloads` without copying bytes through JNI/Kotlin; preserve exact bytes, publish atomically, number collisions, recover stale staging, and bound imports at 16 GiB.
+  - [x] Keep the Service-owned operation/status through Activity recreation, consume incoming intents once, persist completed/failed/interrupted status, and bound the pending Activity queue to one URI.
+  - [x] Pass exact ACTION_VIEW/ACTION_SEND content, duplicate-name, process-restart status, system-picker launch, fatal-log, cleanup, and visually inspected full-device gates on the emulator and Samsung.
+  - [ ] Add multi-document, directory-tree, drag-and-drop, progress/cancel, provider-timeout, and conflict-aware synchronized import.
 - [ ] Support Archphene-to-Android open, save, export, and share flows.
 - [ ] Avoid `MANAGE_EXTERNAL_STORAGE` as the default; evaluate an optional advanced/sideloaded mode only if SAF cannot satisfy a demonstrated workflow.
 - [ ] Test grant creation, persistence, revocation, rename, deletion, conflicts, large trees, offline providers, uninstall behavior, and malicious paths.

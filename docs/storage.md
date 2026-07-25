@@ -72,8 +72,20 @@ replacing an existing rename target.
 
 Create/read/write/rename/delete, collision preservation, hidden/traversal/
 symlink rejection, cleanup, and real DocumentsUI browsing pass on the x86_64
-emulator and physical AArch64 Samsung. Imports, exports, persisted external
-trees, conflict handling, and `/mnt/android` mirrors are still planned.
+emulator and physical AArch64 Samsung.
+
+One Android document can also be imported from the system picker, Open With,
+or Share into `/home/archphene/Downloads`. Kotlin retains Android URI and
+lifecycle ownership but passes only a read-only descriptor and bounded
+metadata. Rust duplicates the descriptor, streams at most 16 GiB into a
+private staging file, syncs it, and atomically publishes a non-replacing
+destination. Duplicate names receive numbered variants and interrupted
+staging is discarded explicitly on the next attempt. The exact content,
+collision, restart-status, and system-picker gates pass on both targets.
+
+Exports, persisted external trees, conflict-aware synchronization,
+drag-and-drop, progress/cancel, provider timeouts, and `/mnt/android` mirrors
+are still planned.
 
 ## Virtual Linux Layout
 
@@ -113,6 +125,11 @@ Recommended layout:
 Linux applications use normal paths. The bridge decides whether the backing
 storage is the private shared Arch root, a synchronized Android grant, or a
 brokered Android content URI.
+
+`~/Documents` and `~/Downloads` are created as conventional private
+directories today. Single-document imports land in `~/Downloads`. They do not
+yet masquerade as live Android shared-storage mounts; later folder grants will
+add explicit mirror/link state instead.
 
 ## Permission Table
 

@@ -7,12 +7,14 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.Uri
 import android.os.Build
 import android.os.Binder
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.ParcelFileDescriptor
+import android.provider.OpenableColumns
 import android.util.Log
 import java.io.File
 import java.nio.ByteBuffer
@@ -20,6 +22,7 @@ import java.nio.ByteOrder
 import java.nio.charset.StandardCharsets
 import java.net.URL
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.net.ssl.HttpsURLConnection
 import org.archphene.app.MainActivity
 import org.archphene.app.R
@@ -57,6 +60,15 @@ class ArchpheneRuntimeService : Service() {
 
         val packageCancellationAvailable: Boolean
             get() = packageOperationActive && packageOperationCancelable
+
+        val documentImportStatus: String
+            get() = storageStatus
+
+        val documentImportAvailable: Boolean
+            get() = readyHandle != 0L && !PROCESS_IMPORT_ACTIVE.get()
+
+        val documentImportRunning: Boolean
+            get() = storageImportActive
 
         val linuxCommandStatus: String
             get() =
@@ -135,6 +147,8 @@ class ArchpheneRuntimeService : Service() {
 
         fun cancelPackageOperation(): Boolean = requestPackageCancellation()
 
+        fun importAndroidDocument(uri: Uri): Boolean = requestDocumentImport(uri)
+
         fun submitLinuxInput(commandLine: String): Boolean =
             if (shellActive) {
                 requestShellInput(commandLine)
@@ -185,6 +199,7 @@ class ArchpheneRuntimeService : Service() {
     private var packageThread: Thread? = null
     private var commandThread: Thread? = null
     private var shellThread: Thread? = null
+    private var storageThread: Thread? = null
     private var boundClients = 0
     @Volatile private var catalogRefreshActive = false
     @Volatile private var catalogStatus = "Package catalog not downloaded"
@@ -195,6 +210,8 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var packageCancellationRequested = false
     @Volatile private var activePackageConnection: HttpsURLConnection? = null
     @Volatile private var commandActive = false
+    @Volatile private var storageImportActive = false
+    @Volatile private var storageStatus = "Import an Android file into ~/Downloads"
     @Volatile private var shellActive = false
     @Volatile private var shellWasStarted = false
     @Volatile private var shellStopRequested = false
@@ -423,7 +440,7 @@ class ArchpheneRuntimeService : Service() {
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        if (!shellActive) {
+        if (!shellActive && !storageImportActive) {
             stopSelf()
         }
         super.onTaskRemoved(rootIntent)
@@ -445,6 +462,8 @@ class ArchpheneRuntimeService : Service() {
         packageThread = null
         commandThread?.interrupt()
         commandThread = null
+        storageThread?.interrupt()
+        storageThread = null
         if (activeHandle != 0L) {
             NativeRuntime.nativeTransition(activeHandle, NativeRuntime.LIFECYCLE_STOPPING)
             NativeRuntime.nativeTransition(activeHandle, NativeRuntime.LIFECYCLE_STOPPED)
@@ -477,7 +496,216 @@ class ArchpheneRuntimeService : Service() {
         private const val SESSION_NOTIFICATION_ID = 0x4152
         private const val SESSION_NOTIFICATION_CHANNEL = "archphene_linux_sessions"
         private const val ACTION_STOP_SHELL = "org.archphene.app.action.STOP_SHARED_SHELL"
+        private const val STORAGE_PREFERENCES = "storage"
+        private const val STORAGE_STATE = "import_state"
+        private const val STORAGE_MESSAGE = "import_message"
+        private const val STORAGE_IDLE = "idle"
+        private const val STORAGE_RUNNING = "running"
+        private const val STORAGE_COMPLETE = "complete"
+        private const val STORAGE_FAILED = "failed"
+        private const val MAX_STORAGE_URI_BYTES = 4 * 1024
+        private const val MAX_STORAGE_REQUEST_BYTES = 4 * 1024
+        private const val MAX_STORAGE_NAME_BYTES = 255
+        private const val MAX_STORAGE_IMPORT_BYTES = 16L * 1024 * 1024 * 1024
+        private val PROCESS_IMPORT_ACTIVE = AtomicBoolean()
     }
+
+    private fun restoreStorageStatus() {
+        val preferences = getSharedPreferences(STORAGE_PREFERENCES, MODE_PRIVATE)
+        val state = preferences.getString(STORAGE_STATE, STORAGE_IDLE) ?: STORAGE_IDLE
+        val message =
+            preferences.getString(
+                STORAGE_MESSAGE,
+                "Import an Android file into ~/Downloads",
+            ) ?: "Import an Android file into ~/Downloads"
+        if (state == STORAGE_RUNNING) {
+            storageStatus = "The previous file import was interrupted. Choose the file again."
+            preferences
+                .edit()
+                .putString(STORAGE_STATE, STORAGE_FAILED)
+                .putString(STORAGE_MESSAGE, storageStatus)
+                .commit()
+        } else {
+            storageStatus = message
+        }
+    }
+
+    private fun persistStorageStatus(
+        state: String,
+        message: String,
+    ) {
+        storageStatus = message
+        getSharedPreferences(STORAGE_PREFERENCES, MODE_PRIVATE)
+            .edit()
+            .putString(STORAGE_STATE, state)
+            .putString(STORAGE_MESSAGE, message)
+            .commit()
+    }
+
+    @Synchronized
+    private fun requestDocumentImport(uri: Uri): Boolean {
+        val encodedUri = uri.toString().toByteArray(StandardCharsets.UTF_8)
+        if (
+            readyHandle == 0L ||
+            storageImportActive ||
+            uri.scheme != "content" ||
+            encodedUri.isEmpty() ||
+            encodedUri.size > MAX_STORAGE_URI_BYTES
+        ) {
+            if (uri.scheme != "content" || encodedUri.size > MAX_STORAGE_URI_BYTES) {
+                storageStatus = "Choose a document supplied by Android Files"
+            }
+            return false
+        }
+        if (!PROCESS_IMPORT_ACTIVE.compareAndSet(false, true)) {
+            return false
+        }
+        storageImportActive = true
+        storageStatus = "Opening the selected Android document…"
+        val worker =
+            Thread(
+                {
+                    try {
+                        val displayName = safeImportDisplayName(uri)
+                        persistStorageStatus(
+                            STORAGE_RUNNING,
+                            "Importing $displayName into ~/Downloads…",
+                        )
+                        val root =
+                            File(filesDir, "arch-root/home/archphene").absolutePath
+                        val fields = listOf(root, "home/Downloads", displayName)
+                        val requestBytes =
+                            fields.joinToString("\t").toByteArray(StandardCharsets.UTF_8)
+                        if (
+                            requestBytes.isEmpty() ||
+                            requestBytes.size > MAX_STORAGE_REQUEST_BYTES
+                        ) {
+                            throw IllegalStateException("Document import request is too large")
+                        }
+                        val request = ByteBuffer.allocateDirect(requestBytes.size)
+                        request.put(requestBytes)
+                        val output = ByteBuffer.allocateDirect(NativeRuntime.STORAGE_OUTPUT_SIZE)
+                        val descriptor =
+                            contentResolver.openFileDescriptor(uri, "r", null)
+                                ?: throw IllegalStateException(
+                                    "Android provider returned no file descriptor",
+                                )
+                        val result =
+                            descriptor.use {
+                                NativeRuntime.nativeImportHomeDocument(
+                                    request,
+                                    requestBytes.size,
+                                    it.fd,
+                                    output,
+                                )
+                            }
+                        val response = readCString(output)
+                        if (result <= 0 || result != response.toByteArray(StandardCharsets.UTF_8).size) {
+                            throw IllegalStateException(
+                                response.ifEmpty { "Native storage error $result" },
+                            )
+                        }
+                        val responseFields = response.split('\t')
+                        if (responseFields.size != 2) {
+                            throw IllegalStateException("Invalid native import response")
+                        }
+                        val importedName = responseFields[0]
+                        val importedBytes =
+                            responseFields[1].toLongOrNull()
+                                ?: throw IllegalStateException("Invalid imported byte count")
+                        if (
+                            !safeVisibleName(importedName) ||
+                            importedBytes !in 0..MAX_STORAGE_IMPORT_BYTES
+                        ) {
+                            throw IllegalStateException("Unsafe native import response")
+                        }
+                        val status =
+                            "Imported $importedName (${formatStorageBytes(importedBytes)}) " +
+                                "to ~/Downloads"
+                        persistStorageStatus(STORAGE_COMPLETE, status)
+                        Log.i(
+                            TAG,
+                            "Android document imported name=$importedName bytes=$importedBytes",
+                        )
+                    } catch (error: Exception) {
+                        val status =
+                            "Import failed: ${error.message ?: error.javaClass.simpleName}"
+                        persistStorageStatus(STORAGE_FAILED, status)
+                        Log.e(TAG, "Android document import failed", error)
+                    } finally {
+                        storageImportActive = false
+                        PROCESS_IMPORT_ACTIVE.set(false)
+                        storageThread = null
+                        mainHandler.post {
+                            if (!shellActive && boundClients == 0) {
+                                stopSelf()
+                            }
+                        }
+                    }
+                },
+                "ArchpheneImport",
+            )
+        storageThread = worker
+        return try {
+            worker.start()
+            true
+        } catch (error: Exception) {
+            storageThread = null
+            storageImportActive = false
+            PROCESS_IMPORT_ACTIVE.set(false)
+            storageStatus = "Import failed: ${error.message ?: error.javaClass.simpleName}"
+            Log.e(TAG, "Could not start Android document import", error)
+            false
+        }
+    }
+
+    private fun safeImportDisplayName(uri: Uri): String {
+        val queried =
+            runCatching {
+                contentResolver
+                    .query(
+                        uri,
+                        arrayOf(OpenableColumns.DISPLAY_NAME),
+                        null,
+                        null,
+                        null,
+                    )?.use { cursor ->
+                        if (cursor.moveToFirst() && !cursor.isNull(0)) {
+                            cursor.getString(0)
+                        } else {
+                            null
+                        }
+                    }
+            }.getOrNull()
+        return queried?.takeIf(::safeVisibleName) ?: "Imported file"
+    }
+
+    private fun safeVisibleName(name: String): Boolean =
+        name.isNotEmpty() &&
+            name.toByteArray(StandardCharsets.UTF_8).size <= MAX_STORAGE_NAME_BYTES &&
+            name != "." &&
+            name != ".." &&
+            !name.startsWith('.') &&
+            '/' !in name &&
+            '\\' !in name &&
+            name.none { character ->
+                character.isISOControl() ||
+                    character == '\u061c' ||
+                    character == '\u200e' ||
+                    character == '\u200f' ||
+                    character in '\u202a'..'\u202e' ||
+                    character in '\u2066'..'\u2069'
+            }
+
+    private fun formatStorageBytes(bytes: Long): String =
+        when {
+            bytes < 1024 -> "$bytes B"
+            bytes < 1024 * 1024 -> "${(bytes + 1023) / 1024} KiB"
+            bytes < 1024L * 1024 * 1024 ->
+                "${(bytes + 1024 * 1024 - 1) / (1024 * 1024)} MiB"
+            else ->
+                "${(bytes + 1024L * 1024 * 1024 - 1) / (1024L * 1024 * 1024)} GiB"
+        }
 
     private fun createSessionNotificationChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
@@ -568,6 +796,7 @@ class ArchpheneRuntimeService : Service() {
             Thread(
                 {
                     try {
+                        restoreStorageStatus()
                         val pathBytes =
                             File(filesDir, "arch-root")
                                 .absolutePath

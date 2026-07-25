@@ -39,6 +39,8 @@ const DIRECTORIES: &[(&str, u32)] = &[
     ("opt", 0o755),
     ("home", 0o755),
     ("home/archphene", 0o700),
+    ("home/archphene/Documents", 0o700),
+    ("home/archphene/Downloads", 0o700),
     ("tmp", 0o1777),
     ("run", 0o700),
     ("mnt", 0o755),
@@ -258,6 +260,8 @@ mod tests {
         assert!(temporary.0.join("var/lib/pacman").is_dir());
         assert!(temporary.0.join("var/lib/pacman/sync").is_dir());
         assert!(temporary.0.join("home/archphene").is_dir());
+        assert!(temporary.0.join("home/archphene/Documents").is_dir());
+        assert!(temporary.0.join("home/archphene/Downloads").is_dir());
         assert!(temporary.0.join("mnt/android").is_dir());
         assert_eq!(
             fs::read(temporary.0.join("home/archphene/.bashrc")).expect("default bashrc"),

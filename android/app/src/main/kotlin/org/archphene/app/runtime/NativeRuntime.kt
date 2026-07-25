@@ -71,6 +71,12 @@ internal object NativeRuntime {
         requestLength: Int,
         outputBuffer: ByteBuffer,
     ): Int
+    external fun nativeImportHomeDocument(
+        requestBuffer: ByteBuffer,
+        requestLength: Int,
+        sourceDescriptor: Int,
+        outputBuffer: ByteBuffer,
+    ): Int
     external fun nativeCreate(): Long
     external fun nativeDestroy(handle: Long): Boolean
     external fun nativeTransition(handle: Long, lifecycle: Int): Int

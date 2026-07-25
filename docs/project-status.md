@@ -42,8 +42,23 @@ relationships, rename collision preservation, delete and cleanup; directly
 attacks dotfiles, `..`, and a live symlink; then browses the retained visible
 fixture through Android DocumentsUI and captures a full-device screenshot.
 Persisted external folder grants, `/mnt/android` mirrors, Android-to-Linux
-import, Linux-to-Android export/share, revocation/conflict handling, and
-first-run storage UX remain open.
+folder synchronization, Linux-to-Android export/share, revocation/conflict
+handling, and first-run storage UX remain open.
+
+Single Android documents can now enter the shared environment from the system
+picker, Open With, or Share. Android passes one read-only content descriptor;
+Rust duplicates and streams it into a private staging file without transferring
+file bytes through JNI or Kotlin, enforces a 16 GiB limit, syncs it, then
+publishes it into `~/Downloads` with a non-replacing descriptor-relative
+rename. Existing names become bounded ` (2)` variants, interrupted staging is
+recovered on the next attempt, and invalid/spoofing display names receive a
+safe fallback. The Service owns coarse durable status and the Activity consumes
+each incoming intent once.
+
+Exact ACTION_VIEW and ACTION_SEND byte-content, collision, restart-status,
+system-picker, cleanup, scoped-log, and full-device visual gates pass on the
+x86_64 emulator and physical AArch64 Samsung. Multi-document and folder import,
+drag-and-drop, progress/cancel, provider timeouts, and export remain open.
 
 The replacement also owns a fixed 11,808-byte package-operation journal. It
 holds at most 32 bounded jobs, enforces legal transitions, publishes updates

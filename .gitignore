@@ -186,6 +186,7 @@ meson-info/
 build.ninja
 
 # Java / Kotlin / Android tooling
+/.kotlin/
 .externalNativeBuild/
 .cxx/
 captures/

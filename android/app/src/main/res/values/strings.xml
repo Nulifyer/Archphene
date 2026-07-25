@@ -16,6 +16,12 @@
     <string name="documents_root_title">Archphene Home</string>
     <string name="documents_root_summary">Linux home files</string>
     <string name="documents_home_name">Home</string>
+    <string name="import_file">Import file</string>
+    <string name="document_import_prompt">Android files can be copied into ~/Downloads</string>
+    <string name="document_import_unavailable">File import unavailable while Linux starts</string>
+    <string name="document_import_queued">Waiting for the shared Linux home…</string>
+    <string name="document_import_already_queued">One file import is already waiting</string>
+    <string name="document_import_content_only">Choose a file supplied by Android Files</string>
     <string name="linux_session_display">Linux session display</string>
     <string name="terminal_accessibility_dimensions">Linux terminal, %1$d columns by %2$d rows</string>
     <string name="terminal_text_smaller">Text smaller</string>

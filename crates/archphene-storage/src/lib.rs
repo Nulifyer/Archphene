@@ -3,8 +3,8 @@
 use std::ffi::{CString, OsStr};
 use std::fmt;
 use std::fs::File;
-use std::io;
-use std::os::fd::AsRawFd;
+use std::io::{self, Read, Write};
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
@@ -29,6 +29,7 @@ mod sys {
     pub const O_DIRECTORY: c_int = 0o200000;
     pub const O_NOFOLLOW: c_int = 0o400000;
     pub const AT_REMOVEDIR: c_int = 0x200;
+    const F_DUPFD_CLOEXEC: c_int = 1030;
     const RENAME_NOREPLACE: c_uint = 1;
 
     #[cfg(target_arch = "x86_64")]
@@ -41,6 +42,7 @@ mod sys {
         fn openat(directory: c_int, path: *const c_char, flags: c_int, mode: c_uint) -> c_int;
         fn mkdirat(directory: c_int, path: *const c_char, mode: c_uint) -> c_int;
         fn unlinkat(directory: c_int, path: *const c_char, flags: c_int) -> c_int;
+        fn fcntl(descriptor: c_int, command: c_int, ...) -> c_int;
         fn syscall(number: c_long, ...) -> c_long;
     }
 
@@ -98,19 +100,28 @@ mod sys {
         }
     }
 
-    pub fn rename_noreplace_at(
-        directory: RawFd,
+    pub fn duplicate(source_descriptor: RawFd) -> io::Result<File> {
+        // SAFETY: `source_descriptor` is only borrowed. F_DUPFD_CLOEXEC returns a new
+        // independently owned descriptor or a negative error result.
+        let duplicate = descriptor(unsafe { fcntl(source_descriptor, F_DUPFD_CLOEXEC, 0) })?;
+        // SAFETY: `fcntl` returned a new owned descriptor.
+        Ok(unsafe { File::from_raw_fd(duplicate) })
+    }
+
+    pub fn rename_noreplace_between(
+        source_directory: RawFd,
         old_name: &CStr,
+        destination_directory: RawFd,
         new_name: &CStr,
     ) -> io::Result<()> {
         // SAFETY: both names are NUL-terminated and remain live. The syscall
-        // receives the same valid directory descriptor for source and target.
+        // receives valid borrowed directory descriptors for source and target.
         let result = unsafe {
             syscall(
                 SYS_RENAMEAT2,
-                directory,
+                source_directory,
                 old_name.as_ptr(),
-                directory,
+                destination_directory,
                 new_name.as_ptr(),
                 RENAME_NOREPLACE,
             )
@@ -127,6 +138,11 @@ pub const HOME_DOCUMENT_ID: &str = "home";
 pub const MAX_DOCUMENT_ID_BYTES: usize = 1024;
 pub const MAX_DOCUMENT_DEPTH: usize = 32;
 pub const MAX_DOCUMENT_NAME_BYTES: usize = 255;
+pub const MAX_IMPORT_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+
+const IMPORT_STAGING_DIRECTORY: &str = ".archphene-import";
+const IMPORT_STAGING_FILE: &str = "pending";
+const MAX_IMPORT_COLLISIONS: u32 = 999;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OpenMode {
@@ -142,6 +158,8 @@ pub enum StorageError {
     InvalidDocument,
     HiddenDocument,
     RootMutation,
+    ImportTooLarge,
+    ImportCollision,
     Io(io::Error),
 }
 
@@ -152,6 +170,10 @@ impl fmt::Display for StorageError {
             Self::InvalidDocument => formatter.write_str("invalid Archphene document"),
             Self::HiddenDocument => formatter.write_str("private Archphene document"),
             Self::RootMutation => formatter.write_str("cannot mutate Archphene home"),
+            Self::ImportTooLarge => formatter.write_str("Android document exceeds 16 GiB"),
+            Self::ImportCollision => {
+                formatter.write_str("too many documents use this imported name")
+            }
             Self::Io(error) => write!(formatter, "Archphene document I/O error: {error}"),
         }
     }
@@ -262,9 +284,107 @@ pub fn rename_document(root: &Path, document_id: &str, new_name: &str) -> Result
     )?;
     drop(source);
     let new_name = c_string(OsStr::new(new_name))?;
-    sys::rename_noreplace_at(parent.as_raw_fd(), &old_name, &new_name)?;
+    sys::rename_noreplace_between(parent.as_raw_fd(), &old_name, parent.as_raw_fd(), &new_name)?;
     parent.sync_all()?;
     Ok(())
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct ImportReport {
+    pub display_name: String,
+    pub bytes: u64,
+}
+
+pub fn import_document_from_fd(
+    root: &Path,
+    parent_id: &str,
+    display_name: &str,
+    source_descriptor: RawFd,
+) -> Result<ImportReport, StorageError> {
+    if source_descriptor < 0 {
+        return Err(StorageError::InvalidDocument);
+    }
+    let mut source = sys::duplicate(source_descriptor)?;
+    import_document(root, parent_id, display_name, &mut source)
+}
+
+pub fn import_document<R: Read>(
+    root: &Path,
+    parent_id: &str,
+    display_name: &str,
+    source: &mut R,
+) -> Result<ImportReport, StorageError> {
+    validate_visible_name(display_name)?;
+    let root_directory = open_directory(root, &[])?;
+    let staging_name = c_string(OsStr::new(IMPORT_STAGING_DIRECTORY))?;
+    match sys::mkdir_at(root_directory.as_raw_fd(), &staging_name, 0o700) {
+        Ok(()) => root_directory.sync_all()?,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
+    }
+    let staging = sys::open_at(
+        root_directory.as_raw_fd(),
+        &staging_name,
+        sys::O_RDONLY | sys::O_DIRECTORY | sys::O_CLOEXEC | sys::O_NOFOLLOW,
+        0,
+    )?;
+    let pending_name = c_string(OsStr::new(IMPORT_STAGING_FILE))?;
+    remove_stale_import(&staging, &pending_name)?;
+
+    let mut pending = sys::open_at(
+        staging.as_raw_fd(),
+        &pending_name,
+        sys::O_WRONLY | sys::O_CREAT | sys::O_EXCL | sys::O_CLOEXEC | sys::O_NOFOLLOW,
+        0o600,
+    )?;
+    let result = (|| {
+        let mut bytes = 0_u64;
+        let mut buffer = [0_u8; 32 * 1024];
+        loop {
+            let count = source.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            bytes = bytes
+                .checked_add(count as u64)
+                .ok_or(StorageError::ImportTooLarge)?;
+            if bytes > MAX_IMPORT_BYTES {
+                return Err(StorageError::ImportTooLarge);
+            }
+            pending.write_all(&buffer[..count])?;
+        }
+        pending.sync_all()?;
+        drop(pending);
+
+        let destination = open_directory(root, &parse_document_id(parent_id)?)?;
+        for ordinal in 1..=MAX_IMPORT_COLLISIONS {
+            let candidate = collision_name(display_name, ordinal)?;
+            let candidate_name = c_string(OsStr::new(&candidate))?;
+            match sys::rename_noreplace_between(
+                staging.as_raw_fd(),
+                &pending_name,
+                destination.as_raw_fd(),
+                &candidate_name,
+            ) {
+                Ok(()) => {
+                    destination.sync_all()?;
+                    staging.sync_all()?;
+                    return Ok(ImportReport {
+                        display_name: candidate,
+                        bytes,
+                    });
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(StorageError::ImportCollision)
+    })();
+    if result.is_err() {
+        let _ = sys::unlink_at(staging.as_raw_fd(), &pending_name, false);
+        let _ = staging.sync_all();
+    }
+    result
 }
 
 pub fn delete_document(root: &Path, document_id: &str) -> Result<(), StorageError> {
@@ -335,6 +455,56 @@ fn open_directory(root: &Path, segments: &[&str]) -> Result<File, StorageError> 
 
 fn c_string(value: &OsStr) -> Result<CString, StorageError> {
     CString::new(value.as_bytes()).map_err(|_| StorageError::InvalidDocument)
+}
+
+fn remove_stale_import(staging: &File, pending_name: &CString) -> Result<(), StorageError> {
+    match sys::open_at(
+        staging.as_raw_fd(),
+        pending_name,
+        sys::O_RDONLY | sys::O_CLOEXEC | sys::O_NOFOLLOW | sys::O_NONBLOCK,
+        0,
+    ) {
+        Ok(entry) => {
+            if !entry.metadata()?.is_file() {
+                return Err(StorageError::InvalidDocument);
+            }
+            drop(entry);
+            sys::unlink_at(staging.as_raw_fd(), pending_name, false)?;
+            staging.sync_all()?;
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn collision_name(display_name: &str, ordinal: u32) -> Result<String, StorageError> {
+    if ordinal == 1 {
+        return Ok(display_name.to_owned());
+    }
+    let suffix = format!(" ({ordinal})");
+    let extension_start = display_name
+        .rfind('.')
+        .filter(|index| *index > 0 && display_name.len() - *index <= 33);
+    let (base, extension) = extension_start
+        .map(|index| display_name.split_at(index))
+        .unwrap_or((display_name, ""));
+    let reserved = suffix
+        .len()
+        .checked_add(extension.len())
+        .ok_or(StorageError::InvalidDocument)?;
+    if reserved >= MAX_DOCUMENT_NAME_BYTES {
+        return Err(StorageError::InvalidDocument);
+    }
+    let maximum_base = MAX_DOCUMENT_NAME_BYTES - reserved;
+    let mut boundary = base.len().min(maximum_base);
+    while boundary > 0 && !base.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    if boundary == 0 {
+        return Err(StorageError::InvalidDocument);
+    }
+    Ok(format!("{}{}{}", &base[..boundary], suffix, extension))
 }
 
 #[cfg(test)]
@@ -455,5 +625,82 @@ mod tests {
             fs::read(home.0.join("target")).expect("target remains"),
             b"target"
         );
+    }
+
+    #[test]
+    fn imports_atomically_and_numbers_collisions() {
+        let home = TestDirectory::new();
+        create_document(&home.0, HOME_DOCUMENT_ID, "Downloads", true).expect("downloads");
+        let first = import_document(&home.0, "home/Downloads", "project.txt", &mut &b"first"[..])
+            .expect("first import");
+        let second = import_document(
+            &home.0,
+            "home/Downloads",
+            "project.txt",
+            &mut &b"second"[..],
+        )
+        .expect("second import");
+        assert_eq!(first.display_name, "project.txt");
+        assert_eq!(first.bytes, 5);
+        assert_eq!(second.display_name, "project (2).txt");
+        assert_eq!(second.bytes, 6);
+        assert_eq!(
+            fs::read(home.0.join("Downloads/project.txt")).expect("first"),
+            b"first"
+        );
+        assert_eq!(
+            fs::read(home.0.join("Downloads/project (2).txt")).expect("second"),
+            b"second"
+        );
+        assert!(
+            home.0
+                .join(IMPORT_STAGING_DIRECTORY)
+                .read_dir()
+                .expect("staging")
+                .next()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn import_recovers_a_stale_regular_staging_file() {
+        let home = TestDirectory::new();
+        create_document(&home.0, HOME_DOCUMENT_ID, "Downloads", true).expect("downloads");
+        fs::create_dir(home.0.join(IMPORT_STAGING_DIRECTORY)).expect("staging");
+        fs::write(
+            home.0
+                .join(IMPORT_STAGING_DIRECTORY)
+                .join(IMPORT_STAGING_FILE),
+            b"partial",
+        )
+        .expect("stale pending");
+        import_document(
+            &home.0,
+            "home/Downloads",
+            "recovered.txt",
+            &mut &b"complete"[..],
+        )
+        .expect("recover import");
+        assert_eq!(
+            fs::read(home.0.join("Downloads/recovered.txt")).expect("recovered"),
+            b"complete"
+        );
+    }
+
+    #[test]
+    fn import_rejects_unsafe_names_and_staging_substitution() {
+        let home = TestDirectory::new();
+        create_document(&home.0, HOME_DOCUMENT_ID, "Downloads", true).expect("downloads");
+        assert!(import_document(&home.0, "home/Downloads", "../escape", &mut &b"no"[..],).is_err());
+        fs::create_dir(home.0.join(IMPORT_STAGING_DIRECTORY)).expect("staging");
+        symlink(
+            home.0.join("Downloads"),
+            home.0
+                .join(IMPORT_STAGING_DIRECTORY)
+                .join(IMPORT_STAGING_FILE),
+        )
+        .expect("pending symlink");
+        assert!(import_document(&home.0, "home/Downloads", "safe.txt", &mut &b"no"[..],).is_err());
+        assert!(!home.0.join("Downloads/safe.txt").exists());
     }
 }
