@@ -508,7 +508,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(dp(16), 0, dp(16), dp(4))
                 setText(R.string.package_job_empty)
-                maxLines = 1
+                maxLines = 3
                 ellipsize = TextUtils.TruncateAt.END
             }
         packageJobTitleView =
@@ -954,7 +954,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                                 jobRow,
                                 LinearLayout.LayoutParams(
                                     ViewGroup.LayoutParams.MATCH_PARENT,
-                                    dp(104),
+                                    dp(140),
                                 ),
                             )
                         },
@@ -1008,7 +1008,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                         jobRow,
                         LinearLayout.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT,
-                            dp(104),
+                            dp(140),
                         ),
                     )
                 }
@@ -2041,6 +2041,9 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         setTextIfChanged(packageJobTitleView, packageName)
         setTextIfChanged(packageJobActivityView, binder.packageJobActivityLabel)
         setTextIfChanged(jobStatusView, binder.packageJobMessage)
+        resetHorizontalScroll(packageJobTitleView)
+        resetHorizontalScroll(packageJobActivityView)
+        resetHorizontalScroll(jobStatusView)
         if (packageJobProgressTrack.visibility != View.VISIBLE) {
             packageJobProgressTrack.visibility = View.VISIBLE
         }
@@ -2328,6 +2331,12 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     ) {
         if (!TextUtils.equals(view.text, text)) {
             view.text = text
+        }
+    }
+
+    private fun resetHorizontalScroll(view: TextView) {
+        if (view.scrollX != 0) {
+            view.scrollTo(0, view.scrollY)
         }
     }
 

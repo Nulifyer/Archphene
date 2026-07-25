@@ -1860,7 +1860,7 @@ class ArchpheneRuntimeService : Service() {
             ?: throw IllegalStateException("Package-runtime probe returned no pacman version")
     }
 
-    private fun refreshInstalledPackages(activeHandle: Long) {
+    private fun refreshInstalledPackages(activeHandle: Long): Boolean {
         val names = ArrayList<String>()
         val versions = ArrayList<String>()
         val explicitFlags = BooleanArray(NativeRuntime.INSTALLED_PACKAGE_LIMIT)
@@ -1975,6 +1975,7 @@ class ArchpheneRuntimeService : Service() {
                     },
                     previousRevision + 1,
                 )
+            return true
         } catch (error: Exception) {
             val previous = installedPackageSnapshot
             installedPackageSnapshot =
@@ -1986,6 +1987,7 @@ class ArchpheneRuntimeService : Service() {
                     previous.revision + 1,
                 )
             Log.w(TAG, "Could not refresh installed package list", error)
+            return false
         }
     }
 
@@ -2769,29 +2771,55 @@ class ArchpheneRuntimeService : Service() {
                     } catch (error: Exception) {
                         val cancelled =
                             error is InterruptedException || packageCancellationRequested
+                        val mutationStarted = !cancelled && recordedPhase >= 4
+                        val installedStateRefreshed =
+                            if (mutationStarted) {
+                                val refreshed = refreshInstalledPackages(activeHandle)
+                                refreshShellChoices(activeHandle)
+                                refreshed
+                            } else {
+                                true
+                            }
+                        val terminalState =
+                            if (cancelled) {
+                                NativeRuntime.JOB_CANCELLED
+                            } else {
+                                NativeRuntime.JOB_FAILED
+                            }
+                        val failureMessage =
+                            boundedJobMessage(
+                                if (cancelled) {
+                                    "Cancelled before package mutation"
+                                } else {
+                                    PackageFailureDiagnostics.install(
+                                        error,
+                                        mutationStarted,
+                                        installedStateRefreshed,
+                                    )
+                                },
+                            )
                         try {
                             updatePackageJob(
                                 activeHandle,
                                 jobId,
-                                if (cancelled) {
-                                    NativeRuntime.JOB_CANCELLED
-                                } else {
-                                    NativeRuntime.JOB_FAILED
-                                },
+                                terminalState,
                                 recordedPhase,
                                 recordedProgress,
-                                boundedJobMessage(
-                                    if (cancelled) {
-                                        "Cancelled before package mutation"
-                                    } else {
-                                        "Install failed: " +
-                                            (error.message ?: error.javaClass.simpleName)
-                                    },
-                                ),
+                                failureMessage,
                                 normalized,
                                 scratch,
                             )
                         } catch (updateError: Exception) {
+                            publishPackageJob(
+                                normalized,
+                                jobOperation,
+                                terminalState,
+                                recordedProgress,
+                                boundedJobMessage(
+                                    "$failureMessage Activity journal update failed; " +
+                                        "restart Archphene.",
+                                ),
+                            )
                             jobStatus =
                                 "Install failed and journal update failed: " +
                                     (updateError.message ?: updateError.javaClass.simpleName)
@@ -2963,29 +2991,55 @@ class ArchpheneRuntimeService : Service() {
                     } catch (error: Exception) {
                         val cancelled =
                             error is InterruptedException || packageCancellationRequested
+                        val mutationStarted = !cancelled && recordedPhase >= 3
+                        val installedStateRefreshed =
+                            if (mutationStarted) {
+                                val refreshed = refreshInstalledPackages(activeHandle)
+                                refreshShellChoices(activeHandle)
+                                refreshed
+                            } else {
+                                true
+                            }
+                        val terminalState =
+                            if (cancelled) {
+                                NativeRuntime.JOB_CANCELLED
+                            } else {
+                                NativeRuntime.JOB_FAILED
+                            }
+                        val failureMessage =
+                            boundedJobMessage(
+                                if (cancelled) {
+                                    "Cancelled before package mutation"
+                                } else {
+                                    PackageFailureDiagnostics.removal(
+                                        error,
+                                        mutationStarted,
+                                        installedStateRefreshed,
+                                    )
+                                },
+                            )
                         try {
                             updatePackageJob(
                                 activeHandle,
                                 jobId,
-                                if (cancelled) {
-                                    NativeRuntime.JOB_CANCELLED
-                                } else {
-                                    NativeRuntime.JOB_FAILED
-                                },
+                                terminalState,
                                 recordedPhase,
                                 recordedProgress,
-                                boundedJobMessage(
-                                    if (cancelled) {
-                                        "Cancelled before package mutation"
-                                    } else {
-                                        "Removal failed: " +
-                                            (error.message ?: error.javaClass.simpleName)
-                                    },
-                                ),
+                                failureMessage,
                                 normalized,
                                 scratch,
                             )
                         } catch (updateError: Exception) {
+                            publishPackageJob(
+                                normalized,
+                                jobOperation,
+                                terminalState,
+                                recordedProgress,
+                                boundedJobMessage(
+                                    "$failureMessage Activity journal update failed; " +
+                                        "restart Archphene.",
+                                ),
+                            )
                             jobStatus =
                                 "Removal failed and journal update failed: " +
                                     (updateError.message ?: updateError.javaClass.simpleName)

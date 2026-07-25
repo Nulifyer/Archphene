@@ -78,7 +78,7 @@ archphene_wait_ui_exact_text \
 archphene_wait_ui_exact_text \
   "Install · Failed · 0%" "package-activity-failed-state-$serial" 15
 archphene_wait_ui_exact_text \
-  "Network unavailable; retry is required" \
+  "Download failed. Check the connection, then Review." \
   "package-activity-failed-message-$serial" 15
 archphene_wait_ui_exact_text \
   "Review" "package-activity-failed-review-$serial" 15

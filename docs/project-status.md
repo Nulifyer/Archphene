@@ -126,6 +126,25 @@ generated debug pacman catalog now contains sufficient real metadata for
 Retry gate plus the fail-closed missing-catalog Review gate on both the emulator
 and Samsung.
 
+Package failures now use one bounded diagnostic policy for install and removal.
+It distinguishes network, Linux-storage, repository/trust, changed-state,
+catalog, generic pre-mutation, post-mutation, and failed state-refresh cases.
+Once pacman mutation has begun, a failure immediately refreshes the installed
+package and shell snapshots before publishing Failed; if that refresh cannot be
+completed, the card directs the user to restart before Review. A failed durable
+journal update also publishes the terminal result in memory so the current UI
+cannot remain misleadingly stuck on Installing while restart recovery repairs
+the journal.
+
+The activity card is 140dp high with a 64dp stacked name/phase header, 6dp
+progress track, and up to three bounded diagnostic lines. Its three text views
+discard stale horizontal scroll offsets during state polling. Eight
+production-classifier fixtures pass from the exact APK on the emulator and
+Samsung, with settled full-device screenshots confirming that short package
+names and the longest partial-mutation guidance remain fully on-screen. Deeper
+cache cleanup, one-tap failure-card catalog refresh, and repair/rollback tooling
+remain pending.
+
 Visible files in the shared `/home/archphene` are now available to Android
 Files, system pickers, and explicitly granted Android consumers through an
 exported `DocumentsProvider` protected by Android's `MANAGE_DOCUMENTS`

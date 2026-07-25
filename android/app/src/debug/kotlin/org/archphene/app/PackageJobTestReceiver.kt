@@ -5,9 +5,12 @@ import android.content.Context
 import android.content.Intent
 import android.util.Log
 import java.io.File
+import java.io.IOException
+import java.net.UnknownHostException
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 import org.archphene.app.runtime.NativeRuntime
+import org.archphene.app.runtime.PackageFailureDiagnostics
 
 internal class PackageJobTestReceiver : BroadcastReceiver() {
     override fun onReceive(
@@ -20,12 +23,19 @@ internal class PackageJobTestReceiver : BroadcastReceiver() {
         val token = intent.getStringExtra(EXTRA_TOKEN)
         val packageName = intent.getStringExtra(EXTRA_PACKAGE)
         val terminalState = intent.getStringExtra(EXTRA_STATE)
+        val operation = intent.getStringExtra(EXTRA_OPERATION) ?: "install"
+        val failure = intent.getStringExtra(EXTRA_FAILURE)
         if (
             token == null ||
             !TOKEN.matches(token) ||
             packageName == null ||
             !PACKAGE.matches(packageName) ||
-            terminalState !in setOf("complete", "failed", "cancelled")
+            terminalState !in setOf("complete", "failed", "cancelled") ||
+            operation !in setOf("install", "remove") ||
+            (
+                failure != null &&
+                    (terminalState != "failed" || failure !in FAILURE_CLASSES)
+            )
         ) {
             Log.e(TAG, "Rejected invalid package-job fixture")
             return
@@ -59,7 +69,11 @@ internal class PackageJobTestReceiver : BroadcastReceiver() {
                     val jobId =
                         NativeRuntime.nativeQueuePackageJob(
                             handle,
-                            NativeRuntime.JOB_OPERATION_INSTALL,
+                            if (operation == "remove") {
+                                NativeRuntime.JOB_OPERATION_REMOVE
+                            } else {
+                                NativeRuntime.JOB_OPERATION_INSTALL
+                            },
                             requestBuffer,
                             requestBytes.size,
                             System.currentTimeMillis(),
@@ -119,9 +133,9 @@ internal class PackageJobTestReceiver : BroadcastReceiver() {
                                 handle,
                                 jobId,
                                 NativeRuntime.JOB_FAILED,
-                                0,
-                                0,
-                                "Network unavailable; retry is required",
+                                if (failure == "mutation" || failure == "refresh-failed") 4 else 0,
+                                if (failure == "mutation" || failure == "refresh-failed") 97 else 0,
+                                failureMessage(operation, failure ?: "network"),
                                 outputBuffer,
                             )
                         else ->
@@ -177,13 +191,56 @@ internal class PackageJobTestReceiver : BroadcastReceiver() {
         }
     }
 
+    private fun failureMessage(
+        operation: String,
+        failure: String,
+    ): String {
+        val error =
+            when (failure) {
+                "network" -> UnknownHostException("fixture.invalid")
+                "storage" -> IOException("No space left on device")
+                "trust" -> SecurityException("invalid package signature")
+                "changed" -> SecurityException("Target version changed; open Details again")
+                "catalog" -> IllegalStateException("invalid package repository catalog")
+                else -> IllegalStateException("pacman exited with status 1")
+            }
+        val mutationStarted = failure == "mutation" || failure == "refresh-failed"
+        val installedStateRefreshed = failure != "refresh-failed"
+        return if (operation == "remove") {
+            PackageFailureDiagnostics.removal(
+                error,
+                mutationStarted,
+                installedStateRefreshed,
+            )
+        } else {
+            PackageFailureDiagnostics.install(
+                error,
+                mutationStarted,
+                installedStateRefreshed,
+            )
+        }
+    }
+
     private companion object {
         private const val TAG = "ArchphenePackageJobProbe"
         private const val ACTION_SEED = "org.archphene.app.debug.action.SEED_PACKAGE_JOB"
         private const val EXTRA_TOKEN = "token"
         private const val EXTRA_PACKAGE = "package"
         private const val EXTRA_STATE = "state"
+        private const val EXTRA_OPERATION = "operation"
+        private const val EXTRA_FAILURE = "failure"
         private val TOKEN = Regex("[a-z0-9-]{1,48}")
         private val PACKAGE = Regex("[a-z0-9@._+\\-]{1,96}")
+        private val FAILURE_CLASSES =
+            setOf(
+                "network",
+                "storage",
+                "trust",
+                "changed",
+                "catalog",
+                "mutation",
+                "refresh-failed",
+                "generic",
+            )
     }
 }
