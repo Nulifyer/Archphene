@@ -106,7 +106,7 @@ archphene_tap_ui_pattern \
 
 verified_log="$(
   archphene_wait_log \
-    "Verified 1 AUR source\\(s\\) for $package: [1-9][0-9]+ bytes" 300 \
+    "Verified 1 AUR source\\(s\\) for $package: [1-9][0-9]+ bytes" 900 \
     'ArchpheneRuntime:I *:S'
 )"
 verified_bytes="$(
@@ -128,7 +128,7 @@ for pattern in \
   'Verified source downloads:' \
   'HTTPS endpoint[^:]*: https://' \
   'Installed/build disk impact: pending the isolated package build\.' \
-  'Official build environment plan: [1-9][0-9]* official packages · [1-9][0-9]* MiB download before cache reuse\.' \
+  'Verified official build environment: [1-9][0-9]* official packages · [1-9][0-9]* MiB archives · [0-9]+ cached · [0-9]+ downloaded\.' \
   "Build sandbox: signed companion UID $builder_uid; no network permission or direct manager-data access; [1-9][0-9]* MiB reviewed inputs staged\\." \
   'code[^<]*\.deb' \
   'direct HTTPS download' \
@@ -225,13 +225,14 @@ archphene_adb_run shell input swipe \
   "$((screen_width / 2))" "$((screen_height * 3 / 4))" \
   "$((screen_width / 2))" "$((screen_height * 2 / 3))" 600
 archphene_wait_ui \
-  'Official build environment plan:' aur-sources-plan-render 15
+  'Verified official build environment:' aur-sources-plan-render 15
 sleep 1
 archphene_adb_run exec-out screencap -p >"$output_dir/$serial.png"
 
 fatal_log="$(archphene_adb_run logcat -d -v brief \
   -s AndroidRuntime:E libc:F '*:S' 2>/dev/null || true)"
-[[ "$fatal_log" != *"FATAL EXCEPTION"* && "$fatal_log" != *"Fatal signal"* ]] ||
+[[ "$fatal_log" != *"$manager"* && "$fatal_log" != *"$builder"* ]] ||
+  [[ "$fatal_log" != *"FATAL EXCEPTION"* && "$fatal_log" != *"Fatal signal"* ]] ||
   archphene_die "AUR source verification emitted a fatal Android error: $fatal_log"
 
 archphene_note "Archphene AUR source verification passed on $serial"

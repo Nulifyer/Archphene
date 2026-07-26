@@ -1061,12 +1061,22 @@ all same-UID descendants.
 The current AUR slice also resolves the complete official build environment in
 one bounded pacman plan: `base-devel` plus all reviewed `makedepends` and
 `checkdepends`, with validated version constraints removed only for repository
-lookup. The live Samsung AArch64 candidate resolves to 130 official packages
-and 187,488,456 download bytes before cache reuse. The manager renders this
-plan without changing the 36-entry shared-root pacman database or enabling
-Install. These are resolution metadata; downloading every exact archive and
-detached signature, re-verifying identity/signers, measuring extracted/build
-space, and transferring a verified closure into the Builder remain pending.
+lookup. The initial 130-package result was correctly rejected as incomplete:
+it used the manager's installed-package database and omitted dependencies an
+empty Builder root still needs. Resolution now copies current sync catalogs
+into an ephemeral manager-owned database with no local package state. The live
+Samsung AArch64 candidate is therefore 152 official packages and 224,514,136
+archive bytes.
+
+The manager has downloaded the exact archives and detached signatures into its
+bounded cache. Rust requires the pinned AArch64 signer and exact package
+name/version/architecture, retains the original resolution, and independently
+reverifies the whole closure before success. A Samsung cache-reuse pass
+reverified all 152 packages, removed the ephemeral database, visibly rendered
+the verified 215 MiB closure, kept Install disabled, and left all 36
+shared-root pacman entries unchanged. Measuring extracted/build space,
+reverification at handoff, and transferring the closure into the Builder
+remain pending.
 
 Code now reaches the packaged Electron executable without a Code-specific
 bridge exception. Translating Arch's standard `/usr/lib/pulseaudio` directory

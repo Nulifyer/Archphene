@@ -41,6 +41,7 @@ pub struct RuntimeHost {
     catalog_download: Option<CatalogDownload>,
     package_download: Option<PackagePayloadDownload>,
     aur_review: Option<AurReview>,
+    aur_build_resolution: Option<PackageResolution>,
     aur_source_download: Option<AurSourceDownload>,
     pty_sessions: PtyRegistry,
     gui_sessions: GuiRegistry,
@@ -200,6 +201,7 @@ impl RuntimeHost {
             catalog_download: None,
             package_download: None,
             aur_review: None,
+            aur_build_resolution: None,
             aur_source_download: None,
             pty_sessions: PtyRegistry::new(),
             gui_sessions: GuiRegistry::new(),
@@ -840,6 +842,7 @@ impl RuntimeHost {
 
     pub fn retain_aur_review(&mut self, review: AurReview) {
         self.aur_source_download = None;
+        self.aur_build_resolution = None;
         self.aur_review = Some(review);
     }
 
@@ -923,7 +926,9 @@ impl RuntimeHost {
             .open_reviewed_aur_snapshot(&review.package_base, expected_sha256)
     }
 
-    pub fn resolve_aur_build_environment(&self) -> Result<PackageResolution, PackageRuntimeError> {
+    pub fn resolve_aur_build_environment(
+        &mut self,
+    ) -> Result<PackageResolution, PackageRuntimeError> {
         let review = self
             .aur_review
             .as_ref()
@@ -941,10 +946,25 @@ impl RuntimeHost {
             }
         }
         let borrowed: Vec<&str> = targets.iter().map(String::as_str).collect();
+        let resolution = self
+            .package_runtime
+            .as_ref()
+            .ok_or(PackageRuntimeError::InvalidPath)?
+            .resolve_targets_for_fresh_root(&borrowed)?;
+        self.aur_build_resolution = Some(resolution.clone());
+        Ok(resolution)
+    }
+
+    pub fn verify_aur_build_environment(&self) -> Result<PackageResolution, PackageRuntimeError> {
+        let resolution = self
+            .aur_build_resolution
+            .as_ref()
+            .ok_or(PackageRuntimeError::InvalidPayload)?;
         self.package_runtime
             .as_ref()
             .ok_or(PackageRuntimeError::InvalidPath)?
-            .resolve_targets(&borrowed)
+            .verify_resolution(resolution)?;
+        Ok(resolution.clone())
     }
 
     pub fn take_aur_source_download(&mut self) -> Result<AurSourceDownload, PackageRuntimeError> {

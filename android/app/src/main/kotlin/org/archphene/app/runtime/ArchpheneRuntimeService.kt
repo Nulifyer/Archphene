@@ -651,9 +651,16 @@ class ArchpheneRuntimeService : Service() {
     )
 
     private data class AurBuildEnvironment(
-        val packageCount: Int,
+        val packages: List<ResolvedPayload>,
+        val resolutionBytes: ByteArray,
         val downloadBytes: Long,
-    )
+        val cachedPackages: Int = 0,
+        val downloadedPackages: Int = 0,
+        val verified: Boolean = false,
+    ) {
+        val packageCount: Int
+            get() = packages.size
+    }
 
     private data class AurBuilderInput(
         val role: Int,
@@ -4251,7 +4258,11 @@ class ArchpheneRuntimeService : Service() {
                         }
                     }
                     retainedAurSourceEvidence = evidence.toTypedArray()
-                    val buildEnvironment = resolveAurBuildEnvironment(activeHandle)
+                    val buildEnvironment =
+                        downloadAndVerifyAurBuildEnvironment(
+                            activeHandle,
+                            resolveAurBuildEnvironment(activeHandle),
+                        )
                     val builder =
                         probeAurBuilderCompanion(
                             activeHandle,
@@ -4270,8 +4281,10 @@ class ArchpheneRuntimeService : Service() {
                         TAG,
                             "Verified ${remoteSources.size} AUR source(s) for " +
                             "${review.packageName}: $totalVerified bytes; " +
-                            "build=${buildEnvironment.packageCount} packages/" +
-                            "${buildEnvironment.downloadBytes} bytes",
+                            "build=${buildEnvironment.packageCount} verified packages/" +
+                            "${buildEnvironment.downloadBytes} bytes " +
+                            "(cached=${buildEnvironment.cachedPackages} " +
+                            "downloaded=${buildEnvironment.downloadedPackages})",
                     )
                     if (builder != null) {
                         Log.i(
@@ -4733,7 +4746,75 @@ class ArchpheneRuntimeService : Service() {
             packages.fold(0L) { total, payload ->
                 Math.addExact(total, payload.size)
             }
-        return AurBuildEnvironment(packages.size, totalBytes)
+        return AurBuildEnvironment(packages, bytes, totalBytes)
+    }
+
+    private fun downloadAndVerifyAurBuildEnvironment(
+        activeHandle: Long,
+        environment: AurBuildEnvironment,
+    ): AurBuildEnvironment {
+        val scratch = PackageIoScratch()
+        var cachedPackages = 0
+        var downloadedPackages = 0
+        environment.packages.forEachIndexed { index, payload ->
+            if (Thread.currentThread().isInterrupted) {
+                throw InterruptedException("AUR build-environment verification interrupted")
+            }
+            searchStatus =
+                "Verifying official build package ${index + 1}/${environment.packageCount}: " +
+                    payload.name
+            if (isCachedPackageValid(activeHandle, payload, scratch)) {
+                cachedPackages += 1
+                return@forEachIndexed
+            }
+            if (payload.size + AUR_STORAGE_RESERVE_BYTES > filesDir.usableSpace) {
+                throw IllegalStateException(
+                    "Not enough private storage for build package ${payload.name}",
+                )
+            }
+            searchStatus =
+                "Downloading official build package ${index + 1}/${environment.packageCount}: " +
+                    payload.name
+            downloadPackagePayload(activeHandle, payload, false, scratch)
+            downloadPackagePayload(activeHandle, payload, true, scratch)
+            verifyPackagePayload(activeHandle, payload, scratch)
+            downloadedPackages += 1
+        }
+        val verifiedBytes =
+            synchronized(packageResolutionOutputBuffer) {
+                packageResolutionOutputBuffer.clear()
+                val outputLength =
+                    NativeRuntime.nativeVerifyAurBuildEnvironment(
+                        activeHandle,
+                        packageResolutionOutputBuffer,
+                    )
+                if (outputLength <= 0) {
+                    throw SecurityException(
+                        readNativeMessage(packageResolutionOutputBuffer, outputLength),
+                    )
+                }
+                ByteArray(outputLength).also { output ->
+                    packageResolutionOutputBuffer.position(0)
+                    packageResolutionOutputBuffer.get(output)
+                }
+            }
+        if (!verifiedBytes.contentEquals(environment.resolutionBytes)) {
+            throw SecurityException("Verified build environment changed after resolution")
+        }
+        val verifiedPackages = decodeResolvedPayloads(verifiedBytes, 512)
+        if (
+            verifiedPackages.size != environment.packageCount ||
+            verifiedPackages.fold(0L) { total, payload ->
+                Math.addExact(total, payload.size)
+            } != environment.downloadBytes
+        ) {
+            throw SecurityException("Verified build environment does not match its plan")
+        }
+        return environment.copy(
+            cachedPackages = cachedPackages,
+            downloadedPackages = downloadedPackages,
+            verified = true,
+        )
     }
 
     private fun parseAurReview(
@@ -4947,11 +5028,27 @@ class ArchpheneRuntimeService : Service() {
                 }
                 append("Installed/build disk impact: pending the isolated package build.\n")
                 if (buildEnvironment != null) {
-                    append("Official build environment plan: ")
+                    append(
+                        if (buildEnvironment.verified) {
+                            "Verified official build environment: "
+                        } else {
+                            "Official build environment plan: "
+                        },
+                    )
                         .append(buildEnvironment.packageCount)
                         .append(" official packages · ")
                         .append(formatStorageBytes(buildEnvironment.downloadBytes))
-                        .append(" download before cache reuse.\n")
+                        .append(" archives")
+                    if (buildEnvironment.verified) {
+                        append(" · ")
+                            .append(buildEnvironment.cachedPackages)
+                            .append(" cached · ")
+                            .append(buildEnvironment.downloadedPackages)
+                            .append(" downloaded")
+                    } else {
+                        append(" before cache reuse")
+                    }
+                    append(".\n")
                 }
                 if (builder == null) {
                     append("Build sandbox: signed companion not installed.\n")

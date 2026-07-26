@@ -35,6 +35,7 @@ const INSTALL_REASON_INTENT_LIMIT: u64 = 64 * 1024;
 const PACMAN_CONFIG_FILE: &str = "etc/pacman.conf";
 const PACMAN_CONFIG_TEMP_FILE: &str = "etc/pacman.conf.tmp";
 const CATALOG_DIRECTORY: &str = "var/lib/pacman/sync";
+const AUR_BUILD_DATABASE_DIRECTORY: &str = "run/aur-build-database-v1";
 const CORE_CATALOG_LIMIT: u64 = 8 * 1024 * 1024;
 const EXTRA_CATALOG_LIMIT: u64 = 64 * 1024 * 1024;
 const PACKAGE_ARCHIVE_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
@@ -301,6 +302,7 @@ pub struct ToolOutput {
     length: usize,
 }
 
+#[derive(Clone, Debug)]
 pub struct PackageResolution {
     bytes: Vec<u8>,
 }
@@ -760,6 +762,29 @@ impl PackageRuntime {
         &self,
         packages: &[&str],
     ) -> Result<PackageResolution, PackageRuntimeError> {
+        let database_path = self.arch_root.join("var/lib/pacman");
+        self.resolve_targets_with_database(packages, &database_path)
+    }
+
+    pub fn resolve_targets_for_fresh_root(
+        &self,
+        packages: &[&str],
+    ) -> Result<PackageResolution, PackageRuntimeError> {
+        let database_path = self.prepare_fresh_resolution_database()?;
+        let result = self.resolve_targets_with_database(packages, &database_path);
+        let cleanup = fs::remove_dir_all(&database_path);
+        match (result, cleanup) {
+            (Ok(resolution), Ok(())) => Ok(resolution),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(PackageRuntimeError::Io(error)),
+        }
+    }
+
+    fn resolve_targets_with_database(
+        &self,
+        packages: &[&str],
+        database_path: &Path,
+    ) -> Result<PackageResolution, PackageRuntimeError> {
         if packages.is_empty()
             || packages.len() > 256
             || packages.iter().any(|package| !safe_logical_name(package))
@@ -783,7 +808,6 @@ impl PackageRuntime {
             .arch_root
             .to_str()
             .ok_or(PackageRuntimeError::InvalidPath)?;
-        let database_path = self.arch_root.join("var/lib/pacman");
         let database = database_path
             .to_str()
             .ok_or(PackageRuntimeError::InvalidPath)?;
@@ -810,6 +834,65 @@ impl PackageRuntime {
         )?;
         let raw = std::str::from_utf8(&raw).map_err(|_| PackageRuntimeError::InvalidResolution)?;
         parse_resolution_output(raw, packages, self.architecture)
+    }
+
+    fn prepare_fresh_resolution_database(&self) -> Result<PathBuf, PackageRuntimeError> {
+        let database = self.arch_root.join(AUR_BUILD_DATABASE_DIRECTORY);
+        match fs::symlink_metadata(&database) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(PackageRuntimeError::UnsafeEntry(database));
+            }
+            Ok(_) => fs::remove_dir_all(&database)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(PackageRuntimeError::Io(error)),
+        }
+        let sync = database.join("sync");
+        let result = (|| {
+            fs::create_dir(&database)?;
+            fs::set_permissions(&database, fs::Permissions::from_mode(0o700))?;
+            fs::create_dir(&sync)?;
+            fs::set_permissions(&sync, fs::Permissions::from_mode(0o700))?;
+            for repository in [Repository::Core, Repository::Extra] {
+                let source = self
+                    .arch_root
+                    .join(CATALOG_DIRECTORY)
+                    .join(repository.file_name());
+                let source_metadata = fs::symlink_metadata(&source)?;
+                if source_metadata.file_type().is_symlink()
+                    || !source_metadata.is_file()
+                    || source_metadata.len() == 0
+                    || source_metadata.len() > repository.size_limit()
+                {
+                    return Err(PackageRuntimeError::InvalidCatalog);
+                }
+                let mut input = OpenOptions::new()
+                    .read(true)
+                    .custom_flags(O_NOFOLLOW | O_CLOEXEC)
+                    .open(&source)?;
+                let opened = input.metadata()?;
+                if !opened.is_file() || opened.len() != source_metadata.len() {
+                    return Err(PackageRuntimeError::InvalidCatalog);
+                }
+                let destination = sync.join(repository.file_name());
+                let mut output = OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .mode(0o600)
+                    .open(&destination)?;
+                let copied = io::copy(&mut input, &mut output)?;
+                if copied != opened.len() {
+                    return Err(PackageRuntimeError::InvalidCatalog);
+                }
+                output.sync_all()?;
+            }
+            File::open(&sync)?.sync_all()?;
+            File::open(&database)?.sync_all()?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_dir_all(&database);
+        }
+        result.map(|()| database)
     }
 
     pub fn installed_version(&self, package: &str) -> Result<ToolOutput, PackageRuntimeError> {
@@ -1646,6 +1729,36 @@ impl PackageRuntime {
             self.architecture,
         )?;
         Ok(output)
+    }
+
+    pub fn verify_resolution(
+        &self,
+        resolution: &PackageResolution,
+    ) -> Result<(usize, u64), PackageRuntimeError> {
+        let mut package_count = 0_usize;
+        let mut archive_bytes = 0_u64;
+        for line in resolution.as_str()?.lines() {
+            let payload = parse_resolved_payload(line)?;
+            self.verify_package(
+                payload.filename,
+                payload.name,
+                payload.version,
+                payload.size,
+            )?;
+            package_count = package_count
+                .checked_add(1)
+                .ok_or(PackageRuntimeError::OutputLimit)?;
+            archive_bytes = archive_bytes
+                .checked_add(payload.size)
+                .ok_or(PackageRuntimeError::OutputLimit)?;
+            if package_count > 512 {
+                return Err(PackageRuntimeError::OutputLimit);
+            }
+        }
+        if package_count == 0 {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        Ok((package_count, archive_bytes))
     }
 
     pub fn prepare_verification_keyring(&mut self) -> Result<(), PackageRuntimeError> {
@@ -3447,6 +3560,35 @@ extra\tdotnet-sdk\t10.0.10.sdk110-1\tdotnet-sdk-10.0.10.sdk110-1-x86_64.pkg.tar.
             ),
             Err(PackageRuntimeError::InvalidResolution)
         ));
+    }
+
+    #[test]
+    fn fresh_build_resolution_database_copies_catalogs_without_local_state() {
+        let tree = TestTree::new();
+        let runtime = tree.package_runtime();
+        fs::write(
+            tree.root.join(CATALOG_DIRECTORY).join("core.db"),
+            b"core catalog",
+        )
+        .expect("core catalog");
+        fs::write(
+            tree.root.join(CATALOG_DIRECTORY).join("extra.db"),
+            b"extra catalog",
+        )
+        .expect("extra catalog");
+        let database = runtime
+            .prepare_fresh_resolution_database()
+            .expect("fresh resolution database");
+        assert_eq!(
+            fs::read(database.join("sync/core.db")).expect("copied core catalog"),
+            b"core catalog"
+        );
+        assert_eq!(
+            fs::read(database.join("sync/extra.db")).expect("copied extra catalog"),
+            b"extra catalog"
+        );
+        assert!(!database.join("local").exists());
+        fs::remove_dir_all(database).expect("fresh database cleanup");
     }
 
     #[test]

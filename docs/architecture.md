@@ -78,10 +78,13 @@ result will return through a manager-opened output descriptor.
 
 The manager resolves the official build environment as one bounded transaction
 containing `base-devel` plus the reviewed recipe's `makedepends` and
-`checkdepends`. The current Code AArch64 plan is 130 packages and 187,488,456
-download bytes before cache reuse. That plan does not mutate the shared root
-and does not claim archive verification; exact package downloads, detached
-signature checks, Builder-root extraction, and installed/build/output disk
+`checkdepends`. It uses current repository catalogs with an empty ephemeral
+local database rather than the shared root's installed-package state. The
+current Code AArch64 plan is 152 packages and 224,514,136 archive bytes. The
+manager downloads every exact archive and detached signature, Rust verifies
+the pinned signer and package identity, retains the exact resolution, and
+reverifies the full closure before reporting it. This does not mutate the
+shared root; Builder-root extraction and installed/build/output disk
 measurements remain separate gates.
 
 This boundary is required because the tested stock Samsung kernel denies user,

@@ -76,11 +76,20 @@ The reviewed recipe's complete `makedepends` and `checkdepends` are normalized
 only by removing validated version operators, then resolved together with the
 official `base-devel` package in one bounded pacman plan. An unavailable
 official target fails closed; recursive AUR build dependencies are not yet
-accepted. On the current Samsung AArch64 catalogs, the Code candidate resolves
-to 130 official packages and 187,488,456 download bytes before cache reuse.
-This is a metadata plan, not a signature claim: each exact archive and detached
-signature still must be downloaded and reverified before it can enter the
-Builder root.
+accepted. Resolution uses an ephemeral manager-owned database containing the
+current sync catalogs and no local installed-package state; resolving against
+the shared root would incorrectly omit packages an empty Builder root needs.
+On the current Samsung AArch64 catalogs, the Code candidate resolves to 152
+official packages and 224,514,136 archive bytes.
+
+The manager downloads each exact archive and detached signature into its
+bounded package cache. Rust requires the pinned architecture signer and exact
+package name, version, and architecture metadata, retains the original
+resolution bytes, then independently reverifies every member before the UI
+calls the closure verified. The ephemeral resolution database is removed after
+each plan. A successful cache-reuse pass on Samsung reverified all 152 members
+without changing the shared pacman database. The closure still must be
+reverified immediately before descriptor handoff to the Builder.
 
 Community build execution will use one hidden Archphene Builder companion APK,
 not the manager UID and not one builder per installed Linux application. The
