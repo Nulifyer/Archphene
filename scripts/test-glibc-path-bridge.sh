@@ -9,6 +9,7 @@ mkdir -p "$root/usr/share/archphene-test"
 mkdir -p "$root/usr/lib/locale/C.utf8"
 mkdir -p "$root/usr/lib/archphene-example"
 mkdir -p "$root/dev" "$root/proc" "$root/sys"
+mkdir -m 1777 "$root/tmp"
 printf expected > "$root/usr/share/archphene-test/value"
 printf expected-locale > "$root/usr/lib/locale/C.utf8/LC_CTYPE"
 cp "$(readlink -f /bin/echo)" "$root/usr/lib/archphene-example/example"
@@ -54,6 +55,9 @@ gcc -O2 -Wall -Wextra -Werror \
 gcc -O2 -Wall -Wextra -Werror \
   -o "$root/pty-probe" \
   native/archphene-glibc-path-bridge/pty_probe.c -lutil
+gcc -O2 -Wall -Wextra -Werror \
+  -o "$root/temporary-probe" \
+  native/archphene-glibc-path-bridge/temporary_probe.c
 export LD_PRELOAD="$output"
 export ARCHPHENE_RUNTIME_ROOT="$root"
 export XDG_RUNTIME_DIR="$root/runtime"
@@ -81,7 +85,10 @@ test "$(
   ARCHPHENE_FAKE_CHROOT=1 /usr/bin/realpath /var/lib/pacman
 )" = /var/lib/pacman
 test "$(
-  ARCHPHENE_FAKE_CHROOT=1 "$root/realpath-probe"
+  ARCHPHENE_FAKE_CHROOT=1 \
+  ARCHPHENE_RUNTIME_PROGRAM_PATH="$root/realpath-probe" \
+  ARCHPHENE_EXPECT_PROGRAM_PATH=/realpath-probe \
+    "$root/realpath-probe"
 )" = fortified-realpath-ok
 test "$(
   ARCHPHENE_FAKE_CHROOT=1 "$root/directory-probe"
@@ -89,6 +96,9 @@ test "$(
 test "$(
   ARCHPHENE_FAKE_CHROOT=1 "$root/pty-probe"
 )" = pty-apis-ok
+test "$(
+  ARCHPHENE_FAKE_CHROOT=1 "$root/temporary-probe"
+)" = temporary-directory-ok
 test "$(
   ARCHPHENE_FAKE_CHROOT=1 ARCHPHENE_SUPERVISED_PROCESS_GROUP=1 \
     "$root/pty-probe"

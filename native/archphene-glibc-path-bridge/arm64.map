@@ -46,6 +46,7 @@ GLIBC_2.17 {
         linkat;
         mkdir;
         mkdirat;
+        mkdtemp;
         mkostemp;
         mkostemps;
         mkstemp;
@@ -74,6 +75,7 @@ GLIBC_2.17 {
         syscall;
         unlink;
         unlinkat;
+        utimensat;
         execlp;
         execv;
         execve;

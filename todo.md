@@ -352,11 +352,13 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [ ] Restore and validate accelerated rendering without the diagnostic `--disable-gpu`; then pass crisp phone/IME resize, touch, mouse, hardware keyboard, clipboard, dialogs, file watching, extensions, network/DNS, Home/resume, and clean-close gates.
   - [ ] Repeat the complete Electron startup and descendant-process gate on x86_64.
 - [ ] Install `dotnet-sdk` through the same shared package system and make `dotnet` available in Code's integrated terminal.
-  - [x] Prove immediate row/activity progress, exact 56-package shared-root closure handling, complete signature verification, and non-mutating low-storage rejection on x86_64. Successful installation still needs a larger emulator data partition.
-- [ ] Create a new ASP.NET Core MVC project in shared Arch storage.
+  - [x] Prove immediate row/activity progress, exact 56-package shared-root closure handling, complete signature verification, and non-mutating low-storage rejection on a deliberately undersized x86_64 root.
+  - [x] On a clean 12 GiB emulator data partition, install the current official SDK and complete shared-root closure through the normal manager UI; `dotnet --info`, restore, and build execute through the generic bridge. A second absent-HOME gate proves first-run NuGet config creation and mode-0600 permission handling without manual repair; the underlying preload-free glibc path passes on x86_64 and physical AArch64.
+  - [ ] Prove the same `dotnet` executable and shared project tree inside Code's integrated terminal.
+- [x] Create a new ASP.NET Core MVC project in shared Arch storage.
 - [ ] Open the project in Code and validate editing, search, Git, terminal PTY, language services, restore/build, and extension-host subprocesses.
 - [ ] Run the project under the debugger, stop at breakpoints, inspect state, continue, and restart.
-- [ ] Open the served localhost URL in Android's browser and validate routing back to the running Linux process.
+- [x] Open the served localhost URL in Android's browser and validate routing back to the running Linux process.
 - [ ] Validate the workflow with touch/IME on a phone and keyboard/mouse on tablet or external display.
 - [ ] Repeat the complete milestone on the x86_64 emulator and physical AArch64 Samsung using full-device screenshots and scoped logs.
 

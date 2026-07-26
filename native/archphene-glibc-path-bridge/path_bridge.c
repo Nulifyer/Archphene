@@ -372,6 +372,14 @@ static bool reject_optional_sandbox_syscall(siginfo_t *information, void *contex
      */
     optional = optional || information->si_syscall == __NR_statx;
 #endif
+#ifdef __NR_get_mempolicy
+    /*
+     * Managed runtimes probe NUMA topology before deciding whether to enable
+     * NUMA-aware allocation. Android app seccomp blocks get_mempolicy even
+     * though the runtime can operate normally without NUMA support.
+     */
+    optional = optional || information->si_syscall == __NR_get_mempolicy;
+#endif
     if (!optional) return false;
 #if defined(__aarch64__)
     ((ucontext_t *)context)->uc_mcontext.regs[0] = (unsigned long)-ENOSYS;
@@ -2424,6 +2432,10 @@ static const char *translate_follow_path(const char *path,
     if (!fake_chroot_active || path == NULL || has_parent_component(path)) {
         return translate_path(path, output, translated);
     }
+    if (path[0] == '\0') {
+        *translated = false;
+        return path;
+    }
     if (inside_shared_memory_path(path)) {
         return translate_path(path, output, translated);
     }
@@ -2623,6 +2635,18 @@ char *get_current_dir_name(void) {
 
 char *realpath(const char *path, char *resolved_path) {
     typedef char *(*function_type)(const char *, char *);
+    const char *program = trusted_linux_program_path();
+    if (path != NULL && strcmp(path, "/proc/self/exe") == 0
+            && program != NULL) {
+        size_t length = strlen(program);
+        char *output = resolved_path;
+        if (output == NULL) {
+            output = malloc(length + 1);
+            if (output == NULL) return NULL;
+        }
+        memcpy(output, program, length + 1);
+        return output;
+    }
     function_type real = (function_type)dlsym(RTLD_NEXT, "realpath");
     bool translated;
     char buffer[PATH_MAX];
@@ -2638,6 +2662,23 @@ char *realpath(const char *path, char *resolved_path) {
 char *__realpath_chk(const char *path, char *resolved_path,
         size_t resolved_size) {
     typedef char *(*function_type)(const char *, char *, size_t);
+    const char *program = trusted_linux_program_path();
+    if (path != NULL && strcmp(path, "/proc/self/exe") == 0
+            && program != NULL) {
+        size_t length = strlen(program);
+        if (resolved_path == NULL) {
+            char *output = malloc(length + 1);
+            if (output == NULL) return NULL;
+            memcpy(output, program, length + 1);
+            return output;
+        }
+        if (length >= resolved_size) {
+            errno = ENAMETOOLONG;
+            return NULL;
+        }
+        memcpy(resolved_path, program, length + 1);
+        return resolved_path;
+    }
     function_type real =
             (function_type)dlsym(RTLD_NEXT, "__realpath_chk");
     bool translated;
@@ -2850,6 +2891,39 @@ static int finish_temporary_file(int descriptor, char *logical_template,
     }
     memcpy(logical_template, physical_template + root_length, logical_length + 1);
     return descriptor;
+}
+
+static char *finish_temporary_directory(char *result, char *logical_template,
+        const char *physical_template, size_t logical_length, bool translated) {
+    if (result == NULL || !translated) return result;
+    size_t root_length = strlen(trusted_root);
+    size_t physical_length = strlen(physical_template);
+    if (root_length == 0 || physical_length != root_length + logical_length
+            || strncmp(physical_template, trusted_root, root_length) != 0
+            || physical_template[root_length] != '/') {
+        int saved_errno = errno == 0 ? EIO : errno;
+        (void)rmdir(physical_template);
+        errno = saved_errno;
+        return NULL;
+    }
+    memcpy(logical_template, physical_template + root_length, logical_length + 1);
+    return logical_template;
+}
+
+char *mkdtemp(char *template) {
+    typedef char *(*function_type)(char *);
+    function_type real = RESOLVE(function_type, "mkdtemp");
+    bool translated;
+    char buffer[PATH_MAX];
+    size_t logical_length = strlen(template);
+    const char *target = translate_path(template, buffer, &translated);
+    if (target == NULL) return NULL;
+    if (real == NULL) {
+        errno = ENOSYS;
+        return NULL;
+    }
+    return finish_temporary_directory(real((char *)target), template, target,
+            logical_length, translated);
 }
 
 int mkstemp(char *template) {
@@ -3292,6 +3366,24 @@ int chmod(const char *path, mode_t mode) {
         return -1;
     }
     return real(AT_FDCWD, target, mode, 0);
+}
+
+int utimensat(int directory, const char *path,
+        const struct timespec times[2], int flags) {
+    typedef int (*function_type)(
+            int, const char *, const struct timespec[2], int);
+    function_type real = RESOLVE(function_type, "utimensat");
+    bool translated;
+    char buffer[PATH_MAX];
+    const char *target = translate_at_path(directory, path, buffer, &translated,
+            (flags & AT_SYMLINK_NOFOLLOW) == 0);
+    if (target == NULL) return -1;
+    REQUIRE_REAL(real);
+    if (translated && !fake_chroot_active) {
+        errno = EROFS;
+        return -1;
+    }
+    return real(directory, target, times, flags);
 }
 
 int unlinkat(int directory, const char *path, int flags) {

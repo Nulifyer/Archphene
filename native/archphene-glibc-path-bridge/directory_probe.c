@@ -2,11 +2,13 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/inotify.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static int has_entry(const char *path, const char *expected) {
@@ -48,6 +50,31 @@ int main(void) {
         return 4;
     }
     close(descriptor);
+    const char *value = "/usr/share/archphene-test/value";
+    const struct timespec times[2] = {
+        {.tv_sec = 1234, .tv_nsec = 5678},
+        {.tv_sec = 2345, .tv_nsec = 6789},
+    };
+    if (utimensat(AT_FDCWD, value, times, 0) != 0) {
+        perror("utimensat");
+        return 5;
+    }
+    struct stat metadata;
+    if (stat(value, &metadata) != 0
+            || metadata.st_atim.tv_sec != times[0].tv_sec
+            || metadata.st_mtim.tv_sec != times[1].tv_sec) {
+        fputs("utimensat did not update the logical file\n", stderr);
+        return 6;
+    }
+    if (chmod(value, 0600) != 0) {
+        perror("chmod");
+        return 7;
+    }
+    if (stat(value, &metadata) != 0
+            || (metadata.st_mode & 0777) != 0600) {
+        fputs("chmod did not update the logical file\n", stderr);
+        return 8;
+    }
     puts("directory-apis-ok");
     return 0;
 }

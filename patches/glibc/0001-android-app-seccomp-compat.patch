@@ -70,10 +70,101 @@ index b0fd4e83..ebdfc3d3 100644
  }
  libc_hidden_def (__access)
 diff --git a/sysdeps/unix/sysv/linux/chmod.c b/sysdeps/unix/sysv/linux/chmod.c
-index 6b8e3601..f86df3bf 100644
+index 6b8e3601..fd2480ad 100644
 --- a/sysdeps/unix/sysv/linux/chmod.c
 +++ b/sysdeps/unix/sysv/linux/chmod.c
-@@ -23,10 +23,10 @@
+@@ -20,13 +20,107 @@
+ #include <sysdep.h>
+ 
+ /* Change the protections of FILE to MODE.  */
++#ifdef ARCHPHENE_ANDROID_APP_COMPAT
++# include <errno.h>
++# include <limits.h>
++# include <stdlib.h>
++# include <string.h>
++
++/* LD_PRELOAD interposition cannot observe calls that originate inside libc.
++   Keep the Android-app glibc build aware of the same logical root used by the
++   external path bridge for those internal calls.  */
++static int
++archphene_has_parent_component (const char *path)
++{
++  const char *part = path;
++  while ((part = strstr (part, "..")) != NULL)
++    {
++      int starts_component = part == path || part[-1] == '/';
++      int ends_component = part[2] == '\0' || part[2] == '/';
++      if (starts_component && ends_component)
++        return 1;
++      part += 2;
++    }
++  return 0;
++}
++
++static int
++archphene_fake_root_path (const char *path)
++{
++  static const char *const prefixes[] =
++    {
++      "/bin", "/etc", "/home", "/lib", "/lib64", "/opt", "/run",
++      "/sbin", "/tmp", "/usr", "/var"
++    };
++
++  if (strcmp (path, "/") == 0)
++    return 1;
++
++  for (size_t index = 0; index < sizeof (prefixes) / sizeof (prefixes[0]);
++       ++index)
++    {
++      size_t length = strlen (prefixes[index]);
++      if (strncmp (path, prefixes[index], length) == 0
++          && (path[length] == '\0' || path[length] == '/'))
++        return 1;
++    }
++  return 0;
++}
++
++static const char *
++archphene_translate_path (const char *path, char output[PATH_MAX])
++{
++  const char *enabled = getenv ("ARCHPHENE_FAKE_CHROOT");
++  const char *root = getenv ("ARCHPHENE_RUNTIME_ROOT");
++  if (path == NULL || path[0] != '/' || enabled == NULL
++      || strcmp (enabled, "1") != 0 || root == NULL || root[0] != '/'
++      || root[1] == '\0')
++    return path;
++
++  if (archphene_has_parent_component (path)
++      || archphene_has_parent_component (root))
++    {
++      __set_errno (EACCES);
++      return NULL;
++    }
++
++  size_t root_length = strlen (root);
++  while (root_length > 1 && root[root_length - 1] == '/')
++    --root_length;
++
++  if (strncmp (path, root, root_length) == 0
++      && (path[root_length] == '\0' || path[root_length] == '/'))
++    return path;
++
++  if (!archphene_fake_root_path (path))
++    return path;
++
++  size_t path_length = strlen (path);
++  if (root_length + path_length + 1 > PATH_MAX)
++    {
++      __set_errno (ENAMETOOLONG);
++      return NULL;
++    }
++
++  memcpy (output, root, root_length);
++  memcpy (output + root_length, path, path_length + 1);
++  return output;
++}
++#endif
++
  int
  __chmod (const char *file, mode_t mode)
  {
@@ -81,6 +172,12 @@ index 6b8e3601..f86df3bf 100644
 -  return INLINE_SYSCALL_CALL (chmod, file, mode);
 -#else
 +#if defined ARCHPHENE_ANDROID_APP_COMPAT || !defined __NR_chmod
++# ifdef ARCHPHENE_ANDROID_APP_COMPAT
++  char translated[PATH_MAX];
++  file = archphene_translate_path (file, translated);
++  if (file == NULL)
++    return -1;
++# endif
    return INLINE_SYSCALL_CALL (fchmodat, AT_FDCWD, file, mode);
 +#else
 +  return INLINE_SYSCALL_CALL (chmod, file, mode);

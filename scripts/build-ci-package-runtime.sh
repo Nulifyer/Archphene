@@ -14,7 +14,13 @@ container_cli="${CONTAINER_CLI:-podman}"
 mkdir -p tooling/build
 rm -rf "$glibc_out" "$stage"
 build_root="$(mktemp -d "$root/tooling/build/ci-runtime.XXXXXX")"
-trap 'rm -rf "$build_root"' EXIT
+cleanup() {
+  if [[ "$(basename "$container_cli")" == podman ]]; then
+    "$container_cli" unshare chown -R 0:0 "$build_root" 2>/dev/null || true
+  fi
+  rm -rf "$build_root"
+}
+trap cleanup EXIT
 container_out="$build_root/linux-runtime"
 mkdir -p "$container_out"
 
@@ -122,6 +128,20 @@ EOF
   make -s -j"$JOBS"
   make -s install DESTDIR="$install"
 )
+
+probe_root=/tmp/archphene-libc-chmod-root
+mkdir -p "$probe_root/home/archphene/.config"
+touch "$probe_root/home/archphene/.config/archphene-chmod-probe"
+gcc -O2 -Wall -Wextra -Werror \
+  -o /tmp/archphene-libc-chmod-probe \
+  /archphene-path-bridge/libc_chmod_probe.c
+probe_output="$(
+  ARCHPHENE_RUNTIME_ROOT="$probe_root" ARCHPHENE_FAKE_CHROOT=1 \
+    "$install/lib64/ld-linux-x86-64.so.2" \
+      --library-path "$install/lib64" /tmp/archphene-libc-chmod-probe
+)"
+[[ "$probe_output" == libc-internal-chmod-ok ]]
+[[ "$(stat -c %a "$probe_root/home/archphene/.config/archphene-chmod-probe")" == 600 ]]
 
 mkdir -p /out/glibc
 runtime_files=(

@@ -17,7 +17,13 @@ builder_image="archphene-arm-runtime-builder:latest"
 
 mkdir -p tooling/build
 work="$(mktemp -d "$root/tooling/build/ci-runtime-arm64.XXXXXX")"
-trap 'rm -rf "$work"' EXIT
+cleanup() {
+  if [[ "$(basename "$container_cli")" == podman ]]; then
+    "$container_cli" unshare chown -R 0:0 "$work" 2>/dev/null || true
+  fi
+  rm -rf "$work"
+}
+trap cleanup EXIT
 container_out="$work/linux-runtime"
 mkdir -p "$container_out"
 

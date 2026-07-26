@@ -1,6 +1,6 @@
 # Project status
 
-Updated: 2026-07-25
+Updated: 2026-07-26
 
 This page separates validated behavior from planned platform work. Package search does not imply package compatibility.
 
@@ -98,7 +98,10 @@ visually inspected full-device screenshots. Release builds cannot arm the
 gate. Returning to a broad search query also disables Install/Remove
 immediately; those actions no longer remain misleadingly enabled for a
 previously resolved exact package. Full populated package details still require
-their own focused deterministic gate.
+their own focused deterministic gate. Exact package-name results are now ranked
+before substring matches while retaining pacman's repository ordering within
+each group; a regression covers `strace` ahead of
+`gst-plugin-rstracers`.
 
 The durable journal now also represents the future launcher pipeline's
 Building, Publishing, and Awaiting Android confirmation states without
@@ -1239,18 +1242,32 @@ Electron policy and clear reduced-isolation disclosure before automating that
 flag. Accelerated rendering, DNS/networking, editor/debugger, extensions,
 IME/clipboard/dialogs, broader lifecycle, and x86_64 remain open.
 
-The x86_64 package lane now renders immediate durable progress for a real
+The x86_64 package lane renders immediate durable progress for a real
 `dotnet-sdk` request and resolves the same shared-root `base` plus SDK closure
-for details, download, size preflight, and commit. This reused emulator needs
-56 packages and a 191 MiB download because its older root predates the complete
-`base` metapackage. After all archives and signatures verify, Rust reads each
-bounded `.PKGINFO` installed size and Android checks filesystem capacity before
-pacman mutation. A full-device gate rejects the 757 MiB requirement with only
-454 MiB available, preserves a readable 95% Failed/Review activity card, and
-leaves no .NET/base local-database entries or lock. Pacman transaction errors
-also remain primary even if best-effort lock/reason recovery encounters a
-damaged full filesystem. Successful SDK installation and the full MVC workflow
-require a larger emulator data partition.
+for details, download, size preflight, and commit. The original reused-emulator
+gate correctly rejected a 757 MiB requirement with only 454 MiB available,
+preserved a readable 95% Failed/Review activity card, and left no .NET/base
+local-database entries or lock.
+
+A subsequent clean API 36 emulator with a 12 GiB data partition completed the
+normal manager installation. The shared root now runs `dotnet --info`, creates
+an ASP.NET Core MVC project, restores it, and builds it successfully. The
+generic glibc bridge gained the contracts exposed by the stock toolchain:
+logical executable `realpath`, optional `get_mempolicy` fallback, translated
+`mkdtemp`, empty-path preservation, and translated `utimensat`. Host probes
+cover each boundary. A second restore with a completely absent HOME proves
+.NET can create and permission its first `NuGet.Config` without manual setup:
+the Android terminal reports a successful restore/build and the resulting file
+is mode 0600. This required the patched glibc itself—not only the preload
+bridge—to translate an internal `chmod` call that managed code reaches
+directly. The build now runs a preload-free direct-libc regression, and the
+same AArch64 glibc passes that probe on the physical Samsung.
+
+Kestrel remains alive while Archphene is backgrounded, and Android Chrome
+loads the generated MVC home page at `127.0.0.1:5000`. The test deliberately
+runs from the project directory so ASP.NET receives the normal content root.
+Code-integrated terminal, language service, debugging, breakpoints, and
+physical AArch64 .NET availability remain open.
 
 The same current-source arm64 manager preserves the Samsung shared root at 35
 installed packages and three current Foot launchers. Cached startup completes

@@ -799,7 +799,7 @@ impl PackageRuntime {
             }
             Err(error) => return Err(error),
         };
-        parse_search_output(raw.as_str()?)
+        parse_search_output(raw.as_str()?, query)
     }
 
     pub fn resolve(&self, package: &str) -> Result<PackageResolution, PackageRuntimeError> {
@@ -2949,28 +2949,49 @@ fn valid_search_query(query: &str) -> bool {
         })
 }
 
-fn parse_search_output(input: &str) -> Result<ToolOutput, PackageRuntimeError> {
+fn parse_search_output(
+    input: &str,
+    preferred_name: &str,
+) -> Result<ToolOutput, PackageRuntimeError> {
     let mut output = ToolOutput {
         bytes: [0; MAX_TOOL_OUTPUT_BYTES],
         length: 0,
     };
-    let mut pending: Option<(&str, &str, &str)> = None;
     let mut count = 0_usize;
+    append_search_output_pass(input, preferred_name, true, &mut output, &mut count)?;
+    if count < 100 {
+        append_search_output_pass(input, preferred_name, false, &mut output, &mut count)?;
+    }
+    Ok(output)
+}
+
+fn append_search_output_pass(
+    input: &str,
+    preferred_name: &str,
+    exact_match: bool,
+    output: &mut ToolOutput,
+    count: &mut usize,
+) -> Result<(), PackageRuntimeError> {
+    let mut pending: Option<(&str, &str, &str)> = None;
     for line in input.lines() {
         if line.starts_with(char::is_whitespace) {
             if let Some((repository, name, version)) = pending.take() {
-                append_search_result(&mut output, repository, name, version, line.trim())?;
-                count += 1;
-                if count >= 100 {
+                if (name == preferred_name) == exact_match {
+                    append_search_result(output, repository, name, version, line.trim())?;
+                    *count += 1;
+                }
+                if *count >= 100 {
                     break;
                 }
             }
             continue;
         }
         if let Some((repository, name, version)) = pending.take() {
-            append_search_result(&mut output, repository, name, version, "")?;
-            count += 1;
-            if count >= 100 {
+            if (name == preferred_name) == exact_match {
+                append_search_result(output, repository, name, version, "")?;
+                *count += 1;
+            }
+            if *count >= 100 {
                 break;
             }
         }
@@ -2993,12 +3014,15 @@ fn parse_search_output(input: &str) -> Result<ToolOutput, PackageRuntimeError> {
             pending = Some((repository, name, version));
         }
     }
-    if count < 100 {
+    if *count < 100 {
         if let Some((repository, name, version)) = pending {
-            append_search_result(&mut output, repository, name, version, "")?;
+            if (name == preferred_name) == exact_match {
+                append_search_result(output, repository, name, version, "")?;
+                *count += 1;
+            }
         }
     }
-    Ok(output)
+    Ok(())
 }
 
 fn empty_tool_output() -> ToolOutput {
@@ -3959,6 +3983,7 @@ library\tlibarchphene_path_bridge.so\tlibarchphene_pkg_555555555555555555555555.
         let parsed = parse_search_output(
             "extra/dotnet-sdk 10.0.10.sdk110-1\n    The .NET Core SDK\n\
 extra/dotnet-sdk-8.0 8.0.29.sdk129-1 [installed]\n    The .NET Core SDK\n",
+            "dotnet-sdk",
         )
         .expect("search output");
         assert_eq!(
@@ -3969,6 +3994,23 @@ extra\tdotnet-sdk-8.0\t8.0.29.sdk129-1\tThe .NET Core SDK\n"
         assert!(valid_search_query("dotnet-sdk"));
         assert!(!valid_search_query("a"));
         assert!(!valid_search_query("../dotnet"));
+    }
+
+    #[test]
+    fn package_search_ranks_an_exact_name_before_substring_matches() {
+        let parsed = parse_search_output(
+            "extra/gst-plugin-rstracers 1.26.4-1\n    GStreamer tracing plugins\n\
+extra/strace 6.16-1\n    A diagnostic tracing utility\n\
+extra/strace-analyzer 1.0-1\n    Analyze strace output\n",
+            "strace",
+        )
+        .expect("search output");
+        assert_eq!(
+            parsed.as_str().expect("utf-8"),
+            "extra\tstrace\t6.16-1\tA diagnostic tracing utility\n\
+extra\tgst-plugin-rstracers\t1.26.4-1\tGStreamer tracing plugins\n\
+extra\tstrace-analyzer\t1.0-1\tAnalyze strace output\n",
+        );
     }
 
     #[test]
