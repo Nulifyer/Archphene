@@ -17,6 +17,10 @@ internal class PackageJobTestReceiver : BroadcastReceiver() {
         context: Context,
         intent: Intent,
     ) {
+        if (intent.action == ACTION_CACHE_SEED || intent.action == ACTION_CACHE_CLEANUP) {
+            handlePackageCacheFixture(context, intent)
+            return
+        }
         if (intent.action != ACTION_SEED) {
             return
         }
@@ -217,6 +221,105 @@ internal class PackageJobTestReceiver : BroadcastReceiver() {
         ).start()
     }
 
+    private fun handlePackageCacheFixture(
+        context: Context,
+        intent: Intent,
+    ) {
+        val token = intent.getStringExtra(EXTRA_TOKEN)
+        if (token == null || !TOKEN.matches(token)) {
+            Log.e(TAG, "Rejected invalid package-cache fixture")
+            return
+        }
+        val pending = goAsync()
+        Thread(
+            {
+                try {
+                    if (intent.action == ACTION_CACHE_SEED) {
+                        seedSelectablePackageCache(context, token)
+                        Log.i(TAG, "Seeded selectable package cache token=$token")
+                    } else {
+                        cleanSelectablePackageCache(context, token)
+                        Log.i(TAG, "Cleaned selectable package cache token=$token")
+                    }
+                } catch (error: Exception) {
+                    Log.e(TAG, "Selectable package-cache fixture failed token=$token", error)
+                } finally {
+                    pending.finish()
+                }
+            },
+            "ArchphenePackageCacheProbe",
+        ).start()
+    }
+
+    private fun seedSelectablePackageCache(
+        context: Context,
+        token: String,
+    ) {
+        val cache = File(context.filesDir, "arch-root/var/cache/pacman/pkg")
+        check(cache.isDirectory) { "package cache directory is unavailable" }
+        val marker = packageCacheFixtureMarker(context, token)
+        check(!marker.exists()) { "package-cache fixture is already active" }
+        val files = selectablePackageCacheFiles(token)
+        check(files.none { (name, _) -> File(cache, name).exists() }) {
+            "package-cache fixture target already exists"
+        }
+        marker.parentFile?.mkdirs()
+        check(marker.createNewFile()) { "could not create package-cache fixture marker" }
+        try {
+            files.forEach { (name, bytes) ->
+                File(cache, name).writeBytes(ByteArray(bytes) { bytes.toByte() })
+            }
+            marker.writeText(files.joinToString("\n") { (name, bytes) -> "$name\t$bytes" })
+        } catch (error: Exception) {
+            files.forEach { (name, _) -> File(cache, name).delete() }
+            marker.delete()
+            throw error
+        }
+    }
+
+    private fun cleanSelectablePackageCache(
+        context: Context,
+        token: String,
+    ) {
+        val marker = packageCacheFixtureMarker(context, token)
+        if (!marker.isFile) {
+            return
+        }
+        val expected = selectablePackageCacheFiles(token)
+        check(
+            marker.readLines() ==
+                expected.map { (name, bytes) -> "$name\t$bytes" },
+        ) {
+            "package-cache fixture marker does not match"
+        }
+        val cache = File(context.filesDir, "arch-root/var/cache/pacman/pkg")
+        expected.forEach { (name, bytes) ->
+            val file = File(cache, name)
+            if (file.exists()) {
+                check(file.isFile && file.length() == bytes.toLong()) {
+                    "package-cache fixture content changed"
+                }
+                check(file.delete()) { "could not remove package-cache fixture" }
+            }
+        }
+        check(marker.delete()) { "could not remove package-cache fixture marker" }
+    }
+
+    private fun selectablePackageCacheFiles(token: String): List<Pair<String, Int>> {
+        val suffix = token.replace('-', '.')
+        return listOf(
+            "0archphene.cache.target.$suffix-2.0-1-any.pkg.tar.zst" to 2_048,
+            "0archphene.cache.target.$suffix-2.0-1-any.pkg.tar.zst.sig" to 512,
+            "0archphene.cache.target.$suffix-1.0-1-any.pkg.tar.zst" to 1_024,
+            "0archphene.cache.sibling.$suffix-1.0-1-any.pkg.tar.zst" to 768,
+        )
+    }
+
+    private fun packageCacheFixtureMarker(
+        context: Context,
+        token: String,
+    ): File = File(context.filesDir, "test-fixtures/package-cache-$token")
+
     private fun update(
         handle: Long,
         jobId: Long,
@@ -293,6 +396,10 @@ internal class PackageJobTestReceiver : BroadcastReceiver() {
     private companion object {
         private const val TAG = "ArchphenePackageJobProbe"
         private const val ACTION_SEED = "org.archphene.app.debug.action.SEED_PACKAGE_JOB"
+        private const val ACTION_CACHE_SEED =
+            "org.archphene.app.debug.action.SEED_PACKAGE_CACHE"
+        private const val ACTION_CACHE_CLEANUP =
+            "org.archphene.app.debug.action.CLEAN_PACKAGE_CACHE"
         private const val EXTRA_TOKEN = "token"
         private const val EXTRA_PACKAGE = "package"
         private const val EXTRA_STATE = "state"

@@ -4,6 +4,10 @@ Notable user-facing changes will be recorded here.
 
 ## Unreleased
 
+### Added
+
+- Added a Downloads inventory for the manager-owned pacman cache with total disk use, package/version grouping, selectable per-package cleanup, and a separately confirmed Clear all action. Cache inspection and deletion are bounded and fail closed in Rust, paged through JNI, and serialized with package work.
+
 ### Fixed
 
 - Added an unambiguous one-tap “Refresh package catalogs” recovery to durable package activity cards for catalog and trust failures. The signed catalog path now records successful recovery against the exact failed job, survives manager restart, and returns to Review; state-restoring no-network emulator/Samsung gates leave both package databases unchanged.
@@ -51,6 +55,7 @@ Notable user-facing changes will be recorded here.
 
 ### Validation
 
+- Passed package-cache inventory and selective cleanup on the API 36 x86_64 emulator and Android 15 AArch64 Samsung on July 26, 2026: real populated caches render with bounded multi-version rows, one selected generated package is removed while its sibling remains, Clear all requires confirmation, every prior cache entry is restored, and the 259/248-package pacman databases remain unchanged. All evidence uses full-device screenshots.
 - Passed one-tap package-catalog recovery on the API 36 x86_64 emulator and Android 15 AArch64 Samsung on July 26, 2026: failure action, completion, Review transition, process-restart persistence, exact journal/preference restoration, full-device presentation, and unchanged 259/248-package databases all pass without network access.
 - Passed the compact selectable AUR review presentation on the API 36 x86_64 emulator and Android 15 AArch64 Samsung on July 26, 2026: summary, collapsed and expanded accessibility states, sources, trust, build environment, digests, recipe, build logs, scrolling, and unchanged 259/248-package pacman databases all pass without network access.
 - Passed the state-preserving shared-terminal lifecycle on the API 36 x86_64 emulator and Android 15 AArch64 Samsung on July 26, 2026: selected Bash/POSIX shell startup, paths and locale, direct input, rotation, Home/Back foreground survival, durable Terminal navigation, status-7 exit, restart, stop, and child reaping all pass with full-device captures.

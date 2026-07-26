@@ -24,6 +24,14 @@
     <string name="package_catalog_unavailable">Package catalog unavailable</string>
     <string name="package_search_unavailable">Package search unavailable</string>
     <string name="refresh_catalogs">Refresh catalogs</string>
+    <string name="downloads">Downloads</string>
+    <string name="manage_package_downloads">Manage downloaded Linux packages</string>
+    <string name="package_downloads_title">Downloaded packages</string>
+    <string name="package_downloads_title_with_size">Downloaded packages · %1$s</string>
+    <string name="clear_selected">Clear selected</string>
+    <string name="clear_all">Clear all</string>
+    <string name="clear_all_downloads_title">Clear all downloaded packages?</string>
+    <string name="clear_all_downloads_message">Installed Linux packages remain installed. Future installs or updates may need to download these package files again.</string>
     <string name="catalog_refresh_busy">Catalog refresh is unavailable or already active</string>
     <string name="package_name_hint">Package name</string>
     <string name="search">Search</string>

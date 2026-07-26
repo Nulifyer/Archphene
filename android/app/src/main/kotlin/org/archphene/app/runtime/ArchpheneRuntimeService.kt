@@ -103,6 +103,16 @@ internal class AurReviewSnapshot(
     val revision: Int,
 )
 
+internal class PackageCacheSnapshot(
+    val names: Array<String>,
+    val versions: Array<String>,
+    val bytes: LongArray,
+    val artifacts: IntArray,
+    val totalBytes: Long,
+    val status: String,
+    val revision: Int,
+)
+
 internal data class LauncherAuthorization(
     val label: String,
     val terminal: Boolean,
@@ -125,6 +135,18 @@ class ArchpheneRuntimeService : Service() {
         val packageCatalogStatus: String
             get() = catalogStatus
 
+        internal val packageCache: PackageCacheSnapshot
+            get() = packageCacheSnapshot
+
+        val packageCacheActionAvailable: Boolean
+            get() =
+                readyHandle != 0L &&
+                    !catalogRefreshActive &&
+                    !packageCacheActive &&
+                    !searchActive &&
+                    !packageOperationActive &&
+                    !commandActive
+
         val packageSearchStatus: String
             get() = searchStatus
 
@@ -135,6 +157,7 @@ class ArchpheneRuntimeService : Service() {
             get() =
                 readyHandle != 0L &&
                     !catalogRefreshActive &&
+                    !packageCacheActive &&
                     !searchActive &&
                     !packageOperationActive &&
                     !commandActive
@@ -149,6 +172,7 @@ class ArchpheneRuntimeService : Service() {
                 } == true &&
                     readyHandle != 0L &&
                     !catalogRefreshActive &&
+                    !packageCacheActive &&
                     !searchActive &&
                     !packageOperationActive &&
                     !commandActive
@@ -160,6 +184,7 @@ class ArchpheneRuntimeService : Service() {
                     retainedAurBuiltPackage == null &&
                     readyHandle != 0L &&
                     !catalogRefreshActive &&
+                    !packageCacheActive &&
                     !searchActive &&
                     !packageOperationActive &&
                     !commandActive
@@ -170,6 +195,7 @@ class ArchpheneRuntimeService : Service() {
                     retainedAurReview != null &&
                     readyHandle != 0L &&
                     !catalogRefreshActive &&
+                    !packageCacheActive &&
                     !searchActive &&
                     !packageOperationActive &&
                     !commandActive
@@ -295,6 +321,7 @@ class ArchpheneRuntimeService : Service() {
             get() =
                 lastResolvedPackage.isNotEmpty() &&
                     !catalogRefreshActive &&
+                    !packageCacheActive &&
                     !searchActive &&
                     !packageOperationActive &&
                     !commandActive &&
@@ -316,6 +343,7 @@ class ArchpheneRuntimeService : Service() {
             get() =
                 removeAvailable &&
                     !catalogRefreshActive &&
+                    !packageCacheActive &&
                     !searchActive &&
                     !packageOperationActive &&
                     !commandActive &&
@@ -336,6 +364,7 @@ class ArchpheneRuntimeService : Service() {
                     ) &&
                     readyHandle != 0L &&
                     !catalogRefreshActive &&
+                    !packageCacheActive &&
                     !searchActive &&
                     !packageOperationActive &&
                     !commandActive &&
@@ -420,6 +449,7 @@ class ArchpheneRuntimeService : Service() {
                 } else {
                     readyHandle != 0L &&
                         !catalogRefreshActive &&
+                        !packageCacheActive &&
                         !searchActive &&
                         !packageOperationActive &&
                         !commandActive
@@ -439,6 +469,7 @@ class ArchpheneRuntimeService : Service() {
                     readyHandle != 0L &&
                         selectedShellIndex >= 0 &&
                         !catalogRefreshActive &&
+                        !packageCacheActive &&
                         !searchActive &&
                         !packageOperationActive &&
                         !commandActive
@@ -469,6 +500,14 @@ class ArchpheneRuntimeService : Service() {
 
         fun refreshPackageCatalogsForRecovery(): Boolean =
             requestCatalogRefresh(recoverPackageJob = true)
+
+        fun refreshPackageCacheInventory(): Boolean = requestPackageCacheInventory()
+
+        fun clearSelectedPackageCache(packages: Array<String>): Boolean =
+            requestSelectedPackageCacheCleanup(packages)
+
+        fun clearAllPackageCacheDownloads(): Boolean =
+            requestAllPackageCacheCleanup()
 
         fun searchPackages(query: String): Boolean = requestPackageSearch(query)
 
@@ -745,6 +784,18 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var packageRecoveryHandledJobRevision = Int.MIN_VALUE
     @Volatile private var packageRecoveryMessageRevision = Int.MIN_VALUE
     @Volatile private var packageRecoveryMessage = ""
+    @Volatile private var packageCacheActive = false
+    @Volatile
+    private var packageCacheSnapshot =
+        PackageCacheSnapshot(
+            emptyArray(),
+            emptyArray(),
+            LongArray(0),
+            IntArray(0),
+            0L,
+            "Open Downloads to inspect the package cache",
+            0,
+        )
     @Volatile private var commandStatus = "Run an installed Linux command"
     private val shellOutput = BoundedByteRing(SHELL_SCROLLBACK_BYTES)
     private val shellInput = FixedByteQueue(SHELL_INPUT_BYTES)
@@ -1490,6 +1541,10 @@ class ArchpheneRuntimeService : Service() {
         private const val SHELL_CHOICE_LIMIT = 8
         private const val SHELL_FIELD_LIMIT = 64
         private const val AVAILABLE_PACKAGE_LIMIT = 100
+        private const val PACKAGE_CACHE_ENTRY_LIMIT = 4096
+        private const val PACKAGE_CACHE_PAGE_SIZE = 32
+        private const val MAX_PACKAGE_CACHE_SELECTION = 256
+        private const val PACKAGE_CACHE_SELECTION_BYTES = 32 * 1024
         private const val DEBUG_AUR_FIXTURE_MAINTAINER = "Archphene test maintainer"
         private val DEBUG_AUR_PACKAGE_NAME = Regex("[a-z0-9@._+\\-]{1,96}")
         private val AUR_PACKAGE_NAME = Regex("[A-Za-z0-9@+._-]{1,128}")
@@ -2579,7 +2634,8 @@ class ArchpheneRuntimeService : Service() {
     private fun workNotification(): Notification {
         val text =
             when {
-                packageOperationActive || searchActive -> R.string.work_notification_packages
+                packageOperationActive || packageCacheActive || searchActive ->
+                    R.string.work_notification_packages
                 catalogRefreshActive -> R.string.work_notification_catalogs
                 commandActive -> R.string.work_notification_command
                 else -> R.string.work_notification_storage
@@ -4109,6 +4165,7 @@ class ArchpheneRuntimeService : Service() {
             catalogRefreshActive ||
             searchActive ||
             packageOperationActive ||
+            packageCacheActive ||
             commandActive ||
             (recoverPackageJob && !packageCatalogRecoveryReady())
         ) {
@@ -4308,6 +4365,7 @@ class ArchpheneRuntimeService : Service() {
         if (
             activeHandle == 0L ||
             catalogRefreshActive ||
+            packageCacheActive ||
             searchActive ||
             packageOperationActive ||
             commandActive ||
@@ -4453,6 +4511,7 @@ class ArchpheneRuntimeService : Service() {
         if (
             activeHandle == 0L ||
             catalogRefreshActive ||
+            packageCacheActive ||
             searchActive ||
             packageOperationActive ||
             commandActive ||
@@ -4622,6 +4681,7 @@ class ArchpheneRuntimeService : Service() {
         if (
             activeHandle == 0L ||
             catalogRefreshActive ||
+            packageCacheActive ||
             searchActive ||
             packageOperationActive ||
             commandActive ||
@@ -4824,6 +4884,7 @@ class ArchpheneRuntimeService : Service() {
             review == null ||
             normalized != review.packageName ||
             catalogRefreshActive ||
+            packageCacheActive ||
             searchActive ||
             packageOperationActive ||
             commandActive
@@ -5045,6 +5106,7 @@ class ArchpheneRuntimeService : Service() {
             normalized != review.packageName ||
             readyHandle == 0L ||
             catalogRefreshActive ||
+            packageCacheActive ||
             searchActive ||
             packageOperationActive ||
             commandActive
@@ -7071,6 +7133,7 @@ class ArchpheneRuntimeService : Service() {
             !built.file.isFile ||
             built.file.length() != built.archiveBytes ||
             catalogRefreshActive ||
+            packageCacheActive ||
             searchActive ||
             packageOperationActive ||
             commandActive
@@ -7307,6 +7370,7 @@ class ArchpheneRuntimeService : Service() {
         if (
             activeHandle == 0L ||
             catalogRefreshActive ||
+            packageCacheActive ||
             searchActive ||
             packageOperationActive ||
             commandActive ||
@@ -7600,6 +7664,7 @@ class ArchpheneRuntimeService : Service() {
         if (
             activeHandle == 0L ||
             catalogRefreshActive ||
+            packageCacheActive ||
             searchActive ||
             packageOperationActive ||
             commandActive ||
@@ -7811,6 +7876,336 @@ class ArchpheneRuntimeService : Service() {
     }
 
     @Synchronized
+    private fun requestPackageCacheInventory(): Boolean {
+        val activeHandle = readyHandle
+        if (
+            activeHandle == 0L ||
+            catalogRefreshActive ||
+            packageCacheActive ||
+            searchActive ||
+            packageOperationActive ||
+            commandActive
+        ) {
+            return false
+        }
+        packageCacheActive = true
+        packageCacheSnapshot =
+            copyPackageCacheSnapshot("Inspecting downloaded package storage…")
+        Thread(
+            {
+                try {
+                    packageCacheSnapshot = loadPackageCacheSnapshot(activeHandle)
+                } catch (error: Exception) {
+                    packageCacheSnapshot =
+                        copyPackageCacheSnapshot(
+                            "Package storage unavailable: " +
+                                (error.message ?: error.javaClass.simpleName),
+                        )
+                    Log.e(TAG, "Package cache inventory failed", error)
+                } finally {
+                    packageCacheActive = false
+                    stopWhenUnobservedAndIdle()
+                }
+            },
+            "ArchphenePackageCacheInventory",
+        ).start()
+        promoteWorkToForeground()
+        return true
+    }
+
+    @Synchronized
+    private fun requestSelectedPackageCacheCleanup(packages: Array<String>): Boolean {
+        val activeHandle = readyHandle
+        val current = packageCacheSnapshot
+        if (
+            activeHandle == 0L ||
+            catalogRefreshActive ||
+            packageCacheActive ||
+            searchActive ||
+            packageOperationActive ||
+            commandActive ||
+            packages.isEmpty() ||
+            packages.size > MAX_PACKAGE_CACHE_SELECTION ||
+            packages.size > current.names.size
+        ) {
+            return false
+        }
+        val selected = packages.copyOf()
+        if (
+            selected.any { packageName ->
+                packageName.isEmpty() ||
+                    packageName.length > 128 ||
+                    current.names.binarySearch(packageName) < 0
+            } ||
+            selected.toSet().size != selected.size
+        ) {
+            return false
+        }
+        val requestBytes =
+            selected
+                .sorted()
+                .joinToString("\n")
+                .toByteArray(StandardCharsets.UTF_8)
+        if (requestBytes.isEmpty() || requestBytes.size > PACKAGE_CACHE_SELECTION_BYTES) {
+            return false
+        }
+        packageCacheActive = true
+        packageCacheSnapshot =
+            copyPackageCacheSnapshot("Clearing selected downloaded packages…")
+        Thread(
+            {
+                try {
+                    val requestBuffer = ByteBuffer.allocateDirect(requestBytes.size)
+                    requestBuffer.put(requestBytes)
+                    val outputBuffer =
+                        ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
+                    val reclaimedBytes =
+                        NativeRuntime.nativeClearSelectedPackageCache(
+                            activeHandle,
+                            requestBuffer,
+                            requestBytes.size,
+                            outputBuffer,
+                        )
+                    if (reclaimedBytes < 0L) {
+                        throw IllegalStateException(
+                            readNativeMessage(outputBuffer, reclaimedBytes),
+                        )
+                    }
+                    packageCacheSnapshot =
+                        loadPackageCacheSnapshot(
+                            activeHandle,
+                            if (reclaimedBytes == 0L) {
+                                "No matching downloaded packages were found"
+                            } else {
+                                "Freed ${formatStorageBytes(reclaimedBytes)} of downloaded packages"
+                            },
+                        )
+                    Log.i(
+                        TAG,
+                        "Cleared $reclaimedBytes package-cache bytes for " +
+                            "${selected.size} selected package(s)",
+                    )
+                } catch (error: Exception) {
+                    packageCacheSnapshot =
+                        copyPackageCacheSnapshot(
+                            "Package cleanup failed: " +
+                                (error.message ?: error.javaClass.simpleName),
+                        )
+                    Log.e(TAG, "Selected package cache cleanup failed", error)
+                } finally {
+                    packageCacheActive = false
+                    stopWhenUnobservedAndIdle()
+                }
+            },
+            "ArchpheneSelectedPackageCache",
+        ).start()
+        promoteWorkToForeground()
+        return true
+    }
+
+    @Synchronized
+    private fun requestAllPackageCacheCleanup(): Boolean {
+        val activeHandle = readyHandle
+        if (
+            activeHandle == 0L ||
+            catalogRefreshActive ||
+            packageCacheActive ||
+            searchActive ||
+            packageOperationActive ||
+            commandActive
+        ) {
+            return false
+        }
+        packageCacheActive = true
+        packageCacheSnapshot =
+            copyPackageCacheSnapshot("Clearing all downloaded packages…")
+        Thread(
+            {
+                try {
+                    val outputBuffer =
+                        ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
+                    val reclaimedBytes =
+                        NativeRuntime.nativeClearPackageCache(activeHandle, outputBuffer)
+                    if (reclaimedBytes < 0L) {
+                        throw IllegalStateException(
+                            readNativeMessage(outputBuffer, reclaimedBytes.toInt()),
+                        )
+                    }
+                    packageCacheSnapshot =
+                        loadPackageCacheSnapshot(
+                            activeHandle,
+                            if (reclaimedBytes == 0L) {
+                                "No downloaded packages are cached"
+                            } else {
+                                "Freed ${formatStorageBytes(reclaimedBytes)} of downloaded packages"
+                            },
+                        )
+                    Log.i(TAG, "Cleared all $reclaimedBytes package-cache bytes")
+                } catch (error: Exception) {
+                    packageCacheSnapshot =
+                        copyPackageCacheSnapshot(
+                            "Package cleanup failed: " +
+                                (error.message ?: error.javaClass.simpleName),
+                        )
+                    Log.e(TAG, "Complete package cache cleanup failed", error)
+                } finally {
+                    packageCacheActive = false
+                    stopWhenUnobservedAndIdle()
+                }
+            },
+            "ArchpheneAllPackageCache",
+        ).start()
+        promoteWorkToForeground()
+        return true
+    }
+
+    private fun loadPackageCacheSnapshot(
+        activeHandle: Long,
+        completionStatus: String? = null,
+    ): PackageCacheSnapshot {
+        val outputBuffer = ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
+        val summaryLength = NativeRuntime.nativeRefreshPackageCache(activeHandle, outputBuffer)
+        if (summaryLength < 0) {
+            throw IllegalStateException(readNativeMessage(outputBuffer, summaryLength))
+        }
+        val summary = readUtf8(outputBuffer, summaryLength).trimEnd().split('\t')
+        if (summary.size != 3 || summary[0] != "C1") {
+            throw IllegalStateException("Package cache returned an invalid summary")
+        }
+        val expectedEntries = summary[1].toIntOrNull() ?: -1
+        val expectedBytes = summary[2].toLongOrNull() ?: -1L
+        if (
+            expectedEntries !in 0..PACKAGE_CACHE_ENTRY_LIMIT ||
+            expectedBytes < 0L
+        ) {
+            throw IllegalStateException("Package cache summary exceeds its bounds")
+        }
+        val names = ArrayList<String>()
+        val versions = ArrayList<String>()
+        val latestVersions = ArrayList<String>()
+        val sizes = ArrayList<Long>()
+        val artifacts = ArrayList<Int>()
+        val versionCounts = ArrayList<Int>()
+        var offset = 0
+        var observedBytes = 0L
+        while (offset < expectedEntries) {
+            outputBuffer.clear()
+            val pageLength =
+                NativeRuntime.nativeReadPackageCachePage(
+                    activeHandle,
+                    offset,
+                    outputBuffer,
+                )
+            if (pageLength < 0) {
+                throw IllegalStateException(readNativeMessage(outputBuffer, pageLength))
+            }
+            if (pageLength == 0) {
+                throw IllegalStateException("Package cache ended before its declared count")
+            }
+            var pageRows = 0
+            readUtf8(outputBuffer, pageLength)
+                .trimEnd('\n')
+                .lineSequence()
+                .forEach { row ->
+                    val fields = row.split('\t')
+                    if (fields.size != 5) {
+                        throw IllegalStateException("Package cache returned an invalid row")
+                    }
+                    val packageName = fields[0]
+                    val version = fields[1]
+                    val architecture = fields[2]
+                    val bytes = fields[3].toLongOrNull() ?: -1L
+                    val artifactCount = fields[4].toIntOrNull() ?: -1
+                    if (
+                        packageName.isEmpty() ||
+                        packageName.length > 128 ||
+                        version.isEmpty() ||
+                        version.length > 193 ||
+                        architecture.isEmpty() ||
+                        architecture.length > 32 ||
+                        bytes < 0L ||
+                        artifactCount <= 0
+                    ) {
+                        throw IllegalStateException("Package cache row exceeds its bounds")
+                    }
+                    observedBytes =
+                        Math.addExact(observedBytes, bytes)
+                    val lastIndex = names.lastIndex
+                    if (lastIndex >= 0 && names[lastIndex] == packageName) {
+                        sizes[lastIndex] = Math.addExact(sizes[lastIndex], bytes)
+                        artifacts[lastIndex] =
+                            Math.addExact(artifacts[lastIndex], artifactCount)
+                        if (latestVersions[lastIndex] != version) {
+                            latestVersions[lastIndex] = version
+                            versionCounts[lastIndex] =
+                                Math.addExact(versionCounts[lastIndex], 1)
+                            versions[lastIndex] =
+                                "${versionCounts[lastIndex]} cached versions"
+                        }
+                    } else {
+                        if (lastIndex >= 0 && names[lastIndex] >= packageName) {
+                            throw IllegalStateException("Package cache rows are not ordered")
+                        }
+                        names.add(packageName)
+                        versions.add(version)
+                        latestVersions.add(version)
+                        sizes.add(bytes)
+                        artifacts.add(artifactCount)
+                        versionCounts.add(1)
+                    }
+                    pageRows++
+                }
+            if (pageRows !in 1..PACKAGE_CACHE_PAGE_SIZE) {
+                throw IllegalStateException("Package cache page exceeds its row bound")
+            }
+            offset = Math.addExact(offset, pageRows)
+        }
+        if (offset != expectedEntries || observedBytes != expectedBytes) {
+            throw IllegalStateException("Package cache summary does not match its rows")
+        }
+        return PackageCacheSnapshot(
+            names.toTypedArray(),
+            versions.toTypedArray(),
+            sizes.toLongArray(),
+            artifacts.toIntArray(),
+            expectedBytes,
+            completionStatus
+                ?: if (names.isEmpty()) {
+                    "No downloaded packages are cached"
+                } else {
+                    "${names.size} cached packages · ${formatStorageBytes(expectedBytes)}"
+                },
+            packageCacheSnapshot.revision + 1,
+        )
+    }
+
+    private fun copyPackageCacheSnapshot(status: String): PackageCacheSnapshot {
+        val current = packageCacheSnapshot
+        return PackageCacheSnapshot(
+            current.names,
+            current.versions,
+            current.bytes,
+            current.artifacts,
+            current.totalBytes,
+            status,
+            current.revision + 1,
+        )
+    }
+
+    private fun readUtf8(
+        buffer: ByteBuffer,
+        length: Int,
+    ): String {
+        if (length < 0 || length > buffer.capacity()) {
+            throw IllegalStateException("Native output exceeds its buffer")
+        }
+        val bytes = ByteArray(length)
+        buffer.position(0)
+        buffer.get(bytes)
+        return String(bytes, StandardCharsets.UTF_8)
+    }
+
+    @Synchronized
     private fun requestPackageCacheCleanup(): Boolean {
         val activeHandle = readyHandle
         val recoveryRevision = jobRevision
@@ -7841,6 +8236,21 @@ class ArchpheneRuntimeService : Service() {
                                 readNativeMessage(outputBuffer, reclaimedBytes.toInt()),
                             )
                         }
+                        packageCacheSnapshot =
+                            PackageCacheSnapshot(
+                                emptyArray(),
+                                emptyArray(),
+                                LongArray(0),
+                                IntArray(0),
+                                0L,
+                                if (reclaimedBytes == 0L) {
+                                    "No downloaded packages are cached"
+                                } else {
+                                    "Freed ${formatStorageBytes(reclaimedBytes)} of " +
+                                        "downloaded packages"
+                                },
+                                packageCacheSnapshot.revision + 1,
+                            )
                         if (jobRevision == recoveryRevision) {
                             val recoveryResult =
                                 if (reclaimedBytes == 0L) {
@@ -8112,6 +8522,7 @@ class ArchpheneRuntimeService : Service() {
                 MIN_PACKAGE_PHASE_TEST_HOLD_MILLIS..MAX_PACKAGE_JOB_TEST_HOLD_MILLIS ||
             activeHandle == 0L ||
             catalogRefreshActive ||
+            packageCacheActive ||
             searchActive ||
             packageOperationActive ||
             commandActive
@@ -8416,6 +8827,7 @@ class ArchpheneRuntimeService : Service() {
             packageJobNeedsStorageRecovery() &&
             readyHandle != 0L &&
             !catalogRefreshActive &&
+            !packageCacheActive &&
             !searchActive &&
             !packageOperationActive &&
             !commandActive &&
@@ -8429,6 +8841,7 @@ class ArchpheneRuntimeService : Service() {
             packageJobNeedsCatalogRecovery() &&
             readyHandle != 0L &&
             !catalogRefreshActive &&
+            !packageCacheActive &&
             !searchActive &&
             !packageOperationActive &&
             !commandActive &&
@@ -8652,6 +9065,7 @@ class ArchpheneRuntimeService : Service() {
         if (
             activeHandle == 0L ||
             catalogRefreshActive ||
+            packageCacheActive ||
             searchActive ||
             packageOperationActive ||
             commandActive ||
@@ -8843,6 +9257,7 @@ class ArchpheneRuntimeService : Service() {
             activeHandle == 0L ||
             selectedShell == null ||
             catalogRefreshActive ||
+            packageCacheActive ||
             searchActive ||
             packageOperationActive ||
             commandActive
@@ -9110,6 +9525,7 @@ class ArchpheneRuntimeService : Service() {
             launcherDecisionActive.get() ||
             launcherReviewActive.get() ||
             catalogRefreshActive ||
+            packageCacheActive ||
             searchActive ||
             packageOperationActive ||
             commandActive ||

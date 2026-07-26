@@ -366,8 +366,7 @@ discard stale horizontal scroll offsets during state polling. Eight
 production-classifier fixtures pass from the exact APK on the emulator and
 Samsung, with settled full-device screenshots confirming that short package
 names and the longest partial-mutation guidance remain fully on-screen.
-One-tap failure-card catalog refresh and repair/rollback tooling remain
-pending.
+Repair/rollback tooling for partial transactions remains pending.
 
 Linux-storage failures now expose Clear cache before Review. The operation runs
 off the Activity thread through a dedicated Rust/JNI boundary and is limited to
@@ -391,6 +390,24 @@ restored post-cleanup Review state on both the emulator and Samsung.
 Network-disabled Rust tests also prove fail-closed behavior when an unknown
 cache entry is present and verify that an empty cache is idempotent.
 
+The Packages workspace also exposes Downloads independently of a failure.
+Rust scans at most 4,096 cache artifacts once, groups archives, detached
+signatures, and partial downloads by package/version/architecture, and retains
+one immutable snapshot for 32-row JNI pages. The Android dialog reports total
+disk use, consolidates several cached versions into one selectable package,
+supports cleanup of up to 256 selected package names, and keeps Clear all behind
+a second confirmation that states installed packages remain installed.
+Inventory and cleanup share the package-operation concurrency boundary and keep
+the foreground Service alive until the refreshed snapshot is available.
+
+A debug-only marker-owned fixture adds two versions of one package plus an
+unselected sibling without replacing existing cache files. Exact-APK emulator
+and Samsung gates select and remove only the target, verify the sibling remains,
+exercise but cancel Clear all, remove the remaining fixture, and compare the
+complete prior cache listing afterward. Both real populated caches and the
+259/248-package databases remain unchanged; full-device captures verify the
+phone inventory and confirmation layouts.
+
 All user-started manager work now shares one Service-retention predicate:
 bootstrap, catalog refresh, search/resolution, package mutation/cache cleanup,
 bounded commands, storage import/mirroring, and the interactive shell cannot be
@@ -404,8 +421,7 @@ real operation without slowing release code: both Pixel Launcher and Samsung
 One UI Recents gestures prove foreground promotion, active task-removal
 retention, cache completion, shutdown ordering, empty cache, exact cold-restart
 result restoration, scoped fatal logs, and visually inspected full-device
-screenshots. Package-specific selection, broader disk-use controls, catalog
-recovery, and partial-transaction repair remain pending.
+screenshots. Verified partial-transaction repair and rollback remain pending.
 
 Visible files in the shared `/home/archphene` are now available to Android
 Files, system pickers, and explicitly granted Android consumers through an

@@ -3,6 +3,7 @@
 pub mod aur;
 pub mod desktop;
 
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fmt;
 use std::fmt::Write as FmtWrite;
@@ -24,6 +25,7 @@ pub const MAX_TOOL_OUTPUT_BYTES: usize = 16 * 1024;
 pub const MAX_PACKAGE_RESOLUTION_BYTES: usize = 256 * 1024;
 pub const MAX_VERIFIED_PACKAGE_CLOSURE_BYTES: usize = 512 * 1024;
 pub const INSTALLED_PACKAGE_PAGE_SIZE: usize = 60;
+pub const PACKAGE_CACHE_PAGE_SIZE: usize = 32;
 
 const MANIFEST_HEADER: &str = "# org.archphene.package-runtime.v1";
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
@@ -340,6 +342,28 @@ pub struct InstalledPackageCatalog {
     packages: Vec<(String, String, bool)>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackageCacheEntry {
+    pub package: String,
+    pub version: String,
+    pub architecture: String,
+    pub bytes: u64,
+    pub artifacts: u32,
+}
+
+pub struct PackageCacheCatalog {
+    entries: Vec<PackageCacheEntry>,
+    total_bytes: u64,
+}
+
+struct PackageCacheArtifact {
+    path: PathBuf,
+    package: String,
+    version: String,
+    architecture: String,
+    bytes: u64,
+}
+
 impl ToolOutput {
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes[..self.length]
@@ -360,6 +384,12 @@ impl ToolOutput {
         self.bytes[self.length..end].copy_from_slice(bytes);
         self.length = end;
         Ok(())
+    }
+}
+
+impl fmt::Write for ToolOutput {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        self.push(value.as_bytes()).map_err(|_| fmt::Error)
     }
 }
 
@@ -403,6 +433,45 @@ impl InstalledPackageCatalog {
             } else {
                 b"\t0\n"
             })?;
+        }
+        Ok(output)
+    }
+}
+
+impl PackageCacheCatalog {
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub const fn total_bytes(&self) -> u64 {
+        self.total_bytes
+    }
+
+    pub fn entries(&self) -> &[PackageCacheEntry] {
+        &self.entries
+    }
+
+    pub fn page(&self, offset: usize) -> Result<ToolOutput, PackageRuntimeError> {
+        if offset > self.entries.len() {
+            return Err(PackageRuntimeError::InvalidQuery);
+        }
+        let mut output = empty_tool_output();
+        for entry in self
+            .entries
+            .iter()
+            .skip(offset)
+            .take(PACKAGE_CACHE_PAGE_SIZE)
+        {
+            writeln!(
+                &mut output,
+                "{}\t{}\t{}\t{}\t{}",
+                entry.package, entry.version, entry.architecture, entry.bytes, entry.artifacts,
+            )
+            .map_err(|_| PackageRuntimeError::OutputLimit)?;
         }
         Ok(output)
     }
@@ -2009,19 +2078,96 @@ impl PackageRuntime {
         aur::open_reviewed_snapshot(&self.arch_root, package_base, expected_sha256)
     }
 
+    pub fn package_cache_catalog(&self) -> Result<PackageCacheCatalog, PackageRuntimeError> {
+        let (_, artifacts) = self.scan_package_cache()?;
+        let mut entries: Vec<PackageCacheEntry> = Vec::new();
+        let mut total_bytes = 0_u64;
+        for artifact in artifacts {
+            total_bytes = total_bytes
+                .checked_add(artifact.bytes)
+                .ok_or(PackageRuntimeError::OutputLimit)?;
+            if let Some(entry) = entries.last_mut()
+                && entry.package == artifact.package
+                && entry.version == artifact.version
+                && entry.architecture == artifact.architecture
+            {
+                entry.bytes = entry
+                    .bytes
+                    .checked_add(artifact.bytes)
+                    .ok_or(PackageRuntimeError::OutputLimit)?;
+                entry.artifacts = entry
+                    .artifacts
+                    .checked_add(1)
+                    .ok_or(PackageRuntimeError::OutputLimit)?;
+                continue;
+            }
+            entries.push(PackageCacheEntry {
+                package: artifact.package,
+                version: artifact.version,
+                architecture: artifact.architecture,
+                bytes: artifact.bytes,
+                artifacts: 1,
+            });
+        }
+        Ok(PackageCacheCatalog {
+            entries,
+            total_bytes,
+        })
+    }
+
+    pub fn clear_package_cache_packages(
+        &self,
+        packages: &[&str],
+    ) -> Result<u64, PackageRuntimeError> {
+        if packages.is_empty() || packages.len() > 256 {
+            return Err(PackageRuntimeError::InvalidQuery);
+        }
+        let mut selected = BTreeSet::new();
+        for package in packages {
+            if !safe_logical_name(package) || !selected.insert(*package) {
+                return Err(PackageRuntimeError::InvalidQuery);
+            }
+        }
+        let (directory, artifacts) = self.scan_package_cache()?;
+        let mut reclaimed_bytes = 0_u64;
+        for artifact in artifacts {
+            if selected.contains(artifact.package.as_str()) {
+                reclaimed_bytes = reclaimed_bytes
+                    .checked_add(artifact.bytes)
+                    .ok_or(PackageRuntimeError::OutputLimit)?;
+                fs::remove_file(artifact.path)?;
+            }
+        }
+        File::open(directory)?.sync_all()?;
+        Ok(reclaimed_bytes)
+    }
+
     pub fn clear_package_cache(&self) -> Result<u64, PackageRuntimeError> {
+        let (directory, artifacts) = self.scan_package_cache()?;
+        let mut reclaimed_bytes = 0_u64;
+        for artifact in artifacts {
+            reclaimed_bytes = reclaimed_bytes
+                .checked_add(artifact.bytes)
+                .ok_or(PackageRuntimeError::OutputLimit)?;
+            fs::remove_file(artifact.path)?;
+        }
+        File::open(directory)?.sync_all()?;
+        Ok(reclaimed_bytes)
+    }
+
+    fn scan_package_cache(
+        &self,
+    ) -> Result<(PathBuf, Vec<PackageCacheArtifact>), PackageRuntimeError> {
         let directory = self.arch_root.join(PACKAGE_CACHE_DIRECTORY);
         let metadata = fs::symlink_metadata(&directory)?;
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
             return Err(PackageRuntimeError::UnsafeEntry(directory));
         }
 
-        let mut entry_count = 0_usize;
-        let mut reclaimed_bytes = 0_u64;
+        let mut artifacts = Vec::new();
         for entry in fs::read_dir(&directory)? {
             let entry = entry?;
-            entry_count = entry_count.saturating_add(1);
-            if entry_count > LOCAL_DATABASE_ENTRY_LIMIT {
+            if artifacts.len() >= LOCAL_DATABASE_ENTRY_LIMIT {
                 return Err(PackageRuntimeError::OutputLimit);
             }
             let path = entry.path();
@@ -2036,29 +2182,34 @@ impl PackageRuntime {
             {
                 return Err(PackageRuntimeError::UnsafeEntry(path));
             }
-            reclaimed_bytes = reclaimed_bytes
-                .checked_add(metadata.len())
-                .ok_or(PackageRuntimeError::OutputLimit)?;
-        }
-
-        for entry in fs::read_dir(&directory)? {
-            let entry = entry?;
-            let path = entry.path();
-            let name = entry
-                .file_name()
-                .into_string()
-                .map_err(|_| PackageRuntimeError::UnsafeEntry(path.clone()))?;
-            let metadata = fs::symlink_metadata(&path)?;
-            if !safe_package_cache_filename(&name)
-                || metadata.file_type().is_symlink()
-                || !metadata.is_file()
-            {
+            let Some((package, version, release, architecture)) =
+                parse_package_cache_filename(&name)
+            else {
                 return Err(PackageRuntimeError::UnsafeEntry(path));
-            }
-            fs::remove_file(path)?;
+            };
+            artifacts.push(PackageCacheArtifact {
+                path,
+                package: package.to_owned(),
+                version: format!("{version}-{release}"),
+                architecture: architecture.to_owned(),
+                bytes: metadata.len(),
+            });
         }
-        File::open(&directory)?.sync_all()?;
-        Ok(reclaimed_bytes)
+        artifacts.sort_unstable_by(|left, right| {
+            (
+                left.package.as_str(),
+                left.version.as_str(),
+                left.architecture.as_str(),
+                left.path.as_os_str(),
+            )
+                .cmp(&(
+                    right.package.as_str(),
+                    right.version.as_str(),
+                    right.architecture.as_str(),
+                    right.path.as_os_str(),
+                ))
+        });
+        Ok((directory, artifacts))
     }
 
     pub fn verify_package(
@@ -3569,6 +3720,30 @@ fn safe_package_cache_filename(value: &str) -> bool {
     safe_package_filename(without_signature)
 }
 
+fn parse_package_cache_filename(value: &str) -> Option<(&str, &str, &str, &str)> {
+    let without_part = value.strip_suffix(".part").unwrap_or(value);
+    let without_signature = without_part.strip_suffix(".sig").unwrap_or(without_part);
+    let stem = without_signature
+        .strip_suffix(".pkg.tar.zst")
+        .or_else(|| without_signature.strip_suffix(".pkg.tar.xz"))?;
+    let mut fields = stem.rsplitn(4, '-');
+    let architecture = fields.next()?;
+    let release = fields.next()?;
+    let version = fields.next()?;
+    let package = fields.next()?;
+    if !safe_logical_name(package)
+        || architecture.is_empty()
+        || release.is_empty()
+        || version.is_empty()
+        || architecture.len() > 32
+        || release.len() > 64
+        || version.len() > 128
+    {
+        return None;
+    }
+    Some((package, version, release, architecture))
+}
+
 fn validate_signature_status(
     output: &[u8],
     architecture: RepositoryArchitecture,
@@ -4550,6 +4725,99 @@ library\tlibarchphene_path_bridge.so\tlibarchphene_pkg_555555555555555555555555.
                 .is_none()
         );
         assert_eq!(runtime.clear_package_cache().expect("clear empty cache"), 0);
+    }
+
+    #[test]
+    fn package_cache_inventory_groups_artifacts_and_removes_only_selected_packages() {
+        let tree = TestTree::new();
+        tree.file("libarchphene_pkg_111111111111111111111111.so", b"loader");
+        tree.file("libarchphene_pkg_222222222222222222222222.so", b"pacman");
+        tree.file("libarchphene_pkg_444444444444444444444444.so", b"keyring");
+        tree.file("libarchphene_pkg_555555555555555555555555.so", b"bridge");
+        tree.file("libarchphene_pkg_666666666666666666666666.so", b"trust");
+        let manifest = b"# org.archphene.package-runtime.v1\n\
+loader\t@loader\tlibarchphene_pkg_111111111111111111111111.so\t6\n\
+tool\t@pacman\tlibarchphene_pkg_222222222222222222222222.so\t6\n\
+keyring\t@keyring\tlibarchphene_pkg_444444444444444444444444.so\t7\n\
+ownertrust\t@ownertrust\tlibarchphene_pkg_666666666666666666666666.so\t5\n\
+library\tlibarchphene_path_bridge.so\tlibarchphene_pkg_555555555555555555555555.so\t6\n";
+        let runtime = PackageRuntime::prepare(
+            &tree.root,
+            &tree.native,
+            manifest,
+            RepositoryArchitecture::X86_64,
+        )
+        .expect("package runtime");
+        let cache = tree.root.join(PACKAGE_CACHE_DIRECTORY);
+        let btop_archive = cache.join("btop-1.4.7-1-x86_64.pkg.tar.zst");
+        let btop_signature = cache.join("btop-1.4.7-1-x86_64.pkg.tar.zst.sig");
+        let glibc_partial = cache.join("glibc-2.42-1-x86_64.pkg.tar.zst.part");
+        let old_btop = cache.join("btop-1.4.6-2-x86_64.pkg.tar.xz");
+        fs::write(&btop_archive, b"archive").expect("btop archive");
+        fs::write(&btop_signature, b"signature").expect("btop signature");
+        fs::write(&glibc_partial, b"partial").expect("glibc partial");
+        fs::write(&old_btop, b"old").expect("old btop archive");
+
+        let inventory = runtime.package_cache_catalog().expect("cache inventory");
+        assert_eq!(inventory.total_bytes(), 26);
+        assert_eq!(
+            inventory.entries(),
+            &[
+                PackageCacheEntry {
+                    package: "btop".to_owned(),
+                    version: "1.4.6-2".to_owned(),
+                    architecture: "x86_64".to_owned(),
+                    bytes: 3,
+                    artifacts: 1,
+                },
+                PackageCacheEntry {
+                    package: "btop".to_owned(),
+                    version: "1.4.7-1".to_owned(),
+                    architecture: "x86_64".to_owned(),
+                    bytes: 16,
+                    artifacts: 2,
+                },
+                PackageCacheEntry {
+                    package: "glibc".to_owned(),
+                    version: "2.42-1".to_owned(),
+                    architecture: "x86_64".to_owned(),
+                    bytes: 7,
+                    artifacts: 1,
+                },
+            ],
+        );
+        assert_eq!(
+            inventory.page(0).expect("cache page").as_str().unwrap(),
+            "btop\t1.4.6-2\tx86_64\t3\t1\n\
+btop\t1.4.7-1\tx86_64\t16\t2\n\
+glibc\t2.42-1\tx86_64\t7\t1\n",
+        );
+        assert_eq!(
+            runtime
+                .clear_package_cache_packages(&["btop"])
+                .expect("selected cleanup"),
+            19
+        );
+        assert!(!btop_archive.exists());
+        assert!(!btop_signature.exists());
+        assert!(!old_btop.exists());
+        assert!(glibc_partial.exists());
+        let retained = runtime.package_cache_catalog().expect("retained inventory");
+        assert_eq!(
+            retained.entries(),
+            &[PackageCacheEntry {
+                package: "glibc".to_owned(),
+                version: "2.42-1".to_owned(),
+                architecture: "x86_64".to_owned(),
+                bytes: 7,
+                artifacts: 1,
+            }],
+        );
+        assert!(matches!(
+            runtime.clear_package_cache_packages(&["glibc", "glibc"]),
+            Err(PackageRuntimeError::InvalidQuery)
+        ));
+        assert!(glibc_partial.exists());
     }
 
     #[test]

@@ -13,9 +13,9 @@ use archphene_launcher::{
     LauncherRegistry, LauncherRegistryError, LauncherReviewDecision, ReconcileReport, WrapperStatus,
 };
 use archphene_packages::{
-    CatalogDownload, InstalledPackageCatalog, PackagePayloadDownload, PackageResolution,
-    PackageRuntime, PackageRuntimeError, PackageTool, Repository, RepositoryArchitecture,
-    ToolOutput, VerifiedPackageClosure,
+    CatalogDownload, InstalledPackageCatalog, PackageCacheCatalog, PackagePayloadDownload,
+    PackageResolution, PackageRuntime, PackageRuntimeError, PackageTool, Repository,
+    RepositoryArchitecture, ToolOutput, VerifiedPackageClosure,
     aur::{AurReview, AurSourceDownload, MAX_AUR_SOURCE_BYTES},
     desktop::{DesktopCatalog, ExecArgument},
 };
@@ -38,6 +38,7 @@ pub struct RuntimeHost {
     package_jobs: Option<PackageJobStore>,
     package_runtime: Option<PackageRuntime>,
     installed_packages: Option<InstalledPackageCatalog>,
+    package_cache: Option<PackageCacheCatalog>,
     desktop_entries: Option<DesktopCatalog>,
     launcher_registry: Option<LauncherRegistry>,
     catalog_download: Option<CatalogDownload>,
@@ -202,6 +203,7 @@ impl RuntimeHost {
             package_jobs: None,
             package_runtime: None,
             installed_packages: None,
+            package_cache: None,
             desktop_entries: None,
             launcher_registry: None,
             catalog_download: None,
@@ -358,6 +360,7 @@ impl RuntimeHost {
         let catalogs_ready = package_runtime.catalogs_ready();
         self.package_runtime = Some(package_runtime);
         self.installed_packages = None;
+        self.package_cache = None;
         self.desktop_entries = None;
         self.launcher_registry = None;
         let mut status_flags =
@@ -436,6 +439,24 @@ impl RuntimeHost {
 
     pub fn installed_package_page(&self, offset: usize) -> Result<ToolOutput, PackageRuntimeError> {
         self.installed_packages
+            .as_ref()
+            .ok_or(PackageRuntimeError::InvalidPath)?
+            .page(offset)
+    }
+
+    pub fn refresh_package_cache(&mut self) -> Result<(usize, u64), PackageRuntimeError> {
+        let catalog = self
+            .package_runtime
+            .as_ref()
+            .ok_or(PackageRuntimeError::InvalidPath)?
+            .package_cache_catalog()?;
+        let summary = (catalog.len(), catalog.total_bytes());
+        self.package_cache = Some(catalog);
+        Ok(summary)
+    }
+
+    pub fn package_cache_page(&self, offset: usize) -> Result<ToolOutput, PackageRuntimeError> {
+        self.package_cache
             .as_ref()
             .ok_or(PackageRuntimeError::InvalidPath)?
             .page(offset)
@@ -1122,14 +1143,33 @@ impl RuntimeHost {
         self.aur_source_download = None;
     }
 
-    pub fn clear_package_cache(&self) -> Result<u64, PackageRuntimeError> {
+    pub fn clear_package_cache(&mut self) -> Result<u64, PackageRuntimeError> {
         if self.package_download.is_some() {
             return Err(PackageRuntimeError::Busy);
         }
-        self.package_runtime
+        let reclaimed = self
+            .package_runtime
             .as_ref()
             .ok_or(PackageRuntimeError::InvalidPath)?
-            .clear_package_cache()
+            .clear_package_cache()?;
+        self.package_cache = None;
+        Ok(reclaimed)
+    }
+
+    pub fn clear_package_cache_packages(
+        &mut self,
+        packages: &[&str],
+    ) -> Result<u64, PackageRuntimeError> {
+        if self.package_download.is_some() {
+            return Err(PackageRuntimeError::Busy);
+        }
+        let reclaimed = self
+            .package_runtime
+            .as_ref()
+            .ok_or(PackageRuntimeError::InvalidPath)?
+            .clear_package_cache_packages(packages)?;
+        self.package_cache = None;
+        Ok(reclaimed)
     }
 
     pub fn open_pty(

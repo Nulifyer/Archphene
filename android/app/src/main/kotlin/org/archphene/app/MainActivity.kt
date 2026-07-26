@@ -18,6 +18,7 @@ import android.provider.Settings
 import android.text.Editable
 import android.text.TextUtils
 import android.text.TextWatcher
+import android.text.format.Formatter
 import android.util.Log
 import android.view.Choreographer
 import android.view.Gravity
@@ -37,6 +38,7 @@ import android.widget.ListView
 import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
+import android.widget.Toast
 import org.archphene.app.runtime.ArchpheneRuntimeService
 import org.archphene.app.runtime.AvailablePackageSnapshot
 import org.archphene.app.runtime.InstalledPackageSnapshot
@@ -60,6 +62,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private lateinit var installedPackageAdapter: InstalledPackageAdapter
     private lateinit var installedPackagesButton: Button
     private lateinit var searchResultsButton: Button
+    private lateinit var packageCacheButton: Button
     private lateinit var availablePackagePanel: LinearLayout
     private lateinit var availablePackageStatusView: TextView
     private lateinit var availablePackageList: ListView
@@ -121,6 +124,9 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private var launcherPermissionDialog: AlertDialog? = null
     private var launcherCancellationDialog: AlertDialog? = null
     private var launcherReviewDialog: AlertDialog? = null
+    private var packageCacheDialog: AlertDialog? = null
+    private var packageCacheDialogRequested = false
+    private var packageCacheRequestedRevision = Int.MIN_VALUE
     private var launcherPermissionDeferred = false
     private var launcherReviewDeferredRevision = Int.MIN_VALUE
     private var pendingImportUri: Uri? = null
@@ -245,6 +251,23 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     }
                 }
             }
+        packageCacheButton =
+            Button(this).apply {
+                setText(R.string.downloads)
+                contentDescription = getString(R.string.manage_package_downloads)
+                setOnClickListener {
+                    val binder = runtimeBinder
+                    if (binder?.packageCacheActionAvailable == true) {
+                        packageCacheDialogRequested = true
+                        packageCacheRequestedRevision = binder.packageCache.revision
+                        isEnabled = false
+                        if (!binder.refreshPackageCacheInventory()) {
+                            packageCacheDialogRequested = false
+                            isEnabled = true
+                        }
+                    }
+                }
+            }
         val catalogRow =
             LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
@@ -262,6 +285,13 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                         0,
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         1f,
+                    ),
+                )
+                addView(
+                    packageCacheButton,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
                     ),
                 )
             }
@@ -1626,6 +1656,9 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         launcherReviewDialog?.setOnDismissListener(null)
         launcherReviewDialog?.dismiss()
         launcherReviewDialog = null
+        packageCacheDialog?.setOnDismissListener(null)
+        packageCacheDialog?.dismiss()
+        packageCacheDialog = null
         if (isFinishing && !keepServiceAfterFinish) {
             stopService(Intent(this, ArchpheneRuntimeService::class.java))
         }
@@ -1805,6 +1838,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         )
         updatePackageActivity()
         updatePackageActions()
+        maybeShowPackageCache()
         maybeShowStorageOnboarding()
         maybeShowLauncherCancellation()
         maybeShowLauncherReview()
@@ -1851,6 +1885,131 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         debugStatusJobsReady = jobsReady
         debugStatusPacmanReady = pacmanReady
         debugStatusDrainedEvents = snapshot.drainedEvents
+    }
+
+    private fun maybeShowPackageCache() {
+        val binder = runtimeBinder ?: return
+        val cache = binder.packageCache
+        if (
+            !packageCacheDialogRequested ||
+            packageCacheDialog != null ||
+            !binder.packageCacheActionAvailable ||
+            cache.revision == packageCacheRequestedRevision ||
+            isFinishing ||
+            isDestroyed
+        ) {
+            return
+        }
+        packageCacheDialogRequested = false
+        val unavailable = cache.status.startsWith("Package storage unavailable:")
+        if (cache.names.isEmpty() || unavailable) {
+            val dialog =
+                AlertDialog
+                    .Builder(this)
+                    .setTitle(R.string.package_downloads_title)
+                    .setMessage(cache.status)
+                    .setPositiveButton(android.R.string.ok, null)
+                    .create()
+            dialog.setOnDismissListener {
+                if (packageCacheDialog === dialog) {
+                    packageCacheDialog = null
+                }
+            }
+            packageCacheDialog = dialog
+            dialog.show()
+            return
+        }
+        val choices = BooleanArray(cache.names.size)
+        val labels =
+            Array<CharSequence>(cache.names.size) { index ->
+                buildString(192) {
+                    append(cache.names[index])
+                        .append(' ')
+                        .append(cache.versions[index])
+                        .append(" · ")
+                        .append(Formatter.formatShortFileSize(this@MainActivity, cache.bytes[index]))
+                        .append(" · ")
+                        .append(cache.artifacts[index])
+                        .append(if (cache.artifacts[index] == 1) " file" else " files")
+                }
+            }
+        val dialog =
+            AlertDialog
+                .Builder(this)
+                .setTitle(
+                    getString(
+                        R.string.package_downloads_title_with_size,
+                        Formatter.formatShortFileSize(this, cache.totalBytes),
+                    ),
+                ).setMultiChoiceItems(labels, choices) { _, which, selected ->
+                    choices[which] = selected
+                    packageCacheDialog
+                        ?.getButton(AlertDialog.BUTTON_POSITIVE)
+                        ?.isEnabled = choices.any { it }
+                }.setPositiveButton(R.string.clear_selected, null)
+                .setNeutralButton(R.string.clear_all, null)
+                .setNegativeButton(android.R.string.cancel, null)
+                .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).apply {
+                isEnabled = false
+                setOnClickListener {
+                    val selected =
+                        cache.names.filterIndexed { index, _ -> choices[index] }.toTypedArray()
+                    if (binder.clearSelectedPackageCache(selected)) {
+                        packageCacheDialogRequested = true
+                        packageCacheRequestedRevision = cache.revision
+                        dialog.dismiss()
+                    }
+                }
+            }
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                dialog.dismiss()
+                showPackageCacheClearConfirmation(cache.revision)
+            }
+        }
+        dialog.setOnDismissListener {
+            if (packageCacheDialog === dialog) {
+                packageCacheDialog = null
+            }
+        }
+        packageCacheDialog = dialog
+        dialog.show()
+        if (
+            cache.status.startsWith("Freed ") ||
+            cache.status.startsWith("No matching ") ||
+            cache.status.startsWith("Package cleanup failed:")
+        ) {
+            Toast.makeText(this, cache.status, Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun showPackageCacheClearConfirmation(revision: Int) {
+        val dialog =
+            AlertDialog
+                .Builder(this)
+                .setTitle(R.string.clear_all_downloads_title)
+                .setMessage(R.string.clear_all_downloads_message)
+                .setPositiveButton(R.string.clear_all, null)
+                .setNegativeButton(android.R.string.cancel, null)
+                .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val binder = runtimeBinder
+                if (binder?.clearAllPackageCacheDownloads() == true) {
+                    packageCacheDialogRequested = true
+                    packageCacheRequestedRevision = revision
+                    dialog.dismiss()
+                }
+            }
+        }
+        dialog.setOnDismissListener {
+            if (packageCacheDialog === dialog) {
+                packageCacheDialog = null
+            }
+        }
+        packageCacheDialog = dialog
+        dialog.show()
     }
 
     private fun maybeShowStorageOnboarding() {
@@ -2479,6 +2638,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             installButton.isEnabled = false
             removeButton.isEnabled = false
             aurReviewButton.isEnabled = false
+            packageCacheButton.isEnabled = false
             cancelButton.isEnabled = false
             cancelButton.visibility = View.GONE
             commandButton.isEnabled = false
@@ -2496,6 +2656,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         setTextIfChanged(installButton, binder.packagePrimaryActionLabel)
         setTextIfChanged(removeButton, binder.packageRemoveActionLabel)
         updatePackageSelectionActions()
+        packageCacheButton.isEnabled = binder.packageCacheActionAvailable
         val packageActionAvailable =
             binder.aurBuildCancellationAvailable ||
                 binder.packageCancellationAvailable ||

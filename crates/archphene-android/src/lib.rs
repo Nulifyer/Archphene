@@ -123,6 +123,7 @@ mod android {
     const ERROR_LAUNCHER: jint = -10;
     const MAX_ANDROID_DNS_REQUEST_BYTES: usize = 512;
     const MAX_LAUNCHER_REVIEW_REQUEST_BYTES: usize = 32 * 1024;
+    const MAX_PACKAGE_CACHE_SELECTION_BYTES: usize = 32 * 1024;
     const MAX_STORAGE_REQUEST_BYTES: usize = 4 * 1024;
     const BUILT_PACKAGE_REPORT_BYTES: usize = 64;
     const BUILT_PACKAGE_REPORT_MAGIC: &[u8; 8] = b"ABMV0001";
@@ -3442,6 +3443,139 @@ mod android {
             return ERROR_INTERNAL;
         }
         i32::try_from(MAX_TOOL_OUTPUT_BYTES - writer.len()).unwrap_or(i32::MAX)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeRefreshPackageCache(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let Ok(handle) = u64::try_from(handle) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(output_capacity) = environment.get_direct_buffer_capacity(&output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if output_capacity < MAX_TOOL_OUTPUT_BYTES {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let Ok(output_address) = environment.get_direct_buffer_address(&output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if output_address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
+        let Ok(mut registry) = registry().lock() else {
+            return ERROR_INTERNAL;
+        };
+        let Some(runtime) = registry.runtime_mut(handle) else {
+            return ERROR_INVALID_HANDLE;
+        };
+        let (entries, bytes) = match runtime.refresh_package_cache() {
+            Ok(summary) => summary,
+            Err(error) => return copy_package_error(&error, destination),
+        };
+        let mut writer = std::io::Cursor::new(destination);
+        if write!(&mut writer, "C1\t{entries}\t{bytes}\n").is_err() {
+            return ERROR_INTERNAL;
+        }
+        i32::try_from(writer.position()).unwrap_or(ERROR_INTERNAL)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeReadPackageCachePage(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        offset: jint,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let (Ok(handle), Ok(offset)) = (u64::try_from(handle), usize::try_from(offset)) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(output_capacity) = environment.get_direct_buffer_capacity(&output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if output_capacity < MAX_TOOL_OUTPUT_BYTES {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let Ok(output_address) = environment.get_direct_buffer_address(&output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if output_address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
+        let Ok(mut registry) = registry().lock() else {
+            return ERROR_INTERNAL;
+        };
+        let Some(runtime) = registry.runtime_mut(handle) else {
+            return ERROR_INVALID_HANDLE;
+        };
+        copy_tool_result(runtime.package_cache_page(offset), destination)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeClearSelectedPackageCache(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        request_buffer: JByteBuffer,
+        request_length: jint,
+        output_buffer: JByteBuffer,
+    ) -> jlong {
+        let (Ok(handle), Ok(request_length)) =
+            (u64::try_from(handle), usize::try_from(request_length))
+        else {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        };
+        let (Ok(request_capacity), Ok(output_capacity)) = (
+            environment.get_direct_buffer_capacity(&request_buffer),
+            environment.get_direct_buffer_capacity(&output_buffer),
+        ) else {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        };
+        if request_length == 0
+            || request_length > request_capacity
+            || request_length > MAX_PACKAGE_CACHE_SELECTION_BYTES
+            || output_capacity < MAX_TOOL_OUTPUT_BYTES
+        {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        }
+        let (Ok(request_address), Ok(output_address)) = (
+            environment.get_direct_buffer_address(&request_buffer),
+            environment.get_direct_buffer_address(&output_buffer),
+        ) else {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        };
+        if request_address.is_null() || output_address.is_null() {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        }
+        let request = unsafe { slice::from_raw_parts(request_address, request_length) };
+        let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
+        let Ok(request) = str::from_utf8(request) else {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        };
+        let packages: Vec<&str> = request.split('\n').collect();
+        if packages.is_empty()
+            || packages.len() > 256
+            || packages.iter().any(|item| item.is_empty())
+        {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        }
+        let Ok(mut registry) = registry().lock() else {
+            return i64::from(ERROR_INTERNAL);
+        };
+        let Some(runtime) = registry.runtime_mut(handle) else {
+            return i64::from(ERROR_INVALID_HANDLE);
+        };
+        match runtime.clear_package_cache_packages(&packages) {
+            Ok(bytes) => i64::try_from(bytes).unwrap_or(i64::from(ERROR_INTERNAL)),
+            Err(error) => i64::from(copy_package_error(&error, destination)),
+        }
     }
 
     #[unsafe(no_mangle)]

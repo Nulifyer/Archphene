@@ -403,6 +403,21 @@ internal object NativeRuntime {
         handle: Long,
         outputBuffer: ByteBuffer,
     ): Long
+    external fun nativeRefreshPackageCache(
+        handle: Long,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeReadPackageCachePage(
+        handle: Long,
+        offset: Int,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeClearSelectedPackageCache(
+        handle: Long,
+        requestBuffer: ByteBuffer,
+        requestLength: Int,
+        outputBuffer: ByteBuffer,
+    ): Long
     external fun nativeBeginPackageDownload(
         handle: Long,
         filenameBuffer: ByteBuffer,
