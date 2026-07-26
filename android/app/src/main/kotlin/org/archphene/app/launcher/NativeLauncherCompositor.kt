@@ -41,6 +41,13 @@ internal class NativeLauncherCompositor(
         }
     }
 
+    fun requestClose(): Int =
+        if (handle == 0L) {
+            RESULT_CLOSED
+        } else {
+            nativeRequestClose(handle)
+        }
+
     fun setHostActive(active: Boolean) {
         if (handle != 0L) {
             nativeSetHostActive(handle, active)
@@ -216,6 +223,8 @@ internal class NativeLauncherCompositor(
     ): Int
 
     private external fun nativeDetachSurface(handle: Long)
+
+    private external fun nativeRequestClose(handle: Long): Int
 
     private external fun nativeSetHostActive(
         handle: Long,

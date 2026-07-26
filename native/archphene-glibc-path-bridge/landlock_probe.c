@@ -19,12 +19,19 @@ int main(void) {
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
                 (unsigned int)offsetof(struct seccomp_data, nr)),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K,
-                __NR_landlock_create_ruleset, 2, 0),
+                __NR_landlock_create_ruleset, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRAP),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K,
-                __NR_io_uring_setup, 1, 0),
+                __NR_io_uring_setup, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRAP),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K,
                 __NR_get_mempolicy, 0, 1),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRAP),
+#ifdef __NR_pkey_alloc
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K,
+                __NR_pkey_alloc, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRAP),
+#endif
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
     };
     struct sock_fprog program = {
@@ -54,6 +61,14 @@ int main(void) {
         fprintf(stderr, "get_mempolicy result=%ld errno=%d\n", result, errno);
         return 1;
     }
+#ifdef __NR_pkey_alloc
+    errno = 0;
+    result = syscall(__NR_pkey_alloc, 0, 0);
+    if (result != -1 || errno != ENOSYS) {
+        fprintf(stderr, "pkey_alloc result=%ld errno=%d\n", result, errno);
+        return 1;
+    }
+#endif
     puts("optional-sandbox-denied");
     return 0;
 #endif

@@ -141,7 +141,7 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
     - [x] Separate Android physical pixels from Wayland logical coordinates, advertise integer and fractional output scale, tile the primary toplevel, preserve client-resolution subsurface rasters, reuse the steady output canvas, and fit the launcher around Android system bars and the visible IME. Foot passes crisp full-device inspection at 1080x2202 portrait, 1080x1343 with the Samsung keyboard, and 2241x978 landscape.
     - [ ] Replace remaining SHM snapshot/copy work with damage-driven retained buffers and HardwareBuffer/dmabuf paths before claiming sustained high-frame-rate or Vulkan production performance.
     - [x] Fix the production launcher resize/input regression exposed by VS Code on Samsung: translate Activity-window input into the inset Surface, preserve at least 432 logical pixels on phone short edges, require matching fresh client frames after IME resize, and validate crisp 1080-wide full-device pixels plus exact visible touch targets.
-    - [ ] Repeat the real-client density, live-resize, lifecycle, and visual gate on the x86_64 emulator.
+    - [x] Repeat the real-client density, live-resize, lifecycle, and visual gate on the x86_64 emulator. Current Code-OSS evidence covers exact full-device pixels, IME/full-height resize, hidden-IME cold launch, graceful Wayland close, and a stopped single-task wrapper reopening into a newly attached session.
   - [ ] Pointer, touch, keyboard, IME, clipboard, and drag-and-drop
     - [x] Bridge authenticated `zwp_text_input_v3` state to a wrapper-owned Android `InputConnection`, including bounded UTF-8 surrounding text, preedit/commit, deletion, editor actions, content hints/purpose, keyboard show/hide, and deterministic detach. Real Samsung Foot accepts text from the Samsung IME.
     - [x] Transform Android touch and pointer coordinates from the physical Surface into the logical Wayland viewport so input and rendered content use the same density model.
@@ -341,7 +341,7 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
 ## P0 - VS Code and .NET daily-use milestone
 
 - [x] Install Code through the generic package/AUR pipeline with no Code-specific bridge exceptions.
-  - [x] On x86_64, the generic official-package path installs the current 198-package, 428 MiB Code closure, discovers four desktop entries, publishes four generated launchers, and reaches the packaged Electron executable.
+  - [x] On x86_64, the generic official-package path installs the current 198-package, 428 MiB Code closure and publishes the Code launcher. Catalog reconciliation now excludes graphical entries owned only by dependency packages, so Code no longer exposes unrelated Avahi launchers.
   - [x] Build, independently verify, and install current `visual-studio-code-bin` through the bounded AUR workflow on physical AArch64 Samsung hardware, including all 250 official closure packages and the generated Android launcher handoff.
 - [ ] Validate Electron/Chromium multiprocess startup, Ozone Wayland, sandbox behavior, rendering, IME, clipboard, dialogs, file watching, extensions, and lifecycle.
   - [x] Resolve Electron's standard PulseAudio private-library dependency through the generic runtime environment.
@@ -350,11 +350,11 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [x] Translate logical home-directory scans and inotify watches, provide a managed `openpty`/`forkpty` path with controlling-terminal and job-control semantics, and reap Code's integrated Bash when the Android launcher is force-stopped. Physical Samsung full-device evidence shows a warning-free integrated terminal.
   - [ ] Replace the temporary user `code-flags.conf` test setup with a reviewed generic Electron/Chromium compatibility profile. Android currently requires `--no-sandbox` and `--disable-dev-shm-usage`; document the reduced Chromium process isolation inside Archphene's Android sandbox and require an explicit product policy before enabling it automatically.
   - [ ] Restore and validate accelerated rendering without the diagnostic `--disable-gpu`; then pass crisp phone/IME resize, touch, mouse, hardware keyboard, clipboard, dialogs, file watching, extensions, network/DNS, Home/resume, and clean-close gates.
-  - [ ] Repeat the complete Electron startup and descendant-process gate on x86_64.
-- [ ] Install `dotnet-sdk` through the same shared package system and make `dotnet` available in Code's integrated terminal.
+  - [x] Repeat Electron startup, Ozone/Wayland rendering, and the descendant-process gate on x86_64. The workbench, shared process, Node workers, extension host, file watcher, and integrated PTY remain live; full-device cold launch and close/relaunch pass without an automatically restored Android IME.
+- [x] Install `dotnet-sdk` through the same shared package system and make `dotnet` available in Code's integrated terminal.
   - [x] Prove immediate row/activity progress, exact 56-package shared-root closure handling, complete signature verification, and non-mutating low-storage rejection on a deliberately undersized x86_64 root.
   - [x] On a clean 12 GiB emulator data partition, install the current official SDK and complete shared-root closure through the normal manager UI; `dotnet --info`, restore, and build execute through the generic bridge. A second absent-HOME gate proves first-run NuGet config creation and mode-0600 permission handling without manual repair; the underlying preload-free glibc path passes on x86_64 and physical AArch64.
-  - [ ] Prove the same `dotnet` executable and shared project tree inside Code's integrated terminal.
+  - [x] Prove the same `dotnet` executable and shared project tree inside Code's integrated terminal: `dotnet --info`, `dotnet new mvc`, restore, build, and run pass from the x86_64 generated Code launcher.
 - [x] Create a new ASP.NET Core MVC project in shared Arch storage.
 - [ ] Open the project in Code and validate editing, search, Git, terminal PTY, language services, restore/build, and extension-host subprocesses.
 - [ ] Run the project under the debugger, stop at breakpoints, inspect state, continue, and restart.

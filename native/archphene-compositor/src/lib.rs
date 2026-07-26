@@ -215,6 +215,9 @@ struct SurfaceState {
     pending_input_region: Option<Option<RegionState>>,
     committed_input_region: Option<RegionState>,
     cached_input_region: Option<Option<RegionState>>,
+    pending_opaque_region: Option<Option<RegionState>>,
+    committed_opaque_region: Option<RegionState>,
+    cached_opaque_region: Option<Option<RegionState>>,
     pending_buffer_scale: Option<i32>,
     committed_buffer_scale: i32,
     cached_buffer_scale: Option<i32>,
@@ -4708,6 +4711,9 @@ fn apply_cached_subsurface_tree(
         if let Some(input_region) = surface_state.cached_input_region.take() {
             surface_state.committed_input_region = input_region;
         }
+        if let Some(opaque_region) = surface_state.cached_opaque_region.take() {
+            surface_state.committed_opaque_region = opaque_region;
+        }
         if let Some(scale) = surface_state.cached_buffer_scale.take() {
             surface_state.committed_buffer_scale = scale;
         }
@@ -5158,7 +5164,27 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                     .unwrap_or_else(|error| error.into_inner())
                     .pending_input_region = Some(region);
             }
-            wl_surface::Request::SetOpaqueRegion { .. } => {}
+            wl_surface::Request::SetOpaqueRegion { region } => {
+                let region = match region {
+                    Some(region) => {
+                        let Some(region_data) = region.data::<RegionData>() else {
+                            return;
+                        };
+                        Some(
+                            region_data
+                                .inner
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner())
+                                .clone(),
+                        )
+                    }
+                    None => None,
+                };
+                data.inner
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .pending_opaque_region = Some(region);
+            }
             wl_surface::Request::Offset { x, y } => {
                 let mut surface = data.inner.lock().unwrap_or_else(|error| error.into_inner());
                 surface.pending_offset.0 = surface.pending_offset.0.saturating_add(x);
@@ -5325,6 +5351,7 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                     }
                 }
                 let input_region_update = surface.pending_input_region.take();
+                let opaque_region_update = surface.pending_opaque_region.take();
                 let pending_offset = std::mem::take(&mut surface.pending_offset);
                 let surface_damage = std::mem::take(&mut surface.pending_surface_damage);
                 let buffer_damage = std::mem::take(&mut surface.pending_buffer_damage);
@@ -5484,6 +5511,9 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                     if let Some(input_region) = input_region_update {
                         surface.cached_input_region = Some(input_region);
                     }
+                    if let Some(opaque_region) = opaque_region_update {
+                        surface.cached_opaque_region = Some(opaque_region);
+                    }
                     surface.cached_buffer_scale = Some(next_scale);
                     surface.cached_buffer_transform = Some(next_transform);
                     surface.cached_viewport_source = Some(next_viewport_source);
@@ -5499,6 +5529,9 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
 
                 if let Some(input_region) = input_region_update {
                     surface.committed_input_region = input_region;
+                }
+                if let Some(opaque_region) = opaque_region_update {
+                    surface.committed_opaque_region = opaque_region;
                 }
                 surface.committed_buffer_scale = next_scale;
                 surface.committed_buffer_transform = next_transform;
@@ -6621,6 +6654,26 @@ fn blend_popup_frame(
     configured_width: i32,
     configured_height: i32,
 ) {
+    blend_frame(
+        destination,
+        source,
+        None,
+        x,
+        y,
+        configured_width,
+        configured_height,
+    );
+}
+
+fn blend_frame(
+    destination: &mut CommittedFrame,
+    source: &CommittedFrame,
+    opaque_region: Option<&RegionState>,
+    x: i32,
+    y: i32,
+    configured_width: i32,
+    configured_height: i32,
+) {
     let target_width = configured_width.max(0) as u32;
     let target_height = configured_height.max(0) as u32;
     if source.width == 0 || source.height == 0 || target_width == 0 || target_height == 0 {
@@ -6643,7 +6696,10 @@ fn blend_popup_frame(
             let source_index = ((source_y * source.width + source_x) * 4) as usize;
             let destination_index =
                 ((destination_y as u32 * destination.width + destination_x as u32) * 4) as usize;
-            let source_alpha = if source.format == wl_shm::Format::Argb8888 {
+            let source_is_opaque = opaque_region.is_some_and(|region| {
+                region.contains(f64::from(target_x) + 0.5, f64::from(target_y) + 0.5)
+            });
+            let source_alpha = if source.format == wl_shm::Format::Argb8888 && !source_is_opaque {
                 u32::from(source.pixels[source_index + 3])
             } else {
                 255
@@ -6703,7 +6759,7 @@ fn blend_surface_tree(
     let Some(surface_data) = surface.data::<SurfaceData>() else {
         return;
     };
-    let (frame, children_below, children_above, transform, viewport_source) = {
+    let (frame, children_below, children_above, transform, viewport_source, opaque_region) = {
         let surface = surface_data
             .inner
             .lock()
@@ -6714,6 +6770,7 @@ fn blend_surface_tree(
             surface.children_above.clone(),
             surface.committed_buffer_transform,
             surface.committed_viewport_source,
+            surface.committed_opaque_region.clone(),
         )
     };
     let (source_width, source_height) = frame
@@ -6737,9 +6794,10 @@ fn blend_surface_tree(
     if let Some(frame) = frame {
         let presentation =
             presentation_buffer_frame(&frame, prefer_original_buffers, transform, viewport_source);
-        blend_popup_frame(
+        blend_frame(
             destination,
             &presentation,
+            opaque_region.as_ref(),
             x,
             y,
             configured_width,
@@ -7641,6 +7699,18 @@ impl CompositorCore {
         toplevel.close();
         1
     }
+
+    pub fn close_all_windows(&self) -> u32 {
+        let mut closed = 0_u32;
+        for toplevel in &self.state.toplevels {
+            if toplevel.is_alive() {
+                toplevel.close();
+                closed = closed.saturating_add(1);
+            }
+        }
+        closed
+    }
+
     pub fn set_host_active(&mut self, active: bool) -> u32 {
         if self.state.host_active == active {
             return 0;
@@ -11668,6 +11738,19 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
 
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeRequestClose(
+    _environment: *mut std::ffi::c_void,
+    _owner: *mut std::ffi::c_void,
+    handle: i64,
+) -> i32 {
+    let Some(compositor) = (unsafe { (handle as *mut LauncherSurfaceCompositor).as_mut() }) else {
+        return -1;
+    };
+    i32::try_from(compositor.core.close_all_windows()).unwrap_or(i32::MAX)
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativePresentationComponent(
     _environment: *mut std::ffi::c_void,
     _owner: *mut std::ffi::c_void,
@@ -13440,6 +13523,61 @@ mod tests {
 
         assert_eq!(destination.pixels, [10, 20, 30, 0, 75, 85, 95, 0]);
     }
+
+    #[test]
+    fn opaque_surface_region_ignores_argb_alpha() {
+        let mut destination = CommittedFrame {
+            width: 2,
+            height: 1,
+            format: wl_shm::Format::Argb8888,
+            pixels: vec![0; 8],
+            source: None,
+        };
+        let source = CommittedFrame {
+            width: 2,
+            height: 1,
+            format: wl_shm::Format::Argb8888,
+            pixels: vec![10, 20, 30, 0, 40, 50, 60, 0],
+            source: None,
+        };
+        let opaque_region = RegionState {
+            operations: vec![RegionOperation::Add(
+                RegionRectangle::new(0, 0, 1, 1).expect("valid region"),
+            )],
+        };
+
+        blend_frame(&mut destination, &source, Some(&opaque_region), 0, 0, 2, 1);
+
+        assert_eq!(destination.pixels, [10, 20, 30, 255, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn opaque_surface_region_uses_surface_coordinates_when_scaled() {
+        let mut destination = CommittedFrame {
+            width: 2,
+            height: 1,
+            format: wl_shm::Format::Argb8888,
+            pixels: vec![0; 8],
+            source: None,
+        };
+        let source = CommittedFrame {
+            width: 4,
+            height: 1,
+            format: wl_shm::Format::Argb8888,
+            pixels: vec![10, 20, 30, 0, 10, 20, 30, 0, 40, 50, 60, 0, 40, 50, 60, 0],
+            source: None,
+        };
+        let opaque_region = RegionState {
+            operations: vec![RegionOperation::Add(
+                RegionRectangle::new(0, 0, 1, 1).expect("valid region"),
+            )],
+        };
+
+        blend_frame(&mut destination, &source, Some(&opaque_region), 0, 0, 2, 1);
+
+        assert_eq!(destination.pixels, [10, 20, 30, 255, 0, 0, 0, 0]);
+    }
+
     #[test]
     fn crops_client_side_shadow_using_negative_surface_origin() {
         let mut source_pixels = Vec::new();

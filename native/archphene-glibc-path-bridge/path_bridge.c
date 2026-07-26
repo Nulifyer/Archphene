@@ -209,15 +209,37 @@ void *archphene_real_syscall_function;
 /*
  * Chromium and libuv sometimes call the exported syscall(2) function
  * directly. Preserve the complete platform calling convention for all
- * unhandled syscalls, while routing raw openat through the same path policy as
- * libc openat. A C variadic forwarding wrapper would have to read arguments
- * the caller did not supply, so use a minimal tail-call trampoline instead.
+ * unhandled syscalls, while routing raw path calls through the same policy as
+ * their libc entry points. A C variadic forwarding wrapper would have to read
+ * arguments the caller did not supply, so use a minimal tail-call trampoline
+ * instead.
  */
 __attribute__((used, visibility("hidden")))
 long archphene_syscall_openat(
         int directory, const char *path, int flags, mode_t mode) {
     return openat(directory, path, flags, mode);
 }
+
+__attribute__((used, visibility("hidden")))
+long archphene_syscall_readlinkat(
+        int directory, const char *path, char *buffer, size_t size) {
+    return readlinkat(directory, path, buffer, size);
+}
+
+#ifdef __NR_creat
+__attribute__((used, visibility("hidden")))
+long archphene_syscall_creat(const char *path, mode_t mode) {
+    return open(path, O_WRONLY | O_CREAT | O_TRUNC, mode);
+}
+#endif
+
+#ifdef __NR_readlink
+__attribute__((used, visibility("hidden")))
+long archphene_syscall_readlink(
+        const char *path, char *buffer, size_t size) {
+    return readlink(path, buffer, size);
+}
+#endif
 
 #if defined(__aarch64__)
 __asm__(
@@ -227,6 +249,8 @@ __asm__(
     "syscall:\n"
     "cmp x0, #" ARCHPHENE_STRINGIFY(__NR_openat) "\n"
     "b.eq 1f\n"
+    "cmp x0, #" ARCHPHENE_STRINGIFY(__NR_readlinkat) "\n"
+    "b.eq 3f\n"
     "adrp x16, archphene_real_syscall_function\n"
     "ldr x16, [x16, #:lo12:archphene_real_syscall_function]\n"
     "cbz x16, 2f\n"
@@ -237,6 +261,12 @@ __asm__(
     "mov x2, x3\n"
     "mov x3, x4\n"
     "b archphene_syscall_openat\n"
+    "3:\n"
+    "mov x0, x1\n"
+    "mov x1, x2\n"
+    "mov x2, x3\n"
+    "mov x3, x4\n"
+    "b archphene_syscall_readlinkat\n"
     "2:\n"
     "mov x0, #-" ARCHPHENE_STRINGIFY(ENOSYS) "\n"
     "ret\n"
@@ -249,6 +279,12 @@ __asm__(
     "syscall:\n"
     "cmpq $" ARCHPHENE_STRINGIFY(__NR_openat) ", %rdi\n"
     "je 1f\n"
+    "cmpq $" ARCHPHENE_STRINGIFY(__NR_readlinkat) ", %rdi\n"
+    "je 3f\n"
+    "cmpq $" ARCHPHENE_STRINGIFY(__NR_readlink) ", %rdi\n"
+    "je 4f\n"
+    "cmpq $" ARCHPHENE_STRINGIFY(__NR_creat) ", %rdi\n"
+    "je 5f\n"
     "movq archphene_real_syscall_function(%rip), %rax\n"
     "testq %rax, %rax\n"
     "je 2f\n"
@@ -259,6 +295,21 @@ __asm__(
     "movq %rcx, %rdx\n"
     "movq %r8, %rcx\n"
     "jmp archphene_syscall_openat\n"
+    "3:\n"
+    "movq %rsi, %rdi\n"
+    "movq %rdx, %rsi\n"
+    "movq %rcx, %rdx\n"
+    "movq %r8, %rcx\n"
+    "jmp archphene_syscall_readlinkat\n"
+    "4:\n"
+    "movq %rsi, %rdi\n"
+    "movq %rdx, %rsi\n"
+    "movq %rcx, %rdx\n"
+    "jmp archphene_syscall_readlink\n"
+    "5:\n"
+    "movq %rsi, %rdi\n"
+    "movq %rdx, %rsi\n"
+    "jmp archphene_syscall_creat\n"
     "2:\n"
     "movq $-" ARCHPHENE_STRINGIFY(ENOSYS) ", %rax\n"
     "ret\n"
@@ -379,6 +430,15 @@ static bool reject_optional_sandbox_syscall(siginfo_t *information, void *contex
      * though the runtime can operate normally without NUMA support.
      */
     optional = optional || information->si_syscall == __NR_get_mempolicy;
+#endif
+#ifdef __NR_pkey_alloc
+    /*
+     * Chromium probes protection keys before selecting its allocator path.
+     * Android app seccomp does not expose this optional CPU facility.
+     */
+    optional = optional || information->si_syscall == __NR_pkey_alloc
+            || information->si_syscall == __NR_pkey_free
+            || information->si_syscall == __NR_pkey_mprotect;
 #endif
     if (!optional) return false;
 #if defined(__aarch64__)
@@ -2831,6 +2891,14 @@ int open64(const char *path, int flags, ...) {
     return open_impl("open64", path, flags, mode, has_mode);
 }
 
+int creat(const char *path, mode_t mode) {
+    return open(path, O_WRONLY | O_CREAT | O_TRUNC, mode);
+}
+
+int creat64(const char *path, mode_t mode) {
+    return open64(path, O_WRONLY | O_CREAT | O_TRUNC, mode);
+}
+
 static int openat_impl(const char *symbol, int directory, const char *path, int flags,
         mode_t mode, bool has_mode) {
     typedef int (*function_type)(int, const char *, int, ...);
@@ -2845,7 +2913,9 @@ static int openat_impl(const char *symbol, int directory, const char *path, int 
         errno = EROFS;
         return -1;
     }
-    return has_mode ? real(directory, target, flags, mode) : real(directory, target, flags);
+    return has_mode
+            ? real(directory, target, flags, mode)
+            : real(directory, target, flags);
 }
 
 int openat(int directory, const char *path, int flags, ...) {
@@ -3273,6 +3343,28 @@ ssize_t readlink(const char *path, char *buffer, size_t size) {
     return length;
 }
 
+ssize_t __readlink_chk(
+        const char *path, char *buffer, size_t size, size_t buffer_size) {
+    typedef ssize_t (*function_type)(
+            const char *, char *, size_t, size_t);
+    function_type real = RESOLVE(function_type, "__readlink_chk");
+    const char *program = trusted_linux_program_path();
+    if (size <= buffer_size
+            && strcmp(path, "/proc/self/exe") == 0
+            && program != NULL) {
+        size_t length = strlen(program);
+        if (length > size) length = size;
+        if (length > 0) memcpy(buffer, program, length);
+        return (ssize_t)length;
+    }
+    bool translated;
+    char translated_path[PATH_MAX];
+    const char *target = translate_path(path, translated_path, &translated);
+    if (target == NULL) return -1;
+    REQUIRE_REAL(real);
+    return real(target, buffer, size, buffer_size);
+}
+
 ssize_t readlinkat(int directory, const char *path, char *buffer, size_t size) {
     typedef ssize_t (*function_type)(int, const char *, char *, size_t);
     const char *program = trusted_linux_program_path();
@@ -3304,6 +3396,30 @@ ssize_t readlinkat(int directory, const char *path, char *buffer, size_t size) {
     }
     return length;
 }
+
+ssize_t __readlinkat_chk(int directory, const char *path, char *buffer,
+        size_t size, size_t buffer_size) {
+    typedef ssize_t (*function_type)(
+            int, const char *, char *, size_t, size_t);
+    function_type real = RESOLVE(function_type, "__readlinkat_chk");
+    const char *program = trusted_linux_program_path();
+    if (size <= buffer_size
+            && strcmp(path, "/proc/self/exe") == 0
+            && program != NULL) {
+        size_t length = strlen(program);
+        if (length > size) length = size;
+        if (length > 0) memcpy(buffer, program, length);
+        return (ssize_t)length;
+    }
+    bool translated;
+    char translated_path[PATH_MAX];
+    const char *target =
+            translate_at_path(directory, path, translated_path, &translated, false);
+    if (target == NULL) return -1;
+    REQUIRE_REAL(real);
+    return real(directory, target, buffer, size, buffer_size);
+}
+
 int mkdir(const char *path, mode_t mode) {
     typedef int (*function_type)(int, const char *, mode_t);
     function_type real = RESOLVE(function_type, "mkdirat");

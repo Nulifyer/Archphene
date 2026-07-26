@@ -982,7 +982,9 @@ from 100%/18 dp to 200%/22 dp with independent 32/48 dp interaction targets.
 The current real Code-OSS transaction on x86_64 completes through the generic
 official-package path. Pacman resolves, downloads, detached-signature verifies,
 and installs its current 198-package, 428 MiB closure; desktop discovery then
-publishes four generated Android launchers, including Code - OSS. This run
+publishes the Code-OSS Android launcher. Desktop reconciliation now retains
+entries only when their owning package was explicitly installed, preventing
+Code's dependency closure from publishing unrelated Avahi browsers. This run
 closed four general package-engine gaps: dependency resolution now has a
 separate bounded, Service-reused 256 KiB direct response rather than exceeding
 the general 16 KiB command channel; GnuPG machine status is parsed as raw bytes so a valid
@@ -1234,13 +1236,25 @@ policy elsewhere. Stock Code opens a warning-free integrated Bash with working
 job control on Samsung. Force-stopping its Android launcher removes both Code
 and the terminal shell while the manager remains alive.
 
-This is still a partial Electron claim. The physical-device run uses a
+This is still a partial Electron claim. Both device lanes use a
 temporary supported `code-flags.conf` containing `--no-sandbox`,
 `--disable-dev-shm-usage`, and diagnostic `--disable-gpu`. Android blocks
 Chromium's normal namespace sandbox; Archphene needs a reviewed generic
 Electron policy and clear reduced-isolation disclosure before automating that
 flag. Accelerated rendering, DNS/networking, editor/debugger, extensions,
-IME/clipboard/dialogs, broader lifecycle, and x86_64 remain open.
+IME/clipboard/dialogs, and broader lifecycle remain open.
+
+Current x86_64 Code-OSS now also reaches its full Ozone/Wayland workbench with
+the shared process, Node workers, extension host, file watcher, and integrated
+PTY alive. The generated launcher starts with Android's IME hidden until an
+intentional touch requests it, avoiding a stale keyboard resize during cold
+startup. Closing the Android session first sends `xdg_toplevel.close`; Code
+flushes its application, shared, and workspace storage before a bounded
+SIGTERM/SIGKILL fallback. Reopening a stopped single-task launcher now clears
+the old Surface attachment and immediately binds the new authenticated session.
+Full-device emulator captures prove cold launch and close/relaunch, and the
+current Samsung manager and all four desired wrappers were reconciled before a
+clean full-device Code cold launch, Back cleanup, and relaunch.
 
 The x86_64 package lane renders immediate durable progress for a real
 `dotnet-sdk` request and resolves the same shared-root `base` plus SDK closure
@@ -1266,8 +1280,11 @@ same AArch64 glibc passes that probe on the physical Samsung.
 Kestrel remains alive while Archphene is backgrounded, and Android Chrome
 loads the generated MVC home page at `127.0.0.1:5000`. The test deliberately
 runs from the project directory so ASP.NET receives the normal content root.
-Code-integrated terminal, language service, debugging, breakpoints, and
-physical AArch64 .NET availability remain open.
+The same x86_64 project is available inside Code's integrated terminal:
+`dotnet --info`, `dotnet new mvc`, restore, build, and run complete through the
+generic runtime, and the browser reaches the running service. C# language
+service installation, debugging, breakpoints, and physical AArch64 .NET
+availability remain open.
 
 The same current-source arm64 manager preserves the Samsung shared root at 35
 installed packages and three current Foot launchers. Cached startup completes
@@ -1288,7 +1305,7 @@ retains an explicit terminal message across every later Surface attachment;
 two consecutive physical-device runs prove no process exists before the
 wrapper is explicitly closed and reopened.
 The visually inspected evidence is a full-device screenshot rather than an
-app-only frame. The complete Rust workspace passes 184 tests, including the
+app-only frame. The complete Rust workspace passes 212 tests, including the
 large-resolution, raw-signature-status, empty-files-record, loader-path, JNI,
 compositor, terminal, storage, AUR snapshot, and warmed-allocation regressions.
 

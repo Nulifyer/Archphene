@@ -1,3 +1,4 @@
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,6 +25,16 @@ int main(void) {
     }
     if (rmdir(directory) != 0) {
         perror("temporary directory removal");
+        return 1;
+    }
+    int descriptor = creat("/tmp/.archphene-creat", 0600);
+    if (descriptor < 0) {
+        perror("creat");
+        return 1;
+    }
+    if (close(descriptor) != 0
+            || unlink("/tmp/.archphene-creat") != 0) {
+        perror("creat cleanup");
         return 1;
     }
     puts("temporary-directory-ok");

@@ -192,10 +192,18 @@ class LauncherSessionService : Service() {
             if (closeCompositor) {
                 val linuxHandle = session.linuxHandle
                 session.linuxHandle = 0L
+                val compositor = session.compositor
+                if (linuxHandle != 0L && compositor != null && compositor.requestClose() > 0) {
+                    // Flush xdg_toplevel.close before the runtime begins its
+                    // bounded graceful-exit wait. This lets desktop clients
+                    // persist their normal session state instead of treating
+                    // every Android task close as a crash.
+                    compositor.dispatchAndPresent(SystemClock.uptimeMillis().toInt())
+                }
                 if (linuxHandle != 0L && runtime?.closeLauncherProcess(linuxHandle) != true) {
                     Log.w(TAG, "Could not close Linux process session=${session.id}")
                 }
-                session.compositor?.close()
+                compositor?.close()
                 session.compositor = null
                 val socket = session.compositorSocket
                 session.compositorSocket = null
@@ -1354,11 +1362,17 @@ class LauncherSessionService : Service() {
             if (output.isNotEmpty()) {
                 val safeOutput =
                     output
-                        .take(2048)
                         .filter { character ->
                             character == '\n' || character == '\t' || character >= ' '
                         }
-                Log.d(TAG, "Linux process final output session=${session.id}: $safeOutput")
+                safeOutput.chunked(PROCESS_LOGCAT_CHUNK_LENGTH)
+                    .forEachIndexed { index, chunk ->
+                        Log.d(
+                            TAG,
+                            "Linux process final output session=${session.id} " +
+                                "chunk=${index + 1}: $chunk",
+                        )
+                    }
             }
         }
         runtime.closeLauncherProcess(handle)
@@ -1585,6 +1599,7 @@ class LauncherSessionService : Service() {
         private const val COMPOSITOR_ACTIVE_DELAY_MILLIS = 8L
         private const val COMPOSITOR_IDLE_DELAY_MILLIS = 50L
         private const val PROCESS_STATUS_DELAY_MILLIS = 500L
+        private const val PROCESS_LOGCAT_CHUNK_LENGTH = 1800
         private const val STATUS_STARTING = 1
         private const val STATUS_RUNNING = 2
         private const val STATUS_STOPPED = 3

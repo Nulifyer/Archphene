@@ -784,6 +784,32 @@ impl PackageRuntime {
         let database = database_path
             .to_str()
             .ok_or(PackageRuntimeError::InvalidPath)?;
+        let exact_pattern = exact_search_pattern(query);
+        let exact_raw = match self.run(
+            PackageTool::Pacman,
+            &[
+                "--config",
+                config,
+                "--root",
+                root,
+                "--dbpath",
+                database,
+                "-Ss",
+                &exact_pattern,
+            ],
+        ) {
+            Ok(output) => Some(output),
+            Err(PackageRuntimeError::ToolFailed(1, output)) if output.as_bytes().is_empty() => None,
+            Err(error) => return Err(error),
+        };
+        if let Some(raw) = exact_raw {
+            let mut output = empty_tool_output();
+            let mut count = 0_usize;
+            append_search_output_pass(raw.as_str()?, query, true, &mut output, &mut count)?;
+            if count != 0 {
+                return Ok(output);
+            }
+        }
         let raw = match self.run(
             PackageTool::Pacman,
             &[
@@ -1136,6 +1162,17 @@ impl PackageRuntime {
     pub fn desktop_catalog(&self) -> Result<desktop::DesktopCatalog, PackageRuntimeError> {
         let mut catalog = desktop::discover_desktop_entries(&self.arch_root)?;
         self.attach_desktop_owners(&mut catalog)?;
+        let installed = self.installed_package_catalog()?;
+        catalog.entries.retain(|entry| {
+            let Some(source_package) = entry.source_package.as_deref() else {
+                return false;
+            };
+            installed
+                .packages
+                .binary_search_by(|(name, _, _)| name.as_str().cmp(source_package))
+                .ok()
+                .is_some_and(|index| installed.packages[index].2)
+        });
         Ok(catalog)
     }
 
@@ -2949,6 +2986,34 @@ fn valid_search_query(query: &str) -> bool {
         })
 }
 
+fn exact_search_pattern(query: &str) -> String {
+    let mut pattern = String::with_capacity(query.len().saturating_mul(2).saturating_add(2));
+    pattern.push('^');
+    for byte in query.bytes() {
+        if matches!(
+            byte,
+            b'.' | b'^'
+                | b'$'
+                | b'*'
+                | b'+'
+                | b'?'
+                | b'('
+                | b')'
+                | b'['
+                | b']'
+                | b'{'
+                | b'}'
+                | b'|'
+                | b'\\'
+        ) {
+            pattern.push('\\');
+        }
+        pattern.push(char::from(byte));
+    }
+    pattern.push('$');
+    pattern
+}
+
 fn parse_search_output(
     input: &str,
     preferred_name: &str,
@@ -3646,6 +3711,20 @@ library\tlibarchphene_path_bridge.so\tlibarchphene_pkg_555555555555555555555555.
             .expect("local package description");
             fs::write(local.join("files"), files).expect("local package files");
         }
+
+        fn local_dependency_package(&self, directory: &str, name: &str, files: &[u8]) {
+            self.local_package(directory, name, files);
+            let description = self
+                .root
+                .join("var/lib/pacman/local")
+                .join(directory)
+                .join("desc");
+            fs::write(
+                description,
+                format!("%NAME%\n{name}\n\n%VERSION%\n1.0-1\n\n%REASON%\n1\n"),
+            )
+            .expect("local dependency description");
+        }
     }
 
     impl Drop for TestTree {
@@ -3717,6 +3796,7 @@ library\tlibalpm.so.16\tlibarchphene_pkg_333333333333333333333333.so\t7\n";
     fn desktop_catalog_derives_bounded_package_ownership_and_rejects_ambiguity() {
         let tree = TestTree::new();
         tree.command("editor");
+        tree.command("dependency-editor");
         let applications = tree.root.join("usr/share/applications");
         fs::create_dir_all(&applications).expect("applications directory");
         fs::write(
@@ -3724,10 +3804,20 @@ library\tlibalpm.so.16\tlibarchphene_pkg_333333333333333333333333.so\t7\n";
             b"[Desktop Entry]\nType=Application\nName=Editor\nExec=editor\n",
         )
         .expect("desktop entry");
+        fs::write(
+            applications.join("dependency-editor.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=Dependency editor\nExec=dependency-editor\n",
+        )
+        .expect("dependency desktop entry");
         tree.local_package(
             "editor-1.0-1",
             "editor",
             b"%FILES%\nusr/bin/editor\nusr/share/applications/editor.desktop\n\n",
+        );
+        tree.local_dependency_package(
+            "dependency-editor-1.0-1",
+            "dependency-editor",
+            b"%FILES%\nusr/bin/dependency-editor\nusr/share/applications/dependency-editor.desktop\n\n",
         );
         tree.local_package(
             "backup-only-1.0-1",
@@ -3757,8 +3847,7 @@ library\tlibalpm.so.16\tlibarchphene_pkg_333333333333333333333333.so\t7\n";
         let catalog = runtime
             .desktop_catalog()
             .expect("ambiguous desktop catalog");
-        assert_eq!(catalog.entries.len(), 1);
-        assert_eq!(catalog.entries[0].source_package, None);
+        assert!(catalog.entries.is_empty());
         assert!(catalog.truncated);
     }
 
@@ -3994,6 +4083,9 @@ extra\tdotnet-sdk-8.0\t8.0.29.sdk129-1\tThe .NET Core SDK\n"
         assert!(valid_search_query("dotnet-sdk"));
         assert!(!valid_search_query("a"));
         assert!(!valid_search_query("../dotnet"));
+        assert_eq!(exact_search_pattern("dotnet-sdk"), "^dotnet-sdk$");
+        assert_eq!(exact_search_pattern("libc++"), "^libc\\+\\+$");
+        assert_eq!(exact_search_pattern("foo.bar"), "^foo\\.bar$");
     }
 
     #[test]

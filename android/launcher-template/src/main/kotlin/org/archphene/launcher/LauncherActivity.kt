@@ -62,6 +62,7 @@ class LauncherActivity :
     private var attempts = 0
     private var binding = false
     private var managerUid = -1
+    private var remoteStatus = STATUS_STARTING
     private var attachedSurface: Surface? = null
     private var attachedWidth = 0
     private var attachedHeight = 0
@@ -69,6 +70,7 @@ class LauncherActivity :
     private var attachedFontScaleMillis = 0
     private var pointerButtonState = 0
     private var imeState = ImeState(false, 0, "", 0, 0, 0, 0)
+    private var softImeRequested = false
     private var hasPendingLinuxClipboard = false
     private var pendingLinuxClipboardText: String? = null
     private val clipboardManager by lazy {
@@ -188,12 +190,14 @@ class LauncherActivity :
             override fun onServiceDisconnected(name: ComponentName) {
                 remote = null
                 sessionId = 0
+                remoteStatus = STATUS_STARTING
                 attachedSurface = null
                 attachedWidth = 0
                 attachedHeight = 0
                 attachedDensityDpi = 0
                 attachedFontScaleMillis = 0
                 pointerButtonState = 0
+                softImeRequested = false
                 hasPendingLinuxClipboard = false
                 pendingLinuxClipboardText = null
                 applyImeState(ImeState(false, 0, "", 0, 0, 0, 0))
@@ -323,6 +327,19 @@ class LauncherActivity :
         bindManager()
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        if (remoteStatus != STATUS_STOPPED) {
+            return
+        }
+        closeSession()
+        attempts = 0
+        remoteStatus = STATUS_STARTING
+        status.text = getString(R.string.launcher_opening, appLabel())
+        status.visibility = View.VISIBLE
+        openSession()
+    }
+
     private fun bindManager() {
         if (binding || remote != null || isFinishing || isDestroyed) {
             return
@@ -353,12 +370,14 @@ class LauncherActivity :
     private fun resetDeadBinding() {
         remote = null
         sessionId = 0
+        remoteStatus = STATUS_STARTING
         attachedSurface = null
         attachedWidth = 0
         attachedHeight = 0
         attachedDensityDpi = 0
         attachedFontScaleMillis = 0
         pointerButtonState = 0
+        softImeRequested = false
         hasPendingLinuxClipboard = false
         pendingLinuxClipboardText = null
         applyImeState(ImeState(false, 0, "", 0, 0, 0, 0))
@@ -373,6 +392,7 @@ class LauncherActivity :
     override fun onStop() {
         handler.removeCallbacksAndMessages(null)
         stopClipboardListening()
+        softImeRequested = false
         hideIme()
         submitHostActive(false)
         detachSurface()
@@ -407,7 +427,7 @@ class LauncherActivity :
             if (!applyPendingLinuxClipboard()) {
                 submitAndroidClipboard()
             }
-            if (imeState.active) {
+            if (imeState.active && softImeRequested) {
                 showIme(restart = true)
             }
         } else {
@@ -437,6 +457,16 @@ class LauncherActivity :
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
         if (event.isFromSource(InputDevice.SOURCE_MOUSE)) {
             return submitPointer(event) || super.dispatchTouchEvent(event)
+        }
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+            // Desktop clients commonly retain a logical text focus across
+            // launches. Do not let that alone pop Android's soft keyboard and
+            // resize a newly starting application; a fresh touch opts into
+            // the phone keyboard while hardware keys remain available.
+            softImeRequested = true
+            if (imeState.active) {
+                handler.post { showIme(restart = true) }
+            }
         }
         val count =
             when (event.actionMasked) {
@@ -694,6 +724,7 @@ class LauncherActivity :
 
     private fun openSession() {
         val service = remote ?: return
+        remoteStatus = STATUS_STARTING
         val data = Parcel.obtain()
         val reply = Parcel.obtain()
         try {
@@ -1173,6 +1204,7 @@ class LauncherActivity :
             return
         }
         if (!next.active) {
+            softImeRequested = false
             if (previous.active) {
                 hideIme()
             }
@@ -1183,7 +1215,12 @@ class LauncherActivity :
                 previous.hint != next.hint ||
                 previous.purpose != next.purpose
         if (restart) {
-            showIme(restart = true)
+            val input = getSystemService(InputMethodManager::class.java)
+            surfaceView.requestFocus()
+            input.restartInput(surfaceView)
+            if (softImeRequested) {
+                showIme(restart = false)
+            }
         } else {
             getSystemService(InputMethodManager::class.java)
                 .updateSelection(surfaceView, next.cursor, next.anchor, -1, -1)
@@ -1314,10 +1351,12 @@ class LauncherActivity :
     }
 
     private fun closeSession() {
-        val service = remote ?: return
         val activeSession = sessionId
+        detachSurface()
         sessionId = 0
-        if (activeSession <= 0) {
+        remoteStatus = STATUS_STARTING
+        val service = remote
+        if (service == null || activeSession <= 0) {
             return
         }
         val data = Parcel.obtain()
@@ -1347,6 +1386,7 @@ class LauncherActivity :
         state: Int,
         message: String,
     ) {
+        remoteStatus = state
         if (state == STATUS_RUNNING) {
             status.visibility = View.GONE
         } else {

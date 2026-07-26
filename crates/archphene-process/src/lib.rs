@@ -39,6 +39,8 @@ pub const MAX_WAYLAND_DISPLAY_BYTES: usize = 64;
 const MAX_SYMLINKS: usize = 16;
 const MAX_SHEBANG_BYTES: usize = 256;
 const MAX_GUI_LOG_DRAIN_BYTES: usize = 64 * 1024;
+const GUI_CLOSE_GRACE: Duration = Duration::from_millis(750);
+const GUI_TERMINATE_GRACE: Duration = Duration::from_millis(750);
 static OUTPUT_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
@@ -606,10 +608,40 @@ impl GuiProcess {
         }
     }
 
+    fn wait_for_group_exit(&mut self, deadline: Instant) -> bool {
+        loop {
+            let _ = self.drain_logs();
+            if self.leader_exit_status.is_none()
+                && let Some(child) = self.child.as_mut()
+                && let Ok(Some(status)) = child.try_wait()
+            {
+                self.leader_exit_status = Some(exit_code(status));
+                self.child = None;
+            }
+            if self.process_group == 0
+                || matches!(system::process_group_exists(self.process_group), Ok(false))
+            {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     pub fn close(&mut self) {
-        let _ = system::kill_process_group(self.process_group);
+        // The compositor sends xdg_toplevel.close before reaching this point.
+        // Give desktop clients a short opportunity to flush databases and
+        // session state, then fall back through TERM to the hard lifecycle
+        // boundary required when the Android launcher has gone away.
+        if !self.wait_for_group_exit(Instant::now() + GUI_CLOSE_GRACE) {
+            let _ = system::signal_process_group(self.process_group, 15);
+            if !self.wait_for_group_exit(Instant::now() + GUI_TERMINATE_GRACE) {
+                let _ = system::kill_process_group(self.process_group);
+            }
+        }
         if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
             self.leader_exit_status = child.wait().ok().map(exit_code);
         }
         self.exit_status = self.leader_exit_status;
@@ -1296,14 +1328,21 @@ mod system {
     }
 
     pub fn kill_process_group(group: u32) -> io::Result<()> {
+        signal_process_group(group, 9)
+    }
+
+    pub fn signal_process_group(group: u32, signal: i32) -> io::Result<()> {
         let group = i32::try_from(group)
             .ok()
             .filter(|group| *group > 0)
             .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+        if !(1..=64).contains(&signal) {
+            return Err(io::Error::from(io::ErrorKind::InvalidInput));
+        }
         // SAFETY: `group` is the positive pid of a child started in its own
-        // process group. Negating it addresses only that group, and SIGKILL
-        // has no pointer, buffer, ownership, or lifetime requirements.
-        if unsafe { kill(-group, 9) } == 0 {
+        // process group. Negating it addresses only that group, and a valid
+        // signal has no pointer, buffer, ownership, or lifetime requirements.
+        if unsafe { kill(-group, signal) } == 0 {
             Ok(())
         } else {
             Err(io::Error::last_os_error())
@@ -1841,6 +1880,37 @@ mod tests {
         assert_eq!(process.exit_status().expect("final status"), Some(7));
         assert!(marker.exists(), "GUI session did not retain its descendant");
         let _ = fs::remove_file(marker);
+    }
+
+    #[test]
+    fn gui_close_preserves_a_natural_exit_during_the_grace_period() {
+        let (reader, writer) = UnixStream::pair().expect("log pair");
+        reader.set_nonblocking(true).expect("nonblocking reader");
+        let error_writer = writer.try_clone().expect("error writer");
+        let writer: OwnedFd = writer.into();
+        let error_writer: OwnedFd = error_writer.into();
+        let child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("sleep 0.05; exit 7")
+            .stdout(Stdio::from(writer))
+            .stderr(Stdio::from(error_writer))
+            .process_group(0)
+            .spawn()
+            .expect("group leader");
+        let mut process = GuiProcess {
+            process_group: child.id(),
+            child: Some(child),
+            leader_exit_status: None,
+            exit_status: None,
+            log_reader: reader,
+            log_bytes: [0; MAX_GUI_LOG_BYTES],
+            log_start: 0,
+            log_length: 0,
+        };
+
+        process.close();
+
+        assert_eq!(process.exit_status, Some(7));
     }
 
     #[test]
