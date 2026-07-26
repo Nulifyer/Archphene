@@ -998,13 +998,17 @@ physical Samsung with full-device captures. This safely completes the bounded
 view; it does not make full-screen system monitors compatible where Android
 withholds the underlying metrics.
 
-This is not yet the production terminal promised by the milestone. Bounded
-physical-row scrollback is implemented, but resizing still preserves the
-current cursor window rather than joining soft-wrapped logical lines and
-reflowing them consistently across the screen/history boundary. Remaining
-xterm controls, logical reflow, selection handles/autoscroll and ranges stable
-across history movement, an explicit overlong-grapheme user-visible policy,
-broader non-Latin composing IME behavior, and richer accessibility remain
+This is not yet the production terminal promised by the milestone. Consecutive
+soft-wrapped rows that have entered bounded scrollback now join into logical
+lines, reflow at the current width without splitting wide graphemes, and cache
+their width measurement outside resize and line-extension work. Exact-ABI
+portrait-to-landscape gates preserve one manager process and visibly retain
+both ends of a long marker on the emulator and Samsung. The live screen still
+preserves its cursor-adjacent physical window during resize rather than
+reflowing consistently across the live-screen/history boundary. Remaining
+xterm controls, live-screen/history reflow, selection handles/autoscroll and
+ranges stable across history movement, broader non-Latin composing IME
+behavior, and richer accessibility remain
 required. The temporary command field remains as a fallback above the
 renderer; direct terminal input no longer depends on it.
 

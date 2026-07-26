@@ -60,7 +60,8 @@ archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 15 >/dev/null
 archphene_open_manager_section Terminal "terminal-scrollback-section-$serial"
 archphene_wait_ui 'text="Start shell"' "terminal-scrollback-start-$serial" 15
 archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Start shell"' 'start shell'
-archphene_wait_ui 'archphene:~\$' "terminal-scrollback-prompt-$serial" 20
+archphene_wait_ui '(?:archphene:~|sh-[0-9.]+)\$' \
+  "terminal-scrollback-prompt-$serial" 20
 
 archphene_wait_ui 'text="Command, e.g. btop"' \
   "terminal-scrollback-field-$serial" 15
@@ -126,7 +127,8 @@ archphene_tap_ui_pattern "$ARCHPHENE_UI" \
   'content-desc="Linux terminal, [0-9]+ columns by [0-9]+ rows"' \
   'terminal surface'
 archphene_adb_run shell input text x >/dev/null
-archphene_wait_ui 'archphene:~\$' "terminal-scrollback-exit-$serial" 15
+archphene_wait_ui '(?:archphene:~|sh-[0-9.]+)\$' \
+  "terminal-scrollback-exit-$serial" 15
 
 fatal_log="$(archphene_adb_run logcat -d -v brief \
   -s AndroidRuntime:E libc:F '*:S' 2>/dev/null || true)"

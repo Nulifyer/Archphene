@@ -93,7 +93,9 @@ struct StoredLine {
     start: u32,
     byte_length: u32,
     cells: u16,
-    _soft_wrapped: bool,
+    soft_wrapped: bool,
+    visual_columns: u16,
+    visual_rows: u16,
 }
 
 #[derive(Debug)]
@@ -118,7 +120,7 @@ impl Scrollback {
         }
     }
 
-    fn append_line(&mut self, cells: &[Cell], soft_wrapped: bool) {
+    fn append_line(&mut self, cells: &[Cell], soft_wrapped: bool, columns: u16) {
         let stored_cells = if soft_wrapped {
             cells
         } else {
@@ -137,17 +139,39 @@ impl Scrollback {
         {
             return;
         }
-        while self.line_count == self.lines.len()
-            || self.bytes.len() - self.bytes_used < byte_length
-        {
+        let mut extend_previous = self.last_line().is_some_and(|line| {
+            line.soft_wrapped
+                && usize::from(line.cells)
+                    .checked_add(stored_cells.len())
+                    .is_some_and(|cells| cells <= usize::from(u16::MAX))
+                && usize::try_from(line.byte_length)
+                    .ok()
+                    .and_then(|length| length.checked_add(byte_length))
+                    .is_some_and(|length| u32::try_from(length).is_ok())
+        });
+        while self.bytes.len() - self.bytes_used < byte_length {
+            if extend_previous && self.line_count == 1 {
+                extend_previous = false;
+            }
             self.evict_oldest();
         }
-        let line_index = (self.first_line + self.line_count) % self.lines.len();
-        self.lines[line_index] = StoredLine {
-            start: self.write_offset as u32,
-            byte_length: byte_length as u32,
-            cells: stored_cells.len() as u16,
-            _soft_wrapped: soft_wrapped,
+        if !extend_previous && self.line_count == self.lines.len() {
+            self.evict_oldest();
+        }
+        let line_index = if extend_previous {
+            (self.first_line + self.line_count - 1) % self.lines.len()
+        } else {
+            let index = (self.first_line + self.line_count) % self.lines.len();
+            self.lines[index] = StoredLine {
+                start: self.write_offset as u32,
+                byte_length: 0,
+                cells: 0,
+                soft_wrapped: false,
+                visual_columns: 0,
+                visual_rows: 0,
+            };
+            self.line_count += 1;
+            index
         };
         for cell in stored_cells {
             self.write_byte(cell.grapheme_len);
@@ -160,15 +184,19 @@ impl Scrollback {
                 self.write_u32(cell.codepoint(index));
             }
         }
-        self.line_count += 1;
+        self.lines[line_index].byte_length += byte_length as u32;
+        self.lines[line_index].cells += stored_cells.len() as u16;
+        self.lines[line_index].soft_wrapped = soft_wrapped;
+        self.lines[line_index].visual_columns = 0;
+        let visual_rows = self.measure_line_rows(self.lines[line_index], columns);
+        self.lines[line_index].visual_columns = columns;
+        self.lines[line_index].visual_rows = visual_rows;
         self.bytes_used += byte_length;
     }
 
     fn visual_rows(&self, columns: u16) -> u32 {
         self.line_iter().fold(0_u32, |rows, line| {
-            rows.saturating_add(
-                u32::from(line.cells).saturating_add(u32::from(columns) - 1) / u32::from(columns),
-            )
+            rows.saturating_add(u32::from(self.line_visual_rows(line, columns)))
         })
     }
 
@@ -179,13 +207,9 @@ impl Scrollback {
         output[..usize::from(columns)].fill(Cell::blank());
         let mut first_visual_row = 0_u32;
         for line in self.line_iter() {
-            let line_rows =
-                u32::from(line.cells).saturating_add(u32::from(columns) - 1) / u32::from(columns);
+            let line_rows = u32::from(self.line_visual_rows(line, columns));
             if visual_row < first_visual_row.saturating_add(line_rows) {
-                let chunk = visual_row - first_visual_row;
-                let first_cell = chunk * u32::from(columns);
-                self.decode_line_chunk(line, first_cell as u16, columns, output);
-                normalize_cell_row(output, columns, 0);
+                self.decode_visual_row(line, visual_row - first_visual_row, columns, output);
                 return true;
             }
             first_visual_row = first_visual_row.saturating_add(line_rows);
@@ -197,24 +221,80 @@ impl Scrollback {
         (0..self.line_count).map(|offset| self.lines[(self.first_line + offset) % self.lines.len()])
     }
 
-    fn decode_line_chunk(
+    fn last_line(&self) -> Option<StoredLine> {
+        (self.line_count != 0)
+            .then(|| self.lines[(self.first_line + self.line_count - 1) % self.lines.len()])
+    }
+
+    fn line_visual_rows(&self, line: StoredLine, columns: u16) -> u16 {
+        if line.visual_columns == columns && line.visual_rows != 0 {
+            line.visual_rows
+        } else {
+            self.measure_line_rows(line, columns)
+        }
+    }
+
+    fn measure_line_rows(&self, line: StoredLine, columns: u16) -> u16 {
+        let mut source = line.start as usize;
+        let mut consumed = 0_usize;
+        let mut rows = 1_u16;
+        let mut column = 0_u16;
+        for _ in 0..line.cells {
+            let grapheme_len = self.read_byte(source);
+            let width = u16::from(self.read_byte(source + 1).min(2));
+            let stored_length = 12 + usize::from(grapheme_len) * 4;
+            if width != 0 {
+                let width = width.min(columns);
+                if column != 0 && column.saturating_add(width) > columns {
+                    rows = rows.saturating_add(1);
+                    column = 0;
+                }
+                column = column.saturating_add(width);
+            }
+            source = (source + stored_length) % self.bytes.len();
+            consumed += stored_length;
+            if consumed >= line.byte_length as usize {
+                break;
+            }
+        }
+        rows
+    }
+
+    fn reflow(&mut self, columns: u16) {
+        for offset in 0..self.line_count {
+            let index = (self.first_line + offset) % self.lines.len();
+            let rows = self.measure_line_rows(self.lines[index], columns);
+            self.lines[index].visual_columns = columns;
+            self.lines[index].visual_rows = rows;
+        }
+    }
+
+    fn decode_visual_row(
         &self,
         line: StoredLine,
-        first_cell: u16,
+        target_row: u32,
         columns: u16,
         output: &mut [Cell],
     ) {
         let mut source = line.start as usize;
         let mut consumed = 0_usize;
-        for cell_index in 0..line.cells {
+        let mut row = 0_u32;
+        let mut column = 0_u16;
+        for _ in 0..line.cells {
             let grapheme_len = self.read_byte(source);
-            let width = self.read_byte(source + 1);
+            let width = u16::from(self.read_byte(source + 1).min(2));
             let attributes = self.read_byte(source + 2);
             let foreground = self.read_u32(source + 4);
             let background = self.read_u32(source + 8);
             let stored_length = 12 + usize::from(grapheme_len) * 4;
-            if cell_index >= first_cell && cell_index < first_cell.saturating_add(columns) {
-                let destination = usize::from(cell_index - first_cell);
+            if width != 0 {
+                let width = width.min(columns);
+                if column != 0 && column.saturating_add(width) > columns {
+                    row = row.saturating_add(1);
+                    column = 0;
+                }
+            }
+            if width != 0 && row == target_row {
                 let mut cell = Cell {
                     codepoint: 0,
                     trailing_codepoints: [0; MAX_GRAPHEME_CODEPOINTS - 1],
@@ -222,7 +302,7 @@ impl Scrollback {
                     background,
                     attributes,
                     grapheme_len: grapheme_len.min(MAX_GRAPHEME_CODEPOINTS as u8),
-                    width: width.min(2),
+                    width: width as u8,
                 };
                 for codepoint_index in 0..usize::from(cell.grapheme_len) {
                     cell.set_codepoint(
@@ -230,11 +310,16 @@ impl Scrollback {
                         self.read_u32(source + 12 + codepoint_index * 4),
                     );
                 }
-                output[destination] = cell;
+                output[usize::from(column)] = cell;
+                if width == 2 {
+                    output[usize::from(column + 1)] =
+                        Cell::continuation(foreground, background, attributes);
+                }
             }
+            column = column.saturating_add(width);
             source = (source + stored_length) % self.bytes.len();
             consumed += stored_length;
-            if consumed >= line.byte_length as usize {
+            if consumed >= line.byte_length as usize || row > target_row {
                 break;
             }
         }
@@ -625,6 +710,7 @@ impl Terminal {
         self.inactive_cells = inactive_cells;
         self.row_soft_wrapped = row_soft_wrapped;
         self.inactive_row_soft_wrapped = inactive_row_soft_wrapped;
+        self.scrollback.reflow(columns);
         self.rows = rows;
         self.columns = columns;
         self.cursor_row = self.cursor_row.saturating_sub(source_row).min(rows - 1);
@@ -1305,6 +1391,7 @@ impl Terminal {
                 self.scrollback.append_line(
                     &self.cells[start..start + columns],
                     self.row_soft_wrapped[usize::from(row)],
+                    self.columns,
                 );
             }
         }
@@ -1791,6 +1878,17 @@ mod tests {
             .collect()
     }
 
+    fn ascii_cells(value: &[u8]) -> Vec<Cell> {
+        value
+            .iter()
+            .map(|byte| {
+                let mut cell = Cell::blank();
+                cell.codepoint = u32::from(*byte);
+                cell
+            })
+            .collect()
+    }
+
     #[test]
     fn printable_utf8_controls_and_wrapping_are_streaming() {
         let mut terminal = Terminal::new(3, 8).unwrap();
@@ -1920,6 +2018,67 @@ mod tests {
     }
 
     #[test]
+    fn soft_wrapped_history_joins_and_reflows_as_one_logical_line() {
+        let mut scrollback = Scrollback::new();
+        scrollback.append_line(&ascii_cells(b"abcdef"), true, 6);
+        scrollback.append_line(&ascii_cells(b"ghijkl"), true, 6);
+        scrollback.append_line(&ascii_cells(b"mnop"), false, 6);
+        assert_eq!(scrollback.line_count, 1);
+        assert_eq!(scrollback.visual_rows(6), 3);
+        assert_eq!(scrollback.visual_rows(4), 4);
+
+        let mut output = vec![Cell::blank(); 4];
+        for (row, expected) in [b"abcd", b"efgh", b"ijkl", b"mnop"].iter().enumerate() {
+            assert!(scrollback.fill_visual_row(row as u32, 4, &mut output));
+            let actual: Vec<u8> = output.iter().map(|cell| cell.codepoint as u8).collect();
+            assert_eq!(&actual, expected);
+        }
+    }
+
+    #[test]
+    fn terminal_scrolls_consecutive_soft_rows_into_one_logical_history_line() {
+        let mut terminal = Terminal::new(2, 6).unwrap();
+        terminal.feed(b"abcdefghijklmnopqrs");
+        assert_eq!(terminal.scrollback.line_count, 1);
+        assert_eq!(terminal.history_rows(), 2);
+
+        terminal.resize(2, 4).unwrap();
+        assert_eq!(terminal.history_rows(), 3);
+        let mut damage = vec![0_u8; MAX_DAMAGE_BYTES];
+        terminal.write_view_damage(&mut damage, 2).unwrap();
+        assert_eq!(damage_text(&damage, 0, 4), "efgh");
+        assert_eq!(damage_text(&damage, 1, 4), "ijkl");
+    }
+
+    #[test]
+    fn logical_history_reflow_never_splits_wide_graphemes() {
+        let wide = Cell {
+            codepoint: '\u{754c}' as u32,
+            trailing_codepoints: [0; MAX_GRAPHEME_CODEPOINTS - 1],
+            foreground: DEFAULT_FOREGROUND,
+            background: DEFAULT_BACKGROUND,
+            attributes: 0,
+            grapheme_len: 1,
+            width: 2,
+        };
+        let continuation = Cell::continuation(DEFAULT_FOREGROUND, DEFAULT_BACKGROUND, 0);
+        let row = [wide, continuation, wide, continuation];
+        let mut scrollback = Scrollback::new();
+        scrollback.append_line(&row, true, 4);
+        scrollback.append_line(&row, false, 4);
+        assert_eq!(scrollback.line_count, 1);
+        assert_eq!(scrollback.visual_rows(3), 4);
+
+        let mut output = vec![Cell::blank(); 3];
+        for row in 0..4 {
+            assert!(scrollback.fill_visual_row(row, 3, &mut output));
+            assert_eq!(output[0], wide);
+            assert_eq!(output[1], continuation);
+            assert_eq!(output[2], Cell::blank());
+        }
+    }
+
+    #[test]
     fn hard_newline_history_does_not_reflow_default_trailing_blanks() {
         let mut terminal = Terminal::new(2, 6).unwrap();
         terminal.feed(b"abc\r\ndef\r\n");
@@ -1939,7 +2098,7 @@ mod tests {
         let mut line = vec![Cell::blank(); usize::from(MAX_COLUMNS)];
         for sequence in 0..700_u32 {
             line[0].codepoint = 0x1000 + sequence;
-            scrollback.append_line(&line, true);
+            scrollback.append_line(&line, true, MAX_COLUMNS);
         }
         assert!(scrollback.line_count < 700);
         assert!(scrollback.bytes_used <= SCROLLBACK_BYTE_LIMIT);
