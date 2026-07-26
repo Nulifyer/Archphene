@@ -41,18 +41,40 @@ Android still presents its system installation confirmation where required.
 
 Production manager releases are built non-debuggable and signed with a dedicated release key. Development builds remain debuggable for emulator automation and must not be distributed as production builds.
 
+### AUR review boundary
+
+AUR metadata and build recipes are community content, not signed official Arch
+packages. Before any recipe is eligible to run, Rust now bounds and checks the
+AUR v5 response and one cgit snapshot as a single review candidate. The
+requested package, package base, version, selected architecture, snapshot path,
+`.SRCINFO`, and PKGBUILD must agree. The snapshot reader rejects traversal,
+links, special files, duplicate paths, oversized compressed or expanded
+content, missing local sources, local-source checksum mismatches, and a missing
+install script. It records both the exact snapshot SHA-256 and the AUR cgit
+commit advertised in the snapshot's PAX header, and reports every selected
+source without treating that advertised commit as an official Arch signature.
+
+The current review core does not execute PKGBUILD, download upstream sources,
+or install its result. On-device transport, full source/build/permission/disk
+review UI, source verification, an unprivileged disposable build environment,
+package-output provenance, and user approval remain required. A successful
+review will not make the eventual package isolated: once installed, its code
+joins the shared Archphene Linux trust domain.
+
 ## Important limitations
 
 - The greenfield manager performs current official-package search, resolution,
   signature verification, shared-root install/remove, terminal execution,
   durable jobs, and Android file integration on x86_64 and AArch64.
 - The real manager-owned cross-process launcher Surface protocol, desktop-entry
-  registry, wrapper generation/signing, and PackageInstaller handoff remain
-  incomplete. Legacy per-wrapper runtime-pack results are historical evidence,
-  not claims about the production shared-root implementation.
+  registry, wrapper generation/signing, PackageInstaller handoff, and a
+  package-installed Foot session now run against the shared AArch64 root.
+  Broader application, capability, GPU, external-display, and x86_64
+  production-client coverage remain incomplete. Legacy per-wrapper runtime-pack
+  results are historical evidence, not substitutes for those production gates.
 - Durable jobs already represent package and future launcher phases without
-  renumbering persisted v1 states. Recovery of real Android installer results
-  still belongs to the pending launcher pipeline.
+  renumbering persisted v1 states. Real launcher installation results reconcile
+  across manager death; AUR build and package-mutation recovery remain pending.
 - The shared Rust Wayland compositor enforces the currently implemented object, role, configure, buffer, popup, subsurface, input, and teardown contracts on x86_64 and AArch64. It still needs broader protocol coverage, independent security review, and sustained parser fuzzing before it should be treated as a hardened general compositor boundary.
 - GrapheneOS-specific hardening has not been validated on a supported Pixel.
 - Running on stock Android does not provide GrapheneOS firmware, verified boot policy, exploit mitigations, or security updates.

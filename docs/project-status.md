@@ -990,6 +990,21 @@ otherwise complete desktop scan appear truncated. A genuinely truncated scan
 still pauses launcher reconciliation rather than mutating the registry from
 incomplete evidence.
 
+The first AUR trust boundary is now implemented without executing community
+recipes. Rust borrows bounded AUR v5 JSON fields, then parses one at-most-4 MiB
+cgit snapshot with at most 128 entries and 8 MiB expanded content. It requires
+exact request, package-base, version, architecture, and snapshot-path
+agreement; rejects traversal, links, special files, duplicate paths, missing
+recipe files, and malformed source/checksum pairs; verifies every local source
+present in the snapshot; records the cgit PAX commit plus the exact snapshot
+SHA-256; and reports dependencies, install-script presence, insecure or
+unverified sources, and visible PKGBUILD functions. The current live
+`visual-studio-code-bin` `1.130.0-1` snapshot passes for AArch64 with 13 runtime
+dependencies, two selected sources, exact SHA-256 values, no insecure
+transport, and no unverified source. This does not yet download upstream
+sources, render the Android review screen, run an unprivileged build, or
+install an AUR result.
+
 Code now reaches the packaged Electron executable without a Code-specific
 bridge exception. Translating Arch's standard `/usr/lib/pulseaudio` directory
 into the private-root loader path resolves `libpulsecommon`; Electron then
@@ -1030,9 +1045,9 @@ retains an explicit terminal message across every later Surface attachment;
 two consecutive physical-device runs prove no process exists before the
 wrapper is explicitly closed and reopened.
 The visually inspected evidence is a full-device screenshot rather than an
-app-only frame. The complete Rust workspace passes 174 tests, including the
+app-only frame. The complete Rust workspace passes 181 tests, including the
 large-resolution, raw-signature-status, empty-files-record, loader-path, JNI,
-compositor, terminal, storage, and warmed-allocation regressions.
+compositor, terminal, storage, AUR snapshot, and warmed-allocation regressions.
 
 ## Validated
 
