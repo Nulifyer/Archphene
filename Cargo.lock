@@ -22,6 +22,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "archphene-builder"
+version = "0.1.0"
+dependencies = [
+ "jni",
+ "rustix",
+ "sha2",
+]
+
+[[package]]
 name = "archphene-compositor"
 version = "0.1.0"
 dependencies = [

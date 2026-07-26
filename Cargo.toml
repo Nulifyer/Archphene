@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/archphene-android",
+    "crates/archphene-builder",
     "crates/archphene-core",
     "crates/archphene-jobs",
     "crates/archphene-launcher",

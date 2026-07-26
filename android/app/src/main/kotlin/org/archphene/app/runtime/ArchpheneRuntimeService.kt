@@ -650,6 +650,10 @@ class ArchpheneRuntimeService : Service() {
         val selinuxContext: String,
         val stagedBytes: Long,
         val inputManifestSha256: String,
+        val closurePackageCount: Int,
+        val closureArchiveBytes: Long,
+        val closureSignatureBytes: Long,
+        val closureManifestSha256: String,
     )
 
     private data class AurBuildEnvironment(
@@ -1245,6 +1249,15 @@ class ArchpheneRuntimeService : Service() {
         private const val HEX_DIGITS = "0123456789abcdef"
         private const val AUR_BUILDER_INPUT_SNAPSHOT = 0
         private const val AUR_BUILDER_INPUT_SOURCE = 1
+        private const val AUR_BUILDER_TRANSACTION_BEGIN_CLOSURE =
+            IBinder.FIRST_CALL_TRANSACTION + 1
+        private const val AUR_BUILDER_TRANSACTION_STAGE_BATCH =
+            IBinder.FIRST_CALL_TRANSACTION + 2
+        private const val AUR_BUILDER_TRANSACTION_FINISH_CLOSURE =
+            IBinder.FIRST_CALL_TRANSACTION + 3
+        private const val AUR_BUILDER_TRANSACTION_ABORT_CLOSURE =
+            IBinder.FIRST_CALL_TRANSACTION + 4
+        private const val AUR_BUILDER_PACKAGE_BATCH = 8
         private const val AUR_REDIRECT_LIMIT = 5
         private const val AUR_STORAGE_RESERVE_BYTES = 64L * 1024 * 1024
         private const val AUR_TOTAL_SOURCE_MAX_BYTES = 8L * 1024 * 1024 * 1024
@@ -4285,6 +4298,7 @@ class ArchpheneRuntimeService : Service() {
                             activeHandle,
                             review,
                             retainedAurSourceEvidence,
+                            buildEnvironment,
                         )
                     searchStatus =
                         formatAurReview(
@@ -4310,7 +4324,11 @@ class ArchpheneRuntimeService : Service() {
                             "AUR builder boundary ready: package=${builder.packageName} " +
                                 "uid=${builder.uid} context=${builder.selinuxContext} " +
                                 "staged=${builder.stagedBytes} " +
-                                "manifest=${builder.inputManifestSha256}",
+                                "manifest=${builder.inputManifestSha256} " +
+                                "closure=${builder.closurePackageCount}/" +
+                                "${builder.closureArchiveBytes}+" +
+                                "${builder.closureSignatureBytes} " +
+                                builder.closureManifestSha256,
                         )
                     } else {
                         Log.i(TAG, "AUR builder companion is not installed")
@@ -4529,6 +4547,7 @@ class ArchpheneRuntimeService : Service() {
         activeHandle: Long,
         review: AurReviewData,
         sourceEvidence: Array<AurSourceEvidence>,
+        buildEnvironment: AurBuildEnvironment,
     ): AurBuilderReport? {
         val builderPackage =
             if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) {
@@ -4715,12 +4734,23 @@ class ArchpheneRuntimeService : Service() {
                 ) {
                     "AUR builder companion failed its storage or permission boundary"
                 }
+                val closure =
+                    stageAurBuildClosure(
+                        endpoint,
+                        activeHandle,
+                        review,
+                        buildEnvironment,
+                    )
                 return AurBuilderReport(
                     builderPackage,
                     reportedUid,
                     selinuxContext,
                     stagedBytes,
                     inputManifestSha256,
+                    closure.packageCount,
+                    closure.archiveBytes,
+                    closure.signatureBytes,
+                    closure.manifestSha256,
                 )
             } finally {
                 request.recycle()
@@ -4736,6 +4766,184 @@ class ArchpheneRuntimeService : Service() {
             }
             sentinel.delete()
             outputFile.delete()
+        }
+    }
+
+    private data class AurBuilderClosureReport(
+        val packageCount: Int,
+        val archiveBytes: Long,
+        val signatureBytes: Long,
+        val manifestSha256: String,
+    )
+
+    private fun stageAurBuildClosure(
+        endpoint: IBinder,
+        activeHandle: Long,
+        review: AurReviewData,
+        environment: AurBuildEnvironment,
+    ): AurBuilderClosureReport {
+        check(
+            environment.verified &&
+                environment.packageCount in 1..512 &&
+                environment.verifiedPackages.size == environment.packageCount &&
+                environment.closureManifest.isNotEmpty() &&
+                environment.closureManifest.size <= NativeRuntime.AUR_BUILD_CLOSURE_OUTPUT_SIZE &&
+                environment.closureManifestSha256.matches(SHA256_HEX),
+        ) {
+            "AUR build closure is not retained and verified"
+        }
+        var began = false
+        try {
+            transactAurBuilder(
+                endpoint,
+                AUR_BUILDER_TRANSACTION_BEGIN_CLOSURE,
+                { request ->
+                    request.writeString(review.packageBase)
+                    request.writeString(review.version)
+                    request.writeByteArray(environment.closureManifest)
+                    request.writeString(environment.closureManifestSha256)
+                },
+            ) { reply ->
+                val packageCount = reply.readInt()
+                check(packageCount == environment.packageCount) {
+                    "Builder package-closure count changed"
+                }
+            }
+            began = true
+
+            environment.verifiedPackages.indices
+                .chunked(AUR_BUILDER_PACKAGE_BATCH)
+                .forEachIndexed { batchIndex, indices ->
+                    val descriptors =
+                        ArrayList<Pair<ParcelFileDescriptor, ParcelFileDescriptor>>(indices.size)
+                    try {
+                        indices.forEach { packageIndex ->
+                            aurEndpointBuffer.clear()
+                            val archive =
+                                NativeRuntime.nativeOpenVerifiedAurBuildPackage(
+                                    activeHandle,
+                                    packageIndex,
+                                    false,
+                                    aurEndpointBuffer,
+                                )
+                            if (archive < 0) {
+                                throw SecurityException(
+                                    readNativeMessage(aurEndpointBuffer, archive),
+                                )
+                            }
+                            val archiveDescriptor = ParcelFileDescriptor.adoptFd(archive)
+                            try {
+                                aurEndpointBuffer.clear()
+                                val signature =
+                                    NativeRuntime.nativeOpenVerifiedAurBuildPackage(
+                                        activeHandle,
+                                        packageIndex,
+                                        true,
+                                        aurEndpointBuffer,
+                                    )
+                                if (signature < 0) {
+                                    throw SecurityException(
+                                        readNativeMessage(aurEndpointBuffer, signature),
+                                    )
+                                }
+                                descriptors +=
+                                    archiveDescriptor to ParcelFileDescriptor.adoptFd(signature)
+                            } catch (error: Exception) {
+                                archiveDescriptor.close()
+                                throw error
+                            }
+                        }
+                        transactAurBuilder(
+                            endpoint,
+                            AUR_BUILDER_TRANSACTION_STAGE_BATCH,
+                            { request ->
+                                request.writeInt(indices.size)
+                                indices.forEachIndexed { offset, packageIndex ->
+                                    val (archive, signature) = descriptors[offset]
+                                    request.writeInt(packageIndex)
+                                    request.writeFileDescriptor(archive.fileDescriptor)
+                                    request.writeFileDescriptor(signature.fileDescriptor)
+                                }
+                            },
+                        ) { reply ->
+                            check(reply.readInt() == indices.size) {
+                                "Builder did not stage the complete package batch"
+                            }
+                        }
+                    } finally {
+                        descriptors.forEach { (archive, signature) ->
+                            runCatching { archive.close() }
+                            runCatching { signature.close() }
+                        }
+                    }
+                    val completed = minOf(
+                        environment.packageCount,
+                        (batchIndex + 1) * AUR_BUILDER_PACKAGE_BATCH,
+                    )
+                    searchStatus =
+                        "Staging verified build package $completed/" +
+                            "${environment.packageCount}"
+                }
+
+            val closure =
+                transactAurBuilder(
+                    endpoint,
+                    AUR_BUILDER_TRANSACTION_FINISH_CLOSURE,
+                    {},
+                ) { reply ->
+                    AurBuilderClosureReport(
+                        reply.readInt(),
+                        reply.readLong(),
+                        reply.readLong(),
+                        reply.readString().orEmpty(),
+                    )
+                }
+            val expectedSignatureBytes =
+                environment.verifiedPackages.fold(0L) { total, value ->
+                    Math.addExact(total, value.signatureBytes)
+                }
+            check(
+                closure.packageCount == environment.packageCount &&
+                    closure.archiveBytes == environment.downloadBytes &&
+                    closure.signatureBytes == expectedSignatureBytes &&
+                    closure.manifestSha256 == environment.closureManifestSha256,
+            ) {
+                "Builder package closure does not match the verified manager closure"
+            }
+            began = false
+            return closure
+        } finally {
+            if (began) {
+                runCatching {
+                    transactAurBuilder(
+                        endpoint,
+                        AUR_BUILDER_TRANSACTION_ABORT_CLOSURE,
+                        {},
+                    ) { Unit }
+                }
+            }
+        }
+    }
+
+    private inline fun <T> transactAurBuilder(
+        endpoint: IBinder,
+        transaction: Int,
+        writeRequest: (Parcel) -> Unit,
+        readReply: (Parcel) -> T,
+    ): T {
+        val request = Parcel.obtain()
+        val reply = Parcel.obtain()
+        try {
+            request.writeInterfaceToken("org.archphene.builder.AurBuilder")
+            writeRequest(request)
+            check(endpoint.transact(transaction, request, reply, 0)) {
+                "AUR builder rejected transaction $transaction"
+            }
+            reply.readException()
+            return readReply(reply)
+        } finally {
+            request.recycle()
+            reply.recycle()
         }
     }
 
@@ -5158,7 +5366,14 @@ class ArchpheneRuntimeService : Service() {
                         .append(builder.uid)
                         .append("; no network permission or direct manager-data access; ")
                         .append(formatStorageBytes(builder.stagedBytes))
-                        .append(" reviewed inputs staged.\n")
+                        .append(" reviewed inputs and ")
+                        .append(builder.closurePackageCount)
+                        .append(" signed build packages (")
+                        .append(formatStorageBytes(builder.closureArchiveBytes))
+                        .append(" archives) staged.\n")
+                    append("Builder closure SHA-256: ")
+                        .append(builder.closureManifestSha256)
+                        .append('\n')
                 }
             } else {
                 append("Download/build disk estimate: verify sources to measure downloads.\n")

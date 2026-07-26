@@ -17,7 +17,10 @@ tasks.register<Exec>("buildArchpheneRust") {
         file("Cargo.lock"),
         file("Cargo.toml"),
     )
-    outputs.dir("android/app/build/generated/jniLibs")
+    outputs.dirs(
+        "android/app/build/generated/jniLibs",
+        "android/builder/build/generated/jniLibs",
+    )
 }
 
 tasks.register<Exec>("buildArchpheneCompositor") {

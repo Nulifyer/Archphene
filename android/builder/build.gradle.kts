@@ -20,6 +20,12 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    sourceSets {
+        getByName("main") {
+            jniLibs.directories.add("build/generated/jniLibs")
+        }
+    }
+
     buildFeatures {
         buildConfig = false
     }
@@ -35,4 +41,8 @@ android {
             proguardFiles("proguard-rules.pro")
         }
     }
+}
+
+tasks.named("preBuild").configure {
+    dependsOn(rootProject.tasks.named("buildArchpheneRust"))
 }

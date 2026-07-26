@@ -1079,8 +1079,21 @@ manifest with every exact resolution identity, URL, archive size/digest, and
 detached-signature size/digest. Kotlin validates all 152 entries against the
 retained resolution and exposes the whole-manifest SHA-256; Rust will reopen a
 package descriptor only while that closure is retained as verified. Measuring
-extracted/build space, reverification at handoff, and batched transfer into the
-Builder remain pending.
+extracted/build space and provisioning the minimal root remain pending.
+
+The verified closure now crosses into the separate Builder UID in bounded
+eight-package Binder batches. A new Rust Builder library resets its private
+closure directory through no-follow directory descriptors, accepts only the
+manifest-bound archive and signature at each index, streams through a fixed
+64 KiB buffer, and atomically publishes the manifest only after all retained
+files pass a final rehash. Host tests prove a hostile symlink cannot escape the
+workspace. The physical Samsung gate independently observes all 152
+archive/signature pairs, 224,514,136 archive bytes plus 86,032 signature bytes,
+and the same
+`a0b7315c89d9f3915f2e8b313b6a09cae77c17c72cc212f3f1fcdeadfb0ab39d`
+manifest digest while the shared pacman database remains at 36 entries. The
+epoch-qualified filenames found in the real closure also corrected the
+Builder validator to accept pacman's already-verified `:` filename syntax.
 
 Code now reaches the packaged Electron executable without a Code-specific
 bridge exception. Translating Arch's standard `/usr/lib/pulseaudio` directory

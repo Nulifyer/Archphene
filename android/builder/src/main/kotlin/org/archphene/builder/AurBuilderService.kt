@@ -14,6 +14,8 @@ import android.system.OsConstants
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.StandardCopyOption
@@ -21,6 +23,10 @@ import java.security.MessageDigest
 
 class AurBuilderService : Service() {
     private val transferBuffer = ByteArray(64 * 1024)
+    private val nativeOutputBuffer =
+        ByteBuffer
+            .allocateDirect(NativeBuilder.ERROR_OUTPUT_BYTES)
+            .order(ByteOrder.LITTLE_ENDIAN)
 
     private val endpoint =
         object : Binder() {
@@ -34,8 +40,24 @@ class AurBuilderService : Service() {
                     reply?.writeString(DESCRIPTOR)
                     return true
                 }
-                if (code != TRANSACTION_PROBE || reply == null) {
+                if (reply == null) {
                     return super.onTransact(code, data, reply, flags)
+                }
+                if (code != TRANSACTION_PROBE) {
+                    data.enforceInterface(DESCRIPTOR)
+                    enforceManagerCaller(Binder.getCallingUid())
+                    try {
+                        when (code) {
+                            TRANSACTION_BEGIN_PACKAGE_CLOSURE -> beginPackageClosure(data, reply)
+                            TRANSACTION_STAGE_PACKAGE_BATCH -> stagePackageBatch(data, reply)
+                            TRANSACTION_FINISH_PACKAGE_CLOSURE -> finishPackageClosure(reply)
+                            TRANSACTION_ABORT_PACKAGE_CLOSURE -> abortPackageClosure(reply)
+                            else -> return super.onTransact(code, data, reply, flags)
+                        }
+                    } catch (error: Exception) {
+                        reply.writeException(error)
+                    }
+                    return true
                 }
                 data.enforceInterface(DESCRIPTOR)
                 val callerUid = Binder.getCallingUid()
@@ -104,6 +126,124 @@ class AurBuilderService : Service() {
         }
 
     override fun onBind(intent: Intent?): IBinder = endpoint
+
+    @Synchronized
+    private fun beginPackageClosure(
+        data: Parcel,
+        reply: Parcel,
+    ) {
+        val packageBase = data.readString().orEmpty()
+        val version = data.readString().orEmpty()
+        val manifest =
+            data.createByteArray()
+                ?: throw IllegalArgumentException("Missing package-closure manifest")
+        val manifestSha256 = data.readString().orEmpty()
+        require(manifest.isNotEmpty() && manifest.size <= MAX_CLOSURE_MANIFEST_BYTES)
+        require(manifestSha256.matches(SHA256))
+        val manifestBuffer =
+            ByteBuffer
+                .allocateDirect(manifest.size)
+                .put(manifest)
+        nativeOutputBuffer.clear()
+        val packageCount =
+            NativeBuilder.nativeBeginPackageClosure(
+                filesDir.absolutePath,
+                packageBase,
+                version,
+                manifestBuffer,
+                manifest.size,
+                manifestSha256,
+                nativeOutputBuffer,
+            )
+        check(packageCount in 1..MAX_CLOSURE_PACKAGES) {
+            "Builder rejected the verified package closure: " +
+                readNativeMessage(nativeOutputBuffer, packageCount)
+        }
+        reply.writeNoException()
+        reply.writeInt(packageCount)
+    }
+
+    @Synchronized
+    private fun stagePackageBatch(
+        data: Parcel,
+        reply: Parcel,
+    ) {
+        val count = data.readInt()
+        require(count in 1..MAX_PACKAGE_BATCH)
+        val inputs = ArrayList<PackageInput>(count)
+        try {
+            repeat(count) {
+                val index = data.readInt()
+                require(index in 0 until MAX_CLOSURE_PACKAGES)
+                val archive =
+                    data.readFileDescriptor()
+                        ?: throw IllegalArgumentException("Missing package archive descriptor")
+                try {
+                    val signature =
+                        data.readFileDescriptor()
+                            ?: throw IllegalArgumentException(
+                                "Missing package signature descriptor",
+                            )
+                    inputs += PackageInput(index, archive, signature)
+                } catch (error: Exception) {
+                    archive.close()
+                    throw error
+                }
+            }
+            require(inputs.map { input -> input.index }.toSet().size == inputs.size)
+            inputs.forEach { input ->
+                val result =
+                    NativeBuilder.nativeStagePackage(
+                        input.index,
+                        input.archive.fd,
+                        input.signature.fd,
+                    )
+                check(result == 0) {
+                    "Builder rejected verified package ${input.index} ($result)"
+                }
+            }
+            reply.writeNoException()
+            reply.writeInt(inputs.size)
+        } finally {
+            inputs.forEach { input ->
+                runCatching { input.archive.close() }
+                runCatching { input.signature.close() }
+            }
+        }
+    }
+
+    @Synchronized
+    private fun finishPackageClosure(reply: Parcel) {
+        val output =
+            ByteBuffer
+                .allocateDirect(NativeBuilder.CLOSURE_REPORT_BYTES)
+                .order(ByteOrder.LITTLE_ENDIAN)
+        val result = NativeBuilder.nativeFinishPackageClosure(output)
+        check(result == NativeBuilder.CLOSURE_REPORT_BYTES) {
+            "Builder could not publish the verified package closure ($result)"
+        }
+        val magic = ByteArray(8)
+        output.position(0)
+        output.get(magic)
+        check(String(magic, Charsets.US_ASCII) == "ABCR0001")
+        val packageCount = output.getInt(8)
+        val archiveBytes = output.getLong(16)
+        val signatureBytes = output.getLong(24)
+        val digest = ByteArray(32)
+        output.position(32)
+        output.get(digest)
+        reply.writeNoException()
+        reply.writeInt(packageCount)
+        reply.writeLong(archiveBytes)
+        reply.writeLong(signatureBytes)
+        reply.writeString(digest.toHex())
+    }
+
+    @Synchronized
+    private fun abortPackageClosure(reply: Parcel) {
+        NativeBuilder.nativeAbortPackageClosure()
+        reply.writeNoException()
+    }
 
     private fun enforceManagerCaller(callerUid: Int) {
         if (
@@ -343,8 +483,27 @@ class AurBuilderService : Service() {
     private fun sha256(bytes: ByteArray): String =
         MessageDigest.getInstance("SHA-256").digest(bytes).toHex()
 
-    private fun ByteArray.toHex(): String =
-        joinToString(separator = "") { byte -> "%02x".format(byte.toInt() and 0xff) }
+    private fun ByteArray.toHex(): String {
+        val output = CharArray(size * 2)
+        forEachIndexed { index, byte ->
+            val value = byte.toInt() and 0xff
+            output[index * 2] = HEX_DIGITS[value ushr 4]
+            output[index * 2 + 1] = HEX_DIGITS[value and 0x0f]
+        }
+        return String(output)
+    }
+
+    private fun readNativeMessage(
+        buffer: ByteBuffer,
+        result: Int,
+    ): String {
+        val source = buffer.duplicate()
+        source.position(0)
+        val bytes = ByteArray(minOf(source.remaining(), NativeBuilder.ERROR_OUTPUT_BYTES))
+        source.get(bytes)
+        val length = bytes.indexOf(0).let { index -> if (index < 0) bytes.size else index }
+        return String(bytes, 0, length, Charsets.UTF_8).ifEmpty { "native error $result" }
+    }
 
     private data class BuildInput(
         val role: Int,
@@ -352,6 +511,12 @@ class AurBuilderService : Service() {
         val sha256: String,
         val bytes: Long,
         val descriptor: ParcelFileDescriptor,
+    )
+
+    private data class PackageInput(
+        val index: Int,
+        val archive: ParcelFileDescriptor,
+        val signature: ParcelFileDescriptor,
     )
 
     private data class ProbeReport(
@@ -369,12 +534,20 @@ class AurBuilderService : Service() {
     companion object {
         const val DESCRIPTOR = "org.archphene.builder.AurBuilder"
         const val TRANSACTION_PROBE = IBinder.FIRST_CALL_TRANSACTION
+        const val TRANSACTION_BEGIN_PACKAGE_CLOSURE = IBinder.FIRST_CALL_TRANSACTION + 1
+        const val TRANSACTION_STAGE_PACKAGE_BATCH = IBinder.FIRST_CALL_TRANSACTION + 2
+        const val TRANSACTION_FINISH_PACKAGE_CLOSURE = IBinder.FIRST_CALL_TRANSACTION + 3
+        const val TRANSACTION_ABORT_PACKAGE_CLOSURE = IBinder.FIRST_CALL_TRANSACTION + 4
         private const val ROLE_SNAPSHOT = 0
         private const val ROLE_SOURCE = 1
         private const val MAX_INPUTS = 65
+        private const val MAX_CLOSURE_PACKAGES = 512
+        private const val MAX_CLOSURE_MANIFEST_BYTES = 512 * 1024
+        private const val MAX_PACKAGE_BATCH = 8
         private const val MAX_INPUT_BYTES = 4L * 1024 * 1024 * 1024
         private const val MAX_TOTAL_BYTES = 8L * 1024 * 1024 * 1024
         private const val MAX_MANIFEST_BYTES = 16 * 1024
+        private const val HEX_DIGITS = "0123456789abcdef"
         private val PACKAGE_NAME = Regex("[A-Za-z0-9@._+-]{1,128}")
         private val SAFE_FILENAME = Regex("[A-Za-z0-9@+,._-]{1,240}")
         private val SHA256 = Regex("[0-9a-f]{64}")

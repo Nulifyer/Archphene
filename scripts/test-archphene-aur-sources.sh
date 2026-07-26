@@ -97,9 +97,18 @@ archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null
 archphene_wait_ui 'text="AUR"[^>]*enabled="true"' aur-sources-review-action 10
 archphene_tap_ui_pattern \
   "$ARCHPHENE_UI" 'text="AUR"[^>]*enabled="true"' "AUR"
-archphene_wait_log \
+reviewed_log="$(
+  archphene_wait_log \
   "Reviewed AUR $package .* commit=[0-9a-f]{40}" 45 \
-  'ArchpheneRuntime:I *:S' >/dev/null
+  'ArchpheneRuntime:I *:S'
+)"
+reviewed_version="$(
+  sed -nE "s/.*Reviewed AUR $package ([^ ]+) commit=.*/\\1/p" \
+    <<<"$reviewed_log" |
+    tail -1
+)"
+[[ -n "$reviewed_version" ]] ||
+  archphene_die "could not parse the reviewed AUR version"
 archphene_wait_ui 'text="Verify"[^>]*enabled="true"' aur-sources-verify-action 20
 archphene_tap_ui_pattern \
   "$ARCHPHENE_UI" 'text="Verify"[^>]*enabled="true"' "Verify"
@@ -119,9 +128,32 @@ verified_bytes="$(
   archphene_die "could not parse the verified source size"
 builder_log="$(
   archphene_wait_log \
-    "AUR builder boundary ready: package=$builder uid=$builder_uid context=.*untrusted_app.*staged=[1-9][0-9]+ manifest=[0-9a-f]{64}" 60 \
+    "AUR builder boundary ready: package=$builder uid=$builder_uid context=.*untrusted_app.*staged=[1-9][0-9]+ manifest=[0-9a-f]{64} closure=[1-9][0-9]*/[1-9][0-9]*\\+[1-9][0-9]* [0-9a-f]{64}" 120 \
     'ArchpheneRuntime:I *:S'
 )"
+builder_closure_count="$(
+  sed -nE 's/.* closure=([1-9][0-9]*)\/.*/\1/p' <<<"$builder_log" |
+    tail -1
+)"
+builder_closure_archive_bytes="$(
+  sed -nE 's/.* closure=[1-9][0-9]*\/([1-9][0-9]*)\+.*/\1/p' <<<"$builder_log" |
+    tail -1
+)"
+builder_closure_signature_bytes="$(
+  sed -nE 's/.* closure=[1-9][0-9]*\/[1-9][0-9]*\+([1-9][0-9]*) .*/\1/p' \
+    <<<"$builder_log" |
+    tail -1
+)"
+builder_closure_sha256="$(
+  sed -nE 's/.* closure=[1-9][0-9]*\/[1-9][0-9]*\+[1-9][0-9]* ([0-9a-f]{64}).*/\1/p' \
+    <<<"$builder_log" |
+    tail -1
+)"
+[[ "$builder_closure_count" =~ ^[1-9][0-9]*$ &&
+   "$builder_closure_archive_bytes" =~ ^[1-9][0-9]*$ &&
+   "$builder_closure_signature_bytes" =~ ^[1-9][0-9]*$ &&
+   "$builder_closure_sha256" =~ ^[0-9a-f]{64}$ ]] ||
+  archphene_die "could not parse the independently published Builder closure"
 archphene_wait_ui 'Verified source downloads:' aur-sources-result 30
 ui="$ARCHPHENE_UI"
 for pattern in \
@@ -130,7 +162,8 @@ for pattern in \
   'Installed/build disk impact: pending the isolated package build\.' \
   'Verified official build environment: [1-9][0-9]* official packages · [1-9][0-9]* MiB archives · [0-9]+ cached · [0-9]+ downloaded\.' \
   'Build closure SHA-256: [0-9a-f]{64}' \
-  "Build sandbox: signed companion UID $builder_uid; no network permission or direct manager-data access; [1-9][0-9]* MiB reviewed inputs staged\\." \
+  "Build sandbox: signed companion UID $builder_uid; no network permission or direct manager-data access; [1-9][0-9]* MiB reviewed inputs and $builder_closure_count signed build packages \\([1-9][0-9]* MiB archives\\) staged\\." \
+  "Builder closure SHA-256: $builder_closure_sha256" \
   'code[^<]*\.deb' \
   'direct HTTPS download' \
   'SHA-256: [0-9a-f]{64}'
@@ -205,6 +238,73 @@ builder_sha256="$(
 [[ "$builder_sha256" == "$expected_sha256" ]] ||
   archphene_die "AUR builder staged source digest does not match the manager"
 
+builder_closure_manifest="$(
+  archphene_adb_run shell run-as "$builder" \
+    cat files/aur-build-workspace-v2/package-closure/manifest |
+    tr -d '\r'
+)"
+grep -Fqx 'ABPC0001' <<<"$builder_closure_manifest" ||
+  archphene_die "AUR Builder closure manifest has the wrong version"
+grep -Fqx \
+  "summary	$builder_closure_count	$builder_closure_archive_bytes" \
+  <<<"$builder_closure_manifest" ||
+  archphene_die "AUR Builder closure manifest summary changed"
+actual_builder_closure_sha256="$(
+  archphene_adb_run shell run-as "$builder" sha256sum \
+    files/aur-build-workspace-v2/package-closure/manifest |
+    awk '{ print $1 }' |
+    tr -d '\r'
+)"
+[[ "$actual_builder_closure_sha256" == "$builder_closure_sha256" ]] ||
+  archphene_die "AUR Builder closure digest does not match the manager"
+builder_closure_session="$(
+  archphene_adb_run shell run-as "$builder" \
+    cat files/aur-build-workspace-v2/package-closure/session |
+    tr -d '\r'
+)"
+grep -Fqx 'ABCS0001' <<<"$builder_closure_session" &&
+  grep -Fqx "package=$package" <<<"$builder_closure_session" &&
+  grep -Fqx "version=$reviewed_version" <<<"$builder_closure_session" &&
+  grep -Fqx "closure=$builder_closure_sha256" <<<"$builder_closure_session" ||
+  archphene_die "AUR Builder closure is not bound to the reviewed package/version"
+builder_archive_count="$(
+  archphene_adb_run shell run-as "$builder" sh -c \
+    "'find files/aur-build-workspace-v2/package-closure/archives -type f ! -name \"*.sig\" | wc -l'" |
+    tr -d '\r[:space:]'
+)"
+builder_signature_count="$(
+  archphene_adb_run shell run-as "$builder" sh -c \
+    "'find files/aur-build-workspace-v2/package-closure/archives -type f -name \"*.sig\" | wc -l'" |
+    tr -d '\r[:space:]'
+)"
+[[ "$builder_archive_count" == "$builder_closure_count" &&
+   "$builder_signature_count" == "$builder_closure_count" ]] ||
+  archphene_die "AUR Builder did not retain every archive/signature pair"
+first_closure_line="$(
+  sed -n '2p' <<<"$builder_closure_manifest"
+)"
+IFS=$'\t' read -r _ _ _ first_filename _ first_archive_bytes \
+  first_archive_sha256 first_signature_bytes first_signature_sha256 \
+  <<<"$first_closure_line"
+[[ "$first_archive_sha256" =~ ^[0-9a-f]{64}$ &&
+   "$first_signature_sha256" =~ ^[0-9a-f]{64}$ ]] ||
+  archphene_die "AUR Builder first closure entry is malformed"
+first_staged_archive="files/aur-build-workspace-v2/package-closure/archives/000-$first_filename"
+first_staged_signature="$first_staged_archive.sig"
+first_actual_sha256="$(
+  archphene_adb_run shell run-as "$builder" sha256sum "$first_staged_archive" |
+    awk '{ print $1 }' |
+    tr -d '\r'
+)"
+first_actual_signature_sha256="$(
+  archphene_adb_run shell run-as "$builder" sha256sum "$first_staged_signature" |
+    awk '{ print $1 }' |
+    tr -d '\r'
+)"
+[[ "$first_actual_sha256" == "$first_archive_sha256" &&
+   "$first_actual_signature_sha256" == "$first_signature_sha256" ]] ||
+  archphene_die "AUR Builder staged bytes do not match its signed closure"
+
 after_count="$(local_package_count)"
 [[ "$after_count" == "$before_count" ]] ||
   archphene_die "AUR source verification mutated the pacman database"
@@ -239,5 +339,6 @@ fatal_log="$(archphene_adb_run logcat -d -v brief \
 archphene_note "Archphene AUR source verification passed on $serial"
 archphene_note "  Rust verified $verified_bytes source bytes"
 archphene_note "  Signed builder UID $builder_uid is separate from manager UID $manager_uid"
+archphene_note "  Builder reverified $builder_closure_count archive/signature pairs"
 archphene_note "  Pacman state remained at $after_count local database entries"
 archphene_note "  Full-device screenshot: $output_dir/$serial.png"

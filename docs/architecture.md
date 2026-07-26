@@ -86,9 +86,12 @@ the pinned signer and package identity, retains the exact resolution, and
 reverifies the full closure before reporting it. The resulting canonical
 manifest binds every archive and detached-signature digest to its exact
 resolution entry and supplies one overall SHA-256 for approval and Builder
-provenance. This does not mutate the shared root; batched descriptor transfer,
-Builder-root extraction, and installed/build/output disk measurements remain
-separate gates.
+provenance. The manager reopens descriptors only while that exact closure
+remains retained, sends at most eight archive/signature pairs per Binder call,
+and the Builder rehashes every pair through fixed buffers before atomically
+publishing the same manifest under no-follow directory-FD-owned storage. This
+does not mutate the shared root; Builder-root extraction and
+installed/build/output disk measurements remain separate gates.
 
 This boundary is required because the tested stock Samsung kernel denies user,
 mount, and network namespace creation to the manager app. Android's
