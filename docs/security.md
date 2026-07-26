@@ -145,21 +145,23 @@ the shared pacman database.
 The Builder's small packaged execution runtime is independently
 content-addressed: Rust validates its manifest, digest-bearing filenames,
 complete SHA-256 values, sizes, modes, and native-library path containment
-before publishing fresh root-local aliases. The physical gate then executes
-only the provisioned root's unmodified `makepkg --version`, producing
+before publishing fresh root-local aliases. The physical gate executes the
+exact reviewed Code recipe with the provisioned root's unmodified
 `makepkg (pacman) 7.1.0` as the separate Builder UID with no Android network
-permission. This proves the loader and path bridge reach the verified root; it
-does not authorize community recipe execution.
+permission. Rust first kills stale same-UID processes, resets the recipe
+through no-follow descriptors, then retains a bounded process group with
+timeout, capped logs, cancellation, and deterministic reap.
 
-The current path still does not execute PKGBUILD, resolve a final
-installed-size estimate, or install its result. Capability analysis, explicit
-build approval, package-output provenance, hostile reviewed-input cleanup,
-descendant supervision, bounded log/cancel behavior, and transaction recovery
-remain required. Before community code can execute, every Builder-writable
-path must be treated as attacker-controlled and all prior descendants must be
-killed and reaped before reuse. A successful review or isolated build will not
-make the eventual package isolated: once manager verification and installation
-complete, its code joins the shared Archphene Linux trust domain.
+The test-side verifier confirms the output's exact reviewed name/version/ABI,
+nonzero 1,079,048,720-byte installed size, and `.BUILDINFO` equality with all
+152 signed official build packages. This does not yet authorize installation:
+the product must enumerate the now-hostile output through no-follow
+descriptors, verify package metadata and provenance in Rust, copy only the
+accepted archive through a manager-owned descriptor, reverify it under the
+manager UID, and commit it through a recoverable shared-root transaction. A
+successful isolated build will not make the eventual package isolated: once
+manager verification and installation complete, its code joins the shared
+Archphene Linux trust domain.
 
 ## Important limitations
 

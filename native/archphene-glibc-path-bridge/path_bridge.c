@@ -9,16 +9,25 @@
 #include <pwd.h>
 #include <signal.h>
 #include <spawn.h>
+#include <stdatomic.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/fsuid.h>
+#include <sys/ipc.h>
+#include <sys/mman.h>
+#include <sys/msg.h>
+#include <sys/sem.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <time.h>
 #include <sys/un.h>
+#include <ucontext.h>
 #include <unistd.h>
 
 /* Android PTYs are valid even when this glibc build's isatty probe is rejected. */
@@ -53,11 +62,40 @@ static char trusted_loader[PATH_MAX];
 static char trusted_program_path[PATH_MAX];
 static char trusted_root[PATH_MAX];
 static bool fake_chroot_active;
+static atomic_uint message_queue_sequence = 1;
+static atomic_uint semaphore_sequence = 1;
+
+static const char *translate_path(const char *path, char output[PATH_MAX],
+        bool *translated);
+static const char *translate_follow_path(const char *path,
+        char output[PATH_MAX], bool *translated);
+static const char *translate_at_path(int directory, const char *path,
+        char output[PATH_MAX], bool *translated, bool follow);
+
+static bool reject_optional_sandbox_syscall(siginfo_t *information, void *context) {
+    if (information == NULL || context == NULL) return false;
+    bool optional = false;
+#ifdef __NR_landlock_create_ruleset
+    optional = information->si_syscall == __NR_landlock_create_ruleset
+            || information->si_syscall == __NR_landlock_add_rule
+            || information->si_syscall == __NR_landlock_restrict_self;
+#endif
+    if (!optional) return false;
+#if defined(__aarch64__)
+    ((ucontext_t *)context)->uc_mcontext.regs[0] = (unsigned long)-ENOSYS;
+    return true;
+#elif defined(__x86_64__)
+    ((ucontext_t *)context)->uc_mcontext.gregs[REG_RAX] = -ENOSYS;
+    return true;
+#else
+    return false;
+#endif
+}
 
 static void report_blocked_syscall(int signal_number, siginfo_t *information,
         void *context) {
     (void)signal_number;
-    (void)context;
+    if (reject_optional_sandbox_syscall(information, context)) return;
     static const char prefix[] = "Archphene blocked Linux syscall ";
     char message[sizeof(prefix) + 16];
     size_t length = sizeof(prefix) - 1;
@@ -81,9 +119,600 @@ static void install_sigsys_diagnostic(void) {
     struct sigaction action;
     memset(&action, 0, sizeof(action));
     action.sa_sigaction = report_blocked_syscall;
-    action.sa_flags = SA_SIGINFO | SA_RESETHAND;
+    action.sa_flags = SA_SIGINFO;
     sigemptyset(&action.sa_mask);
     (void)sigaction(SIGSYS, &action, NULL);
+}
+
+/*
+ * Android app seccomp rejects the SysV message-queue syscalls used by
+ * fakeroot's faked daemon. Keep equivalent bounded queues as private regular
+ * files under the already-private Linux runtime root. File locking preserves
+ * the message ordering/type semantics across faked and its client processes;
+ * no Android sandbox boundary is weakened.
+ */
+#define ARCHPHENE_MESSAGE_HEADER_BYTES 16U
+#define ARCHPHENE_MESSAGE_MAX_BYTES (128U * 1024U)
+#define ARCHPHENE_QUEUE_MAX_BYTES (4U * 1024U * 1024U)
+
+static bool message_queue_path(int queue, char output[PATH_MAX]) {
+    if (trusted_root[0] == '\0' || queue <= 0) {
+        errno = EINVAL;
+        return false;
+    }
+    int length = snprintf(output, PATH_MAX, "%s/run/.archphene-msg-%d",
+            trusted_root, queue);
+    if (length <= 0 || length >= PATH_MAX) {
+        errno = ENAMETOOLONG;
+        return false;
+    }
+    return true;
+}
+
+static void message_store_u64(unsigned char *output, uint64_t value) {
+    for (size_t index = 0; index < 8; index++) {
+        output[index] = (unsigned char)(value >> (index * 8));
+    }
+}
+
+static uint64_t message_load_u64(const unsigned char *input) {
+    uint64_t value = 0;
+    for (size_t index = 0; index < 8; index++) {
+        value |= (uint64_t)input[index] << (index * 8);
+    }
+    return value;
+}
+
+int msgget(key_t key, int flags) {
+    typedef int (*open_type)(const char *, int, ...);
+    open_type real_open = (open_type)dlsym(RTLD_NEXT, "open");
+    if (real_open == NULL || trusted_root[0] == '\0') {
+        errno = ENOSYS;
+        return -1;
+    }
+    int queue;
+    if (key == IPC_PRIVATE) {
+        unsigned int sequence =
+                atomic_fetch_add_explicit(&message_queue_sequence, 1,
+                        memory_order_relaxed);
+        unsigned int candidate =
+                (((unsigned int)getpid() & 0x001fffffU) << 9)
+                ^ (sequence & 0x1ffU);
+        queue = (int)(candidate == 0 ? 1 : candidate);
+    } else {
+        uint32_t candidate = (uint32_t)key & 0x3fffffffU;
+        queue = (int)(candidate == 0 ? 1 : candidate);
+    }
+    char path[PATH_MAX];
+    if (!message_queue_path(queue, path)) return -1;
+    int open_flags = O_RDWR | O_CLOEXEC;
+    if (key == IPC_PRIVATE || (flags & IPC_CREAT) != 0) open_flags |= O_CREAT;
+    if (key == IPC_PRIVATE || (flags & IPC_EXCL) != 0) open_flags |= O_EXCL;
+    int descriptor = real_open(path, open_flags, 0600);
+    if (descriptor < 0) return -1;
+    close(descriptor);
+    return queue;
+}
+
+int msgsnd(int queue, const void *message, size_t size, int flags) {
+    typedef int (*open_type)(const char *, int, ...);
+    open_type real_open = (open_type)dlsym(RTLD_NEXT, "open");
+    if (real_open == NULL || message == NULL || size > ARCHPHENE_MESSAGE_MAX_BYTES) {
+        errno = message == NULL ? EFAULT : EINVAL;
+        return -1;
+    }
+    long type;
+    memcpy(&type, message, sizeof(type));
+    if (type <= 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    char path[PATH_MAX];
+    if (!message_queue_path(queue, path)) return -1;
+    for (;;) {
+        int descriptor = real_open(path, O_RDWR | O_CLOEXEC);
+        if (descriptor < 0) return -1;
+        if (flock(descriptor, LOCK_EX) != 0) {
+            int saved_errno = errno;
+            close(descriptor);
+            errno = saved_errno;
+            return -1;
+        }
+        struct stat metadata;
+        int result = fstat(descriptor, &metadata);
+        uint64_t record_size = ARCHPHENE_MESSAGE_HEADER_BYTES + size;
+        if (result == 0 && metadata.st_size >= 0
+                && (uint64_t)metadata.st_size + record_size
+                        <= ARCHPHENE_QUEUE_MAX_BYTES) {
+            unsigned char header[ARCHPHENE_MESSAGE_HEADER_BYTES];
+            message_store_u64(header, (uint64_t)type);
+            message_store_u64(header + 8, size);
+            off_t offset = metadata.st_size;
+            ssize_t written = pwrite(descriptor, header, sizeof(header), offset);
+            if (written == (ssize_t)sizeof(header)) {
+                written = pwrite(descriptor,
+                        (const unsigned char *)message + sizeof(long), size,
+                        offset + (off_t)sizeof(header));
+            }
+            result = written == (ssize_t)size ? 0 : -1;
+            if (result != 0 && errno == 0) errno = EIO;
+        } else if (result == 0) {
+            errno = EAGAIN;
+            result = -1;
+        }
+        int saved_errno = errno;
+        (void)flock(descriptor, LOCK_UN);
+        close(descriptor);
+        errno = saved_errno;
+        if (result == 0 || (flags & IPC_NOWAIT) != 0 || errno != EAGAIN) {
+            return result;
+        }
+        usleep(10000);
+    }
+}
+
+static bool message_type_matches(long available, long requested,
+        long *selected_type) {
+    if (requested == 0) return true;
+    if (requested > 0) return available == requested;
+    long maximum = requested == LONG_MIN ? LONG_MAX : -requested;
+    if (available > maximum) return false;
+    if (*selected_type == 0 || available < *selected_type) {
+        *selected_type = available;
+        return true;
+    }
+    return false;
+}
+
+ssize_t msgrcv(int queue, void *message, size_t size, long requested_type,
+        int flags) {
+    typedef int (*open_type)(const char *, int, ...);
+    open_type real_open = (open_type)dlsym(RTLD_NEXT, "open");
+    if (real_open == NULL || message == NULL || size > ARCHPHENE_MESSAGE_MAX_BYTES) {
+        errno = message == NULL ? EFAULT : EINVAL;
+        return -1;
+    }
+    char path[PATH_MAX];
+    if (!message_queue_path(queue, path)) return -1;
+    for (;;) {
+        int descriptor = real_open(path, O_RDWR | O_CLOEXEC);
+        if (descriptor < 0) return -1;
+        if (flock(descriptor, LOCK_EX) != 0) {
+            int saved_errno = errno;
+            close(descriptor);
+            errno = saved_errno;
+            return -1;
+        }
+        struct stat metadata;
+        if (fstat(descriptor, &metadata) != 0 || metadata.st_size < 0
+                || (uint64_t)metadata.st_size > ARCHPHENE_QUEUE_MAX_BYTES) {
+            int saved_errno = errno == 0 ? EIO : errno;
+            (void)flock(descriptor, LOCK_UN);
+            close(descriptor);
+            errno = saved_errno;
+            return -1;
+        }
+        size_t file_size = (size_t)metadata.st_size;
+        unsigned char *bytes = NULL;
+        if (file_size != 0) {
+            bytes = mmap(NULL, file_size, PROT_READ | PROT_WRITE,
+                    MAP_SHARED, descriptor, 0);
+            if (bytes == MAP_FAILED) bytes = NULL;
+        }
+        size_t selected_offset = SIZE_MAX;
+        size_t selected_size = 0;
+        long selected_type = 0;
+        size_t offset = 0;
+        bool valid = bytes != NULL || file_size == 0;
+        while (valid && offset < file_size) {
+            if (file_size - offset < ARCHPHENE_MESSAGE_HEADER_BYTES) {
+                valid = false;
+                break;
+            }
+            uint64_t raw_type = message_load_u64(bytes + offset);
+            uint64_t raw_size = message_load_u64(bytes + offset + 8);
+            if (raw_type == 0 || raw_type > LONG_MAX
+                    || raw_size > ARCHPHENE_MESSAGE_MAX_BYTES
+                    || raw_size > file_size - offset
+                            - ARCHPHENE_MESSAGE_HEADER_BYTES) {
+                valid = false;
+                break;
+            }
+            long type = (long)raw_type;
+            bool matches = message_type_matches(
+                    type, requested_type, &selected_type);
+            if (matches && (requested_type >= 0 || type == selected_type)) {
+                selected_offset = offset;
+                selected_size = (size_t)raw_size;
+                if (requested_type >= 0) break;
+            }
+            offset += ARCHPHENE_MESSAGE_HEADER_BYTES + (size_t)raw_size;
+        }
+        ssize_t result = -1;
+        if (!valid) {
+            errno = EIO;
+        } else if (selected_offset != SIZE_MAX) {
+            if (selected_size > size && (flags & MSG_NOERROR) == 0) {
+                errno = E2BIG;
+            } else {
+                size_t copied = selected_size > size ? size : selected_size;
+                long type = (long)message_load_u64(bytes + selected_offset);
+                memcpy(message, &type, sizeof(type));
+                memcpy((unsigned char *)message + sizeof(long),
+                        bytes + selected_offset + ARCHPHENE_MESSAGE_HEADER_BYTES,
+                        copied);
+                size_t record_size =
+                        ARCHPHENE_MESSAGE_HEADER_BYTES + selected_size;
+                memmove(bytes + selected_offset,
+                        bytes + selected_offset + record_size,
+                        file_size - selected_offset - record_size);
+                if (msync(bytes, file_size, MS_SYNC) == 0
+                        && ftruncate(descriptor,
+                                (off_t)(file_size - record_size)) == 0) {
+                    result = (ssize_t)copied;
+                }
+            }
+        } else {
+            errno = ENOMSG;
+        }
+        int saved_errno = errno;
+        if (bytes != NULL) munmap(bytes, file_size);
+        (void)flock(descriptor, LOCK_UN);
+        close(descriptor);
+        errno = saved_errno;
+        if (result >= 0 || (flags & IPC_NOWAIT) != 0 || errno != ENOMSG) {
+            return result;
+        }
+        usleep(10000);
+    }
+}
+
+int msgctl(int queue, int command, struct msqid_ds *status) {
+    typedef int (*open_type)(const char *, int, ...);
+    typedef int (*unlink_type)(const char *);
+    open_type real_open = (open_type)dlsym(RTLD_NEXT, "open");
+    unlink_type real_unlink = (unlink_type)dlsym(RTLD_NEXT, "unlink");
+    char path[PATH_MAX];
+    if (!message_queue_path(queue, path)) return -1;
+    if (command == IPC_RMID) {
+        if (real_unlink == NULL) {
+            errno = ENOSYS;
+            return -1;
+        }
+        return real_unlink(path);
+    }
+    if (command != IPC_STAT || status == NULL || real_open == NULL) {
+        errno = command == IPC_STAT ? EFAULT : EINVAL;
+        return -1;
+    }
+    int descriptor = real_open(path, O_RDONLY | O_CLOEXEC);
+    if (descriptor < 0) return -1;
+    struct stat metadata;
+    int result = fstat(descriptor, &metadata);
+    int saved_errno = errno;
+    close(descriptor);
+    if (result != 0) {
+        errno = saved_errno;
+        return -1;
+    }
+    memset(status, 0, sizeof(*status));
+    status->msg_perm.mode = 0600;
+    status->msg_qbytes = ARCHPHENE_QUEUE_MAX_BYTES;
+    status->msg_ctime = metadata.st_ctime;
+    return 0;
+}
+
+#define ARCHPHENE_SEMAPHORE_MAX_COUNT 64U
+#define ARCHPHENE_SEMAPHORE_MAX_VALUE 32767
+
+static bool semaphore_path(int semaphore, char output[PATH_MAX]) {
+    if (trusted_root[0] == '\0' || semaphore <= 0) {
+        errno = EINVAL;
+        return false;
+    }
+    int length = snprintf(output, PATH_MAX, "%s/run/.archphene-sem-%d",
+            trusted_root, semaphore);
+    if (length <= 0 || length >= PATH_MAX) {
+        errno = ENAMETOOLONG;
+        return false;
+    }
+    return true;
+}
+
+int semget(key_t key, int count, int flags) {
+    typedef int (*open_type)(const char *, int, ...);
+    open_type real_open = (open_type)dlsym(RTLD_NEXT, "open");
+    if (real_open == NULL || count < 0
+            || (unsigned int)count > ARCHPHENE_SEMAPHORE_MAX_COUNT) {
+        errno = count < 0 ? EINVAL : ENOSYS;
+        return -1;
+    }
+    int semaphore;
+    if (key == IPC_PRIVATE) {
+        unsigned int sequence =
+                atomic_fetch_add_explicit(&semaphore_sequence, 1,
+                        memory_order_relaxed);
+        unsigned int candidate =
+                (((unsigned int)getpid() & 0x001fffffU) << 9)
+                ^ (sequence & 0x1ffU);
+        semaphore = (int)(candidate == 0 ? 1 : candidate);
+    } else {
+        uint32_t candidate = (uint32_t)key & 0x3fffffffU;
+        semaphore = (int)(candidate == 0 ? 1 : candidate);
+    }
+    char path[PATH_MAX];
+    if (!semaphore_path(semaphore, path)) return -1;
+    int open_flags = O_RDWR | O_CLOEXEC;
+    bool create = key == IPC_PRIVATE || (flags & IPC_CREAT) != 0;
+    if (create) open_flags |= O_CREAT;
+    if (key == IPC_PRIVATE || (flags & IPC_EXCL) != 0) open_flags |= O_EXCL;
+    int descriptor = real_open(path, open_flags, 0600);
+    if (descriptor < 0) return -1;
+    if (flock(descriptor, LOCK_EX) != 0) {
+        int saved_errno = errno;
+        close(descriptor);
+        errno = saved_errno;
+        return -1;
+    }
+    struct stat metadata;
+    int result = fstat(descriptor, &metadata);
+    uint64_t existing_count = 0;
+    if (result == 0 && metadata.st_size == 0 && create) {
+        if (count == 0) {
+            errno = EINVAL;
+            result = -1;
+        } else {
+            unsigned char bytes[8 + ARCHPHENE_SEMAPHORE_MAX_COUNT * 8];
+            memset(bytes, 0, sizeof(bytes));
+            message_store_u64(bytes, (uint64_t)count);
+            size_t length = 8 + (size_t)count * 8;
+            result = pwrite(descriptor, bytes, length, 0) == (ssize_t)length
+                    ? 0 : -1;
+        }
+    } else if (result == 0 && metadata.st_size >= 8) {
+        unsigned char header[8];
+        if (pread(descriptor, header, sizeof(header), 0)
+                != (ssize_t)sizeof(header)) {
+            result = -1;
+        } else {
+            existing_count = message_load_u64(header);
+            if (existing_count == 0
+                    || existing_count > ARCHPHENE_SEMAPHORE_MAX_COUNT
+                    || metadata.st_size != (off_t)(8 + existing_count * 8)) {
+                errno = EIO;
+                result = -1;
+            } else if (count > 0 && (uint64_t)count > existing_count) {
+                errno = EINVAL;
+                result = -1;
+            }
+        }
+    } else if (result == 0) {
+        errno = EIO;
+        result = -1;
+    }
+    int saved_errno = errno;
+    (void)flock(descriptor, LOCK_UN);
+    close(descriptor);
+    errno = saved_errno;
+    return result == 0 ? semaphore : -1;
+}
+
+static int semop_internal(int semaphore, struct sembuf *operations,
+        size_t operation_count, const struct timespec *timeout) {
+    typedef int (*open_type)(const char *, int, ...);
+    open_type real_open = (open_type)dlsym(RTLD_NEXT, "open");
+    if (real_open == NULL || operations == NULL || operation_count == 0
+            || operation_count > ARCHPHENE_SEMAPHORE_MAX_COUNT) {
+        errno = operations == NULL ? EFAULT : EINVAL;
+        return -1;
+    }
+    struct timespec started = {0, 0};
+    if (timeout != NULL
+            && (timeout->tv_sec < 0 || timeout->tv_nsec < 0
+                || timeout->tv_nsec >= 1000000000L)) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (timeout != NULL) (void)clock_gettime(CLOCK_MONOTONIC, &started);
+    char path[PATH_MAX];
+    if (!semaphore_path(semaphore, path)) return -1;
+    for (;;) {
+        int descriptor = real_open(path, O_RDWR | O_CLOEXEC);
+        if (descriptor < 0) return -1;
+        if (flock(descriptor, LOCK_EX) != 0) {
+            int saved_errno = errno;
+            close(descriptor);
+            errno = saved_errno;
+            return -1;
+        }
+        unsigned char bytes[8 + ARCHPHENE_SEMAPHORE_MAX_COUNT * 8];
+        ssize_t length = pread(descriptor, bytes, sizeof(bytes), 0);
+        uint64_t count =
+                length >= 8 ? message_load_u64(bytes) : 0;
+        bool valid = count > 0 && count <= ARCHPHENE_SEMAPHORE_MAX_COUNT
+                && length == (ssize_t)(8 + count * 8);
+        int64_t values[ARCHPHENE_SEMAPHORE_MAX_COUNT];
+        if (valid) {
+            for (size_t index = 0; index < count; index++) {
+                values[index] =
+                        (int64_t)message_load_u64(bytes + 8 + index * 8);
+            }
+        }
+        bool ready = valid;
+        bool no_wait = false;
+        for (size_t index = 0; ready && index < operation_count; index++) {
+            struct sembuf operation = operations[index];
+            if (operation.sem_num >= count) {
+                errno = EFBIG;
+                ready = false;
+                valid = false;
+                break;
+            }
+            no_wait |= (operation.sem_flg & IPC_NOWAIT) != 0;
+            int64_t current = values[operation.sem_num];
+            if (operation.sem_op < 0) {
+                int64_t required = -(int64_t)operation.sem_op;
+                if (current < required) {
+                    ready = false;
+                } else {
+                    values[operation.sem_num] = current - required;
+                }
+            } else if (operation.sem_op > 0) {
+                if (current + operation.sem_op
+                        > ARCHPHENE_SEMAPHORE_MAX_VALUE) {
+                    errno = ERANGE;
+                    ready = false;
+                    valid = false;
+                } else {
+                    values[operation.sem_num] =
+                            current + operation.sem_op;
+                }
+            } else if (current != 0) {
+                ready = false;
+            }
+        }
+        int result = -1;
+        if (!valid) {
+            if (errno == 0) errno = EIO;
+        } else if (ready) {
+            for (size_t index = 0; index < count; index++) {
+                message_store_u64(bytes + 8 + index * 8,
+                        (uint64_t)values[index]);
+            }
+            result = pwrite(descriptor, bytes, (size_t)length, 0) == length
+                    ? 0 : -1;
+        } else {
+            errno = EAGAIN;
+        }
+        int saved_errno = errno;
+        (void)flock(descriptor, LOCK_UN);
+        close(descriptor);
+        errno = saved_errno;
+        if (result == 0 || !valid || no_wait || errno != EAGAIN) return result;
+        if (timeout != NULL) {
+            struct timespec now;
+            if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return -1;
+            time_t seconds = now.tv_sec - started.tv_sec;
+            long nanoseconds = now.tv_nsec - started.tv_nsec;
+            if (nanoseconds < 0) {
+                seconds--;
+                nanoseconds += 1000000000L;
+            }
+            if (seconds > timeout->tv_sec
+                    || (seconds == timeout->tv_sec
+                        && nanoseconds >= timeout->tv_nsec)) {
+                errno = EAGAIN;
+                return -1;
+            }
+        }
+        usleep(10000);
+    }
+}
+
+int semop(int semaphore, struct sembuf *operations, size_t operation_count) {
+    return semop_internal(semaphore, operations, operation_count, NULL);
+}
+
+int semtimedop(int semaphore, struct sembuf *operations,
+        size_t operation_count, const struct timespec *timeout) {
+    return semop_internal(semaphore, operations, operation_count, timeout);
+}
+
+int semctl(int semaphore, int number, int command, ...) {
+    typedef int (*open_type)(const char *, int, ...);
+    typedef int (*unlink_type)(const char *);
+    open_type real_open = (open_type)dlsym(RTLD_NEXT, "open");
+    unlink_type real_unlink = (unlink_type)dlsym(RTLD_NEXT, "unlink");
+    char path[PATH_MAX];
+    if (!semaphore_path(semaphore, path)) return -1;
+    if (command == IPC_RMID) {
+        if (real_unlink == NULL) {
+            errno = ENOSYS;
+            return -1;
+        }
+        return real_unlink(path);
+    }
+    if (real_open == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    va_list arguments;
+    va_start(arguments, command);
+    int set_value = 0;
+    void *pointer = NULL;
+    if (command == SETVAL) {
+        set_value = va_arg(arguments, int);
+    } else if (command == IPC_STAT || command == GETALL || command == SETALL) {
+        pointer = va_arg(arguments, void *);
+    }
+    va_end(arguments);
+    int descriptor = real_open(path, O_RDWR | O_CLOEXEC);
+    if (descriptor < 0) return -1;
+    if (flock(descriptor, LOCK_EX) != 0) {
+        int saved_errno = errno;
+        close(descriptor);
+        errno = saved_errno;
+        return -1;
+    }
+    unsigned char bytes[8 + ARCHPHENE_SEMAPHORE_MAX_COUNT * 8];
+    ssize_t length = pread(descriptor, bytes, sizeof(bytes), 0);
+    uint64_t count = length >= 8 ? message_load_u64(bytes) : 0;
+    int result = -1;
+    if (count == 0 || count > ARCHPHENE_SEMAPHORE_MAX_COUNT
+            || length != (ssize_t)(8 + count * 8)) {
+        errno = EIO;
+    } else if (number < 0 || (uint64_t)number >= count) {
+        errno = EINVAL;
+    } else if (command == GETVAL) {
+        result = (int)message_load_u64(bytes + 8 + (size_t)number * 8);
+    } else if (command == SETVAL) {
+        if (set_value < 0 || set_value > ARCHPHENE_SEMAPHORE_MAX_VALUE) {
+            errno = ERANGE;
+        } else {
+            message_store_u64(bytes + 8 + (size_t)number * 8,
+                    (uint64_t)set_value);
+            result = pwrite(descriptor, bytes, (size_t)length, 0) == length
+                    ? 0 : -1;
+        }
+    } else if (command == GETALL && pointer != NULL) {
+        unsigned short *values = pointer;
+        for (size_t index = 0; index < count; index++) {
+            values[index] =
+                    (unsigned short)message_load_u64(bytes + 8 + index * 8);
+        }
+        result = 0;
+    } else if (command == SETALL && pointer != NULL) {
+        unsigned short *values = pointer;
+        bool valid = true;
+        for (size_t index = 0; index < count; index++) {
+            if (values[index] > ARCHPHENE_SEMAPHORE_MAX_VALUE) {
+                valid = false;
+                break;
+            }
+            message_store_u64(bytes + 8 + index * 8, values[index]);
+        }
+        if (!valid) {
+            errno = ERANGE;
+        } else {
+            result = pwrite(descriptor, bytes, (size_t)length, 0) == length
+                    ? 0 : -1;
+        }
+    } else if (command == IPC_STAT && pointer != NULL) {
+        struct semid_ds *status = pointer;
+        memset(status, 0, sizeof(*status));
+        status->sem_perm.mode = 0600;
+        status->sem_nsems = count;
+        result = 0;
+    } else if (command == GETPID || command == GETNCNT || command == GETZCNT) {
+        result = 0;
+    } else {
+        errno = EINVAL;
+    }
+    int saved_errno = errno;
+    (void)flock(descriptor, LOCK_UN);
+    close(descriptor);
+    errno = saved_errno;
+    return result;
 }
 
 /*
@@ -114,6 +743,16 @@ static struct passwd root_passwd = {
     .pw_gecos = "Archphene system user",
     .pw_dir = "/home/archphene",
     .pw_shell = "/usr/bin/bash",
+};
+
+static struct passwd alpm_passwd = {
+    .pw_name = "alpm",
+    .pw_passwd = "x",
+    .pw_uid = 0,
+    .pw_gid = 0,
+    .pw_gecos = "Arch Linux Package Management",
+    .pw_dir = "/",
+    .pw_shell = "/usr/bin/nologin",
 };
 
 static int copy_passwd(const struct passwd *source, struct passwd *output,
@@ -167,7 +806,8 @@ int getpwuid_r(uid_t user, struct passwd *output, char *buffer,
 
 struct passwd *getpwnam(const char *name) {
     if (strcmp(name, "archphene") == 0) return &archphene_passwd;
-    return strcmp(name, "root") == 0 ? &root_passwd : NULL;
+    if (strcmp(name, "root") == 0) return &root_passwd;
+    return strcmp(name, "alpm") == 0 ? &alpm_passwd : NULL;
 }
 
 int getpwnam_r(const char *name, struct passwd *output, char *buffer,
@@ -177,6 +817,8 @@ int getpwnam_r(const char *name, struct passwd *output, char *buffer,
         source = &archphene_passwd;
     } else if (strcmp(name, "root") == 0) {
         source = &root_passwd;
+    } else if (strcmp(name, "alpm") == 0) {
+        source = &alpm_passwd;
     }
     if (source == NULL) {
         *result = NULL;
@@ -221,17 +863,22 @@ int fchownat(int directory, const char *path, uid_t owner, gid_t group, int flag
 }
 
 int fchmodat(int directory, const char *path, mode_t mode, int flags) {
+    bool translated;
+    char buffer[PATH_MAX];
+    const char *target = translate_at_path(directory, path, buffer, &translated,
+            (flags & AT_SYMLINK_NOFOLLOW) == 0);
+    if (target == NULL) return -1;
     if (flags == 0) {
-        return (int)syscall(SYS_fchmodat, directory, path, mode);
+        return (int)syscall(SYS_fchmodat, directory, target, mode);
     }
-    if (flags == AT_EMPTY_PATH && path[0] == '\0') {
+    if (flags == AT_EMPTY_PATH && target[0] == '\0') {
         return fchmod(directory, mode);
     }
     if (flags == AT_SYMLINK_NOFOLLOW) {
         struct stat metadata;
-        if (fstatat(directory, path, &metadata, AT_SYMLINK_NOFOLLOW) != 0) return -1;
+        if (fstatat(directory, target, &metadata, AT_SYMLINK_NOFOLLOW) != 0) return -1;
         if (S_ISLNK(metadata.st_mode)) return 0;
-        return (int)syscall(SYS_fchmodat, directory, path, mode);
+        return (int)syscall(SYS_fchmodat, directory, target, mode);
     }
     errno = EINVAL;
     return -1;
@@ -287,31 +934,37 @@ static int copy_hardlink_fallback(int source_directory, const char *source,
 }
 
 int link(const char *source, const char *destination) {
-    typedef int (*function_type)(const char *, const char *);
-    function_type real = (function_type)dlsym(RTLD_NEXT, "link");
-    if (real == NULL) {
-        errno = ENOSYS;
-        return -1;
-    }
-    if (real(source, destination) == 0) return 0;
-    if (errno != EPERM && errno != EACCES) return -1;
-    return copy_hardlink_fallback(AT_FDCWD, source, AT_FDCWD, destination);
+    return linkat(AT_FDCWD, source, AT_FDCWD, destination, 0);
 }
 
 int linkat(int source_directory, const char *source, int destination_directory,
         const char *destination, int flags) {
     typedef int (*function_type)(int, const char *, int, const char *, int);
     function_type real = (function_type)dlsym(RTLD_NEXT, "linkat");
+    bool source_translated;
+    bool destination_translated;
+    char source_buffer[PATH_MAX];
+    char destination_buffer[PATH_MAX];
+    const char *source_target = translate_at_path(source_directory, source,
+            source_buffer, &source_translated, (flags & AT_SYMLINK_FOLLOW) != 0);
+    const char *destination_target = translate_at_path(destination_directory,
+            destination, destination_buffer, &destination_translated, false);
+    if (source_target == NULL || destination_target == NULL) return -1;
     if (real == NULL) {
         errno = ENOSYS;
         return -1;
     }
-    if (real(source_directory, source, destination_directory, destination, flags) == 0) {
+    if (!fake_chroot_active && (source_translated || destination_translated)) {
+        errno = EROFS;
+        return -1;
+    }
+    if (real(source_directory, source_target, destination_directory,
+            destination_target, flags) == 0) {
         return 0;
     }
     if ((errno != EPERM && errno != EACCES) || flags != 0) return -1;
-    return copy_hardlink_fallback(
-            source_directory, source, destination_directory, destination);
+    return copy_hardlink_fallback(source_directory, source_target,
+            destination_directory, destination_target);
 }
 
 __attribute__((constructor))
@@ -465,6 +1118,61 @@ static bool normalize_logical_path(const char *path, char output[PATH_MAX]) {
         output[output_length] = '\0';
     }
     return true;
+}
+
+static const char *translate_at_path(int directory, const char *path,
+        char output[PATH_MAX], bool *translated, bool follow) {
+    if (path == NULL || path[0] == '/' || directory == AT_FDCWD) {
+        return follow
+                ? translate_follow_path(path, output, translated)
+                : translate_path(path, output, translated);
+    }
+    *translated = false;
+    if (!fake_chroot_active || path[0] == '\0') return path;
+    typedef ssize_t (*readlink_type)(const char *, char *, size_t);
+    readlink_type real_readlink = (readlink_type)dlsym(RTLD_NEXT, "readlink");
+    if (real_readlink == NULL || trusted_root[0] == '\0') {
+        errno = EACCES;
+        return NULL;
+    }
+    char descriptor[64];
+    int descriptor_length = snprintf(descriptor, sizeof(descriptor),
+            "/proc/self/fd/%d", directory);
+    if (descriptor_length <= 0
+            || (size_t)descriptor_length >= sizeof(descriptor)) {
+        errno = EBADF;
+        return NULL;
+    }
+    char base[PATH_MAX];
+    ssize_t base_length =
+            real_readlink(descriptor, base, sizeof(base) - 1);
+    if (base_length <= 0 || (size_t)base_length >= sizeof(base)) return NULL;
+    base[base_length] = '\0';
+    size_t root_length = strlen(trusted_root);
+    if (strncmp(base, trusted_root, root_length) != 0
+            || (base[root_length] != '\0' && base[root_length] != '/')) {
+        errno = EACCES;
+        return NULL;
+    }
+    const char *logical_base = base + root_length;
+    if (logical_base[0] == '\0') logical_base = "/";
+    char combined[PATH_MAX];
+    int combined_length = snprintf(combined, sizeof(combined), "%s%s%s",
+            logical_base, strcmp(logical_base, "/") == 0 ? "" : "/", path);
+    char logical[PATH_MAX];
+    if (combined_length <= 0 || (size_t)combined_length >= sizeof(combined)
+            || !normalize_logical_path(combined, logical)) {
+        errno = EACCES;
+        return NULL;
+    }
+    int output_length =
+            snprintf(output, PATH_MAX, "%s%s", trusted_root, logical);
+    if (output_length <= 0 || output_length >= PATH_MAX) {
+        errno = ENAMETOOLONG;
+        return NULL;
+    }
+    *translated = true;
+    return output;
 }
 
 static bool resolve_root_path(const char *path, char output[PATH_MAX]) {
@@ -978,6 +1686,37 @@ static int launch_runtime_file(const char *file, char *const arguments[],
             separator + 1, file, command, arguments, environment);
 }
 
+static int launch_fakeroot_compat(const char *name, char *const arguments[],
+        char *const environment[]) {
+    if (!fake_chroot_active || strcmp(name, "fakeroot") != 0) return 1;
+    if (arguments == NULL || arguments[0] == NULL
+            || arguments[1] == NULL || strcmp(arguments[1], "--") != 0
+            || arguments[2] == NULL) {
+        return 1;
+    }
+    char *const *source = environment == NULL ? environ : environment;
+    char *fakeroot_environment[4096];
+    size_t output_count = 0;
+    for (size_t index = 0; source[index] != NULL; index++) {
+        if (strncmp(source[index], "FAKEROOTKEY=", 12) == 0) continue;
+        if (output_count >= 4094) {
+            errno = E2BIG;
+            return -1;
+        }
+        fakeroot_environment[output_count++] = source[index];
+    }
+    /*
+     * makepkg's private -F re-entry requires proof that fakeroot launched it.
+     * The path bridge provides the UID/GID and metadata virtualization itself,
+     * so retain only that bounded protocol marker instead of starting faked or
+     * preloading libfakeroot ahead of path translation.
+     */
+    fakeroot_environment[output_count++] = "FAKEROOTKEY=archphene";
+    fakeroot_environment[output_count] = NULL;
+    return launch_runtime_file(
+            arguments[2], arguments + 2, fakeroot_environment);
+}
+
 int execve(const char *path, char *const arguments[], char *const environment[]) {
     if (trusted_loader[0] != '\0' && strcmp(path, trusted_loader) == 0) {
         typedef int (*function_type)(const char *, char *const[], char *const[]);
@@ -990,6 +1729,8 @@ int execve(const char *path, char *const arguments[], char *const environment[])
     }
     const char *name = strrchr(path, '/');
     name = name == NULL ? path : name + 1;
+    int fakeroot = launch_fakeroot_compat(name, arguments, environment);
+    if (fakeroot <= 0) return -1;
     char command[PATH_MAX];
     if (resolve_runtime_executable(path, command)) {
         return launch_runtime_executable(
@@ -1006,6 +1747,8 @@ int execve(const char *path, char *const arguments[], char *const environment[])
 int execv(const char *path, char *const arguments[]) {
     const char *name = strrchr(path, '/');
     name = name == NULL ? path : name + 1;
+    int fakeroot = launch_fakeroot_compat(name, arguments, environ);
+    if (fakeroot <= 0) return -1;
     char command[PATH_MAX];
     if (resolve_runtime_executable(path, command)) {
         return launch_runtime_executable(name, path, command, arguments, environ);
@@ -1015,6 +1758,10 @@ int execv(const char *path, char *const arguments[]) {
 }
 
 int execvp(const char *file, char *const arguments[]) {
+    const char *name = strrchr(file, '/');
+    name = name == NULL ? file : name + 1;
+    int fakeroot = launch_fakeroot_compat(name, arguments, environ);
+    if (fakeroot <= 0) return -1;
     int bridged = launch_runtime_file(file, arguments, environ);
     if (bridged <= 0) return -1;
     bridged = launch_android_system_command(file, arguments, environ);
@@ -1024,6 +1771,10 @@ int execvp(const char *file, char *const arguments[]) {
 }
 
 int execvpe(const char *file, char *const arguments[], char *const environment[]) {
+    const char *name = strrchr(file, '/');
+    name = name == NULL ? file : name + 1;
+    int fakeroot = launch_fakeroot_compat(name, arguments, environment);
+    if (fakeroot <= 0) return -1;
     int bridged = launch_runtime_file(file, arguments, environment);
     if (bridged <= 0) return -1;
     bridged = launch_android_system_command(file, arguments, environment);
@@ -1104,6 +1855,50 @@ static const char *translate_path(const char *path, char output[PATH_MAX],
     memcpy(output + root_length, path, path_length + 1);
     *translated = true;
     return output;
+}
+
+static const char *translate_follow_path(const char *path,
+        char output[PATH_MAX], bool *translated) {
+    if (!fake_chroot_active || path == NULL || has_parent_component(path)) {
+        return translate_path(path, output, translated);
+    }
+    char logical[PATH_MAX];
+    if (path[0] == '/') {
+        size_t length = strlen(path);
+        if (length >= sizeof(logical)) {
+            errno = ENAMETOOLONG;
+            return NULL;
+        }
+        memcpy(logical, path, length + 1);
+    } else {
+        typedef char *(*getcwd_type)(char *, size_t);
+        getcwd_type real_getcwd = (getcwd_type)dlsym(RTLD_NEXT, "getcwd");
+        char current[PATH_MAX];
+        if (real_getcwd == NULL || real_getcwd(current, sizeof(current)) == NULL) {
+            return NULL;
+        }
+        size_t root_length = strlen(trusted_root);
+        if (strncmp(current, trusted_root, root_length) != 0
+                || (current[root_length] != '\0'
+                    && current[root_length] != '/')) {
+            return translate_path(path, output, translated);
+        }
+        const char *relative = current + root_length;
+        if (relative[0] == '\0') relative = "/";
+        char combined[PATH_MAX];
+        int length = snprintf(combined, sizeof(combined), "%s%s%s",
+                relative, strcmp(relative, "/") == 0 ? "" : "/", path);
+        if (length <= 0 || (size_t)length >= sizeof(combined)
+                || !normalize_logical_path(combined, logical)) {
+            errno = ENAMETOOLONG;
+            return NULL;
+        }
+    }
+    if (resolve_root_path(logical, output)) {
+        *translated = true;
+        return output;
+    }
+    return translate_path(path, output, translated);
 }
 
 static int translate_unix_address(const struct sockaddr *address,
@@ -1211,7 +2006,7 @@ int chdir(const char *path) {
     function_type real = (function_type)dlsym(RTLD_NEXT, "chdir");
     bool translated;
     char buffer[PATH_MAX];
-    const char *target = translate_path(path, buffer, &translated);
+    const char *target = translate_follow_path(path, buffer, &translated);
     if (target == NULL) return -1;
     if (real == NULL) {
         errno = ENOSYS;
@@ -1255,6 +2050,40 @@ char *get_current_dir_name(void) {
         return NULL;
     }
     return linux_cwd(real());
+}
+
+char *realpath(const char *path, char *resolved_path) {
+    typedef char *(*function_type)(const char *, char *);
+    function_type real = (function_type)dlsym(RTLD_NEXT, "realpath");
+    bool translated;
+    char buffer[PATH_MAX];
+    const char *target = translate_follow_path(path, buffer, &translated);
+    if (target == NULL) return NULL;
+    if (real == NULL) {
+        errno = ENOSYS;
+        return NULL;
+    }
+    return linux_cwd(real(target, resolved_path));
+}
+
+char *__realpath_chk(const char *path, char *resolved_path,
+        size_t resolved_size) {
+    typedef char *(*function_type)(const char *, char *, size_t);
+    function_type real =
+            (function_type)dlsym(RTLD_NEXT, "__realpath_chk");
+    bool translated;
+    char buffer[PATH_MAX];
+    const char *target = translate_follow_path(path, buffer, &translated);
+    if (target == NULL) return NULL;
+    if (real == NULL) {
+        errno = ENOSYS;
+        return NULL;
+    }
+    return linux_cwd(real(target, resolved_path, resolved_size));
+}
+
+char *canonicalize_file_name(const char *path) {
+    return realpath(path, NULL);
 }
 
 static bool write_flags(int flags) {
@@ -1328,7 +2157,7 @@ static int open_impl(const char *symbol, const char *path, int flags, mode_t mod
     function_type real = RESOLVE(function_type, symbol);
     bool translated;
     char buffer[PATH_MAX];
-    const char *target = translate_path(path, buffer, &translated);
+    const char *target = translate_follow_path(path, buffer, &translated);
     if (target == NULL) return -1;
     REQUIRE_REAL(real);
     if (translated && !fake_chroot_active && write_flags(flags)) {
@@ -1368,7 +2197,8 @@ static int openat_impl(const char *symbol, int directory, const char *path, int 
     function_type real = RESOLVE(function_type, symbol);
     bool translated;
     char buffer[PATH_MAX];
-    const char *target = translate_path(path, buffer, &translated);
+    const char *target = translate_at_path(directory, path, buffer, &translated,
+            (flags & O_NOFOLLOW) == 0);
     if (target == NULL) return -1;
     REQUIRE_REAL(real);
     if (translated && !fake_chroot_active && write_flags(flags)) {
@@ -1405,12 +2235,82 @@ int openat64(int directory, const char *path, int flags, ...) {
 int __open_2(const char *path, int flags) { return open(path, flags); }
 int __open64_2(const char *path, int flags) { return open64(path, flags); }
 
+static int finish_temporary_file(int descriptor, char *logical_template,
+        const char *physical_template, size_t logical_length, bool translated) {
+    if (descriptor < 0 || !translated) return descriptor;
+    size_t root_length = strlen(trusted_root);
+    size_t physical_length = strlen(physical_template);
+    if (root_length == 0 || physical_length != root_length + logical_length
+            || strncmp(physical_template, trusted_root, root_length) != 0
+            || physical_template[root_length] != '/') {
+        int saved_errno = errno == 0 ? EIO : errno;
+        close(descriptor);
+        unlink(physical_template);
+        errno = saved_errno;
+        return -1;
+    }
+    memcpy(logical_template, physical_template + root_length, logical_length + 1);
+    return descriptor;
+}
+
+int mkstemp(char *template) {
+    typedef int (*function_type)(char *);
+    function_type real = RESOLVE(function_type, "mkstemp");
+    bool translated;
+    char buffer[PATH_MAX];
+    size_t logical_length = strlen(template);
+    const char *target = translate_path(template, buffer, &translated);
+    if (target == NULL) return -1;
+    REQUIRE_REAL(real);
+    return finish_temporary_file(
+            real((char *)target), template, target, logical_length, translated);
+}
+
+int mkostemp(char *template, int flags) {
+    typedef int (*function_type)(char *, int);
+    function_type real = RESOLVE(function_type, "mkostemp");
+    bool translated;
+    char buffer[PATH_MAX];
+    size_t logical_length = strlen(template);
+    const char *target = translate_path(template, buffer, &translated);
+    if (target == NULL) return -1;
+    REQUIRE_REAL(real);
+    return finish_temporary_file(
+            real((char *)target, flags), template, target, logical_length, translated);
+}
+
+int mkstemps(char *template, int suffix_length) {
+    typedef int (*function_type)(char *, int);
+    function_type real = RESOLVE(function_type, "mkstemps");
+    bool translated;
+    char buffer[PATH_MAX];
+    size_t logical_length = strlen(template);
+    const char *target = translate_path(template, buffer, &translated);
+    if (target == NULL) return -1;
+    REQUIRE_REAL(real);
+    return finish_temporary_file(real((char *)target, suffix_length), template,
+            target, logical_length, translated);
+}
+
+int mkostemps(char *template, int suffix_length, int flags) {
+    typedef int (*function_type)(char *, int, int);
+    function_type real = RESOLVE(function_type, "mkostemps");
+    bool translated;
+    char buffer[PATH_MAX];
+    size_t logical_length = strlen(template);
+    const char *target = translate_path(template, buffer, &translated);
+    if (target == NULL) return -1;
+    REQUIRE_REAL(real);
+    return finish_temporary_file(real((char *)target, suffix_length, flags),
+            template, target, logical_length, translated);
+}
+
 static FILE *fopen_impl(const char *symbol, const char *path, const char *mode) {
     typedef FILE *(*function_type)(const char *, const char *);
     function_type real = RESOLVE(function_type, symbol);
     bool translated;
     char buffer[PATH_MAX];
-    const char *target = translate_path(path, buffer, &translated);
+    const char *target = translate_follow_path(path, buffer, &translated);
     if (target == NULL) return NULL;
     if (real == NULL) {
         errno = ENOSYS;
@@ -1431,7 +2331,7 @@ DIR *opendir(const char *path) {
     function_type real = RESOLVE(function_type, "opendir");
     bool translated;
     char buffer[PATH_MAX];
-    const char *target = translate_path(path, buffer, &translated);
+    const char *target = translate_follow_path(path, buffer, &translated);
     if (target == NULL) return NULL;
     if (real == NULL) {
         errno = ENOSYS;
@@ -1440,39 +2340,97 @@ DIR *opendir(const char *path) {
     return real(target);
 }
 
-#define PATH_CALL(name, value_type) \
+static void normalize_stat_identity(struct stat *value) {
+    if (fake_chroot_active && value != NULL) {
+        value->st_uid = 0;
+        value->st_gid = 0;
+    }
+}
+
+static void normalize_stat64_identity(struct stat64 *value) {
+    if (fake_chroot_active && value != NULL) {
+        value->st_uid = 0;
+        value->st_gid = 0;
+    }
+}
+
+#define PATH_CALL(name, value_type, normalizer, follow) \
     int name(const char *path, value_type *value) { \
         typedef int (*function_type)(const char *, value_type *); \
         function_type real = RESOLVE(function_type, #name); \
         bool translated; \
         char buffer[PATH_MAX]; \
-        const char *target = translate_path(path, buffer, &translated); \
+        const char *target = follow \
+                ? translate_follow_path(path, buffer, &translated) \
+                : translate_path(path, buffer, &translated); \
         if (target == NULL) return -1; \
         REQUIRE_REAL(real); \
-        return real(target, value); \
+        int result = real(target, value); \
+        if (result == 0) normalizer(value); \
+        return result; \
     }
 
-PATH_CALL(stat, struct stat)
-PATH_CALL(stat64, struct stat64)
-PATH_CALL(lstat, struct stat)
-PATH_CALL(lstat64, struct stat64)
+PATH_CALL(stat, struct stat, normalize_stat_identity, true)
+PATH_CALL(stat64, struct stat64, normalize_stat64_identity, true)
+PATH_CALL(lstat, struct stat, normalize_stat_identity, false)
+PATH_CALL(lstat64, struct stat64, normalize_stat64_identity, false)
 
-#define XSTAT_CALL(name, value_type) \
+#define XSTAT_CALL(name, value_type, normalizer, follow) \
     int name(int version, const char *path, value_type *value) { \
         typedef int (*function_type)(int, const char *, value_type *); \
         function_type real = RESOLVE(function_type, #name); \
         bool translated; \
         char buffer[PATH_MAX]; \
-        const char *target = translate_path(path, buffer, &translated); \
+        const char *target = follow \
+                ? translate_follow_path(path, buffer, &translated) \
+                : translate_path(path, buffer, &translated); \
         if (target == NULL) return -1; \
         REQUIRE_REAL(real); \
-        return real(version, target, value); \
+        int result = real(version, target, value); \
+        if (result == 0) normalizer(value); \
+        return result; \
     }
 
-XSTAT_CALL(__xstat, struct stat)
-XSTAT_CALL(__xstat64, struct stat64)
-XSTAT_CALL(__lxstat, struct stat)
-XSTAT_CALL(__lxstat64, struct stat64)
+XSTAT_CALL(__xstat, struct stat, normalize_stat_identity, true)
+XSTAT_CALL(__xstat64, struct stat64, normalize_stat64_identity, true)
+XSTAT_CALL(__lxstat, struct stat, normalize_stat_identity, false)
+XSTAT_CALL(__lxstat64, struct stat64, normalize_stat64_identity, false)
+
+int fstat(int descriptor, struct stat *value) {
+    typedef int (*function_type)(int, struct stat *);
+    function_type real = RESOLVE(function_type, "fstat");
+    REQUIRE_REAL(real);
+    int result = real(descriptor, value);
+    if (result == 0) normalize_stat_identity(value);
+    return result;
+}
+
+int fstat64(int descriptor, struct stat64 *value) {
+    typedef int (*function_type)(int, struct stat64 *);
+    function_type real = RESOLVE(function_type, "fstat64");
+    REQUIRE_REAL(real);
+    int result = real(descriptor, value);
+    if (result == 0) normalize_stat64_identity(value);
+    return result;
+}
+
+int __fxstat(int version, int descriptor, struct stat *value) {
+    typedef int (*function_type)(int, int, struct stat *);
+    function_type real = RESOLVE(function_type, "__fxstat");
+    REQUIRE_REAL(real);
+    int result = real(version, descriptor, value);
+    if (result == 0) normalize_stat_identity(value);
+    return result;
+}
+
+int __fxstat64(int version, int descriptor, struct stat64 *value) {
+    typedef int (*function_type)(int, int, struct stat64 *);
+    function_type real = RESOLVE(function_type, "__fxstat64");
+    REQUIRE_REAL(real);
+    int result = real(version, descriptor, value);
+    if (result == 0) normalize_stat64_identity(value);
+    return result;
+}
 
 int access(const char *path, int mode) {
     typedef int (*function_type)(const char *, int);
@@ -1484,7 +2442,7 @@ int access(const char *path, int mode) {
     }
     bool translated;
     char buffer[PATH_MAX];
-    const char *target = translate_path(path, buffer, &translated);
+    const char *target = translate_follow_path(path, buffer, &translated);
     if (target == NULL) return -1;
     REQUIRE_REAL(real);
     if (translated && !fake_chroot_active && (mode & W_OK) != 0) {
@@ -1504,7 +2462,7 @@ int eaccess(const char *path, int mode) {
     }
     bool translated;
     char buffer[PATH_MAX];
-    const char *target = translate_path(path, buffer, &translated);
+    const char *target = translate_follow_path(path, buffer, &translated);
     if (target == NULL) return -1;
     REQUIRE_REAL(real);
     if (translated && !fake_chroot_active && (mode & W_OK) != 0) {
@@ -1524,7 +2482,8 @@ int faccessat(int directory, const char *path, int mode, int flags) {
     }
     bool translated;
     char buffer[PATH_MAX];
-    const char *target = translate_path(path, buffer, &translated);
+    const char *target = translate_at_path(directory, path, buffer, &translated,
+            (flags & AT_SYMLINK_NOFOLLOW) == 0);
     if (target == NULL) return -1;
     REQUIRE_REAL(real);
     if (translated && !fake_chroot_active && (mode & W_OK) != 0) {
@@ -1539,10 +2498,13 @@ int fstatat(int directory, const char *path, struct stat *value, int flags) {
     function_type real = RESOLVE(function_type, "fstatat");
     bool translated;
     char buffer[PATH_MAX];
-    const char *target = translate_path(path, buffer, &translated);
+    const char *target = translate_at_path(directory, path, buffer, &translated,
+            (flags & AT_SYMLINK_NOFOLLOW) == 0);
     if (target == NULL) return -1;
     REQUIRE_REAL(real);
-    return real(directory, target, value, flags);
+    int result = real(directory, target, value, flags);
+    if (result == 0) normalize_stat_identity(value);
+    return result;
 }
 
 int statx(int directory, const char *path, int flags, unsigned int mask,
@@ -1551,10 +2513,16 @@ int statx(int directory, const char *path, int flags, unsigned int mask,
     function_type real = RESOLVE(function_type, "statx");
     bool translated;
     char buffer[PATH_MAX];
-    const char *target = translate_path(path, buffer, &translated);
+    const char *target = translate_at_path(directory, path, buffer, &translated,
+            (flags & AT_SYMLINK_NOFOLLOW) == 0);
     if (target == NULL) return -1;
     REQUIRE_REAL(real);
-    return real(directory, target, flags, mask, value);
+    int result = real(directory, target, flags, mask, value);
+    if (result == 0 && fake_chroot_active) {
+        value->stx_uid = 0;
+        value->stx_gid = 0;
+    }
+    return result;
 }
 
 ssize_t readlink(const char *path, char *buffer, size_t size) {
@@ -1575,7 +2543,20 @@ ssize_t readlink(const char *path, char *buffer, size_t size) {
         errno = ENOSYS;
         return -1;
     }
-    return real(target, buffer, size);
+    ssize_t length = real(target, buffer, size);
+    size_t root_length = strlen(trusted_root);
+    if (length >= 0 && root_length > 0 && (size_t)length >= root_length
+            && memcmp(buffer, trusted_root, root_length) == 0
+            && ((size_t)length == root_length || buffer[root_length] == '/')) {
+        size_t logical_length = (size_t)length - root_length;
+        if (logical_length == 0) {
+            if (size > 0) buffer[0] = '/';
+            return size > 0 ? 1 : 0;
+        }
+        memmove(buffer, buffer + root_length, logical_length);
+        return (ssize_t)logical_length;
+    }
+    return length;
 }
 
 ssize_t readlinkat(int directory, const char *path, char *buffer, size_t size) {
@@ -1590,10 +2571,24 @@ ssize_t readlinkat(int directory, const char *path, char *buffer, size_t size) {
     function_type real = RESOLVE(function_type, "readlinkat");
     bool translated;
     char translated_path[PATH_MAX];
-    const char *target = translate_path(path, translated_path, &translated);
+    const char *target =
+            translate_at_path(directory, path, translated_path, &translated, false);
     if (target == NULL) return -1;
     REQUIRE_REAL(real);
-    return real(directory, target, buffer, size);
+    ssize_t length = real(directory, target, buffer, size);
+    size_t root_length = strlen(trusted_root);
+    if (length >= 0 && root_length > 0 && (size_t)length >= root_length
+            && memcmp(buffer, trusted_root, root_length) == 0
+            && ((size_t)length == root_length || buffer[root_length] == '/')) {
+        size_t logical_length = (size_t)length - root_length;
+        if (logical_length == 0) {
+            if (size > 0) buffer[0] = '/';
+            return size > 0 ? 1 : 0;
+        }
+        memmove(buffer, buffer + root_length, logical_length);
+        return (ssize_t)logical_length;
+    }
+    return length;
 }
 int mkdir(const char *path, mode_t mode) {
     typedef int (*function_type)(int, const char *, mode_t);
@@ -1633,7 +2628,8 @@ int mkdirat(int directory, const char *path, mode_t mode) {
     function_type real = RESOLVE(function_type, "mkdirat");
     bool translated;
     char buffer[PATH_MAX];
-    const char *target = translate_path(path, buffer, &translated);
+    const char *target =
+            translate_at_path(directory, path, buffer, &translated, false);
     if (target == NULL) return -1;
     REQUIRE_REAL(real);
     if (translated && !fake_chroot_active) {
@@ -1648,7 +2644,7 @@ int chmod(const char *path, mode_t mode) {
     function_type real = RESOLVE(function_type, "fchmodat");
     bool translated;
     char buffer[PATH_MAX];
-    const char *target = translate_path(path, buffer, &translated);
+    const char *target = translate_follow_path(path, buffer, &translated);
     if (target == NULL) return -1;
     REQUIRE_REAL(real);
     if (translated && !fake_chroot_active) {
@@ -1663,7 +2659,8 @@ int unlinkat(int directory, const char *path, int flags) {
     function_type real = RESOLVE(function_type, "unlinkat");
     bool translated;
     char buffer[PATH_MAX];
-    const char *target = translate_path(path, buffer, &translated);
+    const char *target =
+            translate_at_path(directory, path, buffer, &translated, false);
     if (target == NULL) return -1;
     REQUIRE_REAL(real);
     if (translated && !fake_chroot_active) {
@@ -1695,8 +2692,10 @@ int renameat(int old_directory, const char *old_path, int new_directory,
     bool new_translated;
     char old_buffer[PATH_MAX];
     char new_buffer[PATH_MAX];
-    const char *old_target = translate_path(old_path, old_buffer, &old_translated);
-    const char *new_target = translate_path(new_path, new_buffer, &new_translated);
+    const char *old_target = translate_at_path(
+            old_directory, old_path, old_buffer, &old_translated, false);
+    const char *new_target = translate_at_path(
+            new_directory, new_path, new_buffer, &new_translated, false);
     if (old_target == NULL || new_target == NULL) return -1;
     REQUIRE_REAL(real);
     if (!fake_chroot_active && (old_translated || new_translated)) {
@@ -1711,14 +2710,20 @@ int symlinkat(const char *target, int directory, const char *link_path) {
     function_type real = RESOLVE(function_type, "symlinkat");
     bool translated;
     char buffer[PATH_MAX];
-    const char *destination = translate_path(link_path, buffer, &translated);
+    const char *destination =
+            translate_at_path(directory, link_path, buffer, &translated, false);
     if (destination == NULL) return -1;
+    bool target_translated;
+    char target_buffer[PATH_MAX];
+    const char *stored_target =
+            translate_path(target, target_buffer, &target_translated);
+    if (stored_target == NULL) return -1;
     REQUIRE_REAL(real);
     if (translated && !fake_chroot_active) {
         errno = EROFS;
         return -1;
     }
-    return real(target, directory, destination);
+    return real(stored_target, directory, destination);
 }
 
 int symlink(const char *target, const char *link_path) {

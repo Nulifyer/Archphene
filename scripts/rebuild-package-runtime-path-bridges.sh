@@ -52,13 +52,42 @@ podman run --rm --network=none \
   archphene_die "refreshed AArch64 bridge has the wrong machine"
 readelf -Ws "$work/libarchphene_path_bridge-x86_64.so" >"$work/x86-symbols.txt"
 readelf -Ws "$work/libarchphene_path_bridge-aarch64.so" >"$work/arm-symbols.txt"
-for symbol in bind chroot connect execve fchmodat getcwd getpwnam_r getpwuid_r \
-    linkat posix_spawn posix_spawnp renameat setfsgid setfsuid symlinkat \
+awk '$4 == "FUNC" && $5 == "GLOBAL" && $7 != "UND" {
+       sub(/@.*/, "", $8)
+       print $8
+     }' "$work/x86-symbols.txt" |
+  sort -u >"$work/x86-global-functions.txt"
+awk '$4 == "FUNC" && $5 == "GLOBAL" && $7 != "UND" {
+       sub(/@.*/, "", $8)
+       print $8
+     }' "$work/arm-symbols.txt" |
+  sort -u >"$work/arm-global-functions.txt"
+missing_arm_functions="$(
+  comm -23 "$work/x86-global-functions.txt" "$work/arm-global-functions.txt"
+)"
+[[ -z "$missing_arm_functions" ]] ||
+  archphene_die \
+    "refreshed AArch64 bridge omits exported wrappers: $missing_arm_functions"
+for symbol in bind chroot connect execve fchmodat fstat fstatat getcwd \
+    getpwnam_r getpwuid_r \
+    linkat mkdir msgctl msgget msgrcv msgsnd posix_spawn posix_spawnp renameat \
+    semctl semget semop semtimedop setfsgid setfsuid stat statx symlinkat \
     unlinkat; do
   grep -Eq " $symbol$" "$work/x86-symbols.txt" ||
     archphene_die "refreshed x86_64 bridge is missing $symbol"
+done
+for symbol in bind chroot connect execve fchmodat getcwd getpwnam_r \
+    getpwuid_r linkat mkdir msgctl msgget msgrcv msgsnd posix_spawn \
+    posix_spawnp renameat semctl semget semop semtimedop setfsgid setfsuid \
+    symlinkat unlinkat; do
   grep -Eq "$symbol@@GLIBC_2\\.17" "$work/arm-symbols.txt" ||
-    archphene_die "refreshed AArch64 bridge is missing versioned $symbol"
+    archphene_die "refreshed AArch64 bridge is missing $symbol@GLIBC_2.17"
+done
+grep -Eq 'statx@@GLIBC_2\.28' "$work/arm-symbols.txt" ||
+  archphene_die "refreshed AArch64 bridge is missing statx@GLIBC_2.28"
+for symbol in fstat fstatat stat; do
+  grep -Eq "$symbol@@GLIBC_2\\.33" "$work/arm-symbols.txt" ||
+    archphene_die "refreshed AArch64 bridge is missing $symbol@GLIBC_2.33"
 done
 
 install -m755 "$work/libarchphene_path_bridge-x86_64.so" \

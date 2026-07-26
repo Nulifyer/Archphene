@@ -120,6 +120,19 @@ class ArchpheneRuntimeService : Service() {
                     !packageOperationActive &&
                     !commandActive
 
+        val aurBuildAvailable: Boolean
+            get() =
+                retainedAurBuilderReport?.packageName != null &&
+                    retainedAurReview != null &&
+                    readyHandle != 0L &&
+                    !catalogRefreshActive &&
+                    !searchActive &&
+                    !packageOperationActive &&
+                    !commandActive
+
+        val aurBuildCancellationAvailable: Boolean
+            get() = aurBuildActive && aurBuildCancelable
+
         internal val installedPackages: InstalledPackageSnapshot
             get() = installedPackageSnapshot
 
@@ -260,6 +273,7 @@ class ArchpheneRuntimeService : Service() {
         val packageActivityActionLabel: String
             get() =
                 when {
+                    aurBuildCancellationAvailable -> "Cancel build"
                     packageCancellationAvailable -> "Cancel"
                     packageCacheRecoveryAvailable -> "Clear cache"
                     else -> "Review"
@@ -386,6 +400,11 @@ class ArchpheneRuntimeService : Service() {
         fun verifyAurSources(packageName: String): Boolean =
             requestAurSourceVerification(packageName)
 
+        fun buildAurPackage(packageName: String): Boolean =
+            requestAurBuild(packageName)
+
+        fun cancelAurBuild(): Boolean = requestAurBuildCancellation()
+
         fun installPackage(packageName: String): Boolean =
             requestPackageInstall(packageName)
 
@@ -495,6 +514,10 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var retainedAurReview: AurReviewData? = null
     @Volatile private var retainedAurVerifiedBytes = 0L
     @Volatile private var retainedAurSourceEvidence: Array<AurSourceEvidence> = emptyArray()
+    @Volatile private var retainedAurBuilderReport: AurBuilderReport? = null
+    @Volatile private var aurBuildActive = false
+    @Volatile private var aurBuildCancelable = false
+    @Volatile private var aurBuildCancellationRequested = false
     @Volatile
     private var installedPackageSnapshot =
         InstalledPackageSnapshot(
@@ -657,6 +680,20 @@ class ArchpheneRuntimeService : Service() {
         val buildRootEntries: Long,
         val buildRootBytes: Long,
         val runtimeVersion: String,
+        val recipeEntries: Long,
+        val recipeBytes: Long,
+        val recipeSourceBytes: Long,
+    )
+
+    private data class AurRecipeWorkspace(
+        val entryCount: Long,
+        val recipeBytes: Long,
+        val sourceBytes: Long,
+    )
+
+    private data class AurBuildPoll(
+        val exitStatus: Int,
+        val logs: String,
     )
 
     private data class AurBuildEnvironment(
@@ -1270,7 +1307,17 @@ class ArchpheneRuntimeService : Service() {
             IBinder.FIRST_CALL_TRANSACTION + 8
         private const val AUR_BUILDER_TRANSACTION_PROBE_RUNTIME =
             IBinder.FIRST_CALL_TRANSACTION + 9
+        private const val AUR_BUILDER_TRANSACTION_PREPARE_RECIPE =
+            IBinder.FIRST_CALL_TRANSACTION + 10
+        private const val AUR_BUILDER_TRANSACTION_START_BUILD =
+            IBinder.FIRST_CALL_TRANSACTION + 11
+        private const val AUR_BUILDER_TRANSACTION_POLL_BUILD =
+            IBinder.FIRST_CALL_TRANSACTION + 12
+        private const val AUR_BUILDER_TRANSACTION_CANCEL_BUILD =
+            IBinder.FIRST_CALL_TRANSACTION + 13
         private const val AUR_BUILDER_PACKAGE_BATCH = 8
+        private const val AUR_BUILD_POLL_MILLIS = 100L
+        private const val AUR_BUILD_VISIBLE_LOG_CHARACTERS = 8 * 1024
         private const val AUR_REDIRECT_LIMIT = 5
         private const val AUR_STORAGE_RESERVE_BYTES = 64L * 1024 * 1024
         private const val AUR_TOTAL_SOURCE_MAX_BYTES = 8L * 1024 * 1024 * 1024
@@ -3719,6 +3766,7 @@ class ArchpheneRuntimeService : Service() {
         retainedAurReview = null
         retainedAurVerifiedBytes = 0L
         retainedAurSourceEvidence = emptyArray()
+        retainedAurBuilderReport = null
         searchStatus = "Searching for $normalized"
         publishAvailablePackageStatus(searchStatus)
         Thread(
@@ -3990,6 +4038,7 @@ class ArchpheneRuntimeService : Service() {
         retainedAurReview = null
         retainedAurVerifiedBytes = 0L
         retainedAurSourceEvidence = emptyArray()
+        retainedAurBuilderReport = null
         lastResolvedPackage = ""
         lastResolvedRepository = ""
         lastResolvedInstalledVersion = ""
@@ -4193,6 +4242,7 @@ class ArchpheneRuntimeService : Service() {
         searchActive = true
         retainedAurVerifiedBytes = 0L
         retainedAurSourceEvidence = emptyArray()
+        retainedAurBuilderReport = null
         searchStatus = "Preparing ${remoteSources.size} reviewed AUR source download(s)"
         Thread(
             {
@@ -4313,6 +4363,7 @@ class ArchpheneRuntimeService : Service() {
                             retainedAurSourceEvidence,
                             buildEnvironment,
                         )
+                    retainedAurBuilderReport = builder
                     searchStatus =
                         formatAurReview(
                             review,
@@ -4344,7 +4395,9 @@ class ArchpheneRuntimeService : Service() {
                                 "${builder.closureManifestSha256} " +
                                 "root=${builder.buildRootEntries}/" +
                                 "${builder.buildRootBytes} " +
-                                "tool=${builder.runtimeVersion.replace('\n', ' ')}",
+                                "tool=${builder.runtimeVersion.replace('\n', ' ')} " +
+                                "recipe=${builder.recipeEntries}/" +
+                                "${builder.recipeBytes}+${builder.recipeSourceBytes}",
                         )
                     } else {
                         Log.i(TAG, "AUR builder companion is not installed")
@@ -4364,6 +4417,197 @@ class ArchpheneRuntimeService : Service() {
         ).start()
         promoteWorkToForeground()
         return true
+    }
+
+    @Synchronized
+    private fun requestAurBuild(packageName: String): Boolean {
+        val normalized = packageName.trim()
+        val review = retainedAurReview
+        val builder = retainedAurBuilderReport
+        if (
+            review == null ||
+            builder == null ||
+            normalized != review.packageName ||
+            readyHandle == 0L ||
+            catalogRefreshActive ||
+            searchActive ||
+            packageOperationActive ||
+            commandActive
+        ) {
+            searchStatus = "Verify the exact reviewed AUR sources before building"
+            return false
+        }
+        searchActive = true
+        aurBuildActive = true
+        aurBuildCancelable = true
+        aurBuildCancellationRequested = false
+        searchStatus = "Starting isolated offline build for ${review.packageName}"
+        Thread(
+            {
+                try {
+                    val result = runAurBuilderBuild(review, builder)
+                    searchStatus =
+                        if (result.logs.isEmpty()) {
+                            "Built ${review.packageName} ${review.version}; verifying output next"
+                        } else {
+                            "Built ${review.packageName} ${review.version}; verifying output next\n" +
+                                result.logs
+                        }
+                    Log.i(
+                        TAG,
+                        "AUR build completed for ${review.packageName} ${review.version}",
+                    )
+                } catch (error: Exception) {
+                    searchStatus =
+                        if (
+                            error is InterruptedException ||
+                            aurBuildCancellationRequested
+                        ) {
+                            "AUR build cancelled"
+                        } else {
+                            "AUR build failed: ${error.message ?: error.javaClass.simpleName}"
+                        }
+                    Log.e(TAG, "AUR build failed", error)
+                } finally {
+                    aurBuildCancelable = false
+                    aurBuildActive = false
+                    aurBuildCancellationRequested = false
+                    searchActive = false
+                    stopWhenUnobservedAndIdle()
+                }
+            },
+            "ArchpheneAurBuild",
+        ).start()
+        promoteWorkToForeground()
+        return true
+    }
+
+    @Synchronized
+    private fun requestAurBuildCancellation(): Boolean {
+        if (!aurBuildActive || !aurBuildCancelable) {
+            return false
+        }
+        aurBuildCancellationRequested = true
+        aurBuildCancelable = false
+        searchStatus = "Cancelling the AUR build"
+        return true
+    }
+
+    private fun runAurBuilderBuild(
+        review: AurReviewData,
+        builder: AurBuilderReport,
+    ): AurBuildPoll {
+        check(builder.inputManifestSha256.matches(SHA256_HEX))
+        check(builder.closureManifestSha256.matches(SHA256_HEX))
+        check(
+            packageManager.checkSignatures(packageName, builder.packageName) ==
+                PackageManager.SIGNATURE_MATCH,
+        ) {
+            "AUR builder signer changed after source verification"
+        }
+        val connected = CountDownLatch(1)
+        var remote: IBinder? = null
+        var disconnected = false
+        val connection =
+            object : ServiceConnection {
+                override fun onServiceConnected(
+                    name: ComponentName?,
+                    service: IBinder?,
+                ) {
+                    remote = service
+                    connected.countDown()
+                }
+
+                override fun onServiceDisconnected(name: ComponentName?) {
+                    disconnected = true
+                    connected.countDown()
+                }
+            }
+        var bound = false
+        var buildStarted = false
+        try {
+            bound =
+                bindService(
+                    Intent("org.archphene.action.BIND_BUILDER")
+                        .setPackage(builder.packageName),
+                    connection,
+                    BIND_AUTO_CREATE,
+                )
+            if (!bound || !connected.await(10, TimeUnit.SECONDS) || disconnected) {
+                throw IllegalStateException("Could not bind the verified AUR builder")
+            }
+            val endpoint =
+                remote ?: throw IllegalStateException("AUR builder returned no Binder")
+            transactAurBuilder(
+                endpoint,
+                AUR_BUILDER_TRANSACTION_START_BUILD,
+                { request ->
+                    request.writeString(review.packageBase)
+                    request.writeString(review.version)
+                    request.writeString(builder.inputManifestSha256)
+                    request.writeString(builder.closureManifestSha256)
+                },
+            ) {}
+            buildStarted = true
+            while (true) {
+                if (aurBuildCancellationRequested) {
+                    transactAurBuilder(
+                        endpoint,
+                        AUR_BUILDER_TRANSACTION_CANCEL_BUILD,
+                        {},
+                    ) { reply ->
+                        check(reply.readBoolean()) {
+                            "AUR builder had no active build to cancel"
+                        }
+                    }
+                    buildStarted = false
+                    throw InterruptedException("AUR build cancelled")
+                }
+                val poll =
+                    transactAurBuilder(
+                        endpoint,
+                        AUR_BUILDER_TRANSACTION_POLL_BUILD,
+                        {},
+                    ) { reply ->
+                        val exitStatus = reply.readInt()
+                        val logBytes = reply.createByteArray() ?: ByteArray(0)
+                        check(logBytes.size <= 64 * 1024)
+                        val raw = String(logBytes, StandardCharsets.UTF_8)
+                        val visible =
+                            sanitizeCommandOutput(
+                                raw.takeLast(AUR_BUILD_VISIBLE_LOG_CHARACTERS),
+                            ).trim()
+                        AurBuildPoll(exitStatus, visible)
+                    }
+                if (poll.logs.isNotEmpty()) {
+                    searchStatus = "Building ${review.packageName}\n${poll.logs}"
+                }
+                if (poll.exitStatus >= 0) {
+                    buildStarted = false
+                    check(poll.exitStatus == 0) {
+                        "makepkg exited ${poll.exitStatus}" +
+                            if (poll.logs.isEmpty()) "" else "\n${poll.logs}"
+                    }
+                    return poll
+                }
+                Thread.sleep(AUR_BUILD_POLL_MILLIS)
+            }
+        } finally {
+            if (buildStarted) {
+                remote?.let { endpoint ->
+                    runCatching {
+                        transactAurBuilder(
+                            endpoint,
+                            AUR_BUILDER_TRANSACTION_CANCEL_BUILD,
+                            {},
+                        ) {}
+                    }
+                }
+            }
+            if (bound) {
+                unbindService(connection)
+            }
+        }
     }
 
     private fun openAurSourceConnection(initialEndpoint: String): HttpsURLConnection {
@@ -4757,13 +5001,25 @@ class ArchpheneRuntimeService : Service() {
                         review,
                         buildEnvironment,
                     )
+                searchStatus =
+                    "Scanning ${buildEnvironment.packageCount} verified packages for " +
+                        "the isolated build root"
                 val buildRoot =
                     provisionAurBuildRoot(
                         endpoint,
                         review,
                         buildEnvironment,
                     )
+                searchStatus = "Validating the isolated Builder runtime"
                 val runtimeVersion = probeAurBuilderRuntime(endpoint)
+                searchStatus = "Preparing the exact reviewed build recipe"
+                val recipe =
+                    prepareAurBuilderRecipe(
+                        endpoint,
+                        review,
+                        inputManifestSha256,
+                        closure.manifestSha256,
+                    )
                 return AurBuilderReport(
                     builderPackage,
                     reportedUid,
@@ -4777,6 +5033,9 @@ class ArchpheneRuntimeService : Service() {
                     buildRoot.entryCount,
                     buildRoot.expandedBytes,
                     runtimeVersion,
+                    recipe.entryCount,
+                    recipe.recipeBytes,
+                    recipe.sourceBytes,
                 )
             } finally {
                 request.recycle()
@@ -5080,6 +5339,38 @@ class ArchpheneRuntimeService : Service() {
                 "Builder returned an invalid makepkg probe"
             }
             version
+        }
+
+    private fun prepareAurBuilderRecipe(
+        endpoint: IBinder,
+        review: AurReviewData,
+        inputManifestSha256: String,
+        closureSha256: String,
+    ): AurRecipeWorkspace =
+        transactAurBuilder(
+            endpoint,
+            AUR_BUILDER_TRANSACTION_PREPARE_RECIPE,
+            { request ->
+                request.writeString(review.packageBase)
+                request.writeString(review.version)
+                request.writeString(inputManifestSha256)
+                request.writeString(closureSha256)
+            },
+        ) { reply ->
+            val report =
+                AurRecipeWorkspace(
+                    reply.readLong(),
+                    reply.readLong(),
+                    reply.readLong(),
+                )
+            check(
+                report.entryCount > 0 &&
+                    report.recipeBytes > 0 &&
+                    report.sourceBytes >= 0,
+            ) {
+                "Builder returned an invalid reviewed recipe workspace"
+            }
+            report
         }
 
     private fun resolveAurBuildEnvironment(activeHandle: Long): AurBuildEnvironment {
@@ -5517,6 +5808,13 @@ class ArchpheneRuntimeService : Service() {
                     append("Builder toolchain: ")
                         .append(builder.runtimeVersion)
                         .append('\n')
+                    append("Prepared reviewed recipe: ")
+                        .append(builder.recipeEntries)
+                        .append(" entries · ")
+                        .append(formatStorageBytes(builder.recipeBytes))
+                        .append(" recipe · ")
+                        .append(formatStorageBytes(builder.recipeSourceBytes))
+                        .append(" verified sources.\n")
                 }
             } else {
                 append("Download/build disk estimate: verify sources to measure downloads.\n")

@@ -27,6 +27,7 @@ version = "0.1.0"
 dependencies = [
  "archphene-process",
  "archphene-root",
+ "flate2",
  "jni",
  "rustix",
  "sha2",

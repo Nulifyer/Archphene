@@ -11,6 +11,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 archphene-process = { path = "../archphene-process" }
 archphene-root = { path = "../archphene-root" }
+flate2 = "1.1.2"
 rustix = { version = "1.1.4", features = ["fs", "process"] }
 sha2 = "0.10.9"
 tar = { version = "0.4.46", default-features = false }

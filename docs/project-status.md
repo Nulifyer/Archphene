@@ -1120,7 +1120,7 @@ tool through the existing bounded process environment. Eleven host Builder
 tests cover valid preparation and runtime tampering. The cold physical Samsung
 gate then executes `makepkg (pacman) 7.1.0` as Builder UID 10345, validates the
 48,271-entry/1,221,416,416-byte root, and leaves all 36 shared-root packages
-unchanged. No PKGBUILD executes yet.
+unchanged.
 
 That cold gate also exposes two production gaps rather than hiding them:
 after closure transfer reaches 152/152, root scan/extraction takes several
@@ -1139,8 +1139,20 @@ post-stage tampering. The Samsung upgrade gate removes the former 211 MiB
 Kotlin-owned source tree, republishes 220,655,627 exact reviewed bytes under
 `aur-build-workspace-v2`, reuses and reverifies all 152 signed closure members,
 executes the toolchain probe, and preserves the 36-entry shared pacman state.
-The disposable recipe/build/output tree and descendant supervision remain
-required before PKGBUILD execution.
+
+Builder execution now has physical evidence as well. Rust resets and prepares
+the exact reviewed recipe through no-follow directory descriptors, repeats
+same-UID cleanup, retains one bounded makepkg process group, exposes capped
+logs, supports cancellation, enforces a 30-minute timeout, and reaps on exit.
+The path bridge gained the stock Arch behaviors exposed by the real Code build:
+version-correct ARM stat symbols, directory-FD traversal, temporary-file
+rename, fakeroot message queues and identity, optional Landlock fallback,
+hard-link copying, fortified fake-root `realpath`, and the standard `alpm`
+account. The final Samsung run builds
+`visual-studio-code-bin-1.130.0-1-aarch64.pkg.tar.xz`; its `.PKGINFO` reports
+1,079,048,720 installed bytes and its `.BUILDINFO` exactly records all 152
+signed build packages. Product-side hostile-output enumeration, descriptor
+copying, and manager re-verification remain the next trust boundary.
 
 The stale-process half of Builder supervision now has physical evidence.
 Before Rust opens reusable Builder state on Android, it scans at most 4,096
@@ -1149,8 +1161,7 @@ signaling, kills every process other than the current Builder service, and
 fails closed if any remains runnable after bounded retries. The Samsung gate
 creates an orphaned `sleep` as Builder UID 10345 before service startup and
 proves it is terminated while manager UID 10430 completes the entire review
-gate. Active process-group retention, cancellation, and child reaping still
-belong to the recipe execution slice.
+gate.
 
 Code now reaches the packaged Electron executable without a Code-specific
 bridge exception. Translating Arch's standard `/usr/lib/pulseaudio` directory

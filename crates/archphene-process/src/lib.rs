@@ -31,6 +31,8 @@ pub const MAX_PTY_COLUMNS: u16 = MAX_COLUMNS;
 pub const MAX_PTY_SESSIONS: usize = 4;
 pub const MAX_GUI_SESSIONS: usize = 16;
 pub const MAX_GUI_LOG_BYTES: usize = 16 * 1024;
+pub const MAX_BATCH_LOG_BYTES: usize = 64 * 1024;
+pub const BATCH_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 pub const MAX_TERMINAL_DAMAGE_BYTES: usize = MAX_DAMAGE_BYTES;
 pub const MAX_WAYLAND_DISPLAY_BYTES: usize = 64;
 
@@ -184,11 +186,10 @@ impl CommandEnvironment {
             .stderr(Stdio::from(error_file))
             .process_group(0)
             .spawn();
-        let result = match child {
+        match child {
             Ok(mut child) => self.wait_for_output(&mut child, &output_path),
             Err(error) => Err(ProcessError::Io(error)),
-        };
-        result
+        }
     }
 
     pub fn command_available(&self, command: &str) -> Result<bool, ProcessError> {
@@ -267,6 +268,57 @@ impl CommandEnvironment {
             log_start: 0,
             log_length: 0,
         })
+    }
+
+    pub fn open_batch(
+        &self,
+        command: &str,
+        arguments: &[&str],
+        working_directory: &Path,
+    ) -> Result<Box<BatchProcess>, ProcessError> {
+        validate_request(command, arguments)?;
+        let working_directory = self.resolve_working_directory(working_directory)?;
+        let command_path = resolve_installed_command(&self.arch_root, command)?;
+        let launch = prepare_launch(&self.arch_root, command, command_path)?;
+        let (log_reader, log_writer) = UnixStream::pair()?;
+        log_reader.set_nonblocking(true)?;
+        let error_writer = log_writer.try_clone()?;
+        let log_writer: OwnedFd = log_writer.into();
+        let error_writer: OwnedFd = error_writer.into();
+        let child = self
+            .build_command(&launch, arguments, "dumb")
+            .current_dir(working_directory)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(log_writer))
+            .stderr(Stdio::from(error_writer))
+            .process_group(0)
+            .spawn()?;
+        Ok(Box::new(BatchProcess {
+            process_group: child.id(),
+            child: Some(child),
+            exit_status: None,
+            log_reader,
+            log_bytes: [0; MAX_BATCH_LOG_BYTES],
+            log_start: 0,
+            log_length: 0,
+            deadline: Instant::now() + BATCH_TIMEOUT,
+        }))
+    }
+
+    fn resolve_working_directory(&self, path: &Path) -> Result<PathBuf, ProcessError> {
+        if !path.is_absolute() {
+            return Err(ProcessError::InvalidEnvironment);
+        }
+        let root = self.arch_root.canonicalize()?;
+        let metadata = fs::symlink_metadata(path)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(ProcessError::InvalidEnvironment);
+        }
+        let resolved = path.canonicalize()?;
+        if resolved == root || !resolved.starts_with(&root) {
+            return Err(ProcessError::InvalidEnvironment);
+        }
+        Ok(resolved)
     }
 
     fn build_command(&self, launch: &LaunchPlan, arguments: &[&str], terminal: &str) -> Command {
@@ -387,6 +439,92 @@ impl CommandEnvironment {
             std::process::id(),
             OUTPUT_ID.fetch_add(1, Ordering::Relaxed),
         ))
+    }
+}
+
+pub struct BatchProcess {
+    process_group: u32,
+    child: Option<std::process::Child>,
+    exit_status: Option<i32>,
+    log_reader: UnixStream,
+    log_bytes: [u8; MAX_BATCH_LOG_BYTES],
+    log_start: usize,
+    log_length: usize,
+    deadline: Instant,
+}
+
+impl BatchProcess {
+    pub fn exit_status(&mut self) -> Result<Option<i32>, ProcessError> {
+        self.drain_logs()?;
+        if self.exit_status.is_none() && Instant::now() >= self.deadline {
+            self.close();
+            return Err(ProcessError::Timeout);
+        }
+        if self.exit_status.is_none()
+            && let Some(child) = self.child.as_mut()
+            && let Some(status) = child.try_wait()?
+        {
+            // The build leader may leave helpers behind. Kill the group while
+            // the leader PID is still reserved, then reap the direct child.
+            let _ = system::kill_process_group(self.process_group);
+            self.exit_status = Some(exit_code(status));
+            self.child = None;
+            self.drain_logs()?;
+        }
+        Ok(self.exit_status)
+    }
+
+    pub fn read_logs(&mut self, output: &mut [u8]) -> Result<usize, ProcessError> {
+        self.drain_logs()?;
+        let length = self.log_length.min(output.len());
+        let skipped = self.log_length - length;
+        for (index, destination) in output[..length].iter_mut().enumerate() {
+            *destination = self.log_bytes[(self.log_start + skipped + index) % MAX_BATCH_LOG_BYTES];
+        }
+        Ok(length)
+    }
+
+    pub fn close(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        terminate_process_group(&mut child);
+        self.exit_status = child.wait().ok().map(exit_code);
+        let _ = self.drain_logs();
+    }
+
+    fn drain_logs(&mut self) -> Result<(), ProcessError> {
+        let mut chunk = [0_u8; 4096];
+        let mut drained = 0_usize;
+        while drained < MAX_GUI_LOG_DRAIN_BYTES {
+            let remaining = MAX_GUI_LOG_DRAIN_BYTES - drained;
+            let read_length = remaining.min(chunk.len());
+            match self.log_reader.read(&mut chunk[..read_length]) {
+                Ok(0) => return Ok(()),
+                Ok(length) => {
+                    for byte in &chunk[..length] {
+                        if self.log_length < MAX_BATCH_LOG_BYTES {
+                            let index = (self.log_start + self.log_length) % MAX_BATCH_LOG_BYTES;
+                            self.log_bytes[index] = *byte;
+                            self.log_length += 1;
+                        } else {
+                            self.log_bytes[self.log_start] = *byte;
+                            self.log_start = (self.log_start + 1) % MAX_BATCH_LOG_BYTES;
+                        }
+                    }
+                    drained += length;
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+                Err(error) => return Err(ProcessError::Io(error)),
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for BatchProcess {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 
@@ -1398,6 +1536,22 @@ mod tests {
         )
         .expect("command environment");
         assert_eq!(environment.path_bridge, bridge);
+        let build_directory = root.0.join("home/archphene/build");
+        fs::create_dir_all(&build_directory).expect("build directory");
+        assert_eq!(
+            environment
+                .resolve_working_directory(&build_directory)
+                .expect("root-contained working directory"),
+            build_directory,
+        );
+        let outside = std::env::temp_dir();
+        symlink(&outside, root.0.join("home/archphene/build-link"))
+            .expect("working-directory link");
+        assert!(
+            environment
+                .resolve_working_directory(&root.0.join("home/archphene/build-link"))
+                .is_err(),
+        );
         let launch = LaunchPlan {
             program: root.0.join("usr/bin/loader"),
             argv0: "loader".to_owned(),

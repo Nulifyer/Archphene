@@ -51,6 +51,10 @@ class AurBuilderService : Service() {
                             TRANSACTION_FINISH_PROVISION -> finishProvision(reply)
                             TRANSACTION_ABORT_PROVISION -> abortProvision(reply)
                             TRANSACTION_PROBE_RUNTIME -> probeRuntime(reply)
+                            TRANSACTION_PREPARE_RECIPE -> prepareRecipe(data, reply)
+                            TRANSACTION_START_BUILD -> startBuild(data, reply)
+                            TRANSACTION_POLL_BUILD -> pollBuild(reply)
+                            TRANSACTION_CANCEL_BUILD -> cancelBuild(reply)
                             else -> return super.onTransact(code, data, reply, flags)
                         }
                     } catch (error: Exception) {
@@ -310,17 +314,7 @@ class AurBuilderService : Service() {
 
     @Synchronized
     private fun probeRuntime(reply: Parcel) {
-        val architecture =
-            when (Build.SUPPORTED_ABIS.firstOrNull()) {
-                "x86_64" -> "x86_64"
-                "arm64-v8a" -> "aarch64"
-                else -> throw IllegalStateException("Unsupported Builder ABI")
-            }
-        val manifest =
-            assets.open("builder-runtime-$architecture.tsv").use { input ->
-                input.readBytes()
-            }
-        require(manifest.isNotEmpty() && manifest.size <= MAX_RUNTIME_MANIFEST_BYTES)
+        val manifest = readRuntimeManifest()
         val manifestBuffer = ByteBuffer.allocateDirect(manifest.size).put(manifest)
         val output =
             ByteBuffer
@@ -358,6 +352,130 @@ class AurBuilderService : Service() {
         }
         reply.writeNoException()
         reply.writeString(version)
+    }
+
+    @Synchronized
+    private fun prepareRecipe(
+        data: Parcel,
+        reply: Parcel,
+    ) {
+        val packageBase = data.readString().orEmpty()
+        val version = data.readString().orEmpty()
+        val inputManifestSha256 = data.readString().orEmpty()
+        val closureSha256 = data.readString().orEmpty()
+        require(inputManifestSha256.matches(SHA256) && closureSha256.matches(SHA256))
+        nativeOutputBuffer.clear()
+        val result =
+            NativeBuilder.nativePrepareRecipeWorkspace(
+                filesDir.absolutePath,
+                packageBase,
+                version,
+                inputManifestSha256,
+                closureSha256,
+                nativeOutputBuffer,
+            )
+        check(result == NativeBuilder.RECIPE_WORKSPACE_REPORT_BYTES) {
+            "Builder could not prepare the reviewed recipe: " +
+                readNativeMessage(nativeOutputBuffer, result)
+        }
+        val source =
+            nativeOutputBuffer
+                .duplicate()
+                .order(ByteOrder.LITTLE_ENDIAN)
+        val magic = ByteArray(8)
+        source.position(0)
+        source.get(magic)
+        check(String(magic, Charsets.US_ASCII) == "ABRW0001")
+        val recipeEntries = source.getLong(8)
+        val recipeBytes = source.getLong(16)
+        val sourceBytes = source.getLong(24)
+        check(recipeEntries > 0 && recipeBytes > 0 && sourceBytes >= 0)
+        reply.writeNoException()
+        reply.writeLong(recipeEntries)
+        reply.writeLong(recipeBytes)
+        reply.writeLong(sourceBytes)
+    }
+
+    @Synchronized
+    private fun startBuild(
+        data: Parcel,
+        reply: Parcel,
+    ) {
+        val packageBase = data.readString().orEmpty()
+        val version = data.readString().orEmpty()
+        val inputManifestSha256 = data.readString().orEmpty()
+        val closureSha256 = data.readString().orEmpty()
+        require(inputManifestSha256.matches(SHA256) && closureSha256.matches(SHA256))
+        val runtimeManifest = readRuntimeManifest()
+        val runtimeBuffer = ByteBuffer.allocateDirect(runtimeManifest.size).put(runtimeManifest)
+        nativeOutputBuffer.clear()
+        val result =
+            NativeBuilder.nativeStartBuild(
+                filesDir.absolutePath,
+                applicationInfo.nativeLibraryDir,
+                runtimeBuffer,
+                runtimeManifest.size,
+                packageBase,
+                version,
+                inputManifestSha256,
+                closureSha256,
+                nativeOutputBuffer,
+            )
+        check(result == 0) {
+            "Builder could not start the reviewed recipe: " +
+                readNativeMessage(nativeOutputBuffer, result)
+        }
+        reply.writeNoException()
+    }
+
+    @Synchronized
+    private fun pollBuild(reply: Parcel) {
+        val output =
+            ByteBuffer
+                .allocateDirect(NativeBuilder.BUILD_POLL_OUTPUT_BYTES)
+                .order(ByteOrder.LITTLE_ENDIAN)
+        val result = NativeBuilder.nativePollBuild(output)
+        check(result in 16..NativeBuilder.BUILD_POLL_OUTPUT_BYTES) {
+            "Builder execution failed: ${readNativeMessage(output, result)}"
+        }
+        val magic = ByteArray(8)
+        output.position(0)
+        output.get(magic)
+        check(String(magic, Charsets.US_ASCII) == "ABBP0001")
+        val exitStatus = output.getInt(8)
+        val logLength = output.getInt(12)
+        check(
+            exitStatus >= -1 &&
+                logLength in 0..(NativeBuilder.BUILD_POLL_OUTPUT_BYTES - 16) &&
+                result == 16 + logLength,
+        )
+        val logs = ByteArray(logLength)
+        output.position(16)
+        output.get(logs)
+        reply.writeNoException()
+        reply.writeInt(exitStatus)
+        reply.writeByteArray(logs)
+    }
+
+    @Synchronized
+    private fun cancelBuild(reply: Parcel) {
+        val cancelled = NativeBuilder.nativeCancelBuild()
+        reply.writeNoException()
+        reply.writeBoolean(cancelled)
+    }
+
+    private fun readRuntimeManifest(): ByteArray {
+        val architecture =
+            when (Build.SUPPORTED_ABIS.firstOrNull()) {
+                "x86_64" -> "x86_64"
+                "arm64-v8a" -> "aarch64"
+                else -> throw IllegalStateException("Unsupported Builder ABI")
+            }
+        return assets.open("builder-runtime-$architecture.tsv").use { input ->
+            input.readBytes()
+        }.also { manifest ->
+            require(manifest.isNotEmpty() && manifest.size <= MAX_RUNTIME_MANIFEST_BYTES)
+        }
     }
 
     private fun readExtractionReport(result: Int): ExtractionReport {
@@ -591,6 +709,10 @@ class AurBuilderService : Service() {
         const val TRANSACTION_FINISH_PROVISION = IBinder.FIRST_CALL_TRANSACTION + 7
         const val TRANSACTION_ABORT_PROVISION = IBinder.FIRST_CALL_TRANSACTION + 8
         const val TRANSACTION_PROBE_RUNTIME = IBinder.FIRST_CALL_TRANSACTION + 9
+        const val TRANSACTION_PREPARE_RECIPE = IBinder.FIRST_CALL_TRANSACTION + 10
+        const val TRANSACTION_START_BUILD = IBinder.FIRST_CALL_TRANSACTION + 11
+        const val TRANSACTION_POLL_BUILD = IBinder.FIRST_CALL_TRANSACTION + 12
+        const val TRANSACTION_CANCEL_BUILD = IBinder.FIRST_CALL_TRANSACTION + 13
         private const val ROLE_SNAPSHOT = 0
         private const val ROLE_SOURCE = 1
         private const val MAX_INPUTS = 65

@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/fsuid.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -29,10 +30,22 @@ int main(void) {
         fputs("root Linux user was not retained\n", stderr);
         return 4;
     }
+    if (getpwnam_r("alpm", &storage, buffer, sizeof(buffer), &result) != 0
+            || result != &storage || strcmp(result->pw_name, "alpm") != 0
+            || strcmp(result->pw_shell, "/usr/bin/nologin") != 0) {
+        fputs("package-manager Linux user was not retained\n", stderr);
+        return 5;
+    }
     if (getpwuid_r(1, &storage, buffer, sizeof(buffer), &result) != 0
             || result != NULL) {
         fputs("unknown Linux user was fabricated\n", stderr);
-        return 5;
+        return 6;
+    }
+    struct stat metadata;
+    if (stat("/proc/self/exe", &metadata) != 0
+            || metadata.st_uid != 0 || metadata.st_gid != 0) {
+        fputs("filesystem metadata identity was not virtualized\n", stderr);
+        return 7;
     }
     return 0;
 }

@@ -29,10 +29,62 @@ gcc -O2 -Wall -Wextra -Werror \
   -o "$root/identity-probe" native/archphene-glibc-path-bridge/identity_probe.c
 gcc -O2 -Wall -Wextra -Werror \
   -o "$root/socket-probe" native/archphene-glibc-path-bridge/socket_probe.c
+gcc -O2 -Wall -Wextra -Werror \
+  -o "$root/message-queue-probe" \
+  native/archphene-glibc-path-bridge/message_queue_probe.c
+gcc -O2 -Wall -Wextra -Werror \
+  -o "$root/landlock-probe" \
+  native/archphene-glibc-path-bridge/landlock_probe.c
+gcc -O2 -Wall -Wextra -Werror \
+  -o "$root/link-probe" \
+  native/archphene-glibc-path-bridge/link_probe.c
+gcc -O2 -D_FORTIFY_SOURCE=2 -Wall -Wextra -Werror \
+  -o "$root/realpath-probe" \
+  native/archphene-glibc-path-bridge/realpath_probe.c
 export LD_PRELOAD="$output"
 export ARCHPHENE_RUNTIME_ROOT="$root"
 export XDG_RUNTIME_DIR="$root/runtime"
 mkdir -p "$XDG_RUNTIME_DIR"
+mkdir -p "$root/run"
+test "$("$root/message-queue-probe")" = ipc-ok
+test "$("$root/landlock-probe")" = landlock-denied
+ln -s /usr/share/archphene-test/value \
+  "$root/usr/share/archphene-test/absolute-value"
+test "$(
+  cd "$root/usr/share/archphene-test"
+  /bin/cat absolute-value
+)" = expected
+/bin/chmod 640 /usr/share/archphene-test/value
+test "$(stat -c %a "$root/usr/share/archphene-test/value")" = 640
+mkdir -p "$root/home/archphene"
+mkdir -p "$root/var/lib/pacman/local"
+test "$(
+  ARCHPHENE_FAKE_CHROOT=1 /usr/bin/realpath /var/lib/pacman
+)" = /var/lib/pacman
+test "$(
+  ARCHPHENE_FAKE_CHROOT=1 "$root/realpath-probe"
+)" = fortified-realpath-ok
+ARCHPHENE_FAKE_CHROOT=1 /bin/mkdir /home/archphene/legacy-mkdir
+test -d "$root/home/archphene/legacy-mkdir"
+printf 'before\n' >"$root/home/archphene/in-place-edit"
+ARCHPHENE_FAKE_CHROOT=1 /bin/sed -i 's/before/after/' \
+  /home/archphene/in-place-edit
+test "$(<"$root/home/archphene/in-place-edit")" = after
+mkdir -p "$root/home/archphene/directory-fd/one/two"
+printf 'nested\n' >"$root/home/archphene/directory-fd/one/two/value"
+mkdir -p "$root/home/archphene/link-fd"
+printf 'linked\n' >"$root/home/archphene/link-fd/source"
+test "$(
+  ARCHPHENE_FAKE_CHROOT=1 "$root/link-probe"
+)" = directory-link-ok
+test "$(<"$root/home/archphene/link-fd/hard-link")" = linked
+test "$(<"$root/home/archphene/link-fd/symbolic-link")" = linked
+directory_fd_listing="$(
+  ARCHPHENE_FAKE_CHROOT=1 /usr/bin/find \
+    /home/archphene/directory-fd -type f -print
+)"
+test "$directory_fd_listing" = \
+  /home/archphene/directory-fd/one/two/value
 mkdir -p "$root/usr/bin"
 printf program > "$root/usr/bin/test-program"
 chmod 500 "$root/usr/bin/test-program"
@@ -133,6 +185,25 @@ real_nested_output="$(
   "$root/exec-probe" --direct /usr/lib/archphene-example/real-example
 )"
 test "$real_nested_output" = bridge-arg
+fakeroot_compat_output="$(
+  ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+  ARCHPHENE_RUNTIME_LOADER="$host_loader" \
+  ARCHPHENE_RUNTIME_LIB="$(dirname "$host_libc")" \
+  ARCHPHENE_FAKE_CHROOT=1 \
+  "$root/exec-probe" --fakeroot /usr/lib/archphene-example/real-example
+)"
+test "$fakeroot_compat_output" = fakeroot-compat
+cp "$root/exec-probe" "$root/usr/lib/archphene-example/fakeroot-environment"
+chmod 500 "$root/usr/lib/archphene-example/fakeroot-environment"
+fakeroot_environment_output="$(
+  ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+  ARCHPHENE_RUNTIME_LOADER="$host_loader" \
+  ARCHPHENE_RUNTIME_LIB="$(dirname "$host_libc")" \
+  ARCHPHENE_FAKE_CHROOT=1 \
+  "$root/exec-probe" --fakeroot-environment \
+    /usr/lib/archphene-example/fakeroot-environment
+)"
+test "$fakeroot_environment_output" = fakeroot-key:archphene
 real_program_path="$(
   ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
   ARCHPHENE_RUNTIME_LOADER="$host_loader" \
@@ -320,7 +391,7 @@ test "$(cat "$root/rename-target")" = rename-compatible
 "$root/mkdir-probe" "$root/mkdir-target"
 test -d "$root/mkdir-target"
 "$root/shm-probe"
-"$root/identity-probe"
+ARCHPHENE_FAKE_CHROOT=1 "$root/identity-probe"
 mkdir -p "$root/run"
 ARCHPHENE_FAKE_CHROOT=1 "$root/socket-probe" |
   grep -qx unix-socket-bridge-passed

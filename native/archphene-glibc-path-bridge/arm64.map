@@ -1,10 +1,20 @@
 GLIBC_2.17 {
     global:
+        __fxstat;
+        __fxstat64;
+        __lxstat;
+        __lxstat64;
+        __open64_2;
+        __open_2;
+        __realpath_chk;
+        __xstat;
+        __xstat64;
         access;
         bind;
         chdir;
         chroot;
         chmod;
+        canonicalize_file_name;
         connect;
         eaccess;
         faccessat;
@@ -12,6 +22,8 @@ GLIBC_2.17 {
         chown;
         fchown;
         fchownat;
+        fopen;
+        fopen64;
         getegid;
         geteuid;
         getgid;
@@ -22,13 +34,30 @@ GLIBC_2.17 {
         get_current_dir_name;
         getcwd;
         getuid;
+        isatty;
         lchown;
         link;
         linkat;
+        mkdir;
         mkdirat;
+        mkostemp;
+        mkostemps;
+        mkstemp;
+        mkstemps;
+        msgctl;
+        msgget;
+        msgrcv;
+        msgsnd;
+        open;
+        open64;
+        openat;
+        openat64;
+        opendir;
         posix_spawn;
         posix_spawnp;
         remove;
+        realpath;
+        rename;
         renameat;
         rmdir;
         symlink;
@@ -42,6 +71,28 @@ GLIBC_2.17 {
         execvpe;
         readlink;
         readlinkat;
+        semctl;
+        semget;
+        semop;
+        semtimedop;
         setfsgid;
         setfsuid;
+        shm_open;
+        shm_unlink;
 };
+
+GLIBC_2.28 {
+    global:
+        statx;
+} GLIBC_2.17;
+
+GLIBC_2.33 {
+    global:
+        fstat;
+        fstat64;
+        fstatat;
+        lstat;
+        lstat64;
+        stat;
+        stat64;
+} GLIBC_2.28;

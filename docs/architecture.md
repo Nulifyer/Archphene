@@ -106,10 +106,12 @@ Builder Rust then scans every XZ/Zstandard package before mutation, provisions
 a fresh private Arch root, rehashes each archive immediately before extraction,
 rejects path escapes and unsupported entry types, and copies package hard links
 because Android app storage denies `link(2)`. After a filesystem sync it
-atomically publishes a closure-bound root manifest. The current Samsung Code
-gate provisions all 152 packages, 48,271 verified archive entries, and
-1,221,416,416 expanded bytes without changing the shared root. Final build
-workspace, package-output, and installed-size measurements remain separate.
+atomically publishes a closure-bound root manifest. It also derives a
+Builder-private pacman local index from each already signed package's exact
+`.PKGINFO`, including the versioned ALPM database marker; this lets unmodified
+makepkg record the real build closure without borrowing shared-root state. The
+current Samsung Code gate provisions all 152 packages, 48,271 verified archive
+entries, and 1,221,416,416 expanded bytes without changing the shared root.
 
 The Builder APK also carries only the content-addressed patched loader,
 loader dependencies, and path bridge needed to enter that root; it does not
@@ -118,9 +120,11 @@ native filename to its complete SHA-256 and size. Builder Rust checks the
 manifest, filename digest prefix, full digest, exact size, safe mode, and
 native-library path containment before publishing a fresh alias directory
 inside the root. The physical Samsung gate uses that runtime to execute the
-root's unmodified `makepkg --version` as the Builder UID and observes
-`makepkg (pacman) 7.1.0`. This is an execution-path smoke test, not permission
-to execute PKGBUILD.
+exact reviewed Code recipe with the root's unmodified
+`makepkg (pacman) 7.1.0` as the Builder UID. The generic bridge supplies the
+Linux filesystem, identity, fakeroot, SysV IPC, optional Landlock, and
+fortified canonical-path behavior required by the stock Arch tools; no Code
+source patch is carried.
 
 This boundary is required because the tested stock Samsung kernel denies user,
 mount, and network namespace creation to the manager app. Android's
@@ -132,13 +136,15 @@ retaining a distinct UID and SELinux `untrusted_app` domain.
 The live Samsung boundary probe verifies signer continuity, distinct UIDs, no
 network permission or launcher entry, private workspace writes, denial of
 manager-private paths, descriptor output, and denial of direct manager access
-to builder-private state. It also proves failed partial-root recovery and a
-published minimal root containing executable `bash`, `makepkg`, and `fakeroot`,
-then executes only `makepkg --version` through the verified runtime bridge. It
-does not yet execute PKGBUILD. Hostile reviewed-input reuse, descendant
-supervision, explicit approval, bounded build logs/cancellation, output
-provenance, and post-build package verification remain required before
-installation can be enabled.
+to builder-private state. It also proves failed partial-root recovery, a
+published root containing executable `bash`, `makepkg`, and `fakeroot`, stale
+same-UID cleanup, explicit Build approval, bounded process-group execution,
+live logs, cancellation plumbing, and normal reap. The current Code output has
+exact name/version/AArch64 metadata, a 1,079,048,720-byte installed size, and a
+`.BUILDINFO` set equal to the 152-package signed closure. That inspection is
+still a test-side assertion: hostile output enumeration, Rust verification,
+manager-owned descriptor copying, manager-side re-verification, and
+installation remain disabled.
 
 ### Thin launcher application
 

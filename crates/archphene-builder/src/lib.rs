@@ -9,12 +9,13 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use archphene_process::{CommandEnvironment, ProcessError};
+use archphene_process::{BatchProcess, CommandEnvironment, ProcessError};
 use archphene_root::{ArchRoot, RootError};
+use flate2::read::GzDecoder;
 use rustix::fd::OwnedFd;
 use rustix::fs::{
-    AtFlags, CWD, Dir, FileType, Mode, OFlags, fchmod, fsync, mkdirat, openat, renameat, statat,
-    symlinkat, syncfs, unlinkat,
+    AtFlags, CWD, Dir, FileType, Mode, OFlags, chmodat, fchmod, fsync, mkdirat, openat, renameat,
+    statat, symlinkat, syncfs, unlinkat,
 };
 use rustix::io::Errno;
 use sha2::{Digest, Sha256};
@@ -42,14 +43,19 @@ const BUILD_ROOT_MANIFEST_NAME: &str = "build-root-manifest";
 const BUILDER_RUNTIME_ALIAS_NAME: &str = "builder-runtime-v1";
 const BUILDER_RUNTIME_HEADER: &str = "# org.archphene.builder-runtime.v1";
 const BUILDER_RUNTIME_PATH_BRIDGE: &str = "libarchphene_path_bridge.so";
+const PACMAN_LOCAL_DATABASE_VERSION: &[u8] = b"9\n";
 const MAX_BUILDER_RUNTIME_MANIFEST_BYTES: usize = 32 * 1024;
 const MAX_BUILDER_RUNTIME_ENTRIES: usize = 32;
 const REVIEWED_INPUTS_NAME: &str = "reviewed-inputs";
 const REVIEWED_INPUT_MANIFEST_NAME: &str = "manifest";
+const BUILD_SESSION_NAME: &str = "aur-build";
 const MAX_REVIEWED_INPUTS: usize = 65;
 const MAX_REVIEWED_INPUT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_REVIEWED_INPUT_TOTAL_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const MAX_REVIEWED_INPUT_MANIFEST_BYTES: usize = 16 * 1024;
+const MAX_RECIPE_ENTRIES: u64 = 128;
+const MAX_RECIPE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_PACKAGE_INFO_BYTES: usize = 64 * 1024;
 const EXPECTED_MANIFEST_NAME: &str = "expected-manifest";
 const PUBLISHED_MANIFEST_NAME: &str = "manifest";
 const SESSION_MANIFEST_NAME: &str = "session";
@@ -118,6 +124,7 @@ impl From<ProcessError> for BuilderError {
 #[derive(Clone, Debug)]
 struct ExpectedPackage {
     name: String,
+    version: String,
     filename: String,
     archive_bytes: u64,
     archive_sha256: [u8; 32],
@@ -152,11 +159,13 @@ pub struct ProvisionSession {
     root: std::path::PathBuf,
     workspace: OwnedFd,
     archives: OwnedFd,
+    local_database: OwnedFd,
     packages: Vec<ExpectedPackage>,
     manifest_sha256: [u8; 32],
     next_package: usize,
     expected: ExtractionReport,
     extracted: ExtractionReport,
+    package_info_buffer: Vec<u8>,
 }
 
 pub struct BuilderRuntime {
@@ -194,6 +203,24 @@ pub struct ReviewedInputSession {
     expected_inputs: usize,
     input_bytes: u64,
     inputs: Vec<ReviewedInput>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecipeWorkspace {
+    pub directory: PathBuf,
+    pub recipe_entries: u64,
+    pub recipe_bytes: u64,
+    pub source_bytes: u64,
+}
+
+pub struct AurBuildSession {
+    process: Box<BatchProcess>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AurBuildPoll {
+    pub exit_status: Option<i32>,
+    pub logs: Vec<u8>,
 }
 
 #[derive(Clone)]
@@ -551,15 +578,34 @@ impl ProvisionSession {
         fsync(&workspace)?;
         let root = files_directory.join(WORKSPACE_NAME).join(BUILD_ROOT_NAME);
         ArchRoot::bootstrap(&root)?;
+        let root_descriptor = openat(
+            CWD,
+            &root,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        let var = open_directory(&root_descriptor, "var")?;
+        let lib = open_directory(&var, "lib")?;
+        let pacman = open_directory(&lib, "pacman")?;
+        mkdirat(&pacman, "local", Mode::from_raw_mode(0o755))?;
+        let local_database = open_directory(&pacman, "local")?;
+        write_atomic(
+            &local_database,
+            "ALPM_DB_VERSION",
+            PACMAN_LOCAL_DATABASE_VERSION,
+        )?;
+        fsync(&local_database)?;
         Ok(Self {
             root,
             workspace,
             archives,
+            local_database,
             packages,
             manifest_sha256: expected_manifest_sha256,
             next_package: 0,
             expected,
             extracted: ExtractionReport::default(),
+            package_info_buffer: Vec::with_capacity(MAX_PACKAGE_INFO_BYTES),
         })
     }
 
@@ -588,8 +634,18 @@ impl ProvisionSession {
                 package.archive_bytes,
                 package.archive_sha256,
             )?;
+            let metadata_archive = open_regular_file(&self.archives, &archive_name)?;
+            self.package_info_buffer.clear();
+            read_package_info(
+                metadata_archive,
+                &package.filename,
+                &mut self.package_info_buffer,
+            )?;
+            let architecture =
+                validate_package_info(package, &self.package_info_buffer)?.to_owned();
             let archive = open_regular_file(&self.archives, &archive_name)?;
             let report = inspect_package_archive(archive, &package.filename, Some(&self.root))?;
+            publish_local_package_database(&self.local_database, package, &architecture)?;
             self.extracted.package_count = self
                 .extracted
                 .package_count
@@ -623,6 +679,7 @@ impl ProvisionSession {
             BUILD_ROOT_MANIFEST_NAME,
             manifest.as_bytes(),
         )?;
+        fsync(&self.local_database)?;
         Ok(self.extracted)
     }
 
@@ -696,6 +753,8 @@ impl BuilderRuntime {
         library_path.push(native_directory.as_os_str());
         library_path.push(":");
         library_path.push(root.join("usr/lib").as_os_str());
+        library_path.push(":");
+        library_path.push(root.join("usr/lib/libfakeroot").as_os_str());
         let environment = CommandEnvironment::new(
             &root,
             &loader,
@@ -731,6 +790,327 @@ impl BuilderRuntime {
     pub fn closure_sha256(&self) -> [u8; 32] {
         self.closure_sha256
     }
+}
+
+impl AurBuildSession {
+    pub fn start(
+        files_directory: &Path,
+        native_directory: &Path,
+        runtime_manifest: &[u8],
+        package_base: &str,
+        version: &str,
+        expected_input_manifest_sha256: [u8; 32],
+        expected_closure_sha256: [u8; 32],
+    ) -> Result<Self, BuilderError> {
+        terminate_stale_builder_processes()?;
+        let runtime = BuilderRuntime::prepare(files_directory, native_directory, runtime_manifest)?;
+        if runtime.closure_sha256() != expected_closure_sha256 {
+            return Err(BuilderError::InvalidInput);
+        }
+        let recipe = prepare_recipe_workspace(
+            files_directory,
+            package_base,
+            version,
+            expected_input_manifest_sha256,
+            expected_closure_sha256,
+        )?;
+        let process = runtime.environment.open_batch(
+            "makepkg",
+            &[
+                "--cleanbuild",
+                "--clean",
+                "--nodeps",
+                "--noconfirm",
+                "--noprogressbar",
+                "--nosign",
+            ],
+            &recipe.directory,
+        )?;
+        Ok(Self { process })
+    }
+
+    pub fn poll(&mut self, maximum_log_bytes: usize) -> Result<AurBuildPoll, BuilderError> {
+        if maximum_log_bytes == 0 || maximum_log_bytes > 64 * 1024 {
+            return Err(BuilderError::InvalidArgument);
+        }
+        let exit_status = self.process.exit_status()?;
+        if exit_status.is_some() {
+            terminate_stale_builder_processes()?;
+        }
+        let mut logs = vec![0_u8; maximum_log_bytes];
+        let length = self.process.read_logs(&mut logs)?;
+        logs.truncate(length);
+        Ok(AurBuildPoll { exit_status, logs })
+    }
+
+    pub fn cancel(&mut self) {
+        self.process.close();
+    }
+}
+
+pub fn prepare_recipe_workspace(
+    files_directory: &Path,
+    package_base: &str,
+    version: &str,
+    expected_input_manifest_sha256: [u8; 32],
+    expected_closure_sha256: [u8; 32],
+) -> Result<RecipeWorkspace, BuilderError> {
+    terminate_stale_builder_processes()?;
+    if !safe_name(package_base)
+        || version.is_empty()
+        || version.len() > 128
+        || version.bytes().any(|byte| !(0x21..=0x7e).contains(&byte))
+    {
+        return Err(BuilderError::InvalidArgument);
+    }
+    let files = openat(
+        CWD,
+        files_directory,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let workspace = open_directory(&files, WORKSPACE_NAME)?;
+    let root_manifest = read_bounded_regular_file(&workspace, BUILD_ROOT_MANIFEST_NAME, 1024)?;
+    let (closure_sha256, _) = parse_build_root_manifest(&root_manifest)?;
+    if closure_sha256 != expected_closure_sha256 {
+        return Err(BuilderError::InvalidInput);
+    }
+    let inputs = open_directory(&workspace, REVIEWED_INPUTS_NAME)?;
+    let manifest = read_bounded_regular_file(
+        &inputs,
+        REVIEWED_INPUT_MANIFEST_NAME,
+        MAX_REVIEWED_INPUT_MANIFEST_BYTES,
+    )?;
+    if sha256_bytes(&manifest) != expected_input_manifest_sha256 {
+        return Err(BuilderError::InvalidInput);
+    }
+    let reviewed = parse_reviewed_input_manifest(&manifest, package_base, version)?;
+
+    let root = files_directory.join(WORKSPACE_NAME).join(BUILD_ROOT_NAME);
+    let root_descriptor = openat(
+        CWD,
+        &root,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let home = open_directory(&root_descriptor, "home")?;
+    let archphene = open_directory(&home, "archphene")?;
+    let mut visited = 0;
+    remove_entry_if_present(&archphene, BUILD_SESSION_NAME, 0, &mut visited)?;
+    mkdirat(&archphene, BUILD_SESSION_NAME, Mode::from_raw_mode(0o700))?;
+    let build = open_directory(&archphene, BUILD_SESSION_NAME)?;
+    let build_path = root.join("home/archphene").join(BUILD_SESSION_NAME);
+
+    let snapshot = reviewed
+        .iter()
+        .find(|input| input.role == ReviewedInputRole::Snapshot)
+        .ok_or(BuilderError::InvalidInput)?;
+    let snapshot_name = reviewed_input_staged_name(snapshot);
+    verify_staged_file(&inputs, &snapshot_name, snapshot.bytes, snapshot.sha256)?;
+    let snapshot_file = open_regular_file(&inputs, &snapshot_name)?;
+    let recipe_report = extract_reviewed_snapshot(snapshot_file, &build_path, package_base)?;
+    let recipe_directory = build_path.join(package_base);
+    let recipe_descriptor = openat(
+        CWD,
+        &recipe_directory,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+
+    let mut source_bytes = 0_u64;
+    for input in reviewed
+        .iter()
+        .filter(|input| input.role == ReviewedInputRole::Source)
+    {
+        match statat(
+            &recipe_descriptor,
+            input.filename.as_str(),
+            AtFlags::SYMLINK_NOFOLLOW,
+        ) {
+            Err(Errno::NOENT) => {}
+            Ok(_) => return Err(BuilderError::UnsafeWorkspace),
+            Err(error) => return Err(error.into()),
+        }
+        let staged_name = reviewed_input_staged_name(input);
+        verify_staged_file(&inputs, &staged_name, input.bytes, input.sha256)?;
+        let mut source = open_regular_file(&inputs, &staged_name)?;
+        publish_descriptor(
+            &recipe_descriptor,
+            &input.filename,
+            &mut source,
+            input.bytes,
+            input.sha256,
+        )?;
+        source_bytes = source_bytes
+            .checked_add(input.bytes)
+            .ok_or(BuilderError::OutputLimit)?;
+    }
+    fsync(&recipe_descriptor)?;
+    fsync(&build)?;
+    fsync(&archphene)?;
+    syncfs(&recipe_descriptor)?;
+    Ok(RecipeWorkspace {
+        directory: recipe_directory,
+        recipe_entries: recipe_report.entry_count,
+        recipe_bytes: recipe_report.expanded_bytes,
+        source_bytes,
+    })
+}
+
+fn parse_reviewed_input_manifest(
+    manifest: &[u8],
+    expected_package_base: &str,
+    expected_version: &str,
+) -> Result<Vec<ReviewedInput>, BuilderError> {
+    let input = std::str::from_utf8(manifest).map_err(|_| BuilderError::InvalidInput)?;
+    let mut lines = input.lines();
+    if lines.next() != Some("ABIN0001")
+        || lines.next().and_then(|line| line.strip_prefix("package="))
+            != Some(expected_package_base)
+        || lines.next().and_then(|line| line.strip_prefix("version=")) != Some(expected_version)
+    {
+        return Err(BuilderError::InvalidInput);
+    }
+    let mut inputs = Vec::<ReviewedInput>::new();
+    let mut total_bytes = 0_u64;
+    for line in lines {
+        let mut fields = line.split('\t');
+        let role = match fields.next() {
+            Some("snapshot") => ReviewedInputRole::Snapshot,
+            Some("source") => ReviewedInputRole::Source,
+            _ => return Err(BuilderError::InvalidInput),
+        };
+        let filename = fields.next().ok_or(BuilderError::InvalidInput)?;
+        let bytes = fields
+            .next()
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or(BuilderError::InvalidInput)?;
+        let sha256 = fields
+            .next()
+            .ok_or(BuilderError::InvalidInput)
+            .and_then(parse_sha256)?;
+        if fields.next().is_some()
+            || inputs.len() >= MAX_REVIEWED_INPUTS
+            || !safe_reviewed_filename(filename)
+            || bytes == 0
+            || bytes > MAX_REVIEWED_INPUT_BYTES
+            || inputs.iter().any(|input| input.filename == filename)
+            || (role == ReviewedInputRole::Snapshot
+                && inputs
+                    .iter()
+                    .any(|input| input.role == ReviewedInputRole::Snapshot))
+        {
+            return Err(BuilderError::InvalidInput);
+        }
+        total_bytes = total_bytes
+            .checked_add(bytes)
+            .ok_or(BuilderError::OutputLimit)?;
+        if total_bytes > MAX_REVIEWED_INPUT_TOTAL_BYTES {
+            return Err(BuilderError::OutputLimit);
+        }
+        inputs.push(ReviewedInput {
+            role,
+            filename: filename.to_owned(),
+            bytes,
+            sha256,
+        });
+    }
+    if inputs.is_empty()
+        || inputs
+            .iter()
+            .filter(|input| input.role == ReviewedInputRole::Snapshot)
+            .count()
+            != 1
+    {
+        return Err(BuilderError::InvalidInput);
+    }
+    Ok(inputs)
+}
+
+fn reviewed_input_staged_name(input: &ReviewedInput) -> String {
+    let prefix = match input.role {
+        ReviewedInputRole::Snapshot => "snapshot",
+        ReviewedInputRole::Source => "source",
+    };
+    format!("{prefix}-{}-{}", hex_sha256(&input.sha256), input.filename,)
+}
+
+fn extract_reviewed_snapshot(
+    snapshot: File,
+    build_directory: &Path,
+    package_base: &str,
+) -> Result<ExtractionReport, BuilderError> {
+    let mut archive = Archive::new(GzDecoder::new(snapshot));
+    archive.set_overwrite(false);
+    archive.set_preserve_permissions(false);
+    archive.set_preserve_ownerships(false);
+    archive.set_unpack_xattrs(false);
+    let mut report = ExtractionReport::default();
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let entry_type = entry.header().entry_type();
+        if entry_type.is_pax_global_extensions() {
+            if entry.header().size()? > 1024 {
+                return Err(BuilderError::OutputLimit);
+            }
+            let mut extensions = entry
+                .pax_extensions()?
+                .ok_or(BuilderError::InvalidArchive)?;
+            let extension = extensions
+                .next()
+                .transpose()?
+                .ok_or(BuilderError::InvalidArchive)?;
+            let key = extension.key_bytes();
+            let value = extension.value_bytes();
+            if key != b"comment"
+                || value.len() != 40
+                || !value
+                    .iter()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                || extensions.next().is_some()
+            {
+                return Err(BuilderError::InvalidArchive);
+            }
+            continue;
+        }
+        let path = entry.path()?.into_owned();
+        validate_archive_path(&path)?;
+        let mut components = path.components();
+        if !matches!(
+            components.next(),
+            Some(std::path::Component::Normal(component))
+                if component.as_bytes() == package_base.as_bytes()
+        ) {
+            return Err(BuilderError::InvalidArchive);
+        }
+        if !(entry_type.is_file() || entry_type.is_dir()) {
+            return Err(BuilderError::InvalidArchive);
+        }
+        report.entry_count = report
+            .entry_count
+            .checked_add(1)
+            .ok_or(BuilderError::OutputLimit)?;
+        if report.entry_count > MAX_RECIPE_ENTRIES {
+            return Err(BuilderError::OutputLimit);
+        }
+        if entry_type.is_file() {
+            let bytes = entry.header().size()?;
+            report.expanded_bytes = report
+                .expanded_bytes
+                .checked_add(bytes)
+                .ok_or(BuilderError::OutputLimit)?;
+            if report.expanded_bytes > MAX_RECIPE_BYTES {
+                return Err(BuilderError::OutputLimit);
+            }
+        }
+        if !entry.unpack_in(build_directory)? {
+            return Err(BuilderError::InvalidArchive);
+        }
+    }
+    if report.entry_count == 0 {
+        return Err(BuilderError::InvalidArchive);
+    }
+    Ok(report)
 }
 
 #[cfg(target_os = "android")]
@@ -1051,6 +1431,106 @@ fn inspect_package_archive(
     } else {
         Err(BuilderError::InvalidArchive)
     }
+}
+
+fn read_package_info(
+    archive: File,
+    filename: &str,
+    output: &mut Vec<u8>,
+) -> Result<(), BuilderError> {
+    if filename.ends_with(".pkg.tar.xz") {
+        read_package_info_tar(XzDecoder::new(archive), output)
+    } else if filename.ends_with(".pkg.tar.zst") {
+        let decoder = zstd::stream::read::Decoder::new(archive)?;
+        read_package_info_tar(decoder, output)
+    } else {
+        Err(BuilderError::InvalidArchive)
+    }
+}
+
+fn read_package_info_tar(reader: impl Read, output: &mut Vec<u8>) -> Result<(), BuilderError> {
+    let mut archive = Archive::new(reader);
+    for entry in archive.entries()? {
+        let entry = entry?;
+        if entry.path()?.as_os_str().as_bytes() != b".PKGINFO" {
+            continue;
+        }
+        if !entry.header().entry_type().is_file()
+            || entry.header().size()? == 0
+            || entry.header().size()? > MAX_PACKAGE_INFO_BYTES as u64
+        {
+            return Err(BuilderError::InvalidArchive);
+        }
+        output.clear();
+        entry
+            .take((MAX_PACKAGE_INFO_BYTES + 1) as u64)
+            .read_to_end(output)?;
+        if output.is_empty() || output.len() > MAX_PACKAGE_INFO_BYTES {
+            return Err(BuilderError::InvalidArchive);
+        }
+        return Ok(());
+    }
+    Err(BuilderError::InvalidArchive)
+}
+
+fn validate_package_info<'a>(
+    package: &ExpectedPackage,
+    package_info: &'a [u8],
+) -> Result<&'a str, BuilderError> {
+    let text = std::str::from_utf8(package_info).map_err(|_| BuilderError::InvalidArchive)?;
+    let mut name = None;
+    let mut version = None;
+    let mut architecture = None;
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once(" = ") else {
+            continue;
+        };
+        match key {
+            "pkgname" if name.replace(value).is_none() => {}
+            "pkgver" if version.replace(value).is_none() => {}
+            "arch" if architecture.replace(value).is_none() => {}
+            "pkgname" | "pkgver" | "arch" => return Err(BuilderError::InvalidArchive),
+            _ => {}
+        }
+    }
+    let architecture = architecture.ok_or(BuilderError::InvalidArchive)?;
+    if name != Some(package.name.as_str())
+        || version != Some(package.version.as_str())
+        || !matches!(architecture, "any" | "aarch64" | "x86_64")
+        || !package
+            .filename
+            .contains(&format!("-{architecture}.pkg.tar."))
+    {
+        return Err(BuilderError::InvalidArchive);
+    }
+    Ok(architecture)
+}
+
+fn publish_local_package_database(
+    local_database: &OwnedFd,
+    package: &ExpectedPackage,
+    architecture: &str,
+) -> Result<(), BuilderError> {
+    let directory_name = format!("{}-{}", package.name, package.version);
+    if directory_name.len() > 240
+        || directory_name.bytes().any(|byte| byte == 0 || byte == b'/')
+        || matches!(directory_name.as_str(), "." | "..")
+    {
+        return Err(BuilderError::InvalidArchive);
+    }
+    mkdirat(
+        local_database,
+        directory_name.as_str(),
+        Mode::from_raw_mode(0o755),
+    )?;
+    let directory = open_directory(local_database, directory_name.as_str())?;
+    let description = format!(
+        "%NAME%\n{}\n\n%VERSION%\n{}\n\n%ARCH%\n{}\n\n%REASON%\n1\n\n%VALIDATION%\npgp\n\n",
+        package.name, package.version, architecture,
+    );
+    write_atomic(&directory, "desc", description.as_bytes())?;
+    fsync(&directory)?;
+    Ok(())
 }
 
 fn inspect_tar_archive(
@@ -1384,6 +1864,7 @@ fn parse_manifest(manifest: &[u8]) -> Result<Vec<ExpectedPackage>, BuilderError>
         }
         packages.push(ExpectedPackage {
             name: name.to_owned(),
+            version: version.to_owned(),
             filename: filename.to_owned(),
             archive_bytes,
             archive_sha256,
@@ -1493,6 +1974,7 @@ fn remove_entry_if_present(
         unlinkat(parent, name, AtFlags::empty())?;
         return Ok(());
     }
+    chmodat(parent, name, Mode::from_raw_mode(0o700), AtFlags::empty())?;
     let directory = open_directory(parent, name)?;
     remove_directory_contents(&directory, depth, visited)?;
     unlinkat(parent, name, AtFlags::REMOVEDIR)?;
@@ -1517,6 +1999,7 @@ fn remove_entry_if_present_cstr(
         unlinkat(parent, name, AtFlags::empty())?;
         return Ok(());
     }
+    chmodat(parent, name, Mode::from_raw_mode(0o700), AtFlags::empty())?;
     let directory = openat(
         parent,
         name,
@@ -1748,8 +2231,8 @@ mod android {
     use jni::sys::{JNI_FALSE, JNI_TRUE, jboolean, jint};
 
     use super::{
-        BuilderRuntime, ClosureSession, ExtractionReport, ProvisionSession, ReviewedInputRole,
-        ReviewedInputSession, parse_sha256,
+        AurBuildSession, BuilderRuntime, ClosureSession, ExtractionReport, ProvisionSession,
+        ReviewedInputRole, ReviewedInputSession, parse_sha256, prepare_recipe_workspace,
     };
 
     const ERROR_INVALID_ARGUMENT: jint = -1;
@@ -1762,9 +2245,16 @@ mod android {
     const EXTRACTION_REPORT_MAGIC: &[u8; 8] = b"ABPE0001";
     const REVIEWED_INPUT_REPORT_BYTES: usize = 56;
     const REVIEWED_INPUT_REPORT_MAGIC: &[u8; 8] = b"ABIR0001";
+    const RECIPE_WORKSPACE_REPORT_BYTES: usize = 32;
+    const RECIPE_WORKSPACE_REPORT_MAGIC: &[u8; 8] = b"ABRW0001";
+    const BUILD_POLL_HEADER_BYTES: usize = 16;
+    const BUILD_POLL_LOG_BYTES: usize = 64 * 1024;
+    const BUILD_POLL_OUTPUT_BYTES: usize = BUILD_POLL_HEADER_BYTES + BUILD_POLL_LOG_BYTES;
+    const BUILD_POLL_MAGIC: &[u8; 8] = b"ABBP0001";
     const RUNTIME_OUTPUT_BYTES: usize = 16 * 1024;
 
     static REVIEWED_INPUTS: OnceLock<Mutex<Option<ReviewedInputSession>>> = OnceLock::new();
+    static BUILD: OnceLock<Mutex<Option<AurBuildSession>>> = OnceLock::new();
     static SESSION: OnceLock<Mutex<Option<ClosureSession>>> = OnceLock::new();
     static PROVISION: OnceLock<Mutex<Option<ProvisionSession>>> = OnceLock::new();
 
@@ -1774,6 +2264,10 @@ mod android {
 
     fn reviewed_inputs() -> &'static Mutex<Option<ReviewedInputSession>> {
         REVIEWED_INPUTS.get_or_init(|| Mutex::new(None))
+    }
+
+    fn build() -> &'static Mutex<Option<AurBuildSession>> {
+        BUILD.get_or_init(|| Mutex::new(None))
     }
 
     fn provision() -> &'static Mutex<Option<ProvisionSession>> {
@@ -2302,11 +2796,229 @@ mod android {
             Err(error) => copy_builder_error(&error, output),
         }
     }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_builder_NativeBuilder_nativePrepareRecipeWorkspace(
+        mut environment: JNIEnv,
+        _class: JClass,
+        files_directory: JString,
+        package_base: JString,
+        version: JString,
+        input_manifest_sha256: JString,
+        closure_sha256: JString,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let (
+            Ok(files_directory),
+            Ok(package_base),
+            Ok(version),
+            Ok(input_manifest_sha256),
+            Ok(closure_sha256),
+        ) = (
+            java_string(&mut environment, &files_directory),
+            java_string(&mut environment, &package_base),
+            java_string(&mut environment, &version),
+            java_string(&mut environment, &input_manifest_sha256),
+            java_string(&mut environment, &closure_sha256),
+        )
+        else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let (Ok(input_manifest_sha256), Ok(closure_sha256)) = (
+            parse_sha256(&input_manifest_sha256),
+            parse_sha256(&closure_sha256),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let (Ok(capacity), Ok(address)) = (
+            environment.get_direct_buffer_capacity(&output_buffer),
+            environment.get_direct_buffer_address(&output_buffer),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if capacity < ERROR_OUTPUT_BYTES || address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        // SAFETY: JNI verified the fixed direct diagnostic/report buffer.
+        let output = unsafe { slice::from_raw_parts_mut(address, capacity) };
+        match prepare_recipe_workspace(
+            Path::new(&files_directory),
+            &package_base,
+            &version,
+            input_manifest_sha256,
+            closure_sha256,
+        ) {
+            Ok(report) => {
+                output[..RECIPE_WORKSPACE_REPORT_BYTES].fill(0);
+                output[..8].copy_from_slice(RECIPE_WORKSPACE_REPORT_MAGIC);
+                output[8..16].copy_from_slice(&report.recipe_entries.to_le_bytes());
+                output[16..24].copy_from_slice(&report.recipe_bytes.to_le_bytes());
+                output[24..32].copy_from_slice(&report.source_bytes.to_le_bytes());
+                RECIPE_WORKSPACE_REPORT_BYTES as jint
+            }
+            Err(error) => copy_builder_error(&error, output),
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_builder_NativeBuilder_nativeStartBuild(
+        mut environment: JNIEnv,
+        _class: JClass,
+        files_directory: JString,
+        native_directory: JString,
+        runtime_manifest_buffer: JByteBuffer,
+        runtime_manifest_length: jint,
+        package_base: JString,
+        version: JString,
+        input_manifest_sha256: JString,
+        closure_sha256: JString,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let Ok(runtime_manifest_length) = usize::try_from(runtime_manifest_length) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let (
+            Ok(files_directory),
+            Ok(native_directory),
+            Ok(package_base),
+            Ok(version),
+            Ok(input_manifest_sha256),
+            Ok(closure_sha256),
+        ) = (
+            java_string(&mut environment, &files_directory),
+            java_string(&mut environment, &native_directory),
+            java_string(&mut environment, &package_base),
+            java_string(&mut environment, &version),
+            java_string(&mut environment, &input_manifest_sha256),
+            java_string(&mut environment, &closure_sha256),
+        )
+        else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let (Ok(input_manifest_sha256), Ok(closure_sha256)) = (
+            parse_sha256(&input_manifest_sha256),
+            parse_sha256(&closure_sha256),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let (Ok(manifest_capacity), Ok(manifest_address), Ok(output_capacity), Ok(output_address)) = (
+            environment.get_direct_buffer_capacity(&runtime_manifest_buffer),
+            environment.get_direct_buffer_address(&runtime_manifest_buffer),
+            environment.get_direct_buffer_capacity(&output_buffer),
+            environment.get_direct_buffer_address(&output_buffer),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if runtime_manifest_length == 0
+            || runtime_manifest_length > manifest_capacity
+            || manifest_address.is_null()
+            || output_capacity < ERROR_OUTPUT_BYTES
+            || output_address.is_null()
+        {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        // SAFETY: JNI verified the direct runtime-manifest bounds.
+        let runtime_manifest = unsafe {
+            slice::from_raw_parts(manifest_address.cast_const(), runtime_manifest_length)
+        };
+        // SAFETY: JNI verified the fixed direct diagnostic buffer.
+        let output = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
+        let Ok(mut slot) = build().lock() else {
+            return ERROR_INVALID_STATE;
+        };
+        if slot.is_some() {
+            return ERROR_INVALID_STATE;
+        }
+        match AurBuildSession::start(
+            Path::new(&files_directory),
+            Path::new(&native_directory),
+            runtime_manifest,
+            &package_base,
+            &version,
+            input_manifest_sha256,
+            closure_sha256,
+        ) {
+            Ok(value) => {
+                *slot = Some(value);
+                0
+            }
+            Err(error) => copy_builder_error(&error, output),
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_builder_NativeBuilder_nativePollBuild(
+        environment: JNIEnv,
+        _class: JClass,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let (Ok(capacity), Ok(address)) = (
+            environment.get_direct_buffer_capacity(&output_buffer),
+            environment.get_direct_buffer_address(&output_buffer),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if capacity < BUILD_POLL_OUTPUT_BYTES || address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let Ok(mut slot) = build().lock() else {
+            return ERROR_INVALID_STATE;
+        };
+        let Some(session) = slot.as_mut() else {
+            return ERROR_INVALID_STATE;
+        };
+        let report = match session.poll(BUILD_POLL_LOG_BYTES) {
+            Ok(report) => report,
+            Err(error) => {
+                // SAFETY: JNI verified the fixed direct output buffer.
+                let output = unsafe { slice::from_raw_parts_mut(address, capacity) };
+                return copy_builder_error(&error, output);
+            }
+        };
+        let finished = report.exit_status.is_some();
+        let Ok(log_length) = u32::try_from(report.logs.len()) else {
+            return ERROR_BUILDER;
+        };
+        // SAFETY: JNI verified the complete fixed report/log capacity.
+        let output = unsafe { slice::from_raw_parts_mut(address, BUILD_POLL_OUTPUT_BYTES) };
+        output.fill(0);
+        output[..8].copy_from_slice(BUILD_POLL_MAGIC);
+        output[8..12].copy_from_slice(&report.exit_status.unwrap_or(-1).to_le_bytes());
+        output[12..16].copy_from_slice(&log_length.to_le_bytes());
+        output[16..16 + report.logs.len()].copy_from_slice(&report.logs);
+        let result = BUILD_POLL_HEADER_BYTES
+            .checked_add(report.logs.len())
+            .and_then(|value| i32::try_from(value).ok())
+            .unwrap_or(ERROR_BUILDER);
+        if finished {
+            slot.take();
+        }
+        result
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_builder_NativeBuilder_nativeCancelBuild(
+        _environment: JNIEnv,
+        _class: JClass,
+    ) -> jboolean {
+        match build().lock() {
+            Ok(mut slot) => {
+                let Some(mut session) = slot.take() else {
+                    return JNI_FALSE;
+                };
+                session.cancel();
+                JNI_TRUE
+            }
+            Err(_) => JNI_FALSE,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
     use std::fs;
     use std::io::Cursor;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -2387,6 +3099,12 @@ summary\t1\t{}\n",
         let encoder = XzEncoder::new(Vec::new(), 6);
         let mut builder = tar::Builder::new(encoder);
         builder.mode(tar::HeaderMode::Deterministic);
+        append_file(
+            &mut builder,
+            ".PKGINFO",
+            0o644,
+            b"pkgname = base-devel\npkgver = 1-1\narch = any\n",
+        );
         add_entries(&mut builder);
         let encoder = builder.into_inner().expect("finish tar archive");
         encoder.finish().expect("finish xz archive")
@@ -2447,6 +3165,44 @@ summary\t1\t{}\n",
             ));
         }
         (native, manifest.into_bytes(), closure)
+    }
+
+    fn reviewed_snapshot(package_base: &str) -> Vec<u8> {
+        let output = Vec::<u8>::new();
+        let encoder = GzEncoder::new(output, Compression::default());
+        let mut archive = tar::Builder::new(encoder);
+        archive
+            .append_pax_extensions([(
+                "comment",
+                b"0123456789abcdef0123456789abcdef01234567".as_slice(),
+            )])
+            .expect("snapshot commit");
+        let mut directory = tar::Header::new_gnu();
+        directory.set_entry_type(EntryType::Directory);
+        directory.set_mode(0o755);
+        directory.set_size(0);
+        directory.set_cksum();
+        archive
+            .append_data(&mut directory, format!("{package_base}/"), std::io::empty())
+            .expect("snapshot directory");
+        for (name, bytes) in [
+            ("PKGBUILD", b"package() { :; }\n".as_slice()),
+            ("local-source.sh", b"#!/bin/sh\n".as_slice()),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(EntryType::Regular);
+            header.set_mode(0o644);
+            header.set_size(bytes.len() as u64);
+            header.set_cksum();
+            archive
+                .append_data(&mut header, format!("{package_base}/{name}"), bytes)
+                .expect("snapshot file");
+        }
+        archive
+            .into_inner()
+            .expect("snapshot archive")
+            .finish()
+            .expect("snapshot gzip")
     }
 
     #[test]
@@ -2666,6 +3422,81 @@ summary\t1\t{}\n",
     }
 
     #[test]
+    fn prepares_disposable_recipe_from_exact_reviewed_inputs() {
+        let directory = test_directory();
+        let snapshot = reviewed_snapshot("example-bin");
+        let source = b"verified remote source";
+        let snapshot_path = directory.join("snapshot");
+        let source_path = directory.join("source");
+        fs::write(&snapshot_path, &snapshot).expect("snapshot");
+        fs::write(&source_path, source).expect("source");
+        let mut inputs = ReviewedInputSession::begin(&directory, "example-bin", "1.2.3-1", 2)
+            .expect("reviewed inputs");
+        inputs
+            .stage(
+                ReviewedInputRole::Snapshot,
+                "example-bin.tar.gz",
+                snapshot.len() as u64,
+                sha256_bytes(&snapshot),
+                &mut File::open(&snapshot_path).expect("open snapshot"),
+            )
+            .expect("stage snapshot");
+        inputs
+            .stage(
+                ReviewedInputRole::Source,
+                "remote-source.bin",
+                source.len() as u64,
+                sha256_bytes(source),
+                &mut File::open(&source_path).expect("open source"),
+            )
+            .expect("stage source");
+        let input_report = inputs.finish().expect("publish inputs");
+
+        let workspace = directory.join(WORKSPACE_NAME);
+        let root = workspace.join(BUILD_ROOT_NAME);
+        ArchRoot::bootstrap(&root).expect("build root");
+        let outside = directory.join("outside-build");
+        fs::create_dir(&outside).expect("outside build");
+        fs::write(outside.join("sentinel"), b"retained").expect("outside sentinel");
+        std::os::unix::fs::symlink(
+            &outside,
+            root.join("home/archphene").join(BUILD_SESSION_NAME),
+        )
+        .expect("hostile build workspace");
+        let closure = [9_u8; 32];
+        fs::write(
+            workspace.join(BUILD_ROOT_MANIFEST_NAME),
+            format!(
+                "ABBR0001\nclosure={}\npackages=1\nentries=3\nbytes=4\n",
+                hex_sha256(&closure),
+            ),
+        )
+        .expect("root manifest");
+        let recipe = prepare_recipe_workspace(
+            &directory,
+            "example-bin",
+            "1.2.3-1",
+            input_report.manifest_sha256,
+            closure,
+        )
+        .expect("recipe workspace");
+        assert_eq!(recipe.recipe_entries, 3);
+        assert_eq!(
+            fs::read(recipe.directory.join("remote-source.bin")).expect("prepared source"),
+            source,
+        );
+        assert_eq!(
+            fs::read(recipe.directory.join("PKGBUILD")).expect("prepared recipe"),
+            b"package() { :; }\n",
+        );
+        assert_eq!(
+            fs::read(outside.join("sentinel")).expect("outside survived"),
+            b"retained",
+        );
+        fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
     fn finish_rejects_a_tampered_staged_archive() {
         let directory = test_directory();
         let archive = b"package archive";
@@ -2745,7 +3576,6 @@ summary\t1\t{}\n",
     fn provisions_a_fresh_root_from_an_xz_package() {
         let directory = test_directory();
         let archive = package_archive(|builder| {
-            append_file(builder, ".PKGINFO", 0o644, b"pkgname = base-devel\n");
             append_file(builder, "usr/bin/build-tool", 0o755, b"tool\n");
             append_symlink(builder, "usr/bin/build-tool-link", Path::new("build-tool"));
         });
@@ -2767,6 +3597,16 @@ summary\t1\t{}\n",
             Path::new("build-tool"),
         );
         assert!(!root.join(".PKGINFO").exists());
+        assert_eq!(
+            fs::read(root.join("var/lib/pacman/local/ALPM_DB_VERSION"))
+                .expect("local database version"),
+            PACMAN_LOCAL_DATABASE_VERSION,
+        );
+        let local_description =
+            fs::read_to_string(root.join("var/lib/pacman/local/base-devel-1-1/desc"))
+                .expect("local package description");
+        assert!(local_description.contains("%NAME%\nbase-devel\n"));
+        assert!(local_description.contains("%VERSION%\n1-1\n"));
         let root_manifest = fs::read_to_string(
             directory
                 .join(WORKSPACE_NAME)
@@ -2794,7 +3634,8 @@ summary\t1\t{}\n",
             .expect("provision session");
         assert_eq!(
             provision.expected().expanded_bytes,
-            (b"shared bytes\n".len() * 2) as u64,
+            (b"pkgname = base-devel\npkgver = 1-1\narch = any\n".len()
+                + b"shared bytes\n".len() * 2) as u64,
         );
         provision.extract_next(1).expect("extract package");
         let root = provision.root().to_path_buf();
@@ -2802,6 +3643,34 @@ summary\t1\t{}\n",
         assert_eq!(
             fs::read(root.join("usr/share/data/alias")).expect("materialized hard link"),
             b"shared bytes\n",
+        );
+        fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn provisioning_rejects_package_metadata_that_disagrees_with_the_signed_manifest() {
+        let directory = test_directory();
+        let encoder = XzEncoder::new(Vec::new(), 6);
+        let mut builder = tar::Builder::new(encoder);
+        builder.mode(tar::HeaderMode::Deterministic);
+        append_file(
+            &mut builder,
+            ".PKGINFO",
+            0o644,
+            b"pkgname = substituted\npkgver = 1-1\narch = any\n",
+        );
+        append_file(&mut builder, "usr/bin/build-tool", 0o755, b"tool\n");
+        let encoder = builder.into_inner().expect("finish tar archive");
+        let archive = encoder.finish().expect("finish xz archive");
+        let digest = stage_fixture_closure(&directory, &archive, b"signature");
+        let mut provision = ProvisionSession::begin(&directory, "fixture", "1-1", digest)
+            .expect("provision session");
+        assert!(provision.extract_next(1).is_err());
+        assert!(
+            !provision
+                .root()
+                .join("var/lib/pacman/local/base-devel-1-1/desc")
+                .exists(),
         );
         fs::remove_dir_all(directory).expect("cleanup");
     }
@@ -2823,6 +3692,8 @@ summary\t1\t{}\n",
         for index in 0..4_200 {
             fs::write(churn.join(index.to_string()), b"x").expect("churn file");
         }
+        fs::set_permissions(&churn, fs::Permissions::from_mode(0o111))
+            .expect("hostile directory mode");
 
         let second = ProvisionSession::begin(&directory, "fixture", "1-1", digest)
             .expect("repeat provision");

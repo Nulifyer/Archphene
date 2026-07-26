@@ -10,7 +10,11 @@ extern char **environ;
 
 int main(int argc, char **argv) {
     const char *command = argc > 1 ? argv[1] : "cat";
-    if (argc > 2 && strcmp(argv[1], "--access") == 0) {
+    if (argc > 1 && strcmp(argv[1], "--fakeroot-child") == 0) {
+        const char *key = getenv("FAKEROOTKEY");
+        printf("fakeroot-key:%s\n", key == NULL ? "missing" : key);
+        return 0;
+    } else if (argc > 2 && strcmp(argv[1], "--access") == 0) {
         if (access(argv[2], R_OK | X_OK) != 0) {
             perror("access");
             return 1;
@@ -51,6 +55,16 @@ int main(int argc, char **argv) {
         int status;
         return waitpid(process, &status, 0) == process && WIFEXITED(status)
                 ? WEXITSTATUS(status) : 1;
+    } else if (argc > 2 && strcmp(argv[1], "--fakeroot") == 0) {
+        char *arguments[] = {
+            "fakeroot", "--", argv[2], "fakeroot-compat", NULL
+        };
+        execvp("fakeroot", arguments);
+    } else if (argc > 2 && strcmp(argv[1], "--fakeroot-environment") == 0) {
+        char *arguments[] = {
+            "fakeroot", "--", argv[2], "--fakeroot-child", NULL
+        };
+        execvp("fakeroot", arguments);
     } else {
         execlp(command, command, "bridge-arg", NULL);
     }

@@ -33,6 +33,8 @@
     <string name="aur_review_unavailable">AUR review is unavailable or the package name is invalid</string>
     <string name="verify_sources">Verify</string>
     <string name="verify_sources_description">Download and verify reviewed AUR sources</string>
+    <string name="build">Build</string>
+    <string name="build_aur_description">Build the exact verified AUR package offline</string>
     <string name="install">Install</string>
     <string name="remove">Remove</string>
     <string name="cancel">Cancel</string>

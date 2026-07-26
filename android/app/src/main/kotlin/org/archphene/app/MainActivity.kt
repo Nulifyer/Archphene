@@ -289,6 +289,11 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     val binder = runtimeBinder
                     val accepted =
                         if (
+                            binder?.aurBuildAvailable == true &&
+                            binder.aurReviewedPackage == packageName
+                        ) {
+                            binder.buildAurPackage(packageName)
+                        } else if (
                             binder?.aurSourcesAvailable == true &&
                             binder.aurReviewedPackage == packageName
                         ) {
@@ -637,6 +642,10 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 setOnClickListener {
                     val binder = runtimeBinder ?: return@setOnClickListener
                     when {
+                        binder.aurBuildCancellationAvailable -> {
+                            isEnabled = false
+                            binder.cancelAurBuild()
+                        }
                         binder.packageCancellationAvailable -> {
                             isEnabled = false
                             binder.cancelPackageOperation()
@@ -2143,7 +2152,9 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         setTextIfChanged(removeButton, binder.packageRemoveActionLabel)
         updatePackageSelectionActions()
         val packageActionAvailable =
-            binder.packageCancellationAvailable || binder.packageRecoveryAvailable
+            binder.aurBuildCancellationAvailable ||
+                binder.packageCancellationAvailable ||
+                binder.packageRecoveryAvailable
         setTextIfChanged(cancelButton, binder.packageActivityActionLabel)
         cancelButton.isEnabled = packageActionAvailable
         setVisibilityIfChanged(
@@ -2177,23 +2188,29 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         val aurPackage = packageSearchInput.text.toString().trim()
         val sourcesAvailable =
             binder.aurSourcesAvailable && binder.aurReviewedPackage == aurPackage
+        val buildAvailable =
+            binder.aurBuildAvailable && binder.aurReviewedPackage == aurPackage
         aurReviewButton.setText(
-            if (sourcesAvailable) R.string.verify_sources else R.string.aur,
+            when {
+                buildAvailable -> R.string.build
+                sourcesAvailable -> R.string.verify_sources
+                else -> R.string.aur
+            },
         )
         aurReviewButton.contentDescription =
             getString(
-                if (sourcesAvailable) {
-                    R.string.verify_sources_description
-                } else {
-                    R.string.aur_review_description
+                when {
+                    buildAvailable -> R.string.build_aur_description
+                    sourcesAvailable -> R.string.verify_sources_description
+                    else -> R.string.aur_review_description
                 },
             )
         aurReviewButton.isEnabled =
             aurPackage.isNotEmpty() &&
-                if (sourcesAvailable) {
-                    binder.aurSourcesAvailable
-                } else {
-                    binder.aurReviewAvailable
+                when {
+                    buildAvailable -> binder.aurBuildAvailable
+                    sourcesAvailable -> binder.aurSourcesAvailable
+                    else -> binder.aurReviewAvailable
                 }
     }
 

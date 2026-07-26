@@ -147,7 +147,7 @@ verified_bytes="$(
   archphene_die "could not parse the verified source size"
 builder_log="$(
   archphene_wait_log \
-    "AUR builder boundary ready: package=$builder uid=$builder_uid context=.*untrusted_app.*staged=[1-9][0-9]+ manifest=[0-9a-f]{64} closure=[1-9][0-9]*/[1-9][0-9]*\\+[1-9][0-9]* [0-9a-f]{64} root=[1-9][0-9]*/[1-9][0-9]* tool=[^\\r\\n]*makepkg" 120 \
+    "AUR builder boundary ready: package=$builder uid=$builder_uid context=.*untrusted_app.*staged=[1-9][0-9]+ manifest=[0-9a-f]{64} closure=[1-9][0-9]*/[1-9][0-9]*\\+[1-9][0-9]* [0-9a-f]{64} root=[1-9][0-9]*/[1-9][0-9]* tool=[^\\r\\n]*makepkg.* recipe=[1-9][0-9]*/[1-9][0-9]*\\+[1-9][0-9]*" 120 \
     'ArchpheneRuntime:I *:S'
 )"
 builder_closure_count="$(
@@ -176,13 +176,31 @@ builder_root_bytes="$(
   sed -nE 's/.* root=[1-9][0-9]*\/([1-9][0-9]*).*/\1/p' <<<"$builder_log" |
     tail -1
 )"
+builder_recipe_entries="$(
+  sed -nE 's/.* recipe=([1-9][0-9]*)\/[1-9][0-9]*\+[1-9][0-9]*/\1/p' \
+    <<<"$builder_log" |
+    tail -1
+)"
+builder_recipe_bytes="$(
+  sed -nE 's/.* recipe=[1-9][0-9]*\/([1-9][0-9]*)\+[1-9][0-9]*/\1/p' \
+    <<<"$builder_log" |
+    tail -1
+)"
+builder_recipe_source_bytes="$(
+  sed -nE 's/.* recipe=[1-9][0-9]*\/[1-9][0-9]*\+([1-9][0-9]*).*/\1/p' \
+    <<<"$builder_log" |
+    tail -1
+)"
 [[ "$builder_closure_count" =~ ^[1-9][0-9]*$ &&
    "$builder_closure_archive_bytes" =~ ^[1-9][0-9]*$ &&
    "$builder_closure_signature_bytes" =~ ^[1-9][0-9]*$ &&
    "$builder_closure_sha256" =~ ^[0-9a-f]{64}$ &&
    "$builder_root_entries" =~ ^[1-9][0-9]*$ &&
-   "$builder_root_bytes" =~ ^[1-9][0-9]*$ ]] ||
-  archphene_die "could not parse the independently published Builder closure and root"
+   "$builder_root_bytes" =~ ^[1-9][0-9]*$ &&
+   "$builder_recipe_entries" =~ ^[1-9][0-9]*$ &&
+   "$builder_recipe_bytes" =~ ^[1-9][0-9]*$ &&
+   "$builder_recipe_source_bytes" == "$verified_bytes" ]] ||
+  archphene_die "could not parse the independently published Builder closure/root/recipe"
 stale_deadline=$((SECONDS + 10))
 while ((SECONDS < stale_deadline)); do
   stale_state="$(
@@ -209,6 +227,7 @@ for pattern in \
   "Builder closure SHA-256: $builder_closure_sha256" \
   "Isolated build root: [1-9][0-9]* (?:KiB|MiB|GiB) across $builder_root_entries verified archive entries\\." \
   'Builder toolchain: [^<]*makepkg' \
+  "Prepared reviewed recipe: $builder_recipe_entries entries · [1-9][0-9]* (?:B|KiB|MiB) recipe · [1-9][0-9]* MiB verified sources\\." \
   'code[^<]*\.deb' \
   'direct HTTPS download' \
   'SHA-256: [0-9a-f]{64}'
@@ -377,12 +396,103 @@ grep -Fqx 'ABBR0001' <<<"$builder_root_manifest" &&
 archphene_adb_run shell run-as "$builder" test -L \
   "$builder_root/run/builder-runtime-v1/libarchphene_path_bridge.so" ||
   archphene_die "Builder runtime did not publish its verified bridge alias"
+builder_recipe="files/aur-build-workspace-v2/build-root/home/archphene/aur-build/$package"
+for recipe_file in PKGBUILD visual-studio-code-bin.sh
+do
+  archphene_adb_run shell run-as "$builder" test -f \
+    "$builder_recipe/$recipe_file" ||
+    archphene_die "prepared reviewed recipe omits $recipe_file"
+done
+prepared_source_filename="$(
+  awk -F '\t' '$1 == "source" { print $2; exit }' <<<"$builder_manifest"
+)"
+[[ -n "$prepared_source_filename" ]] ||
+  archphene_die "could not resolve the prepared source filename"
+prepared_source="$builder_recipe/$prepared_source_filename"
+prepared_source_sha256="$(
+  archphene_adb_run shell run-as "$builder" sha256sum "$prepared_source" |
+    awk '{ print $1 }' |
+    tr -d '\r'
+)"
+[[ "$prepared_source_sha256" == "$expected_sha256" ]] ||
+  archphene_die "prepared recipe source digest changed"
+recipe_links="$(
+  archphene_adb_run shell run-as "$builder" sh -c \
+    "'find $builder_recipe -type l | wc -l'" |
+    tr -d '\r[:space:]'
+)"
+[[ "$recipe_links" == 0 ]] ||
+  archphene_die "prepared reviewed recipe contains an unexpected link"
+
+archphene_wait_ui 'text="Build"[^>]*enabled="true"' aur-build-action 15
+archphene_tap_ui_pattern \
+  "$ARCHPHENE_UI" 'text="Build"[^>]*enabled="true"' "Build"
+build_log="$(
+  archphene_wait_log \
+    "AUR build completed for $package $reviewed_version" 900 \
+    'ArchpheneRuntime:I *:S'
+)"
+[[ -n "$build_log" ]] ||
+  archphene_die "isolated AUR build did not report completion"
+archphene_wait_ui \
+  "Built $package $reviewed_version; verifying output next" \
+  aur-build-complete 30
+builder_packages="$(
+  archphene_adb_run shell run-as "$builder" sh -c \
+    "'find $builder_recipe -maxdepth 1 -type f \\( -name \"*.pkg.tar.xz\" -o -name \"*.pkg.tar.zst\" \\) -print'" |
+    tr -d '\r'
+)"
+[[ -n "$builder_packages" ]] ||
+  archphene_die "successful isolated AUR build published no package archive"
+while IFS= read -r builder_package
+do
+  [[ -n "$builder_package" ]] || continue
+  archphene_adb_run shell run-as "$builder" test ! -L "$builder_package" ||
+    archphene_die "isolated AUR build published a symlink package archive"
+done <<<"$builder_packages"
+builder_package_count="$(awk 'NF { count++ } END { print count + 0 }' <<<"$builder_packages")"
+[[ "$builder_package_count" == 1 ]] ||
+  archphene_die "Code AUR fixture published an unexpected number of package archives"
+builder_package="$(awk 'NF { print; exit }' <<<"$builder_packages")"
+package_metadata="$(
+  archphene_adb_run exec-out run-as "$builder" cat "$builder_package" |
+    bsdtar -xOf - .BUILDINFO .PKGINFO
+)"
+grep -Fqx "pkgname = $package" <<<"$package_metadata" &&
+  grep -Fqx "pkgbase = $package" <<<"$package_metadata" &&
+  grep -Fqx "pkgver = $reviewed_version" <<<"$package_metadata" &&
+  grep -Fqx 'arch = aarch64' <<<"$package_metadata" &&
+  grep -Eq '^size = [1-9][0-9]*$' <<<"$package_metadata" ||
+  archphene_die "built Code package metadata does not match the reviewed result"
+actual_build_packages="$(
+  sed -n 's/^installed = //p' <<<"$package_metadata" |
+    sort
+)"
+expected_build_packages="$(
+  awk -F '\t' '
+    NR > 1 && $1 != "summary" {
+      filename = $4
+      sub(/\.pkg\.tar\.(xz|zst)$/, "", filename)
+      sub(/^.*-/, "", filename)
+      print $2 "-" $3 "-" filename
+    }
+  ' <<<"$builder_closure_manifest" |
+    sort
+)"
+actual_build_package_count="$(
+  awk 'NF { count++ } END { print count + 0 }' <<<"$actual_build_packages"
+)"
+[[ "$actual_build_package_count" == "$builder_closure_count" &&
+   "$actual_build_packages" == "$expected_build_packages" ]] ||
+  archphene_die "built Code package does not record its exact verified build closure"
 
 after_count="$(local_package_count)"
 [[ "$after_count" == "$before_count" ]] ||
-  archphene_die "AUR source verification mutated the pacman database"
+  archphene_die "isolated AUR build mutated the manager pacman database"
 
-archphene_wait_ui 'Verified source downloads:' aur-sources-final-render 15
+archphene_wait_ui \
+  "Built $package $reviewed_version; verifying output next" \
+  aur-sources-final-render 15
 resumed_activity="$(
   archphene_adb_run shell dumpsys activity activities |
     tr -d '\r' |
@@ -390,16 +500,6 @@ resumed_activity="$(
 )"
 [[ "$resumed_activity" == *"$manager"* ]] ||
   archphene_die "Archphene manager is not the resumed Activity before screenshot"
-read -r screen_width screen_height < <(
-  archphene_adb_run shell wm size |
-    sed -n 's/.*: \([0-9][0-9]*\)x\([0-9][0-9]*\).*/\1 \2/p' |
-    tail -n1
-)
-archphene_adb_run shell input swipe \
-  "$((screen_width / 2))" "$((screen_height * 3 / 4))" \
-  "$((screen_width / 2))" "$((screen_height * 2 / 3))" 600
-archphene_wait_ui \
-  'Verified official build environment:' aur-sources-plan-render 15
 sleep 1
 archphene_adb_run exec-out screencap -p >"$output_dir/$serial.png"
 
@@ -415,5 +515,7 @@ archphene_note "  Signed builder UID $builder_uid is separate from manager UID $
 archphene_note "  Builder terminated stale same-UID process $stale_builder_pid before reuse"
 archphene_note "  Builder reverified $builder_closure_count archive/signature pairs"
 archphene_note "  Builder provisioned $builder_root_entries verified entries ($builder_root_bytes bytes)"
+archphene_note "  Builder prepared $builder_recipe_entries reviewed recipe entries and $builder_recipe_source_bytes source bytes"
+archphene_note "  Builder completed makepkg and recorded all $builder_closure_count build packages"
 archphene_note "  Pacman state remained at $after_count local database entries"
 archphene_note "  Full-device screenshot: $output_dir/$serial.png"
