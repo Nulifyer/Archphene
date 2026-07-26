@@ -66,6 +66,8 @@ pub struct LauncherRegistrySummary {
     pub needs_removal: u16,
     pub active: u16,
     pub failed: u16,
+    pub cancelled: u16,
+    pub dismissed: u16,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -254,6 +256,13 @@ impl RuntimeHost {
 
     pub fn arch_root(&self) -> Option<&Path> {
         self.arch_root.as_ref().map(ArchRoot::path)
+    }
+
+    pub fn configure_android_dns(&self, request: &[u8]) -> Result<usize, RootError> {
+        self.arch_root
+            .as_ref()
+            .ok_or(RootError::InvalidPath)?
+            .configure_android_dns(request)
     }
 
     pub fn begin_mirror_import(&mut self, project_name: &str) -> Result<(), StorageError> {
@@ -473,6 +482,8 @@ impl RuntimeHost {
             needs_removal: 0,
             active: 0,
             failed: 0,
+            cancelled: 0,
+            dismissed: 0,
         };
         for descriptor in registry.descriptors() {
             match descriptor.status {
@@ -492,6 +503,12 @@ impl RuntimeHost {
                 }
                 WrapperStatus::Failed => {
                     summary.failed = summary.failed.saturating_add(1);
+                }
+                WrapperStatus::Cancelled => {
+                    summary.cancelled = summary.cancelled.saturating_add(1);
+                }
+                WrapperStatus::Dismissed => {
+                    summary.dismissed = summary.dismissed.saturating_add(1);
                 }
             }
         }
@@ -714,6 +731,51 @@ impl RuntimeHost {
             .as_mut()
             .ok_or(LauncherRegistryError::InvalidTransition)?
             .mark_failed(arch_root.path(), android_package, generation)
+    }
+
+    pub fn launcher_publish_cancelled(
+        &mut self,
+        android_package: &str,
+        generation: u64,
+    ) -> Result<(), LauncherRegistryError> {
+        let arch_root = self
+            .arch_root
+            .as_ref()
+            .ok_or(LauncherRegistryError::InvalidRoot)?;
+        self.launcher_registry
+            .as_mut()
+            .ok_or(LauncherRegistryError::InvalidTransition)?
+            .mark_cancelled(arch_root.path(), android_package, generation)
+    }
+
+    pub fn launcher_retry(
+        &mut self,
+        android_package: &str,
+        generation: u64,
+    ) -> Result<(), LauncherRegistryError> {
+        let arch_root = self
+            .arch_root
+            .as_ref()
+            .ok_or(LauncherRegistryError::InvalidRoot)?;
+        self.launcher_registry
+            .as_mut()
+            .ok_or(LauncherRegistryError::InvalidTransition)?
+            .retry_terminal(arch_root.path(), android_package, generation)
+    }
+
+    pub fn launcher_dismiss_cancelled(
+        &mut self,
+        android_package: &str,
+        generation: u64,
+    ) -> Result<(), LauncherRegistryError> {
+        let arch_root = self
+            .arch_root
+            .as_ref()
+            .ok_or(LauncherRegistryError::InvalidRoot)?;
+        self.launcher_registry
+            .as_mut()
+            .ok_or(LauncherRegistryError::InvalidTransition)?
+            .dismiss_cancelled(arch_root.path(), android_package, generation)
     }
 
     pub fn launcher_template_stale(

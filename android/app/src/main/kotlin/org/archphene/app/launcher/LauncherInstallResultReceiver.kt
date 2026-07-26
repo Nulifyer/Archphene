@@ -26,36 +26,46 @@ class LauncherInstallResultReceiver : BroadcastReceiver() {
             Log.e(TAG, "Rejected invalid launcher install result")
             return
         }
-        when (
+        val status =
             intent.getIntExtra(
                 PackageInstaller.EXTRA_STATUS,
                 PackageInstaller.STATUS_FAILURE,
             )
-        ) {
+        when (status) {
             PackageInstaller.STATUS_PENDING_USER_ACTION -> {
                 @Suppress("DEPRECATION")
                 val confirmation = intent.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)
                 if (confirmation == null) {
-                    report(context, androidPackage, generation, operation, false)
+                    report(context, androidPackage, generation, operation, RESULT_FAILED)
                 } else {
                     confirmation.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     context.startActivity(confirmation)
                 }
             }
             PackageInstaller.STATUS_SUCCESS -> {
-                report(context, androidPackage, generation, operation, true)
+                report(context, androidPackage, generation, operation, RESULT_SUCCEEDED)
             }
             else -> {
                 Log.w(
                     TAG,
                     "Android rejected launcher package=$androidPackage " +
                         "generation=$generation status=" +
-                        intent.getIntExtra(
-                            PackageInstaller.EXTRA_STATUS,
-                            PackageInstaller.STATUS_FAILURE,
-                        ),
+                        status,
                 )
-                report(context, androidPackage, generation, operation, false)
+                report(
+                    context,
+                    androidPackage,
+                    generation,
+                    operation,
+                    if (
+                        operation == OPERATION_INSTALL &&
+                        status == PackageInstaller.STATUS_FAILURE_ABORTED
+                    ) {
+                        RESULT_CANCELLED
+                    } else {
+                        RESULT_FAILED
+                    },
+                )
             }
         }
     }
@@ -65,12 +75,14 @@ class LauncherInstallResultReceiver : BroadcastReceiver() {
         androidPackage: String,
         generation: Long,
         operation: Int,
-        succeeded: Boolean,
+        result: Int,
     ) {
         val service =
             Intent(context, ArchpheneRuntimeService::class.java).apply {
                 action =
-                    if (!succeeded) {
+                    if (result == RESULT_CANCELLED) {
+                        ArchpheneRuntimeService.ACTION_LAUNCHER_CANCELLED
+                    } else if (result != RESULT_SUCCEEDED) {
                         ArchpheneRuntimeService.ACTION_LAUNCHER_FAILED
                     } else if (operation == OPERATION_INSTALL) {
                         ArchpheneRuntimeService.ACTION_LAUNCHER_INSTALLED
@@ -90,6 +102,9 @@ class LauncherInstallResultReceiver : BroadcastReceiver() {
         const val EXTRA_OPERATION = "launcherOperation"
         const val OPERATION_INSTALL = 1
         const val OPERATION_REMOVE = 2
+        private const val RESULT_FAILED = 0
+        private const val RESULT_SUCCEEDED = 1
+        private const val RESULT_CANCELLED = 2
         private const val TAG = "ArchpheneLauncherInstall"
         private val PACKAGE =
             Regex("org\\.archphene\\.linux\\.p[0-9a-f]{32}")

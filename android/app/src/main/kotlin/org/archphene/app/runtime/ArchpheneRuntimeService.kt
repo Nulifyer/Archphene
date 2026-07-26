@@ -13,6 +13,9 @@ import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.graphics.BitmapFactory
+import android.net.ConnectivityManager
+import android.net.LinkProperties
+import android.net.Network
 import android.net.Uri
 import android.os.Build
 import android.os.Binder
@@ -191,6 +194,9 @@ class ArchpheneRuntimeService : Service() {
         val launcherInstallPermissionRequired: Boolean
             get() = launcherPermissionRequired
 
+        val cancelledLauncherCount: Int
+            get() = launcherCancelledCount
+
         fun resumeLauncherPublisher(): Boolean {
             val activeHandle = readyHandle
             if (activeHandle == 0L) {
@@ -203,6 +209,10 @@ class ArchpheneRuntimeService : Service() {
             startLauncherPublisher(activeHandle)
             return true
         }
+
+        fun retryCancelledLauncher(): Boolean = requestCancelledLauncherDecision("retry")
+
+        fun dismissCancelledLauncher(): Boolean = requestCancelledLauncherDecision("dismiss")
 
         internal fun authorizeLauncher(
             androidPackage: String,
@@ -524,10 +534,35 @@ class ArchpheneRuntimeService : Service() {
 
     private val binder = LocalBinder()
     private val mainHandler = Handler(Looper.getMainLooper())
-    private var handle = 0L
+    @Volatile private var handle = 0L
     @Volatile private var readyHandle = 0L
+    @Volatile private var dnsRootReady = false
+    private var connectivityManager: ConnectivityManager? = null
+    private var networkCallbackRegistered = false
+    private val dnsRefreshActive = AtomicBoolean(false)
+    private val dnsRefreshPending = AtomicBoolean(false)
+    private var dnsThread: Thread? = null
+    private val networkCallback =
+        object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                scheduleAndroidDnsRefresh()
+            }
+
+            override fun onLinkPropertiesChanged(
+                network: Network,
+                linkProperties: LinkProperties,
+            ) {
+                scheduleAndroidDnsRefresh()
+            }
+
+            override fun onLost(network: Network) {
+                scheduleAndroidDnsRefresh()
+            }
+        }
     private val launcherPublisherActive = AtomicBoolean(false)
+    private val launcherDecisionActive = AtomicBoolean(false)
     @Volatile private var launcherPermissionRequired = false
+    @Volatile private var launcherCancelledCount = 0
     @Volatile private var pendingLauncherResultPackage = ""
     @Volatile private var pendingLauncherResultGeneration = 0L
     @Volatile private var pendingLauncherResultAction = ""
@@ -883,6 +918,8 @@ class ArchpheneRuntimeService : Service() {
         val needsRemoval: Int,
         val active: Int,
         val failed: Int,
+        val cancelled: Int,
+        val dismissed: Int,
     )
 
     private data class MirrorDirectory(
@@ -1056,6 +1093,13 @@ class ArchpheneRuntimeService : Service() {
             Log.e(TAG, "Native runtime creation failed")
             stopSelf()
             return
+        }
+        connectivityManager = getSystemService(ConnectivityManager::class.java)
+        try {
+            connectivityManager?.registerDefaultNetworkCallback(networkCallback)
+            networkCallbackRegistered = connectivityManager != null
+        } catch (error: RuntimeException) {
+            Log.w(TAG, "Could not observe Android network changes", error)
         }
         startBootstrap(handle)
     }
@@ -1260,7 +1304,8 @@ class ArchpheneRuntimeService : Service() {
         } else if (
             intent?.action == ACTION_LAUNCHER_INSTALLED ||
             intent?.action == ACTION_LAUNCHER_REMOVED ||
-            intent?.action == ACTION_LAUNCHER_FAILED
+            intent?.action == ACTION_LAUNCHER_FAILED ||
+            intent?.action == ACTION_LAUNCHER_CANCELLED
         ) {
             val androidPackage = intent.getStringExtra(EXTRA_LAUNCHER_PACKAGE).orEmpty()
             val generation = intent.getLongExtra(EXTRA_LAUNCHER_GENERATION, 0)
@@ -1304,6 +1349,18 @@ class ArchpheneRuntimeService : Service() {
     }
 
     override fun onDestroy() {
+        dnsRootReady = false
+        dnsRefreshPending.set(false)
+        if (networkCallbackRegistered) {
+            try {
+                connectivityManager?.unregisterNetworkCallback(networkCallback)
+            } catch (error: RuntimeException) {
+                Log.w(TAG, "Could not unregister Android network observer", error)
+            }
+            networkCallbackRegistered = false
+        }
+        dnsThread?.interrupt()
+        dnsThread = null
         stopSharedShell(waitForWorker = true)
         removeSessionNotification()
         val activeHandle = handle
@@ -1412,6 +1469,7 @@ class ArchpheneRuntimeService : Service() {
         private const val PACKAGE_JOB_TEST_WORKER_HOLD_MILLIS = "worker_hold_ms"
         private const val MAX_PACKAGE_JOB_TEST_HOLD_MILLIS = 5_000L
         private const val MIN_PACKAGE_PHASE_TEST_HOLD_MILLIS = 750L
+        private const val MAX_ANDROID_DNS_SERVERS = 4
         private const val SESSION_NOTIFICATION_ID = 0x4152
         private const val SESSION_NOTIFICATION_CHANNEL = "archphene_linux_sessions"
         private const val ACTION_STOP_SHELL = "org.archphene.app.action.STOP_SHARED_SHELL"
@@ -1421,6 +1479,8 @@ class ArchpheneRuntimeService : Service() {
             "org.archphene.app.action.LAUNCHER_REMOVED"
         const val ACTION_LAUNCHER_FAILED =
             "org.archphene.app.action.LAUNCHER_FAILED"
+        const val ACTION_LAUNCHER_CANCELLED =
+            "org.archphene.app.action.LAUNCHER_CANCELLED"
         const val EXTRA_LAUNCHER_PACKAGE = "launcherPackage"
         const val EXTRA_LAUNCHER_GENERATION = "launcherGeneration"
         private val LAUNCHER_PACKAGE =
@@ -1429,6 +1489,7 @@ class ArchpheneRuntimeService : Service() {
         private const val LAUNCHER_STATUS_AWAITING_INSTALL = 3
         private const val LAUNCHER_STATUS_NEEDS_REMOVAL = 5
         private const val LAUNCHER_STATUS_AWAITING_REMOVAL = 6
+        private const val LAUNCHER_STATUS_CANCELLED = 8
         private const val LAUNCHER_ICON_BYTES_LIMIT = 1024 * 1024
         private const val LAUNCHER_ICON_DIMENSION_LIMIT = 2048
         private const val LAUNCHER_ICON_PIXEL_LIMIT = 4L * 1024 * 1024
@@ -2540,6 +2601,83 @@ class ArchpheneRuntimeService : Service() {
         stopForeground(STOP_FOREGROUND_REMOVE)
     }
 
+    private fun scheduleAndroidDnsRefresh() {
+        if (!dnsRootReady || handle == 0L) {
+            return
+        }
+        dnsRefreshPending.set(true)
+        if (!dnsRefreshActive.compareAndSet(false, true)) {
+            return
+        }
+        dnsThread =
+            Thread(
+                {
+                    try {
+                        while (
+                            dnsRefreshPending.getAndSet(false) &&
+                            !Thread.currentThread().isInterrupted
+                        ) {
+                            val activeHandle = handle
+                            if (!dnsRootReady || activeHandle == 0L) {
+                                return@Thread
+                            }
+                            publishAndroidDns(activeHandle)
+                        }
+                    } finally {
+                        dnsRefreshActive.set(false)
+                        dnsThread = null
+                        if (dnsRefreshPending.get() && dnsRootReady && handle != 0L) {
+                            scheduleAndroidDnsRefresh()
+                        }
+                    }
+                },
+                "ArchpheneDns",
+            ).also(Thread::start)
+    }
+
+    private fun publishAndroidDns(activeHandle: Long): Boolean {
+        val manager = connectivityManager ?: return false
+        val linkProperties =
+            try {
+                val activeNetwork = manager.activeNetwork ?: return false
+                manager.getLinkProperties(activeNetwork) ?: return false
+            } catch (error: RuntimeException) {
+                Log.w(TAG, "Could not read Android DNS configuration", error)
+                return false
+            }
+        val request = StringBuilder("D1\n")
+        val emitted = ArrayList<String>(MAX_ANDROID_DNS_SERVERS)
+        for (address in linkProperties.dnsServers) {
+            val hostAddress = address.hostAddress ?: continue
+            if (hostAddress.isEmpty() || emitted.contains(hostAddress)) {
+                continue
+            }
+            emitted.add(hostAddress)
+            request.append(hostAddress).append('\n')
+            if (emitted.size == MAX_ANDROID_DNS_SERVERS) {
+                break
+            }
+        }
+        if (emitted.isEmpty()) {
+            Log.i(TAG, "Android active network has no DNS servers; retaining prior resolver")
+            return false
+        }
+        val bytes = request.toString().toByteArray(StandardCharsets.US_ASCII)
+        if (bytes.size > NativeRuntime.DNS_REQUEST_LIMIT) {
+            Log.e(TAG, "Android DNS request exceeded native bound")
+            return false
+        }
+        val buffer = ByteBuffer.allocateDirect(bytes.size)
+        buffer.put(bytes)
+        val result = NativeRuntime.nativeConfigureDns(activeHandle, buffer, bytes.size)
+        if (result < 0) {
+            Log.e(TAG, "Android DNS publication failed: $result")
+            return false
+        }
+        Log.i(TAG, "Published $result Android DNS server(s) to the Arch root")
+        return true
+    }
+
     private fun startBootstrap(activeHandle: Long) {
         bootstrapActive = true
         bootstrapThread =
@@ -2565,6 +2703,8 @@ class ArchpheneRuntimeService : Service() {
                                 "Shared Arch root bootstrap failed: $createdDirectories",
                             )
                         }
+                        dnsRootReady = true
+                        publishAndroidDns(activeHandle)
                         val packageVersion = preparePackageRuntime(activeHandle)
                         refreshPackageInventory(activeHandle)
                         reconcileInstalledLaunchers(activeHandle)
@@ -2986,6 +3126,7 @@ class ArchpheneRuntimeService : Service() {
                 }
             }
             val launcherSummary = readLauncherSummary(activeHandle)
+            launcherCancelledCount = launcherSummary?.cancelled ?: 0
             val status =
                 buildString {
                     append(desktopIds.size)
@@ -3038,6 +3179,30 @@ class ArchpheneRuntimeService : Service() {
                             append(launcherSummary.failed)
                             append(" launcher ")
                             append(if (launcherSummary.failed == 1) "failure" else "failures")
+                        }
+                        if (launcherSummary.cancelled > 0) {
+                            append(" · ")
+                            append(launcherSummary.cancelled)
+                            append(" launcher ")
+                            append(
+                                if (launcherSummary.cancelled == 1) {
+                                    "confirmation cancelled"
+                                } else {
+                                    "confirmations cancelled"
+                                },
+                            )
+                        }
+                        if (launcherSummary.dismissed > 0) {
+                            append(" · ")
+                            append(launcherSummary.dismissed)
+                            append(" ")
+                            append(
+                                if (launcherSummary.dismissed == 1) {
+                                    "launcher not added"
+                                } else {
+                                    "launchers not added"
+                                },
+                            )
                         }
                     }
                 }
@@ -3351,6 +3516,7 @@ class ArchpheneRuntimeService : Service() {
                     when (action) {
                         ACTION_LAUNCHER_INSTALLED -> "installed"
                         ACTION_LAUNCHER_REMOVED -> "removed"
+                        ACTION_LAUNCHER_CANCELLED -> "cancelled"
                         else -> "failed"
                     }
                 val transitioned =
@@ -3562,7 +3728,7 @@ class ArchpheneRuntimeService : Service() {
                     desired in 1..Int.MAX_VALUE.toLong() &&
                         published in 0..desired &&
                         pending in 0..desired &&
-                        status in 1..7,
+                        status in 1..9,
                 ) {
                     "Invalid launcher registry state"
                 }
@@ -3580,6 +3746,54 @@ class ArchpheneRuntimeService : Service() {
                 return rows
             }
         }
+    }
+
+    private fun requestCancelledLauncherDecision(action: String): Boolean {
+        val activeHandle = readyHandle
+        if (
+            activeHandle == 0L ||
+            launcherCancelledCount == 0 ||
+            (action != "retry" && action != "dismiss") ||
+            !launcherDecisionActive.compareAndSet(false, true)
+        ) {
+            return false
+        }
+        Thread(
+            {
+                try {
+                    val row =
+                        readLauncherRegistryRows(activeHandle)
+                            .firstOrNull { entry ->
+                                entry.status == LAUNCHER_STATUS_CANCELLED
+                            }
+                    if (row == null) {
+                        launcherCancelledCount = 0
+                        return@Thread
+                    }
+                    check(
+                        launcherTransition(
+                            activeHandle,
+                            action,
+                            row.androidPackage,
+                            row.desiredGeneration,
+                        ),
+                    ) {
+                        "Could not persist cancelled launcher decision"
+                    }
+                    refreshDesktopEntries(activeHandle)
+                    if (action == "retry") {
+                        startLauncherPublisher(activeHandle)
+                    }
+                } catch (error: Exception) {
+                    Log.e(TAG, "Cancelled launcher decision failed", error)
+                } finally {
+                    launcherDecisionActive.set(false)
+                    mainHandler.post { stopIfUnobservedAndIdle() }
+                }
+            },
+            "ArchpheneLauncherDecision",
+        ).start()
+        return true
     }
 
     private fun launcherTransition(
@@ -3622,7 +3836,7 @@ class ArchpheneRuntimeService : Service() {
                 outputLength,
                 StandardCharsets.US_ASCII,
             ).trimEnd('\n').split('\t')
-        if (fields.size != 8 || fields[0] != "L1") {
+        if (fields.size != 10 || fields[0] != "L2") {
             return null
         }
         val generation = fields[1].toLongOrNull() ?: return null
@@ -3632,6 +3846,8 @@ class ArchpheneRuntimeService : Service() {
         val needsRemoval = fields[5].toLongOrNull() ?: return null
         val active = fields[6].toLongOrNull() ?: return null
         val failed = fields[7].toLongOrNull() ?: return null
+        val cancelled = fields[8].toLongOrNull() ?: return null
+        val dismissed = fields[9].toLongOrNull() ?: return null
         if (
             generation < 0 ||
             total !in 0..NativeRuntime.DESKTOP_ENTRY_LIMIT.toLong() ||
@@ -3640,7 +3856,15 @@ class ArchpheneRuntimeService : Service() {
             needsRemoval !in 0..total ||
             active !in 0..total ||
             failed !in 0..total ||
-            needsPublish + current + needsRemoval + active + failed != total
+            cancelled !in 0..total ||
+            dismissed !in 0..total ||
+            needsPublish +
+                current +
+                needsRemoval +
+                active +
+                failed +
+                cancelled +
+                dismissed != total
         ) {
             return null
         }
@@ -3651,6 +3875,8 @@ class ArchpheneRuntimeService : Service() {
             needsRemoval.toInt(),
             active.toInt(),
             failed.toInt(),
+            cancelled.toInt(),
+            dismissed.toInt(),
         )
     }
 
@@ -8288,6 +8514,7 @@ class ArchpheneRuntimeService : Service() {
     private fun hasActiveRuntimeWork(): Boolean =
         bootstrapActive ||
             launcherPublisherActive.get() ||
+            launcherDecisionActive.get() ||
             catalogRefreshActive ||
             searchActive ||
             packageOperationActive ||

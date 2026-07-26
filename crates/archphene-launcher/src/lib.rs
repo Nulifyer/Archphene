@@ -37,6 +37,8 @@ pub enum WrapperStatus {
     NeedsRemoval = 5,
     AwaitingRemoval = 6,
     Failed = 7,
+    Cancelled = 8,
+    Dismissed = 9,
 }
 
 impl WrapperStatus {
@@ -49,6 +51,8 @@ impl WrapperStatus {
             5 => Self::NeedsRemoval,
             6 => Self::AwaitingRemoval,
             7 => Self::Failed,
+            8 => Self::Cancelled,
+            9 => Self::Dismissed,
             _ => return None,
         })
     }
@@ -259,7 +263,12 @@ impl LauncherRegistry {
                         } else {
                             match descriptor.status {
                                 WrapperStatus::AwaitingInstall => descriptor.status,
-                                WrapperStatus::Building | WrapperStatus::Failed if !revived => {
+                                WrapperStatus::Building
+                                | WrapperStatus::Failed
+                                | WrapperStatus::Cancelled
+                                | WrapperStatus::Dismissed
+                                    if !revived =>
+                                {
                                     descriptor.status
                                 }
                                 _ => WrapperStatus::NeedsPublish,
@@ -281,9 +290,17 @@ impl LauncherRegistry {
                             desired_generation,
                             old.published_generation,
                         );
-                        if old.status == WrapperStatus::AwaitingInstall {
-                            replacement.pending_generation = old.pending_generation;
-                            replacement.status = WrapperStatus::AwaitingInstall;
+                        match old.status {
+                            WrapperStatus::AwaitingInstall => {
+                                replacement.pending_generation = old.pending_generation;
+                                replacement.status = WrapperStatus::AwaitingInstall;
+                            }
+                            WrapperStatus::Failed
+                            | WrapperStatus::Cancelled
+                            | WrapperStatus::Dismissed => {
+                                replacement.status = old.status;
+                            }
+                            _ => {}
                         }
                         descriptor = replacement;
                         changed = changed.saturating_add(1);
@@ -510,6 +527,37 @@ impl LauncherRegistry {
         self.advance_and_store(arch_root)
     }
 
+    pub fn mark_cancelled(
+        &mut self,
+        arch_root: &Path,
+        android_package: &str,
+        operation_generation: u64,
+    ) -> Result<(), LauncherRegistryError> {
+        let index = self
+            .descriptors
+            .iter()
+            .position(|descriptor| descriptor.android_package == android_package)
+            .ok_or(LauncherRegistryError::InvalidTransition)?;
+        let descriptor = &self.descriptors[index];
+        if descriptor.status != WrapperStatus::AwaitingInstall
+            || descriptor.pending_generation != operation_generation
+        {
+            return Err(LauncherRegistryError::InvalidTransition);
+        }
+        if !descriptor.desired_present && descriptor.published_generation == 0 {
+            self.descriptors.remove(index);
+        } else {
+            let descriptor = &mut self.descriptors[index];
+            descriptor.pending_generation = 0;
+            descriptor.status = if descriptor.desired_present {
+                WrapperStatus::Cancelled
+            } else {
+                WrapperStatus::NeedsRemoval
+            };
+        }
+        self.advance_and_store(arch_root)
+    }
+
     pub fn mark_template_stale(
         &mut self,
         arch_root: &Path,
@@ -542,17 +590,23 @@ impl LauncherRegistry {
         self.advance_and_store(arch_root)
     }
 
-    pub fn retry_failed(
+    pub fn retry_terminal(
         &mut self,
         arch_root: &Path,
         android_package: &str,
+        desired_generation: u64,
     ) -> Result<(), LauncherRegistryError> {
         let descriptor = self
             .descriptors
             .iter_mut()
             .find(|descriptor| descriptor.android_package == android_package)
             .ok_or(LauncherRegistryError::InvalidTransition)?;
-        if descriptor.status != WrapperStatus::Failed || descriptor.pending_generation != 0 {
+        if !matches!(
+            descriptor.status,
+            WrapperStatus::Failed | WrapperStatus::Cancelled | WrapperStatus::Dismissed
+        ) || descriptor.pending_generation != 0
+            || descriptor.desired_generation != desired_generation
+        {
             return Err(LauncherRegistryError::InvalidTransition);
         }
         descriptor.status = if descriptor.desired_present {
@@ -562,6 +616,28 @@ impl LauncherRegistry {
         } else {
             return Err(LauncherRegistryError::InvalidTransition);
         };
+        self.advance_and_store(arch_root)
+    }
+
+    pub fn dismiss_cancelled(
+        &mut self,
+        arch_root: &Path,
+        android_package: &str,
+        desired_generation: u64,
+    ) -> Result<(), LauncherRegistryError> {
+        let descriptor = self
+            .descriptors
+            .iter_mut()
+            .find(|descriptor| descriptor.android_package == android_package)
+            .ok_or(LauncherRegistryError::InvalidTransition)?;
+        if descriptor.status != WrapperStatus::Cancelled
+            || descriptor.pending_generation != 0
+            || descriptor.desired_generation != desired_generation
+            || !descriptor.desired_present
+        {
+            return Err(LauncherRegistryError::InvalidTransition);
+        }
+        descriptor.status = WrapperStatus::Dismissed;
         self.advance_and_store(arch_root)
     }
 
@@ -595,6 +671,11 @@ impl LauncherRegistry {
                     WrapperStatus::NeedsRemoval
                 } else if generation == descriptor.desired_generation {
                     WrapperStatus::Current
+                } else if matches!(
+                    previous.status,
+                    WrapperStatus::Failed | WrapperStatus::Cancelled | WrapperStatus::Dismissed
+                ) {
+                    previous.status
                 } else {
                     WrapperStatus::NeedsPublish
                 };
@@ -603,7 +684,12 @@ impl LauncherRegistry {
                 let descriptor = &mut self.descriptors[index];
                 descriptor.published_generation = 0;
                 descriptor.pending_generation = 0;
-                descriptor.status = WrapperStatus::NeedsPublish;
+                descriptor.status = match previous.status {
+                    WrapperStatus::Failed | WrapperStatus::Cancelled | WrapperStatus::Dismissed => {
+                        previous.status
+                    }
+                    _ => WrapperStatus::NeedsPublish,
+                };
             }
             None => {
                 self.descriptors.remove(index);
@@ -1267,7 +1353,9 @@ fn validate_registry(registry: &LauncherRegistry) -> Result<(), LauncherRegistry
                     descriptor.published_generation != descriptor.desired_generation
                         && descriptor.pending_generation != 0
                 }
-                WrapperStatus::Failed => descriptor.pending_generation == 0,
+                WrapperStatus::Failed | WrapperStatus::Cancelled | WrapperStatus::Dismissed => {
+                    descriptor.pending_generation == 0
+                }
                 WrapperStatus::NeedsRemoval | WrapperStatus::AwaitingRemoval => false,
             }
         } else {
@@ -2098,7 +2186,7 @@ mod tests {
         assert_eq!(registry.descriptors[0].status, WrapperStatus::Failed);
         assert!(registry.mark_building(&root.path, &package, 1).is_err());
         registry
-            .retry_failed(&root.path, &package)
+            .retry_terminal(&root.path, &package, 1)
             .expect("retry build");
         assert_eq!(registry.descriptors[0].status, WrapperStatus::NeedsPublish);
 
@@ -2122,9 +2210,45 @@ mod tests {
             .expect("removal failure");
         assert_eq!(registry.descriptors[0].status, WrapperStatus::Failed);
         registry
-            .retry_failed(&root.path, &package)
+            .retry_terminal(&root.path, &package, 1)
             .expect("retry removal");
         assert_eq!(registry.descriptors[0].status, WrapperStatus::NeedsRemoval);
+    }
+
+    #[test]
+    fn cancelled_install_survives_restart_until_retry_or_dismiss() {
+        let root = TestRoot::new();
+        let source = catalog(vec![entry("org.kde.kate.desktop", "Kate")]);
+        let (mut registry, _) =
+            LauncherRegistry::reconcile(&root.path, &source).expect("initial reconcile");
+        let package = registry.descriptors[0].android_package.clone();
+        registry
+            .mark_building(&root.path, &package, 1)
+            .expect("building");
+        registry
+            .mark_awaiting_install(&root.path, &package, 1)
+            .expect("awaiting install");
+        registry
+            .mark_cancelled(&root.path, &package, 1)
+            .expect("cancelled");
+
+        let mut restarted = LauncherRegistry::load(&root.path).expect("restart load");
+        restarted
+            .reconcile_android_package(&root.path, &package, None)
+            .expect("wrapper remains absent");
+        assert_eq!(restarted.descriptors[0].status, WrapperStatus::Cancelled);
+        assert!(restarted.mark_building(&root.path, &package, 1).is_err());
+
+        restarted
+            .dismiss_cancelled(&root.path, &package, 1)
+            .expect("dismiss");
+        let (mut restarted, _) =
+            LauncherRegistry::reconcile(&root.path, &source).expect("catalog refresh");
+        assert_eq!(restarted.descriptors[0].status, WrapperStatus::Dismissed);
+        restarted
+            .retry_terminal(&root.path, &package, 1)
+            .expect("explicit retry");
+        assert_eq!(restarted.descriptors[0].status, WrapperStatus::NeedsPublish);
     }
 
     #[test]

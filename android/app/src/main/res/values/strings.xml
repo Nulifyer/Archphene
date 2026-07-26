@@ -65,6 +65,13 @@
     <string name="launcher_permission_message">Android requires one approval before Archphene can add Linux apps to your app drawer. Archphene will still show each Android install confirmation.</string>
     <string name="launcher_permission_settings">Open settings</string>
     <string name="launcher_permission_later">Not now</string>
+    <string name="launcher_cancelled_title">Linux app launcher not added</string>
+    <plurals name="launcher_cancelled_message">
+        <item quantity="one">Android launcher installation was cancelled. Retry now or dismiss it; Archphene will not retry automatically.</item>
+        <item quantity="other">%1$d Android launcher installations were cancelled. Retry the next one now or dismiss it; Archphene will not retry automatically.</item>
+    </plurals>
+    <string name="launcher_cancelled_retry">Retry</string>
+    <string name="launcher_cancelled_dismiss">Dismiss</string>
     <string name="linux_session_display">Linux session display</string>
     <string name="terminal_accessibility_dimensions">Linux terminal, %1$d columns by %2$d rows</string>
     <string name="terminal_text_smaller">Text smaller</string>

@@ -1192,10 +1192,15 @@ unrecoverable stale output copies on startup, reducing its transient cache from
 launcher through Android's confirmation UI. After another manager restart,
 bounded no-follow pacman-local inspection identifies its `none` validation
 origin, renders an honest disabled Installed action, and enables conservative
-Remove instead of failing official-repository resolution. The physical audit
-also exposed that cancelled dependency launcher prompts are resubmitted after a
-manager restart; explicit retry/dismiss and batch selection are now tracked UX
-work. Recursive AUR dependencies, the
+Remove instead of failing official-repository resolution. Cancelled
+PackageInstaller confirmations now persist as a distinct terminal launcher
+state instead of being reconciled back to publication after manager restart.
+The manager shows explicit Retry/Dismiss choices, persists dismissal, and only
+Retry submits another Android session. Exact-ABI emulator and Samsung gates
+remove one generated wrapper, cancel the Android confirmation, force-stop and
+restart the manager without a resubmission, then Retry and restore the wrapper
+through one successful confirmation. Reviewed batch selection and a way to
+revisit dismissed launchers remain UX work. Recursive AUR dependencies, the
 install-script/scriptlet policy, verified-output retention across manager
 process death, and actual Electron/Code launch remain open.
 
@@ -1262,12 +1267,24 @@ clean full-device Code cold launch, Back cleanup, and relaunch.
 The first real extension-marketplace UI gate fails before HTTP. A bounded
 temporary Chromium netlog shows Open VSX host resolution returning
 `getaddrinfo` `EAI_AGAIN` and `ERR_NAME_NOT_RESOLVED`; no TLS request is made.
-The managed glibc environment currently has no resolver configuration tied to
-Android's active `LinkProperties`. The production fix must atomically publish
-only validated Android DNS addresses through the Rust-owned root and refresh
-them on network changes so VPN, private-DNS, Wi-Fi, and cellular behavior are
-not bypassed by hardcoded public resolvers. Diagnostic netlog flags and output
-were removed after the capture.
+The manager now publishes up to four validated, canonical IPv4/IPv6 addresses
+from Android's active `LinkProperties` through bounded direct JNI into an
+atomic, mode-0600, no-follow resolver file owned by the Rust Arch root. Scoped
+IPv6 interface identifiers are preserved, unchanged configurations avoid
+flash churn, default-network callbacks refresh the file, and a missing active
+network retains the last usable configuration instead of installing a public
+resolver. Host tests cover malformed input, canonicalization, replacement,
+mode repair, unchanged inode retention, and hostile destination/staging links.
+
+A direct glibc runtime probe exposed the remaining boundary: resolver loading
+uses an internal libc `fopen` that cannot be interposed by the preload bridge.
+The current packaged libc therefore still reads Android's absent
+`/etc/resolv.conf`, falls back to `127.0.0.1`, and returns `EAI_AGAIN` despite
+the correct private-root file. A narrowly scoped glibc patch now selects only
+`$ARCHPHENE_RUNTIME_ROOT/etc/resolv.conf` for the Android compatibility build,
+with a build-time probe prepared against a documentation-prefix DNS address.
+The checksum-pinned source rebuild and live dual-device Open VSX gate remain
+pending. Diagnostic netlog flags and output were removed after the capture.
 
 The x86_64 package lane renders immediate durable progress for a real
 `dotnet-sdk` request and resolves the same shared-root `base` plus SDK closure

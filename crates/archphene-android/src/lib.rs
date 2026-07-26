@@ -120,6 +120,7 @@ mod android {
     const ERROR_PROCESS: jint = -8;
     const ERROR_STORAGE: jint = -9;
     const ERROR_LAUNCHER: jint = -10;
+    const MAX_ANDROID_DNS_REQUEST_BYTES: usize = 512;
     const MAX_STORAGE_REQUEST_BYTES: usize = 4 * 1024;
     const BUILT_PACKAGE_REPORT_BYTES: usize = 64;
     const BUILT_PACKAGE_REPORT_MAGIC: &[u8; 8] = b"ABMV0001";
@@ -816,6 +817,49 @@ mod android {
             .bootstrap_arch_root(Path::new(path), now_millis)
             .map_or(ERROR_BOOTSTRAP, |report| {
                 i32::try_from(report.root.created_directories).unwrap_or(i32::MAX)
+            })
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeConfigureDns(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        request_buffer: JByteBuffer,
+        request_length: jint,
+    ) -> jint {
+        let (Ok(handle), Ok(request_length)) =
+            (u64::try_from(handle), usize::try_from(request_length))
+        else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(request_capacity) = environment.get_direct_buffer_capacity(&request_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if request_length == 0
+            || request_length > request_capacity
+            || request_length > MAX_ANDROID_DNS_REQUEST_BYTES
+        {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let Ok(request_address) = environment.get_direct_buffer_address(&request_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if request_address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let request =
+            unsafe { slice::from_raw_parts(request_address.cast_const(), request_length) };
+        let Ok(mut registry) = registry().lock() else {
+            return ERROR_INTERNAL;
+        };
+        let Some(runtime) = registry.runtime_mut(handle) else {
+            return ERROR_INVALID_HANDLE;
+        };
+        runtime
+            .configure_android_dns(request)
+            .map_or(ERROR_BOOTSTRAP, |servers| {
+                i32::try_from(servers).unwrap_or(i32::MAX)
             })
     }
 
@@ -2138,7 +2182,7 @@ mod android {
             summary
         };
         let encoded = format!(
-            "L1\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            "L2\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             summary.generation,
             summary.total,
             summary.needs_publish,
@@ -2146,6 +2190,8 @@ mod android {
             summary.needs_removal,
             summary.active,
             summary.failed,
+            summary.cancelled,
+            summary.dismissed,
         );
         if encoded.len() > output_capacity {
             return ERROR_INTERNAL;
@@ -2692,6 +2738,9 @@ mod android {
                 }
                 "installed" => runtime.launcher_confirm_installed(android_package, generation),
                 "failed" => runtime.launcher_publish_failed(android_package, generation),
+                "cancelled" => runtime.launcher_publish_cancelled(android_package, generation),
+                "retry" => runtime.launcher_retry(android_package, generation),
+                "dismiss" => runtime.launcher_dismiss_cancelled(android_package, generation),
                 "template-stale" if generation != 0 => {
                     runtime.launcher_template_stale(android_package, generation)
                 }

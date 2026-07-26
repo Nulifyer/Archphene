@@ -19,6 +19,7 @@ internal object NativeRuntime {
     const val DESKTOP_ENTRY_LIMIT = 256
     const val LAUNCHER_PROCESS_LOG_SIZE = 16 * 1024
     const val COMMAND_REQUEST_LIMIT = 16 * 1024
+    const val DNS_REQUEST_LIMIT = 512
     const val TERMINAL_DAMAGE_SIZE = 6_080_040
     const val ERROR_INVALID_STATE = -3
 
@@ -128,6 +129,11 @@ internal object NativeRuntime {
         buffer: ByteBuffer,
         byteCount: Int,
         nowMillis: Long,
+    ): Int
+    external fun nativeConfigureDns(
+        handle: Long,
+        requestBuffer: ByteBuffer,
+        requestLength: Int,
     ): Int
     external fun nativePreparePackageRuntime(
         handle: Long,

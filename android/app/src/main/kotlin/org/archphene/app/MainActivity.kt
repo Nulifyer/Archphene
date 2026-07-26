@@ -113,6 +113,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private var packageJobListRevision = Int.MIN_VALUE
     private var storageOnboardingDialog: AlertDialog? = null
     private var launcherPermissionDialog: AlertDialog? = null
+    private var launcherCancellationDialog: AlertDialog? = null
     private var launcherPermissionDeferred = false
     private var pendingImportUri: Uri? = null
     private var pendingFolderUri: Uri? = null
@@ -1483,6 +1484,9 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         launcherPermissionDialog?.setOnDismissListener(null)
         launcherPermissionDialog?.dismiss()
         launcherPermissionDialog = null
+        launcherCancellationDialog?.setOnDismissListener(null)
+        launcherCancellationDialog?.dismiss()
+        launcherCancellationDialog = null
         if (isFinishing && !keepServiceAfterFinish) {
             stopService(Intent(this, ArchpheneRuntimeService::class.java))
         }
@@ -1634,6 +1638,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         updatePackageActivity()
         updatePackageActions()
         maybeShowStorageOnboarding()
+        maybeShowLauncherCancellation()
         maybeShowLauncherPermission()
     }
 
@@ -1746,6 +1751,44 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             }
         }
         launcherPermissionDialog = dialog
+        dialog.show()
+    }
+
+    private fun maybeShowLauncherCancellation() {
+        val binder = runtimeBinder ?: return
+        val count = binder.cancelledLauncherCount
+        if (
+            count == 0 ||
+            launcherCancellationDialog != null ||
+            storageOnboardingDialog != null ||
+            launcherPermissionDialog != null ||
+            isFinishing ||
+            isDestroyed
+        ) {
+            return
+        }
+        val dialog =
+            AlertDialog
+                .Builder(this)
+                .setTitle(R.string.launcher_cancelled_title)
+                .setMessage(
+                    resources.getQuantityString(
+                        R.plurals.launcher_cancelled_message,
+                        count,
+                        count,
+                    ),
+                ).setPositiveButton(R.string.launcher_cancelled_retry) { _, _ ->
+                    binder.retryCancelledLauncher()
+                }.setNegativeButton(R.string.launcher_cancelled_dismiss) { _, _ ->
+                    binder.dismissCancelledLauncher()
+                }.setCancelable(false)
+                .create()
+        dialog.setOnDismissListener {
+            if (launcherCancellationDialog === dialog) {
+                launcherCancellationDialog = null
+            }
+        }
+        launcherCancellationDialog = dialog
         dialog.show()
     }
 

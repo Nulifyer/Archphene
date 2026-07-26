@@ -143,6 +143,21 @@ probe_output="$(
 [[ "$probe_output" == libc-internal-chmod-ok ]]
 [[ "$(stat -c %a "$probe_root/home/archphene/.config/archphene-chmod-probe")" == 600 ]]
 
+resolver_root=/tmp/archphene-libc-resolver-root
+mkdir -p "$resolver_root/etc"
+printf "nameserver 192.0.2.53\n" >"$resolver_root/etc/resolv.conf"
+gcc -O2 -Wall -Wextra -Werror \
+  -o /tmp/archphene-libc-resolver-probe \
+  /archphene-path-bridge/resolver_probe.c -lresolv
+resolver_output="$(
+  ARCHPHENE_RUNTIME_ROOT="$resolver_root" ARCHPHENE_FAKE_CHROOT=1 \
+    "$install/lib64/ld-linux-x86-64.so.2" \
+      --library-path "$install/lib64" \
+      /tmp/archphene-libc-resolver-probe --configuration-only
+)"
+grep -qx "nameservers=1" <<<"$resolver_output"
+grep -qx "nameserver\\[0\\]=192.0.2.53" <<<"$resolver_output"
+
 mkdir -p /out/glibc
 runtime_files=(
   ld-linux-x86-64.so.2 libc.so.6 libm.so.6 libdl.so.2 libpthread.so.0

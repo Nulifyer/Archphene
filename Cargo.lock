@@ -85,6 +85,9 @@ dependencies = [
 [[package]]
 name = "archphene-root"
 version = "0.1.0"
+dependencies = [
+ "rustix",
+]
 
 [[package]]
 name = "archphene-runtime"

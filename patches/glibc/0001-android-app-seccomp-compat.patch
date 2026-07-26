@@ -1,3 +1,124 @@
+diff --git a/resolv/res_init.c b/resolv/res_init.c
+index f2f2e95a..48d7d136 100644
+--- a/resolv/res_init.c
++++ b/resolv/res_init.c
+@@ -104,6 +104,10 @@
+ #include <resolv_conf.h>
+ #include <file_change_detection.h>
+ 
++#ifdef ARCHPHENE_ANDROID_APP_COMPAT
++# include <limits.h>
++#endif
++
+ static uint32_t net_mask (struct in_addr);
+ 
+ int
+@@ -556,7 +560,12 @@ __resolv_conf_load (struct __res_state *preinit,
+   /* Ensure that /etc/host.conf has been loaded (once).  */
+   _res_hconf_init ();
+ 
+-  FILE *fp = fopen (_PATH_RESCONF, "rce");
++  const char *resolv_conf_path = _PATH_RESCONF;
++#ifdef ARCHPHENE_ANDROID_APP_COMPAT
++  char archphene_resolv_conf[PATH_MAX];
++  resolv_conf_path = __archphene_resolv_conf_path (archphene_resolv_conf);
++#endif
++  FILE *fp = fopen (resolv_conf_path, "rce");
+   if (fp == NULL)
+     switch (errno)
+       {
+diff --git a/resolv/resolv_conf.c b/resolv/resolv_conf.c
+index 389b6cfb..6688bb93 100644
+--- a/resolv/resolv_conf.c
++++ b/resolv/resolv_conf.c
+@@ -26,6 +26,12 @@
+ #include <libc-symbols.h>
+ #include <file_change_detection.h>
+ 
++#ifdef ARCHPHENE_ANDROID_APP_COMPAT
++# include <limits.h>
++# include <stdlib.h>
++# include <string.h>
++#endif
++
+ /* _res._u._ext.__glibc_extension_index is used as an index into a
+    struct resolv_conf_array object.  The intent of this construction
+    is to make reasonably sure that even if struct __res_state objects
+@@ -120,11 +126,59 @@ conf_decrement (struct resolv_conf *conf)
+     free (conf);
+ }
+ 
++#ifdef ARCHPHENE_ANDROID_APP_COMPAT
++/* Resolver configuration is loaded through an internal libc path which an
++   LD_PRELOAD bridge cannot interpose.  Resolve only the fixed resolver suffix
++   below the validated Android-app runtime root.  The environment is immutable
++   for an Archphene process and Android does not grant Linux file capabilities
++   or set-ID elevation to package files.  */
++static int
++archphene_has_parent_component (const char *path)
++{
++  const char *part = path;
++  while ((part = strstr (part, "..")) != NULL)
++    {
++      int starts_component = part == path || part[-1] == '/';
++      int ends_component = part[2] == '\0' || part[2] == '/';
++      if (starts_component && ends_component)
++        return 1;
++      part += 2;
++    }
++  return 0;
++}
++
++const char *
++__archphene_resolv_conf_path (char output[PATH_MAX])
++{
++  const char *enabled = getenv ("ARCHPHENE_FAKE_CHROOT");
++  const char *root = getenv ("ARCHPHENE_RUNTIME_ROOT");
++  if (enabled == NULL || strcmp (enabled, "1") != 0
++      || root == NULL || root[0] != '/' || root[1] == '\0'
++      || strchr (root, '\n') != NULL
++      || archphene_has_parent_component (root))
++    return _PATH_RESCONF;
++
++  size_t root_length = strlen (root);
++  while (root_length > 1 && root[root_length - 1] == '/')
++    --root_length;
++  if (root_length + sizeof (_PATH_RESCONF) > PATH_MAX)
++    return _PATH_RESCONF;
++  memcpy (output, root, root_length);
++  memcpy (output + root_length, _PATH_RESCONF, sizeof (_PATH_RESCONF));
++  return output;
++}
++#endif
++
+ struct resolv_conf *
+ __resolv_conf_get_current (void)
+ {
++  const char *resolv_conf_path = _PATH_RESCONF;
++#ifdef ARCHPHENE_ANDROID_APP_COMPAT
++  char archphene_resolv_conf[PATH_MAX];
++  resolv_conf_path = __archphene_resolv_conf_path (archphene_resolv_conf);
++#endif
+   struct file_change_detection initial;
+-  if (!__file_change_detection_for_path (&initial, _PATH_RESCONF))
++  if (!__file_change_detection_for_path (&initial, resolv_conf_path))
+     return NULL;
+ 
+   struct resolv_conf_global *global_copy = get_locked_global ();
+diff --git a/resolv/resolv_conf.h b/resolv/resolv_conf.h
+index 0f611a6b..2cce5dc2 100644
+--- a/resolv/resolv_conf.h
++++ b/resolv/resolv_conf.h
+@@ -63,4 +63,9 @@ struct resolv_conf
+    and the struct resolv_context facility.  */
+ 
+ struct __res_state;
++#ifdef ARCHPHENE_ANDROID_APP_COMPAT
++const char *__archphene_resolv_conf_path (char *output)
++  attribute_hidden __attribute__ ((nonnull (1)));
++#endif
++
+ struct file_change_detection;
 diff --git a/nptl/pthread_create.c b/nptl/pthread_create.c
 index 6e7e0c64..bdbc9485 100644
 --- a/nptl/pthread_create.c
