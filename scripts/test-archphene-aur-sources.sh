@@ -128,7 +128,7 @@ verified_bytes="$(
   archphene_die "could not parse the verified source size"
 builder_log="$(
   archphene_wait_log \
-    "AUR builder boundary ready: package=$builder uid=$builder_uid context=.*untrusted_app.*staged=[1-9][0-9]+ manifest=[0-9a-f]{64} closure=[1-9][0-9]*/[1-9][0-9]*\\+[1-9][0-9]* [0-9a-f]{64}" 120 \
+    "AUR builder boundary ready: package=$builder uid=$builder_uid context=.*untrusted_app.*staged=[1-9][0-9]+ manifest=[0-9a-f]{64} closure=[1-9][0-9]*/[1-9][0-9]*\\+[1-9][0-9]* [0-9a-f]{64} root=[1-9][0-9]*/[1-9][0-9]* tool=[^\\r\\n]*makepkg" 120 \
     'ArchpheneRuntime:I *:S'
 )"
 builder_closure_count="$(
@@ -150,7 +150,7 @@ builder_closure_sha256="$(
     tail -1
 )"
 builder_root_entries="$(
-  sed -nE 's/.* root=([1-9][0-9]*)\/[1-9][0-9]*/\1/p' <<<"$builder_log" |
+  sed -nE 's/.* root=([1-9][0-9]*)\/[1-9][0-9]*.*/\1/p' <<<"$builder_log" |
     tail -1
 )"
 builder_root_bytes="$(
@@ -175,6 +175,7 @@ for pattern in \
   "Build sandbox: signed companion UID $builder_uid; no network permission or direct manager-data access; [1-9][0-9]* MiB reviewed inputs and $builder_closure_count signed build packages \\([1-9][0-9]* MiB archives\\) staged\\." \
   "Builder closure SHA-256: $builder_closure_sha256" \
   "Isolated build root: [1-9][0-9]* (?:KiB|MiB|GiB) across $builder_root_entries verified archive entries\\." \
+  'Builder toolchain: [^<]*makepkg' \
   'code[^<]*\.deb' \
   'direct HTTPS download' \
   'SHA-256: [0-9a-f]{64}'
@@ -344,6 +345,9 @@ grep -Fqx 'ABBR0001' <<<"$builder_root_manifest" &&
   grep -Fqx "entries=$builder_root_entries" <<<"$builder_root_manifest" &&
   grep -Fqx "bytes=$builder_root_bytes" <<<"$builder_root_manifest" ||
   archphene_die "isolated Builder root publication manifest changed"
+archphene_adb_run shell run-as "$builder" test -L \
+  "$builder_root/run/builder-runtime-v1/libarchphene_path_bridge.so" ||
+  archphene_die "Builder runtime did not publish its verified bridge alias"
 
 after_count="$(local_package_count)"
 [[ "$after_count" == "$before_count" ]] ||

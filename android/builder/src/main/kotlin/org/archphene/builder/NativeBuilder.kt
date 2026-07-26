@@ -6,6 +6,7 @@ internal object NativeBuilder {
     const val CLOSURE_REPORT_BYTES = 64
     const val EXTRACTION_REPORT_BYTES = 32
     const val ERROR_OUTPUT_BYTES = 512
+    const val RUNTIME_OUTPUT_BYTES = 16 * 1024
 
     init {
         System.loadLibrary("archphene_builder")
@@ -47,4 +48,12 @@ internal object NativeBuilder {
     external fun nativeFinishProvision(outputBuffer: ByteBuffer): Int
 
     external fun nativeAbortProvision(): Boolean
+
+    external fun nativeProbeRuntime(
+        filesDirectory: String,
+        nativeDirectory: String,
+        manifestBuffer: ByteBuffer,
+        manifestLength: Int,
+        outputBuffer: ByteBuffer,
+    ): Int
 }

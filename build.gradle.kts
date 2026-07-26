@@ -54,6 +54,23 @@ tasks.register<Exec>("stageArchphenePackageRuntime") {
     outputs.dir("android/app/build/generated/packageRuntime")
 }
 
+tasks.register<Exec>("stageArchpheneBuilderRuntime") {
+    workingDir(rootDir)
+    commandLine("bash", "scripts/stage-archphene-builder-runtime.sh")
+    inputs.files(
+        file("scripts/stage-archphene-builder-runtime.sh"),
+        fileTree("tooling/build/ci-package-runtime") {
+            include("SHA256SUMS", "**/glibc-archphene-runtime-x86_64/*")
+            include("**/archphene-path-bridge-x86_64/*")
+        },
+        fileTree("tooling/build/ci-package-runtime-arm64") {
+            include("SHA256SUMS", "**/glibc-archphene-runtime-aarch64/*")
+            include("**/archphene-path-bridge-aarch64/*")
+        },
+    )
+    outputs.dir("android/builder/build/generated/builderRuntime")
+}
+
 tasks.register<Sync>("stageArchpheneLauncherTemplate") {
     dependsOn(":android:launcher-template:assembleRelease")
     from("android/launcher-template/build/outputs/apk/release/launcher-template-release-unsigned.apk")

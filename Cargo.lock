@@ -25,6 +25,7 @@ dependencies = [
 name = "archphene-builder"
 version = "0.1.0"
 dependencies = [
+ "archphene-process",
  "archphene-root",
  "jni",
  "rustix",

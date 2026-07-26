@@ -6,14 +6,15 @@ use std::fmt;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+use archphene_process::{CommandEnvironment, ProcessError};
 use archphene_root::{ArchRoot, RootError};
 use rustix::fd::OwnedFd;
 use rustix::fs::{
     AtFlags, CWD, Dir, FileType, Mode, OFlags, fchmod, fsync, mkdirat, openat, renameat, statat,
-    syncfs, unlinkat,
+    symlinkat, syncfs, unlinkat,
 };
 use rustix::io::Errno;
 use sha2::{Digest, Sha256};
@@ -37,6 +38,11 @@ const CLOSURE_NAME: &str = "package-closure";
 const ARCHIVES_NAME: &str = "archives";
 const BUILD_ROOT_NAME: &str = "build-root";
 const BUILD_ROOT_MANIFEST_NAME: &str = "build-root-manifest";
+const BUILDER_RUNTIME_ALIAS_NAME: &str = "builder-runtime-v1";
+const BUILDER_RUNTIME_HEADER: &str = "# org.archphene.builder-runtime.v1";
+const BUILDER_RUNTIME_PATH_BRIDGE: &str = "libarchphene_path_bridge.so";
+const MAX_BUILDER_RUNTIME_MANIFEST_BYTES: usize = 32 * 1024;
+const MAX_BUILDER_RUNTIME_ENTRIES: usize = 32;
 const EXPECTED_MANIFEST_NAME: &str = "expected-manifest";
 const PUBLISHED_MANIFEST_NAME: &str = "manifest";
 const SESSION_MANIFEST_NAME: &str = "session";
@@ -49,9 +55,11 @@ pub enum BuilderError {
     UnsafeWorkspace,
     OutputLimit,
     InvalidArchive,
+    InvalidRuntime,
     Io(std::io::Error),
     Syscall(Errno),
     Root(RootError),
+    Process(ProcessError),
 }
 
 impl fmt::Display for BuilderError {
@@ -65,9 +73,11 @@ impl fmt::Display for BuilderError {
             Self::UnsafeWorkspace => formatter.write_str("unsafe builder workspace"),
             Self::OutputLimit => formatter.write_str("builder limit exceeded"),
             Self::InvalidArchive => formatter.write_str("invalid package archive"),
+            Self::InvalidRuntime => formatter.write_str("invalid Builder execution runtime"),
             Self::Io(error) => error.fmt(formatter),
             Self::Syscall(error) => error.fmt(formatter),
             Self::Root(error) => error.fmt(formatter),
+            Self::Process(error) => error.fmt(formatter),
         }
     }
 }
@@ -89,6 +99,12 @@ impl From<Errno> for BuilderError {
 impl From<RootError> for BuilderError {
     fn from(error: RootError) -> Self {
         Self::Root(error)
+    }
+}
+
+impl From<ProcessError> for BuilderError {
+    fn from(error: ProcessError) -> Self {
+        Self::Process(error)
     }
 }
 
@@ -134,6 +150,21 @@ pub struct ProvisionSession {
     next_package: usize,
     expected: ExtractionReport,
     extracted: ExtractionReport,
+}
+
+pub struct BuilderRuntime {
+    environment: CommandEnvironment,
+    root_report: ExtractionReport,
+    closure_sha256: [u8; 32],
+}
+
+#[derive(Clone)]
+struct BuilderRuntimeEntry {
+    role: String,
+    logical: String,
+    packaged: String,
+    bytes: u64,
+    sha256: [u8; 32],
 }
 
 impl ClosureSession {
@@ -406,6 +437,267 @@ impl ProvisionSession {
     pub fn root(&self) -> &Path {
         &self.root
     }
+}
+
+impl BuilderRuntime {
+    pub fn prepare(
+        files_directory: &Path,
+        native_directory: &Path,
+        manifest: &[u8],
+    ) -> Result<Self, BuilderError> {
+        let entries = parse_builder_runtime_manifest(manifest)?;
+        let files = openat(
+            CWD,
+            files_directory,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        let workspace = open_directory(&files, WORKSPACE_NAME)?;
+        let root_report_bytes =
+            read_bounded_regular_file(&workspace, BUILD_ROOT_MANIFEST_NAME, 1024)?;
+        let (closure_sha256, root_report) = parse_build_root_manifest(&root_report_bytes)?;
+        let root = files_directory.join(WORKSPACE_NAME).join(BUILD_ROOT_NAME);
+        let root_descriptor = openat(
+            CWD,
+            &root,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        let run = open_directory(&root_descriptor, "run")?;
+        let mut visited = 0;
+        remove_entry_if_present(&run, BUILDER_RUNTIME_ALIAS_NAME, 0, &mut visited)?;
+        mkdirat(&run, BUILDER_RUNTIME_ALIAS_NAME, Mode::from_raw_mode(0o700))?;
+        let aliases = open_directory(&run, BUILDER_RUNTIME_ALIAS_NAME)?;
+
+        let native_directory = native_directory.canonicalize()?;
+        let native_metadata = std::fs::symlink_metadata(&native_directory)?;
+        if native_metadata.file_type().is_symlink() || !native_metadata.is_dir() {
+            return Err(BuilderError::InvalidRuntime);
+        }
+        let mut loader = None;
+        let mut has_path_bridge = false;
+        for entry in &entries {
+            let source = verified_runtime_source(&native_directory, entry)?;
+            match entry.role.as_str() {
+                "loader" if entry.logical == "@loader" && loader.is_none() => {
+                    loader = Some(source);
+                }
+                "library" => {
+                    if !safe_runtime_logical(&entry.logical) {
+                        return Err(BuilderError::InvalidRuntime);
+                    }
+                    has_path_bridge |= entry.logical == BUILDER_RUNTIME_PATH_BRIDGE;
+                    symlinkat(&source, &aliases, entry.logical.as_str())?;
+                }
+                _ => return Err(BuilderError::InvalidRuntime),
+            }
+        }
+        let loader = loader.ok_or(BuilderError::InvalidRuntime)?;
+        if !has_path_bridge {
+            return Err(BuilderError::InvalidRuntime);
+        }
+        fsync(&aliases)?;
+        fsync(&run)?;
+        let alias_path = root.join("run").join(BUILDER_RUNTIME_ALIAS_NAME);
+        let mut library_path = alias_path.as_os_str().to_os_string();
+        library_path.push(":");
+        library_path.push(native_directory.as_os_str());
+        library_path.push(":");
+        library_path.push(root.join("usr/lib").as_os_str());
+        let environment = CommandEnvironment::new(
+            &root,
+            &loader,
+            &library_path,
+            &alias_path.join(BUILDER_RUNTIME_PATH_BRIDGE),
+            &alias_path,
+        )?;
+        Ok(Self {
+            environment,
+            root_report,
+            closure_sha256,
+        })
+    }
+
+    pub fn probe_makepkg(&self) -> Result<Vec<u8>, BuilderError> {
+        let output = self.environment.run("makepkg", &["--version"])?;
+        if output.exit_code() != 0
+            || output.as_bytes().is_empty()
+            || !output
+                .as_bytes()
+                .windows(b"makepkg".len())
+                .any(|value| value.eq_ignore_ascii_case(b"makepkg"))
+        {
+            return Err(BuilderError::InvalidRuntime);
+        }
+        Ok(output.as_bytes().to_vec())
+    }
+
+    pub fn root_report(&self) -> ExtractionReport {
+        self.root_report
+    }
+
+    pub fn closure_sha256(&self) -> [u8; 32] {
+        self.closure_sha256
+    }
+}
+
+fn parse_build_root_manifest(
+    manifest: &[u8],
+) -> Result<([u8; 32], ExtractionReport), BuilderError> {
+    let input = std::str::from_utf8(manifest).map_err(|_| BuilderError::InvalidRuntime)?;
+    let mut lines = input.lines();
+    if lines.next() != Some("ABBR0001") {
+        return Err(BuilderError::InvalidRuntime);
+    }
+    let closure = lines
+        .next()
+        .and_then(|line| line.strip_prefix("closure="))
+        .ok_or(BuilderError::InvalidRuntime)
+        .and_then(parse_sha256)?;
+    let package_count = parse_root_manifest_value(lines.next(), "packages=")?;
+    let entry_count = parse_root_manifest_value(lines.next(), "entries=")?;
+    let expanded_bytes = parse_root_manifest_value(lines.next(), "bytes=")?;
+    if lines.next().is_some()
+        || package_count == 0
+        || package_count > MAX_CLOSURE_PACKAGES as u64
+        || entry_count == 0
+        || entry_count > MAX_EXPANDED_ENTRIES
+        || expanded_bytes == 0
+        || expanded_bytes > MAX_EXPANDED_BYTES
+    {
+        return Err(BuilderError::InvalidRuntime);
+    }
+    Ok((
+        closure,
+        ExtractionReport {
+            package_count: usize::try_from(package_count)
+                .map_err(|_| BuilderError::InvalidRuntime)?,
+            entry_count,
+            expanded_bytes,
+        },
+    ))
+}
+
+fn parse_root_manifest_value(line: Option<&str>, prefix: &str) -> Result<u64, BuilderError> {
+    line.and_then(|value| value.strip_prefix(prefix))
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or(BuilderError::InvalidRuntime)
+}
+
+fn parse_builder_runtime_manifest(
+    manifest: &[u8],
+) -> Result<Vec<BuilderRuntimeEntry>, BuilderError> {
+    if manifest.is_empty() || manifest.len() > MAX_BUILDER_RUNTIME_MANIFEST_BYTES {
+        return Err(BuilderError::InvalidRuntime);
+    }
+    let input = std::str::from_utf8(manifest).map_err(|_| BuilderError::InvalidRuntime)?;
+    let mut lines = input.lines();
+    if lines.next() != Some(BUILDER_RUNTIME_HEADER) {
+        return Err(BuilderError::InvalidRuntime);
+    }
+    let mut entries = Vec::<BuilderRuntimeEntry>::new();
+    for line in lines {
+        if line.is_empty() || entries.len() >= MAX_BUILDER_RUNTIME_ENTRIES {
+            return Err(BuilderError::InvalidRuntime);
+        }
+        let mut fields = line.split('\t');
+        let role = fields.next().ok_or(BuilderError::InvalidRuntime)?;
+        let logical = fields.next().ok_or(BuilderError::InvalidRuntime)?;
+        let packaged = fields.next().ok_or(BuilderError::InvalidRuntime)?;
+        let bytes = fields
+            .next()
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or(BuilderError::InvalidRuntime)?;
+        let sha256 = fields
+            .next()
+            .ok_or(BuilderError::InvalidRuntime)
+            .and_then(parse_sha256)?;
+        if fields.next().is_some()
+            || !matches!(role, "loader" | "library")
+            || logical.is_empty()
+            || logical.len() > 128
+            || !safe_runtime_packaged(packaged, &sha256)
+            || bytes == 0
+            || bytes > 64 * 1024 * 1024
+            || entries.iter().any(|entry| entry.logical == logical)
+        {
+            return Err(BuilderError::InvalidRuntime);
+        }
+        entries.push(BuilderRuntimeEntry {
+            role: role.to_owned(),
+            logical: logical.to_owned(),
+            packaged: packaged.to_owned(),
+            bytes,
+            sha256,
+        });
+    }
+    if entries.len() < 12 {
+        return Err(BuilderError::InvalidRuntime);
+    }
+    Ok(entries)
+}
+
+fn safe_runtime_logical(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && !value.starts_with('.')
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'.' | b'_' | b'-'))
+}
+
+fn safe_runtime_packaged(value: &str, sha256: &[u8; 32]) -> bool {
+    let Some(identity) = value
+        .strip_prefix("libarchphene_builder_")
+        .and_then(|value| value.strip_suffix(".so"))
+    else {
+        return false;
+    };
+    identity.len() == 24
+        && identity
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        && hex_sha256(sha256).starts_with(identity)
+}
+
+fn verified_runtime_source(
+    native_directory: &Path,
+    entry: &BuilderRuntimeEntry,
+) -> Result<PathBuf, BuilderError> {
+    let source = native_directory.join(&entry.packaged);
+    let metadata = std::fs::symlink_metadata(&source)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() != entry.bytes
+        || metadata.mode() & 0o022 != 0
+    {
+        return Err(BuilderError::InvalidRuntime);
+    }
+    let canonical = source.canonicalize()?;
+    if !canonical.starts_with(native_directory) {
+        return Err(BuilderError::InvalidRuntime);
+    }
+    let mut file = File::open(&canonical)?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut total = 0_u64;
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        total = total
+            .checked_add(count as u64)
+            .ok_or(BuilderError::OutputLimit)?;
+        if total > entry.bytes {
+            return Err(BuilderError::InvalidRuntime);
+        }
+        digest.update(&buffer[..count]);
+    }
+    if total != entry.bytes || <[u8; 32]>::from(digest.finalize()) != entry.sha256 {
+        return Err(BuilderError::InvalidRuntime);
+    }
+    Ok(canonical)
 }
 
 fn read_bounded_regular_file(
@@ -1144,7 +1436,7 @@ mod android {
     use jni::objects::{JByteBuffer, JClass, JString};
     use jni::sys::{JNI_FALSE, JNI_TRUE, jboolean, jint};
 
-    use super::{ClosureSession, ExtractionReport, ProvisionSession, parse_sha256};
+    use super::{BuilderRuntime, ClosureSession, ExtractionReport, ProvisionSession, parse_sha256};
 
     const ERROR_INVALID_ARGUMENT: jint = -1;
     const ERROR_INVALID_STATE: jint = -2;
@@ -1154,6 +1446,7 @@ mod android {
     const CLOSURE_REPORT_MAGIC: &[u8; 8] = b"ABCR0001";
     const EXTRACTION_REPORT_BYTES: usize = 32;
     const EXTRACTION_REPORT_MAGIC: &[u8; 8] = b"ABPE0001";
+    const RUNTIME_OUTPUT_BYTES: usize = 16 * 1024;
 
     static SESSION: OnceLock<Mutex<Option<ClosureSession>>> = OnceLock::new();
     static PROVISION: OnceLock<Mutex<Option<ProvisionSession>>> = OnceLock::new();
@@ -1481,6 +1774,65 @@ mod android {
             Err(_) => JNI_FALSE,
         }
     }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_builder_NativeBuilder_nativeProbeRuntime(
+        mut environment: JNIEnv,
+        _class: JClass,
+        files_directory: JString,
+        native_directory: JString,
+        manifest_buffer: JByteBuffer,
+        manifest_length: jint,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let Ok(manifest_length) = usize::try_from(manifest_length) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let (Ok(files_directory), Ok(native_directory)) = (
+            java_string(&mut environment, &files_directory),
+            java_string(&mut environment, &native_directory),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let (Ok(manifest_capacity), Ok(manifest_address), Ok(output_capacity), Ok(output_address)) = (
+            environment.get_direct_buffer_capacity(&manifest_buffer),
+            environment.get_direct_buffer_address(&manifest_buffer),
+            environment.get_direct_buffer_capacity(&output_buffer),
+            environment.get_direct_buffer_address(&output_buffer),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if manifest_length == 0
+            || manifest_length > manifest_capacity
+            || manifest_address.is_null()
+            || output_capacity < RUNTIME_OUTPUT_BYTES
+            || output_address.is_null()
+        {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        // SAFETY: JNI verified the direct input and output buffer bounds for this call.
+        let manifest =
+            unsafe { slice::from_raw_parts(manifest_address.cast_const(), manifest_length) };
+        // SAFETY: JNI verified the direct output buffer capacity.
+        let output = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
+        output.fill(0);
+        let result = (|| {
+            let runtime = BuilderRuntime::prepare(
+                Path::new(&files_directory),
+                Path::new(&native_directory),
+                manifest,
+            )?;
+            runtime.probe_makepkg()
+        })();
+        match result {
+            Ok(bytes) if !bytes.is_empty() && bytes.len() <= RUNTIME_OUTPUT_BYTES => {
+                output[..bytes.len()].copy_from_slice(&bytes);
+                i32::try_from(bytes.len()).unwrap_or(ERROR_BUILDER)
+            }
+            Ok(_) => ERROR_BUILDER,
+            Err(error) => copy_builder_error(&error, output),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1592,6 +1944,42 @@ summary\t1\t{}\n",
         digest
     }
 
+    fn runtime_fixture(directory: &Path) -> (PathBuf, Vec<u8>, [u8; 32]) {
+        let workspace = directory.join(WORKSPACE_NAME);
+        fs::create_dir(&workspace).expect("runtime workspace");
+        let root = workspace.join(BUILD_ROOT_NAME);
+        ArchRoot::bootstrap(&root).expect("runtime root");
+        let closure = [7_u8; 32];
+        fs::write(
+            workspace.join(BUILD_ROOT_MANIFEST_NAME),
+            format!(
+                "ABBR0001\nclosure={}\npackages=1\nentries=3\nbytes=4\n",
+                hex_sha256(&closure),
+            ),
+        )
+        .expect("root manifest");
+        let native = directory.join("native");
+        fs::create_dir(&native).expect("native directory");
+        let mut manifest = format!("{BUILDER_RUNTIME_HEADER}\n");
+        for index in 0..12 {
+            let bytes = format!("verified-runtime-{index}").into_bytes();
+            let digest = sha256_bytes(&bytes);
+            let packaged = format!("libarchphene_builder_{}.so", &hex_sha256(&digest)[..24],);
+            fs::write(native.join(&packaged), &bytes).expect("runtime source");
+            let (role, logical) = match index {
+                0 => ("loader", "@loader".to_owned()),
+                1 => ("library", BUILDER_RUNTIME_PATH_BRIDGE.to_owned()),
+                _ => ("library", format!("libfixture{index}.so.1")),
+            };
+            manifest.push_str(&format!(
+                "{role}\t{logical}\t{packaged}\t{}\t{}\n",
+                bytes.len(),
+                hex_sha256(&digest),
+            ));
+        }
+        (native, manifest.into_bytes(), closure)
+    }
+
     #[test]
     fn stages_and_reverifies_one_bounded_closure() {
         let directory = test_directory();
@@ -1666,6 +2054,46 @@ summary\t1\t{}\n",
             signature,
         );
         assert_eq!(parse_manifest(&manifest).expect("valid manifest").len(), 1);
+    }
+
+    #[test]
+    fn prepares_a_verified_builder_execution_runtime() {
+        let directory = test_directory();
+        let (native, manifest, closure) = runtime_fixture(&directory);
+        let runtime = BuilderRuntime::prepare(&directory, &native, &manifest)
+            .expect("verified Builder runtime");
+        assert_eq!(runtime.closure_sha256(), closure);
+        assert_eq!(runtime.root_report().package_count, 1);
+        let bridge = directory
+            .join(WORKSPACE_NAME)
+            .join(BUILD_ROOT_NAME)
+            .join("run")
+            .join(BUILDER_RUNTIME_ALIAS_NAME)
+            .join(BUILDER_RUNTIME_PATH_BRIDGE);
+        assert!(
+            fs::symlink_metadata(bridge)
+                .expect("bridge alias")
+                .file_type()
+                .is_symlink(),
+        );
+        fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn rejects_a_tampered_builder_execution_runtime() {
+        let directory = test_directory();
+        let (native, manifest, _) = runtime_fixture(&directory);
+        let packaged = std::str::from_utf8(&manifest)
+            .expect("runtime manifest")
+            .lines()
+            .nth(1)
+            .expect("loader entry")
+            .split('\t')
+            .nth(2)
+            .expect("loader package");
+        fs::write(native.join(packaged), b"tampered").expect("tamper runtime");
+        assert!(BuilderRuntime::prepare(&directory, &native, &manifest).is_err());
+        fs::remove_dir_all(directory).expect("cleanup");
     }
 
     #[test]

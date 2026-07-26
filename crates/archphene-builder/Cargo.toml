@@ -9,6 +9,7 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+archphene-process = { path = "../archphene-process" }
 archphene-root = { path = "../archphene-root" }
 rustix = { version = "1.1.4", features = ["fs"] }
 sha2 = "0.10.9"

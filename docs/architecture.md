@@ -99,6 +99,17 @@ gate provisions all 152 packages, 48,271 verified archive entries, and
 1,221,416,416 expanded bytes without changing the shared root. Final build
 workspace, package-output, and installed-size measurements remain separate.
 
+The Builder APK also carries only the content-addressed patched loader,
+loader dependencies, and path bridge needed to enter that root; it does not
+duplicate the manager's full package runtime. A generated manifest binds each
+native filename to its complete SHA-256 and size. Builder Rust checks the
+manifest, filename digest prefix, full digest, exact size, safe mode, and
+native-library path containment before publishing a fresh alias directory
+inside the root. The physical Samsung gate uses that runtime to execute the
+root's unmodified `makepkg --version` as the Builder UID and observes
+`makepkg (pacman) 7.1.0`. This is an execution-path smoke test, not permission
+to execute PKGBUILD.
+
 This boundary is required because the tested stock Samsung kernel denies user,
 mount, and network namespace creation to the manager app. Android's
 `isolatedProcess` UID removes network and direct manager-data access, but also
@@ -110,10 +121,12 @@ The live Samsung boundary probe verifies signer continuity, distinct UIDs, no
 network permission or launcher entry, private workspace writes, denial of
 manager-private paths, descriptor output, and denial of direct manager access
 to builder-private state. It also proves failed partial-root recovery and a
-published minimal root containing executable `bash`, `makepkg`, and `fakeroot`.
-It does not yet execute PKGBUILD. Hostile reviewed-input reuse, descendant
-supervision, explicit approval, output provenance, and post-build package
-verification remain required before installation can be enabled.
+published minimal root containing executable `bash`, `makepkg`, and `fakeroot`,
+then executes only `makepkg --version` through the verified runtime bridge. It
+does not yet execute PKGBUILD. Hostile reviewed-input reuse, descendant
+supervision, explicit approval, bounded build logs/cancellation, output
+provenance, and post-build package verification remain required before
+installation can be enabled.
 
 ### Thin launcher application
 

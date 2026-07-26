@@ -127,15 +127,24 @@ a closure-bound root manifest. The physical Samsung recovery gate provisions
 bytes, including executable `bash`, `makepkg`, and `fakeroot`, without changing
 the shared pacman database.
 
-The current path still does not execute PKGBUILD, resolve a final installed-size
-estimate, or install its result. Capability analysis, explicit build approval,
-package-output provenance, hostile reviewed-input cleanup, descendant
-supervision, and transaction recovery remain required. Before community code
-can execute, every Builder-writable path must be treated as attacker-controlled
-and all prior descendants must be killed and reaped before reuse. A successful
-review or isolated build will not make the eventual package isolated: once
-manager verification and installation complete, its code joins the shared
-Archphene Linux trust domain.
+The Builder's small packaged execution runtime is independently
+content-addressed: Rust validates its manifest, digest-bearing filenames,
+complete SHA-256 values, sizes, modes, and native-library path containment
+before publishing fresh root-local aliases. The physical gate then executes
+only the provisioned root's unmodified `makepkg --version`, producing
+`makepkg (pacman) 7.1.0` as the separate Builder UID with no Android network
+permission. This proves the loader and path bridge reach the verified root; it
+does not authorize community recipe execution.
+
+The current path still does not execute PKGBUILD, resolve a final
+installed-size estimate, or install its result. Capability analysis, explicit
+build approval, package-output provenance, hostile reviewed-input cleanup,
+descendant supervision, bounded log/cancel behavior, and transaction recovery
+remain required. Before community code can execute, every Builder-writable
+path must be treated as attacker-controlled and all prior descendants must be
+killed and reaped before reuse. A successful review or isolated build will not
+make the eventual package isolated: once manager verification and installation
+complete, its code joins the shared Archphene Linux trust domain.
 
 ## Important limitations
 

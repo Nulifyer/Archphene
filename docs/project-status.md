@@ -1110,6 +1110,25 @@ extraction exposed this Android behavior; the recovery run then provisioned all
 transaction card still consumes too much of the phone review and remains a
 tracked UX defect.
 
+The verified Builder execution bridge now reaches that root without packaging
+the manager's complete runtime a second time. A generated dual-ABI manifest
+binds the patched loader, its required libraries, and the path bridge by
+digest-bearing filename, full SHA-256, and exact size. Builder Rust checks
+those fields, safe file modes, and native-library path containment, resets its
+root-local aliases with no-follow operations, and invokes the unmodified root
+tool through the existing bounded process environment. Eleven host Builder
+tests cover valid preparation and runtime tampering. The cold physical Samsung
+gate then executes `makepkg (pacman) 7.1.0` as Builder UID 10345, validates the
+48,271-entry/1,221,416,416-byte root, and leaves all 36 shared-root packages
+unchanged. No PKGBUILD executes yet.
+
+That cold gate also exposes two production gaps rather than hiding them:
+after closure transfer reaches 152/152, root scan/extraction takes several
+minutes with no distinct progress phase, and the full-device review remains a
+long text surface partly obscured by a previous completed transaction card.
+Phase-specific extraction progress, compact expandable review sections, and
+completed-card dismissal remain tracked UI work.
+
 Code now reaches the packaged Electron executable without a Code-specific
 bridge exception. Translating Arch's standard `/usr/lib/pulseaudio` directory
 into the private-root loader path resolves `libpulsecommon`; Electron then

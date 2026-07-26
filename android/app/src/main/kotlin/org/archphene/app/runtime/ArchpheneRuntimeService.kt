@@ -656,6 +656,7 @@ class ArchpheneRuntimeService : Service() {
         val closureManifestSha256: String,
         val buildRootEntries: Long,
         val buildRootBytes: Long,
+        val runtimeVersion: String,
     )
 
     private data class AurBuildEnvironment(
@@ -1267,6 +1268,8 @@ class ArchpheneRuntimeService : Service() {
             IBinder.FIRST_CALL_TRANSACTION + 7
         private const val AUR_BUILDER_TRANSACTION_ABORT_PROVISION =
             IBinder.FIRST_CALL_TRANSACTION + 8
+        private const val AUR_BUILDER_TRANSACTION_PROBE_RUNTIME =
+            IBinder.FIRST_CALL_TRANSACTION + 9
         private const val AUR_BUILDER_PACKAGE_BATCH = 8
         private const val AUR_REDIRECT_LIMIT = 5
         private const val AUR_STORAGE_RESERVE_BYTES = 64L * 1024 * 1024
@@ -4340,7 +4343,8 @@ class ArchpheneRuntimeService : Service() {
                                 "${builder.closureSignatureBytes} " +
                                 "${builder.closureManifestSha256} " +
                                 "root=${builder.buildRootEntries}/" +
-                                builder.buildRootBytes,
+                                "${builder.buildRootBytes} " +
+                                "tool=${builder.runtimeVersion.replace('\n', ' ')}",
                         )
                     } else {
                         Log.i(TAG, "AUR builder companion is not installed")
@@ -4759,6 +4763,7 @@ class ArchpheneRuntimeService : Service() {
                         review,
                         buildEnvironment,
                     )
+                val runtimeVersion = probeAurBuilderRuntime(endpoint)
                 return AurBuilderReport(
                     builderPackage,
                     reportedUid,
@@ -4771,6 +4776,7 @@ class ArchpheneRuntimeService : Service() {
                     closure.manifestSha256,
                     buildRoot.entryCount,
                     buildRoot.expandedBytes,
+                    runtimeVersion,
                 )
             } finally {
                 request.recycle()
@@ -5055,6 +5061,26 @@ class ArchpheneRuntimeService : Service() {
         )
         return report
     }
+
+    private fun probeAurBuilderRuntime(endpoint: IBinder): String =
+        transactAurBuilder(
+            endpoint,
+            AUR_BUILDER_TRANSACTION_PROBE_RUNTIME,
+            {},
+        ) { reply ->
+            val version = reply.readString().orEmpty().trim()
+            check(
+                version.length in 1..16 * 1024 &&
+                    version.contains("makepkg", ignoreCase = true) &&
+                    version.none { character ->
+                        character == '\u0000' ||
+                            character.isISOControl() && character !in "\n\r\t"
+                    },
+            ) {
+                "Builder returned an invalid makepkg probe"
+            }
+            version
+        }
 
     private fun resolveAurBuildEnvironment(activeHandle: Long): AurBuildEnvironment {
         val bytes =
@@ -5488,6 +5514,9 @@ class ArchpheneRuntimeService : Service() {
                         .append(" across ")
                         .append(builder.buildRootEntries)
                         .append(" verified archive entries.\n")
+                    append("Builder toolchain: ")
+                        .append(builder.runtimeVersion)
+                        .append('\n')
                 }
             } else {
                 append("Download/build disk estimate: verify sources to measure downloads.\n")

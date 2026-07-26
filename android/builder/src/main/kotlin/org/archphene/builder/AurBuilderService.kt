@@ -5,6 +5,7 @@ import android.app.Service
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Binder
+import android.os.Build
 import android.os.IBinder
 import android.os.Parcel
 import android.os.ParcelFileDescriptor
@@ -57,6 +58,7 @@ class AurBuilderService : Service() {
                                 extractProvisionBatch(data, reply)
                             TRANSACTION_FINISH_PROVISION -> finishProvision(reply)
                             TRANSACTION_ABORT_PROVISION -> abortProvision(reply)
+                            TRANSACTION_PROBE_RUNTIME -> probeRuntime(reply)
                             else -> return super.onTransact(code, data, reply, flags)
                         }
                     } catch (error: Exception) {
@@ -312,6 +314,58 @@ class AurBuilderService : Service() {
     private fun abortProvision(reply: Parcel) {
         NativeBuilder.nativeAbortProvision()
         reply.writeNoException()
+    }
+
+    @Synchronized
+    private fun probeRuntime(reply: Parcel) {
+        val architecture =
+            when (Build.SUPPORTED_ABIS.firstOrNull()) {
+                "x86_64" -> "x86_64"
+                "arm64-v8a" -> "aarch64"
+                else -> throw IllegalStateException("Unsupported Builder ABI")
+            }
+        val manifest =
+            assets.open("builder-runtime-$architecture.tsv").use { input ->
+                input.readBytes()
+            }
+        require(manifest.isNotEmpty() && manifest.size <= MAX_RUNTIME_MANIFEST_BYTES)
+        val manifestBuffer = ByteBuffer.allocateDirect(manifest.size).put(manifest)
+        val output =
+            ByteBuffer
+                .allocateDirect(NativeBuilder.RUNTIME_OUTPUT_BYTES)
+                .order(ByteOrder.LITTLE_ENDIAN)
+        val result =
+            NativeBuilder.nativeProbeRuntime(
+                filesDir.absolutePath,
+                applicationInfo.nativeLibraryDir,
+                manifestBuffer,
+                manifest.size,
+                output,
+            )
+        check(result in 1..NativeBuilder.RUNTIME_OUTPUT_BYTES) {
+            "Builder execution runtime failed: ${readNativeMessage(output, result)}"
+        }
+        val bytes = ByteArray(result)
+        output.position(0)
+        output.get(bytes)
+        val version =
+            String(bytes, Charsets.UTF_8)
+                .lineSequence()
+                .firstOrNull { line -> line.isNotBlank() }
+                .orEmpty()
+                .trim()
+        check(
+            version.isNotEmpty() &&
+                version.length <= 256 &&
+                version.none { character ->
+                    character == '\u0000' ||
+                        character.isISOControl() && character !in "\n\r\t"
+                },
+        ) {
+            "Builder execution runtime returned invalid output"
+        }
+        reply.writeNoException()
+        reply.writeString(version)
     }
 
     private fun readExtractionReport(result: Int): ExtractionReport {
@@ -654,6 +708,7 @@ class AurBuilderService : Service() {
         const val TRANSACTION_EXTRACT_PROVISION_BATCH = IBinder.FIRST_CALL_TRANSACTION + 6
         const val TRANSACTION_FINISH_PROVISION = IBinder.FIRST_CALL_TRANSACTION + 7
         const val TRANSACTION_ABORT_PROVISION = IBinder.FIRST_CALL_TRANSACTION + 8
+        const val TRANSACTION_PROBE_RUNTIME = IBinder.FIRST_CALL_TRANSACTION + 9
         private const val ROLE_SNAPSHOT = 0
         private const val ROLE_SOURCE = 1
         private const val MAX_INPUTS = 65
@@ -664,6 +719,7 @@ class AurBuilderService : Service() {
         private const val MAX_INPUT_BYTES = 4L * 1024 * 1024 * 1024
         private const val MAX_TOTAL_BYTES = 8L * 1024 * 1024 * 1024
         private const val MAX_MANIFEST_BYTES = 16 * 1024
+        private const val MAX_RUNTIME_MANIFEST_BYTES = 32 * 1024
         private const val HEX_DIGITS = "0123456789abcdef"
         private val PACKAGE_NAME = Regex("[A-Za-z0-9@._+-]{1,128}")
         private val SAFE_FILENAME = Regex("[A-Za-z0-9@+,._-]{1,240}")
