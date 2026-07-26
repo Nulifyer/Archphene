@@ -114,7 +114,9 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private var storageOnboardingDialog: AlertDialog? = null
     private var launcherPermissionDialog: AlertDialog? = null
     private var launcherCancellationDialog: AlertDialog? = null
+    private var launcherReviewDialog: AlertDialog? = null
     private var launcherPermissionDeferred = false
+    private var launcherReviewDeferredRevision = Int.MIN_VALUE
     private var pendingImportUri: Uri? = null
     private var pendingFolderUri: Uri? = null
     private var pendingFolderFlags = 0
@@ -446,6 +448,9 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 setText(R.string.desktop_entries_loading)
                 maxLines = 2
                 ellipsize = TextUtils.TruncateAt.END
+                setOnClickListener {
+                    maybeShowLauncherReview(force = true)
+                }
             }
         installedPackageAdapter = InstalledPackageAdapter()
         installedPackageList =
@@ -1487,6 +1492,9 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         launcherCancellationDialog?.setOnDismissListener(null)
         launcherCancellationDialog?.dismiss()
         launcherCancellationDialog = null
+        launcherReviewDialog?.setOnDismissListener(null)
+        launcherReviewDialog?.dismiss()
+        launcherReviewDialog = null
         if (isFinishing && !keepServiceAfterFinish) {
             stopService(Intent(this, ArchpheneRuntimeService::class.java))
         }
@@ -1639,6 +1647,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         updatePackageActions()
         maybeShowStorageOnboarding()
         maybeShowLauncherCancellation()
+        maybeShowLauncherReview()
         maybeShowLauncherPermission()
     }
 
@@ -1792,6 +1801,88 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         dialog.show()
     }
 
+    private fun maybeShowLauncherReview(force: Boolean = false) {
+        val binder = runtimeBinder ?: return
+        val review = binder.launcherReview
+        if (
+            review.androidPackages.isEmpty() ||
+            binder.launcherReviewInProgress ||
+            (!force &&
+                (
+                    review.needsReviewCount == 0 ||
+                        launcherReviewDeferredRevision == review.revision
+                )) ||
+            launcherReviewDialog != null ||
+            storageOnboardingDialog != null ||
+            launcherCancellationDialog != null ||
+            launcherPermissionDialog != null ||
+            isFinishing ||
+            isDestroyed
+        ) {
+            return
+        }
+        val choices =
+            BooleanArray(review.statuses.size) { index ->
+                review.statuses[index] == LAUNCHER_STATUS_NEEDS_REVIEW
+            }
+        val labels =
+            Array<CharSequence>(review.labels.size) { index ->
+                val source = review.sourcePackages[index]
+                if (source.isEmpty()) {
+                    review.labels[index]
+                } else {
+                    "${review.labels[index]} · $source"
+                }
+            }
+        val hasPendingReview = review.needsReviewCount > 0
+        val builder =
+            AlertDialog
+                .Builder(this)
+                .setTitle(
+                    if (hasPendingReview) {
+                        R.string.launcher_review_title
+                    } else {
+                        R.string.launcher_manage_title
+                    },
+                ).setMultiChoiceItems(labels, choices) { _, which, selected ->
+                    choices[which] = selected
+                }.setPositiveButton(R.string.launcher_review_apply) { _, _ ->
+                    if (binder.reviewLaunchers(review.revision, choices)) {
+                        launcherReviewDeferredRevision = review.revision
+                    }
+                }.setNegativeButton(
+                    if (hasPendingReview) {
+                        R.string.launcher_review_later
+                    } else {
+                        android.R.string.cancel
+                    },
+                ) { _, _ ->
+                    if (hasPendingReview) {
+                        launcherReviewDeferredRevision = review.revision
+                    }
+                }.setOnCancelListener {
+                    if (hasPendingReview) {
+                        launcherReviewDeferredRevision = review.revision
+                    }
+                }
+        if (hasPendingReview) {
+            builder.setNeutralButton(R.string.launcher_review_skip) { _, _ ->
+                choices.fill(false)
+                if (binder.reviewLaunchers(review.revision, choices)) {
+                    launcherReviewDeferredRevision = review.revision
+                }
+            }
+        }
+        val dialog = builder.create()
+        dialog.setOnDismissListener {
+            if (launcherReviewDialog === dialog) {
+                launcherReviewDialog = null
+            }
+        }
+        launcherReviewDialog = dialog
+        dialog.show()
+    }
+
     private fun showPackageResultMode(installedPackages: Boolean) {
         showingInstalledPackages = installedPackages
         installedPackagePanel.visibility =
@@ -1850,8 +1941,12 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         }
         val packages = binder.installedPackages
         val desktopEntries = binder.desktopEntries
+        val launcherReview = binder.launcherReview
         setTextIfChanged(installedPackageStatusView, packages.status)
         setTextIfChanged(desktopEntryStatusView, desktopEntries.status)
+        desktopEntryStatusView.isEnabled =
+            launcherReview.needsReviewCount > 0 || launcherReview.dismissedCount > 0
+        desktopEntryStatusView.isClickable = desktopEntryStatusView.isEnabled
         if (packages.revision == installedPackageRevision) {
             return
         }
@@ -2649,6 +2744,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         private const val WIDE_NAVIGATION_WIDTH_DP = 176
         private const val WIDE_FILE_CARD_HEIGHT_DP = 136
         private const val MAX_FOLDER_URI_BYTES = 4 * 1024
+        private const val LAUNCHER_STATUS_NEEDS_REVIEW = 10
         private var activityGeneration = 0
     }
 }

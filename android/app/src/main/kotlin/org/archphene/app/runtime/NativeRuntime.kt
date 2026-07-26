@@ -20,6 +20,7 @@ internal object NativeRuntime {
     const val LAUNCHER_PROCESS_LOG_SIZE = 16 * 1024
     const val COMMAND_REQUEST_LIMIT = 16 * 1024
     const val DNS_REQUEST_LIMIT = 512
+    const val LAUNCHER_REVIEW_REQUEST_LIMIT = 32 * 1024
     const val TERMINAL_DAMAGE_SIZE = 6_080_040
     const val ERROR_INVALID_STATE = -3
 
@@ -315,6 +316,11 @@ internal object NativeRuntime {
         outputBuffer: ByteBuffer,
     ): Int
     external fun nativeLauncherTransition(
+        handle: Long,
+        requestBuffer: ByteBuffer,
+        requestLength: Int,
+    ): Int
+    external fun nativeReviewLaunchers(
         handle: Long,
         requestBuffer: ByteBuffer,
         requestLength: Int,

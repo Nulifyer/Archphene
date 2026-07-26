@@ -1199,8 +1199,17 @@ The manager shows explicit Retry/Dismiss choices, persists dismissal, and only
 Retry submits another Android session. Exact-ABI emulator and Samsung gates
 remove one generated wrapper, cancel the Android confirmation, force-stop and
 restart the manager without a resubmission, then Retry and restore the wrapper
-through one successful confirmation. Reviewed batch selection and a way to
-revisit dismissed launchers remain UX work. Recursive AUR dependencies, the
+through one successful confirmation. Reviewed batch selection and later
+launcher management are now implemented as well. When one reconcile introduces
+two or more desktop entries, Rust holds the complete set in `NeedsReview`; no
+wrapper can be claimed until one bounded, generation-checked batch records
+every choice atomically. The manager presents one default-selected checklist
+with Add selected, Skip all, and Not now. Unselected entries become durable
+Dismissed launchers, and the package summary opens them later for
+re-enablement. Emulator and Samsung gates create two package-owned desktop
+entries, inspect full-device review/manage views, exercise skip,
+partial/re-enable paths through real generated wrappers, and restore the exact
+original package sets. Recursive AUR dependencies, the
 install-script/scriptlet policy, verified-output retention across manager
 process death, and actual Electron/Code launch remain open.
 

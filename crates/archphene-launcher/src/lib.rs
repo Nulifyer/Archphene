@@ -17,7 +17,8 @@ const REGISTRY_DIRECTORY: &str = "var/lib/archphene";
 const REGISTRY_FILE: &str = "launcher-registry-v1";
 const REGISTRY_TEMP_FILE: &str = ".launcher-registry-v1.tmp";
 const REGISTRY_MAGIC: &[u8; 8] = b"ARCHLREG";
-const REGISTRY_VERSION: u32 = 2;
+const REGISTRY_VERSION: u32 = 3;
+const PREVIOUS_REGISTRY_VERSION: u32 = 2;
 const LEGACY_REGISTRY_VERSION: u32 = 1;
 const REGISTRY_HEADER_BYTES: usize = 8 + 4 + 8 + 4 + 32;
 const MAX_LAUNCHER_ICON_BYTES: u64 = 1024 * 1024;
@@ -39,6 +40,7 @@ pub enum WrapperStatus {
     Failed = 7,
     Cancelled = 8,
     Dismissed = 9,
+    NeedsReview = 10,
 }
 
 impl WrapperStatus {
@@ -53,6 +55,7 @@ impl WrapperStatus {
             7 => Self::Failed,
             8 => Self::Cancelled,
             9 => Self::Dismissed,
+            10 => Self::NeedsReview,
             _ => return None,
         })
     }
@@ -109,6 +112,13 @@ pub struct ReconcileReport {
     pub changed: u16,
     pub removed: u16,
     pub unchanged: u16,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LauncherReviewDecision {
+    pub android_package: String,
+    pub desired_generation: u64,
+    pub publish: bool,
 }
 
 #[derive(Debug)]
@@ -240,6 +250,7 @@ impl LauncherRegistry {
         let mut unchanged = 0_u16;
         let mut old_index = 0_usize;
         let mut desired_index = 0_usize;
+        let mut added_indices = Vec::new();
         while old_index < registry.descriptors.len() || desired_index < desired.len() {
             let old = registry.descriptors.get(old_index);
             let target = desired.get(desired_index).copied();
@@ -267,6 +278,7 @@ impl LauncherRegistry {
                                 | WrapperStatus::Failed
                                 | WrapperStatus::Cancelled
                                 | WrapperStatus::Dismissed
+                                | WrapperStatus::NeedsReview
                                     if !revived =>
                                 {
                                     descriptor.status
@@ -297,7 +309,8 @@ impl LauncherRegistry {
                             }
                             WrapperStatus::Failed
                             | WrapperStatus::Cancelled
-                            | WrapperStatus::Dismissed => {
+                            | WrapperStatus::Dismissed
+                            | WrapperStatus::NeedsReview => {
                                 replacement.status = old.status;
                             }
                             _ => {}
@@ -311,6 +324,7 @@ impl LauncherRegistry {
                 }
                 (Some(old), Some(target)) if old.desktop_id > target.desktop_id => {
                     next.push(descriptor_from_entry(arch_root, target, 1, 0));
+                    added_indices.push(next.len() - 1);
                     added = added.saturating_add(1);
                     desired_index += 1;
                 }
@@ -320,6 +334,7 @@ impl LauncherRegistry {
                 }
                 (None, Some(target)) => {
                     next.push(descriptor_from_entry(arch_root, target, 1, 0));
+                    added_indices.push(next.len() - 1);
                     added = added.saturating_add(1);
                     desired_index += 1;
                 }
@@ -329,6 +344,11 @@ impl LauncherRegistry {
         }
         if next.len() > MAX_LAUNCHER_DESCRIPTORS {
             return Err(LauncherRegistryError::LimitExceeded);
+        }
+        if added_indices.len() > 1 {
+            for index in added_indices {
+                next[index].status = WrapperStatus::NeedsReview;
+            }
         }
         next.sort_unstable_by(|left, right| left.desktop_id.cmp(&right.desktop_id));
         validate_identities(&next)?;
@@ -641,6 +661,66 @@ impl LauncherRegistry {
         self.advance_and_store(arch_root)
     }
 
+    pub fn review_batch(
+        &mut self,
+        arch_root: &Path,
+        decisions: &[LauncherReviewDecision],
+    ) -> Result<(), LauncherRegistryError> {
+        if decisions.is_empty() || decisions.len() > MAX_LAUNCHER_DESCRIPTORS {
+            return Err(LauncherRegistryError::InvalidTransition);
+        }
+        let needs_review = self
+            .descriptors
+            .iter()
+            .filter(|descriptor| descriptor.status == WrapperStatus::NeedsReview)
+            .count();
+        let covered_review = decisions
+            .iter()
+            .filter(|decision| {
+                self.descriptors.iter().any(|descriptor| {
+                    descriptor.android_package == decision.android_package
+                        && descriptor.status == WrapperStatus::NeedsReview
+                })
+            })
+            .count();
+        if covered_review != needs_review {
+            return Err(LauncherRegistryError::InvalidTransition);
+        }
+
+        let mut next = self.clone();
+        for (decision_index, decision) in decisions.iter().enumerate() {
+            if decisions[..decision_index]
+                .iter()
+                .any(|known| known.android_package == decision.android_package)
+            {
+                return Err(LauncherRegistryError::InvalidTransition);
+            }
+            let descriptor = next
+                .descriptors
+                .iter_mut()
+                .find(|descriptor| descriptor.android_package == decision.android_package)
+                .ok_or(LauncherRegistryError::InvalidTransition)?;
+            if descriptor.desired_generation != decision.desired_generation
+                || !descriptor.desired_present
+                || descriptor.pending_generation != 0
+                || !matches!(
+                    descriptor.status,
+                    WrapperStatus::NeedsReview | WrapperStatus::Dismissed
+                )
+            {
+                return Err(LauncherRegistryError::InvalidTransition);
+            }
+            descriptor.status = if decision.publish {
+                WrapperStatus::NeedsPublish
+            } else {
+                WrapperStatus::Dismissed
+            };
+        }
+        next.advance_and_store(arch_root)?;
+        *self = next;
+        Ok(())
+    }
+
     /// Reconciles one descriptor with a wrapper whose signing certificate and
     /// Archphene generation metadata were verified by the Android caller.
     /// `None` means that PackageManager found no matching package.
@@ -688,6 +768,7 @@ impl LauncherRegistry {
                     WrapperStatus::Failed | WrapperStatus::Cancelled | WrapperStatus::Dismissed => {
                         previous.status
                     }
+                    WrapperStatus::NeedsReview => previous.status,
                     _ => WrapperStatus::NeedsPublish,
                 };
             }
@@ -1127,7 +1208,10 @@ fn encode_registry_version(
     registry: &LauncherRegistry,
     version: u32,
 ) -> Result<Vec<u8>, LauncherRegistryError> {
-    if !matches!(version, LEGACY_REGISTRY_VERSION | REGISTRY_VERSION) {
+    if !matches!(
+        version,
+        LEGACY_REGISTRY_VERSION | PREVIOUS_REGISTRY_VERSION | REGISTRY_VERSION
+    ) {
         return Err(LauncherRegistryError::Corrupt);
     }
     let mut body = Vec::with_capacity(registry.descriptors.len().saturating_mul(1024));
@@ -1218,7 +1302,10 @@ fn decode_registry(bytes: &[u8]) -> Result<LauncherRegistry, LauncherRegistryErr
         return Err(LauncherRegistryError::Corrupt);
     }
     let version = cursor.u32()?;
-    if !matches!(version, LEGACY_REGISTRY_VERSION | REGISTRY_VERSION) {
+    if !matches!(
+        version,
+        LEGACY_REGISTRY_VERSION | PREVIOUS_REGISTRY_VERSION | REGISTRY_VERSION
+    ) {
         return Err(LauncherRegistryError::Corrupt);
     }
     let generation = cursor.u64()?;
@@ -1355,6 +1442,9 @@ fn validate_registry(registry: &LauncherRegistry) -> Result<(), LauncherRegistry
                 }
                 WrapperStatus::Failed | WrapperStatus::Cancelled | WrapperStatus::Dismissed => {
                     descriptor.pending_generation == 0
+                }
+                WrapperStatus::NeedsReview => {
+                    descriptor.published_generation == 0 && descriptor.pending_generation == 0
                 }
                 WrapperStatus::NeedsRemoval | WrapperStatus::AwaitingRemoval => false,
             }
@@ -1928,11 +2018,30 @@ mod tests {
             migrated.descriptors[0].icon_digest(),
             Some(sha256(&legacy_icon)),
         );
-        let stored =
-            fs::read(root.path.join(REGISTRY_DIRECTORY).join(REGISTRY_FILE)).expect("v2 registry");
+        let stored = fs::read(root.path.join(REGISTRY_DIRECTORY).join(REGISTRY_FILE))
+            .expect("current registry");
         assert_eq!(
             u32::from_le_bytes(stored[8..12].try_into().expect("registry version")),
             REGISTRY_VERSION,
+        );
+    }
+
+    #[test]
+    fn previous_registry_version_loads_before_review_state_is_written() {
+        let root = TestRoot::new();
+        let source = catalog(vec![entry("org.kde.kate.desktop", "Kate")]);
+        let (registry, _) =
+            LauncherRegistry::reconcile(&root.path, &source).expect("current registry");
+        let previous = encode_registry_version(&registry, PREVIOUS_REGISTRY_VERSION)
+            .expect("previous registry");
+        fs::write(
+            root.path.join(REGISTRY_DIRECTORY).join(REGISTRY_FILE),
+            previous,
+        )
+        .expect("replace with previous registry");
+        assert_eq!(
+            LauncherRegistry::load(&root.path).expect("load previous registry"),
+            registry,
         );
     }
 
@@ -2249,6 +2358,68 @@ mod tests {
             .retry_terminal(&root.path, &package, 1)
             .expect("explicit retry");
         assert_eq!(restarted.descriptors[0].status, WrapperStatus::NeedsPublish);
+    }
+
+    #[test]
+    fn multiple_new_launchers_require_one_atomic_review_batch() {
+        let root = TestRoot::new();
+        let source = catalog(vec![
+            entry("org.kde.kate.desktop", "Kate"),
+            entry("org.kde.kwrite.desktop", "KWrite"),
+        ]);
+        let (mut registry, report) =
+            LauncherRegistry::reconcile(&root.path, &source).expect("initial reconcile");
+        assert_eq!(report.added, 2);
+        assert!(
+            registry
+                .descriptors
+                .iter()
+                .all(|descriptor| descriptor.status == WrapperStatus::NeedsReview),
+        );
+        let first_package = registry.descriptors[0].android_package.clone();
+        assert!(
+            registry
+                .mark_building(&root.path, &first_package, 1)
+                .is_err(),
+        );
+
+        let incomplete = vec![LauncherReviewDecision {
+            android_package: registry.descriptors[0].android_package.clone(),
+            desired_generation: 1,
+            publish: true,
+        }];
+        assert!(registry.review_batch(&root.path, &incomplete).is_err());
+
+        let decisions = vec![
+            LauncherReviewDecision {
+                android_package: registry.descriptors[0].android_package.clone(),
+                desired_generation: 1,
+                publish: true,
+            },
+            LauncherReviewDecision {
+                android_package: registry.descriptors[1].android_package.clone(),
+                desired_generation: 1,
+                publish: false,
+            },
+        ];
+        registry
+            .review_batch(&root.path, &decisions)
+            .expect("review batch");
+        assert_eq!(registry.descriptors[0].status, WrapperStatus::NeedsPublish);
+        assert_eq!(registry.descriptors[1].status, WrapperStatus::Dismissed);
+
+        let mut restarted = LauncherRegistry::load(&root.path).expect("restart");
+        restarted
+            .review_batch(
+                &root.path,
+                &[LauncherReviewDecision {
+                    android_package: restarted.descriptors[1].android_package.clone(),
+                    desired_generation: 1,
+                    publish: true,
+                }],
+            )
+            .expect("revisit dismissed launcher");
+        assert_eq!(restarted.descriptors[1].status, WrapperStatus::NeedsPublish);
     }
 
     #[test]

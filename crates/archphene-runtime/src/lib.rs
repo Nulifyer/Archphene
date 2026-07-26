@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 
 use archphene_core::{Lifecycle, Runtime, RuntimeError};
 use archphene_jobs::{JobError, JobOperation, JobState, PackageJob, PackageJobStore};
-use archphene_launcher::{LauncherRegistry, LauncherRegistryError, ReconcileReport, WrapperStatus};
+use archphene_launcher::{
+    LauncherRegistry, LauncherRegistryError, LauncherReviewDecision, ReconcileReport, WrapperStatus,
+};
 use archphene_packages::{
     CatalogDownload, InstalledPackageCatalog, PackagePayloadDownload, PackageResolution,
     PackageRuntime, PackageRuntimeError, PackageTool, Repository, RepositoryArchitecture,
@@ -68,6 +70,7 @@ pub struct LauncherRegistrySummary {
     pub failed: u16,
     pub cancelled: u16,
     pub dismissed: u16,
+    pub needs_review: u16,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -484,6 +487,7 @@ impl RuntimeHost {
             failed: 0,
             cancelled: 0,
             dismissed: 0,
+            needs_review: 0,
         };
         for descriptor in registry.descriptors() {
             match descriptor.status {
@@ -509,6 +513,9 @@ impl RuntimeHost {
                 }
                 WrapperStatus::Dismissed => {
                     summary.dismissed = summary.dismissed.saturating_add(1);
+                }
+                WrapperStatus::NeedsReview => {
+                    summary.needs_review = summary.needs_review.saturating_add(1);
                 }
             }
         }
@@ -776,6 +783,20 @@ impl RuntimeHost {
             .as_mut()
             .ok_or(LauncherRegistryError::InvalidTransition)?
             .dismiss_cancelled(arch_root.path(), android_package, generation)
+    }
+
+    pub fn review_launchers(
+        &mut self,
+        decisions: &[LauncherReviewDecision],
+    ) -> Result<(), LauncherRegistryError> {
+        let arch_root = self
+            .arch_root
+            .as_ref()
+            .ok_or(LauncherRegistryError::InvalidRoot)?;
+        self.launcher_registry
+            .as_mut()
+            .ok_or(LauncherRegistryError::InvalidTransition)?
+            .review_batch(arch_root.path(), decisions)
     }
 
     pub fn launcher_template_stale(

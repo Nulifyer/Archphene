@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]
 archphene-core = { path = "../archphene-core" }
 archphene-builder = { path = "../archphene-builder" }
 archphene-jobs = { path = "../archphene-jobs" }
+archphene-launcher = { path = "../archphene-launcher" }
 archphene-packages = { path = "../archphene-packages" }
 archphene-process = { path = "../archphene-process" }
 archphene-runtime = { path = "../archphene-runtime" }

@@ -72,6 +72,17 @@ internal class DesktopEntrySnapshot(
     val revision: Int,
 )
 
+internal class LauncherReviewSnapshot(
+    val androidPackages: Array<String>,
+    val desiredGenerations: LongArray,
+    val labels: Array<String>,
+    val sourcePackages: Array<String>,
+    val statuses: IntArray,
+    val needsReviewCount: Int,
+    val dismissedCount: Int,
+    val revision: Int,
+)
+
 internal class AvailablePackageSnapshot(
     val repositories: Array<String>,
     val names: Array<String>,
@@ -91,6 +102,8 @@ private data class LauncherRegistryRow(
     val descriptorIdHex: String,
     val desiredGeneration: Long,
     val status: Int,
+    val name: String,
+    val sourcePackage: String,
 )
 
 class ArchpheneRuntimeService : Service() {
@@ -156,6 +169,9 @@ class ArchpheneRuntimeService : Service() {
         internal val desktopEntries: DesktopEntrySnapshot
             get() = desktopEntrySnapshot
 
+        internal val launcherReview: LauncherReviewSnapshot
+            get() = launcherReviewSnapshot
+
         internal val availablePackages: AvailablePackageSnapshot
             get() = availablePackageSnapshot
 
@@ -197,6 +213,9 @@ class ArchpheneRuntimeService : Service() {
         val cancelledLauncherCount: Int
             get() = launcherCancelledCount
 
+        val launcherReviewInProgress: Boolean
+            get() = launcherReviewActive.get()
+
         fun resumeLauncherPublisher(): Boolean {
             val activeHandle = readyHandle
             if (activeHandle == 0L) {
@@ -213,6 +232,11 @@ class ArchpheneRuntimeService : Service() {
         fun retryCancelledLauncher(): Boolean = requestCancelledLauncherDecision("retry")
 
         fun dismissCancelledLauncher(): Boolean = requestCancelledLauncherDecision("dismiss")
+
+        fun reviewLaunchers(
+            revision: Int,
+            publish: BooleanArray,
+        ): Boolean = requestLauncherReview(revision, publish)
 
         internal fun authorizeLauncher(
             androidPackage: String,
@@ -561,6 +585,7 @@ class ArchpheneRuntimeService : Service() {
         }
     private val launcherPublisherActive = AtomicBoolean(false)
     private val launcherDecisionActive = AtomicBoolean(false)
+    private val launcherReviewActive = AtomicBoolean(false)
     @Volatile private var launcherPermissionRequired = false
     @Volatile private var launcherCancelledCount = 0
     @Volatile private var pendingLauncherResultPackage = ""
@@ -606,6 +631,18 @@ class ArchpheneRuntimeService : Service() {
             emptyArray(),
             emptyArray(),
             "Discovering Linux apps…",
+            0,
+        )
+    @Volatile
+    private var launcherReviewSnapshot =
+        LauncherReviewSnapshot(
+            emptyArray(),
+            LongArray(0),
+            emptyArray(),
+            emptyArray(),
+            IntArray(0),
+            0,
+            0,
             0,
         )
     @Volatile
@@ -920,6 +957,7 @@ class ArchpheneRuntimeService : Service() {
         val failed: Int,
         val cancelled: Int,
         val dismissed: Int,
+        val needsReview: Int,
     )
 
     private data class MirrorDirectory(
@@ -1490,6 +1528,8 @@ class ArchpheneRuntimeService : Service() {
         private const val LAUNCHER_STATUS_NEEDS_REMOVAL = 5
         private const val LAUNCHER_STATUS_AWAITING_REMOVAL = 6
         private const val LAUNCHER_STATUS_CANCELLED = 8
+        private const val LAUNCHER_STATUS_DISMISSED = 9
+        private const val LAUNCHER_STATUS_NEEDS_REVIEW = 10
         private const val LAUNCHER_ICON_BYTES_LIMIT = 1024 * 1024
         private const val LAUNCHER_ICON_DIMENSION_LIMIT = 2048
         private const val LAUNCHER_ICON_PIXEL_LIMIT = 4L * 1024 * 1024
@@ -3127,6 +3167,16 @@ class ArchpheneRuntimeService : Service() {
             }
             val launcherSummary = readLauncherSummary(activeHandle)
             launcherCancelledCount = launcherSummary?.cancelled ?: 0
+            val launcherRows =
+                if (
+                    launcherSummary != null &&
+                    (launcherSummary.needsReview > 0 || launcherSummary.dismissed > 0)
+                ) {
+                    readLauncherRegistryRows(activeHandle)
+                } else {
+                    emptyList()
+                }
+            updateLauncherReviewSnapshot(launcherRows)
             val status =
                 buildString {
                     append(desktopIds.size)
@@ -3192,6 +3242,18 @@ class ArchpheneRuntimeService : Service() {
                                 },
                             )
                         }
+                        if (launcherSummary.needsReview > 0) {
+                            append(" · ")
+                            append(launcherSummary.needsReview)
+                            append(" ")
+                            append(
+                                if (launcherSummary.needsReview == 1) {
+                                    "launcher awaiting selection"
+                                } else {
+                                    "launchers awaiting selection"
+                                },
+                            )
+                        }
                         if (launcherSummary.dismissed > 0) {
                             append(" · ")
                             append(launcherSummary.dismissed)
@@ -3203,6 +3265,7 @@ class ArchpheneRuntimeService : Service() {
                                     "launchers not added"
                                 },
                             )
+                            append(" · tap to manage")
                         }
                     }
                 }
@@ -3671,8 +3734,8 @@ class ArchpheneRuntimeService : Service() {
 
     private fun readLauncherRegistryRows(activeHandle: Long): List<LauncherRegistryRow> {
         val rows = ArrayList<LauncherRegistryRow>()
-        val output = ByteBuffer.allocateDirect(4096)
-        val bytes = ByteArray(4096)
+        val output = ByteBuffer.allocateDirect(8192)
+        val bytes = ByteArray(8192)
         var offset = 0
         var expectedTotal = -1
         while (true) {
@@ -3693,11 +3756,11 @@ class ArchpheneRuntimeService : Service() {
             output.position(0)
             output.get(bytes, 0, length)
             val lines =
-                String(bytes, 0, length, StandardCharsets.US_ASCII)
+                String(bytes, 0, length, StandardCharsets.UTF_8)
                     .trimEnd('\n')
                     .split('\n')
             val header = lines.first().split('\t')
-            check(header.size == 3 && header[0] == "P1") {
+            check(header.size == 3 && header[0] == "P2") {
                 "Invalid launcher registry page"
             }
             val next = header[1].toInt()
@@ -3714,7 +3777,7 @@ class ArchpheneRuntimeService : Service() {
             for (line in lines.drop(1)) {
                 val fields = line.split('\t')
                 check(
-                    fields.size == 6 &&
+                    fields.size == 8 &&
                         LAUNCHER_PACKAGE.matches(fields[0]) &&
                         LAUNCHER_DESCRIPTOR.matches(fields[1]),
                 ) {
@@ -3724,11 +3787,16 @@ class ArchpheneRuntimeService : Service() {
                 val published = fields[3].toLong()
                 val pending = fields[4].toLong()
                 val status = fields[5].toInt()
+                val name = fields[6]
+                val sourcePackage = fields[7]
                 check(
                     desired in 1..Int.MAX_VALUE.toLong() &&
                         published in 0..desired &&
                         pending in 0..desired &&
-                        status in 1..9,
+                        status in 1..10 &&
+                        name.toByteArray(StandardCharsets.UTF_8).size in 1..256 &&
+                        name.none(Char::isISOControl) &&
+                        (sourcePackage.isEmpty() || AUR_PACKAGE_NAME.matches(sourcePackage)),
                 ) {
                     "Invalid launcher registry state"
                 }
@@ -3738,6 +3806,8 @@ class ArchpheneRuntimeService : Service() {
                         fields[1],
                         desired,
                         status,
+                        name,
+                        sourcePackage,
                     ),
                 )
             }
@@ -3746,6 +3816,40 @@ class ArchpheneRuntimeService : Service() {
                 return rows
             }
         }
+    }
+
+    private fun updateLauncherReviewSnapshot(rows: List<LauncherRegistryRow>) {
+        val relevant =
+            rows.filter { row ->
+                row.status == LAUNCHER_STATUS_DISMISSED ||
+                    row.status == LAUNCHER_STATUS_NEEDS_REVIEW
+            }
+        val packages = Array(relevant.size) { index -> relevant[index].androidPackage }
+        val generations = LongArray(relevant.size) { index -> relevant[index].desiredGeneration }
+        val labels = Array(relevant.size) { index -> relevant[index].name }
+        val sources = Array(relevant.size) { index -> relevant[index].sourcePackage }
+        val statuses = IntArray(relevant.size) { index -> relevant[index].status }
+        val previous = launcherReviewSnapshot
+        if (
+            packages.contentEquals(previous.androidPackages) &&
+            generations.contentEquals(previous.desiredGenerations) &&
+            labels.contentEquals(previous.labels) &&
+            sources.contentEquals(previous.sourcePackages) &&
+            statuses.contentEquals(previous.statuses)
+        ) {
+            return
+        }
+        launcherReviewSnapshot =
+            LauncherReviewSnapshot(
+                packages,
+                generations,
+                labels,
+                sources,
+                statuses,
+                statuses.count { status -> status == LAUNCHER_STATUS_NEEDS_REVIEW },
+                statuses.count { status -> status == LAUNCHER_STATUS_DISMISSED },
+                previous.revision + 1,
+            )
     }
 
     private fun requestCancelledLauncherDecision(action: String): Boolean {
@@ -3796,6 +3900,69 @@ class ArchpheneRuntimeService : Service() {
         return true
     }
 
+    private fun requestLauncherReview(
+        revision: Int,
+        publish: BooleanArray,
+    ): Boolean {
+        val activeHandle = readyHandle
+        val review = launcherReviewSnapshot
+        if (
+            activeHandle == 0L ||
+            review.revision != revision ||
+            review.androidPackages.isEmpty() ||
+            publish.size != review.androidPackages.size ||
+            (review.needsReviewCount == 0 && publish.none { selected -> selected }) ||
+            !launcherReviewActive.compareAndSet(false, true)
+        ) {
+            return false
+        }
+        val choices = publish.copyOf()
+        Thread(
+            {
+                try {
+                    val request =
+                        buildString {
+                            append("B1\t")
+                            append(review.androidPackages.size)
+                            append('\n')
+                            for (index in review.androidPackages.indices) {
+                                append(review.androidPackages[index])
+                                append('\t')
+                                append(review.desiredGenerations[index])
+                                append('\t')
+                                append(if (choices[index]) '1' else '0')
+                                append('\n')
+                            }
+                        }.toByteArray(StandardCharsets.US_ASCII)
+                    check(request.size <= NativeRuntime.LAUNCHER_REVIEW_REQUEST_LIMIT) {
+                        "Launcher review request exceeds its bound"
+                    }
+                    val buffer =
+                        ByteBuffer.allocateDirect(NativeRuntime.LAUNCHER_REVIEW_REQUEST_LIMIT)
+                    buffer.put(request)
+                    check(
+                        NativeRuntime.nativeReviewLaunchers(
+                            activeHandle,
+                            buffer,
+                            request.size,
+                        ) == 0,
+                    ) {
+                        "Could not persist launcher review"
+                    }
+                    refreshDesktopEntries(activeHandle)
+                    startLauncherPublisher(activeHandle)
+                } catch (error: Exception) {
+                    Log.e(TAG, "Launcher review failed", error)
+                } finally {
+                    launcherReviewActive.set(false)
+                    mainHandler.post { stopIfUnobservedAndIdle() }
+                }
+            },
+            "ArchpheneLauncherReview",
+        ).start()
+        return true
+    }
+
     private fun launcherTransition(
         activeHandle: Long,
         action: String,
@@ -3836,7 +4003,7 @@ class ArchpheneRuntimeService : Service() {
                 outputLength,
                 StandardCharsets.US_ASCII,
             ).trimEnd('\n').split('\t')
-        if (fields.size != 10 || fields[0] != "L2") {
+        if (fields.size != 11 || fields[0] != "L3") {
             return null
         }
         val generation = fields[1].toLongOrNull() ?: return null
@@ -3848,6 +4015,7 @@ class ArchpheneRuntimeService : Service() {
         val failed = fields[7].toLongOrNull() ?: return null
         val cancelled = fields[8].toLongOrNull() ?: return null
         val dismissed = fields[9].toLongOrNull() ?: return null
+        val needsReview = fields[10].toLongOrNull() ?: return null
         if (
             generation < 0 ||
             total !in 0..NativeRuntime.DESKTOP_ENTRY_LIMIT.toLong() ||
@@ -3858,13 +4026,15 @@ class ArchpheneRuntimeService : Service() {
             failed !in 0..total ||
             cancelled !in 0..total ||
             dismissed !in 0..total ||
+            needsReview !in 0..total ||
             needsPublish +
                 current +
                 needsRemoval +
                 active +
                 failed +
                 cancelled +
-                dismissed != total
+                dismissed +
+                needsReview != total
         ) {
             return null
         }
@@ -3877,6 +4047,7 @@ class ArchpheneRuntimeService : Service() {
             failed.toInt(),
             cancelled.toInt(),
             dismissed.toInt(),
+            needsReview.toInt(),
         )
     }
 
@@ -8515,6 +8686,7 @@ class ArchpheneRuntimeService : Service() {
         bootstrapActive ||
             launcherPublisherActive.get() ||
             launcherDecisionActive.get() ||
+            launcherReviewActive.get() ||
             catalogRefreshActive ||
             searchActive ||
             packageOperationActive ||

@@ -333,9 +333,9 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [x] Suppress unrelated terminal activity cards while a package/AUR workflow is selected and retain only its compact relevant completion state, so an old transaction cannot obscure a phone-sized review.
   - [ ] Replace the AUR review's long plain-text evidence dump with a compact summary and expandable source, trust, build-environment, digest, and recipe sections while retaining exact accessible text and copyable values.
   - [ ] Add expandable/copyable AUR logs. The default product view now uses one compact live phase line, a verified output summary, and a clear Build/Install/Verify next action without exposing the raw makepkg transcript.
-  - [ ] Make launcher publication a reviewed, recoverable workflow instead of an automatic series of Android prompts.
+  - [x] Make launcher publication a reviewed, recoverable workflow instead of an automatic series of Android prompts.
     - [x] Stop automatically resubmitting user-cancelled Android launcher installations after manager restart. Persist distinct Cancelled and Dismissed states, require explicit Retry/Dismiss, and verify cancel/restart/retry/install with full-device screenshots and scoped logs on the emulator and Samsung.
-    - [ ] Offer a reviewed batch-selection flow when one dependency introduces several desktop entries, including a way to revisit dismissed launchers later.
+    - [x] Hold two or more newly discovered desktop entries in one durable review batch, default them selected, support Skip all/Not now/Add selected, and expose dismissed launchers through the package-screen status for later re-enablement. Prove the atomic Rust transition and real generated-wrapper flows on the emulator and Samsung, then remove every temporary package record, desktop entry, and wrapper.
 - [ ] Review Obtainium's source, license, screenshots, app-list structure, and update progress UI. Adapt suitable open-source patterns to Archphene's compact list, spinner, and richer phase strings without copying blindly.
 - [ ] Ensure search results distinguish graphical apps, CLI tools, libraries, installed packages, available updates, AUR results, unsupported packages, and compatibility status.
 - [ ] Add clear disk-use estimates and controls for package archives, shared runtime data, build caches, and user files.

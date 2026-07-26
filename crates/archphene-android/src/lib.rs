@@ -90,6 +90,7 @@ mod android {
 
     use archphene_core::{Lifecycle, PROTOCOL_VERSION, RuntimeError, SNAPSHOT_SIZE};
     use archphene_jobs::{JobError, JobOperation, JobState};
+    use archphene_launcher::{LauncherReviewDecision, MAX_LAUNCHER_DESCRIPTORS};
     use archphene_packages::{
         MAX_MANIFEST_BYTES, MAX_PACKAGE_RESOLUTION_BYTES, MAX_TOOL_OUTPUT_BYTES,
         MAX_VERIFIED_PACKAGE_CLOSURE_BYTES, PackageResolution, PackageRuntimeError, Repository,
@@ -121,6 +122,7 @@ mod android {
     const ERROR_STORAGE: jint = -9;
     const ERROR_LAUNCHER: jint = -10;
     const MAX_ANDROID_DNS_REQUEST_BYTES: usize = 512;
+    const MAX_LAUNCHER_REVIEW_REQUEST_BYTES: usize = 32 * 1024;
     const MAX_STORAGE_REQUEST_BYTES: usize = 4 * 1024;
     const BUILT_PACKAGE_REPORT_BYTES: usize = 64;
     const BUILT_PACKAGE_REPORT_MAGIC: &[u8; 8] = b"ABMV0001";
@@ -2182,7 +2184,7 @@ mod android {
             summary
         };
         let encoded = format!(
-            "L2\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            "L3\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             summary.generation,
             summary.total,
             summary.needs_publish,
@@ -2192,6 +2194,7 @@ mod android {
             summary.failed,
             summary.cancelled,
             summary.dismissed,
+            summary.needs_review,
         );
         if encoded.len() > output_capacity {
             return ERROR_INTERNAL;
@@ -2238,19 +2241,21 @@ mod android {
                 return ERROR_INVALID_ARGUMENT;
             }
             let end = offset.saturating_add(8).min(launchers.descriptors().len());
-            let mut encoded = format!("P1\t{}\t{}\n", end, launchers.descriptors().len());
+            let mut encoded = format!("P2\t{}\t{}\n", end, launchers.descriptors().len());
             for descriptor in &launchers.descriptors()[offset..end] {
                 let descriptor_id = descriptor.descriptor_id_hex();
                 let descriptor_id =
                     str::from_utf8(&descriptor_id).expect("hex launcher descriptor");
                 encoded.push_str(&format!(
-                    "{}\t{}\t{}\t{}\t{}\t{}\n",
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
                     descriptor.android_package,
                     descriptor_id,
                     descriptor.desired_generation,
                     descriptor.published_generation,
                     descriptor.pending_generation,
                     descriptor.status as u8,
+                    descriptor.name,
+                    descriptor.source_package.as_deref().unwrap_or(""),
                 ));
             }
             encoded
@@ -2754,6 +2759,112 @@ mod android {
                 }
                 _ => return ERROR_INVALID_ARGUMENT,
             }
+        };
+        match result {
+            Ok(()) => 0,
+            Err(_) => ERROR_LAUNCHER,
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeReviewLaunchers(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        request_buffer: JByteBuffer,
+        request_length: jint,
+    ) -> jint {
+        let (Ok(handle), Ok(request_length)) =
+            (u64::try_from(handle), usize::try_from(request_length))
+        else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(request_capacity) = environment.get_direct_buffer_capacity(&request_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if request_length == 0
+            || request_length > request_capacity
+            || request_length > MAX_LAUNCHER_REVIEW_REQUEST_BYTES
+        {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let Ok(request_address) = environment.get_direct_buffer_address(&request_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if request_address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let request =
+            unsafe { slice::from_raw_parts(request_address.cast_const(), request_length) };
+        let Ok(request) = str::from_utf8(request) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Some(request) = request.strip_suffix('\n') else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let mut lines = request.split('\n');
+        let Some(header) = lines.next() else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let mut header_fields = header.split('\t');
+        let (Some("B1"), Some(count), None) = (
+            header_fields.next(),
+            header_fields.next(),
+            header_fields.next(),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(count) = count.parse::<usize>() else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if count == 0 || count > MAX_LAUNCHER_DESCRIPTORS {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let mut decisions = Vec::with_capacity(count);
+        for line in lines {
+            let mut fields = line.split('\t');
+            let (Some(android_package), Some(generation), Some(publish), None) =
+                (fields.next(), fields.next(), fields.next(), fields.next())
+            else {
+                return ERROR_INVALID_ARGUMENT;
+            };
+            if android_package.len() != 53
+                || !android_package.starts_with("org.archphene.linux.p")
+                || !android_package
+                    .bytes()
+                    .skip(21)
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+            {
+                return ERROR_INVALID_ARGUMENT;
+            }
+            let Ok(desired_generation) = generation.parse::<u64>() else {
+                return ERROR_INVALID_ARGUMENT;
+            };
+            if desired_generation == 0 || desired_generation > i32::MAX as u64 {
+                return ERROR_INVALID_ARGUMENT;
+            }
+            let publish = match publish {
+                "0" => false,
+                "1" => true,
+                _ => return ERROR_INVALID_ARGUMENT,
+            };
+            decisions.push(LauncherReviewDecision {
+                android_package: android_package.to_owned(),
+                desired_generation,
+                publish,
+            });
+        }
+        if decisions.len() != count {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let result = {
+            let Ok(mut registry) = registry().lock() else {
+                return ERROR_INTERNAL;
+            };
+            let Some(runtime) = registry.runtime_mut(handle) else {
+                return ERROR_INVALID_HANDLE;
+            };
+            runtime.review_launchers(&decisions)
         };
         match result {
             Ok(()) => 0,

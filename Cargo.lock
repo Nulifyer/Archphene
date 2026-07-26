@@ -15,6 +15,7 @@ dependencies = [
  "archphene-builder",
  "archphene-core",
  "archphene-jobs",
+ "archphene-launcher",
  "archphene-packages",
  "archphene-process",
  "archphene-runtime",
