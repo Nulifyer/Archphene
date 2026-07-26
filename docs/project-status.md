@@ -1259,6 +1259,16 @@ Full-device emulator captures prove cold launch and close/relaunch, and the
 current Samsung manager and all four desired wrappers were reconciled before a
 clean full-device Code cold launch, Back cleanup, and relaunch.
 
+The first real extension-marketplace UI gate fails before HTTP. A bounded
+temporary Chromium netlog shows Open VSX host resolution returning
+`getaddrinfo` `EAI_AGAIN` and `ERR_NAME_NOT_RESOLVED`; no TLS request is made.
+The managed glibc environment currently has no resolver configuration tied to
+Android's active `LinkProperties`. The production fix must atomically publish
+only validated Android DNS addresses through the Rust-owned root and refresh
+them on network changes so VPN, private-DNS, Wi-Fi, and cellular behavior are
+not bypassed by hardcoded public resolvers. Diagnostic netlog flags and output
+were removed after the capture.
+
 The x86_64 package lane renders immediate durable progress for a real
 `dotnet-sdk` request and resolves the same shared-root `base` plus SDK closure
 for details, download, size preflight, and commit. The original reused-emulator
