@@ -76,6 +76,12 @@ internal object NativeRuntime {
         mode: Int,
         outputBuffer: ByteBuffer,
     ): Int
+    external fun nativeOpenShellStartupDocument(
+        requestBuffer: ByteBuffer,
+        requestLength: Int,
+        mode: Int,
+        outputBuffer: ByteBuffer,
+    ): Int
     external fun nativeCreateHomeDocument(
         requestBuffer: ByteBuffer,
         requestLength: Int,

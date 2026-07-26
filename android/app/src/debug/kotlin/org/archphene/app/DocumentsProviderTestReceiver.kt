@@ -78,7 +78,71 @@ internal class DocumentsProviderTestReceiver : BroadcastReceiver() {
         val resolver = context.contentResolver
         val authority = "${context.packageName}.documents"
         val root = DocumentsContract.buildDocumentUri(authority, HOME_ID)
+        val shellStartup =
+            DocumentsContract.buildDocumentUri(authority, SHELL_STARTUP_ID)
+        val bashrc =
+            DocumentsContract.buildDocumentUri(authority, BASHRC_DOCUMENT_ID)
         val directoryName = "$PROBE_PREFIX$token"
+        check(DocumentsContract.isChildDocument(resolver, root, shellStartup)) {
+            "shell startup directory is not a child of Archphene Home"
+        }
+        check(DocumentsContract.isChildDocument(resolver, shellStartup, bashrc)) {
+            ".bashrc is not a child of the shell startup directory"
+        }
+        val startupNames = mutableSetOf<String>()
+        resolver
+            .query(
+                DocumentsContract.buildChildDocumentsUri(authority, SHELL_STARTUP_ID),
+                arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME),
+                null,
+                null,
+                null,
+            )!!
+            .use { children ->
+                while (children.moveToNext()) {
+                    startupNames += children.getString(0)
+                }
+            }
+        check(
+            startupNames ==
+                setOf(
+                    "Edit .bashrc",
+                    "Edit .bash_profile",
+                ),
+        ) {
+            "provider exposed an unexpected shell startup set: $startupNames"
+        }
+        val directBashrc =
+            File(context.filesDir, "$HOME_RELATIVE_PATH/.bashrc").readBytes()
+        check(
+            resolver.openInputStream(bashrc)!!.use { stream ->
+                stream.readBytes().contentEquals(directBashrc)
+            },
+        ) {
+            "reviewed .bashrc content does not match the Linux home"
+        }
+        resolver.openFileDescriptor(bashrc, "rw")!!.close()
+        expectNoDocument("startup create") {
+            DocumentsContract.createDocument(resolver, shellStartup, "text/plain", "extra")
+        }
+        expectFailure("startup rename") {
+            DocumentsContract.renameDocument(resolver, bashrc, "renamed")
+        }
+        expectFailure("startup delete") {
+            DocumentsContract.deleteDocument(resolver, bashrc)
+        }
+        expectUnavailable("unreviewed startup alias") {
+            resolver.query(
+                DocumentsContract.buildDocumentUri(
+                    authority,
+                    "$SHELL_STARTUP_ID/secret",
+                ),
+                null,
+                null,
+                null,
+                null,
+            )
+        }
         expectNoDocument("traversing create") {
             DocumentsContract.createDocument(
                 resolver,
@@ -391,6 +455,8 @@ internal class DocumentsProviderTestReceiver : BroadcastReceiver() {
         private const val EXTRA_TOKEN = "token"
         private const val EXTRA_RETAIN_VISUAL = "retain_visual"
         private const val HOME_ID = "home"
+        private const val SHELL_STARTUP_ID = "shell-startup"
+        private const val BASHRC_DOCUMENT_ID = "$SHELL_STARTUP_ID/bashrc"
         private const val HOME_RELATIVE_PATH = "arch-root/home/archphene"
         private const val PROBE_PREFIX = "Archphene-Documents-"
         private const val SOURCE_NAME = "source.txt"

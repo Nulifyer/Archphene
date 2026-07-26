@@ -88,12 +88,14 @@ archphene_adb_run shell input text 'archphene-command-test%sverified' >/dev/null
 archphene_wait_ui 'text="archphene-command-test verified"' \
   "archphene-script-command-entered-$serial" 10
 archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null
-archphene_wait_ui 'text="RUN"' "archphene-script-keyboard-dismissed-$serial" 10
-archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="RUN"' 'run Linux script'
+archphene_wait_ui 'text="(?:RUN|Run)"' \
+  "archphene-script-keyboard-dismissed-$serial" 10
+archphene_tap_ui_pattern "$ARCHPHENE_UI" \
+  'text="(?:RUN|Run)"' 'run Linux script'
 archphene_wait_ui 'text="Exited 0[^"]*archphene-script-ok:verified' \
   "archphene-script-complete-$serial" 45
 archphene_wait_ui \
-  'archphene-env:/home/archphene\|/home/archphene\|/usr/local/sbin:/usr/local/bin:/usr/bin\|UTF-8\|1' \
+  'archphene-env:/home/archphene\|/home/archphene\|/home/archphene/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/bin\|UTF-8\|1' \
   "archphene-script-environment-$serial" 15
 [[ "$ARCHPHENE_UI" != *"cannot change locale"* ]] ||
   archphene_die "script command exposed an unavailable locale warning"

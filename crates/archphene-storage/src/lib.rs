@@ -166,6 +166,8 @@ mod sys {
 }
 
 pub const HOME_DOCUMENT_ID: &str = "home";
+pub const BASHRC_STARTUP_ID: &str = "bashrc";
+pub const BASH_PROFILE_STARTUP_ID: &str = "bash-profile";
 pub const MAX_DOCUMENT_ID_BYTES: usize = 1024;
 pub const MAX_DOCUMENT_DEPTH: usize = 32;
 pub const MAX_DOCUMENT_NAME_BYTES: usize = 255;
@@ -899,17 +901,41 @@ pub fn validate_visible_name(name: &str) -> Result<(), StorageError> {
 }
 
 pub fn open_document(root: &Path, document_id: &str, mode: OpenMode) -> Result<File, StorageError> {
+    validate_open_mode(mode)?;
+    let segments = parse_document_id(document_id)?;
+    if segments.is_empty() {
+        return Err(StorageError::InvalidDocument);
+    }
+    let (parent, leaf) = open_parent(root, &segments)?;
+    open_regular_file(&parent, &leaf, mode)
+}
+
+pub fn open_shell_startup_document(
+    root: &Path,
+    startup_id: &str,
+    mode: OpenMode,
+) -> Result<File, StorageError> {
+    validate_open_mode(mode)?;
+    let name = match startup_id {
+        BASHRC_STARTUP_ID => c_string(OsStr::new(".bashrc"))?,
+        BASH_PROFILE_STARTUP_ID => c_string(OsStr::new(".bash_profile"))?,
+        _ => return Err(StorageError::InvalidDocument),
+    };
+    let home = open_directory(root, &[])?;
+    open_regular_file(&home, &name, mode)
+}
+
+fn validate_open_mode(mode: OpenMode) -> Result<(), StorageError> {
     if (mode.append || mode.truncate || !mode.read) && !mode.write {
         return Err(StorageError::InvalidDocument);
     }
     if mode.truncate && mode.append {
         return Err(StorageError::InvalidDocument);
     }
-    let segments = parse_document_id(document_id)?;
-    if segments.is_empty() {
-        return Err(StorageError::InvalidDocument);
-    }
-    let (parent, leaf) = open_parent(root, &segments)?;
+    Ok(())
+}
+
+fn open_regular_file(parent: &File, leaf: &CString, mode: OpenMode) -> Result<File, StorageError> {
     let access = match (mode.read, mode.write) {
         (true, true) => sys::O_RDWR,
         (false, true) => sys::O_WRONLY,
@@ -923,7 +949,7 @@ pub fn open_document(root: &Path, document_id: &str, mode: OpenMode) -> Result<F
     if mode.append {
         flags |= sys::O_APPEND;
     }
-    let file = sys::open_at(parent.as_raw_fd(), &leaf, flags, 0)?;
+    let file = sys::open_at(parent.as_raw_fd(), leaf, flags, 0)?;
     if !file.metadata()?.is_file() {
         return Err(StorageError::InvalidDocument);
     }
@@ -1342,6 +1368,49 @@ mod tests {
         assert!(create_document(&home.0, "home/..", "escape", false).is_err());
         assert!(rename_document(&home.0, HOME_DOCUMENT_ID, "other").is_err());
         assert!(delete_document(&home.0, HOME_DOCUMENT_ID).is_err());
+    }
+
+    #[test]
+    fn exposes_only_reviewed_shell_startup_files() {
+        let home = TestDirectory::new();
+        fs::write(home.0.join(".bashrc"), b"export EDITOR=vi\n").expect("bashrc");
+        fs::write(
+            home.0.join(".bash_profile"),
+            b"if [[ -r ~/.bashrc ]]; then . ~/.bashrc; fi\n",
+        )
+        .expect("bash profile");
+        fs::write(home.0.join(".secret"), b"secret").expect("private file");
+
+        let mut bashrc = open_shell_startup_document(&home.0, BASHRC_STARTUP_ID, read_write_mode())
+            .expect("open bashrc");
+        bashrc
+            .write_all(b"export PATH=$PATH:$HOME/bin\n")
+            .expect("write");
+        bashrc.rewind().expect("rewind");
+        let mut content = String::new();
+        bashrc.read_to_string(&mut content).expect("read");
+        assert_eq!(content, "export PATH=$PATH:$HOME/bin\n");
+        assert!(
+            open_shell_startup_document(
+                &home.0,
+                BASH_PROFILE_STARTUP_ID,
+                OpenMode {
+                    read: true,
+                    write: false,
+                    truncate: false,
+                    append: false,
+                },
+            )
+            .is_ok()
+        );
+        assert!(open_shell_startup_document(&home.0, "secret", read_write_mode()).is_err());
+        assert!(open_document(&home.0, "home/.secret", read_write_mode()).is_err());
+
+        fs::remove_file(home.0.join(".bashrc")).expect("remove bashrc");
+        symlink("/tmp/host-bashrc", home.0.join(".bashrc")).expect("bashrc symlink");
+        assert!(
+            open_shell_startup_document(&home.0, BASHRC_STARTUP_ID, read_write_mode()).is_err()
+        );
     }
 
     #[test]

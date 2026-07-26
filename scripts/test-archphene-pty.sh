@@ -116,7 +116,8 @@ archphene_wait_ui '/home/archphene' "archphene-shell-pwd-output-$serial" 15
 enter_shell_line "declare -p HOME" "archphene-shell-home-$serial"
 archphene_wait_ui 'HOME=.*/home/archphene' "archphene-shell-home-output-$serial" 15
 enter_shell_line "declare -p PATH" "archphene-shell-path-$serial"
-archphene_wait_ui_unwrapped '/usr/local/sbin:/usr/local/bin:/usr/bin' \
+archphene_wait_ui_unwrapped \
+  '/home/archphene/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/bin' \
   "archphene-shell-path-output-$serial" 15
 enter_shell_line "locale charmap" "archphene-shell-locale-$serial"
 archphene_wait_ui 'UTF-8' "archphene-shell-locale-output-$serial" 15

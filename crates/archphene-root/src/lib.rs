@@ -73,6 +73,8 @@ const DIRECTORIES: &[(&str, u32)] = &[
     ("opt", 0o755),
     ("home", 0o755),
     ("home/archphene", 0o700),
+    ("home/archphene/.local", 0o700),
+    ("home/archphene/.local/bin", 0o700),
     ("home/archphene/Documents", 0o700),
     ("home/archphene/Downloads", 0o700),
     ("home/archphene/Projects", 0o700),

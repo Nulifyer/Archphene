@@ -347,7 +347,10 @@ impl CommandEnvironment {
             // of through libc, so those paths cannot be translated by the bridge.
             // Keep the directory private while publishing its physical path.
             .env("TMPDIR", self.arch_root.join("tmp"))
-            .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/bin")
+            .env(
+                "PATH",
+                "/home/archphene/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/bin",
+            )
             .env("LANG", "C.UTF-8")
             .env("LC_ALL", "C.UTF-8")
             .env("LOCPATH", self.arch_root.join("usr/lib/locale"))
@@ -1651,7 +1654,9 @@ mod tests {
         assert_eq!(value("TMPDIR"), Some(expected_tmpdir.as_os_str()));
         assert_eq!(
             value("PATH"),
-            Some(OsStr::new("/usr/local/sbin:/usr/local/bin:/usr/bin")),
+            Some(OsStr::new(
+                "/home/archphene/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/bin",
+            )),
         );
         assert_eq!(value("LANG"), Some(OsStr::new("C.UTF-8")));
         assert_eq!(value("LC_ALL"), Some(OsStr::new("C.UTF-8")));

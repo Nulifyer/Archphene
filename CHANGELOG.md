@@ -6,6 +6,7 @@ Notable user-facing changes will be recorded here.
 
 ### Added
 
+- Added a safe Shell startup files folder to Archphene Home in Android Files. It exposes only writable `.bashrc` and `.bash_profile` aliases through Rust no-follow opens while keeping arbitrary dotfiles private and preventing create/rename/delete operations. New and reused roots also receive `~/.local/bin` at the front of the shared Linux process PATH.
 - Added explicit forward repair for interrupted official package transactions. Rust retains exact verified install inputs or a removal baseline before pacman mutation, refuses cache cleanup while those inputs are required, and clears the intent only after database and final-state validation. The manager distinguishes safe Retry from required Repair after process death.
 - Added a Downloads inventory for the manager-owned pacman cache with total disk use, package/version grouping, selectable per-package cleanup, and a separately confirmed Clear all action. Cache inspection and deletion are bounded and fail closed in Rust, paged through JNI, and serialized with package work.
 

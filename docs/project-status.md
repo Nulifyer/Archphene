@@ -692,14 +692,18 @@ pass after real reboots of the emulator and physical Samsung.
 
 User-visible processes now receive Linux-facing `HOME=/home/archphene`,
 `TMPDIR=/tmp`, conventional XDG locations, and
-`PATH=/usr/local/sbin:/usr/local/bin:/usr/bin`; bridge-private host paths remain
+`PATH=/home/archphene/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/bin`;
+bridge-private host paths remain
 only in the explicit loader variables. The path bridge maps `getcwd` and
 `get_current_dir_name` back into the shared root, so both `PWD` and `pwd`
 report `/home/archphene` instead of Android's private data path. `LOCPATH`
 points directly at the verified locale data installed by the architecture's
 official glibc package, enabling `C.UTF-8` without generating or bundling a
 second locale. Root bootstrap creates `.bashrc` and `.bash_profile` defaults
-once, rejects symlink substitution, and never overwrites user edits.
+once, rejects symlink substitution, and never overwrites user edits. It also
+creates private `~/.local/bin`; that conventional directory is first in the
+shared PATH for terminal and graphical processes, while additional PATH
+changes made in `.bashrc` intentionally affect only shells that source it.
 
 Interactive lifecycle gates now pass on the x86_64 emulator and AArch64
 Samsung. Each proves the Archphene prompt, HOME, PWD, conventional PATH, and
@@ -729,8 +733,14 @@ The readable Android selector, process-death persistence, distinct
 `archphene:~$` and `sh-5.3$` PTY prompts, stop/reap behavior, scoped fatal
 logs, and full-device screenshots pass with exact-ABI APKs on the API 36
 x86_64 emulator and AArch64 Samsung. Bash is restored as the selected default
-after each gate. Additional shell-specific startup adapters, editable startup
-files, and the production terminal surface remain pending.
+after each gate. Android Files now exposes a virtual **Shell startup files**
+directory containing writable `Edit .bashrc` and `Edit .bash_profile`
+documents. Rust maps only those two stable identities to no-follow opens of the
+real user-owned files; Android cannot create, rename, or delete entries there,
+and arbitrary dotfiles remain private. Host substitution tests and exact-ABI
+DocumentsUI read/write/security/full-device gates pass on both targets.
+Additional shell-specific startup adapters and the remaining production
+terminal work remain pending.
 
 The production terminal replacement now has a separate Rust state-core
 foundation. It bounds grids to 200 by 400 cells, parses strict streaming UTF-8

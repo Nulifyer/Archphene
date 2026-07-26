@@ -434,6 +434,40 @@ mod android {
     }
 
     #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeOpenShellStartupDocument(
+        environment: JNIEnv,
+        _class: JClass,
+        request_buffer: JByteBuffer,
+        request_length: jint,
+        mode: jint,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        if mode <= 0 || mode & !0x0f != 0 {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let Ok(output) = storage_output(&environment, &output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(request) = storage_request(&environment, &request_buffer, request_length, 2) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let open_mode = OpenMode {
+            read: mode & 1 != 0,
+            write: mode & 2 != 0,
+            truncate: mode & 4 != 0,
+            append: mode & 8 != 0,
+        };
+        match archphene_storage::open_shell_startup_document(
+            Path::new(&request[0]),
+            &request[1],
+            open_mode,
+        ) {
+            Ok(file) => file.into_raw_fd(),
+            Err(error) => copy_storage_error(&error, output),
+        }
+    }
+
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeCreateHomeDocument(
         environment: JNIEnv,
         _class: JClass,

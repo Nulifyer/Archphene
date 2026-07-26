@@ -79,11 +79,26 @@ archphene_adb_run shell am start -W -a android.intent.action.OPEN_DOCUMENT \
   "content://$authority/root/archphene-home" >/dev/null
 archphene_wait_ui 'text="Archphene Home"' "documents-home-$serial" 20
 archphene_wait_ui "text=\"$fixture\"" "documents-fixture-$serial" 20
+archphene_wait_ui 'text="Shell startup files"' "documents-startup-folder-$serial" 20
 home_ui="$ARCHPHENE_UI"
 [[ "$home_ui" != *'text=".bashrc"'* &&
     "$home_ui" != *'text=".bash_profile"'* &&
     "$home_ui" != *'text="private-link"'* ]] ||
   archphene_die "DocumentsUI exposed a private or symbolic-link entry"
+archphene_tap_text "$home_ui" "Shell startup files"
+archphene_wait_ui 'text="Edit .bashrc"' \
+  "documents-bashrc-$serial" 15
+archphene_wait_ui 'text="Edit .bash_profile"' \
+  "documents-bash-profile-$serial" 15
+startup_ui="$ARCHPHENE_UI"
+[[ "$startup_ui" != *'text=".secret"'* &&
+    "$startup_ui" != *'text="private-link"'* ]] ||
+  archphene_die "DocumentsUI exposed an unreviewed private startup entry"
+archphene_adb_run exec-out screencap -p \
+  >"$output_dir/$serial-shell-startup.png"
+archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null
+archphene_wait_ui "text=\"$fixture\"" "documents-fixture-return-$serial" 15
+home_ui="$ARCHPHENE_UI"
 archphene_tap_text "$home_ui" "$fixture"
 archphene_wait_ui 'text="Welcome.txt"' "documents-welcome-$serial" 15
 
@@ -106,5 +121,7 @@ trap - EXIT
 cleanup
 archphene_note "Archphene DocumentsProvider passed on $serial"
 archphene_note "  Exact create/read/write/rename/delete and collision behavior passed"
+archphene_note "  Only .bashrc/.bash_profile are exposed through the reviewed startup folder"
 archphene_note "  Hidden, traversal, bidi-spoof, and symlink access were rejected"
-archphene_note "  Full-device screenshot: $output_dir/$serial.png"
+archphene_note \
+  "  Full-device screenshots: $output_dir/$serial{,-shell-startup}.png"

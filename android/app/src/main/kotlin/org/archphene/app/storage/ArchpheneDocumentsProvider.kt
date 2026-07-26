@@ -70,24 +70,43 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
         sortOrder: String?,
     ): Cursor {
         val parent = documentForId(parentDocumentId)
-        if (!parent.attributes.isDirectory) {
+        if (!parent.isDirectory) {
             throw missing("Document is not a directory: $parentDocumentId")
         }
+        if (parent.kind == DocumentKind.SHELL_STARTUP_DIRECTORY) {
+            val rows =
+                MatrixCursor(
+                    projection?.copyOf() ?: DEFAULT_DOCUMENT_PROJECTION,
+                    SHELL_STARTUP_DOCUMENT_IDS.size,
+                )
+            SHELL_STARTUP_DOCUMENT_IDS.forEach { documentId ->
+                include(rows, documentId, documentForId(documentId))
+            }
+            return rows
+        }
+        val parentFile =
+            parent.file ?: throw missing("Document has no backing directory: $parentDocumentId")
+        val maximumChildren =
+            if (parentDocumentId == HOME_ID) {
+                MAX_VISIBLE_CHILDREN - 1
+            } else {
+                MAX_VISIBLE_CHILDREN
+            }
         val visibleChildren =
             try {
-                Files.newDirectoryStream(parent.file.toPath()).use { entries ->
+                Files.newDirectoryStream(parentFile.toPath()).use { entries ->
                     entries
                         .asSequence()
                         .filter { path -> visibleName(path.fileName.toString()) }
                         .filterNot(Files::isSymbolicLink)
-                        .take(MAX_VISIBLE_CHILDREN + 1)
+                        .take(maximumChildren + 1)
                         .map { path -> path.toFile() }
                         .toList()
                 }
             } catch (error: Exception) {
                 throw missing("Could not list directory: $parentDocumentId", error)
             }
-        if (visibleChildren.size > MAX_VISIBLE_CHILDREN) {
+        if (visibleChildren.size > maximumChildren) {
             throw missing("Directory exceeds the visible-entry limit")
         }
         val children =
@@ -97,8 +116,11 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
         val rows =
             MatrixCursor(
                 projection?.copyOf() ?: DEFAULT_DOCUMENT_PROJECTION,
-                children.size,
+                children.size + if (parentDocumentId == HOME_ID) 1 else 0,
             )
+        if (parentDocumentId == HOME_ID) {
+            include(rows, SHELL_STARTUP_ID, documentForId(SHELL_STARTUP_ID))
+        }
         children.forEach { child ->
             val childId =
                 if (parentDocumentId == HOME_ID) {
@@ -118,18 +140,35 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
     ): ParcelFileDescriptor {
         signal?.throwIfCanceled()
         val document = documentForId(documentId)
-        if (!document.attributes.isRegularFile) {
+        if (!document.isRegularFile) {
             throw missing("Document is not a regular file: $documentId")
         }
         val nativeMode = nativeMode(mode)
         val descriptor =
-            nativeOperation(listOf(homePath(), documentId)) { request, length, output ->
-                NativeRuntime.nativeOpenHomeDocument(
-                    request,
-                    length,
-                    nativeMode,
-                    output,
-                )
+            if (document.kind == DocumentKind.SHELL_STARTUP_FILE) {
+                nativeOperation(
+                    listOf(
+                        homePath(),
+                        document.startupId
+                            ?: throw missing("Startup document identity is unavailable"),
+                    ),
+                ) { request, length, output ->
+                    NativeRuntime.nativeOpenShellStartupDocument(
+                        request,
+                        length,
+                        nativeMode,
+                        output,
+                    )
+                }
+            } else {
+                nativeOperation(listOf(homePath(), documentId)) { request, length, output ->
+                    NativeRuntime.nativeOpenHomeDocument(
+                        request,
+                        length,
+                        nativeMode,
+                        output,
+                    )
+                }
             }
         if (nativeMode and NativeRuntime.STORAGE_MODE_WRITE != 0) {
             notifyDocument(documentId)
@@ -143,8 +182,11 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
         displayName: String,
     ): String {
         val parent = documentForId(parentDocumentId)
-        if (!parent.attributes.isDirectory) {
+        if (!parent.isDirectory) {
             throw missing("Document is not a directory: $parentDocumentId")
+        }
+        if (parent.kind != DocumentKind.PHYSICAL) {
+            throw missing("Cannot create shell startup documents")
         }
         requireVisibleName(displayName)
         nativeOperation(listOf(homePath(), parentDocumentId, displayName)) {
@@ -174,7 +216,9 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
         if (documentId == HOME_ID) {
             throw missing("Cannot rename Archphene Home")
         }
-        documentForId(documentId)
+        if (documentForId(documentId).kind != DocumentKind.PHYSICAL) {
+            throw missing("Cannot rename shell startup documents")
+        }
         requireVisibleName(displayName)
         nativeOperation(listOf(homePath(), documentId, displayName)) {
                 request,
@@ -195,7 +239,9 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
         if (documentId == HOME_ID) {
             throw missing("Cannot delete Archphene Home")
         }
-        documentForId(documentId)
+        if (documentForId(documentId).kind != DocumentKind.PHYSICAL) {
+            throw missing("Cannot delete shell startup documents")
+        }
         nativeOperation(listOf(homePath(), documentId)) { request, length, output ->
             NativeRuntime.nativeDeleteHomeDocument(request, length, output)
         }
@@ -210,7 +256,14 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
             documentForId(parentDocumentId)
             documentForId(documentId)
             documentId == parentDocumentId ||
-                documentId.startsWith("$parentDocumentId/")
+                documentId.startsWith("$parentDocumentId/") ||
+                (
+                    parentDocumentId == HOME_ID &&
+                        (
+                            documentId == SHELL_STARTUP_ID ||
+                                documentId.startsWith("$SHELL_STARTUP_ID/")
+                        )
+                )
         } catch (_: FileNotFoundException) {
             false
         }
@@ -220,17 +273,20 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
         documentId: String,
         document: ResolvedDocument,
     ) {
-        val attributes = document.attributes
-        if (!attributes.isDirectory && !attributes.isRegularFile) {
+        if (!document.isDirectory && !document.isRegularFile) {
             throw missing("Unsupported document type: $documentId")
         }
         var flags =
-            if (attributes.isDirectory) {
-                DocumentsContract.Document.FLAG_DIR_SUPPORTS_CREATE
+            if (document.isDirectory) {
+                if (document.kind == DocumentKind.PHYSICAL) {
+                    DocumentsContract.Document.FLAG_DIR_SUPPORTS_CREATE
+                } else {
+                    0
+                }
             } else {
                 DocumentsContract.Document.FLAG_SUPPORTS_WRITE
             }
-        if (documentId != HOME_ID) {
+        if (documentId != HOME_ID && document.kind == DocumentKind.PHYSICAL) {
             flags =
                 flags or
                     DocumentsContract.Document.FLAG_SUPPORTS_RENAME or
@@ -242,35 +298,55 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
             row,
             rows,
             DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-            if (documentId == HOME_ID) {
-                providerContext().getString(R.string.documents_home_name)
-            } else {
-                document.file.name
-            },
+            document.displayName,
         )
         put(
             row,
             rows,
             DocumentsContract.Document.COLUMN_MIME_TYPE,
-            if (attributes.isDirectory) {
+            if (document.isDirectory) {
                 DocumentsContract.Document.MIME_TYPE_DIR
+            } else if (document.kind == DocumentKind.SHELL_STARTUP_FILE) {
+                "text/plain"
             } else {
-                mimeType(document.file.name)
+                mimeType(document.file?.name ?: document.displayName)
             },
         )
         put(row, rows, DocumentsContract.Document.COLUMN_FLAGS, flags)
-        if (attributes.isRegularFile) {
-            put(row, rows, DocumentsContract.Document.COLUMN_SIZE, attributes.size())
+        if (document.isRegularFile) {
+            put(
+                row,
+                rows,
+                DocumentsContract.Document.COLUMN_SIZE,
+                document.attributes?.size(),
+            )
         }
         put(
             row,
             rows,
             DocumentsContract.Document.COLUMN_LAST_MODIFIED,
-            attributes.lastModifiedTime().toMillis(),
+            document.attributes?.lastModifiedTime()?.toMillis() ?: 0L,
         )
     }
 
     private fun documentForId(documentId: String): ResolvedDocument {
+        if (documentId == SHELL_STARTUP_ID) {
+            homeDirectory()
+            return ResolvedDocument(
+                file = null,
+                attributes = null,
+                displayName = providerContext().getString(R.string.shell_startup_files),
+                kind = DocumentKind.SHELL_STARTUP_DIRECTORY,
+            )
+        }
+        SHELL_STARTUP_FILES[documentId]?.let { startup ->
+            return resolvePhysicalDocument(
+                File(homeDirectory(), startup.fileName),
+                startup.displayName,
+                DocumentKind.SHELL_STARTUP_FILE,
+                startup.id,
+            )
+        }
         val segments = parseDocumentId(documentId)
         var current = homeDirectory()
         if (Files.isSymbolicLink(current.toPath())) {
@@ -282,17 +358,40 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
                 throw missing("Symbolic links are private")
             }
         }
+        return resolvePhysicalDocument(
+            current,
+            if (documentId == HOME_ID) {
+                providerContext().getString(R.string.documents_home_name)
+            } else {
+                current.name
+            },
+            DocumentKind.PHYSICAL,
+        )
+    }
+
+    private fun resolvePhysicalDocument(
+        file: File,
+        displayName: String,
+        kind: DocumentKind,
+        startupId: String? = null,
+    ): ResolvedDocument {
         val attributes =
             try {
                 Files.readAttributes(
-                    current.toPath(),
+                    file.toPath(),
                     BasicFileAttributes::class.java,
                     LinkOption.NOFOLLOW_LINKS,
                 )
             } catch (error: Exception) {
-                throw missing("Document is unavailable: $documentId", error)
+                throw missing("Document is unavailable: $displayName", error)
             }
-        return ResolvedDocument(current, attributes)
+        if (
+            kind == DocumentKind.SHELL_STARTUP_FILE &&
+            (!attributes.isRegularFile || Files.isSymbolicLink(file.toPath()))
+        ) {
+            throw missing("Shell startup file is unavailable: $displayName")
+        }
+        return ResolvedDocument(file, attributes, displayName, kind, startupId)
     }
 
     private fun parseDocumentId(documentId: String): List<String> {
@@ -430,20 +529,62 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
             this in '\u202a'..'\u202e' ||
             this in '\u2066'..'\u2069'
 
+    private enum class DocumentKind {
+        PHYSICAL,
+        SHELL_STARTUP_DIRECTORY,
+        SHELL_STARTUP_FILE,
+    }
+
     private data class ResolvedDocument(
-        val file: File,
-        val attributes: BasicFileAttributes,
+        val file: File?,
+        val attributes: BasicFileAttributes?,
+        val displayName: String,
+        val kind: DocumentKind,
+        val startupId: String? = null,
+    ) {
+        val isDirectory: Boolean
+            get() =
+                kind == DocumentKind.SHELL_STARTUP_DIRECTORY ||
+                    attributes?.isDirectory == true
+        val isRegularFile: Boolean
+            get() = attributes?.isRegularFile == true
+    }
+
+    private data class ShellStartupFile(
+        val id: String,
+        val fileName: String,
+        val displayName: String,
     )
 
     private companion object {
         private const val ROOT_ID = "archphene-home"
         private const val HOME_ID = "home"
+        private const val SHELL_STARTUP_ID = "shell-startup"
+        private const val BASHRC_DOCUMENT_ID = "$SHELL_STARTUP_ID/bashrc"
+        private const val BASH_PROFILE_DOCUMENT_ID = "$SHELL_STARTUP_ID/bash-profile"
         private const val HOME_RELATIVE_PATH = "arch-root/home/archphene"
         private const val MAX_DOCUMENT_ID_BYTES = 1024
         private const val MAX_DOCUMENT_NAME_BYTES = 255
         private const val MAX_DOCUMENT_DEPTH = 32
         private const val MAX_VISIBLE_CHILDREN = 4096
         private const val MAX_NATIVE_REQUEST_BYTES = 4 * 1024
+        private val SHELL_STARTUP_FILES =
+            mapOf(
+                BASHRC_DOCUMENT_ID to
+                    ShellStartupFile(
+                        id = "bashrc",
+                        fileName = ".bashrc",
+                        displayName = "Edit .bashrc",
+                    ),
+                BASH_PROFILE_DOCUMENT_ID to
+                    ShellStartupFile(
+                        id = "bash-profile",
+                        fileName = ".bash_profile",
+                        displayName = "Edit .bash_profile",
+                    ),
+            )
+        private val SHELL_STARTUP_DOCUMENT_IDS =
+            arrayOf(BASHRC_DOCUMENT_ID, BASH_PROFILE_DOCUMENT_ID)
 
         private val DEFAULT_ROOT_PROJECTION =
             arrayOf(
