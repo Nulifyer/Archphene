@@ -211,16 +211,12 @@ actual_sha256="$(
 )"
 [[ "$actual_sha256" == "$expected_sha256" ]] ||
   archphene_die "independent device SHA-256 does not match the reviewed digest"
-builder_marker="$(
-  archphene_adb_run shell run-as "$builder" \
-    cat files/aur-build-workspace/builder-owned |
-    tr -d '\r'
-)"
-[[ "$builder_marker" == "builder:$builder_uid" ]] ||
-  archphene_die "AUR builder did not retain its private workspace marker"
+archphene_adb_run shell run-as "$builder" test ! -e \
+  files/aur-build-workspace ||
+  archphene_die "AUR builder retained its legacy Kotlin-owned workspace"
 builder_manifest="$(
   archphene_adb_run shell run-as "$builder" \
-    cat files/aur-build-workspace/reviewed-inputs/manifest |
+    cat files/aur-build-workspace-v2/reviewed-inputs/manifest |
     tr -d '\r'
 )"
 grep -Fqx 'ABIN0001' <<<"$builder_manifest" ||
@@ -235,7 +231,7 @@ grep -Eq $'^source\tcode[^\t]*\\.deb\t[1-9][0-9]*\t[0-9a-f]{64}$' \
   archphene_die "AUR builder input manifest omits the verified remote source"
 builder_source="$(
   archphene_adb_run shell run-as "$builder" \
-    find files/aur-build-workspace/reviewed-inputs -maxdepth 1 \
+    find files/aur-build-workspace-v2/reviewed-inputs -maxdepth 1 \
       -type f -name "source-$expected_sha256-*.deb" |
     tr -d '\r' |
     tail -1

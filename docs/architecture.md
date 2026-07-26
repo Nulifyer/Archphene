@@ -72,9 +72,13 @@ separate ordinary Android UID and private storage, requests no `INTERNET`
 permission, publishes no launcher Activity, and accepts only an explicit
 signature-permission Binder call from the matching Archphene manager signer.
 Reviewed snapshots and source files cross as bounded read-only descriptors.
-The current staging path rehashes them on both sides and publishes a canonical
-Builder-private input manifest without executing recipe code. The package
-result will return through a manager-opened output descriptor.
+The current staging path rehashes them on both sides. Builder Rust resets the
+reviewed-input directory through no-follow directory descriptors, removes the
+legacy Kotlin-owned workspace on upgrade without following substitutions,
+streams and hashes each regular descriptor through a fixed buffer, reverifies
+all staged bytes, and atomically publishes a canonical Builder-private input
+manifest without executing recipe code. The package result will return through
+a manager-opened output descriptor.
 
 The manager resolves the official build environment as one bounded transaction
 containing `base-devel` plus the reviewed recipe's `makedepends` and

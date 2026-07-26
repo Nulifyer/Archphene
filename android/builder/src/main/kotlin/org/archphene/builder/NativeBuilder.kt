@@ -5,12 +5,33 @@ import java.nio.ByteBuffer
 internal object NativeBuilder {
     const val CLOSURE_REPORT_BYTES = 64
     const val EXTRACTION_REPORT_BYTES = 32
+    const val REVIEWED_INPUT_REPORT_BYTES = 56
     const val ERROR_OUTPUT_BYTES = 512
     const val RUNTIME_OUTPUT_BYTES = 16 * 1024
 
     init {
         System.loadLibrary("archphene_builder")
     }
+
+    external fun nativeBeginReviewedInputs(
+        filesDirectory: String,
+        packageBase: String,
+        version: String,
+        expectedInputs: Int,
+        outputBuffer: ByteBuffer,
+    ): Int
+
+    external fun nativeStageReviewedInput(
+        role: Int,
+        filename: String,
+        expectedBytes: Long,
+        expectedSha256: String,
+        descriptor: Int,
+    ): Int
+
+    external fun nativeFinishReviewedInputs(outputBuffer: ByteBuffer): Int
+
+    external fun nativeAbortReviewedInputs(): Boolean
 
     external fun nativeBeginPackageClosure(
         filesDirectory: String,

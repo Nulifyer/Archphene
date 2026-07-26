@@ -105,7 +105,12 @@ signature-permission Binder service. The manager now atomically retains the
 exact Rust-reviewed snapshot, rehashes it and each verified remote source, then
 passes them as bounded read-only regular file descriptors. The Builder
 independently bounds and hashes every descriptor before atomically publishing a
-canonical input manifest in its private storage. Package output will later
+canonical input manifest in its private storage. This mutation is now entirely
+Rust-owned: no-follow directory descriptors remove hostile prior state and the
+legacy Kotlin workspace, fixed-buffer copies verify exact lengths and digests,
+and finish rehashes every staged file before publication. Host tests cover
+symlink substitution and post-stage tampering; the Samsung upgrade gate removes
+the old 211 MiB tree and republishes the exact inputs. Package output will later
 return through a manager-opened descriptor.
 
 This is an Android UID/SELinux build boundary, not a claim that the stock

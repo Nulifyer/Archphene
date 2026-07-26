@@ -1129,6 +1129,19 @@ long text surface partly obscured by a previous completed transaction card.
 Phase-specific extraction progress, compact expandable review sections, and
 completed-card dismissal remain tracked UI work.
 
+Reviewed-input reuse is no longer a Kotlin filesystem boundary. A Rust-owned
+session now removes both substituted v2 state and the legacy
+`aur-build-workspace` through no-follow directory descriptors, stages each
+bounded regular descriptor with fixed-buffer SHA-256 verification, and
+reverifies all bytes before atomically publishing the canonical manifest.
+Thirteen Builder host tests cover hostile symlink recovery, legacy cleanup, and
+post-stage tampering. The Samsung upgrade gate removes the former 211 MiB
+Kotlin-owned source tree, republishes 220,655,627 exact reviewed bytes under
+`aur-build-workspace-v2`, reuses and reverifies all 152 signed closure members,
+executes the toolchain probe, and preserves the 36-entry shared pacman state.
+The disposable recipe/build/output tree and descendant supervision remain
+required before PKGBUILD execution.
+
 Code now reaches the packaged Electron executable without a Code-specific
 bridge exception. Translating Arch's standard `/usr/lib/pulseaudio` directory
 into the private-root loader path resolves `libpulsecommon`; Electron then

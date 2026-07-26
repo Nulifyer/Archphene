@@ -11,19 +11,11 @@ import android.os.Parcel
 import android.os.ParcelFileDescriptor
 import android.os.Process
 import android.system.Os
-import android.system.OsConstants
 import java.io.File
-import java.io.FileInputStream
-import java.io.FileOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.nio.file.Files
-import java.nio.file.LinkOption
-import java.nio.file.StandardCopyOption
-import java.security.MessageDigest
 
 class AurBuilderService : Service() {
-    private val transferBuffer = ByteArray(64 * 1024)
     private val nativeOutputBuffer =
         ByteBuffer
             .allocateDirect(NativeBuilder.ERROR_OUTPUT_BYTES)
@@ -439,14 +431,6 @@ class AurBuilderService : Service() {
                 runCatching {
                     File(managerSentinel).readBytes()
                 }.isSuccess
-        val privateWorkspaceWritable =
-            runCatching {
-                val workspace = File(filesDir, "aur-build-workspace")
-                require(workspace.exists() || workspace.mkdir())
-                val marker = File(workspace, "builder-owned")
-                marker.writeText("builder:$uid\n", Charsets.US_ASCII)
-                marker.readText(Charsets.US_ASCII) == "builder:$uid\n"
-            }.getOrDefault(false)
         val outputWriteSucceeded =
             runCatching {
                 val bytes = "builder-output:$uid\n".toByteArray(Charsets.US_ASCII)
@@ -459,6 +443,7 @@ class AurBuilderService : Service() {
                 File("/proc/self/attr/current").readText().trimEnd('\u0000', '\n')
             }.getOrDefault("unavailable")
         val staged = stageReviewedInputs(packageBase, version, inputs)
+        val privateWorkspaceWritable = staged.first > 0 && staged.second.length == 64
         return ProbeReport(
             uid,
             callerUid,
@@ -477,171 +462,68 @@ class AurBuilderService : Service() {
         version: String,
         inputs: List<BuildInput>,
     ): Pair<Long, String> {
-        require(packageBase.matches(PACKAGE_NAME))
-        require(version.length in 1..128 && version.all { it.code in 0x21..0x7e })
-        require(inputs.count { input -> input.role == ROLE_SNAPSHOT } == 1)
-        require(inputs.all { input -> input.role == ROLE_SNAPSHOT || input.role == ROLE_SOURCE })
-        val names = HashSet<String>(inputs.size)
-        var totalBytes = 0L
-        inputs.forEach { input ->
-            require(input.filename.matches(SAFE_FILENAME) && names.add(input.filename))
-            require(input.sha256.matches(SHA256))
-            require(input.bytes in 1..MAX_INPUT_BYTES)
-            totalBytes = Math.addExact(totalBytes, input.bytes)
-            require(totalBytes <= MAX_TOTAL_BYTES)
-            require(OsConstants.S_ISREG(Os.fstat(input.descriptor.fileDescriptor).st_mode))
-        }
-        val workspace = requirePrivateDirectory(File(filesDir, "aur-build-workspace"))
-        val inputDirectory = requirePrivateDirectory(File(workspace, "reviewed-inputs"))
-        val manifest = StringBuilder(1024 + inputs.size * 192)
-        manifest
-            .append("ABIN0001\n")
-            .append("package=")
-            .append(packageBase)
-            .append('\n')
-            .append("version=")
-            .append(version)
-            .append('\n')
-        inputs.sortedWith(compareBy<BuildInput> { it.role }.thenBy { it.filename }).forEach { input ->
-            val prefix = if (input.role == ROLE_SNAPSHOT) "snapshot-" else "source-"
-            val destination = File(inputDirectory, "$prefix${input.sha256}-${input.filename}")
-            publishVerifiedInput(input, destination)
-            manifest
-                .append(if (input.role == ROLE_SNAPSHOT) "snapshot" else "source")
-                .append('\t')
-                .append(input.filename)
-                .append('\t')
-                .append(input.bytes)
-                .append('\t')
-                .append(input.sha256)
-                .append('\n')
-        }
-        val manifestBytes = manifest.toString().toByteArray(Charsets.US_ASCII)
-        require(manifestBytes.size <= MAX_MANIFEST_BYTES)
-        val manifestDigest = sha256(manifestBytes)
-        publishBytes(File(inputDirectory, "manifest"), manifestBytes)
-        val directoryDescriptor =
-            Os.open(
-                inputDirectory.absolutePath,
-                OsConstants.O_RDONLY or OsConstants.O_CLOEXEC,
-                0,
+        nativeOutputBuffer.clear()
+        val begin =
+            NativeBuilder.nativeBeginReviewedInputs(
+                filesDir.absolutePath,
+                packageBase,
+                version,
+                inputs.size,
+                nativeOutputBuffer,
             )
+        check(begin == 0) {
+            "Builder rejected reviewed inputs: " +
+                readNativeMessage(nativeOutputBuffer, begin)
+        }
+        var finished = false
         try {
-            Os.fsync(directoryDescriptor)
-        } finally {
-            Os.close(directoryDescriptor)
-        }
-        return totalBytes to manifestDigest
-    }
-
-    private fun requirePrivateDirectory(directory: File): File {
-        val path = directory.toPath()
-        if (Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
-            require(
-                Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS) &&
-                    !Files.isSymbolicLink(path),
-            )
-        } else {
-            Files.createDirectory(path)
-        }
-        return directory
-    }
-
-    private fun publishVerifiedInput(
-        input: BuildInput,
-        destination: File,
-    ) {
-        if (verifyRegularFile(destination, input.bytes, input.sha256)) {
-            return
-        }
-        val temporary = File(destination.parentFile, "${destination.name}.part")
-        prepareRegularOutput(temporary)
-        val digest = MessageDigest.getInstance("SHA-256")
-        var total = 0L
-        ParcelFileDescriptor.AutoCloseInputStream(input.descriptor).use { source ->
-            FileOutputStream(temporary).use { output ->
-                while (true) {
-                    val count = source.read(transferBuffer)
-                    if (count < 0) {
-                        break
+            inputs
+                .sortedWith(
+                    compareBy<BuildInput> { input -> input.role }
+                        .thenBy { input -> input.filename },
+                ).forEach { input ->
+                    val result =
+                        NativeBuilder.nativeStageReviewedInput(
+                            input.role,
+                            input.filename,
+                            input.bytes,
+                            input.sha256,
+                            input.descriptor.fd,
+                        )
+                    check(result == 0) {
+                        "Builder rejected reviewed input ${input.filename} ($result)"
                     }
-                    total = Math.addExact(total, count.toLong())
-                    require(total <= input.bytes)
-                    output.write(transferBuffer, 0, count)
-                    digest.update(transferBuffer, 0, count)
                 }
-                output.fd.sync()
+            val output =
+                ByteBuffer
+                    .allocateDirect(NativeBuilder.REVIEWED_INPUT_REPORT_BYTES)
+                    .order(ByteOrder.LITTLE_ENDIAN)
+            val result = NativeBuilder.nativeFinishReviewedInputs(output)
+            check(result == NativeBuilder.REVIEWED_INPUT_REPORT_BYTES) {
+                "Builder could not publish reviewed inputs ($result)"
+            }
+            val magic = ByteArray(8)
+            output.position(0)
+            output.get(magic)
+            check(String(magic, Charsets.US_ASCII) == "ABIR0001")
+            val inputCount = output.getInt(8)
+            val inputBytes = output.getLong(16)
+            val manifestSha256 = ByteArray(32)
+            output.position(24)
+            output.get(manifestSha256)
+            check(
+                inputCount == inputs.size &&
+                    inputBytes > 0 &&
+                    manifestSha256.any { byte -> byte.toInt() != 0 },
+            )
+            finished = true
+            return inputBytes to manifestSha256.toHex()
+        } finally {
+            if (!finished) {
+                NativeBuilder.nativeAbortReviewedInputs()
             }
         }
-        require(total == input.bytes && digest.digest().toHex() == input.sha256)
-        Os.chmod(temporary.absolutePath, 0x180)
-        Files.move(
-            temporary.toPath(),
-            destination.toPath(),
-            StandardCopyOption.ATOMIC_MOVE,
-            StandardCopyOption.REPLACE_EXISTING,
-        )
     }
-
-    private fun publishBytes(
-        destination: File,
-        bytes: ByteArray,
-    ) {
-        val temporary = File(destination.parentFile, "${destination.name}.part")
-        prepareRegularOutput(temporary)
-        FileOutputStream(temporary).use { output ->
-            output.write(bytes)
-            output.fd.sync()
-        }
-        Os.chmod(temporary.absolutePath, 0x180)
-        Files.move(
-            temporary.toPath(),
-            destination.toPath(),
-            StandardCopyOption.ATOMIC_MOVE,
-            StandardCopyOption.REPLACE_EXISTING,
-        )
-    }
-
-    private fun prepareRegularOutput(file: File) {
-        val path = file.toPath()
-        if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
-            return
-        }
-        require(Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS))
-        Files.delete(path)
-    }
-
-    private fun verifyRegularFile(
-        file: File,
-        expectedBytes: Long,
-        expectedSha256: String,
-    ): Boolean {
-        val path = file.toPath()
-        if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
-            return false
-        }
-        require(
-            Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) &&
-                !Files.isSymbolicLink(path),
-        )
-        if (Files.size(path) != expectedBytes) {
-            return false
-        }
-        val digest = MessageDigest.getInstance("SHA-256")
-        FileInputStream(file).use { input ->
-            while (true) {
-                val count = input.read(transferBuffer)
-                if (count < 0) {
-                    break
-                }
-                digest.update(transferBuffer, 0, count)
-            }
-        }
-        return digest.digest().toHex() == expectedSha256
-    }
-
-    private fun sha256(bytes: ByteArray): String =
-        MessageDigest.getInstance("SHA-256").digest(bytes).toHex()
 
     private fun ByteArray.toHex(): String {
         val output = CharArray(size * 2)
@@ -716,13 +598,8 @@ class AurBuilderService : Service() {
         private const val MAX_CLOSURE_MANIFEST_BYTES = 512 * 1024
         private const val MAX_PACKAGE_BATCH = 8
         private const val BUILD_ROOT_STORAGE_RESERVE_BYTES = 512L * 1024 * 1024
-        private const val MAX_INPUT_BYTES = 4L * 1024 * 1024 * 1024
-        private const val MAX_TOTAL_BYTES = 8L * 1024 * 1024 * 1024
-        private const val MAX_MANIFEST_BYTES = 16 * 1024
         private const val MAX_RUNTIME_MANIFEST_BYTES = 32 * 1024
         private const val HEX_DIGITS = "0123456789abcdef"
-        private val PACKAGE_NAME = Regex("[A-Za-z0-9@._+-]{1,128}")
-        private val SAFE_FILENAME = Regex("[A-Za-z0-9@+,._-]{1,240}")
         private val SHA256 = Regex("[0-9a-f]{64}")
     }
 }

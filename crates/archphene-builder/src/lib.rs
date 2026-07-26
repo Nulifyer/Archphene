@@ -33,6 +33,7 @@ const MAX_EXPANDED_ENTRIES: u64 = 2_000_000;
 const MAX_EXPANDED_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRY_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_ARCHIVE_PATH_BYTES: usize = 4 * 1024;
+const LEGACY_WORKSPACE_NAME: &str = "aur-build-workspace";
 const WORKSPACE_NAME: &str = "aur-build-workspace-v2";
 const CLOSURE_NAME: &str = "package-closure";
 const ARCHIVES_NAME: &str = "archives";
@@ -43,6 +44,12 @@ const BUILDER_RUNTIME_HEADER: &str = "# org.archphene.builder-runtime.v1";
 const BUILDER_RUNTIME_PATH_BRIDGE: &str = "libarchphene_path_bridge.so";
 const MAX_BUILDER_RUNTIME_MANIFEST_BYTES: usize = 32 * 1024;
 const MAX_BUILDER_RUNTIME_ENTRIES: usize = 32;
+const REVIEWED_INPUTS_NAME: &str = "reviewed-inputs";
+const REVIEWED_INPUT_MANIFEST_NAME: &str = "manifest";
+const MAX_REVIEWED_INPUTS: usize = 65;
+const MAX_REVIEWED_INPUT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const MAX_REVIEWED_INPUT_TOTAL_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+const MAX_REVIEWED_INPUT_MANIFEST_BYTES: usize = 16 * 1024;
 const EXPECTED_MANIFEST_NAME: &str = "expected-manifest";
 const PUBLISHED_MANIFEST_NAME: &str = "manifest";
 const SESSION_MANIFEST_NAME: &str = "session";
@@ -69,7 +76,7 @@ impl fmt::Display for BuilderError {
                 write!(formatter, "invalid build-closure manifest: {reason}")
             }
             Self::InvalidArgument => formatter.write_str("invalid builder argument"),
-            Self::InvalidInput => formatter.write_str("invalid build-closure input"),
+            Self::InvalidInput => formatter.write_str("invalid Builder input"),
             Self::UnsafeWorkspace => formatter.write_str("unsafe builder workspace"),
             Self::OutputLimit => formatter.write_str("builder limit exceeded"),
             Self::InvalidArchive => formatter.write_str("invalid package archive"),
@@ -158,6 +165,37 @@ pub struct BuilderRuntime {
     closure_sha256: [u8; 32],
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ReviewedInputRole {
+    Snapshot,
+    Source,
+}
+
+#[derive(Clone, Debug)]
+struct ReviewedInput {
+    role: ReviewedInputRole,
+    filename: String,
+    bytes: u64,
+    sha256: [u8; 32],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReviewedInputReport {
+    pub input_count: usize,
+    pub input_bytes: u64,
+    pub manifest_sha256: [u8; 32],
+}
+
+pub struct ReviewedInputSession {
+    directory: OwnedFd,
+    workspace: OwnedFd,
+    package_base: String,
+    version: String,
+    expected_inputs: usize,
+    input_bytes: u64,
+    inputs: Vec<ReviewedInput>,
+}
+
 #[derive(Clone)]
 struct BuilderRuntimeEntry {
     role: String,
@@ -165,6 +203,159 @@ struct BuilderRuntimeEntry {
     packaged: String,
     bytes: u64,
     sha256: [u8; 32],
+}
+
+impl ReviewedInputSession {
+    pub fn begin(
+        files_directory: &Path,
+        package_base: &str,
+        version: &str,
+        expected_inputs: usize,
+    ) -> Result<Self, BuilderError> {
+        if !safe_name(package_base)
+            || version.is_empty()
+            || version.len() > 128
+            || version.bytes().any(|byte| !(0x21..=0x7e).contains(&byte))
+            || !(1..=MAX_REVIEWED_INPUTS).contains(&expected_inputs)
+        {
+            return Err(BuilderError::InvalidArgument);
+        }
+        let files = openat(
+            CWD,
+            files_directory,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        let mut visited = 0;
+        remove_entry_if_present(&files, LEGACY_WORKSPACE_NAME, 0, &mut visited)?;
+        let workspace = open_or_create_directory(&files, WORKSPACE_NAME)?;
+        visited = 0;
+        remove_entry_if_present(&workspace, REVIEWED_INPUTS_NAME, 0, &mut visited)?;
+        mkdirat(&workspace, REVIEWED_INPUTS_NAME, Mode::from_raw_mode(0o700))?;
+        let directory = open_directory(&workspace, REVIEWED_INPUTS_NAME)?;
+        fsync(&workspace)?;
+        Ok(Self {
+            directory,
+            workspace,
+            package_base: package_base.to_owned(),
+            version: version.to_owned(),
+            expected_inputs,
+            input_bytes: 0,
+            inputs: Vec::with_capacity(expected_inputs),
+        })
+    }
+
+    pub fn stage(
+        &mut self,
+        role: ReviewedInputRole,
+        filename: &str,
+        expected_bytes: u64,
+        expected_sha256: [u8; 32],
+        source: &mut File,
+    ) -> Result<(), BuilderError> {
+        if self.inputs.len() >= self.expected_inputs
+            || !safe_reviewed_filename(filename)
+            || expected_bytes == 0
+            || expected_bytes > MAX_REVIEWED_INPUT_BYTES
+            || self.inputs.iter().any(|input| input.filename == filename)
+            || (role == ReviewedInputRole::Snapshot
+                && self
+                    .inputs
+                    .iter()
+                    .any(|input| input.role == ReviewedInputRole::Snapshot))
+        {
+            return Err(BuilderError::InvalidInput);
+        }
+        let input_bytes = self
+            .input_bytes
+            .checked_add(expected_bytes)
+            .ok_or(BuilderError::OutputLimit)?;
+        if input_bytes > MAX_REVIEWED_INPUT_TOTAL_BYTES {
+            return Err(BuilderError::OutputLimit);
+        }
+        let prefix = match role {
+            ReviewedInputRole::Snapshot => "snapshot",
+            ReviewedInputRole::Source => "source",
+        };
+        let destination = format!("{prefix}-{}-{filename}", hex_sha256(&expected_sha256),);
+        publish_descriptor(
+            &self.directory,
+            &destination,
+            source,
+            expected_bytes,
+            expected_sha256,
+        )?;
+        fsync(&self.directory)?;
+        self.input_bytes = input_bytes;
+        self.inputs.push(ReviewedInput {
+            role,
+            filename: filename.to_owned(),
+            bytes: expected_bytes,
+            sha256: expected_sha256,
+        });
+        Ok(())
+    }
+
+    pub fn finish(mut self) -> Result<ReviewedInputReport, BuilderError> {
+        if self.inputs.len() != self.expected_inputs
+            || self
+                .inputs
+                .iter()
+                .filter(|input| input.role == ReviewedInputRole::Snapshot)
+                .count()
+                != 1
+        {
+            return Err(BuilderError::InvalidInput);
+        }
+        self.inputs.sort_unstable_by(|left, right| {
+            (left.role, &left.filename).cmp(&(right.role, &right.filename))
+        });
+        let mut manifest = String::with_capacity(1024 + self.inputs.len() * 192);
+        manifest.push_str("ABIN0001\npackage=");
+        manifest.push_str(&self.package_base);
+        manifest.push_str("\nversion=");
+        manifest.push_str(&self.version);
+        manifest.push('\n');
+        for input in &self.inputs {
+            manifest.push_str(match input.role {
+                ReviewedInputRole::Snapshot => "snapshot",
+                ReviewedInputRole::Source => "source",
+            });
+            manifest.push('\t');
+            manifest.push_str(&input.filename);
+            manifest.push('\t');
+            manifest.push_str(&input.bytes.to_string());
+            manifest.push('\t');
+            manifest.push_str(&hex_sha256(&input.sha256));
+            manifest.push('\n');
+            let prefix = match input.role {
+                ReviewedInputRole::Snapshot => "snapshot",
+                ReviewedInputRole::Source => "source",
+            };
+            verify_staged_file(
+                &self.directory,
+                &format!("{prefix}-{}-{}", hex_sha256(&input.sha256), input.filename),
+                input.bytes,
+                input.sha256,
+            )?;
+        }
+        if manifest.len() > MAX_REVIEWED_INPUT_MANIFEST_BYTES {
+            return Err(BuilderError::OutputLimit);
+        }
+        let manifest_sha256 = sha256_bytes(manifest.as_bytes());
+        write_atomic(
+            &self.directory,
+            REVIEWED_INPUT_MANIFEST_NAME,
+            manifest.as_bytes(),
+        )?;
+        fsync(&self.directory)?;
+        fsync(&self.workspace)?;
+        Ok(ReviewedInputReport {
+            input_count: self.inputs.len(),
+            input_bytes: self.input_bytes,
+            manifest_sha256,
+        })
+    }
 }
 
 impl ClosureSession {
@@ -1408,6 +1599,14 @@ fn safe_filename(value: &str) -> bool {
         })
 }
 
+fn safe_reviewed_filename(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 240
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'@' | b'+' | b',' | b'.' | b'_' | b'-')
+        })
+}
+
 fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
@@ -1436,7 +1635,10 @@ mod android {
     use jni::objects::{JByteBuffer, JClass, JString};
     use jni::sys::{JNI_FALSE, JNI_TRUE, jboolean, jint};
 
-    use super::{BuilderRuntime, ClosureSession, ExtractionReport, ProvisionSession, parse_sha256};
+    use super::{
+        BuilderRuntime, ClosureSession, ExtractionReport, ProvisionSession, ReviewedInputRole,
+        ReviewedInputSession, parse_sha256,
+    };
 
     const ERROR_INVALID_ARGUMENT: jint = -1;
     const ERROR_INVALID_STATE: jint = -2;
@@ -1446,13 +1648,20 @@ mod android {
     const CLOSURE_REPORT_MAGIC: &[u8; 8] = b"ABCR0001";
     const EXTRACTION_REPORT_BYTES: usize = 32;
     const EXTRACTION_REPORT_MAGIC: &[u8; 8] = b"ABPE0001";
+    const REVIEWED_INPUT_REPORT_BYTES: usize = 56;
+    const REVIEWED_INPUT_REPORT_MAGIC: &[u8; 8] = b"ABIR0001";
     const RUNTIME_OUTPUT_BYTES: usize = 16 * 1024;
 
+    static REVIEWED_INPUTS: OnceLock<Mutex<Option<ReviewedInputSession>>> = OnceLock::new();
     static SESSION: OnceLock<Mutex<Option<ClosureSession>>> = OnceLock::new();
     static PROVISION: OnceLock<Mutex<Option<ProvisionSession>>> = OnceLock::new();
 
     fn session() -> &'static Mutex<Option<ClosureSession>> {
         SESSION.get_or_init(|| Mutex::new(None))
+    }
+
+    fn reviewed_inputs() -> &'static Mutex<Option<ReviewedInputSession>> {
+        REVIEWED_INPUTS.get_or_init(|| Mutex::new(None))
     }
 
     fn provision() -> &'static Mutex<Option<ProvisionSession>> {
@@ -1497,6 +1706,154 @@ mod android {
         output[16..24].copy_from_slice(&report.entry_count.to_le_bytes());
         output[24..32].copy_from_slice(&report.expanded_bytes.to_le_bytes());
         Ok(EXTRACTION_REPORT_BYTES as jint)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_builder_NativeBuilder_nativeBeginReviewedInputs(
+        mut environment: JNIEnv,
+        _class: JClass,
+        files_directory: JString,
+        package_base: JString,
+        version: JString,
+        expected_inputs: jint,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let Ok(expected_inputs) = usize::try_from(expected_inputs) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let (Ok(files_directory), Ok(package_base), Ok(version)) = (
+            java_string(&mut environment, &files_directory),
+            java_string(&mut environment, &package_base),
+            java_string(&mut environment, &version),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let (Ok(capacity), Ok(address)) = (
+            environment.get_direct_buffer_capacity(&output_buffer),
+            environment.get_direct_buffer_address(&output_buffer),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if capacity < ERROR_OUTPUT_BYTES || address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        // SAFETY: JNI verified the fixed direct diagnostic buffer.
+        let output = unsafe { slice::from_raw_parts_mut(address, capacity) };
+        let Ok(mut slot) = reviewed_inputs().lock() else {
+            return ERROR_INVALID_STATE;
+        };
+        *slot = None;
+        match ReviewedInputSession::begin(
+            Path::new(&files_directory),
+            &package_base,
+            &version,
+            expected_inputs,
+        ) {
+            Ok(value) => {
+                *slot = Some(value);
+                0
+            }
+            Err(error) => copy_builder_error(&error, output),
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_builder_NativeBuilder_nativeStageReviewedInput(
+        mut environment: JNIEnv,
+        _class: JClass,
+        role: jint,
+        filename: JString,
+        expected_bytes: jni::sys::jlong,
+        expected_sha256: JString,
+        descriptor: jint,
+    ) -> jint {
+        let role = match role {
+            0 => ReviewedInputRole::Snapshot,
+            1 => ReviewedInputRole::Source,
+            _ => return ERROR_INVALID_ARGUMENT,
+        };
+        let Ok(expected_bytes) = u64::try_from(expected_bytes) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let (Ok(filename), Ok(expected_sha256)) = (
+            java_string(&mut environment, &filename),
+            java_string(&mut environment, &expected_sha256),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(expected_sha256) = parse_sha256(&expected_sha256) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(mut source) = duplicate_file(descriptor) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(mut slot) = reviewed_inputs().lock() else {
+            return ERROR_INVALID_STATE;
+        };
+        let Some(value) = slot.as_mut() else {
+            return ERROR_INVALID_STATE;
+        };
+        match value.stage(
+            role,
+            &filename,
+            expected_bytes,
+            expected_sha256,
+            &mut source,
+        ) {
+            Ok(()) => 0,
+            Err(_) => ERROR_BUILDER,
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_builder_NativeBuilder_nativeFinishReviewedInputs(
+        environment: JNIEnv,
+        _class: JClass,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let (Ok(capacity), Ok(address)) = (
+            environment.get_direct_buffer_capacity(&output_buffer),
+            environment.get_direct_buffer_address(&output_buffer),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if capacity < REVIEWED_INPUT_REPORT_BYTES || address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let Ok(mut slot) = reviewed_inputs().lock() else {
+            return ERROR_INVALID_STATE;
+        };
+        let Some(value) = slot.take() else {
+            return ERROR_INVALID_STATE;
+        };
+        let Ok(report) = value.finish() else {
+            return ERROR_BUILDER;
+        };
+        let Ok(input_count) = u32::try_from(report.input_count) else {
+            return ERROR_BUILDER;
+        };
+        // SAFETY: JNI verified this direct buffer has at least the fixed report size.
+        let output = unsafe { slice::from_raw_parts_mut(address, REVIEWED_INPUT_REPORT_BYTES) };
+        output.fill(0);
+        output[..8].copy_from_slice(REVIEWED_INPUT_REPORT_MAGIC);
+        output[8..12].copy_from_slice(&input_count.to_le_bytes());
+        output[16..24].copy_from_slice(&report.input_bytes.to_le_bytes());
+        output[24..56].copy_from_slice(&report.manifest_sha256);
+        REVIEWED_INPUT_REPORT_BYTES as jint
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_builder_NativeBuilder_nativeAbortReviewedInputs(
+        _environment: JNIEnv,
+        _class: JClass,
+    ) -> jboolean {
+        match reviewed_inputs().lock() {
+            Ok(mut slot) => {
+                let existed = slot.take().is_some();
+                if existed { JNI_TRUE } else { JNI_FALSE }
+            }
+            Err(_) => JNI_FALSE,
+        }
     }
 
     #[unsafe(no_mangle)]
@@ -2093,6 +2450,106 @@ summary\t1\t{}\n",
             .expect("loader package");
         fs::write(native.join(packaged), b"tampered").expect("tamper runtime");
         assert!(BuilderRuntime::prepare(&directory, &native, &manifest).is_err());
+        fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn stages_reviewed_inputs_with_nofollow_recovery_and_canonical_manifest() {
+        let directory = test_directory();
+        let legacy = directory.join(LEGACY_WORKSPACE_NAME);
+        fs::create_dir(&legacy).expect("legacy workspace");
+        fs::write(legacy.join("stale-source"), b"legacy").expect("legacy source");
+        let workspace = directory.join(WORKSPACE_NAME);
+        fs::create_dir(&workspace).expect("workspace");
+        let outside = directory.join("outside");
+        fs::create_dir(&outside).expect("outside");
+        fs::write(outside.join("sentinel"), b"retained").expect("outside sentinel");
+        std::os::unix::fs::symlink(&outside, workspace.join(REVIEWED_INPUTS_NAME))
+            .expect("hostile prior inputs");
+
+        let snapshot_bytes = b"reviewed snapshot";
+        let source_bytes = b"verified source";
+        let snapshot_path = directory.join("snapshot");
+        let source_path = directory.join("source");
+        fs::write(&snapshot_path, snapshot_bytes).expect("snapshot");
+        fs::write(&source_path, source_bytes).expect("source");
+        let snapshot_sha256 = sha256_bytes(snapshot_bytes);
+        let source_sha256 = sha256_bytes(source_bytes);
+
+        let mut session = ReviewedInputSession::begin(&directory, "example-bin", "1.2.3-1", 2)
+            .expect("reviewed-input session");
+        session
+            .stage(
+                ReviewedInputRole::Source,
+                "example.tar.zst",
+                source_bytes.len() as u64,
+                source_sha256,
+                &mut File::open(&source_path).expect("open source"),
+            )
+            .expect("stage source");
+        session
+            .stage(
+                ReviewedInputRole::Snapshot,
+                "example-bin.tar.gz",
+                snapshot_bytes.len() as u64,
+                snapshot_sha256,
+                &mut File::open(&snapshot_path).expect("open snapshot"),
+            )
+            .expect("stage snapshot");
+        let report = session.finish().expect("publish reviewed inputs");
+        assert_eq!(report.input_count, 2);
+        assert_eq!(
+            report.input_bytes,
+            (snapshot_bytes.len() + source_bytes.len()) as u64,
+        );
+        let manifest = fs::read(workspace.join(REVIEWED_INPUTS_NAME).join("manifest"))
+            .expect("published input manifest");
+        let expected = format!(
+            "ABIN0001\npackage=example-bin\nversion=1.2.3-1\n\
+             snapshot\texample-bin.tar.gz\t{}\t{}\n\
+             source\texample.tar.zst\t{}\t{}\n",
+            snapshot_bytes.len(),
+            hex_sha256(&snapshot_sha256),
+            source_bytes.len(),
+            hex_sha256(&source_sha256),
+        );
+        assert_eq!(manifest, expected.as_bytes());
+        assert_eq!(report.manifest_sha256, sha256_bytes(expected.as_bytes()));
+        assert_eq!(
+            fs::read(outside.join("sentinel")).expect("outside survived"),
+            b"retained",
+        );
+        assert!(!legacy.exists());
+        fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn reviewed_input_publication_rehashes_before_manifest() {
+        let directory = test_directory();
+        let snapshot_bytes = b"reviewed snapshot";
+        let snapshot_path = directory.join("snapshot");
+        fs::write(&snapshot_path, snapshot_bytes).expect("snapshot");
+        let snapshot_sha256 = sha256_bytes(snapshot_bytes);
+        let mut session = ReviewedInputSession::begin(&directory, "example-bin", "1.2.3-1", 1)
+            .expect("reviewed-input session");
+        session
+            .stage(
+                ReviewedInputRole::Snapshot,
+                "example-bin.tar.gz",
+                snapshot_bytes.len() as u64,
+                snapshot_sha256,
+                &mut File::open(&snapshot_path).expect("open snapshot"),
+            )
+            .expect("stage snapshot");
+        let staged = directory
+            .join(WORKSPACE_NAME)
+            .join(REVIEWED_INPUTS_NAME)
+            .join(format!(
+                "snapshot-{}-example-bin.tar.gz",
+                hex_sha256(&snapshot_sha256),
+            ));
+        fs::write(staged, b"tampered snapshot").expect("tamper staged input");
+        assert!(session.finish().is_err());
         fs::remove_dir_all(directory).expect("cleanup");
     }
 
