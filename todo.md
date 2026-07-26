@@ -176,7 +176,8 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
       - [x] Prove package-installed Foot connects from the shared AArch64 Arch root, resolves generic Unix sockets, user identity, Bash, runtime libraries, and Android system fonts, and presents a crisp density-aware client/subsurface tree. Full-device Samsung evidence covers safe system/IME insets, Samsung IME text, and live portrait/keyboard/landscape Surface replacement.
       - [ ] Repeat the production Foot client gate on the x86_64 emulator, then add HOME/resume, deliberate crash status, and descendant-cleanup variants on both targets.
         - [x] On Samsung, Home detaches the Surface without closing session 1; the same manager and wrapper PIDs survive, resume reattaches the Surface, and the retained Foot frame remains readable in a full-device capture.
-        - [ ] Add deliberate client-crash and descendant-cleanup variants on Samsung, and repeat all production-client lifecycle variants on x86_64.
+        - [x] On Samsung, deliberately killing the real Foot leader reports visible exit `-9`, reaps its Bash descendant even though that child owns a separate process group, and permits a clean fresh-client relaunch. Stopped sessions no longer silently restart after an IME-driven Surface resize. A repeatable gate retains full-device evidence, rejects in-session relaunch, and checks fatal logs.
+        - [ ] Repeat all production-client lifecycle variants on x86_64.
       - [ ] Add composing/non-Latin IME, non-text clipboard formats, drag-and-drop, pointer cursor/relative-pointer behavior, and accessibility semantics to the production launcher path.
   - [ ] Qt, GTK, native Wayland, SDL, Electron, and XWayland adaptation
   - [ ] Audio, camera, printing, notifications, URLs, secrets, and accessibility

@@ -1018,7 +1018,17 @@ starts the manager-owned Linux process, connects the real Wayland client,
 presents its first 1080×2202 frame, and resizes cleanly for the Samsung IME.
 Pressing Home detaches that Surface with `close=false`; the observed manager
 and wrapper PIDs remain unchanged, and resume reattaches session 1 with its
-readable frame intact.
+readable frame intact. A repeatable physical-device crash gate then sends
+`SIGKILL` to the real Foot leader through the manager UID, observes the
+wrapper-owned `Foot stopped (exit -9).` state, and proves that both the leader
+and its Bash child disappear even though Bash created a separate process
+group. The same generated launcher subsequently starts a fresh Foot/Bash tree
+and presents a new Wayland frame without a fatal Android log. Repeating the
+gate exposed an IME-resize race that had recreated the compositor and silently
+relaunched a stopped client in the same authenticated session. The Service now
+retains an explicit terminal message across every later Surface attachment;
+two consecutive physical-device runs prove no process exists before the
+wrapper is explicitly closed and reopened.
 The visually inspected evidence is a full-device screenshot rather than an
 app-only frame. The complete Rust workspace passes 174 tests, including the
 large-resolution, raw-signature-status, empty-files-record, loader-path, JNI,

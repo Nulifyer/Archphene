@@ -38,6 +38,7 @@ class LauncherSessionService : Service() {
         var compositor: NativeLauncherCompositor? = null
         var compositorSocket: File? = null
         var linuxHandle = 0L
+        var terminalMessage: String? = null
         var nextProcessStatusMillis = 0L
         var pumpStarted = false
         var clientLogged = false
@@ -949,6 +950,11 @@ class LauncherSessionService : Service() {
         height: Int,
         densityDpi: Int,
     ) {
+        val terminalMessage = session.terminalMessage
+        if (terminalMessage != null) {
+            notifyStatus(session, STATUS_STOPPED, terminalMessage)
+            return
+        }
         try {
             val compositor =
                 session.compositor
@@ -1013,7 +1019,7 @@ class LauncherSessionService : Service() {
         session: Session,
         attachedSurface: Surface,
     ) {
-        if (session.linuxHandle != 0L) {
+        if (session.linuxHandle != 0L || session.terminalMessage != null) {
             return
         }
         val runtime = runtimeBinder
@@ -1336,6 +1342,7 @@ class LauncherSessionService : Service() {
             } else {
                 "${session.authorization.label} stopped (exit $exitStatus)."
             }
+        session.terminalMessage = message
         val surface = session.surface
         if (surface != null) {
             stopCompositorForStatus(
