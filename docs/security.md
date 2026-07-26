@@ -113,6 +113,16 @@ symlink substitution and post-stage tampering; the Samsung upgrade gate removes
 the old 211 MiB tree and republishes the exact inputs. Package output will later
 return through a manager-opened descriptor.
 
+Before that Rust session opens reusable storage on Android, it scans a bounded
+view of `/proc` for the Builder's unique UID. Every other candidate is paired
+with its kernel start time, rechecked immediately before `SIGKILL`, and the
+transaction fails closed until no process remains runnable. This avoids
+signaling a reused PID and does not rely on a recipe-writable marker. A physical
+gate starts an orphaned same-UID process before the Builder service, then proves
+the service terminates it while the different-UID manager continues. The
+eventual build supervisor must additionally retain, cancel, and reap its live
+child process group on every normal and exceptional exit.
+
 This is an Android UID/SELinux build boundary, not a claim that the stock
 Samsung provides Linux user namespaces. Live kernel tests reject user, mount,
 and network namespace creation. Android's isolated-process mode denied network

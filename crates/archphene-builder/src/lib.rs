@@ -212,6 +212,7 @@ impl ReviewedInputSession {
         version: &str,
         expected_inputs: usize,
     ) -> Result<Self, BuilderError> {
+        terminate_stale_builder_processes()?;
         if !safe_name(package_base)
             || version.is_empty()
             || version.len() > 128
@@ -730,6 +731,117 @@ impl BuilderRuntime {
     pub fn closure_sha256(&self) -> [u8; 32] {
         self.closure_sha256
     }
+}
+
+#[cfg(target_os = "android")]
+fn terminate_stale_builder_processes() -> Result<(), BuilderError> {
+    use std::thread;
+    use std::time::Duration;
+
+    use rustix::process::{Pid, Signal, getpid, getuid, kill_process};
+
+    let current = getpid();
+    let uid = getuid().as_raw();
+    for _ in 0..8 {
+        let mut stale = Vec::<(Pid, u64)>::new();
+        for entry in std::fs::read_dir("/proc")? {
+            let entry = entry?;
+            let Some(raw_pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|value| value.parse::<i32>().ok())
+            else {
+                continue;
+            };
+            let Some(pid) = Pid::from_raw(raw_pid) else {
+                continue;
+            };
+            if pid == current {
+                continue;
+            }
+            let process = entry.path();
+            let Some(process_uid) = read_proc_uid(&process)? else {
+                continue;
+            };
+            if process_uid != uid {
+                continue;
+            }
+            let Some(start_time) = read_proc_start_time(&process)? else {
+                continue;
+            };
+            stale.push((pid, start_time));
+            if stale.len() > 4096 {
+                return Err(BuilderError::OutputLimit);
+            }
+        }
+        if stale.is_empty() {
+            return Ok(());
+        }
+        for (pid, expected_start_time) in stale {
+            let process = PathBuf::from("/proc").join(pid.as_raw_nonzero().to_string());
+            if read_proc_start_time(&process)? != Some(expected_start_time) {
+                continue;
+            }
+            match kill_process(pid, Signal::KILL) {
+                Ok(()) | Err(Errno::SRCH) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    Err(BuilderError::UnsafeWorkspace)
+}
+
+#[cfg(target_os = "android")]
+fn read_proc_uid(process: &Path) -> Result<Option<u32>, BuilderError> {
+    let Some(status) = read_bounded_proc_file(&process.join("status"))? else {
+        return Ok(None);
+    };
+    Ok(status
+        .lines()
+        .find_map(|line| line.strip_prefix("Uid:"))
+        .and_then(|value| value.split_ascii_whitespace().next())
+        .and_then(|value| value.parse::<u32>().ok()))
+}
+
+#[cfg(target_os = "android")]
+fn read_proc_start_time(process: &Path) -> Result<Option<u64>, BuilderError> {
+    let Some(stat) = read_bounded_proc_file(&process.join("stat"))? else {
+        return Ok(None);
+    };
+    let Some(command_end) = stat.rfind(')') else {
+        return Err(BuilderError::UnsafeWorkspace);
+    };
+    Ok(stat[command_end + 1..]
+        .split_ascii_whitespace()
+        .nth(19)
+        .and_then(|value| value.parse::<u64>().ok()))
+}
+
+#[cfg(target_os = "android")]
+fn read_bounded_proc_file(path: &Path) -> Result<Option<String>, BuilderError> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let mut bytes = Vec::with_capacity(4096);
+    Read::by_ref(&mut file)
+        .take(16 * 1024)
+        .read_to_end(&mut bytes)?;
+    let mut extra = [0_u8; 1];
+    if file.read(&mut extra)? != 0 {
+        return Err(BuilderError::OutputLimit);
+    }
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| BuilderError::UnsafeWorkspace)
+}
+
+#[cfg(not(target_os = "android"))]
+fn terminate_stale_builder_processes() -> Result<(), BuilderError> {
+    Ok(())
 }
 
 fn parse_build_root_manifest(

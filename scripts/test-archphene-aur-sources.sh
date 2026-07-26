@@ -32,6 +32,10 @@ mkdir -p "$output_dir"
 
 cleanup() {
   archphene_adb_run shell am force-stop "$manager" >/dev/null 2>&1 || true
+  if [[ "${stale_builder_pid:-}" =~ ^[1-9][0-9]*$ ]]; then
+    archphene_adb_run shell run-as "$builder" kill -9 \
+      "$stale_builder_pid" >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT
 
@@ -79,6 +83,21 @@ builder_activity="$(
 )"
 [[ "$builder_activity" == *"No activity found"* ]] ||
   archphene_die "AUR builder unexpectedly publishes an Android launcher activity"
+
+stale_builder_pid="$(
+  archphene_adb_run shell run-as "$builder" sh -c \
+    "'sleep 900 >/dev/null 2>&1 & echo \$!'" |
+    tr -d '\r[:space:]'
+)"
+[[ "$stale_builder_pid" =~ ^[1-9][0-9]*$ ]] ||
+  archphene_die "could not create a stale same-UID Builder process"
+stale_builder_uid="$(
+  archphene_adb_run shell cat "/proc/$stale_builder_pid/status" |
+    sed -nE 's/^Uid:[[:space:]]+([0-9]+).*/\1/p' |
+    tr -d '\r'
+)"
+[[ "$stale_builder_uid" == "$builder_uid" ]] ||
+  archphene_die "stale Builder process did not use the Builder UID"
 
 archphene_adb_run shell am force-stop "$manager" >/dev/null
 archphene_adb_run logcat -c
@@ -164,6 +183,20 @@ builder_root_bytes="$(
    "$builder_root_entries" =~ ^[1-9][0-9]*$ &&
    "$builder_root_bytes" =~ ^[1-9][0-9]*$ ]] ||
   archphene_die "could not parse the independently published Builder closure and root"
+stale_deadline=$((SECONDS + 10))
+while ((SECONDS < stale_deadline)); do
+  stale_state="$(
+    archphene_adb_run shell cat "/proc/$stale_builder_pid/stat" 2>/dev/null |
+      sed -nE 's/^[0-9]+ \\(.*\\) ([A-Z]).*/\\1/p' |
+      tr -d '\r'
+  )"
+  if [[ -z "$stale_state" || "$stale_state" == Z ]]; then
+    break
+  fi
+  sleep 0.1
+done
+[[ -z "$stale_state" || "$stale_state" == Z ]] ||
+  archphene_die "Builder did not terminate its stale same-UID process"
 archphene_wait_ui 'Verified source downloads:' aur-sources-result 30
 ui="$ARCHPHENE_UI"
 for pattern in \
@@ -379,6 +412,7 @@ fatal_log="$(archphene_adb_run logcat -d -v brief \
 archphene_note "Archphene AUR source verification passed on $serial"
 archphene_note "  Rust verified $verified_bytes source bytes"
 archphene_note "  Signed builder UID $builder_uid is separate from manager UID $manager_uid"
+archphene_note "  Builder terminated stale same-UID process $stale_builder_pid before reuse"
 archphene_note "  Builder reverified $builder_closure_count archive/signature pairs"
 archphene_note "  Builder provisioned $builder_root_entries verified entries ($builder_root_bytes bytes)"
 archphene_note "  Pacman state remained at $after_count local database entries"

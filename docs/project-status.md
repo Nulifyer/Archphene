@@ -1142,6 +1142,16 @@ executes the toolchain probe, and preserves the 36-entry shared pacman state.
 The disposable recipe/build/output tree and descendant supervision remain
 required before PKGBUILD execution.
 
+The stale-process half of Builder supervision now has physical evidence.
+Before Rust opens reusable Builder state on Android, it scans at most 4,096
+same-UID `/proc` candidates, records and rechecks each kernel start time before
+signaling, kills every process other than the current Builder service, and
+fails closed if any remains runnable after bounded retries. The Samsung gate
+creates an orphaned `sleep` as Builder UID 10345 before service startup and
+proves it is terminated while manager UID 10430 completes the entire review
+gate. Active process-group retention, cancellation, and child reaping still
+belong to the recipe execution slice.
+
 Code now reaches the packaged Electron executable without a Code-specific
 bridge exception. Translating Arch's standard `/usr/lib/pulseaudio` directory
 into the private-root loader path resolves `libpulsecommon`; Electron then

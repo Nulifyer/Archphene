@@ -80,6 +80,14 @@ all staged bytes, and atomically publishes a canonical Builder-private input
 manifest without executing recipe code. The package result will return through
 a manager-opened output descriptor.
 
+Before opening that reusable state on Android, Builder Rust scans the bounded
+process table for its unique UID, pairs each other process with its kernel start
+time, rechecks that identity before signaling, and fails closed until no prior
+same-UID process remains runnable. This handles a recipe that outlives a prior
+service without trusting a Builder-writable PID file. The active build path
+will additionally own one process group so normal completion, cancellation,
+timeout, and service teardown can kill and reap its direct child.
+
 The manager resolves the official build environment as one bounded transaction
 containing `base-devel` plus the reviewed recipe's `makedepends` and
 `checkdepends`. It uses current repository catalogs with an empty ephemeral
