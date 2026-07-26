@@ -60,7 +60,9 @@ archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 15 >/dev/null
 archphene_open_manager_section Terminal "terminal-color-section-$serial"
 archphene_wait_ui 'text="Start shell"' "terminal-color-start-$serial" 15
 archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Start shell"' 'start shell'
-archphene_wait_ui 'archphene:~\$' "terminal-color-prompt-$serial" 20
+archphene_wait_ui \
+  'content-desc="Linux terminal, [0-9]+ columns by [0-9]+ rows".*text="Shared shell ready"' \
+  "terminal-color-prompt-$serial" 20
 
 archphene_wait_ui 'text="Command, e.g. btop"' \
   "terminal-color-field-$serial" 15
@@ -74,7 +76,8 @@ archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Send"' 'send shell input'
 
 archphene_wait_ui 'terminal-color-ready' "terminal-color-ready-$serial" 20
 for marker in RED196 GREEN46 BLUE21 MAGENTA201 YELLOW226 CYAN51 GRAY244 \
-  WHITE231-ON-BLUE25 RGB-123456-ABCDEF DEC-LINE; do
+  WHITE231-ON-BLUE25 RGB-123456-ABCDEF DEC-LINE BOLD DIM ITALIC UNDERLINE \
+  STRIKE INVERSE HIDDEN-TEXT CONCEAL-END; do
   archphene_regex_contains "$ARCHPHENE_UI" "$marker" ||
     archphene_die "terminal color output did not render marker: $marker"
 done
@@ -85,7 +88,8 @@ archphene_tap_ui_pattern "$ARCHPHENE_UI" \
   'content-desc="Linux terminal, [0-9]+ columns by [0-9]+ rows"' \
   'terminal surface'
 archphene_adb_run shell input text x >/dev/null
-archphene_wait_ui 'archphene:~\$' "terminal-color-exit-$serial" 15
+archphene_wait_ui '(?:archphene:~\$|sh-[0-9.]+\$)' \
+  "terminal-color-exit-$serial" 15
 
 fatal_log="$(archphene_adb_run logcat -d -v brief \
   -s AndroidRuntime:E libc:F '*:S' 2>/dev/null || true)"
@@ -93,5 +97,5 @@ fatal_log="$(archphene_adb_run logcat -d -v brief \
   archphene_die "terminal color regression emitted a fatal runtime error: $fatal_log"
 
 archphene_note "Archphene terminal color regression passed on $serial"
-archphene_note "  Installed tput 256-color and exact direct-RGB rendering passed"
+archphene_note "  Installed tput colors, direct RGB, DEC lines, and SGR styles passed"
 archphene_note "  Full-device screenshot: $output_dir/$serial.png"

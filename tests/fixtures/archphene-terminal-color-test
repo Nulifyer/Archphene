@@ -29,6 +29,12 @@ tput smacs
 printf 'lqqqqk'
 tput rmacs
 printf ' DEC-LINE'
+printf '\r\n'
+printf '\033[1mBOLD\033[22m \033[2mDIM\033[22m \033[3mITALIC\033[23m'
+printf '\r\n'
+printf '\033[4mUNDERLINE\033[24m \033[9mSTRIKE\033[29m \033[7mINVERSE\033[27m'
+printf '\r\n'
+printf '\033[8mHIDDEN-TEXT\033[28m CONCEAL-END'
 printf '\r\n\r\nterminal-color-ready'
 IFS= read -r -n 1
 tput clear

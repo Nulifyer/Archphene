@@ -29,6 +29,13 @@ const FLAG_APPLICATION_KEYPAD: u32 = 1 << 2;
 const FLAG_BRACKETED_PASTE: u32 = 1 << 3;
 const FLAG_NEW_LINE_MODE: u32 = 1 << 4;
 const FLAG_BACKARROW_KEY: u32 = 1 << 5;
+const ATTRIBUTE_BOLD: u8 = 1;
+const ATTRIBUTE_UNDERLINE: u8 = 1 << 1;
+const ATTRIBUTE_INVERSE: u8 = 1 << 2;
+const ATTRIBUTE_FAINT: u8 = 1 << 3;
+const ATTRIBUTE_ITALIC: u8 = 1 << 4;
+const ATTRIBUTE_STRIKE: u8 = 1 << 5;
+const ATTRIBUTE_HIDDEN: u8 = 1 << 6;
 const ATTRIBUTE_GRAPHEME_TRUNCATED: u8 = 1 << 7;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1951,12 +1958,19 @@ impl Terminal {
                     self.background = DEFAULT_BACKGROUND;
                     self.attributes = 0;
                 }
-                1 => self.attributes |= 1,
-                4 => self.attributes |= 2,
-                7 => self.attributes |= 4,
-                22 => self.attributes &= !1,
-                24 => self.attributes &= !2,
-                27 => self.attributes &= !4,
+                1 => self.attributes |= ATTRIBUTE_BOLD,
+                2 => self.attributes |= ATTRIBUTE_FAINT,
+                3 => self.attributes |= ATTRIBUTE_ITALIC,
+                4 | 21 => self.attributes |= ATTRIBUTE_UNDERLINE,
+                7 => self.attributes |= ATTRIBUTE_INVERSE,
+                8 => self.attributes |= ATTRIBUTE_HIDDEN,
+                9 => self.attributes |= ATTRIBUTE_STRIKE,
+                22 => self.attributes &= !(ATTRIBUTE_BOLD | ATTRIBUTE_FAINT),
+                23 => self.attributes &= !ATTRIBUTE_ITALIC,
+                24 => self.attributes &= !ATTRIBUTE_UNDERLINE,
+                27 => self.attributes &= !ATTRIBUTE_INVERSE,
+                28 => self.attributes &= !ATTRIBUTE_HIDDEN,
+                29 => self.attributes &= !ATTRIBUTE_STRIKE,
                 30..=37 => self.foreground = u32::from(self.csi_parameters[index] - 30),
                 39 => self.foreground = DEFAULT_FOREGROUND,
                 40..=47 => self.background = u32::from(self.csi_parameters[index] - 40),
@@ -2703,6 +2717,23 @@ mod tests {
             ),
             DIRECT_COLOR_FLAG | 0x005faf
         );
+    }
+
+    #[test]
+    fn sgr_styles_set_and_reset_independently() {
+        let mut terminal = Terminal::new(2, 8).unwrap();
+        terminal.feed(b"\x1b[1;2;3;4;7;8;9mA\x1b[22;23;24;27;28;29mB");
+        assert_eq!(
+            terminal.cell(0, 0).unwrap().attributes,
+            ATTRIBUTE_BOLD
+                | ATTRIBUTE_FAINT
+                | ATTRIBUTE_ITALIC
+                | ATTRIBUTE_UNDERLINE
+                | ATTRIBUTE_INVERSE
+                | ATTRIBUTE_HIDDEN
+                | ATTRIBUTE_STRIKE
+        );
+        assert_eq!(terminal.cell(0, 1).unwrap().attributes, 0);
     }
 
     #[test]

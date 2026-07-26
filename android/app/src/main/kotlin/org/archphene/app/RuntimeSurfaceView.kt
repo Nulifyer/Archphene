@@ -730,7 +730,7 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
                 runEnd++
             }
             val foregroundColor = styledForeground and COLOR_VALUE_MASK
-            val foreground =
+            val baseForeground =
                 if (attributes and ATTRIBUTE_INVERSE != 0) {
                     resolveTerminalColor(backgroundColor)
                 } else {
@@ -741,6 +741,13 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
                     resolveTerminalColor(foregroundColor)
                 } else {
                     resolveTerminalColor(backgroundColor)
+                }
+            val foreground =
+                when {
+                    attributes and ATTRIBUTE_HIDDEN != 0 -> background
+                    attributes and ATTRIBUTE_FAINT != 0 ->
+                        blendTerminalColors(baseForeground, background)
+                    else -> baseForeground
                 }
             if (background != TERMINAL_BACKGROUND) {
                 backgroundPaint.color = background
@@ -754,6 +761,9 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
             }
             textPaint.color = foreground
             textPaint.isFakeBoldText = attributes and ATTRIBUTE_BOLD != 0
+            textPaint.textSkewX =
+                if (attributes and ATTRIBUTE_ITALIC != 0) ITALIC_TEXT_SKEW else 0f
+            textPaint.isStrikeThruText = attributes and ATTRIBUTE_STRIKE != 0
             var column = runStart
             while (column < runEnd) {
                 if (isBlankGlyph(start + column)) {
@@ -1801,6 +1811,25 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
             ANSI_COLORS[color.coerceIn(0, ANSI_COLORS.lastIndex)]
         }
 
+    private fun blendTerminalColors(
+        foreground: Int,
+        background: Int,
+    ): Int {
+        val red =
+            (((foreground ushr 16) and 0xff) * FAINT_FOREGROUND_WEIGHT +
+                ((background ushr 16) and 0xff) * FAINT_BACKGROUND_WEIGHT) /
+                FAINT_TOTAL_WEIGHT
+        val green =
+            (((foreground ushr 8) and 0xff) * FAINT_FOREGROUND_WEIGHT +
+                ((background ushr 8) and 0xff) * FAINT_BACKGROUND_WEIGHT) /
+                FAINT_TOTAL_WEIGHT
+        val blue =
+            ((foreground and 0xff) * FAINT_FOREGROUND_WEIGHT +
+                (background and 0xff) * FAINT_BACKGROUND_WEIGHT) /
+                FAINT_TOTAL_WEIGHT
+        return 0xff000000.toInt() or (red shl 16) or (green shl 8) or blue
+    }
+
     companion object {
         private const val NANOS_PER_MILLISECOND = 1_000_000L
         private const val DISPLAY_PREFERENCES = "terminal_display"
@@ -1827,6 +1856,11 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         private const val CONTENT_PADDING = 8f
         private const val CURSOR_HEIGHT = 2f
         private const val UNDERLINE_HEIGHT = 1f
+        private const val ITALIC_TEXT_SKEW = -0.2f
+        private const val FAINT_FOREGROUND_WEIGHT = 3
+        private const val FAINT_BACKGROUND_WEIGHT = 2
+        private const val FAINT_TOTAL_WEIGHT =
+            FAINT_FOREGROUND_WEIGHT + FAINT_BACKGROUND_WEIGHT
         private const val DAMAGE_MAGIC = 0x4d525441
         private const val DAMAGE_VERSION = 5
         private const val DAMAGE_HEADER_SIZE = 48
@@ -1858,6 +1892,10 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         private const val ATTRIBUTE_BOLD = 1
         private const val ATTRIBUTE_UNDERLINE = 2
         private const val ATTRIBUTE_INVERSE = 4
+        private const val ATTRIBUTE_FAINT = 1 shl 3
+        private const val ATTRIBUTE_ITALIC = 1 shl 4
+        private const val ATTRIBUTE_STRIKE = 1 shl 5
+        private const val ATTRIBUTE_HIDDEN = 1 shl 6
         private const val TERMINAL_BACKGROUND = 0xff1f2326.toInt()
         private const val CURSOR_COLOR = 0xff7dd3fc.toInt()
         private const val COMPOSING_BACKGROUND = 0xff31363b.toInt()
