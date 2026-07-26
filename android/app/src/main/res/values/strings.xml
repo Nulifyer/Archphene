@@ -31,6 +31,14 @@
     <string name="aur">AUR</string>
     <string name="aur_review_description">Review this community AUR package</string>
     <string name="aur_review_unavailable">AUR review is unavailable or the package name is invalid</string>
+    <string name="aur_section_sources">Sources</string>
+    <string name="aur_section_trust">Trust</string>
+    <string name="aur_section_build_environment">Build environment</string>
+    <string name="aur_section_digests">Digests</string>
+    <string name="aur_section_recipe">Recipe</string>
+    <string name="aur_section_logs">Build logs</string>
+    <string name="aur_section_collapsed_description">%1$s, collapsed. Tap to expand</string>
+    <string name="aur_section_expanded_description">%1$s, expanded. Tap to collapse</string>
     <string name="verify_sources">Verify</string>
     <string name="verify_sources_description">Download and verify reviewed AUR sources</string>
     <string name="build">Build</string>

@@ -40,7 +40,6 @@ import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.net.URL
 import java.security.MessageDigest
-import java.time.Instant
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.CountDownLatch
@@ -92,6 +91,18 @@ internal class AvailablePackageSnapshot(
     val revision: Int,
 )
 
+internal class AurReviewSnapshot(
+    val packageName: String,
+    val summary: String,
+    val sources: String,
+    val trust: String,
+    val buildEnvironment: String,
+    val digests: String,
+    val recipe: String,
+    val logs: String,
+    val revision: Int,
+)
+
 internal data class LauncherAuthorization(
     val label: String,
     val terminal: Boolean,
@@ -116,6 +127,9 @@ class ArchpheneRuntimeService : Service() {
 
         val packageSearchStatus: String
             get() = searchStatus
+
+        internal val aurReview: AurReviewSnapshot
+            get() = aurReviewSnapshot
 
         val aurReviewAvailable: Boolean
             get() =
@@ -487,6 +501,12 @@ class ArchpheneRuntimeService : Service() {
             holdMillis: Long,
         ): Boolean = requestDebugPackagePhaseFixture(packageName, holdMillis)
 
+        fun publishDebugAurReviewFixture(packageName: String): Boolean =
+            requestDebugAurReviewFixture(packageName)
+
+        fun clearDebugAurReviewFixture(packageName: String): Boolean =
+            clearDebugAurReviewFixtureState(packageName)
+
         fun releaseWhenIdle() {
             stopWhenUnobservedRequested = true
         }
@@ -609,6 +629,20 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var retainedAurSourceEvidence: Array<AurSourceEvidence> = emptyArray()
     @Volatile private var retainedAurBuilderReport: AurBuilderReport? = null
     @Volatile private var retainedAurBuiltPackage: AurBuiltPackage? = null
+    @Volatile private var retainedAurBuildLogs = ""
+    @Volatile
+    private var aurReviewSnapshot =
+        AurReviewSnapshot(
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            0,
+        )
     @Volatile private var aurBuildActive = false
     @Volatile private var aurBuildCancelable = false
     @Volatile private var aurBuildCancellationRequested = false
@@ -1449,6 +1483,8 @@ class ArchpheneRuntimeService : Service() {
         private const val SHELL_CHOICE_LIMIT = 8
         private const val SHELL_FIELD_LIMIT = 64
         private const val AVAILABLE_PACKAGE_LIMIT = 100
+        private const val DEBUG_AUR_FIXTURE_MAINTAINER = "Archphene test maintainer"
+        private val DEBUG_AUR_PACKAGE_NAME = Regex("[a-z0-9@._+\\-]{1,96}")
         private val AUR_PACKAGE_NAME = Regex("[A-Za-z0-9@+._-]{1,128}")
         private val AUR_SOURCE_FILENAME = Regex("[A-Za-z0-9@+,._-]{1,240}")
         private val AUR_BUILT_PACKAGE_FILENAME =
@@ -4243,6 +4279,7 @@ class ArchpheneRuntimeService : Service() {
         retainedAurBuilderReport = null
         retainedAurBuiltPackage?.file?.delete()
         retainedAurBuiltPackage = null
+        clearAurReviewPresentation()
         searchStatus = "Searching for $normalized"
         publishAvailablePackageStatus(searchStatus)
         Thread(
@@ -4555,6 +4592,7 @@ class ArchpheneRuntimeService : Service() {
         retainedAurBuilderReport = null
         retainedAurBuiltPackage?.file?.delete()
         retainedAurBuiltPackage = null
+        clearAurReviewPresentation()
         lastResolvedPackage = ""
         lastResolvedRepository = ""
         lastResolvedInstalledVersion = ""
@@ -4639,7 +4677,10 @@ class ArchpheneRuntimeService : Service() {
                     }
                     val review = parseAurReview(aurReviewBuffer, reviewLength)
                     retainedAurReview = review
-                    searchStatus = formatAurReview(review)
+                    publishAurReviewPresentation(review)
+                    searchStatus =
+                        "Reviewed ${review.packageName} ${review.version} · " +
+                            "expand the evidence sections below"
                     Log.i(
                         TAG,
                         "Reviewed AUR ${review.packageName} ${review.version} " +
@@ -4882,14 +4923,21 @@ class ArchpheneRuntimeService : Service() {
                             buildEnvironment,
                         )
                     retainedAurBuilderReport = builder
+                    publishAurReviewPresentation(
+                        review,
+                        totalVerified,
+                        retainedAurSourceEvidence,
+                        builder,
+                        buildEnvironment,
+                    )
                     searchStatus =
-                        formatAurReview(
-                            review,
-                            totalVerified,
-                            retainedAurSourceEvidence,
-                            builder,
-                            buildEnvironment,
-                        )
+                        "Verified ${remoteSources.size} source(s) · " +
+                            "${formatStorageBytes(totalVerified)} · " +
+                            if (builder == null) {
+                                "builder companion unavailable"
+                            } else {
+                                "ready to build"
+                            }
                     Log.i(
                         TAG,
                             "Verified ${remoteSources.size} AUR source(s) for " +
@@ -4959,6 +5007,7 @@ class ArchpheneRuntimeService : Service() {
         aurBuildActive = true
         aurBuildCancelable = true
         aurBuildCancellationRequested = false
+        publishAurBuildLogs("")
         retainedAurBuiltPackage?.file?.delete()
         retainedAurBuiltPackage = null
         searchStatus = "Starting isolated offline build for ${review.packageName}"
@@ -4968,6 +5017,7 @@ class ArchpheneRuntimeService : Service() {
                     val result = runAurBuilderBuild(review, builder)
                     retainedAurBuiltPackage?.file?.delete()
                     retainedAurBuiltPackage = result
+                    publishAurBuiltPresentation(review, result)
                     lastResolvedPackage = review.packageName
                     lastResolvedRepository = "aur"
                     lastResolvedInstalledVersion =
@@ -5118,6 +5168,7 @@ class ArchpheneRuntimeService : Service() {
                         AurBuildPoll(exitStatus, visible)
                     }
                 if (poll.logs.isNotEmpty()) {
+                    publishAurBuildLogs(poll.logs)
                     val phase =
                         poll.logs
                             .lineSequence()
@@ -6352,69 +6403,199 @@ class ArchpheneRuntimeService : Service() {
         )
     }
 
-    private fun formatAurReview(
-        review: AurReviewData,
-        verifiedSourceBytes: Long = 0L,
-        sourceEvidence: Array<AurSourceEvidence> = emptyArray(),
-        builder: AurBuilderReport? = null,
-        buildEnvironment: AurBuildEnvironment? = null,
-    ): String =
-        buildString(
-            minOf(
-                NativeRuntime.AUR_REVIEW_SIZE,
-                review.pkgbuild.length + review.installScriptContents.length + 4096,
-            ),
-        ) {
-            append("AUR community package\n\n")
-            append(review.packageName).append(' ').append(review.version).append('\n')
-            if (review.description.isNotEmpty()) {
-                append(review.description).append('\n')
-            }
-            append("Maintainer: ")
-                .append(review.maintainer.ifEmpty { "Orphaned" })
-                .append('\n')
-            if (review.projectUrl.isNotEmpty()) {
-                append("Project: ").append(review.projectUrl).append('\n')
-            }
-            append("AUR updated: ")
-                .append(Instant.ofEpochSecond(review.lastModified))
-                .append(if (review.outOfDate) " · flagged out of date\n" else "\n")
-            append("\nTrust\n")
-            append("Community PKGBUILD; not an official signed Arch package.\n")
-            append(
-                "If installed, it joins the shared Archphene Linux environment and can " +
-                    "access its files and toolchain.\n",
+    @Synchronized
+    private fun clearAurReviewPresentation() {
+        retainedAurBuildLogs = ""
+        val revision = aurReviewSnapshot.revision + 1
+        aurReviewSnapshot =
+            AurReviewSnapshot(
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                revision,
             )
-            append("AUR commit: ").append(review.snapshotCommit).append('\n')
-            append("Snapshot SHA-256: ").append(review.snapshotSha256).append('\n')
-            append("Unverified sources: ")
-                .append(if (review.unverifiedSources) "yes" else "none")
-                .append('\n')
-            append("Insecure source transports: ")
-                .append(if (review.insecureSources) "yes" else "none")
-                .append('\n')
-            append("Android permissions: none requested at this review stage.\n")
-            if (verifiedSourceBytes > 0L) {
-                append("Verified source downloads: ")
-                    .append(formatStorageBytes(verifiedSourceBytes))
-                    .append('\n')
-                sourceEvidence.forEach { evidence ->
+    }
+
+    @Synchronized
+    private fun publishAurReviewPresentation(
+        review: AurReviewData,
+        verifiedSourceBytes: Long = retainedAurVerifiedBytes,
+        sourceEvidence: Array<AurSourceEvidence> = retainedAurSourceEvidence,
+        builder: AurBuilderReport? = retainedAurBuilderReport,
+        buildEnvironment: AurBuildEnvironment? = null,
+        built: AurBuiltPackage? = retainedAurBuiltPackage,
+    ) {
+        val previousRevision = aurReviewSnapshot.revision
+        aurReviewSnapshot =
+            formatAurReviewPresentation(
+                review,
+                verifiedSourceBytes,
+                sourceEvidence,
+                builder,
+                buildEnvironment,
+                built,
+                retainedAurBuildLogs,
+                previousRevision + 1,
+            )
+    }
+
+    @Synchronized
+    private fun publishAurBuildLogs(logs: String) {
+        if (logs == retainedAurBuildLogs) {
+            return
+        }
+        retainedAurBuildLogs = logs
+        val current = aurReviewSnapshot
+        if (current.packageName.isEmpty()) {
+            return
+        }
+        aurReviewSnapshot =
+            AurReviewSnapshot(
+                current.packageName,
+                current.summary,
+                current.sources,
+                current.trust,
+                current.buildEnvironment,
+                current.digests,
+                current.recipe,
+                logs,
+                current.revision + 1,
+            )
+    }
+
+    @Synchronized
+    private fun publishAurBuiltPresentation(
+        review: AurReviewData,
+        built: AurBuiltPackage,
+    ) {
+        retainedAurBuildLogs = built.logs
+        val current = aurReviewSnapshot
+        if (current.packageName != review.packageName) {
+            publishAurReviewPresentation(review, built = built)
+            return
+        }
+        val buildEnvironment =
+            current.buildEnvironment +
+                "\nVerified package: ${built.filename} · " +
+                "${formatStorageBytes(built.archiveBytes)} archive · " +
+                "${formatStorageBytes(built.installedBytes)} installed"
+        val digests =
+            current.digests +
+                "\nBuilt package SHA-256: ${built.sha256}"
+        aurReviewSnapshot =
+            AurReviewSnapshot(
+                current.packageName,
+                current.summary,
+                current.sources,
+                current.trust,
+                buildEnvironment,
+                digests,
+                current.recipe,
+                built.logs,
+                current.revision + 1,
+            )
+    }
+
+    private fun formatAurReviewPresentation(
+        review: AurReviewData,
+        verifiedSourceBytes: Long,
+        sourceEvidence: Array<AurSourceEvidence>,
+        builder: AurBuilderReport?,
+        buildEnvironment: AurBuildEnvironment?,
+        built: AurBuiltPackage?,
+        logs: String,
+        revision: Int,
+    ): AurReviewSnapshot {
+        val summary =
+            buildString(768) {
+                append(review.packageName).append(' ').append(review.version).append('\n')
+                if (review.description.isNotEmpty()) {
+                    append(review.description).append('\n')
+                }
+                append("Community AUR package")
+                if (review.outOfDate) {
+                    append(" · flagged out of date")
+                }
+                append(" · review evidence before continuing")
+            }
+        val sources =
+            buildString(4096) {
+                if (review.licenses.isNotEmpty()) {
+                    append("Licenses\n")
+                    review.licenses.forEach { value -> append("• ").append(value).append('\n') }
+                    append('\n')
+                }
+                review.sources.forEach { source ->
                     append("• ")
-                        .append(evidence.filename)
-                        .append(": ")
-                        .append(formatStorageBytes(evidence.bytes))
+                    if (source.architecture.isNotEmpty()) {
+                        append('[').append(source.architecture).append("] ")
+                    }
+                    append(source.expression).append('\n')
+                    append("  File: ").append(source.filename).append('\n')
+                    append("  Origin: ")
                         .append(
-                            if (evidence.cached) {
-                                "\n  Reviewed HTTPS endpoint (cached): "
-                            } else {
-                                "\n  Resolved HTTPS endpoint: "
+                            when {
+                                source.local -> "included in AUR snapshot"
+                                source.remoteUrl != null -> source.remoteUrl
+                                else -> "unsupported source transport"
                             },
                         )
-                        .append(evidence.endpoint)
                         .append('\n')
+                    if (source.insecureTransport) {
+                        append("  Warning: insecure transport\n")
+                    }
                 }
-                append("Installed/build disk impact: pending the isolated package build.\n")
-                if (buildEnvironment != null) {
+            }.trimEnd()
+        val trust =
+            buildString(2048) {
+                append("Community PKGBUILD; not an official signed Arch package.\n")
+                append(
+                    "If installed, it joins the shared Archphene Linux environment and can " +
+                        "access its files and toolchain.\n",
+                )
+                append("Package base: ").append(review.packageBase).append('\n')
+                append("Maintainer: ")
+                    .append(review.maintainer.ifEmpty { "Orphaned" })
+                    .append('\n')
+                if (review.projectUrl.isNotEmpty()) {
+                    append("Project: ").append(review.projectUrl).append('\n')
+                }
+                append("AUR snapshot: ").append(review.snapshotPath).append('\n')
+                append("Unverified sources: ")
+                    .append(if (review.unverifiedSources) "yes" else "none")
+                    .append('\n')
+                append("Insecure source transports: ")
+                    .append(if (review.insecureSources) "yes" else "none")
+                    .append('\n')
+                append("Android permissions: none requested at this review stage.")
+            }
+        val buildEnvironmentText =
+            buildString(4096) {
+                if (verifiedSourceBytes > 0L) {
+                    append("Verified source downloads: ")
+                        .append(formatStorageBytes(verifiedSourceBytes))
+                        .append('\n')
+                    sourceEvidence.forEach { evidence ->
+                        append("• ")
+                            .append(evidence.filename)
+                            .append(": ")
+                            .append(formatStorageBytes(evidence.bytes))
+                            .append(if (evidence.cached) " · cached\n" else "\n")
+                            .append("  HTTPS endpoint: ")
+                            .append(evidence.endpoint)
+                            .append('\n')
+                    }
+                } else {
+                    append("Source download size: verify sources to measure.\n")
+                }
+                if (buildEnvironment == null) {
+                    append("Official build environment: verify sources to resolve.\n")
+                } else {
                     append(
                         if (buildEnvironment.verified) {
                             "Verified official build environment: "
@@ -6423,7 +6604,7 @@ class ArchpheneRuntimeService : Service() {
                         },
                     )
                         .append(buildEnvironment.packageCount)
-                        .append(" official packages · ")
+                        .append(" packages · ")
                         .append(formatStorageBytes(buildEnvironment.downloadBytes))
                         .append(" archives")
                     if (buildEnvironment.verified) {
@@ -6432,90 +6613,103 @@ class ArchpheneRuntimeService : Service() {
                             .append(" cached · ")
                             .append(buildEnvironment.downloadedPackages)
                             .append(" downloaded")
-                    } else {
-                        append(" before cache reuse")
                     }
-                    append(".\n")
-                    if (buildEnvironment.verified) {
-                        append("Build closure SHA-256: ")
-                            .append(buildEnvironment.closureManifestSha256)
-                            .append('\n')
-                    }
+                    append('\n')
                 }
                 if (builder == null) {
-                    append("Build sandbox: signed companion not installed.\n")
+                    append("Build sandbox: signed companion not ready.\n")
                 } else {
                     append("Build sandbox: signed companion UID ")
                         .append(builder.uid)
-                        .append("; no network permission or direct manager-data access; ")
+                        .append("; no network permission or direct manager-data access.\n")
+                    append("Reviewed inputs: ")
                         .append(formatStorageBytes(builder.stagedBytes))
-                        .append(" reviewed inputs and ")
-                        .append(builder.closurePackageCount)
-                        .append(" signed build packages (")
-                        .append(formatStorageBytes(builder.closureArchiveBytes))
-                        .append(" archives) staged.\n")
-                    append("Builder closure SHA-256: ")
-                        .append(builder.closureManifestSha256)
                         .append('\n')
+                    append("Signed build packages: ")
+                        .append(builder.closurePackageCount)
+                        .append(" · ")
+                        .append(formatStorageBytes(builder.closureArchiveBytes))
+                        .append(" archives\n")
                     append("Isolated build root: ")
                         .append(formatStorageBytes(builder.buildRootBytes))
                         .append(" across ")
                         .append(builder.buildRootEntries)
-                        .append(" verified archive entries.\n")
+                        .append(" verified entries\n")
                     append("Builder toolchain: ")
                         .append(builder.runtimeVersion)
                         .append('\n')
-                    append("Prepared reviewed recipe: ")
-                        .append(builder.recipeEntries)
-                        .append(" entries · ")
-                        .append(formatStorageBytes(builder.recipeBytes))
-                        .append(" recipe · ")
-                        .append(formatStorageBytes(builder.recipeSourceBytes))
-                        .append(" verified sources.\n")
                 }
-            } else {
-                append("Download/build disk estimate: verify sources to measure downloads.\n")
-            }
-            if (review.licenses.isNotEmpty()) {
-                append("\nLicenses\n")
-                review.licenses.forEach { value -> append("• ").append(value).append('\n') }
-            }
-            append("\nSources\n")
-            review.sources.forEach { source ->
-                append("• ")
-                if (source.architecture.isNotEmpty()) {
-                    append('[').append(source.architecture).append("] ")
+                if (built == null) {
+                    append("Installed/build disk impact: pending the isolated package build.")
+                } else {
+                    append("Verified package: ")
+                        .append(built.filename)
+                        .append(" · ")
+                        .append(formatStorageBytes(built.archiveBytes))
+                        .append(" archive · ")
+                        .append(formatStorageBytes(built.installedBytes))
+                        .append(" installed")
                 }
-                append(source.expression).append('\n')
-                append("  File: ").append(source.filename).append(" · ")
-                    .append(
-                        when {
-                            source.local -> "included in AUR snapshot"
-                            source.remoteUrl != null -> "direct HTTPS download"
-                            else -> "unsupported source transport"
-                        },
-                    )
-                    .append('\n')
-                append("  SHA-256: ").append(source.sha256 ?: "SKIP").append('\n')
-                if (source.insecureTransport) {
-                    append("  Warning: insecure transport\n")
+            }.trimEnd()
+        val digests =
+            buildString(4096) {
+                append("AUR commit: ").append(review.snapshotCommit).append('\n')
+                append("Snapshot SHA-256: ").append(review.snapshotSha256).append('\n')
+                review.sources.forEach { source ->
+                    append(source.filename)
+                        .append(" SHA-256: ")
+                        .append(source.sha256 ?: "SKIP")
+                        .append('\n')
                 }
-            }
-            appendAurValues("Runtime dependencies", review.dependencies)
-            appendAurValues("Build dependencies", review.makeDependencies)
-            appendAurValues("Check dependencies", review.checkDependencies)
-            if (review.validPgpKeys.isNotEmpty()) {
+                if (buildEnvironment?.verified == true) {
+                    append("Build closure SHA-256: ")
+                        .append(buildEnvironment.closureManifestSha256)
+                        .append('\n')
+                }
+                if (builder != null) {
+                    append("Builder input SHA-256: ")
+                        .append(builder.inputManifestSha256)
+                        .append('\n')
+                    append("Builder closure SHA-256: ")
+                        .append(builder.closureManifestSha256)
+                        .append('\n')
+                }
+                if (built != null) {
+                    append("Built package SHA-256: ").append(built.sha256).append('\n')
+                }
+            }.trimEnd()
+        val recipe =
+            buildString(
+                minOf(
+                    NativeRuntime.AUR_REVIEW_SIZE,
+                    review.pkgbuild.length + review.installScriptContents.length + 2048,
+                ),
+            ) {
+                appendAurValues("Runtime dependencies", review.dependencies)
+                appendAurValues("Build dependencies", review.makeDependencies)
+                appendAurValues("Check dependencies", review.checkDependencies)
                 appendAurValues("Valid PGP keys", review.validPgpKeys)
-            }
-            append("\nVisible build functions\n")
-            review.buildSteps.forEach { step -> append("• ").append(step).append('\n') }
-            if (review.installScript.isNotEmpty()) {
-                append("\nInstall script: ").append(review.installScript).append('\n')
-                append(review.installScriptContents).append('\n')
-            }
-            append("\nPKGBUILD\n")
-            append(review.pkgbuild)
-        }
+                append("\nVisible build functions\n")
+                review.buildSteps.forEach { step -> append("• ").append(step).append('\n') }
+                if (review.installScript.isNotEmpty()) {
+                    append("\nInstall script: ").append(review.installScript).append('\n')
+                    append(review.installScriptContents).append('\n')
+                }
+                append("\nPKGBUILD\n")
+                append(review.pkgbuild)
+            }.trim()
+        return AurReviewSnapshot(
+            review.packageName,
+            summary,
+            sources,
+            trust,
+            buildEnvironmentText,
+            digests,
+            recipe,
+            logs,
+            revision,
+        )
+    }
 
     private fun StringBuilder.appendAurValues(
         heading: String,
@@ -7685,6 +7879,154 @@ class ArchpheneRuntimeService : Service() {
         }
         preferences.edit().remove(preference).commit()
         Thread.sleep(holdMillis)
+    }
+
+    @Synchronized
+    private fun requestDebugAurReviewFixture(packageName: String): Boolean {
+        if (
+            applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0 ||
+            !packageName.matches(DEBUG_AUR_PACKAGE_NAME) ||
+            readyHandle == 0L ||
+            catalogRefreshActive ||
+            searchActive ||
+            packageOperationActive ||
+            commandActive
+        ) {
+            return false
+        }
+        val sourceDigest = "2".repeat(64)
+        val review =
+            AurReviewData(
+                packageBase = packageName,
+                packageName = packageName,
+                version = "1.2.3-1",
+                description = "A bounded community development tool fixture",
+                maintainer = DEBUG_AUR_FIXTURE_MAINTAINER,
+                projectUrl = "https://example.invalid/$packageName",
+                snapshotPath = "/cgit/aur.git/snapshot/$packageName.tar.gz",
+                snapshotCommit = "1".repeat(40),
+                snapshotSha256 = "3".repeat(64),
+                lastModified = 1_720_000_000L,
+                outOfDate = false,
+                licenses = arrayOf("MIT"),
+                dependencies = arrayOf("glibc", "zlib"),
+                makeDependencies = arrayOf("rust", "cargo"),
+                checkDependencies = arrayOf("bats"),
+                sources =
+                    arrayOf(
+                        AurSourceReview(
+                            architecture = "",
+                            expression = "$packageName-1.2.3.tar.gz::https://example.invalid/source",
+                            filename = "$packageName-1.2.3.tar.gz",
+                            remoteUrl = "https://example.invalid/source",
+                            local = false,
+                            sha256 = sourceDigest,
+                            insecureTransport = false,
+                        ),
+                    ),
+                validPgpKeys = arrayOf("0123456789ABCDEF0123456789ABCDEF01234567"),
+                buildSteps = arrayOf("prepare()", "build()", "check()", "package()"),
+                installScript = "$packageName.install",
+                pkgbuild =
+                    "pkgname=$packageName\n" +
+                        "pkgver=1.2.3\n" +
+                        "pkgrel=1\n" +
+                        "arch=('x86_64' 'aarch64')\n" +
+                        "sha256sums=('$sourceDigest')\n",
+                installScriptContents =
+                    "post_install() {\n  echo 'fixture installed'\n}\n",
+                unverifiedSources = false,
+                insecureSources = false,
+            )
+        val evidence =
+            arrayOf(
+                AurSourceEvidence(
+                    filename = "$packageName-1.2.3.tar.gz",
+                    bytes = 2_097_152L,
+                    endpoint = "https://example.invalid/source",
+                    cached = true,
+                ),
+            )
+        val builder =
+            AurBuilderReport(
+                packageName = "org.archphene.builder.debug",
+                uid = 12_345,
+                selinuxContext = "u:r:untrusted_app:s0",
+                stagedBytes = 2_097_152L,
+                inputManifestSha256 = "4".repeat(64),
+                closurePackageCount = 4,
+                closureArchiveBytes = 16_777_216L,
+                closureSignatureBytes = 2_048L,
+                closureManifestSha256 = "5".repeat(64),
+                buildRootEntries = 128L,
+                buildRootBytes = 33_554_432L,
+                runtimeVersion = "makepkg 7.0",
+                recipeEntries = 3L,
+                recipeBytes = 1_024L,
+                recipeSourceBytes = 2_097_152L,
+            )
+        val buildEnvironment =
+            AurBuildEnvironment(
+                packages =
+                    listOf(
+                        ResolvedPayload(
+                            repository = "core",
+                            name = "base-devel",
+                            version = "1-2",
+                            filename = "base-devel-1-2-any.pkg.tar.zst",
+                            url =
+                                "https://example.invalid/" +
+                                    "base-devel-1-2-any.pkg.tar.zst",
+                            size = 16_777_216L,
+                        ),
+                    ),
+                resolutionBytes = ByteArray(0),
+                downloadBytes = 16_777_216L,
+                closureManifestSha256 = builder.closureManifestSha256,
+                cachedPackages = 1,
+                downloadedPackages = 0,
+                verified = true,
+            )
+        retainedAurReview = review
+        retainedAurVerifiedBytes = evidence.sumOf(AurSourceEvidence::bytes)
+        retainedAurSourceEvidence = evidence
+        retainedAurBuilderReport = builder
+        retainedAurBuiltPackage?.file?.delete()
+        retainedAurBuiltPackage = null
+        publishAurReviewPresentation(
+            review,
+            retainedAurVerifiedBytes,
+            evidence,
+            builder,
+            buildEnvironment,
+        )
+        publishAurBuildLogs(
+            "==> Making package: $packageName 1.2.3-1\n" +
+                "==> Finished making: $packageName 1.2.3-1",
+        )
+        searchStatus = "Verified fixture evidence · ready to build"
+        return true
+    }
+
+    @Synchronized
+    private fun clearDebugAurReviewFixtureState(packageName: String): Boolean {
+        val review = retainedAurReview
+        if (
+            applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0 ||
+            review?.packageName != packageName ||
+            review.maintainer != DEBUG_AUR_FIXTURE_MAINTAINER
+        ) {
+            return false
+        }
+        retainedAurReview = null
+        retainedAurVerifiedBytes = 0L
+        retainedAurSourceEvidence = emptyArray()
+        retainedAurBuilderReport = null
+        retainedAurBuiltPackage?.file?.delete()
+        retainedAurBuiltPackage = null
+        clearAurReviewPresentation()
+        searchStatus = "Search the official Arch repositories"
+        return true
     }
 
     @Synchronized

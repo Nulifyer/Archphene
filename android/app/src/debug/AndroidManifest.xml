@@ -30,5 +30,8 @@
         <receiver
             android:name=".PackagePhaseTestReceiver"
             android:exported="true" />
+        <receiver
+            android:name=".AurReviewTestReceiver"
+            android:exported="true" />
     </application>
 </manifest>

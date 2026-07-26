@@ -48,6 +48,10 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private lateinit var catalogStatusView: TextView
     private lateinit var packageSearchInput: EditText
     private lateinit var searchStatusView: TextView
+    private lateinit var aurReviewPanel: LinearLayout
+    private lateinit var aurReviewSummaryView: TextView
+    private lateinit var aurSectionButtons: Array<Button>
+    private lateinit var aurSectionTextViews: Array<TextView>
     private lateinit var packageSearchResults: ScrollView
     private lateinit var installedPackagePanel: LinearLayout
     private lateinit var installedPackageStatusView: TextView
@@ -111,6 +115,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private var installedPackageRevision = Int.MIN_VALUE
     private var availablePackageRevision = Int.MIN_VALUE
     private var packageJobListRevision = Int.MIN_VALUE
+    private var aurReviewRevision = Int.MIN_VALUE
+    private var aurReviewPackage = ""
     private var storageOnboardingDialog: AlertDialog? = null
     private var launcherPermissionDialog: AlertDialog? = null
     private var launcherCancellationDialog: AlertDialog? = null
@@ -425,11 +431,122 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 setTextIsSelectable(true)
                 setBackgroundColor(getColor(R.color.archphene_surface))
             }
+        val aurSectionTitles =
+            intArrayOf(
+                R.string.aur_section_sources,
+                R.string.aur_section_trust,
+                R.string.aur_section_build_environment,
+                R.string.aur_section_digests,
+                R.string.aur_section_recipe,
+                R.string.aur_section_logs,
+            )
+        aurSectionButtons = Array(aurSectionTitles.size) { Button(this) }
+        aurSectionTextViews = Array(aurSectionTitles.size) { TextView(this) }
+        aurReviewSummaryView =
+            TextView(this).apply {
+                setTextColor(getColor(R.color.archphene_on_surface))
+                textSize = 15f
+                setPadding(dp(20), dp(12), dp(20), dp(12))
+                setTextIsSelectable(true)
+            }
+        aurReviewPanel =
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                visibility = View.GONE
+                setBackgroundColor(getColor(R.color.archphene_surface))
+                addView(
+                    aurReviewSummaryView,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ),
+                )
+                aurSectionTitles.forEachIndexed { index, title ->
+                    val detail =
+                        TextView(this@MainActivity).apply {
+                            setTextColor(getColor(R.color.archphene_on_surface))
+                            textSize = 13f
+                            setPadding(dp(20), dp(8), dp(20), dp(16))
+                            setTextIsSelectable(true)
+                            visibility = View.GONE
+                        }
+                    val button =
+                        Button(this@MainActivity).apply {
+                            setText(title)
+                            gravity = Gravity.CENTER_VERTICAL or Gravity.START
+                            contentDescription =
+                                getString(
+                                    R.string.aur_section_collapsed_description,
+                                    getString(title),
+                                )
+                            setOnClickListener {
+                                val expanded = detail.visibility != View.VISIBLE
+                                if (expanded) {
+                                    aurSectionTextViews.forEachIndexed { otherIndex, otherDetail ->
+                                        if (otherIndex != index) {
+                                            otherDetail.visibility = View.GONE
+                                            aurSectionButtons[otherIndex].contentDescription =
+                                                getString(
+                                                    R.string
+                                                        .aur_section_collapsed_description,
+                                                    aurSectionButtons[otherIndex].text,
+                                                )
+                                        }
+                                    }
+                                }
+                                detail.visibility = if (expanded) View.VISIBLE else View.GONE
+                                contentDescription =
+                                    getString(
+                                        if (expanded) {
+                                            R.string.aur_section_expanded_description
+                                        } else {
+                                            R.string.aur_section_collapsed_description
+                                        },
+                                        getString(title),
+                                    )
+                            }
+                        }
+                    aurSectionButtons[index] = button
+                    aurSectionTextViews[index] = detail
+                    addView(
+                        button,
+                        LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            dp(52),
+                        ),
+                    )
+                    addView(
+                        detail,
+                        LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ),
+                    )
+                }
+            }
+        val packageDetailsContent =
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(
+                    searchStatusView,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ),
+                )
+                addView(
+                    aurReviewPanel,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ),
+                )
+            }
         packageSearchResults =
             ScrollView(this).apply {
                 isFillViewport = true
                 addView(
-                    searchStatusView,
+                    packageDetailsContent,
                     ViewGroup.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -1428,6 +1545,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         applySystemBarInsets(layout)
         setContentView(layout)
         updateShellPresentation(false)
+        showDebugAurReview(intent)
         startService(Intent(this, ArchpheneRuntimeService::class.java))
         val restoredImport =
             savedInstanceState
@@ -1512,6 +1630,34 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         super.onNewIntent(intent)
         setIntent(intent)
         queueIncomingImport(intent)
+        showDebugAurReview(intent)
+    }
+
+    private fun showDebugAurReview(source: Intent) {
+        if (
+            !debugRuntimeEvidenceEnabled ||
+            source.action != DEBUG_SHOW_AUR_REVIEW_ACTION
+        ) {
+            return
+        }
+        val packageName = source.getStringExtra(DEBUG_AUR_PACKAGE_EXTRA).orEmpty()
+        if (
+            packageName.isEmpty() ||
+            packageName.length > 96 ||
+            packageName.any { character ->
+                !character.isLowerCase() &&
+                    !character.isDigit() &&
+                    character !in "@._+-"
+            }
+        ) {
+            return
+        }
+        source.action = null
+        source.removeExtra(DEBUG_AUR_PACKAGE_EXTRA)
+        packageSearchInput.setText(packageName)
+        packageSearchInput.setSelection(packageName.length)
+        selectManagerSection(MANAGER_SECTION_PACKAGES)
+        showPackageDetails()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -1570,6 +1716,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         dispatchPendingFolderGrant()
         updateInstalledPackages(runtimeBinder)
         updateAvailablePackages(runtimeBinder)
+        updateAurReview(runtimeBinder)
         val handle = runtimeBinder?.runtimeHandle ?: 0L
         if (!snapshot.read(handle)) {
             statusView.contentDescription = null
@@ -1991,6 +2138,51 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             if (binder.packageJobState == NativeRuntime.JOB_QUEUED) {
                 showPackageSearchResults()
             }
+        }
+    }
+
+    private fun updateAurReview(binder: ArchpheneRuntimeService.LocalBinder?) {
+        val review = binder?.aurReview
+        if (review == null || review.packageName.isEmpty()) {
+            if (aurReviewPanel.visibility != View.GONE) {
+                aurReviewPanel.visibility = View.GONE
+            }
+            aurReviewPackage = ""
+            return
+        }
+        if (review.revision == aurReviewRevision) {
+            return
+        }
+        aurReviewRevision = review.revision
+        val packageChanged = aurReviewPackage != review.packageName
+        aurReviewPackage = review.packageName
+        setTextIfChanged(aurReviewSummaryView, review.summary)
+        aurSectionTextViews.indices.forEach { index ->
+            val section =
+                when (index) {
+                    0 -> review.sources
+                    1 -> review.trust
+                    2 -> review.buildEnvironment
+                    3 -> review.digests
+                    4 -> review.recipe
+                    else -> review.logs
+                }
+            val available = section.isNotEmpty()
+            val button = aurSectionButtons[index]
+            val detail = aurSectionTextViews[index]
+            button.visibility = if (available) View.VISIBLE else View.GONE
+            setTextIfChanged(detail, section)
+            if (packageChanged || !available) {
+                detail.visibility = View.GONE
+                button.contentDescription =
+                    getString(
+                        R.string.aur_section_collapsed_description,
+                        button.text,
+                    )
+            }
+        }
+        if (aurReviewPanel.visibility != View.VISIBLE) {
+            aurReviewPanel.visibility = View.VISIBLE
         }
     }
 
@@ -2757,6 +2949,9 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         private const val WIDE_FILE_CARD_HEIGHT_DP = 136
         private const val MAX_FOLDER_URI_BYTES = 4 * 1024
         private const val LAUNCHER_STATUS_NEEDS_REVIEW = 10
+        private const val DEBUG_SHOW_AUR_REVIEW_ACTION =
+            "org.archphene.app.debug.action.SHOW_AUR_REVIEW"
+        private const val DEBUG_AUR_PACKAGE_EXTRA = "package"
         private var activityGeneration = 0
     }
 }
