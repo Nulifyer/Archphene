@@ -787,6 +787,12 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                                 updateStatus()
                             }
                         }
+                        binder.packageCatalogRecoveryAvailable -> {
+                            isEnabled = false
+                            if (binder.refreshPackageCatalogsForRecovery()) {
+                                updateStatus()
+                            }
+                        }
                         binder.packageRecoveryAvailable -> {
                             val packageName = binder.packageJobName
                             packageSearchInput.setText(packageName)
@@ -2493,6 +2499,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         val packageActionAvailable =
             binder.aurBuildCancellationAvailable ||
                 binder.packageCancellationAvailable ||
+                binder.packageCatalogRecoveryAvailable ||
                 binder.packageRecoveryAvailable
         setTextIfChanged(cancelButton, binder.packageActivityActionLabel)
         cancelButton.isEnabled = packageActionAvailable

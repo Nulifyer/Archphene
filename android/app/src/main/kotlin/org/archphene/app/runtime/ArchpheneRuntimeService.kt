@@ -344,12 +344,16 @@ class ArchpheneRuntimeService : Service() {
         val packageCacheRecoveryAvailable: Boolean
             get() = packageCacheRecoveryReady()
 
+        val packageCatalogRecoveryAvailable: Boolean
+            get() = packageCatalogRecoveryReady()
+
         val packageActivityActionLabel: String
             get() =
                 when {
                     aurBuildCancellationAvailable -> "Cancel build"
                     packageCancellationAvailable -> "Cancel"
                     packageCacheRecoveryAvailable -> "Clear cache"
+                    packageCatalogRecoveryAvailable -> "Refresh package catalogs"
                     else -> "Review"
                 }
 
@@ -462,6 +466,9 @@ class ArchpheneRuntimeService : Service() {
             get() = !shellActive && shellChoices.size > 1
 
         fun refreshPackageCatalogs(): Boolean = requestCatalogRefresh()
+
+        fun refreshPackageCatalogsForRecovery(): Boolean =
+            requestCatalogRefresh(recoverPackageJob = true)
 
         fun searchPackages(query: String): Boolean = requestPackageSearch(query)
 
@@ -735,7 +742,7 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var removeActionLabel = "Remove"
     @Volatile private var removeAvailable = false
     @Volatile private var recoveryReviewedJobRevision = Int.MIN_VALUE
-    @Volatile private var packageCacheRecoveryHandledJobRevision = Int.MIN_VALUE
+    @Volatile private var packageRecoveryHandledJobRevision = Int.MIN_VALUE
     @Volatile private var packageRecoveryMessageRevision = Int.MIN_VALUE
     @Volatile private var packageRecoveryMessage = ""
     @Volatile private var commandStatus = "Run an installed Linux command"
@@ -1540,6 +1547,7 @@ class ArchpheneRuntimeService : Service() {
         private const val PACKAGE_RECOVERY_RESULT = "result"
         private const val PACKAGE_JOB_TEST_PREFERENCES = "package_job_test"
         private const val PACKAGE_JOB_TEST_CACHE_HOLD_MILLIS = "cache_hold_ms"
+        private const val PACKAGE_JOB_TEST_CATALOG_RECOVERY = "catalog_recovery_fixture"
         private const val PACKAGE_JOB_TEST_WORKER_HOLD_MILLIS = "worker_hold_ms"
         private const val MAX_PACKAGE_JOB_TEST_HOLD_MILLIS = 5_000L
         private const val MIN_PACKAGE_PHASE_TEST_HOLD_MILLIS = 750L
@@ -2787,7 +2795,7 @@ class ArchpheneRuntimeService : Service() {
                         refreshDesktopEntries(activeHandle)
                         refreshShellChoices(activeHandle)
                         jobStatus = readLatestPackageJob(activeHandle)
-                        restorePackageCacheRecovery()
+                        restorePackageRecovery()
                         mainHandler.post {
                             if (handle != activeHandle) {
                                 return@post
@@ -4088,31 +4096,72 @@ class ArchpheneRuntimeService : Service() {
     }
 
     @Synchronized
-    private fun requestCatalogRefresh(): Boolean {
+    private fun requestCatalogRefresh(recoverPackageJob: Boolean = false): Boolean {
         val activeHandle = readyHandle
+        val recoveryRevision = jobRevision
+        val recoveryJobId = jobPersistentId
+        val recoveryPackage = jobPackage
+        val recoveryOperation = jobOperation
+        val recoveryState = jobState
+        val recoveryFailure = jobMessage
         if (
             activeHandle == 0L ||
             catalogRefreshActive ||
             searchActive ||
             packageOperationActive ||
-            commandActive
+            commandActive ||
+            (recoverPackageJob && !packageCatalogRecoveryReady())
         ) {
             return false
         }
         catalogRefreshActive = true
+        val debugRecoveryFixture =
+            recoverPackageJob && consumeDebugCatalogRecoveryFixture()
+        if (recoverPackageJob) {
+            packageRecoveryMessageRevision = recoveryRevision
+            packageRecoveryMessage = "Refreshing signed package catalogs…"
+        }
         catalogThread =
             Thread(
                 {
                     try {
-                        catalogStatus = "Refreshing core package catalog"
-                        downloadCatalog(activeHandle, NativeRuntime.CATALOG_CORE)
-                        catalogStatus = "Refreshing extra package catalog"
-                        downloadCatalog(activeHandle, NativeRuntime.CATALOG_EXTRA)
+                        if (!debugRecoveryFixture) {
+                            catalogStatus = "Refreshing core package catalog"
+                            downloadCatalog(activeHandle, NativeRuntime.CATALOG_CORE)
+                            catalogStatus = "Refreshing extra package catalog"
+                            downloadCatalog(activeHandle, NativeRuntime.CATALOG_EXTRA)
+                        }
                         catalogStatus = "Package catalog ready"
+                        if (recoverPackageJob && jobRevision == recoveryRevision) {
+                            val recoveryResult =
+                                "Catalogs refreshed. Review the current package before retrying."
+                            require(
+                                persistPackageRecovery(
+                                    recoveryJobId,
+                                    recoveryPackage,
+                                    recoveryOperation,
+                                    recoveryState,
+                                    recoveryFailure,
+                                    recoveryResult,
+                                ),
+                            ) {
+                                "Could not save the catalog refresh result"
+                            }
+                            packageRecoveryHandledJobRevision = recoveryRevision
+                            packageRecoveryMessage = recoveryResult
+                        }
                         Log.i(TAG, "Official package catalogs refreshed")
                     } catch (error: Exception) {
                         catalogStatus =
                             "Catalog refresh failed: ${error.message ?: error.javaClass.simpleName}"
+                        if (recoverPackageJob && jobRevision == recoveryRevision) {
+                            packageRecoveryMessage =
+                                boundedJobMessage(
+                                    "Catalog refresh failed: " +
+                                        (error.message ?: error.javaClass.simpleName) +
+                                        ". Check the connection, then try again.",
+                                )
+                        }
                         Log.e(TAG, "Package catalog refresh failed", error)
                     } finally {
                         catalogRefreshActive = false
@@ -7802,7 +7851,7 @@ class ArchpheneRuntimeService : Service() {
                                         "packages. Review before retrying."
                                 }
                             require(
-                                persistPackageCacheRecovery(
+                                persistPackageRecovery(
                                     recoveryJobId,
                                     recoveryPackage,
                                     recoveryOperation,
@@ -7813,7 +7862,7 @@ class ArchpheneRuntimeService : Service() {
                             ) {
                                 "Could not save the cache cleanup result"
                             }
-                            packageCacheRecoveryHandledJobRevision = recoveryRevision
+                            packageRecoveryHandledJobRevision = recoveryRevision
                             packageRecoveryMessage = recoveryResult
                         }
                         Log.i(TAG, "Cleared $reclaimedBytes bytes from the package cache")
@@ -7825,7 +7874,7 @@ class ArchpheneRuntimeService : Service() {
                                         (error.message ?: error.javaClass.simpleName) +
                                         ". Restart Archphene, then Review.",
                                 )
-                            persistPackageCacheRecovery(
+                            persistPackageRecovery(
                                 recoveryJobId,
                                 recoveryPackage,
                                 recoveryOperation,
@@ -7833,7 +7882,7 @@ class ArchpheneRuntimeService : Service() {
                                 recoveryFailure,
                                 recoveryResult,
                             )
-                            packageCacheRecoveryHandledJobRevision = recoveryRevision
+                            packageRecoveryHandledJobRevision = recoveryRevision
                             packageRecoveryMessage = recoveryResult
                         }
                         Log.e(TAG, "Package cache cleanup failed", error)
@@ -7863,6 +7912,20 @@ class ArchpheneRuntimeService : Service() {
 
     private fun holdDebugPackageWorker() {
         holdDebugPackageWork(PACKAGE_JOB_TEST_WORKER_HOLD_MILLIS)
+    }
+
+    private fun consumeDebugCatalogRecoveryFixture(): Boolean {
+        if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0) {
+            return false
+        }
+        val preferences = getSharedPreferences(PACKAGE_JOB_TEST_PREFERENCES, MODE_PRIVATE)
+        if (!preferences.getBoolean(PACKAGE_JOB_TEST_CATALOG_RECOVERY, false)) {
+            return false
+        }
+        return preferences
+            .edit()
+            .remove(PACKAGE_JOB_TEST_CATALOG_RECOVERY)
+            .commit()
     }
 
     private fun holdDebugPackageWork(preference: String) {
@@ -8357,12 +8420,29 @@ class ArchpheneRuntimeService : Service() {
             !packageOperationActive &&
             !commandActive &&
             recoveryReviewedJobRevision != jobRevision &&
-            packageCacheRecoveryHandledJobRevision != jobRevision
+            packageRecoveryHandledJobRevision != jobRevision
+
+    private fun packageCatalogRecoveryReady(): Boolean =
+        jobPersistentId > 0L &&
+            jobPackage.isNotEmpty() &&
+            jobState == NativeRuntime.JOB_FAILED &&
+            packageJobNeedsCatalogRecovery() &&
+            readyHandle != 0L &&
+            !catalogRefreshActive &&
+            !searchActive &&
+            !packageOperationActive &&
+            !commandActive &&
+            recoveryReviewedJobRevision != jobRevision &&
+            packageRecoveryHandledJobRevision != jobRevision
 
     private fun packageJobNeedsStorageRecovery(): Boolean =
         jobMessage.startsWith("Not enough Linux storage.")
 
-    private fun persistPackageCacheRecovery(
+    private fun packageJobNeedsCatalogRecovery(): Boolean =
+        jobMessage.startsWith("Package catalog is unavailable or invalid.") ||
+            jobMessage.startsWith("Package trust verification failed.")
+
+    private fun persistPackageRecovery(
         jobId: Long,
         packageName: String,
         operation: Int,
@@ -8380,7 +8460,7 @@ class ArchpheneRuntimeService : Service() {
             .putString(PACKAGE_RECOVERY_RESULT, result)
             .commit()
 
-    private fun restorePackageCacheRecovery() {
+    private fun restorePackageRecovery() {
         val preferences = getSharedPreferences(PACKAGE_RECOVERY_PREFERENCES, MODE_PRIVATE)
         val result = preferences.getString(PACKAGE_RECOVERY_RESULT, null) ?: return
         if (
@@ -8392,7 +8472,7 @@ class ArchpheneRuntimeService : Service() {
         ) {
             return
         }
-        packageCacheRecoveryHandledJobRevision = jobRevision
+        packageRecoveryHandledJobRevision = jobRevision
         packageRecoveryMessageRevision = jobRevision
         packageRecoveryMessage = boundedJobMessage(result)
     }

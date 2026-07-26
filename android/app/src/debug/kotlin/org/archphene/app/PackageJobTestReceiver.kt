@@ -28,6 +28,8 @@ internal class PackageJobTestReceiver : BroadcastReceiver() {
         val cacheFixture = intent.getBooleanExtra(EXTRA_CACHE_FIXTURE, false)
         val cacheEntries = intent.getIntExtra(EXTRA_CACHE_ENTRIES, DEFAULT_CACHE_ENTRIES)
         val cacheHoldMillis = intent.getIntExtra(EXTRA_CACHE_HOLD_MILLIS, 0)
+        val catalogRecoveryFixture =
+            intent.getBooleanExtra(EXTRA_CATALOG_RECOVERY_FIXTURE, false)
         if (
             token == null ||
             !TOKEN.matches(token) ||
@@ -46,6 +48,14 @@ internal class PackageJobTestReceiver : BroadcastReceiver() {
                             failure != "storage" ||
                             cacheEntries !in DEFAULT_CACHE_ENTRIES..MAX_CACHE_ENTRIES ||
                             cacheHoldMillis !in 0..MAX_CACHE_HOLD_MILLIS
+                    )
+            ) ||
+            (
+                catalogRecoveryFixture &&
+                    (
+                        cacheFixture ||
+                        terminalState != "failed" ||
+                            (failure != "catalog" && failure != "trust")
                     )
             ) ||
             (
@@ -93,6 +103,17 @@ internal class PackageJobTestReceiver : BroadcastReceiver() {
                             ) {
                                 "could not save package-cache completion gate"
                             }
+                        }
+                    }
+                    if (catalogRecoveryFixture) {
+                        check(
+                            context
+                                .getSharedPreferences(TEST_PREFERENCES, Context.MODE_PRIVATE)
+                                .edit()
+                                .putBoolean(TEST_CATALOG_RECOVERY_FIXTURE, true)
+                                .commit(),
+                        ) {
+                            "could not save catalog-recovery completion gate"
                         }
                     }
                     val requestBytes = "extra\t$packageName".toByteArray(StandardCharsets.UTF_8)
@@ -280,11 +301,13 @@ internal class PackageJobTestReceiver : BroadcastReceiver() {
         private const val EXTRA_CACHE_FIXTURE = "cache-fixture"
         private const val EXTRA_CACHE_ENTRIES = "cache-entries"
         private const val EXTRA_CACHE_HOLD_MILLIS = "cache-hold-ms"
+        private const val EXTRA_CATALOG_RECOVERY_FIXTURE = "catalog-recovery-fixture"
         private const val DEFAULT_CACHE_ENTRIES = 3
         private const val MAX_CACHE_ENTRIES = 4096
         private const val MAX_CACHE_HOLD_MILLIS = 5_000
         private const val TEST_PREFERENCES = "package_job_test"
         private const val TEST_CACHE_HOLD_MILLIS = "cache_hold_ms"
+        private const val TEST_CATALOG_RECOVERY_FIXTURE = "catalog_recovery_fixture"
         private val TOKEN = Regex("[a-z0-9-]{1,48}")
         private val PACKAGE = Regex("[a-z0-9@._+\\-]{1,96}")
         private val FAILURE_CLASSES =
