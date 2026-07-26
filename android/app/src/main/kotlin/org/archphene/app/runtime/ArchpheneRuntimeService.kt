@@ -654,6 +654,8 @@ class ArchpheneRuntimeService : Service() {
         val closureArchiveBytes: Long,
         val closureSignatureBytes: Long,
         val closureManifestSha256: String,
+        val buildRootEntries: Long,
+        val buildRootBytes: Long,
     )
 
     private data class AurBuildEnvironment(
@@ -1257,6 +1259,14 @@ class ArchpheneRuntimeService : Service() {
             IBinder.FIRST_CALL_TRANSACTION + 3
         private const val AUR_BUILDER_TRANSACTION_ABORT_CLOSURE =
             IBinder.FIRST_CALL_TRANSACTION + 4
+        private const val AUR_BUILDER_TRANSACTION_BEGIN_PROVISION =
+            IBinder.FIRST_CALL_TRANSACTION + 5
+        private const val AUR_BUILDER_TRANSACTION_EXTRACT_PROVISION_BATCH =
+            IBinder.FIRST_CALL_TRANSACTION + 6
+        private const val AUR_BUILDER_TRANSACTION_FINISH_PROVISION =
+            IBinder.FIRST_CALL_TRANSACTION + 7
+        private const val AUR_BUILDER_TRANSACTION_ABORT_PROVISION =
+            IBinder.FIRST_CALL_TRANSACTION + 8
         private const val AUR_BUILDER_PACKAGE_BATCH = 8
         private const val AUR_REDIRECT_LIMIT = 5
         private const val AUR_STORAGE_RESERVE_BYTES = 64L * 1024 * 1024
@@ -4328,7 +4338,9 @@ class ArchpheneRuntimeService : Service() {
                                 "closure=${builder.closurePackageCount}/" +
                                 "${builder.closureArchiveBytes}+" +
                                 "${builder.closureSignatureBytes} " +
-                                builder.closureManifestSha256,
+                                "${builder.closureManifestSha256} " +
+                                "root=${builder.buildRootEntries}/" +
+                                builder.buildRootBytes,
                         )
                     } else {
                         Log.i(TAG, "AUR builder companion is not installed")
@@ -4741,6 +4753,12 @@ class ArchpheneRuntimeService : Service() {
                         review,
                         buildEnvironment,
                     )
+                val buildRoot =
+                    provisionAurBuildRoot(
+                        endpoint,
+                        review,
+                        buildEnvironment,
+                    )
                 return AurBuilderReport(
                     builderPackage,
                     reportedUid,
@@ -4751,6 +4769,8 @@ class ArchpheneRuntimeService : Service() {
                     closure.archiveBytes,
                     closure.signatureBytes,
                     closure.manifestSha256,
+                    buildRoot.entryCount,
+                    buildRoot.expandedBytes,
                 )
             } finally {
                 request.recycle()
@@ -4774,6 +4794,12 @@ class ArchpheneRuntimeService : Service() {
         val archiveBytes: Long,
         val signatureBytes: Long,
         val manifestSha256: String,
+    )
+
+    private data class AurBuilderRootReport(
+        val packageCount: Int,
+        val entryCount: Long,
+        val expandedBytes: Long,
     )
 
     private fun stageAurBuildClosure(
@@ -4945,6 +4971,89 @@ class ArchpheneRuntimeService : Service() {
             request.recycle()
             reply.recycle()
         }
+    }
+
+    private fun provisionAurBuildRoot(
+        endpoint: IBinder,
+        review: AurReviewData,
+        environment: AurBuildEnvironment,
+    ): AurBuilderRootReport {
+        var began = false
+        try {
+            val expected =
+                transactAurBuilder(
+                    endpoint,
+                    AUR_BUILDER_TRANSACTION_BEGIN_PROVISION,
+                    { request ->
+                        request.writeString(review.packageBase)
+                        request.writeString(review.version)
+                        request.writeString(environment.closureManifestSha256)
+                    },
+                ) { reply -> readAurBuilderRootReport(reply) }
+            check(
+                expected.packageCount == environment.packageCount &&
+                    expected.entryCount > expected.packageCount &&
+                    expected.expandedBytes > 0,
+            ) {
+                "Builder root extraction plan does not match the verified closure"
+            }
+            began = true
+            var extracted = AurBuilderRootReport(0, 0, 0)
+            while (extracted.packageCount < expected.packageCount) {
+                extracted =
+                    transactAurBuilder(
+                        endpoint,
+                        AUR_BUILDER_TRANSACTION_EXTRACT_PROVISION_BATCH,
+                        { request -> request.writeInt(AUR_BUILDER_PACKAGE_BATCH) },
+                    ) { reply -> readAurBuilderRootReport(reply) }
+                check(
+                    extracted.packageCount in 1..expected.packageCount &&
+                        extracted.entryCount in 1..expected.entryCount &&
+                        extracted.expandedBytes in 0..expected.expandedBytes,
+                ) {
+                    "Builder root extraction exceeded its verified plan"
+                }
+                searchStatus =
+                    "Provisioning isolated build root ${extracted.packageCount}/" +
+                        "${expected.packageCount}"
+            }
+            val finished =
+                transactAurBuilder(
+                    endpoint,
+                    AUR_BUILDER_TRANSACTION_FINISH_PROVISION,
+                    {},
+                ) { reply -> readAurBuilderRootReport(reply) }
+            check(finished == expected) {
+                "Builder root extraction changed between scan and publication"
+            }
+            began = false
+            return finished
+        } finally {
+            if (began) {
+                runCatching {
+                    transactAurBuilder(
+                        endpoint,
+                        AUR_BUILDER_TRANSACTION_ABORT_PROVISION,
+                        {},
+                    ) { Unit }
+                }
+            }
+        }
+    }
+
+    private fun readAurBuilderRootReport(reply: Parcel): AurBuilderRootReport {
+        val report =
+            AurBuilderRootReport(
+                reply.readInt(),
+                reply.readLong(),
+                reply.readLong(),
+            )
+        check(
+            report.packageCount in 0..512 &&
+                report.entryCount >= 0 &&
+                report.expandedBytes >= 0,
+        )
+        return report
     }
 
     private fun resolveAurBuildEnvironment(activeHandle: Long): AurBuildEnvironment {
@@ -5374,6 +5483,11 @@ class ArchpheneRuntimeService : Service() {
                     append("Builder closure SHA-256: ")
                         .append(builder.closureManifestSha256)
                         .append('\n')
+                    append("Isolated build root: ")
+                        .append(formatStorageBytes(builder.buildRootBytes))
+                        .append(" across ")
+                        .append(builder.buildRootEntries)
+                        .append(" verified archive entries.\n")
                 }
             } else {
                 append("Download/build disk estimate: verify sources to measure downloads.\n")

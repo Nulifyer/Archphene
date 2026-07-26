@@ -52,6 +52,11 @@ class AurBuilderService : Service() {
                             TRANSACTION_STAGE_PACKAGE_BATCH -> stagePackageBatch(data, reply)
                             TRANSACTION_FINISH_PACKAGE_CLOSURE -> finishPackageClosure(reply)
                             TRANSACTION_ABORT_PACKAGE_CLOSURE -> abortPackageClosure(reply)
+                            TRANSACTION_BEGIN_PROVISION -> beginProvision(data, reply)
+                            TRANSACTION_EXTRACT_PROVISION_BATCH ->
+                                extractProvisionBatch(data, reply)
+                            TRANSACTION_FINISH_PROVISION -> finishProvision(reply)
+                            TRANSACTION_ABORT_PROVISION -> abortProvision(reply)
                             else -> return super.onTransact(code, data, reply, flags)
                         }
                     } catch (error: Exception) {
@@ -243,6 +248,107 @@ class AurBuilderService : Service() {
     private fun abortPackageClosure(reply: Parcel) {
         NativeBuilder.nativeAbortPackageClosure()
         reply.writeNoException()
+    }
+
+    @Synchronized
+    private fun beginProvision(
+        data: Parcel,
+        reply: Parcel,
+    ) {
+        val packageBase = data.readString().orEmpty()
+        val version = data.readString().orEmpty()
+        val manifestSha256 = data.readString().orEmpty()
+        require(manifestSha256.matches(SHA256))
+        nativeOutputBuffer.clear()
+        val result =
+            NativeBuilder.nativeBeginProvision(
+                filesDir.absolutePath,
+                packageBase,
+                version,
+                manifestSha256,
+                nativeOutputBuffer,
+            )
+        val report = readExtractionReport(result)
+        val requiredBytes =
+            runCatching {
+                Math.addExact(report.expandedBytes, BUILD_ROOT_STORAGE_RESERVE_BYTES)
+            }.getOrElse {
+                NativeBuilder.nativeAbortProvision()
+                throw IllegalStateException("Builder root storage estimate overflowed")
+            }
+        if (requiredBytes > filesDir.usableSpace) {
+            NativeBuilder.nativeAbortProvision()
+            throw IllegalStateException(
+                "Not enough Builder-private storage for the isolated build root",
+            )
+        }
+        writeExtractionReport(reply, report)
+    }
+
+    @Synchronized
+    private fun extractProvisionBatch(
+        data: Parcel,
+        reply: Parcel,
+    ) {
+        val maximumPackages = data.readInt()
+        require(maximumPackages in 1..MAX_PACKAGE_BATCH)
+        nativeOutputBuffer.clear()
+        val result =
+            NativeBuilder.nativeExtractProvisionBatch(
+                maximumPackages,
+                nativeOutputBuffer,
+            )
+        writeExtractionReport(reply, readExtractionReport(result))
+    }
+
+    @Synchronized
+    private fun finishProvision(reply: Parcel) {
+        nativeOutputBuffer.clear()
+        val result = NativeBuilder.nativeFinishProvision(nativeOutputBuffer)
+        writeExtractionReport(reply, readExtractionReport(result))
+    }
+
+    @Synchronized
+    private fun abortProvision(reply: Parcel) {
+        NativeBuilder.nativeAbortProvision()
+        reply.writeNoException()
+    }
+
+    private fun readExtractionReport(result: Int): ExtractionReport {
+        check(result == NativeBuilder.EXTRACTION_REPORT_BYTES) {
+            "Builder root provisioning failed: " +
+                readNativeMessage(nativeOutputBuffer, result)
+        }
+        val source =
+            nativeOutputBuffer
+                .duplicate()
+                .order(ByteOrder.LITTLE_ENDIAN)
+        val magic = ByteArray(8)
+        source.position(0)
+        source.get(magic)
+        check(String(magic, Charsets.US_ASCII) == "ABPE0001")
+        val report =
+            ExtractionReport(
+                source.getInt(8),
+                source.getLong(16),
+                source.getLong(24),
+            )
+        check(
+            report.packageCount in 0..MAX_CLOSURE_PACKAGES &&
+                report.entryCount >= 0 &&
+                report.expandedBytes >= 0,
+        )
+        return report
+    }
+
+    private fun writeExtractionReport(
+        reply: Parcel,
+        report: ExtractionReport,
+    ) {
+        reply.writeNoException()
+        reply.writeInt(report.packageCount)
+        reply.writeLong(report.entryCount)
+        reply.writeLong(report.expandedBytes)
     }
 
     private fun enforceManagerCaller(callerUid: Int) {
@@ -519,6 +625,12 @@ class AurBuilderService : Service() {
         val signature: ParcelFileDescriptor,
     )
 
+    private data class ExtractionReport(
+        val packageCount: Int,
+        val entryCount: Long,
+        val expandedBytes: Long,
+    )
+
     private data class ProbeReport(
         val uid: Int,
         val callingUid: Int,
@@ -538,12 +650,17 @@ class AurBuilderService : Service() {
         const val TRANSACTION_STAGE_PACKAGE_BATCH = IBinder.FIRST_CALL_TRANSACTION + 2
         const val TRANSACTION_FINISH_PACKAGE_CLOSURE = IBinder.FIRST_CALL_TRANSACTION + 3
         const val TRANSACTION_ABORT_PACKAGE_CLOSURE = IBinder.FIRST_CALL_TRANSACTION + 4
+        const val TRANSACTION_BEGIN_PROVISION = IBinder.FIRST_CALL_TRANSACTION + 5
+        const val TRANSACTION_EXTRACT_PROVISION_BATCH = IBinder.FIRST_CALL_TRANSACTION + 6
+        const val TRANSACTION_FINISH_PROVISION = IBinder.FIRST_CALL_TRANSACTION + 7
+        const val TRANSACTION_ABORT_PROVISION = IBinder.FIRST_CALL_TRANSACTION + 8
         private const val ROLE_SNAPSHOT = 0
         private const val ROLE_SOURCE = 1
         private const val MAX_INPUTS = 65
         private const val MAX_CLOSURE_PACKAGES = 512
         private const val MAX_CLOSURE_MANIFEST_BYTES = 512 * 1024
         private const val MAX_PACKAGE_BATCH = 8
+        private const val BUILD_ROOT_STORAGE_RESERVE_BYTES = 512L * 1024 * 1024
         private const val MAX_INPUT_BYTES = 4L * 1024 * 1024 * 1024
         private const val MAX_TOTAL_BYTES = 8L * 1024 * 1024 * 1024
         private const val MAX_MANIFEST_BYTES = 16 * 1024

@@ -18,7 +18,14 @@ podman run --rm --network=none \
   -w /workspace \
   -e CARGO_TARGET_DIR=/workspace/tooling/build/rust-next \
   "$image" \
-  bash -lc 'cargo build --release --locked --offline -p archphene-android --target x86_64-linux-android &&
+  bash -lc 'ndk_bin=/opt/android-sdk-linux/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/bin
+    export CC_x86_64_linux_android="$ndk_bin/x86_64-linux-android29-clang"
+    export CXX_x86_64_linux_android="$ndk_bin/x86_64-linux-android29-clang++"
+    export AR_x86_64_linux_android="$ndk_bin/llvm-ar"
+    export CC_aarch64_linux_android="$ndk_bin/aarch64-linux-android29-clang"
+    export CXX_aarch64_linux_android="$ndk_bin/aarch64-linux-android29-clang++"
+    export AR_aarch64_linux_android="$ndk_bin/llvm-ar"
+    cargo build --release --locked --offline -p archphene-android --target x86_64-linux-android &&
     cargo build --release --locked --offline -p archphene-builder --target x86_64-linux-android &&
     cargo build --release --locked --offline -p archphene-android --target aarch64-linux-android &&
     cargo build --release --locked --offline -p archphene-builder --target aarch64-linux-android'

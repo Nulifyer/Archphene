@@ -9,8 +9,12 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+archphene-root = { path = "../archphene-root" }
 rustix = { version = "1.1.4", features = ["fs"] }
 sha2 = "0.10.9"
+tar = { version = "0.4.46", default-features = false }
+xz2 = "0.1.7"
+zstd = { version = "0.13.3", default-features = false }
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { version = "0.21.1", default-features = false }

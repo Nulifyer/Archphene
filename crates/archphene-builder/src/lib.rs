@@ -1,17 +1,24 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
+use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::fmt;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 
+use archphene_root::{ArchRoot, RootError};
 use rustix::fd::OwnedFd;
 use rustix::fs::{
-    AtFlags, CWD, Dir, FileType, Mode, OFlags, fsync, mkdirat, openat, renameat, statat, unlinkat,
+    AtFlags, CWD, Dir, FileType, Mode, OFlags, fchmod, fsync, mkdirat, openat, renameat, statat,
+    syncfs, unlinkat,
 };
 use rustix::io::Errno;
 use sha2::{Digest, Sha256};
+use tar::{Archive, EntryType};
+use xz2::read::XzDecoder;
 
 pub const MAX_CLOSURE_MANIFEST_BYTES: usize = 512 * 1024;
 pub const MAX_CLOSURE_PACKAGES: usize = 512;
@@ -19,11 +26,17 @@ const MAX_ARCHIVE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_SIGNATURE_BYTES: u64 = 1024 * 1024;
 const MAX_CLOSURE_ARCHIVE_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const MAX_CLOSURE_SIGNATURE_BYTES: u64 = 512 * 1024 * 1024;
-const MAX_DIRECTORY_ENTRIES: usize = 4096;
 const MAX_DIRECTORY_DEPTH: usize = 64;
+const MAX_WORKSPACE_ENTRIES: usize = 2_000_000;
+const MAX_EXPANDED_ENTRIES: u64 = 2_000_000;
+const MAX_EXPANDED_BYTES: u64 = 32 * 1024 * 1024 * 1024;
+const MAX_ARCHIVE_ENTRY_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const MAX_ARCHIVE_PATH_BYTES: usize = 4 * 1024;
 const WORKSPACE_NAME: &str = "aur-build-workspace-v2";
 const CLOSURE_NAME: &str = "package-closure";
 const ARCHIVES_NAME: &str = "archives";
+const BUILD_ROOT_NAME: &str = "build-root";
+const BUILD_ROOT_MANIFEST_NAME: &str = "build-root-manifest";
 const EXPECTED_MANIFEST_NAME: &str = "expected-manifest";
 const PUBLISHED_MANIFEST_NAME: &str = "manifest";
 const SESSION_MANIFEST_NAME: &str = "session";
@@ -35,8 +48,10 @@ pub enum BuilderError {
     InvalidInput,
     UnsafeWorkspace,
     OutputLimit,
+    InvalidArchive,
     Io(std::io::Error),
     Syscall(Errno),
+    Root(RootError),
 }
 
 impl fmt::Display for BuilderError {
@@ -49,8 +64,10 @@ impl fmt::Display for BuilderError {
             Self::InvalidInput => formatter.write_str("invalid build-closure input"),
             Self::UnsafeWorkspace => formatter.write_str("unsafe builder workspace"),
             Self::OutputLimit => formatter.write_str("builder limit exceeded"),
+            Self::InvalidArchive => formatter.write_str("invalid package archive"),
             Self::Io(error) => error.fmt(formatter),
             Self::Syscall(error) => error.fmt(formatter),
+            Self::Root(error) => error.fmt(formatter),
         }
     }
 }
@@ -66,6 +83,12 @@ impl From<std::io::Error> for BuilderError {
 impl From<Errno> for BuilderError {
     fn from(error: Errno) -> Self {
         Self::Syscall(error)
+    }
+}
+
+impl From<RootError> for BuilderError {
+    fn from(error: RootError) -> Self {
+        Self::Root(error)
     }
 }
 
@@ -93,6 +116,24 @@ pub struct ClosureSession {
     manifest: Vec<u8>,
     manifest_sha256: [u8; 32],
     packages: Vec<ExpectedPackage>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ExtractionReport {
+    pub package_count: usize,
+    pub entry_count: u64,
+    pub expanded_bytes: u64,
+}
+
+pub struct ProvisionSession {
+    root: std::path::PathBuf,
+    workspace: OwnedFd,
+    archives: OwnedFd,
+    packages: Vec<ExpectedPackage>,
+    manifest_sha256: [u8; 32],
+    next_package: usize,
+    expected: ExtractionReport,
+    extracted: ExtractionReport,
 }
 
 impl ClosureSession {
@@ -212,6 +253,456 @@ impl ClosureSession {
             manifest_sha256: self.manifest_sha256,
         })
     }
+}
+
+impl ProvisionSession {
+    pub fn begin(
+        files_directory: &Path,
+        package_base: &str,
+        version: &str,
+        expected_manifest_sha256: [u8; 32],
+    ) -> Result<Self, BuilderError> {
+        if !safe_name(package_base)
+            || version.is_empty()
+            || version.len() > 128
+            || version.bytes().any(|byte| !(0x21..=0x7e).contains(&byte))
+        {
+            return Err(BuilderError::InvalidArgument);
+        }
+        let files = openat(
+            CWD,
+            files_directory,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        let workspace = open_directory(&files, WORKSPACE_NAME)?;
+        let closure = open_directory(&workspace, CLOSURE_NAME)?;
+        let archives = open_directory(&closure, ARCHIVES_NAME)?;
+        let manifest = read_bounded_regular_file(
+            &closure,
+            PUBLISHED_MANIFEST_NAME,
+            MAX_CLOSURE_MANIFEST_BYTES,
+        )?;
+        if sha256_bytes(&manifest) != expected_manifest_sha256 {
+            return Err(BuilderError::InvalidInput);
+        }
+        let packages = parse_manifest(&manifest)?;
+        let expected_session = format!(
+            "ABCS0001\npackage={package_base}\nversion={version}\nclosure={}\n",
+            hex_sha256(&expected_manifest_sha256),
+        );
+        let session = read_bounded_regular_file(&closure, SESSION_MANIFEST_NAME, 1024)?;
+        if session != expected_session.as_bytes() {
+            return Err(BuilderError::InvalidInput);
+        }
+
+        let mut expected = ExtractionReport {
+            package_count: packages.len(),
+            ..ExtractionReport::default()
+        };
+        for (index, package) in packages.iter().enumerate() {
+            let archive_name = staged_name(index, &package.filename, false);
+            verify_staged_file(
+                &archives,
+                &archive_name,
+                package.archive_bytes,
+                package.archive_sha256,
+            )?;
+            verify_staged_file(
+                &archives,
+                &staged_name(index, &package.filename, true),
+                package.signature_bytes,
+                package.signature_sha256,
+            )?;
+            let archive = open_regular_file(&archives, &archive_name)?;
+            let report = inspect_package_archive(archive, &package.filename, None)?;
+            expected.entry_count = checked_entries(expected.entry_count, report.entry_count)?;
+            expected.expanded_bytes =
+                checked_expanded_bytes(expected.expanded_bytes, report.expanded_bytes)?;
+        }
+
+        let mut visited = 0;
+        remove_entry_if_present(&workspace, BUILD_ROOT_MANIFEST_NAME, 0, &mut visited)?;
+        remove_entry_if_present(&workspace, BUILD_ROOT_NAME, 0, &mut visited)?;
+        mkdirat(&workspace, BUILD_ROOT_NAME, Mode::from_raw_mode(0o700))?;
+        fsync(&workspace)?;
+        let root = files_directory.join(WORKSPACE_NAME).join(BUILD_ROOT_NAME);
+        ArchRoot::bootstrap(&root)?;
+        Ok(Self {
+            root,
+            workspace,
+            archives,
+            packages,
+            manifest_sha256: expected_manifest_sha256,
+            next_package: 0,
+            expected,
+            extracted: ExtractionReport::default(),
+        })
+    }
+
+    pub fn expected(&self) -> ExtractionReport {
+        self.expected
+    }
+
+    pub fn extract_next(
+        &mut self,
+        maximum_packages: usize,
+    ) -> Result<ExtractionReport, BuilderError> {
+        if maximum_packages == 0 || maximum_packages > 8 {
+            return Err(BuilderError::InvalidArgument);
+        }
+        let end = self
+            .next_package
+            .saturating_add(maximum_packages)
+            .min(self.packages.len());
+        while self.next_package < end {
+            let index = self.next_package;
+            let package = &self.packages[index];
+            let archive_name = staged_name(index, &package.filename, false);
+            verify_staged_file(
+                &self.archives,
+                &archive_name,
+                package.archive_bytes,
+                package.archive_sha256,
+            )?;
+            let archive = open_regular_file(&self.archives, &archive_name)?;
+            let report = inspect_package_archive(archive, &package.filename, Some(&self.root))?;
+            self.extracted.package_count = self
+                .extracted
+                .package_count
+                .checked_add(1)
+                .ok_or(BuilderError::OutputLimit)?;
+            self.extracted.entry_count =
+                checked_entries(self.extracted.entry_count, report.entry_count)?;
+            self.extracted.expanded_bytes =
+                checked_expanded_bytes(self.extracted.expanded_bytes, report.expanded_bytes)?;
+            self.next_package += 1;
+        }
+        Ok(self.extracted)
+    }
+
+    pub fn finish(self) -> Result<ExtractionReport, BuilderError> {
+        if self.next_package != self.packages.len() || self.extracted != self.expected {
+            return Err(BuilderError::InvalidInput);
+        }
+        let root = File::open(&self.root)?;
+        root.sync_all()?;
+        syncfs(&root)?;
+        let manifest = format!(
+            "ABBR0001\nclosure={}\npackages={}\nentries={}\nbytes={}\n",
+            hex_sha256(&self.manifest_sha256),
+            self.extracted.package_count,
+            self.extracted.entry_count,
+            self.extracted.expanded_bytes,
+        );
+        write_atomic(
+            &self.workspace,
+            BUILD_ROOT_MANIFEST_NAME,
+            manifest.as_bytes(),
+        )?;
+        Ok(self.extracted)
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+}
+
+fn read_bounded_regular_file(
+    directory: &OwnedFd,
+    name: &str,
+    maximum: usize,
+) -> Result<Vec<u8>, BuilderError> {
+    let descriptor = open_regular_file(directory, name)?;
+    let metadata = descriptor.metadata()?;
+    let length = usize::try_from(metadata.len()).map_err(|_| BuilderError::OutputLimit)?;
+    if !metadata.is_file() || length == 0 || length > maximum {
+        return Err(BuilderError::InvalidInput);
+    }
+    let mut output = vec![0_u8; length];
+    let mut file = descriptor;
+    file.read_exact(&mut output)?;
+    let mut extra = [0_u8; 1];
+    if file.read(&mut extra)? != 0 {
+        return Err(BuilderError::InvalidInput);
+    }
+    Ok(output)
+}
+
+fn open_regular_file(directory: &OwnedFd, name: &str) -> Result<File, BuilderError> {
+    let descriptor = openat(
+        directory,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let file = File::from(descriptor);
+    if !file.metadata()?.is_file() {
+        return Err(BuilderError::InvalidInput);
+    }
+    Ok(file)
+}
+
+fn inspect_package_archive(
+    archive: File,
+    filename: &str,
+    extraction_root: Option<&Path>,
+) -> Result<ExtractionReport, BuilderError> {
+    if filename.ends_with(".pkg.tar.xz") {
+        inspect_tar_archive(XzDecoder::new(archive), extraction_root)
+    } else if filename.ends_with(".pkg.tar.zst") {
+        let decoder = zstd::stream::read::Decoder::new(archive)?;
+        inspect_tar_archive(decoder, extraction_root)
+    } else {
+        Err(BuilderError::InvalidArchive)
+    }
+}
+
+fn inspect_tar_archive(
+    reader: impl Read,
+    extraction_root: Option<&Path>,
+) -> Result<ExtractionReport, BuilderError> {
+    let mut archive = Archive::new(reader);
+    archive.set_overwrite(true);
+    archive.set_preserve_permissions(false);
+    archive.set_preserve_ownerships(false);
+    archive.set_unpack_xattrs(false);
+    let mut report = ExtractionReport::default();
+    let mut materialized_files = HashMap::<PathBuf, u64>::new();
+    let entries = archive.entries()?;
+    for entry in entries {
+        let mut entry = entry?;
+        let path = entry.path()?.into_owned();
+        validate_archive_path(&path)?;
+        let entry_type = entry.header().entry_type();
+        validate_archive_entry_type(entry_type)?;
+        let mut materialized_bytes = None;
+        let mut hard_link_target = None;
+        if entry_type.is_symlink() || entry_type.is_hard_link() {
+            let target = entry
+                .link_name()?
+                .ok_or(BuilderError::InvalidArchive)?
+                .into_owned();
+            validate_archive_link(&target, entry_type.is_hard_link())?;
+            if entry_type.is_hard_link() {
+                let bytes = materialized_files
+                    .get(&target)
+                    .copied()
+                    .ok_or(BuilderError::InvalidArchive)?;
+                materialized_bytes = Some(bytes);
+                hard_link_target = Some(target);
+            }
+        }
+        report.entry_count = checked_entries(report.entry_count, 1)?;
+        if entry_type.is_file() {
+            let bytes = entry.header().size()?;
+            if bytes > MAX_ARCHIVE_ENTRY_BYTES {
+                return Err(BuilderError::OutputLimit);
+            }
+            report.expanded_bytes = checked_expanded_bytes(report.expanded_bytes, bytes)?;
+            materialized_bytes = Some(bytes);
+        } else if let Some(bytes) = materialized_bytes {
+            report.expanded_bytes = checked_expanded_bytes(report.expanded_bytes, bytes)?;
+        }
+        if archive_metadata_path(&path) {
+            materialized_files.remove(&path);
+            continue;
+        }
+        if let Some(bytes) = materialized_bytes {
+            materialized_files.insert(path.clone(), bytes);
+        } else {
+            materialized_files.remove(&path);
+        }
+        if let Some(root) = extraction_root {
+            if let Some(target) = hard_link_target {
+                copy_android_hard_link(root, &path, &target, materialized_bytes.unwrap_or(0))?;
+            } else if !entry.unpack_in(root)? {
+                return Err(BuilderError::InvalidArchive);
+            }
+        }
+    }
+    Ok(report)
+}
+
+fn copy_android_hard_link(
+    root: &Path,
+    destination_path: &Path,
+    source_path: &Path,
+    expected_bytes: u64,
+) -> Result<(), BuilderError> {
+    let canonical_root = root.canonicalize()?;
+    let source = root.join(source_path);
+    let source_metadata = std::fs::symlink_metadata(&source)?;
+    if !source_metadata.is_file() || source_metadata.len() != expected_bytes {
+        return Err(BuilderError::InvalidArchive);
+    }
+    let canonical_source = source.canonicalize()?;
+    if !canonical_source.starts_with(&canonical_root) {
+        return Err(BuilderError::InvalidArchive);
+    }
+
+    let destination = root.join(destination_path);
+    let parent = destination.parent().ok_or(BuilderError::InvalidArchive)?;
+    create_archive_parent(root, parent)?;
+    let canonical_parent = parent.canonicalize()?;
+    if !canonical_parent.starts_with(&canonical_root) {
+        return Err(BuilderError::InvalidArchive);
+    }
+    match std::fs::symlink_metadata(&destination) {
+        Ok(metadata) if metadata.is_file() || metadata.file_type().is_symlink() => {
+            std::fs::remove_file(&destination)?;
+        }
+        Ok(_) => return Err(BuilderError::InvalidArchive),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    let source_descriptor = openat(
+        CWD,
+        &source,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let input = File::from(source_descriptor);
+    if !input.metadata()?.is_file() {
+        return Err(BuilderError::InvalidArchive);
+    }
+    let destination_descriptor = openat(
+        CWD,
+        &destination,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_raw_mode(0o600),
+    )?;
+    let copy_result = (|| {
+        let mut output = File::from(destination_descriptor);
+        let maximum = expected_bytes
+            .checked_add(1)
+            .ok_or(BuilderError::OutputLimit)?;
+        let copied = std::io::copy(&mut input.take(maximum), &mut output)?;
+        if copied != expected_bytes {
+            return Err(BuilderError::InvalidArchive);
+        }
+        fchmod(
+            &output,
+            Mode::from_raw_mode(source_metadata.permissions().mode() & 0o777),
+        )?;
+        Ok(())
+    })();
+    if let Err(error) = copy_result {
+        let _ = std::fs::remove_file(&destination);
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn create_archive_parent(root: &Path, parent: &Path) -> Result<(), BuilderError> {
+    let relative = parent
+        .strip_prefix(root)
+        .map_err(|_| BuilderError::InvalidArchive)?;
+    let root_descriptor = openat(
+        CWD,
+        root,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let mut directory = root_descriptor;
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(BuilderError::InvalidArchive);
+        };
+        match mkdirat(&directory, name, Mode::from_raw_mode(0o755)) {
+            Ok(()) | Err(Errno::EXIST) => {}
+            Err(error) => return Err(error.into()),
+        }
+        directory = openat(
+            &directory,
+            name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_archive_path(path: &Path) -> Result<(), BuilderError> {
+    let bytes = path.as_os_str().as_bytes();
+    if bytes.is_empty()
+        || bytes.len() > MAX_ARCHIVE_PATH_BYTES
+        || bytes.contains(&0)
+        || path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err(BuilderError::InvalidArchive);
+    }
+    Ok(())
+}
+
+fn validate_archive_link(path: &Path, hard_link: bool) -> Result<(), BuilderError> {
+    let bytes = path.as_os_str().as_bytes();
+    if bytes.is_empty() || bytes.len() > MAX_ARCHIVE_PATH_BYTES || bytes.contains(&0) {
+        return Err(BuilderError::InvalidArchive);
+    }
+    if hard_link
+        && (path.is_absolute()
+            || path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            }))
+    {
+        return Err(BuilderError::InvalidArchive);
+    }
+    Ok(())
+}
+
+fn validate_archive_entry_type(entry_type: EntryType) -> Result<(), BuilderError> {
+    if entry_type.is_file()
+        || entry_type.is_dir()
+        || entry_type.is_symlink()
+        || entry_type.is_hard_link()
+    {
+        Ok(())
+    } else {
+        Err(BuilderError::InvalidArchive)
+    }
+}
+
+fn archive_metadata_path(path: &Path) -> bool {
+    path.components().count() == 1
+        && matches!(
+            path.as_os_str().as_bytes(),
+            b".BUILDINFO" | b".CHANGELOG" | b".INSTALL" | b".MTREE" | b".PKGINFO"
+        )
+}
+
+fn checked_entries(current: u64, additional: u64) -> Result<u64, BuilderError> {
+    let total = current
+        .checked_add(additional)
+        .ok_or(BuilderError::OutputLimit)?;
+    if total > MAX_EXPANDED_ENTRIES {
+        return Err(BuilderError::OutputLimit);
+    }
+    Ok(total)
+}
+
+fn checked_expanded_bytes(current: u64, additional: u64) -> Result<u64, BuilderError> {
+    let total = current
+        .checked_add(additional)
+        .ok_or(BuilderError::OutputLimit)?;
+    if total > MAX_EXPANDED_BYTES {
+        return Err(BuilderError::OutputLimit);
+    }
+    Ok(total)
 }
 
 fn parse_manifest(manifest: &[u8]) -> Result<Vec<ExpectedPackage>, BuilderError> {
@@ -400,7 +891,7 @@ fn remove_entry_if_present(
         Err(error) => return Err(error.into()),
     };
     *visited = visited.checked_add(1).ok_or(BuilderError::OutputLimit)?;
-    if *visited > MAX_DIRECTORY_ENTRIES {
+    if *visited > MAX_WORKSPACE_ENTRIES {
         return Err(BuilderError::OutputLimit);
     }
     if FileType::from_raw_mode(metadata.st_mode) != FileType::Directory {
@@ -408,21 +899,7 @@ fn remove_entry_if_present(
         return Ok(());
     }
     let directory = open_directory(parent, name)?;
-    let mut names = Vec::<CString>::new();
-    for entry in Dir::read_from(&directory)? {
-        let entry = entry?;
-        let raw = entry.file_name().to_bytes();
-        if raw == b"." || raw == b".." {
-            continue;
-        }
-        if raw.is_empty() || raw.contains(&b'/') || names.len() >= MAX_DIRECTORY_ENTRIES {
-            return Err(BuilderError::UnsafeWorkspace);
-        }
-        names.push(CString::new(raw).map_err(|_| BuilderError::UnsafeWorkspace)?);
-    }
-    for child in names {
-        remove_entry_if_present_cstr(&directory, &child, depth + 1, visited)?;
-    }
+    remove_directory_contents(&directory, depth, visited)?;
     unlinkat(parent, name, AtFlags::REMOVEDIR)?;
     Ok(())
 }
@@ -438,7 +915,7 @@ fn remove_entry_if_present_cstr(
     }
     let metadata = statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)?;
     *visited = visited.checked_add(1).ok_or(BuilderError::OutputLimit)?;
-    if *visited > MAX_DIRECTORY_ENTRIES {
+    if *visited > MAX_WORKSPACE_ENTRIES {
         return Err(BuilderError::OutputLimit);
     }
     if FileType::from_raw_mode(metadata.st_mode) != FileType::Directory {
@@ -451,23 +928,35 @@ fn remove_entry_if_present_cstr(
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     )?;
-    let mut names = Vec::<CString>::new();
-    for entry in Dir::read_from(&directory)? {
-        let entry = entry?;
-        let raw = entry.file_name().to_bytes();
-        if raw == b"." || raw == b".." {
-            continue;
-        }
-        if raw.is_empty() || raw.contains(&b'/') || names.len() >= MAX_DIRECTORY_ENTRIES {
-            return Err(BuilderError::UnsafeWorkspace);
-        }
-        names.push(CString::new(raw).map_err(|_| BuilderError::UnsafeWorkspace)?);
-    }
-    for child in names {
-        remove_entry_if_present_cstr(&directory, &child, depth + 1, visited)?;
-    }
+    remove_directory_contents(&directory, depth, visited)?;
     unlinkat(parent, name, AtFlags::REMOVEDIR)?;
     Ok(())
+}
+
+fn remove_directory_contents(
+    directory: &OwnedFd,
+    depth: usize,
+    visited: &mut usize,
+) -> Result<(), BuilderError> {
+    loop {
+        let mut child = None;
+        for entry in Dir::read_from(directory)? {
+            let entry = entry?;
+            let raw = entry.file_name().to_bytes();
+            if raw == b"." || raw == b".." {
+                continue;
+            }
+            if raw.is_empty() || raw.contains(&b'/') || raw.len() > 255 {
+                return Err(BuilderError::UnsafeWorkspace);
+            }
+            child = Some(CString::new(raw).map_err(|_| BuilderError::UnsafeWorkspace)?);
+            break;
+        }
+        let Some(child) = child else {
+            return Ok(());
+        };
+        remove_entry_if_present_cstr(directory, &child, depth + 1, visited)?;
+    }
 }
 
 fn write_atomic(directory: &OwnedFd, destination: &str, bytes: &[u8]) -> Result<(), BuilderError> {
@@ -655,7 +1144,7 @@ mod android {
     use jni::objects::{JByteBuffer, JClass, JString};
     use jni::sys::{JNI_FALSE, JNI_TRUE, jboolean, jint};
 
-    use super::{ClosureSession, parse_sha256};
+    use super::{ClosureSession, ExtractionReport, ProvisionSession, parse_sha256};
 
     const ERROR_INVALID_ARGUMENT: jint = -1;
     const ERROR_INVALID_STATE: jint = -2;
@@ -663,11 +1152,18 @@ mod android {
     const ERROR_OUTPUT_BYTES: usize = 512;
     const CLOSURE_REPORT_BYTES: usize = 64;
     const CLOSURE_REPORT_MAGIC: &[u8; 8] = b"ABCR0001";
+    const EXTRACTION_REPORT_BYTES: usize = 32;
+    const EXTRACTION_REPORT_MAGIC: &[u8; 8] = b"ABPE0001";
 
     static SESSION: OnceLock<Mutex<Option<ClosureSession>>> = OnceLock::new();
+    static PROVISION: OnceLock<Mutex<Option<ProvisionSession>>> = OnceLock::new();
 
     fn session() -> &'static Mutex<Option<ClosureSession>> {
         SESSION.get_or_init(|| Mutex::new(None))
+    }
+
+    fn provision() -> &'static Mutex<Option<ProvisionSession>> {
+        PROVISION.get_or_init(|| Mutex::new(None))
     }
 
     fn java_string(environment: &mut JNIEnv, value: &JString) -> Result<String, jint> {
@@ -695,6 +1191,19 @@ mod android {
         let length = message.len().min(output.len().saturating_sub(1));
         output[..length].copy_from_slice(&message.as_bytes()[..length]);
         ERROR_BUILDER
+    }
+
+    fn write_extraction_report(output: &mut [u8], report: ExtractionReport) -> Result<jint, jint> {
+        if output.len() < EXTRACTION_REPORT_BYTES {
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+        let package_count = u32::try_from(report.package_count).map_err(|_| ERROR_BUILDER)?;
+        output[..EXTRACTION_REPORT_BYTES].fill(0);
+        output[..8].copy_from_slice(EXTRACTION_REPORT_MAGIC);
+        output[8..12].copy_from_slice(&package_count.to_le_bytes());
+        output[16..24].copy_from_slice(&report.entry_count.to_le_bytes());
+        output[24..32].copy_from_slice(&report.expanded_bytes.to_le_bytes());
+        Ok(EXTRACTION_REPORT_BYTES as jint)
     }
 
     #[unsafe(no_mangle)]
@@ -845,13 +1354,143 @@ mod android {
             Err(_) => JNI_FALSE,
         }
     }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_builder_NativeBuilder_nativeBeginProvision(
+        mut environment: JNIEnv,
+        _class: JClass,
+        files_directory: JString,
+        package_base: JString,
+        version: JString,
+        manifest_sha256: JString,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let (Ok(files_directory), Ok(package_base), Ok(version), Ok(manifest_sha256)) = (
+            java_string(&mut environment, &files_directory),
+            java_string(&mut environment, &package_base),
+            java_string(&mut environment, &version),
+            java_string(&mut environment, &manifest_sha256),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(expected_sha256) = parse_sha256(&manifest_sha256) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let (Ok(capacity), Ok(address)) = (
+            environment.get_direct_buffer_capacity(&output_buffer),
+            environment.get_direct_buffer_address(&output_buffer),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if capacity < ERROR_OUTPUT_BYTES || address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        // SAFETY: JNI verified the fixed direct diagnostic/report buffer.
+        let output = unsafe { slice::from_raw_parts_mut(address, capacity) };
+        let Ok(mut slot) = provision().lock() else {
+            return ERROR_INVALID_STATE;
+        };
+        *slot = None;
+        match ProvisionSession::begin(
+            Path::new(&files_directory),
+            &package_base,
+            &version,
+            expected_sha256,
+        ) {
+            Ok(value) => {
+                let report = value.expected();
+                *slot = Some(value);
+                write_extraction_report(output, report).unwrap_or(ERROR_BUILDER)
+            }
+            Err(error) => copy_builder_error(&error, output),
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_builder_NativeBuilder_nativeExtractProvisionBatch(
+        environment: JNIEnv,
+        _class: JClass,
+        maximum_packages: jint,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let Ok(maximum_packages) = usize::try_from(maximum_packages) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let (Ok(capacity), Ok(address)) = (
+            environment.get_direct_buffer_capacity(&output_buffer),
+            environment.get_direct_buffer_address(&output_buffer),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if capacity < ERROR_OUTPUT_BYTES || address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        // SAFETY: JNI verified the fixed direct diagnostic/report buffer.
+        let output = unsafe { slice::from_raw_parts_mut(address, capacity) };
+        let Ok(mut slot) = provision().lock() else {
+            return ERROR_INVALID_STATE;
+        };
+        let Some(value) = slot.as_mut() else {
+            return ERROR_INVALID_STATE;
+        };
+        match value.extract_next(maximum_packages) {
+            Ok(report) => write_extraction_report(output, report).unwrap_or(ERROR_BUILDER),
+            Err(error) => copy_builder_error(&error, output),
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_builder_NativeBuilder_nativeFinishProvision(
+        environment: JNIEnv,
+        _class: JClass,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let (Ok(capacity), Ok(address)) = (
+            environment.get_direct_buffer_capacity(&output_buffer),
+            environment.get_direct_buffer_address(&output_buffer),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if capacity < ERROR_OUTPUT_BYTES || address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        // SAFETY: JNI verified the fixed direct diagnostic/report buffer.
+        let output = unsafe { slice::from_raw_parts_mut(address, capacity) };
+        let Ok(mut slot) = provision().lock() else {
+            return ERROR_INVALID_STATE;
+        };
+        let Some(value) = slot.take() else {
+            return ERROR_INVALID_STATE;
+        };
+        match value.finish() {
+            Ok(report) => write_extraction_report(output, report).unwrap_or(ERROR_BUILDER),
+            Err(error) => copy_builder_error(&error, output),
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_builder_NativeBuilder_nativeAbortProvision(
+        _environment: JNIEnv,
+        _class: JClass,
+    ) -> jboolean {
+        match provision().lock() {
+            Ok(mut slot) => {
+                let existed = slot.take().is_some();
+                if existed { JNI_TRUE } else { JNI_FALSE }
+            }
+            Err(_) => JNI_FALSE,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+    use std::io::Cursor;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use tar::Header;
+    use xz2::write::XzEncoder;
 
     static TEST_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -881,6 +1520,76 @@ summary\t1\t{}\n",
 
     fn fixture_manifest(archive: &[u8], signature: &[u8]) -> Vec<u8> {
         fixture_manifest_with_filename("base-devel-1-1-any.pkg.tar.zst", archive, signature)
+    }
+
+    fn append_file(
+        builder: &mut tar::Builder<XzEncoder<Vec<u8>>>,
+        path: &str,
+        mode: u32,
+        contents: &[u8],
+    ) {
+        let mut header = Header::new_gnu();
+        header.set_entry_type(EntryType::Regular);
+        header.set_mode(mode);
+        header.set_size(contents.len() as u64);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, path, Cursor::new(contents))
+            .expect("append package file");
+    }
+
+    fn append_symlink(builder: &mut tar::Builder<XzEncoder<Vec<u8>>>, path: &str, target: &Path) {
+        let mut header = Header::new_gnu();
+        header.set_entry_type(EntryType::Symlink);
+        header.set_mode(0o777);
+        header.set_size(0);
+        header.set_link_name(target).expect("symlink target");
+        header.set_cksum();
+        builder
+            .append_data(&mut header, path, Cursor::new([]))
+            .expect("append package symlink");
+    }
+
+    fn append_hard_link(builder: &mut tar::Builder<XzEncoder<Vec<u8>>>, path: &str, target: &Path) {
+        let mut header = Header::new_gnu();
+        header.set_entry_type(EntryType::Link);
+        header.set_mode(0o644);
+        header.set_size(0);
+        header.set_link_name(target).expect("hard-link target");
+        header.set_cksum();
+        builder
+            .append_data(&mut header, path, Cursor::new([]))
+            .expect("append package hard link");
+    }
+
+    fn package_archive(add_entries: impl FnOnce(&mut tar::Builder<XzEncoder<Vec<u8>>>)) -> Vec<u8> {
+        let encoder = XzEncoder::new(Vec::new(), 6);
+        let mut builder = tar::Builder::new(encoder);
+        builder.mode(tar::HeaderMode::Deterministic);
+        add_entries(&mut builder);
+        let encoder = builder.into_inner().expect("finish tar archive");
+        encoder.finish().expect("finish xz archive")
+    }
+
+    fn stage_fixture_closure(directory: &Path, archive: &[u8], signature: &[u8]) -> [u8; 32] {
+        let filename = "base-devel-1-1-any.pkg.tar.xz";
+        let manifest = fixture_manifest_with_filename(filename, archive, signature);
+        let digest = sha256_bytes(&manifest);
+        let session = ClosureSession::begin(directory, "fixture", "1-1", &manifest, digest)
+            .expect("closure session");
+        let archive_path = directory.join("archive");
+        let signature_path = directory.join("signature");
+        fs::write(&archive_path, archive).expect("archive fixture");
+        fs::write(&signature_path, signature).expect("signature fixture");
+        session
+            .stage_package(
+                0,
+                &mut File::open(archive_path).expect("archive"),
+                &mut File::open(signature_path).expect("signature"),
+            )
+            .expect("stage package");
+        session.finish().expect("publish closure");
+        digest
     }
 
     #[test]
@@ -1033,5 +1742,117 @@ summary\t1\t{}\n",
                 .exists(),
         );
         fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn provisions_a_fresh_root_from_an_xz_package() {
+        let directory = test_directory();
+        let archive = package_archive(|builder| {
+            append_file(builder, ".PKGINFO", 0o644, b"pkgname = base-devel\n");
+            append_file(builder, "usr/bin/build-tool", 0o755, b"tool\n");
+            append_symlink(builder, "usr/bin/build-tool-link", Path::new("build-tool"));
+        });
+        let digest = stage_fixture_closure(&directory, &archive, b"signature");
+        let mut provision = ProvisionSession::begin(&directory, "fixture", "1-1", digest)
+            .expect("provision session");
+        assert_eq!(provision.expected().package_count, 1);
+        assert!(provision.expected().entry_count >= 3);
+        let report = provision.extract_next(8).expect("extract package");
+        assert_eq!(report.package_count, 1);
+        let root = provision.root().to_path_buf();
+        assert_eq!(provision.finish().expect("finish provision"), report);
+        assert_eq!(
+            fs::read(root.join("usr/bin/build-tool")).expect("extracted tool"),
+            b"tool\n",
+        );
+        assert_eq!(
+            fs::read_link(root.join("usr/bin/build-tool-link")).expect("extracted symlink"),
+            Path::new("build-tool"),
+        );
+        assert!(!root.join(".PKGINFO").exists());
+        let root_manifest = fs::read_to_string(
+            directory
+                .join(WORKSPACE_NAME)
+                .join(BUILD_ROOT_MANIFEST_NAME),
+        )
+        .expect("published root manifest");
+        assert!(root_manifest.starts_with("ABBR0001\nclosure="));
+        assert!(root_manifest.contains("\npackages=1\n"));
+        fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn materializes_hard_links_for_android_filesystems() {
+        let directory = test_directory();
+        let archive = package_archive(|builder| {
+            append_file(builder, "usr/share/data/original", 0o644, b"shared bytes\n");
+            append_hard_link(
+                builder,
+                "usr/share/data/alias",
+                Path::new("usr/share/data/original"),
+            );
+        });
+        let digest = stage_fixture_closure(&directory, &archive, b"signature");
+        let mut provision = ProvisionSession::begin(&directory, "fixture", "1-1", digest)
+            .expect("provision session");
+        assert_eq!(
+            provision.expected().expanded_bytes,
+            (b"shared bytes\n".len() * 2) as u64,
+        );
+        provision.extract_next(1).expect("extract package");
+        let root = provision.root().to_path_buf();
+        provision.finish().expect("finish provision");
+        assert_eq!(
+            fs::read(root.join("usr/share/data/alias")).expect("materialized hard link"),
+            b"shared bytes\n",
+        );
+        fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn reprovision_removes_more_than_legacy_workspace_limit() {
+        let directory = test_directory();
+        let archive = package_archive(|builder| {
+            append_file(builder, "usr/bin/build-tool", 0o755, b"tool\n");
+        });
+        let digest = stage_fixture_closure(&directory, &archive, b"signature");
+        let mut first =
+            ProvisionSession::begin(&directory, "fixture", "1-1", digest).expect("first provision");
+        first.extract_next(1).expect("first extraction");
+        let root = first.root().to_path_buf();
+        first.finish().expect("finish first provision");
+        let churn = root.join("tmp/churn");
+        fs::create_dir(&churn).expect("churn directory");
+        for index in 0..4_200 {
+            fs::write(churn.join(index.to_string()), b"x").expect("churn file");
+        }
+
+        let second = ProvisionSession::begin(&directory, "fixture", "1-1", digest)
+            .expect("repeat provision");
+        assert!(!second.root().join("tmp/churn").exists());
+        assert!(
+            !directory
+                .join(WORKSPACE_NAME)
+                .join(BUILD_ROOT_MANIFEST_NAME)
+                .exists(),
+        );
+        fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn extraction_rejects_a_symlink_parent_escape() {
+        let directory = test_directory();
+        let outside = test_directory();
+        let archive = package_archive(|builder| {
+            append_symlink(builder, "usr/escape", &outside);
+            append_file(builder, "usr/escape/pwn", 0o644, b"escaped\n");
+        });
+        let digest = stage_fixture_closure(&directory, &archive, b"signature");
+        let mut provision = ProvisionSession::begin(&directory, "fixture", "1-1", digest)
+            .expect("provision session");
+        assert!(provision.extract_next(1).is_err());
+        assert!(!outside.join("pwn").exists());
+        fs::remove_dir_all(directory).expect("cleanup");
+        fs::remove_dir_all(outside).expect("outside cleanup");
     }
 }

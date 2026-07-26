@@ -1,6 +1,6 @@
 # Architecture
 
-Updated: 2026-07-25
+Updated: 2026-07-26
 
 Archphene is one user-owned Arch Linux environment inside one ordinary Android
 application. Pacman and AUR packages intentionally share one filesystem, home,
@@ -89,9 +89,15 @@ resolution entry and supplies one overall SHA-256 for approval and Builder
 provenance. The manager reopens descriptors only while that exact closure
 remains retained, sends at most eight archive/signature pairs per Binder call,
 and the Builder rehashes every pair through fixed buffers before atomically
-publishing the same manifest under no-follow directory-FD-owned storage. This
-does not mutate the shared root; Builder-root extraction and
-installed/build/output disk measurements remain separate gates.
+publishing the same manifest under no-follow directory-FD-owned storage.
+Builder Rust then scans every XZ/Zstandard package before mutation, provisions
+a fresh private Arch root, rehashes each archive immediately before extraction,
+rejects path escapes and unsupported entry types, and copies package hard links
+because Android app storage denies `link(2)`. After a filesystem sync it
+atomically publishes a closure-bound root manifest. The current Samsung Code
+gate provisions all 152 packages, 48,271 verified archive entries, and
+1,221,416,416 expanded bytes without changing the shared root. Final build
+workspace, package-output, and installed-size measurements remain separate.
 
 This boundary is required because the tested stock Samsung kernel denies user,
 mount, and network namespace creation to the manager app. Android's
@@ -103,10 +109,11 @@ retaining a distinct UID and SELinux `untrusted_app` domain.
 The live Samsung boundary probe verifies signer continuity, distinct UIDs, no
 network permission or launcher entry, private workspace writes, denial of
 manager-private paths, descriptor output, and denial of direct manager access
-to builder-private state. It does not yet execute PKGBUILD. A minimal verified
-Arch build root, input manifest, explicit approval, output provenance, and
-post-build package verification remain required before installation can be
-enabled.
+to builder-private state. It also proves failed partial-root recovery and a
+published minimal root containing executable `bash`, `makepkg`, and `fakeroot`.
+It does not yet execute PKGBUILD. Hostile reviewed-input reuse, descendant
+supervision, explicit approval, output provenance, and post-build package
+verification remain required before installation can be enabled.
 
 ### Thin launcher application
 

@@ -117,16 +117,25 @@ different manager/builder UIDs, matching signers, an `untrusted_app` builder
 context, private workspace writes, denial of direct manager-data reads,
 descriptor-only output, and reciprocal private-storage denial.
 
+The Builder now scans the complete signed official closure before mutation,
+rehashes every archive immediately before extraction, rejects unsafe archive
+paths/types, and provisions a disposable private Arch root through Rust. Root
+reuse is reset with no-follow directory-FD traversal; Android-forbidden hard
+links become bounded regular copies. A filesystem sync precedes publication of
+a closure-bound root manifest. The physical Samsung recovery gate provisions
+152 packages, 48,271 verified archive entries, and 1,221,416,416 expanded
+bytes, including executable `bash`, `makepkg`, and `fakeroot`, without changing
+the shared pacman database.
+
 The current path still does not execute PKGBUILD, resolve a final installed-size
 estimate, or install its result. Capability analysis, explicit build approval,
-a verified minimal build root inside the companion, package-output provenance,
-hostile-workspace cleanup, descendant supervision, and transaction recovery
-remain required. Once community code can execute under the Builder UID, every
-Builder-writable path must be treated as attacker-controlled; reusable staging
-must move behind no-follow directory-FD operations and all prior descendants
-must be killed before reuse. A successful review or isolated build will not
-make the eventual package isolated: once manager verification and installation
-complete, its code joins the shared Archphene Linux trust domain.
+package-output provenance, hostile reviewed-input cleanup, descendant
+supervision, and transaction recovery remain required. Before community code
+can execute, every Builder-writable path must be treated as attacker-controlled
+and all prior descendants must be killed and reaped before reuse. A successful
+review or isolated build will not make the eventual package isolated: once
+manager verification and installation complete, its code joins the shared
+Archphene Linux trust domain.
 
 ## Important limitations
 

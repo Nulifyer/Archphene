@@ -1095,6 +1095,21 @@ manifest digest while the shared pacman database remains at 36 entries. The
 epoch-qualified filenames found in the real closure also corrected the
 Builder validator to accept pacman's already-verified `:` filename syntax.
 
+The isolated build root now passes its physical-device gate. Builder Rust scans
+the entire published XZ/Zstandard closure before mutation, resets stale or
+partial roots through no-follow directory-FD traversal, rehashes every archive
+again before extraction, and rejects traversal, unsupported entries, and
+symlink-parent escapes. Samsung app storage denies hard links even for the
+owning UID, so archive hard links are materialized as bounded regular copies
+and counted in the storage plan. After syncing the filesystem, the Builder
+publishes a closure-bound root manifest. A deliberately failed `tzdata`
+extraction exposed this Android behavior; the recovery run then provisioned all
+152 packages, 48,271 archive entries, and 1,221,416,416 bytes with executable
+`bash`, `makepkg`, and `fakeroot`, while the shared pacman database stayed at
+36 entries. The gate captures the full Samsung display. The retained completed
+transaction card still consumes too much of the phone review and remains a
+tracked UX defect.
+
 Code now reaches the packaged Electron executable without a Code-specific
 bridge exception. Translating Arch's standard `/usr/lib/pulseaudio` directory
 into the private-root loader path resolves `libpulsecommon`; Electron then

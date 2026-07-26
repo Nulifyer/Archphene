@@ -149,11 +149,21 @@ builder_closure_sha256="$(
     <<<"$builder_log" |
     tail -1
 )"
+builder_root_entries="$(
+  sed -nE 's/.* root=([1-9][0-9]*)\/[1-9][0-9]*/\1/p' <<<"$builder_log" |
+    tail -1
+)"
+builder_root_bytes="$(
+  sed -nE 's/.* root=[1-9][0-9]*\/([1-9][0-9]*).*/\1/p' <<<"$builder_log" |
+    tail -1
+)"
 [[ "$builder_closure_count" =~ ^[1-9][0-9]*$ &&
    "$builder_closure_archive_bytes" =~ ^[1-9][0-9]*$ &&
    "$builder_closure_signature_bytes" =~ ^[1-9][0-9]*$ &&
-   "$builder_closure_sha256" =~ ^[0-9a-f]{64}$ ]] ||
-  archphene_die "could not parse the independently published Builder closure"
+   "$builder_closure_sha256" =~ ^[0-9a-f]{64}$ &&
+   "$builder_root_entries" =~ ^[1-9][0-9]*$ &&
+   "$builder_root_bytes" =~ ^[1-9][0-9]*$ ]] ||
+  archphene_die "could not parse the independently published Builder closure and root"
 archphene_wait_ui 'Verified source downloads:' aur-sources-result 30
 ui="$ARCHPHENE_UI"
 for pattern in \
@@ -164,6 +174,7 @@ for pattern in \
   'Build closure SHA-256: [0-9a-f]{64}' \
   "Build sandbox: signed companion UID $builder_uid; no network permission or direct manager-data access; [1-9][0-9]* MiB reviewed inputs and $builder_closure_count signed build packages \\([1-9][0-9]* MiB archives\\) staged\\." \
   "Builder closure SHA-256: $builder_closure_sha256" \
+  "Isolated build root: [1-9][0-9]* (?:KiB|MiB|GiB) across $builder_root_entries verified archive entries\\." \
   'code[^<]*\.deb' \
   'direct HTTPS download' \
   'SHA-256: [0-9a-f]{64}'
@@ -305,6 +316,35 @@ first_actual_signature_sha256="$(
    "$first_actual_signature_sha256" == "$first_signature_sha256" ]] ||
   archphene_die "AUR Builder staged bytes do not match its signed closure"
 
+builder_root=files/aur-build-workspace-v2/build-root
+for tool in usr/bin/bash usr/bin/makepkg usr/bin/fakeroot
+do
+  archphene_adb_run shell run-as "$builder" test -f "$builder_root/$tool" &&
+    archphene_adb_run shell run-as "$builder" test -x "$builder_root/$tool" ||
+    archphene_die "isolated Builder root omits executable $tool"
+done
+archphene_adb_run shell run-as "$builder" test ! -e "$builder_root/.PKGINFO" ||
+  archphene_die "isolated Builder root published package metadata at its root"
+builder_root_nodes="$(
+  archphene_adb_run shell run-as "$builder" sh -c \
+    "'find $builder_root -xdev | wc -l'" |
+    tr -d '\r[:space:]'
+)"
+[[ "$builder_root_nodes" =~ ^[1-9][0-9]*$ &&
+   "$builder_root_nodes" -gt "$builder_closure_count" ]] ||
+  archphene_die "isolated Builder root does not contain a plausible extracted tree"
+builder_root_manifest="$(
+  archphene_adb_run shell run-as "$builder" \
+    cat files/aur-build-workspace-v2/build-root-manifest |
+    tr -d '\r'
+)"
+grep -Fqx 'ABBR0001' <<<"$builder_root_manifest" &&
+  grep -Fqx "closure=$builder_closure_sha256" <<<"$builder_root_manifest" &&
+  grep -Fqx "packages=$builder_closure_count" <<<"$builder_root_manifest" &&
+  grep -Fqx "entries=$builder_root_entries" <<<"$builder_root_manifest" &&
+  grep -Fqx "bytes=$builder_root_bytes" <<<"$builder_root_manifest" ||
+  archphene_die "isolated Builder root publication manifest changed"
+
 after_count="$(local_package_count)"
 [[ "$after_count" == "$before_count" ]] ||
   archphene_die "AUR source verification mutated the pacman database"
@@ -340,5 +380,6 @@ archphene_note "Archphene AUR source verification passed on $serial"
 archphene_note "  Rust verified $verified_bytes source bytes"
 archphene_note "  Signed builder UID $builder_uid is separate from manager UID $manager_uid"
 archphene_note "  Builder reverified $builder_closure_count archive/signature pairs"
+archphene_note "  Builder provisioned $builder_root_entries verified entries ($builder_root_bytes bytes)"
 archphene_note "  Pacman state remained at $after_count local database entries"
 archphene_note "  Full-device screenshot: $output_dir/$serial.png"
