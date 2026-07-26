@@ -1191,6 +1191,28 @@ mod android {
             Ok(length) => length,
             Err(error) => return copy_package_error(&error, destination),
         };
+        let Some(snapshot_sha256) = review.snapshot_sha256 else {
+            return copy_package_error(&PackageRuntimeError::InvalidPayload, destination);
+        };
+        let package_runtime = {
+            let Ok(mut registry) = registry().lock() else {
+                return ERROR_INTERNAL;
+            };
+            let Some(runtime) = registry.runtime_mut(handle) else {
+                return ERROR_INVALID_HANDLE;
+            };
+            let Some(package_runtime) = runtime.package_runtime() else {
+                return ERROR_INVALID_STATE;
+            };
+            package_runtime.clone()
+        };
+        if let Err(error) = package_runtime.retain_reviewed_aur_snapshot(
+            &review.package_base,
+            snapshot_sha256,
+            snapshot,
+        ) {
+            return copy_package_error(&error, destination);
+        }
         let Ok(mut registry) = registry().lock() else {
             return ERROR_INTERNAL;
         };
@@ -1199,6 +1221,73 @@ mod android {
         };
         runtime.retain_aur_review(review);
         i32::try_from(length).unwrap_or(ERROR_INTERNAL)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeOpenReviewedAurSnapshot(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        open_reviewed_aur_input(environment, handle, None, output_buffer)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeOpenVerifiedAurSource(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        source_index: jint,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let Ok(source_index) = usize::try_from(source_index) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if source_index >= 64 {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        open_reviewed_aur_input(environment, handle, Some(source_index), output_buffer)
+    }
+
+    fn open_reviewed_aur_input(
+        environment: JNIEnv,
+        handle: jlong,
+        source_index: Option<usize>,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let Ok(handle) = u64::try_from(handle) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(output_capacity) = environment.get_direct_buffer_capacity(&output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if output_capacity < MAX_TOOL_OUTPUT_BYTES {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let Ok(output_address) = environment.get_direct_buffer_address(&output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if output_address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
+        let result = {
+            let Ok(mut registry) = registry().lock() else {
+                return ERROR_INTERNAL;
+            };
+            let Some(runtime) = registry.runtime_mut(handle) else {
+                return ERROR_INVALID_HANDLE;
+            };
+            match source_index {
+                Some(index) => runtime.open_verified_aur_source(index),
+                None => runtime.open_reviewed_aur_snapshot(),
+            }
+        };
+        match result {
+            Ok(file) => file.into_raw_fd(),
+            Err(error) => copy_package_error(&error, destination),
+        }
     }
 
     #[unsafe(no_mangle)]

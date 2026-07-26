@@ -191,6 +191,15 @@ internal object NativeRuntime {
         sourceIndex: Int,
         outputBuffer: ByteBuffer,
     ): Long
+    external fun nativeOpenReviewedAurSnapshot(
+        handle: Long,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeOpenVerifiedAurSource(
+        handle: Long,
+        sourceIndex: Int,
+        outputBuffer: ByteBuffer,
+    ): Int
     external fun nativeFinishAurSourceDownload(
         handle: Long,
         success: Boolean,

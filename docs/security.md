@@ -77,9 +77,12 @@ not the manager UID and not one builder per installed Linux application. The
 companion is signed by the same release identity as the manager, has a distinct
 ordinary Android UID and private storage, requests no Android network
 permission, publishes no launcher Activity, and exposes only an explicit
-signature-permission Binder service. The manager will pass reviewed inputs as
-bounded read-only file descriptors and receive package output through a
-manager-opened descriptor.
+signature-permission Binder service. The manager now atomically retains the
+exact Rust-reviewed snapshot, rehashes it and each verified remote source, then
+passes them as bounded read-only regular file descriptors. The Builder
+independently bounds and hashes every descriptor before atomically publishing a
+canonical input manifest in its private storage. Package output will later
+return through a manager-opened descriptor.
 
 This is an Android UID/SELinux build boundary, not a claim that the stock
 Samsung provides Linux user namespaces. Live kernel tests reject user, mount,
@@ -93,10 +96,13 @@ descriptor-only output, and reciprocal private-storage denial.
 The current path still does not execute PKGBUILD, resolve a final installed-size
 estimate, or install its result. Capability analysis, explicit build approval,
 a verified minimal build root inside the companion, package-output provenance,
-and transaction recovery remain required. A successful review or isolated
-build will not make the eventual package isolated: once manager verification
-and installation complete, its code joins the shared Archphene Linux trust
-domain.
+hostile-workspace cleanup, descendant supervision, and transaction recovery
+remain required. Once community code can execute under the Builder UID, every
+Builder-writable path must be treated as attacker-controlled; reusable staging
+must move behind no-follow directory-FD operations and all prior descendants
+must be killed before reuse. A successful review or isolated build will not
+make the eventual package isolated: once manager verification and installation
+complete, its code joins the shared Archphene Linux trust domain.
 
 ## Important limitations
 

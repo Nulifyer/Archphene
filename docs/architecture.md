@@ -71,8 +71,10 @@ UID and not to each desktop application's launcher APK. The companion has a
 separate ordinary Android UID and private storage, requests no `INTERNET`
 permission, publishes no launcher Activity, and accepts only an explicit
 signature-permission Binder call from the matching Archphene manager signer.
-Reviewed snapshots and source files cross as bounded read-only descriptors;
-the package result returns through a manager-opened output descriptor.
+Reviewed snapshots and source files cross as bounded read-only descriptors.
+The current staging path rehashes them on both sides and publishes a canonical
+Builder-private input manifest without executing recipe code. The package
+result will return through a manager-opened output descriptor.
 
 This boundary is required because the tested stock Samsung kernel denies user,
 mount, and network namespace creation to the manager app. Android's

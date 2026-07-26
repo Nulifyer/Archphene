@@ -1043,6 +1043,21 @@ unchanged. This proves the Android boundary only; provisioning the verified
 build root, executing an approved recipe, verifying output provenance, showing
 final disk impact, and installation remain pending.
 
+The next Samsung slice now stages exact reviewed inputs across that boundary
+without executing them. Rust atomically retains the 2,237-byte cgit snapshot
+and rehashes it plus the cached 220,653,390-byte Code source before returning
+read-only descriptors. The Builder requires bounded regular inputs,
+independently hashes and atomically publishes 220,655,627 total bytes, and
+writes canonical manifest
+`9ed97af5bf70bc6a007cc34be4cb4a41a02881c8f336ff90b818b658f109fef0`.
+The live gate independently verifies the Builder-side Code digest, manifest,
+distinct UID/no-network/no-launcher properties, unchanged 36-entry pacman
+database, disabled Install action, resumed Activity, scoped fatal log, and
+full-device screenshot. Because no community recipe can execute yet, the
+Builder workspace has not become hostile. Before execution is enabled, its
+reuse path must move to no-follow directory-FD Rust operations and supervise
+all same-UID descendants.
+
 Code now reaches the packaged Electron executable without a Code-specific
 bridge exception. Translating Arch's standard `/usr/lib/pulseaudio` directory
 into the private-root loader path resolves `libpulsecommon`; Electron then

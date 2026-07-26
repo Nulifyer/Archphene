@@ -25,6 +25,7 @@ const MAX_AUR_SNAPSHOT_ENTRIES: usize = 128;
 const MAX_AUR_SNAPSHOT_EXPANDED_BYTES: usize = 8 * 1024 * 1024;
 const MAX_AUR_SNAPSHOT_ENTRY_BYTES: u64 = 512 * 1024;
 const AUR_SOURCE_CACHE_DIRECTORY: &str = "var/cache/archphene/aur-sources";
+const AUR_SNAPSHOT_CACHE_DIRECTORY: &str = "var/cache/archphene/aur-snapshots";
 const MAX_NAME_BYTES: usize = 128;
 const MAX_VERSION_BYTES: usize = 128;
 const MAX_DESCRIPTION_BYTES: usize = 2 * 1024;
@@ -240,6 +241,25 @@ impl AurSourceDownload {
             Err(error) => Err(error),
         }
     }
+
+    pub(super) fn open_verified_cache(
+        arch_root: &Path,
+        filename: &str,
+        expected_sha256: [u8; 32],
+        maximum_size: u64,
+    ) -> Result<File, super::PackageRuntimeError> {
+        let length = Self::verified_cache_size(arch_root, filename, expected_sha256, maximum_size)?
+            .ok_or(super::PackageRuntimeError::InvalidPayload)?;
+        let path = arch_root
+            .join(AUR_SOURCE_CACHE_DIRECTORY)
+            .join(format!("{}-{filename}", hex_sha256(&expected_sha256)));
+        let mut file = File::open(path)?;
+        if verify_source_file(&mut file, expected_sha256, maximum_size)? != length {
+            return Err(super::PackageRuntimeError::InvalidPayload);
+        }
+        file.seek(SeekFrom::Start(0))?;
+        Ok(file)
+    }
 }
 
 impl Drop for AurSourceDownload {
@@ -281,6 +301,82 @@ fn verify_source_file(
         return Err(super::PackageRuntimeError::InvalidPayload);
     }
     Ok(length)
+}
+
+pub(super) fn retain_reviewed_snapshot(
+    arch_root: &Path,
+    package_base: &str,
+    expected_sha256: [u8; 32],
+    bytes: &[u8],
+) -> Result<u64, super::PackageRuntimeError> {
+    if !safe_source_filename(package_base)
+        || expected_sha256 == [0; 32]
+        || bytes.is_empty()
+        || bytes.len() > MAX_AUR_SNAPSHOT_BYTES
+        || <[u8; 32]>::from(Sha256::digest(bytes)) != expected_sha256
+    {
+        return Err(super::PackageRuntimeError::InvalidPayload);
+    }
+    let cache_root = arch_root.join("var/cache");
+    require_directory(&cache_root)?;
+    let archphene_cache = cache_root.join("archphene");
+    create_or_require_directory(&archphene_cache)?;
+    let directory = arch_root.join(AUR_SNAPSHOT_CACHE_DIRECTORY);
+    create_or_require_directory(&directory)?;
+    let name = format!("{}-{package_base}.tar.gz", hex_sha256(&expected_sha256));
+    let destination = directory.join(&name);
+    let temporary = directory.join(format!("{name}.part"));
+    super::prepare_output_path(&temporary)?;
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(&temporary)?;
+    use std::io::Write;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    match fs::symlink_metadata(&destination) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(super::PackageRuntimeError::UnsafeEntry(destination));
+        }
+        Ok(_) => fs::remove_file(&destination)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(super::PackageRuntimeError::Io(error)),
+    }
+    fs::rename(&temporary, &destination)?;
+    File::open(&directory)?.sync_all()?;
+    Ok(u64::try_from(bytes.len()).map_err(|_| super::PackageRuntimeError::OutputLimit)?)
+}
+
+pub(super) fn open_reviewed_snapshot(
+    arch_root: &Path,
+    package_base: &str,
+    expected_sha256: [u8; 32],
+) -> Result<File, super::PackageRuntimeError> {
+    if !safe_source_filename(package_base) || expected_sha256 == [0; 32] {
+        return Err(super::PackageRuntimeError::InvalidPayload);
+    }
+    let path = arch_root.join(AUR_SNAPSHOT_CACHE_DIRECTORY).join(format!(
+        "{}-{package_base}.tar.gz",
+        hex_sha256(&expected_sha256)
+    ));
+    let metadata = fs::symlink_metadata(&path)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > u64::try_from(MAX_AUR_SNAPSHOT_BYTES).unwrap_or(u64::MAX)
+    {
+        return Err(super::PackageRuntimeError::UnsafeEntry(path));
+    }
+    let mut file = File::open(path)?;
+    verify_source_file(
+        &mut file,
+        expected_sha256,
+        u64::try_from(MAX_AUR_SNAPSHOT_BYTES).unwrap_or(u64::MAX),
+    )?;
+    file.seek(SeekFrom::Start(0))?;
+    Ok(file)
 }
 
 pub fn aur_snapshot_path<'a>(
@@ -1456,6 +1552,18 @@ package() {
             .expect("cached source"),
             Some(15),
         );
+        let mut reopened = AurSourceDownload::open_verified_cache(
+            &root,
+            "code.deb",
+            expected,
+            MAX_AUR_SOURCE_BYTES,
+        )
+        .expect("open verified source");
+        let mut reopened_bytes = Vec::new();
+        reopened
+            .read_to_end(&mut reopened_bytes)
+            .expect("read verified source");
+        assert_eq!(reopened_bytes, b"verified source");
         fs::write(
             root.join(AUR_SOURCE_CACHE_DIRECTORY)
                 .join(format!("{digest}-code.deb")),
@@ -1472,6 +1580,30 @@ package() {
             .expect("discard tampered source"),
             None,
         );
+        fs::remove_dir_all(root).expect("remove test root");
+    }
+
+    #[test]
+    fn retains_and_reopens_only_the_reviewed_snapshot() {
+        let root = temporary_root("snapshot-cache");
+        let bytes = snapshot(b"abc");
+        let digest: [u8; 32] = Sha256::digest(&bytes).into();
+        assert_eq!(
+            retain_reviewed_snapshot(&root, "visual-studio-code-bin", digest, &bytes)
+                .expect("retain snapshot"),
+            u64::try_from(bytes.len()).expect("snapshot length"),
+        );
+        let mut reopened =
+            open_reviewed_snapshot(&root, "visual-studio-code-bin", digest).expect("open snapshot");
+        let mut reopened_bytes = Vec::new();
+        reopened
+            .read_to_end(&mut reopened_bytes)
+            .expect("read snapshot");
+        assert_eq!(reopened_bytes, bytes);
+        assert!(matches!(
+            retain_reviewed_snapshot(&root, "visual-studio-code-bin", [7; 32], &reopened_bytes,),
+            Err(super::super::PackageRuntimeError::InvalidPayload),
+        ));
         fs::remove_dir_all(root).expect("remove test root");
     }
 

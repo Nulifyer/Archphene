@@ -1490,6 +1490,36 @@ impl PackageRuntime {
         )
     }
 
+    pub fn open_verified_aur_source(
+        &self,
+        filename: &str,
+        expected_sha256: [u8; 32],
+    ) -> Result<File, PackageRuntimeError> {
+        aur::AurSourceDownload::open_verified_cache(
+            &self.arch_root,
+            filename,
+            expected_sha256,
+            aur::MAX_AUR_SOURCE_BYTES,
+        )
+    }
+
+    pub fn retain_reviewed_aur_snapshot(
+        &self,
+        package_base: &str,
+        expected_sha256: [u8; 32],
+        bytes: &[u8],
+    ) -> Result<u64, PackageRuntimeError> {
+        aur::retain_reviewed_snapshot(&self.arch_root, package_base, expected_sha256, bytes)
+    }
+
+    pub fn open_reviewed_aur_snapshot(
+        &self,
+        package_base: &str,
+        expected_sha256: [u8; 32],
+    ) -> Result<File, PackageRuntimeError> {
+        aur::open_reviewed_snapshot(&self.arch_root, package_base, expected_sha256)
+    }
+
     pub fn clear_package_cache(&self) -> Result<u64, PackageRuntimeError> {
         let directory = self.arch_root.join(PACKAGE_CACHE_DIRECTORY);
         let metadata = fs::symlink_metadata(&directory)?;

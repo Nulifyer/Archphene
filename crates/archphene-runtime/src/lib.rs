@@ -898,6 +898,29 @@ impl RuntimeHost {
         Ok((package_runtime, source.filename.clone(), expected_sha256))
     }
 
+    pub fn open_verified_aur_source(
+        &self,
+        source_index: usize,
+    ) -> Result<File, PackageRuntimeError> {
+        let (package_runtime, filename, expected_sha256) =
+            self.aur_source_cache_candidate(source_index)?;
+        package_runtime.open_verified_aur_source(&filename, expected_sha256)
+    }
+
+    pub fn open_reviewed_aur_snapshot(&self) -> Result<File, PackageRuntimeError> {
+        let review = self
+            .aur_review
+            .as_ref()
+            .ok_or(PackageRuntimeError::InvalidPayload)?;
+        let expected_sha256 = review
+            .snapshot_sha256
+            .ok_or(PackageRuntimeError::InvalidPayload)?;
+        self.package_runtime
+            .as_ref()
+            .ok_or(PackageRuntimeError::InvalidPath)?
+            .open_reviewed_aur_snapshot(&review.package_base, expected_sha256)
+    }
+
     pub fn take_aur_source_download(&mut self) -> Result<AurSourceDownload, PackageRuntimeError> {
         self.aur_source_download
             .take()

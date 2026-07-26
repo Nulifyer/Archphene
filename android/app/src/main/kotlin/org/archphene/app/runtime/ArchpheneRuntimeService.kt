@@ -646,6 +646,16 @@ class ArchpheneRuntimeService : Service() {
         val packageName: String,
         val uid: Int,
         val selinuxContext: String,
+        val stagedBytes: Long,
+        val inputManifestSha256: String,
+    )
+
+    private data class AurBuilderInput(
+        val role: Int,
+        val filename: String,
+        val sha256: String,
+        val bytes: Long,
+        val descriptor: ParcelFileDescriptor,
     )
 
     private data class AurReviewData(
@@ -1202,7 +1212,10 @@ class ArchpheneRuntimeService : Service() {
         private const val AVAILABLE_PACKAGE_LIMIT = 100
         private val AUR_PACKAGE_NAME = Regex("[A-Za-z0-9@+._-]{1,128}")
         private val AUR_SOURCE_FILENAME = Regex("[A-Za-z0-9@+,._-]{1,240}")
+        private val SHA256_HEX = Regex("[0-9a-f]{64}")
         private const val HEX_DIGITS = "0123456789abcdef"
+        private const val AUR_BUILDER_INPUT_SNAPSHOT = 0
+        private const val AUR_BUILDER_INPUT_SOURCE = 1
         private const val AUR_REDIRECT_LIMIT = 5
         private const val AUR_STORAGE_RESERVE_BYTES = 64L * 1024 * 1024
         private const val AUR_TOTAL_SOURCE_MAX_BYTES = 8L * 1024 * 1024 * 1024
@@ -4233,7 +4246,12 @@ class ArchpheneRuntimeService : Service() {
                         }
                     }
                     retainedAurSourceEvidence = evidence.toTypedArray()
-                    val builder = probeAurBuilderCompanion()
+                    val builder =
+                        probeAurBuilderCompanion(
+                            activeHandle,
+                            review,
+                            retainedAurSourceEvidence,
+                        )
                     searchStatus =
                         formatAurReview(
                             review,
@@ -4250,7 +4268,9 @@ class ArchpheneRuntimeService : Service() {
                         Log.i(
                             TAG,
                             "AUR builder boundary ready: package=${builder.packageName} " +
-                                "uid=${builder.uid} context=${builder.selinuxContext}",
+                                "uid=${builder.uid} context=${builder.selinuxContext} " +
+                                "staged=${builder.stagedBytes} " +
+                                "manifest=${builder.inputManifestSha256}",
                         )
                     } else {
                         Log.i(TAG, "AUR builder companion is not installed")
@@ -4465,7 +4485,11 @@ class ArchpheneRuntimeService : Service() {
         }
     }
 
-    private fun probeAurBuilderCompanion(): AurBuilderReport? {
+    private fun probeAurBuilderCompanion(
+        activeHandle: Long,
+        review: AurReviewData,
+        sourceEvidence: Array<AurSourceEvidence>,
+    ): AurBuilderReport? {
         val builderPackage =
             if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) {
                 "org.archphene.builder.debug"
@@ -4509,6 +4533,63 @@ class ArchpheneRuntimeService : Service() {
                 outputFile,
                 ParcelFileDescriptor.MODE_READ_WRITE,
             )
+        val buildInputs = ArrayList<AurBuilderInput>(sourceEvidence.size + 1)
+        try {
+            aurEndpointBuffer.clear()
+            val snapshotFd =
+                NativeRuntime.nativeOpenReviewedAurSnapshot(
+                    activeHandle,
+                    aurEndpointBuffer,
+                )
+            if (snapshotFd < 0) {
+                throw IllegalStateException(readNativeMessage(aurEndpointBuffer, snapshotFd))
+            }
+            val snapshotDescriptor = ParcelFileDescriptor.adoptFd(snapshotFd)
+            val snapshotBytes = Os.fstat(snapshotDescriptor.fileDescriptor).st_size
+            buildInputs +=
+                AurBuilderInput(
+                    AUR_BUILDER_INPUT_SNAPSHOT,
+                    "${review.packageBase}.tar.gz",
+                    review.snapshotSha256,
+                    snapshotBytes,
+                    snapshotDescriptor,
+                )
+            var evidenceIndex = 0
+            review.sources.forEachIndexed { sourceIndex, source ->
+                if (source.local) {
+                    return@forEachIndexed
+                }
+                val evidence =
+                    sourceEvidence.getOrNull(evidenceIndex++)
+                        ?: throw IllegalStateException("Missing verified AUR source evidence")
+                require(evidence.filename == source.filename && source.sha256 != null)
+                aurEndpointBuffer.clear()
+                val sourceFd =
+                    NativeRuntime.nativeOpenVerifiedAurSource(
+                        activeHandle,
+                        sourceIndex,
+                        aurEndpointBuffer,
+                    )
+                if (sourceFd < 0) {
+                    throw IllegalStateException(readNativeMessage(aurEndpointBuffer, sourceFd))
+                }
+                buildInputs +=
+                    AurBuilderInput(
+                        AUR_BUILDER_INPUT_SOURCE,
+                        source.filename,
+                        source.sha256,
+                        evidence.bytes,
+                        ParcelFileDescriptor.adoptFd(sourceFd),
+                    )
+            }
+            require(evidenceIndex == sourceEvidence.size)
+        } catch (error: Exception) {
+            buildInputs.forEach { input -> runCatching { input.descriptor.close() } }
+            outputDescriptor.close()
+            sentinel.delete()
+            outputFile.delete()
+            throw error
+        }
         val connected = CountDownLatch(1)
         var remote: IBinder? = null
         var disconnected = false
@@ -4547,6 +4628,16 @@ class ArchpheneRuntimeService : Service() {
                 request.writeInterfaceToken("org.archphene.builder.AurBuilder")
                 request.writeString(sentinel.absolutePath)
                 request.writeFileDescriptor(outputDescriptor.fileDescriptor)
+                request.writeString(review.packageBase)
+                request.writeString(review.version)
+                request.writeInt(buildInputs.size)
+                buildInputs.forEach { input ->
+                    request.writeInt(input.role)
+                    request.writeString(input.filename)
+                    request.writeString(input.sha256)
+                    request.writeLong(input.bytes)
+                    request.writeFileDescriptor(input.descriptor.fileDescriptor)
+                }
                 if (!endpoint.transact(IBinder.FIRST_CALL_TRANSACTION, request, reply, 0)) {
                     throw IllegalStateException("AUR builder rejected its boundary probe")
                 }
@@ -4558,7 +4649,13 @@ class ArchpheneRuntimeService : Service() {
                 val privateWorkspaceWritable = reply.readBoolean()
                 val outputWriteSucceeded = reply.readBoolean()
                 val selinuxContext = reply.readString().orEmpty()
+                val stagedBytes = reply.readLong()
+                val inputManifestSha256 = reply.readString().orEmpty()
                 val output = outputFile.readText(StandardCharsets.US_ASCII)
+                val expectedStagedBytes =
+                    buildInputs.fold(0L) { total, input ->
+                        Math.addExact(total, input.bytes)
+                    }
                 check(
                     reportedUid == builderUid &&
                         reportedUid != Process.myUid() &&
@@ -4568,6 +4665,8 @@ class ArchpheneRuntimeService : Service() {
                         privateWorkspaceWritable &&
                         outputWriteSucceeded &&
                         output == "builder-output:$reportedUid\n" &&
+                        stagedBytes == expectedStagedBytes &&
+                        inputManifestSha256.matches(SHA256_HEX) &&
                         selinuxContext.length in 1..256 &&
                         selinuxContext.contains("untrusted_app") &&
                         selinuxContext.none { character ->
@@ -4580,6 +4679,8 @@ class ArchpheneRuntimeService : Service() {
                     builderPackage,
                     reportedUid,
                     selinuxContext,
+                    stagedBytes,
+                    inputManifestSha256,
                 )
             } finally {
                 request.recycle()
@@ -4587,6 +4688,9 @@ class ArchpheneRuntimeService : Service() {
             }
         } finally {
             outputDescriptor.close()
+            buildInputs.forEach { input ->
+                runCatching { input.descriptor.close() }
+            }
             if (bound) {
                 unbindService(connection)
             }
@@ -4809,7 +4913,9 @@ class ArchpheneRuntimeService : Service() {
                 } else {
                     append("Build sandbox: signed companion UID ")
                         .append(builder.uid)
-                        .append("; no network permission or direct manager-data access.\n")
+                        .append("; no network permission or direct manager-data access; ")
+                        .append(formatStorageBytes(builder.stagedBytes))
+                        .append(" reviewed inputs staged.\n")
                 }
             } else {
                 append("Download/build disk estimate: verify sources to measure downloads.\n")

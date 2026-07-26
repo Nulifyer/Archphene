@@ -117,16 +117,18 @@ verified_bytes="$(
 )"
 [[ "$verified_bytes" =~ ^[1-9][0-9]+$ ]] ||
   archphene_die "could not parse the verified source size"
-archphene_wait_log \
-  "AUR builder boundary ready: package=$builder uid=$builder_uid context=.*untrusted_app" 30 \
-  'ArchpheneRuntime:I *:S' >/dev/null
+builder_log="$(
+  archphene_wait_log \
+    "AUR builder boundary ready: package=$builder uid=$builder_uid context=.*untrusted_app.*staged=[1-9][0-9]+ manifest=[0-9a-f]{64}" 60 \
+    'ArchpheneRuntime:I *:S'
+)"
 archphene_wait_ui 'Verified source downloads:' aur-sources-result 30
 ui="$ARCHPHENE_UI"
 for pattern in \
   'Verified source downloads:' \
   'HTTPS endpoint[^:]*: https://' \
   'Installed/build disk impact: pending the isolated package build\.' \
-  "Build sandbox: signed companion UID $builder_uid; no network permission or direct manager-data access\\." \
+  "Build sandbox: signed companion UID $builder_uid; no network permission or direct manager-data access; [1-9][0-9]* MiB reviewed inputs staged\\." \
   'code[^<]*\.deb' \
   'direct HTTPS download' \
   'SHA-256: [0-9a-f]{64}'
@@ -169,17 +171,50 @@ builder_marker="$(
 )"
 [[ "$builder_marker" == "builder:$builder_uid" ]] ||
   archphene_die "AUR builder did not retain its private workspace marker"
-if archphene_adb_run shell run-as "$manager" \
-  cat "/data/user/0/$builder/files/aur-build-workspace/builder-owned" \
-  >/dev/null 2>&1
-then
-  archphene_die "manager unexpectedly read the builder's private workspace"
-fi
+builder_manifest="$(
+  archphene_adb_run shell run-as "$builder" \
+    cat files/aur-build-workspace/reviewed-inputs/manifest |
+    tr -d '\r'
+)"
+grep -Fqx 'ABIN0001' <<<"$builder_manifest" ||
+  archphene_die "AUR builder input manifest has the wrong version"
+grep -Fqx "package=$package" <<<"$builder_manifest" ||
+  archphene_die "AUR builder input manifest omits the exact package"
+grep -Eq $'^snapshot\tvisual-studio-code-bin\\.tar\\.gz\t[1-9][0-9]*\t[0-9a-f]{64}$' \
+  <<<"$builder_manifest" ||
+  archphene_die "AUR builder input manifest omits the reviewed snapshot"
+grep -Eq $'^source\tcode[^\t]*\\.deb\t[1-9][0-9]*\t[0-9a-f]{64}$' \
+  <<<"$builder_manifest" ||
+  archphene_die "AUR builder input manifest omits the verified remote source"
+builder_source="$(
+  archphene_adb_run shell run-as "$builder" \
+    find files/aur-build-workspace/reviewed-inputs -maxdepth 1 \
+      -type f -name "source-$expected_sha256-*.deb" |
+    tr -d '\r' |
+    tail -1
+)"
+[[ -n "$builder_source" ]] ||
+  archphene_die "AUR builder did not stage the exact verified source"
+builder_sha256="$(
+  archphene_adb_run shell run-as "$builder" sha256sum "$builder_source" |
+    awk '{ print $1 }' |
+    tr -d '\r'
+)"
+[[ "$builder_sha256" == "$expected_sha256" ]] ||
+  archphene_die "AUR builder staged source digest does not match the manager"
 
 after_count="$(local_package_count)"
 [[ "$after_count" == "$before_count" ]] ||
   archphene_die "AUR source verification mutated the pacman database"
 
+archphene_wait_ui 'Verified source downloads:' aur-sources-final-render 15
+resumed_activity="$(
+  archphene_adb_run shell dumpsys activity activities |
+    tr -d '\r' |
+    grep -m1 -E 'topResumedActivity=|mResumedActivity:|Resumed:' || true
+)"
+[[ "$resumed_activity" == *"$manager"* ]] ||
+  archphene_die "Archphene manager is not the resumed Activity before screenshot"
 archphene_adb_run shell screencap -p /sdcard/archphene-aur-sources.png
 archphene_adb_run pull /sdcard/archphene-aur-sources.png \
   "$output_dir/$serial.png" >/dev/null
