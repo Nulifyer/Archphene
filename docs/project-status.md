@@ -1236,9 +1236,12 @@ policy elsewhere. Stock Code opens a warning-free integrated Bash with working
 job control on Samsung. Force-stopping its Android launcher removes both Code
 and the terminal shell while the manager remains alive.
 
-This is still a partial Electron claim. Both device lanes use a
-temporary supported `code-flags.conf` containing `--no-sandbox`,
-`--disable-dev-shm-usage`, and diagnostic `--disable-gpu`. Android blocks
+This is still a partial Electron claim. Both device lanes use temporary
+supported flags containing `--no-sandbox` and `--disable-dev-shm-usage`.
+The diagnostic `--disable-gpu` flag has now been removed on both: full-device
+rendering and normal close remain stable, and Samsung creates a Chromium GPU
+process. That process still reports `--use-gl=disabled`, so this is not an
+accelerated-rendering claim. Android blocks
 Chromium's normal namespace sandbox; Archphene needs a reviewed generic
 Electron policy and clear reduced-isolation disclosure before automating that
 flag. Accelerated rendering, DNS/networking, editor/debugger, extensions,
