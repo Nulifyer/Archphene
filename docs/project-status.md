@@ -1339,8 +1339,9 @@ process. That process still reports `--use-gl=disabled`, so this is not an
 accelerated-rendering claim. Android blocks
 Chromium's normal namespace sandbox; Archphene needs a reviewed generic
 Electron policy and clear reduced-isolation disclosure before automating that
-flag. Accelerated rendering, DNS/networking, editor/debugger, extensions,
-IME/clipboard/dialogs, and broader lifecycle remain open.
+flag. Accelerated rendering, the marketplace's Code UI flow,
+editor/debugger, extensions, IME/clipboard/dialogs, and broader lifecycle
+remain open.
 
 Current x86_64 Code-OSS now also reaches its full Ozone/Wayland workbench with
 the shared process, Node workers, extension host, file watcher, and integrated
@@ -1354,9 +1355,9 @@ Full-device emulator captures prove cold launch and close/relaunch, and the
 current Samsung manager and all four desired wrappers were reconciled before a
 clean full-device Code cold launch, Back cleanup, and relaunch.
 
-The first real extension-marketplace UI gate fails before HTTP. A bounded
-temporary Chromium netlog shows Open VSX host resolution returning
-`getaddrinfo` `EAI_AGAIN` and `ERR_NAME_NOT_RESOLVED`; no TLS request is made.
+The first real extension-marketplace UI gate failed before HTTP. A bounded
+temporary Chromium netlog showed Open VSX host resolution returning
+`getaddrinfo` `EAI_AGAIN` and `ERR_NAME_NOT_RESOLVED`; no TLS request was made.
 The manager now publishes up to four validated, canonical IPv4/IPv6 addresses
 from Android's active `LinkProperties` through bounded direct JNI into an
 atomic, mode-0600, no-follow resolver file owned by the Rust Arch root. Scoped
@@ -1368,13 +1369,25 @@ mode repair, unchanged inode retention, and hostile destination/staging links.
 
 A direct glibc runtime probe exposed the remaining boundary: resolver loading
 uses an internal libc `fopen` that cannot be interposed by the preload bridge.
-The current packaged libc therefore still reads Android's absent
-`/etc/resolv.conf`, falls back to `127.0.0.1`, and returns `EAI_AGAIN` despite
-the correct private-root file. A narrowly scoped glibc patch now selects only
+The old packaged libc therefore read Android's absent `/etc/resolv.conf`, fell
+back to `127.0.0.1`, and returned `EAI_AGAIN` despite the correct private-root
+file. A narrowly scoped glibc patch now selects only
 `$ARCHPHENE_RUNTIME_ROOT/etc/resolv.conf` for the Android compatibility build,
-with a build-time probe prepared against a documentation-prefix DNS address.
-The checksum-pinned source rebuild and live dual-device Open VSX gate remain
-pending. Diagnostic netlog flags and output were removed after the capture.
+including libc's normal file-change detection. Both checksum-pinned x86_64 and
+AArch64 runtimes were rebuilt from the verified glibc source.
+
+A permanent exact-APK gate now runs through the real shared terminal on the
+API 36 x86_64 emulator and physical AArch64 Samsung. One process resolves
+Open VSX, atomically switches to an unavailable documentation-prefix resolver
+and observes failure, restores Android's resolver and succeeds again. It then
+uses the installed Arch `curl`, generated standard Arch CA bundle, and real TLS
+to validate a bounded Open VSX API result. The gate verifies mode 0600 resolver
+state, the exact checksum-named patched libc mapped by the live child, scoped
+fatal logs, cleanup, and full-device screenshots. AArch64 additionally exposed
+and fixed versioned `dlopen@GLIBC_2.34` interposition needed by p11-kit; generic
+`statx` fallback, safe parent-path/symlink handling, and large-file temporary
+entry points now have host regressions. The remaining marketplace work is the
+Code UI/extension workflow, not private-root DNS or TLS.
 
 The x86_64 package lane renders immediate durable progress for a real
 `dotnet-sdk` request and resolves the same shared-root `base` plus SDK closure

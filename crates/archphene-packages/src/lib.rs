@@ -58,6 +58,9 @@ const PACKAGE_TRUST_STATE: &str = "source-v1";
 const PACKAGE_TRUST_STATE_LIMIT: u64 = 512;
 const PACKAGE_KEYBOX_LIMIT: u64 = 8 * 1024 * 1024;
 const PACKAGE_TRUSTDB_LIMIT: u64 = 1024 * 1024;
+const SYSTEM_TRUST_BUNDLE: &str = "etc/ssl/certs/ca-certificates.crt";
+const SYSTEM_TRUST_SOURCE: &str = "usr/share/ca-certificates/trust-source/mozilla.trust.p11-kit";
+const SYSTEM_TRUST_BUNDLE_LIMIT: u64 = 8 * 1024 * 1024;
 const SHELLS_FILE: &str = "etc/shells";
 const SHELLS_FILE_LIMIT: u64 = 4 * 1024;
 const LOCAL_DATABASE_ENTRY_LIMIT: usize = 4096;
@@ -794,6 +797,51 @@ impl PackageRuntime {
             }
         }
         Ok(output)
+    }
+
+    pub fn ensure_system_trust(&self) -> Result<bool, PackageRuntimeError> {
+        self.materialize_system_trust(false)
+    }
+
+    fn refresh_system_trust(&self) -> Result<bool, PackageRuntimeError> {
+        self.materialize_system_trust(true)
+    }
+
+    fn materialize_system_trust(&self, force: bool) -> Result<bool, PackageRuntimeError> {
+        if !force && system_trust_bundle_ready(&self.arch_root) {
+            return Ok(false);
+        }
+        let source = self.arch_root.join(SYSTEM_TRUST_SOURCE);
+        let Ok(source_metadata) = fs::symlink_metadata(&source) else {
+            return Ok(false);
+        };
+        if source_metadata.file_type().is_symlink()
+            || !source_metadata.is_file()
+            || source_metadata.permissions().mode() & 0o022 != 0
+            || source_metadata.len() == 0
+            || source_metadata.len() > SYSTEM_TRUST_BUNDLE_LIMIT
+        {
+            return Err(PackageRuntimeError::UnsafeEntry(source));
+        }
+        let environment = self.command_environment()?;
+        for command in ["update-ca-trust", "trust"] {
+            if !environment.command_available(command)? {
+                return Ok(false);
+            }
+        }
+        let output = environment.run_as_root("update-ca-trust", &[])?;
+        if output.exit_code() != 0 {
+            let mut diagnostic = empty_tool_output();
+            diagnostic.push(output.as_bytes())?;
+            return Err(PackageRuntimeError::ToolFailed(
+                output.exit_code(),
+                Box::new(diagnostic),
+            ));
+        }
+        if !system_trust_bundle_ready(&self.arch_root) {
+            return Err(PackageRuntimeError::InvalidPayload);
+        }
+        Ok(true)
     }
 
     pub fn begin_catalog_download(
@@ -1729,6 +1777,7 @@ impl PackageRuntime {
             return Err(PackageRuntimeError::InvalidResolution);
         }
         self.clear_pending_mutation()?;
+        self.refresh_system_trust()?;
         Ok(())
     }
 
@@ -2833,6 +2882,27 @@ impl PackageRuntime {
         )
         .map_err(PackageRuntimeError::from)
     }
+}
+
+fn system_trust_bundle_ready(arch_root: &Path) -> bool {
+    let bundle = arch_root.join(SYSTEM_TRUST_BUNDLE);
+    let Ok(canonical_root) = arch_root.canonicalize() else {
+        return false;
+    };
+    let Ok(resolved) = bundle.canonicalize() else {
+        return false;
+    };
+    if resolved == canonical_root || !resolved.starts_with(&canonical_root) {
+        return false;
+    }
+    let Ok(metadata) = fs::symlink_metadata(resolved) else {
+        return false;
+    };
+    !metadata.file_type().is_symlink()
+        && metadata.is_file()
+        && metadata.permissions().mode() & 0o022 == 0
+        && metadata.len() > 0
+        && metadata.len() <= SYSTEM_TRUST_BUNDLE_LIMIT
 }
 
 #[derive(Debug)]
@@ -4259,6 +4329,35 @@ library\tlibarchphene_path_bridge.so\tlibarchphene_pkg_555555555555555555555555.
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
         }
+    }
+
+    #[test]
+    fn system_trust_bundle_must_resolve_to_a_safe_bounded_root_file() {
+        let tree = TestTree::new();
+        let extracted = tree.root.join("etc/ca-certificates/extracted");
+        let certificates = tree.root.join("etc/ssl/certs");
+        fs::create_dir_all(&extracted).expect("extracted trust directory");
+        fs::create_dir_all(&certificates).expect("certificate directory");
+        let bundle = extracted.join("tls-ca-bundle.pem");
+        fs::write(&bundle, b"certificate\n").expect("trust bundle");
+        fs::set_permissions(&bundle, fs::Permissions::from_mode(0o444)).expect("trust bundle mode");
+        symlink(
+            "../../ca-certificates/extracted/tls-ca-bundle.pem",
+            certificates.join("ca-certificates.crt"),
+        )
+        .expect("trust bundle link");
+        assert!(system_trust_bundle_ready(&tree.root));
+
+        fs::set_permissions(&bundle, fs::Permissions::from_mode(0o666))
+            .expect("unsafe trust bundle mode");
+        assert!(!system_trust_bundle_ready(&tree.root));
+        fs::set_permissions(&bundle, fs::Permissions::from_mode(0o444))
+            .expect("restore trust bundle mode");
+        fs::remove_file(certificates.join("ca-certificates.crt"))
+            .expect("remove trust bundle link");
+        symlink("/etc/passwd", certificates.join("ca-certificates.crt"))
+            .expect("escaping trust bundle link");
+        assert!(!system_trust_bundle_ready(&tree.root));
     }
 
     #[test]

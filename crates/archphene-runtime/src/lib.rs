@@ -356,6 +356,7 @@ impl RuntimeHost {
         let mut package_runtime =
             PackageRuntime::prepare(arch_root.path(), native_root, manifest, architecture)?;
         package_runtime.prepare_verification_keyring()?;
+        package_runtime.ensure_system_trust()?;
         let version = package_runtime.run(PackageTool::Pacman, &["--version"])?;
         let catalogs_ready = package_runtime.catalogs_ready();
         self.package_runtime = Some(package_runtime);

@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
@@ -32,6 +33,26 @@ int main(void) {
         close(directory);
         return 1;
     }
+    int nested = openat(directory, "nested",
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (nested < 0
+            || symlinkat("../source", nested, "parent-link") != 0
+            || readlinkat(nested, "parent-link", target, sizeof(target) - 1)
+                != (ssize_t)strlen("../source")) {
+        perror("contained parent symlink");
+        if (nested >= 0) close(nested);
+        close(directory);
+        return 1;
+    }
+    errno = 0;
+    if (symlinkat("../../../../../../etc/passwd", nested, "escape") != -1
+            || errno != EACCES) {
+        fputs("escaping relative symlink was accepted\n", stderr);
+        close(nested);
+        close(directory);
+        return 1;
+    }
+    close(nested);
     close(directory);
     puts("directory-link-ok");
     return 0;

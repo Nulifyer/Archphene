@@ -70,7 +70,7 @@ index 389b6cfb..6688bb93 100644
 +}
 +
 +const char *
-+__archphene_resolv_conf_path (char output[PATH_MAX])
++__archphene_resolv_conf_path (char *output)
 +{
 +  const char *enabled = getenv ("ARCHPHENE_FAKE_CHROOT");
 +  const char *root = getenv ("ARCHPHENE_RUNTIME_ROOT");

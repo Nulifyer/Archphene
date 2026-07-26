@@ -1,0 +1,35 @@
+#!/usr/bin/bash
+set -euo pipefail
+
+response="/tmp/archphene-open-vsx-$$.json"
+trap 'rm -f "$response"' EXIT
+
+grep '^nameserver ' /etc/resolv.conf
+printf 'resolver-config-ready\r\n'
+/usr/bin/archphene-resolver-reload-test open-vsx.org
+
+address=
+while read -r candidate _; do
+  address="$candidate"
+  break
+done < <(getent ahosts open-vsx.org)
+[[ -n "$address" ]]
+printf 'dns-open-vsx=%s\r\n' "$address"
+
+curl \
+  --fail \
+  --silent \
+  --show-error \
+  --connect-timeout 10 \
+  --max-time 45 \
+  --max-filesize 1048576 \
+  --output "$response" \
+  'https://open-vsx.org/api/-/search?query=rust&size=1'
+grep -q '"extensions":' "$response"
+grep -q '"namespace":' "$response"
+response_size="$(wc -c < "$response")"
+((response_size > 0 && response_size <= 1048576))
+printf 'open-vsx-bytes=%s\r\n' "$response_size"
+printf 'open-vsx-ready'
+
+IFS= read -r -n 1

@@ -228,6 +228,8 @@ grep -Eq "readlink@@GLIBC_2\\.17" /tmp/path-bridge-symbols.txt
 grep -Eq "readlinkat@@GLIBC_2\\.17" /tmp/path-bridge-symbols.txt
 grep -Eq "setfsgid@@GLIBC_2\\.17" /tmp/path-bridge-symbols.txt
 grep -Eq "setfsuid@@GLIBC_2\\.17" /tmp/path-bridge-symbols.txt
+grep -Eq "dlmopen@GLIBC_2\\.34" /tmp/path-bridge-symbols.txt
+grep -Eq "dlopen@GLIBC_2\\.34" /tmp/path-bridge-symbols.txt
 
 printf "glibc-%s+sha256.%s\n" "$GLIBC_VERSION" "$GLIBC_SHA256" \
   > /out/glibc/source-commit.txt

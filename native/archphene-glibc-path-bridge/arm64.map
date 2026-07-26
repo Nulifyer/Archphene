@@ -48,9 +48,13 @@ GLIBC_2.17 {
         mkdirat;
         mkdtemp;
         mkostemp;
+        mkostemp64;
         mkostemps;
+        mkostemps64;
         mkstemp;
+        mkstemp64;
         mkstemps;
+        mkstemps64;
         msgctl;
         msgget;
         msgrcv;
@@ -112,3 +116,6 @@ GLIBC_2.33 {
         stat;
         stat64;
 } GLIBC_2.28;
+
+GLIBC_2.34 {
+} GLIBC_2.33;

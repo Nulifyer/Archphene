@@ -109,7 +109,9 @@ archphene_linux_loader_pid() {
     { parent[$1] = $2; name[$1] = $3 }
     END {
       for (candidate in name) {
-        if (name[candidate] != "loader" && name[candidate] != "libarchphene_ld.so") continue
+        if (name[candidate] != "loader" &&
+            name[candidate] != "libarchphene_ld.so" &&
+            name[candidate] !~ /^libarchphene_pkg_[0-9a-f]+\.so$/) continue
         current = candidate
         for (depth = 0; depth < 64 && current in parent; depth++) {
           if (parent[current] == root) {

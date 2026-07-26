@@ -33,6 +33,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/sysmacros.h>
 #include <time.h>
 #include <sys/un.h>
 #include <ucontext.h>
@@ -2604,7 +2605,7 @@ static const char *translate_path(const char *path, char output[PATH_MAX],
 
 static const char *translate_follow_path(const char *path,
         char output[PATH_MAX], bool *translated) {
-    if (!fake_chroot_active || path == NULL || has_parent_component(path)) {
+    if (!fake_chroot_active || path == NULL) {
         return translate_path(path, output, translated);
     }
     if (path[0] == '\0') {
@@ -2871,7 +2872,7 @@ char *canonicalize_file_name(const char *path) {
     return realpath(path, NULL);
 }
 
-void *dlopen(const char *path, int flags) {
+static void *dlopen_impl(const char *path, int flags) {
     typedef void *(*function_type)(const char *, int);
     function_type real = (function_type)dlsym(RTLD_NEXT, "dlopen");
     if (real == NULL) {
@@ -2886,7 +2887,11 @@ void *dlopen(const char *path, int flags) {
     return real(target, flags);
 }
 
-void *dlmopen(Lmid_t namespace, const char *path, int flags) {
+void *dlopen(const char *path, int flags) {
+    return dlopen_impl(path, flags);
+}
+
+static void *dlmopen_impl(Lmid_t namespace, const char *path, int flags) {
     typedef void *(*function_type)(Lmid_t, const char *, int);
     function_type real = (function_type)dlsym(RTLD_NEXT, "dlmopen");
     if (real == NULL) {
@@ -2900,6 +2905,24 @@ void *dlmopen(Lmid_t namespace, const char *path, int flags) {
     if (target == NULL) return NULL;
     return real(namespace, target, flags);
 }
+
+void *dlmopen(Lmid_t namespace, const char *path, int flags) {
+    return dlmopen_impl(namespace, path, flags);
+}
+
+#if defined(__aarch64__)
+void *archphene_dlopen_glibc_2_34(const char *path, int flags) {
+    return dlopen_impl(path, flags);
+}
+
+void *archphene_dlmopen_glibc_2_34(
+        Lmid_t namespace, const char *path, int flags) {
+    return dlmopen_impl(namespace, path, flags);
+}
+
+__asm__(".symver archphene_dlopen_glibc_2_34,dlopen@GLIBC_2.34, remove");
+__asm__(".symver archphene_dlmopen_glibc_2_34,dlmopen@GLIBC_2.34, remove");
+#endif
 
 static bool write_flags(int flags) {
     return (flags & O_ACCMODE) != O_RDONLY
@@ -3124,9 +3147,35 @@ int mkstemp(char *template) {
             real((char *)target), template, target, logical_length, translated);
 }
 
+int mkstemp64(char *template) {
+    typedef int (*function_type)(char *);
+    function_type real = RESOLVE(function_type, "mkstemp64");
+    bool translated;
+    char buffer[PATH_MAX];
+    size_t logical_length = strlen(template);
+    const char *target = translate_path(template, buffer, &translated);
+    if (target == NULL) return -1;
+    REQUIRE_REAL(real);
+    return finish_temporary_file(
+            real((char *)target), template, target, logical_length, translated);
+}
+
 int mkostemp(char *template, int flags) {
     typedef int (*function_type)(char *, int);
     function_type real = RESOLVE(function_type, "mkostemp");
+    bool translated;
+    char buffer[PATH_MAX];
+    size_t logical_length = strlen(template);
+    const char *target = translate_path(template, buffer, &translated);
+    if (target == NULL) return -1;
+    REQUIRE_REAL(real);
+    return finish_temporary_file(
+            real((char *)target, flags), template, target, logical_length, translated);
+}
+
+int mkostemp64(char *template, int flags) {
+    typedef int (*function_type)(char *, int);
+    function_type real = RESOLVE(function_type, "mkostemp64");
     bool translated;
     char buffer[PATH_MAX];
     size_t logical_length = strlen(template);
@@ -3150,9 +3199,35 @@ int mkstemps(char *template, int suffix_length) {
             target, logical_length, translated);
 }
 
+int mkstemps64(char *template, int suffix_length) {
+    typedef int (*function_type)(char *, int);
+    function_type real = RESOLVE(function_type, "mkstemps64");
+    bool translated;
+    char buffer[PATH_MAX];
+    size_t logical_length = strlen(template);
+    const char *target = translate_path(template, buffer, &translated);
+    if (target == NULL) return -1;
+    REQUIRE_REAL(real);
+    return finish_temporary_file(real((char *)target, suffix_length), template,
+            target, logical_length, translated);
+}
+
 int mkostemps(char *template, int suffix_length, int flags) {
     typedef int (*function_type)(char *, int, int);
     function_type real = RESOLVE(function_type, "mkostemps");
+    bool translated;
+    char buffer[PATH_MAX];
+    size_t logical_length = strlen(template);
+    const char *target = translate_path(template, buffer, &translated);
+    if (target == NULL) return -1;
+    REQUIRE_REAL(real);
+    return finish_temporary_file(real((char *)target, suffix_length, flags),
+            template, target, logical_length, translated);
+}
+
+int mkostemps64(char *template, int suffix_length, int flags) {
+    typedef int (*function_type)(char *, int, int);
+    function_type real = RESOLVE(function_type, "mkostemps64");
     bool translated;
     char buffer[PATH_MAX];
     size_t logical_length = strlen(template);
@@ -3491,19 +3566,76 @@ int fstatat(int directory, const char *path, struct stat *value, int flags) {
 int statx(int directory, const char *path, int flags, unsigned int mask,
         struct statx *value) {
     typedef int (*function_type)(int, const char *, int, unsigned int, struct statx *);
+    typedef int (*fstatat_type)(int, const char *, struct stat *, int);
     function_type real = RESOLVE(function_type, "statx");
     bool translated;
     char buffer[PATH_MAX];
     const char *target = translate_at_path(directory, path, buffer, &translated,
             (flags & AT_SYMLINK_NOFOLLOW) == 0);
     if (target == NULL) return -1;
-    REQUIRE_REAL(real);
-    int result = real(directory, target, flags, mask, value);
-    if (result == 0 && fake_chroot_active) {
-        value->stx_uid = 0;
-        value->stx_gid = 0;
+    int result;
+    if (real == NULL) {
+        result = -1;
+        errno = ENOSYS;
+    } else {
+        result = real(directory, target, flags, mask, value);
     }
-    return result;
+    if (result == 0 && fake_chroot_active) {
+        value->stx_uid = root_identity_active ? 0 : ARCHPHENE_USER_ID;
+        value->stx_gid = root_identity_active ? 0 : ARCHPHENE_USER_ID;
+    }
+    if (result == 0 || errno != ENOSYS) return result;
+
+    /*
+     * The compatibility filter deliberately reports raw statx syscalls as
+     * unavailable so callers that bypass symbol interposition cannot inspect
+     * an untranslated Android path. A caller that reached this wrapper has
+     * already been translated safely, so provide the normal fstatat fallback
+     * here. This also covers tools such as GNU stat that do not retry after an
+     * interposed statx function returns ENOSYS.
+     */
+    unsigned int accepted_flags = AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT
+            | AT_EMPTY_PATH | AT_STATX_SYNC_TYPE;
+    if (((unsigned int)flags & ~accepted_flags) != 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    fstatat_type real_fstatat = RESOLVE(fstatat_type, "fstatat");
+    if (real_fstatat == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    struct stat metadata;
+    int fstatat_flags = flags
+            & (AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_EMPTY_PATH);
+    if (real_fstatat(directory, target, &metadata, fstatat_flags) != 0) {
+        return -1;
+    }
+    memset(value, 0, sizeof(*value));
+    value->stx_mask = STATX_BASIC_STATS;
+    value->stx_blksize = (uint32_t)metadata.st_blksize;
+    value->stx_nlink = (uint32_t)metadata.st_nlink;
+    value->stx_uid = fake_chroot_active
+            ? (root_identity_active ? 0 : ARCHPHENE_USER_ID)
+            : metadata.st_uid;
+    value->stx_gid = fake_chroot_active
+            ? (root_identity_active ? 0 : ARCHPHENE_USER_ID)
+            : metadata.st_gid;
+    value->stx_mode = (uint16_t)metadata.st_mode;
+    value->stx_ino = metadata.st_ino;
+    value->stx_size = metadata.st_size;
+    value->stx_blocks = metadata.st_blocks;
+    value->stx_atime.tv_sec = metadata.st_atim.tv_sec;
+    value->stx_atime.tv_nsec = (uint32_t)metadata.st_atim.tv_nsec;
+    value->stx_ctime.tv_sec = metadata.st_ctim.tv_sec;
+    value->stx_ctime.tv_nsec = (uint32_t)metadata.st_ctim.tv_nsec;
+    value->stx_mtime.tv_sec = metadata.st_mtim.tv_sec;
+    value->stx_mtime.tv_nsec = (uint32_t)metadata.st_mtim.tv_nsec;
+    value->stx_rdev_major = major(metadata.st_rdev);
+    value->stx_rdev_minor = minor(metadata.st_rdev);
+    value->stx_dev_major = major(metadata.st_dev);
+    value->stx_dev_minor = minor(metadata.st_dev);
+    return 0;
 }
 
 ssize_t readlink(const char *path, char *buffer, size_t size) {
@@ -3760,9 +3892,46 @@ int symlinkat(const char *target, int directory, const char *link_path) {
     if (destination == NULL) return -1;
     bool target_translated;
     char target_buffer[PATH_MAX];
-    const char *stored_target =
-            translate_path(target, target_buffer, &target_translated);
-    if (stored_target == NULL) return -1;
+    const char *stored_target;
+    if (target[0] != '/') {
+        if (strchr(target, '\n') != NULL
+                || (fake_chroot_active
+                    && !inside_trusted_root(destination))) {
+            errno = EACCES;
+            return -1;
+        }
+        if (fake_chroot_active) {
+            char parent[PATH_MAX];
+            size_t destination_length = strlen(destination);
+            if (destination_length >= sizeof(parent)) {
+                errno = ENAMETOOLONG;
+                return -1;
+            }
+            memcpy(parent, destination, destination_length + 1);
+            char *separator = strrchr(parent, '/');
+            if (separator == NULL) {
+                errno = EACCES;
+                return -1;
+            }
+            *separator = '\0';
+            char combined[PATH_MAX];
+            int combined_length =
+                    snprintf(combined, sizeof(combined), "%s/%s", parent, target);
+            char logical[PATH_MAX];
+            if (combined_length <= 0
+                    || (size_t)combined_length >= sizeof(combined)
+                    || !normalize_logical_path(combined, logical)) {
+                errno = EACCES;
+                return -1;
+            }
+        }
+        stored_target = target;
+        target_translated = false;
+    } else {
+        stored_target =
+                translate_path(target, target_buffer, &target_translated);
+        if (stored_target == NULL) return -1;
+    }
     REQUIRE_REAL(real);
     if (translated && !fake_chroot_active) {
         errno = EROFS;

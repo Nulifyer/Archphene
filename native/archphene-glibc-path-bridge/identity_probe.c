@@ -71,6 +71,11 @@ int main(int argc, char **argv) {
         fputs("filesystem metadata identity was not virtualized\n", stderr);
         return 7;
     }
+    if (stat("/usr/share/archphene-test/..", &metadata) != 0
+            || !S_ISDIR(metadata.st_mode)) {
+        fputs("contained parent path was not normalized\n", stderr);
+        return 13;
+    }
     int proc = open("/proc", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (proc < 0 || fstatat(proc, "self/task/", &metadata, 0) != 0
             || !S_ISDIR(metadata.st_mode)) {
@@ -81,6 +86,15 @@ int main(int argc, char **argv) {
     close(proc);
 #ifdef __NR_statx
     struct statx extended_metadata;
+    if (statx(AT_FDCWD, "/proc/self/exe", AT_STATX_SYNC_AS_STAT,
+                STATX_BASIC_STATS, &extended_metadata) != 0
+            || (extended_metadata.stx_mask & STATX_BASIC_STATS)
+                != STATX_BASIC_STATS
+            || extended_metadata.stx_uid != expected
+            || extended_metadata.stx_gid != expected) {
+        fputs("interposed statx fallback did not preserve metadata\n", stderr);
+        return 12;
+    }
     errno = 0;
     if (syscall(__NR_statx, AT_FDCWD, "/proc/self/exe",
                 AT_STATX_SYNC_AS_STAT, STATX_BASIC_STATS,

@@ -118,6 +118,7 @@ test "$(<"$root/home/archphene/in-place-edit")" = after
 mkdir -p "$root/home/archphene/directory-fd/one/two"
 printf 'nested\n' >"$root/home/archphene/directory-fd/one/two/value"
 mkdir -p "$root/home/archphene/link-fd"
+mkdir -p "$root/home/archphene/link-fd/nested"
 printf 'linked\n' >"$root/home/archphene/link-fd/source"
 test "$(
   ARCHPHENE_FAKE_CHROOT=1 "$root/link-probe"

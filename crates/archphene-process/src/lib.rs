@@ -171,6 +171,23 @@ impl CommandEnvironment {
     }
 
     pub fn run(&self, command: &str, arguments: &[&str]) -> Result<CommandOutput, ProcessError> {
+        self.run_with_identity(command, arguments, false)
+    }
+
+    pub fn run_as_root(
+        &self,
+        command: &str,
+        arguments: &[&str],
+    ) -> Result<CommandOutput, ProcessError> {
+        self.run_with_identity(command, arguments, true)
+    }
+
+    fn run_with_identity(
+        &self,
+        command: &str,
+        arguments: &[&str],
+        root_identity: bool,
+    ) -> Result<CommandOutput, ProcessError> {
         validate_request(command, arguments)?;
         let command_path = resolve_installed_command(&self.arch_root, command)?;
         let launch = prepare_launch(&self.arch_root, command, command_path)?;
@@ -182,8 +199,16 @@ impl CommandEnvironment {
             .open(&output_path)?;
         let _output_guard = TemporaryOutput(output_path.clone());
         let error_file = output_file.try_clone()?;
-        let child = self
-            .build_command(&launch, arguments, "dumb")
+        let mut command_builder = self.build_command(&launch, arguments, "dumb");
+        if root_identity {
+            command_builder
+                .current_dir(&self.arch_root)
+                .env("ARCHPHENE_ROOT_IDENTITY", "1")
+                .env("HOME", "/root")
+                .env("USER", "root")
+                .env("LOGNAME", "root");
+        }
+        let child = command_builder
             .stdin(Stdio::null())
             .stdout(Stdio::from(output_file))
             .stderr(Stdio::from(error_file))
@@ -1728,6 +1753,27 @@ mod tests {
         assert_eq!(
             value("ARCHPHENE_RUNTIME_PROGRAM_PATH"),
             Some(launch.program.as_os_str()),
+        );
+        assert_eq!(value("ARCHPHENE_ROOT_IDENTITY"), None);
+
+        let mut root_command = environment.build_command(&launch, &[], "dumb");
+        root_command
+            .current_dir(&environment.arch_root)
+            .env("ARCHPHENE_ROOT_IDENTITY", "1")
+            .env("HOME", "/root")
+            .env("USER", "root")
+            .env("LOGNAME", "root");
+        let root_value = |name: &str| {
+            root_command
+                .get_envs()
+                .find_map(|(key, value)| (key == name).then_some(value).flatten())
+        };
+        assert_eq!(root_value("ARCHPHENE_ROOT_IDENTITY"), Some(OsStr::new("1")));
+        assert_eq!(root_value("HOME"), Some(OsStr::new("/root")));
+        assert_eq!(root_value("USER"), Some(OsStr::new("root")));
+        assert_eq!(
+            root_command.get_current_dir(),
+            Some(environment.arch_root.as_path())
         );
 
         let gui = environment.build_gui_command(&launch, &["--new-window"], "launcher-7.sock");

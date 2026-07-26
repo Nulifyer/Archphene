@@ -1,3 +1,5 @@
+#define _LARGEFILE64_SOURCE
+
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,6 +37,20 @@ int main(void) {
     if (close(descriptor) != 0
             || unlink("/tmp/.archphene-creat") != 0) {
         perror("creat cleanup");
+        return 1;
+    }
+    char file[] = "/tmp/.archphene-file.XXXXXX";
+    descriptor = mkstemp64(file);
+    if (descriptor < 0) {
+        perror("mkstemp64");
+        return 1;
+    }
+    static const char file_prefix[] = "/tmp/.archphene-file.";
+    if (strncmp(file, file_prefix, sizeof(file_prefix) - 1) != 0
+            || write(descriptor, "ok", 2) != 2
+            || close(descriptor) != 0
+            || unlink(file) != 0) {
+        perror("mkstemp64 cleanup");
         return 1;
     }
     puts("temporary-directory-ok");
