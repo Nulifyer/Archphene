@@ -8,6 +8,7 @@ rm -rf "$root"
 mkdir -p "$root/usr/share/archphene-test"
 mkdir -p "$root/usr/lib/locale/C.utf8"
 mkdir -p "$root/usr/lib/archphene-example"
+mkdir -p "$root/dev" "$root/proc" "$root/sys"
 printf expected > "$root/usr/share/archphene-test/value"
 printf expected-locale > "$root/usr/lib/locale/C.utf8/LC_CTYPE"
 cp "$(readlink -f /bin/echo)" "$root/usr/lib/archphene-example/example"
@@ -27,6 +28,12 @@ gcc -O2 -Wall -Wextra -Werror \
   -o "$root/readlink-probe" native/archphene-glibc-path-bridge/readlink_probe.c
 gcc -O2 -Wall -Wextra -Werror \
   -o "$root/identity-probe" native/archphene-glibc-path-bridge/identity_probe.c
+gcc -shared -fPIC -O2 -Wall -Wextra -Werror \
+  -o "$root/usr/lib/archphene-example/libdlopen-fixture.so" \
+  native/archphene-glibc-path-bridge/dlopen_fixture.c
+gcc -O2 -Wall -Wextra -Werror \
+  -o "$root/dlopen-probe" \
+  native/archphene-glibc-path-bridge/dlopen_probe.c -ldl
 gcc -O2 -Wall -Wextra -Werror \
   -o "$root/socket-probe" native/archphene-glibc-path-bridge/socket_probe.c
 gcc -O2 -Wall -Wextra -Werror \
@@ -41,13 +48,25 @@ gcc -O2 -Wall -Wextra -Werror \
 gcc -O2 -D_FORTIFY_SOURCE=2 -Wall -Wextra -Werror \
   -o "$root/realpath-probe" \
   native/archphene-glibc-path-bridge/realpath_probe.c
+gcc -O2 -Wall -Wextra -Werror \
+  -o "$root/directory-probe" \
+  native/archphene-glibc-path-bridge/directory_probe.c
+gcc -O2 -Wall -Wextra -Werror \
+  -o "$root/pty-probe" \
+  native/archphene-glibc-path-bridge/pty_probe.c -lutil
 export LD_PRELOAD="$output"
 export ARCHPHENE_RUNTIME_ROOT="$root"
 export XDG_RUNTIME_DIR="$root/runtime"
 mkdir -p "$XDG_RUNTIME_DIR"
 mkdir -p "$root/run"
+ARCHPHENE_FAKE_CHROOT=1 "$root/identity-probe"
+ARCHPHENE_FAKE_CHROOT=1 ARCHPHENE_ROOT_IDENTITY=1 \
+  "$root/identity-probe" --root
+ARCHPHENE_FAKE_CHROOT=1 ARCHPHENE_SUPERVISED_PROCESS_GROUP=1 \
+  "$root/identity-probe" --supervised
+test "$(ARCHPHENE_FAKE_CHROOT=1 "$root/dlopen-probe")" = dynamic-loading-ok
 test "$("$root/message-queue-probe")" = ipc-ok
-test "$("$root/landlock-probe")" = landlock-denied
+test "$("$root/landlock-probe")" = optional-sandbox-denied
 ln -s /usr/share/archphene-test/value \
   "$root/usr/share/archphene-test/absolute-value"
 test "$(
@@ -64,6 +83,16 @@ test "$(
 test "$(
   ARCHPHENE_FAKE_CHROOT=1 "$root/realpath-probe"
 )" = fortified-realpath-ok
+test "$(
+  ARCHPHENE_FAKE_CHROOT=1 "$root/directory-probe"
+)" = directory-apis-ok
+test "$(
+  ARCHPHENE_FAKE_CHROOT=1 "$root/pty-probe"
+)" = pty-apis-ok
+test "$(
+  ARCHPHENE_FAKE_CHROOT=1 ARCHPHENE_SUPERVISED_PROCESS_GROUP=1 \
+    "$root/pty-probe"
+)" = pty-apis-ok
 ARCHPHENE_FAKE_CHROOT=1 /bin/mkdir /home/archphene/legacy-mkdir
 test -d "$root/home/archphene/legacy-mkdir"
 printf 'before\n' >"$root/home/archphene/in-place-edit"
@@ -92,7 +121,7 @@ program_path="$(
   ARCHPHENE_RUNTIME_PROGRAM_PATH="$root/usr/bin/test-program" \
     "$root/readlink-probe"
 )"
-test "$program_path" = "$root/usr/bin/test-program"
+test "$program_path" = /usr/bin/test-program
 mkdir -p "$root/commands"
 cp "$(readlink -f /bin/echo)" "$root/commands/cat"
 chmod 400 "$root/commands/cat"
@@ -174,6 +203,25 @@ host_loader="$(gcc -print-file-name=ld-linux-x86-64.so.2)"
 host_libc="$(gcc -print-file-name=libc.so.6)"
 test -f "$host_loader"
 test -f "$host_libc"
+cp "$root/exec-probe" "$root/usr/lib/archphene-example/self-exec-probe"
+chmod 500 "$root/usr/lib/archphene-example/self-exec-probe"
+self_exec_output="$(
+  ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+  ARCHPHENE_RUNTIME_LOADER="$host_loader" \
+  ARCHPHENE_RUNTIME_LIB="$(dirname "$host_libc")" \
+  ARCHPHENE_RUNTIME_PROGRAM_PATH="$root/usr/lib/archphene-example/self-exec-probe" \
+  "$root/usr/lib/archphene-example/self-exec-probe" --self-exec
+)"
+test "$self_exec_output" = self-exec:self-exec-probe
+self_clean_output="$(
+  ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+  ARCHPHENE_RUNTIME_LOADER="$host_loader" \
+  ARCHPHENE_RUNTIME_LIB="$(dirname "$host_libc")" \
+  ARCHPHENE_RUNTIME_PROGRAM_PATH="$root/usr/lib/archphene-example/self-exec-probe" \
+  ARCHPHENE_FAKE_CHROOT=1 \
+  "$root/usr/lib/archphene-example/self-exec-probe" --self-exec-clean
+)"
+test "$self_clean_output" = self-clean:self-exec-probe
 cp "$(readlink -f /bin/echo)" "$root/usr/lib/archphene-example/real-example"
 chmod 500 "$root/usr/lib/archphene-example/real-example"
 cp "$root/readlink-probe" "$root/usr/lib/archphene-example/readlink-example"
@@ -211,7 +259,7 @@ real_program_path="$(
   ARCHPHENE_RUNTIME_PROGRAM_PATH=/stale/program \
   "$root/exec-probe" --direct /usr/lib/archphene-example/readlink-example
 )"
-test "$real_program_path" = "$root/usr/lib/archphene-example/readlink-example"
+test "$real_program_path" = /usr/lib/archphene-example/readlink-example
 spawned_program_path="$(
   ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
   ARCHPHENE_RUNTIME_LOADER="$host_loader" \
@@ -219,7 +267,7 @@ spawned_program_path="$(
   ARCHPHENE_RUNTIME_PROGRAM_PATH=/stale/program \
   "$root/exec-probe" --spawn-path /usr/lib/archphene-example/readlink-example
 )"
-test "$spawned_program_path" = "$root/usr/lib/archphene-example/readlink-example"
+test "$spawned_program_path" = /usr/lib/archphene-example/readlink-example
 ln -s /usr/lib/archphene-example/real-example "$root/usr/bin/absolute-bare"
 absolute_bare_output="$(
   ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
@@ -316,6 +364,35 @@ relative_link_output="$(
   "$root/exec-probe" --spawn-direct /usr/lib/archphene-example/relative-link
 )"
 test "$relative_link_output" = bridge-arg
+mkdir -p "$root/usr/lib/archphene-example/nested"
+normalized_parent_output="$(
+  ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+  ARCHPHENE_RUNTIME_LOADER="$host_loader" \
+  ARCHPHENE_RUNTIME_LIB="$(dirname "$host_libc")" \
+  "$root/exec-probe" --direct \
+    /usr/lib/archphene-example/nested/../real-example
+)"
+test "$normalized_parent_output" = bridge-arg
+translated_argument_output="$(
+  ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+  ARCHPHENE_RUNTIME_LOADER="$host_loader" \
+  ARCHPHENE_RUNTIME_LIB="$(dirname "$host_libc")" \
+  "$root/exec-probe" --direct-path-argument \
+    /usr/lib/archphene-example/real-example \
+    /usr/share/archphene-test/value
+)"
+test "$translated_argument_output" = \
+  "$root/usr/share/archphene-test/value"
+set +e
+ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+ARCHPHENE_RUNTIME_LOADER="$loader_path" \
+ARCHPHENE_RUNTIME_LIB=/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu \
+  "$root/exec-probe" --direct /../../bin/sh \
+  >"$root/escaped-parent-command.out" 2>&1
+escaped_parent_status=$?
+set -e
+test "$escaped_parent_status" -eq 2
+grep -qx 'execlp: No such file or directory' "$root/escaped-parent-command.out"
 ln -s ../../../../../../bin/sh "$root/usr/lib/archphene-example/escape"
 set +e
 ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
@@ -340,13 +417,23 @@ set -e
 test "$cyclic_nested_status" -eq 2
 grep -qx 'execlp: No such file or directory' "$root/cyclic-nested-command.out"
 cp "$root/usr/lib/archphene-example/example" \
-  "$root/usr/lib/archphene-example/writable"
-chmod 520 "$root/usr/lib/archphene-example/writable"
+  "$root/usr/lib/archphene-example/group-writable"
+chmod 520 "$root/usr/lib/archphene-example/group-writable"
+group_writable_output="$(
+  ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+  ARCHPHENE_RUNTIME_LOADER="$host_loader" \
+  ARCHPHENE_RUNTIME_LIB="$(dirname "$host_libc")" \
+    "$root/exec-probe" --direct /usr/lib/archphene-example/group-writable
+)"
+test "$group_writable_output" = bridge-arg
+cp "$root/usr/lib/archphene-example/example" \
+  "$root/usr/lib/archphene-example/world-writable"
+chmod 502 "$root/usr/lib/archphene-example/world-writable"
 set +e
 ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
 ARCHPHENE_RUNTIME_LOADER="$loader_path" \
 ARCHPHENE_RUNTIME_LIB=/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu \
-  "$root/exec-probe" --direct /usr/lib/archphene-example/writable \
+  "$root/exec-probe" --direct /usr/lib/archphene-example/world-writable \
   >"$root/writable-nested-command.out" 2>&1
 writable_nested_status=$?
 set -e

@@ -1,26 +1,50 @@
+#define _GNU_SOURCE
+
+#include <errno.h>
+#include <fcntl.h>
+#include <linux/stat.h>
 #include <pwd.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/fsuid.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <unistd.h>
 
-int main(void) {
-    if (getuid() != 0 || geteuid() != 0 || getgid() != 0 || getegid() != 0) {
-        fputs("root identity was not virtualized\n", stderr);
+int main(int argc, char **argv) {
+    uid_t expected = argc == 2 && strcmp(argv[1], "--root") == 0 ? 0 : 1000;
+    const char *expected_name = expected == 0 ? "root" : "archphene";
+    uid_t real_uid = (uid_t)-1;
+    uid_t effective_uid = (uid_t)-1;
+    uid_t saved_uid = (uid_t)-1;
+    gid_t real_gid = (gid_t)-1;
+    gid_t effective_gid = (gid_t)-1;
+    gid_t saved_gid = (gid_t)-1;
+    if (getuid() != expected || geteuid() != expected
+            || getgid() != expected || getegid() != expected) {
+        fputs("Linux identity was not virtualized\n", stderr);
         return 1;
     }
-    if (setfsuid((uid_t)-1) != 0 || setfsgid((gid_t)-1) != 0) {
+    if (getresuid(&real_uid, &effective_uid, &saved_uid) != 0
+            || getresgid(&real_gid, &effective_gid, &saved_gid) != 0
+            || real_uid != expected || effective_uid != expected
+            || saved_uid != expected || real_gid != expected
+            || effective_gid != expected || saved_gid != expected) {
+        fputs("saved Linux identity was not virtualized\n", stderr);
+        return 9;
+    }
+    if ((uid_t)setfsuid((uid_t)-1) != expected
+            || (gid_t)setfsgid((gid_t)-1) != expected) {
         fputs("filesystem identity was not virtualized\n", stderr);
         return 2;
     }
     struct passwd storage;
     struct passwd *result = NULL;
     char buffer[128];
-    if (getpwuid_r(0, &storage, buffer, sizeof(buffer), &result) != 0
+    if (getpwuid_r(expected, &storage, buffer, sizeof(buffer), &result) != 0
             || result != &storage
-            || strcmp(result->pw_name, "archphene") != 0
+            || strcmp(result->pw_name, expected_name) != 0
             || strcmp(result->pw_dir, "/home/archphene") != 0) {
         fputs("current Linux user was not virtualized\n", stderr);
         return 3;
@@ -43,9 +67,37 @@ int main(void) {
     }
     struct stat metadata;
     if (stat("/proc/self/exe", &metadata) != 0
-            || metadata.st_uid != 0 || metadata.st_gid != 0) {
+            || metadata.st_uid != expected || metadata.st_gid != expected) {
         fputs("filesystem metadata identity was not virtualized\n", stderr);
         return 7;
+    }
+    int proc = open("/proc", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (proc < 0 || fstatat(proc, "self/task/", &metadata, 0) != 0
+            || !S_ISDIR(metadata.st_mode)) {
+        if (proc >= 0) close(proc);
+        fputs("procfs directory descriptors were not preserved\n", stderr);
+        return 10;
+    }
+    close(proc);
+#ifdef __NR_statx
+    struct statx extended_metadata;
+    errno = 0;
+    if (syscall(__NR_statx, AT_FDCWD, "/proc/self/exe",
+                AT_STATX_SYNC_AS_STAT, STATX_BASIC_STATS,
+                &extended_metadata) != -1
+            || errno != ENOSYS) {
+        fputs("raw statx did not select the translated fallback\n", stderr);
+        return 11;
+    }
+#endif
+    if (argc == 2 && strcmp(argv[1], "--supervised") == 0) {
+        pid_t group = getpgrp();
+        pid_t session = getsid(0);
+        if (group <= 0 || session <= 0 || setsid() != session
+                || setpgid(0, 0) != 0 || getpgrp() != group) {
+            fputs("supervised process escaped its process group\n", stderr);
+            return 8;
+        }
     }
     return 0;
 }

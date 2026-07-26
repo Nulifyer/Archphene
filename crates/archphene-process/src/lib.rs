@@ -262,6 +262,7 @@ impl CommandEnvironment {
         Ok(GuiProcess {
             process_group: child.id(),
             child: Some(child),
+            leader_exit_status: None,
             exit_status: None,
             log_reader,
             log_bytes: [0; MAX_GUI_LOG_BYTES],
@@ -340,7 +341,10 @@ impl CommandEnvironment {
             .current_dir(self.arch_root.join("home/archphene"))
             .env_clear()
             .env("HOME", "/home/archphene")
-            .env("TMPDIR", "/tmp")
+            // Chromium/Electron issue some temporary-file syscalls inline instead
+            // of through libc, so those paths cannot be translated by the bridge.
+            // Keep the directory private while publishing its physical path.
+            .env("TMPDIR", self.arch_root.join("tmp"))
             .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/bin")
             .env("LANG", "C.UTF-8")
             .env("LC_ALL", "C.UTF-8")
@@ -385,7 +389,8 @@ impl CommandEnvironment {
             .env("XDG_CURRENT_DESKTOP", "Archphene")
             .env("GDK_BACKEND", "wayland")
             .env("QT_QPA_PLATFORM", "wayland")
-            .env("SDL_VIDEODRIVER", "wayland");
+            .env("SDL_VIDEODRIVER", "wayland")
+            .env("ARCHPHENE_SUPERVISED_PROCESS_GROUP", "1");
         command
     }
 
@@ -531,6 +536,7 @@ impl Drop for BatchProcess {
 pub struct GuiProcess {
     process_group: u32,
     child: Option<std::process::Child>,
+    leader_exit_status: Option<i32>,
     exit_status: Option<i32>,
     log_reader: UnixStream,
     log_bytes: [u8; MAX_GUI_LOG_BYTES],
@@ -541,15 +547,18 @@ pub struct GuiProcess {
 impl GuiProcess {
     pub fn exit_status(&mut self) -> Result<Option<i32>, ProcessError> {
         self.drain_logs()?;
-        if self.exit_status.is_none()
+        if self.leader_exit_status.is_none()
             && let Some(child) = self.child.as_mut()
             && let Some(status) = child.try_wait()?
         {
-            // The GUI leader may exit while helper processes remain. Address
-            // the group immediately, before the leader pid can be reused.
-            let _ = system::kill_process_group(self.process_group);
-            self.exit_status = Some(exit_code(status));
+            self.leader_exit_status = Some(exit_code(status));
             self.child = None;
+        }
+        if self.exit_status.is_none()
+            && let Some(status) = self.leader_exit_status
+            && !system::process_group_exists(self.process_group)?
+        {
+            self.exit_status = Some(status);
             self.drain_logs()?;
         }
         Ok(self.exit_status)
@@ -598,11 +607,12 @@ impl GuiProcess {
     }
 
     pub fn close(&mut self) {
-        let Some(mut child) = self.child.take() else {
-            return;
-        };
-        terminate_process_group(&mut child);
-        self.exit_status = child.wait().ok().map(exit_code);
+        let _ = system::kill_process_group(self.process_group);
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            self.leader_exit_status = child.wait().ok().map(exit_code);
+        }
+        self.exit_status = self.leader_exit_status;
         let _ = self.drain_logs();
     }
 }
@@ -1090,7 +1100,7 @@ fn resolve_installed_command(root: &Path, command: &str) -> Result<PathBuf, Proc
             path = normalize_under_root(root, &candidate)?;
             continue;
         }
-        if !safe_regular_file(&metadata) || metadata.mode() & 0o111 == 0 {
+        if !safe_installed_command(&metadata) || metadata.mode() & 0o111 == 0 {
             return Err(ProcessError::UnsafeCommand(path));
         }
         return Ok(path);
@@ -1211,6 +1221,10 @@ fn safe_regular_file(metadata: &fs::Metadata) -> bool {
     metadata.is_file() && metadata.mode() & 0o022 == 0
 }
 
+fn safe_installed_command(metadata: &fs::Metadata) -> bool {
+    metadata.is_file() && metadata.mode() & 0o002 == 0
+}
+
 struct TemporaryOutput(PathBuf);
 
 impl Drop for TemporaryOutput {
@@ -1293,6 +1307,24 @@ mod system {
             Ok(())
         } else {
             Err(io::Error::last_os_error())
+        }
+    }
+
+    pub fn process_group_exists(group: u32) -> io::Result<bool> {
+        let group = i32::try_from(group)
+            .ok()
+            .filter(|group| *group > 0)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+        // SAFETY: signal zero performs an existence/permission check and
+        // cannot mutate the process group.
+        if unsafe { kill(-group, 0) } == 0 {
+            return Ok(true);
+        }
+        let error = io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(3) => Ok(false),
+            Some(1) => Ok(true),
+            _ => Err(error),
         }
     }
 
@@ -1492,21 +1524,32 @@ mod tests {
     }
 
     #[test]
-    fn command_resolution_rejects_escape_and_writable_programs() {
+    fn command_resolution_accepts_private_group_write_and_rejects_world_write() {
         let root = TestRoot::new();
         symlink("../../../../system/bin/sh", root.0.join("usr/bin/escape")).expect("escape link");
         assert!(matches!(
             resolve_installed_command(&root.0, "escape"),
             Err(ProcessError::UnsafeCommand(_))
         ));
-        root.command("writable");
+        root.command("group-writable");
         fs::set_permissions(
-            root.0.join("usr/bin/writable"),
+            root.0.join("usr/bin/group-writable"),
+            fs::Permissions::from_mode(0o775),
+        )
+        .expect("group-writable mode");
+        assert_eq!(
+            resolve_installed_command(&root.0, "group-writable")
+                .expect("private group-write is the same Android app identity"),
+            root.0.join("usr/bin/group-writable")
+        );
+        root.command("world-writable");
+        fs::set_permissions(
+            root.0.join("usr/bin/world-writable"),
             fs::Permissions::from_mode(0o777),
         )
         .expect("writable mode");
         assert!(matches!(
-            resolve_installed_command(&root.0, "writable"),
+            resolve_installed_command(&root.0, "world-writable"),
             Err(ProcessError::UnsafeCommand(_))
         ));
     }
@@ -1565,6 +1608,8 @@ mod tests {
                 .find_map(|(key, value)| (key == name).then_some(value).flatten())
         };
         assert_eq!(value("HOME"), Some(OsStr::new("/home/archphene")));
+        let expected_tmpdir = root.0.join("tmp");
+        assert_eq!(value("TMPDIR"), Some(expected_tmpdir.as_os_str()));
         assert_eq!(
             value("PATH"),
             Some(OsStr::new("/usr/local/sbin:/usr/local/bin:/usr/bin")),
@@ -1743,6 +1788,7 @@ mod tests {
         let mut process = GuiProcess {
             process_group: 0,
             child: None,
+            leader_exit_status: Some(0),
             exit_status: Some(0),
             log_reader: reader,
             log_bytes: [0; MAX_GUI_LOG_BYTES],
@@ -1758,7 +1804,7 @@ mod tests {
     }
 
     #[test]
-    fn gui_leader_exit_terminates_remaining_process_group() {
+    fn gui_session_waits_for_remaining_process_group() {
         let marker = std::env::temp_dir().join(format!(
             "archphene-gui-descendant-{}-{}",
             std::process::id(),
@@ -1781,6 +1827,7 @@ mod tests {
         let mut process = GuiProcess {
             process_group: child.id(),
             child: Some(child),
+            leader_exit_status: None,
             exit_status: None,
             log_reader: reader,
             log_bytes: [0; MAX_GUI_LOG_BYTES],
@@ -1792,8 +1839,7 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(process.exit_status().expect("final status"), Some(7));
-        thread::sleep(Duration::from_millis(350));
-        assert!(!marker.exists(), "descendant survived its GUI leader");
+        assert!(marker.exists(), "GUI session did not retain its descendant");
         let _ = fs::remove_file(marker);
     }
 

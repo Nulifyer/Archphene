@@ -2010,6 +2010,7 @@ mod android {
             2 => package_runtime.install(package),
             3 => package_runtime.remove(package),
             4 => package_runtime.installed_origin(package),
+            5 => package_runtime.installation_bytes(package),
             _ => return ERROR_INVALID_ARGUMENT,
         };
         let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };

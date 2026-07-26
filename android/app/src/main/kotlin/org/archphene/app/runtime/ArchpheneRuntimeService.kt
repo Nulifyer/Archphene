@@ -22,6 +22,7 @@ import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.os.Parcel
 import android.os.Process
+import android.os.StatFs
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import android.system.Os
@@ -6262,6 +6263,34 @@ class ArchpheneRuntimeService : Service() {
         return String(bytes, StandardCharsets.UTF_8)
     }
 
+    private fun packageInstallationBytes(
+        activeHandle: Long,
+        packageName: String,
+    ): Long {
+        val packageBytes = packageName.toByteArray(StandardCharsets.UTF_8)
+        val packageBuffer = ByteBuffer.allocateDirect(packageBytes.size)
+        packageBuffer.put(packageBytes)
+        val outputBuffer = ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
+        val outputLength =
+            NativeRuntime.nativePackageCommand(
+                activeHandle,
+                NativeRuntime.PACKAGE_COMMAND_INSTALLATION_BYTES,
+                packageBuffer,
+                packageBytes.size,
+                outputBuffer,
+            )
+        if (outputLength <= 0) {
+            throw IllegalStateException(readNativeMessage(outputBuffer, outputLength))
+        }
+        val bytes = ByteArray(outputLength)
+        outputBuffer.position(0)
+        outputBuffer.get(bytes)
+        return String(bytes, StandardCharsets.US_ASCII)
+            .toLongOrNull()
+            ?.takeIf { value -> value > 0L }
+            ?: throw IllegalStateException("Invalid package installation size")
+    }
+
     private fun installedPackageOrigin(
         activeHandle: Long,
         packageName: String,
@@ -6758,6 +6787,22 @@ class ArchpheneRuntimeService : Service() {
                                 "Verifying ${payload.name} (${index + 1}/${packages.size})",
                             )
                             verifyPackagePayload(activeHandle, payload, scratch)
+                        }
+                        val installedBytes =
+                            packageInstallationBytes(activeHandle, normalized)
+                        val availableBytes = StatFs(filesDir.absolutePath).availableBytes
+                        val reserveBytes =
+                            maxOf(
+                                64L * 1024L * 1024L,
+                                installedBytes / 10L,
+                            )
+                        val requiredBytes = Math.addExact(installedBytes, reserveBytes)
+                        if (availableBytes < requiredBytes) {
+                            throw IllegalStateException(
+                                "Not enough storage: ${formatStorageBytes(requiredBytes)} free " +
+                                    "is required to install; " +
+                                    "${formatStorageBytes(availableBytes)} is available",
+                            )
                         }
                         if (!enterPackageCommit()) {
                             throw InterruptedException("Package operation cancelled")

@@ -43,6 +43,7 @@ class LauncherSessionService : Service() {
         var pumpStarted = false
         var clientLogged = false
         var frameLogged = false
+        var attachmentFramesLogged = 0
         var inputLogged = false
         var clipboardLogged = false
         val inputRecords = IntArray(MAX_INPUT_RECORDS * INPUT_FIELDS)
@@ -976,6 +977,7 @@ class LauncherSessionService : Service() {
             check(compositor.attach(surface, width, height, densityDpi)) {
                 "ANativeWindow attachment failed"
             }
+            session.attachmentFramesLogged = 0
             compositor.setHostActive(true)
             compositor.setClipboardActive(true)
             session.clipboardRevision = session.clipboardRevision.inc().coerceAtLeast(1)
@@ -1090,13 +1092,38 @@ class LauncherSessionService : Service() {
             ) {
                 session.frameLogged = true
                 notifyStatus(session, STATUS_RUNNING, session.authorization.label)
+            }
+            if (
+                result and NativeLauncherCompositor.FLAG_FRAME_PRESENTED != 0 &&
+                session.attachmentFramesLogged < MAX_ATTACHMENT_FRAME_LOGS
+            ) {
+                session.attachmentFramesLogged += 1
+                val selectedWidth = compositor.presentationComponent(0)
+                val selectedHeight = compositor.presentationComponent(1)
+                val surfaceWidth = compositor.presentationComponent(2)
+                val surfaceHeight = compositor.presentationComponent(3)
+                val originalWidth = compositor.presentationComponent(4)
+                val originalHeight = compositor.presentationComponent(5)
+                val logicalWidth = compositor.presentationComponent(6)
+                val logicalHeight = compositor.presentationComponent(7)
                 Log.i(
                     TAG,
-                    "Presented first Linux frame session=${session.id} " +
-                        "presentation=" +
-                        (0..9).joinToString(",") {
-                            compositor.presentationComponent(it).toString()
-                        },
+                    "Presented Linux frame session=${session.id} " +
+                        "attachmentFrame=${session.attachmentFramesLogged} " +
+                        "selected=${selectedWidth}x$selectedHeight " +
+                        "surface=${surfaceWidth}x$surfaceHeight " +
+                        "original=${originalWidth}x$originalHeight " +
+                        "logical=${logicalWidth}x$logicalHeight " +
+                        "reasons=${compositor.presentationComponent(8)}," +
+                        "${compositor.presentationComponent(9)} " +
+                        "output=${compositor.presentationComponent(10)}x" +
+                        "${compositor.presentationComponent(11)} " +
+                        "mode=${compositor.presentationComponent(12)}x" +
+                        "${compositor.presentationComponent(13)} " +
+                        "commit=${compositor.presentationComponent(14)} " +
+                        "ack=${compositor.presentationComponent(15)} " +
+                        "serial=${compositor.presentationComponent(16)} " +
+                        "pending=${compositor.presentationComponent(17)}",
                 )
             }
             pumpClipboardTransfers(session, compositor)
@@ -1562,6 +1589,7 @@ class LauncherSessionService : Service() {
         private const val STATUS_RUNNING = 2
         private const val STATUS_STOPPED = 3
         private const val MAX_INPUT_RECORDS = 32
+        private const val MAX_ATTACHMENT_FRAME_LOGS = 4
         private const val INPUT_FIELDS = 6
         private const val MAX_TOUCHES = 32
         private const val MIN_INPUT_COORDINATE = -8192

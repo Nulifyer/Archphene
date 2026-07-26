@@ -464,8 +464,8 @@ class LauncherActivity :
                         data,
                         INPUT_TOUCH_DOWN,
                         event.getPointerId(index),
-                        event.getX(index).roundToInt(),
-                        event.getY(index).roundToInt(),
+                        surfaceX(event, index),
+                        surfaceY(event, index),
                         event.eventTime.toInt(),
                     )
                 }
@@ -475,8 +475,8 @@ class LauncherActivity :
                             data,
                             INPUT_TOUCH_MOTION,
                             event.getPointerId(index),
-                            event.getX(index).roundToInt(),
-                            event.getY(index).roundToInt(),
+                            surfaceX(event, index),
+                            surfaceY(event, index),
                             event.eventTime.toInt(),
                         )
                     }
@@ -542,8 +542,8 @@ class LauncherActivity :
             writeInputRecord(
                 data,
                 INPUT_POINTER_MOTION,
-                event.x.roundToInt(),
-                event.y.roundToInt(),
+                surfaceX(event),
+                surfaceY(event),
                 event.eventTime.toInt(),
             )
             for (button in POINTER_BUTTONS) {
@@ -576,6 +576,25 @@ class LauncherActivity :
             data.recycle()
         }
     }
+
+    private fun surfaceX(
+        event: MotionEvent,
+        pointerIndex: Int = 0,
+    ): Int = surfaceCoordinate(event.getX(pointerIndex), surfaceView.left, surfaceView.width)
+
+    private fun surfaceY(
+        event: MotionEvent,
+        pointerIndex: Int = 0,
+    ): Int = surfaceCoordinate(event.getY(pointerIndex), surfaceView.top, surfaceView.height)
+
+    private fun surfaceCoordinate(
+        windowCoordinate: Float,
+        surfaceOffset: Int,
+        surfaceExtent: Int,
+    ): Int =
+        (windowCoordinate - surfaceOffset)
+            .roundToInt()
+            .coerceIn(0, (surfaceExtent - 1).coerceAtLeast(0))
 
     private fun pointerButtonsAfter(event: MotionEvent): Int {
         val reported = event.buttonState and POINTER_BUTTON_MASK

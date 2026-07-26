@@ -37,7 +37,28 @@ tasks.register<Exec>("buildArchpheneCompositor") {
     outputs.dir("android/app/build/generated/compositorJniLibs")
 }
 
+val rebuildArchphenePackageRuntimePathBridges =
+    tasks.register<Exec>("rebuildArchphenePackageRuntimePathBridges") {
+        workingDir(rootDir)
+        commandLine("bash", "scripts/rebuild-package-runtime-path-bridges.sh")
+        inputs.files(
+            file("native/archphene-glibc-path-bridge/path_bridge.c"),
+            file("native/archphene-glibc-path-bridge/arm64.map"),
+            file("scripts/rebuild-package-runtime-path-bridges.sh"),
+            file("scripts/lib/common.sh"),
+        )
+        outputs.files(
+            "tooling/build/ci-package-runtime/tooling/build/" +
+                "archphene-path-bridge-x86_64/libarchphene_path_bridge.so",
+            "tooling/build/ci-package-runtime/SHA256SUMS",
+            "tooling/build/ci-package-runtime-arm64/tooling/build/" +
+                "archphene-path-bridge-aarch64/libarchphene_path_bridge.so",
+            "tooling/build/ci-package-runtime-arm64/SHA256SUMS",
+        )
+    }
+
 tasks.register<Exec>("stageArchphenePackageRuntime") {
+    dependsOn(rebuildArchphenePackageRuntimePathBridges)
     workingDir(rootDir)
     commandLine("bash", "scripts/stage-archphene-package-runtime.sh")
     inputs.files(
@@ -55,6 +76,7 @@ tasks.register<Exec>("stageArchphenePackageRuntime") {
 }
 
 tasks.register<Exec>("stageArchpheneBuilderRuntime") {
+    dependsOn(rebuildArchphenePackageRuntimePathBridges)
     workingDir(rootDir)
     commandLine("bash", "scripts/stage-archphene-builder-runtime.sh")
     inputs.files(

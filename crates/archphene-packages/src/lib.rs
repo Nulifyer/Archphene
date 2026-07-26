@@ -63,6 +63,7 @@ const LOCAL_FILE_PATH_LIMIT: usize = 4 * 1024;
 const O_NOFOLLOW: i32 = 0o400000;
 const O_CLOEXEC: i32 = 0o2000000;
 const PATH_BRIDGE_NAME: &str = "libarchphene_path_bridge.so";
+const BASE_PACKAGE: &str = "base";
 const AARCH64_BUILD_KEY: &str = "68B3537F39A313B3E574D06777193F152BDBE6A6";
 
 const X86_64_PACMAN_CONFIG: &[u8] = b"[options]\n\
@@ -802,7 +803,11 @@ impl PackageRuntime {
     }
 
     pub fn resolve(&self, package: &str) -> Result<PackageResolution, PackageRuntimeError> {
-        self.resolve_targets(&[package])
+        if package == BASE_PACKAGE {
+            self.resolve_targets(&[BASE_PACKAGE])
+        } else {
+            self.resolve_targets(&[BASE_PACKAGE, package])
+        }
     }
 
     pub fn resolve_targets(
@@ -1262,7 +1267,11 @@ impl PackageRuntime {
 
     pub fn install(&self, package: &str) -> Result<ToolOutput, PackageRuntimeError> {
         let resolution = self.resolve(package)?;
-        self.install_resolution(&resolution, Some(package))?;
+        if package == BASE_PACKAGE {
+            self.install_resolution(&resolution, &[BASE_PACKAGE])?;
+        } else {
+            self.install_resolution(&resolution, &[BASE_PACKAGE, package])?;
+        }
         let installed = self.installed_version(package)?;
         let expected = resolution
             .as_str()?
@@ -1281,12 +1290,42 @@ impl PackageRuntime {
         Ok(installed)
     }
 
-    pub fn install_dependencies(&self, packages: &[&str]) -> Result<(), PackageRuntimeError> {
-        if packages.is_empty() {
-            return Ok(());
+    pub fn installation_bytes(&self, package: &str) -> Result<ToolOutput, PackageRuntimeError> {
+        let resolution = self.resolve(package)?;
+        let mut total = 0_u64;
+        for line in resolution.as_str()?.lines() {
+            let payload = parse_resolved_payload(line)?;
+            let archive = self
+                .arch_root
+                .join(PACKAGE_CACHE_DIRECTORY)
+                .join(payload.filename);
+            let archive = archive.to_str().ok_or(PackageRuntimeError::InvalidPath)?;
+            let package_info = self.run(PackageTool::Bsdtar, &["-xOf", archive, ".PKGINFO"])?;
+            total = total
+                .checked_add(parse_package_info_size(package_info.as_str()?)?)
+                .ok_or(PackageRuntimeError::OutputLimit)?;
         }
-        let resolution = self.resolve_targets(packages)?;
-        self.install_resolution(&resolution, None)
+        if total == 0 {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        let mut output = empty_tool_output();
+        output.push(total.to_string().as_bytes())?;
+        Ok(output)
+    }
+
+    pub fn install_dependencies(&self, packages: &[&str]) -> Result<(), PackageRuntimeError> {
+        if packages.len() >= 256 {
+            return Err(PackageRuntimeError::OutputLimit);
+        }
+        let mut targets = Vec::with_capacity(packages.len().saturating_add(1));
+        targets.push(BASE_PACKAGE);
+        for package in packages {
+            if *package != BASE_PACKAGE {
+                targets.push(*package);
+            }
+        }
+        let resolution = self.resolve_targets(&targets)?;
+        self.install_resolution(&resolution, &[BASE_PACKAGE])
     }
 
     pub fn install_verified_aur_archive(
@@ -1437,8 +1476,8 @@ impl PackageRuntime {
             MAX_PACKAGE_TRANSACTION_OUTPUT_BYTES,
             false,
         ) {
-            self.recover_database_lock()?;
-            self.recover_pending_install_reasons()?;
+            let _ = self.recover_database_lock();
+            let _ = self.recover_pending_install_reasons();
             return Err(error);
         }
         self.recover_pending_install_reasons()?;
@@ -1452,7 +1491,7 @@ impl PackageRuntime {
     fn install_resolution(
         &self,
         resolution: &PackageResolution,
-        explicit_target: Option<&str>,
+        explicit_targets: &[&str],
     ) -> Result<(), PackageRuntimeError> {
         let package_count = resolution.as_str()?.lines().count();
         let mut archives = Vec::with_capacity(package_count);
@@ -1475,7 +1514,7 @@ impl PackageRuntime {
                     .to_owned(),
                 name: payload.name.to_owned(),
                 version: payload.version.to_owned(),
-                explicitly_installed: explicit_target == Some(payload.name),
+                explicitly_installed: explicit_targets.contains(&payload.name),
             });
         }
         if archives.is_empty() || archives.len() > 256 {
@@ -1557,9 +1596,12 @@ impl PackageRuntime {
             MAX_PACKAGE_TRANSACTION_OUTPUT_BYTES,
             false,
         ) {
-            self.recover_database_lock()?;
+            // Never hide the transaction diagnostic behind a secondary
+            // cleanup failure on a damaged or full filesystem. The retained
+            // reason intent is recovered idempotently at the next startup.
+            let _ = self.recover_database_lock();
             if has_explicit {
-                self.recover_pending_install_reasons()?;
+                let _ = self.recover_pending_install_reasons();
             }
             return Err(error);
         }
@@ -2345,6 +2387,7 @@ impl PackageRuntime {
             .env("ARCHPHENE_RUNTIME_COMMAND_DIR", &self.alias_root)
             .env("ARCHPHENE_RUNTIME_ROOT", &self.arch_root)
             .env("ARCHPHENE_RUNTIME_PROGRAM_PATH", tool_path)
+            .env("ARCHPHENE_ROOT_IDENTITY", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::from(output_file))
             .stderr(Stdio::from(error_file))
@@ -3376,6 +3419,26 @@ fn parse_resolved_payload(line: &str) -> Result<ResolvedPayload<'_>, PackageRunt
     })
 }
 
+fn parse_package_info_size(input: &str) -> Result<u64, PackageRuntimeError> {
+    let mut size = None;
+    for line in input.lines() {
+        let Some(value) = line.strip_prefix("size = ") else {
+            continue;
+        };
+        if size.is_some() {
+            return Err(PackageRuntimeError::InvalidPayload);
+        }
+        let parsed = value
+            .parse::<u64>()
+            .map_err(|_| PackageRuntimeError::InvalidPayload)?;
+        if parsed > PACKAGE_ARCHIVE_LIMIT * 16 {
+            return Err(PackageRuntimeError::InvalidPayload);
+        }
+        size = Some(parsed);
+    }
+    size.ok_or(PackageRuntimeError::InvalidPayload)
+}
+
 fn resolution_push(
     output: &mut PackageResolution,
     bytes: &[u8],
@@ -4197,6 +4260,29 @@ https://geo.mirror.pkgbuild.com/extra/os/x86_64/{filename}\t{}\n",
             validate_install_plan("btop 1.4.7-1\n", &archives),
             Err(PackageRuntimeError::InvalidResolution)
         ));
+    }
+
+    #[test]
+    fn package_info_size_is_exact_bounded_and_unique() {
+        assert_eq!(
+            parse_package_info_size(
+                "pkgname = dotnet-sdk\npkgver = 10.0.10.sdk110-1\nsize = 506314752\n",
+            )
+            .expect("installed size"),
+            506_314_752,
+        );
+        assert!(matches!(
+            parse_package_info_size("pkgname = dotnet-sdk\n"),
+            Err(PackageRuntimeError::InvalidPayload),
+        ));
+        assert!(matches!(
+            parse_package_info_size("size = 1\nsize = 2\n"),
+            Err(PackageRuntimeError::InvalidPayload),
+        ));
+        assert_eq!(
+            parse_package_info_size("pkgname = base\nsize = 0\n").expect("metadata-only package"),
+            0,
+        );
     }
 
     #[test]

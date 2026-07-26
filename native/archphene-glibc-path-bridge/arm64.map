@@ -16,6 +16,8 @@ GLIBC_2.17 {
         chmod;
         canonicalize_file_name;
         connect;
+        dlmopen;
+        dlopen;
         eaccess;
         faccessat;
         fchmodat;
@@ -24,9 +26,12 @@ GLIBC_2.17 {
         fchownat;
         fopen;
         fopen64;
+        forkpty;
         getegid;
         geteuid;
         getgid;
+        getresgid;
+        getresuid;
         getpwnam;
         getpwnam_r;
         getpwuid;
@@ -34,6 +39,7 @@ GLIBC_2.17 {
         get_current_dir_name;
         getcwd;
         getuid;
+        inotify_add_watch;
         isatty;
         lchown;
         link;
@@ -52,6 +58,7 @@ GLIBC_2.17 {
         open64;
         openat;
         openat64;
+        openpty;
         opendir;
         posix_spawn;
         posix_spawnp;
@@ -60,8 +67,11 @@ GLIBC_2.17 {
         rename;
         renameat;
         rmdir;
+        scandir;
+        scandir64;
         symlink;
         symlinkat;
+        syscall;
         unlink;
         unlinkat;
         execlp;
@@ -75,6 +85,8 @@ GLIBC_2.17 {
         semget;
         semop;
         semtimedop;
+        setpgid;
+        setsid;
         setfsgid;
         setfsuid;
         shm_open;

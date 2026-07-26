@@ -19,6 +19,15 @@ preferences described below are the retained product policy from the validated
 prototype; migrating those live toolkit bridges into the shared-root greenfield
 runtime remains pending.
 
+The phone auto-density policy also preserves a 432-logical-pixel short edge
+when a desktop client declares that conventional minimum. On the 1080-pixel
+Samsung display this selects 400 dpi, allowing stock Code to commit an exact
+1080-pixel raster instead of scaling a 1134-pixel buffer back with nearest
+neighbor filtering. Input originates in Activity-window coordinates and is
+translated into the inset Surface before the compositor's physical-to-logical
+mapping; full-device Code gates cover both crisp pixels and exact visible
+touch targets with and without the IME.
+
 ## User controls
 
 Settings exposes separate controls for:

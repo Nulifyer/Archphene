@@ -1117,6 +1117,7 @@ impl LauncherSurfaceCompositor {
         if window.is_null() {
             return -3;
         }
+        let density_dpi = launcher_auto_density_dpi(width, height, density_dpi);
         let logical_width = launcher_logical_extent(width, density_dpi);
         let logical_height = launcher_logical_extent(height, density_dpi);
         const AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM: i32 = 1;
@@ -1202,6 +1203,21 @@ fn launcher_logical_extent(physical: i32, density_dpi: i32) -> i32 {
 }
 
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn launcher_auto_density_dpi(width: i32, height: i32, android_density_dpi: i32) -> i32 {
+    const MIN_DESKTOP_LOGICAL_EXTENT: i32 = 432;
+    let short_extent = width.min(height);
+    let density_for_minimum = i32::try_from(
+        i64::from(short_extent)
+            .saturating_mul(160)
+            .saturating_div(i64::from(MIN_DESKTOP_LOGICAL_EXTENT)),
+    )
+    .unwrap_or(android_density_dpi);
+    android_density_dpi
+        .min(density_for_minimum)
+        .clamp(72, 1_000)
+}
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 fn configure_launcher_output(
     core: &mut CompositorCore,
     width: i32,
@@ -1211,6 +1227,7 @@ fn configure_launcher_output(
     if !valid_launcher_surface_size(width, height) || !valid_launcher_density(density_dpi) {
         return 0;
     }
+    let density_dpi = launcher_auto_density_dpi(width, height, density_dpi);
     let logical_width = launcher_logical_extent(width, density_dpi);
     let logical_height = launcher_logical_extent(height, density_dpi);
     let scale = density_dpi.saturating_add(159).saturating_div(160).max(1);
@@ -1635,6 +1652,30 @@ fn launcher_presentation_component(state: &CompositorState, component: i32) -> i
     let selected = launcher_presentation_frame(state);
     let root = state.root_surface.as_ref().and_then(surface_frame);
     let original = root.as_ref().map(original_buffer_frame);
+    let primary_pending_configures = state
+        .primary_toplevel
+        .as_ref()
+        .and_then(toplevel_surface)
+        .and_then(|surface| {
+            surface.data::<SurfaceData>().and_then(|data| {
+                data.inner
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .xdg_surface
+                    .clone()
+            })
+        })
+        .and_then(|xdg_surface| {
+            xdg_surface.data::<XdgSurfaceData>().map(|data| {
+                data.state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .pending_configures
+                    .len()
+            })
+        })
+        .and_then(|count| i32::try_from(count).ok())
+        .unwrap_or(-1);
     let surface_state = state
         .root_surface
         .as_ref()
@@ -1689,6 +1730,14 @@ fn launcher_presentation_component(state: &CompositorState, component: i32) -> i
             }
             reasons
         }
+        10 => state.output_width,
+        11 => state.output_height,
+        12 => state.output_mode_width,
+        13 => state.output_mode_height,
+        14 => i32::try_from(state.surface_commit_count).unwrap_or(i32::MAX),
+        15 => i32::try_from(state.xdg_ack_count).unwrap_or(i32::MAX),
+        16 => i32::try_from(state.next_configure_serial).unwrap_or(i32::MAX),
+        17 => primary_pending_configures,
         _ => -1,
     }
 }
@@ -13958,23 +14007,32 @@ mod tests {
         assert_eq!(configure_launcher_output(&mut core, 1080, 2316, 450), 0);
         assert_eq!(
             (core.state.output_width, core.state.output_height),
-            (384, 823)
+            (432, 926)
         );
         assert_eq!(
             (core.state.output_mode_width, core.state.output_mode_height),
             (1080, 2316)
         );
         assert_eq!(core.state.output_scale, 3);
-        assert_eq!(core.state.output_fractional_scale, 338);
+        assert_eq!(core.state.output_fractional_scale, 300);
 
         assert_eq!(
-            scale_launcher_input_record([1, 0, 540, 1158, 7, 0], 384, 823, 1080, 2316),
-            [1, 0, 192, 412, 7, 0],
+            scale_launcher_input_record([1, 0, 540, 1158, 7, 0], 432, 926, 1080, 2316),
+            [1, 0, 216, 463, 7, 0],
         );
         assert_eq!(
-            scale_launcher_input_record([6, 1080, 2316, 9, 0, 0], 384, 823, 1080, 2316),
-            [6, 384, 823, 9, 0, 0],
+            scale_launcher_input_record([6, 1080, 2316, 9, 0, 0], 432, 926, 1080, 2316),
+            [6, 432, 926, 9, 0, 0],
         );
+    }
+
+    #[test]
+    fn launcher_auto_density_only_floors_desktop_logical_space() {
+        assert_eq!(launcher_auto_density_dpi(1080, 2202, 420), 400);
+        assert_eq!(launcher_auto_density_dpi(1080, 1343, 420), 400);
+        assert_eq!(launcher_auto_density_dpi(2316, 978, 420), 362);
+        assert_eq!(launcher_auto_density_dpi(1920, 1080, 160), 160);
+        assert_eq!(launcher_auto_density_dpi(2560, 1600, 320), 320);
     }
 
     #[test]

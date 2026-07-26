@@ -1194,26 +1194,63 @@ work. Recursive AUR dependencies, the
 install-script/scriptlet policy, verified-output retention across manager
 process death, and actual Electron/Code launch remain open.
 
-Code now reaches the packaged Electron executable without a Code-specific
-bridge exception. Translating Arch's standard `/usr/lib/pulseaudio` directory
-into the private-root loader path resolves `libpulsecommon`; Electron then
-aborts with `Invalid file descriptor to ICU data received`. Electron/Chromium
-multiprocess startup, Ozone rendering, sandboxing, and the daily-use workflow
-therefore remain unvalidated. A generic policy for other package-private
-absolute RUNPATH trees also remains open; globally mixing arbitrary
-`/usr/lib/<app>` directories would risk resolving the wrong private library.
+Current AArch64 Code now reaches and retains its Ozone/Wayland workbench without
+a package patch. The generic bridge passes Chromium's kernel `/proc`
+directory-FD probes, returns `ENOSYS` for raw `statx` so libuv selects its
+translated fallback, maps conventional and imported-syscall shared-memory
+access, publishes a physical app-private `TMPDIR` for inline syscalls, and
+translates absolute `dlopen`/`dlmopen` paths for native Node, Qt, GTK, and
+language-runtime modules. Logical `/proc/self/exe` readlink and exec support
+lets Chromium re-enter the actual Electron binary rather than the Android
+loader.
 
-Source-level tracing identified a generic candidate for that ICU failure.
-Processes started through an explicit glibc loader otherwise expose the loader
-through `/proc/self/exe`, so Electron cannot derive the neighboring
-`icudtl.dat` path. The bridge's existing bounded readlink substitution was not
-wired into the greenfield runtime and remained stale across nested execution.
-Initial commands now publish the verified real program, and every intercepted
-`exec` or `posix_spawn` replaces that value with its newly verified target.
-Host probes prove both direct and spawned target paths, the sealed dual-ABI
-bridges rebuild, and current Samsung Foot still connects and presents. This is
-not yet an Electron success claim; the x86_64 launch must be repeated when the
-emulator is used again.
+Chromium also deliberately removes `LD_PRELOAD` from utility-process
+environments. A bounded no-heap re-exec path now reconstructs only the
+initially verified bridge, root, loader, library, command-directory, identity,
+and process-group contract while preserving ordinary caller environment
+entries. A clean-environment host regression proves the bridge remains active
+and can read a logical root path. On the Samsung, full-device evidence and the
+live process tree show Code's main, network, shared-process, file-watcher, and
+extension-host services remaining alive instead of aborting with the prior
+deliberate `SIGTRAP`.
+
+The next physical-device pass closes the immediate Code resize/input and PTY
+gaps without a Code patch. Activity-window touch and pointer coordinates are
+translated into the inset launcher Surface before Wayland mapping. Phone
+auto-density preserves a 432-logical-pixel short edge, so Code commits an exact
+1080-wide Samsung raster rather than a 1134-pixel buffer that requires lossy
+downscaling. Full-device captures with the IME and at full height show crisp
+text and exact visible hamburger-menu activation. Generic `scandir`,
+`scandir64`, and `inotify_add_watch` translation keeps logical
+`/home/archphene` scans and watchers alive.
+
+The generic bridge now implements `openpty` and `forkpty` over
+`TIOCGPTPEER`, creates a controlling session for the PTY child, and allows
+normal terminal process-group changes while retaining the supervised GUI
+policy elsewhere. Stock Code opens a warning-free integrated Bash with working
+job control on Samsung. Force-stopping its Android launcher removes both Code
+and the terminal shell while the manager remains alive.
+
+This is still a partial Electron claim. The physical-device run uses a
+temporary supported `code-flags.conf` containing `--no-sandbox`,
+`--disable-dev-shm-usage`, and diagnostic `--disable-gpu`. Android blocks
+Chromium's normal namespace sandbox; Archphene needs a reviewed generic
+Electron policy and clear reduced-isolation disclosure before automating that
+flag. Accelerated rendering, DNS/networking, editor/debugger, extensions,
+IME/clipboard/dialogs, broader lifecycle, and x86_64 remain open.
+
+The x86_64 package lane now renders immediate durable progress for a real
+`dotnet-sdk` request and resolves the same shared-root `base` plus SDK closure
+for details, download, size preflight, and commit. This reused emulator needs
+56 packages and a 191 MiB download because its older root predates the complete
+`base` metapackage. After all archives and signatures verify, Rust reads each
+bounded `.PKGINFO` installed size and Android checks filesystem capacity before
+pacman mutation. A full-device gate rejects the 757 MiB requirement with only
+454 MiB available, preserves a readable 95% Failed/Review activity card, and
+leaves no .NET/base local-database entries or lock. Pacman transaction errors
+also remain primary even if best-effort lock/reason recovery encounters a
+damaged full filesystem. Successful SDK installation and the full MVC workflow
+require a larger emulator data partition.
 
 The same current-source arm64 manager preserves the Samsung shared root at 35
 installed packages and three current Foot launchers. Cached startup completes
