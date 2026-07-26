@@ -72,12 +72,31 @@ entry is deleted and downloaded again. Snapshot-local files remain covered by
 the snapshot review. Insecure, unsupported, or `SKIP` remote sources fail
 closed until their separate verification mechanism exists.
 
+Community build execution will use one hidden Archphene Builder companion APK,
+not the manager UID and not one builder per installed Linux application. The
+companion is signed by the same release identity as the manager, has a distinct
+ordinary Android UID and private storage, requests no Android network
+permission, publishes no launcher Activity, and exposes only an explicit
+signature-permission Binder service. The manager will pass reviewed inputs as
+bounded read-only file descriptors and receive package output through a
+manager-opened descriptor.
+
+This is an Android UID/SELinux build boundary, not a claim that the stock
+Samsung provides Linux user namespaces. Live kernel tests reject user, mount,
+and network namespace creation. Android's isolated-process mode denied network
+and manager storage but could not create a usable descriptor-granted build
+workspace. The selected companion model has been proven on Samsung with
+different manager/builder UIDs, matching signers, an `untrusted_app` builder
+context, private workspace writes, denial of direct manager-data reads,
+descriptor-only output, and reciprocal private-storage denial.
+
 The current path still does not execute PKGBUILD, resolve a final installed-size
 estimate, or install its result. Capability analysis, explicit build approval,
-an unprivileged disposable build environment, package-output provenance, and
-transaction recovery remain required. A successful review will not make the
-eventual package isolated: once installed, its code joins the shared Archphene
-Linux trust domain.
+a verified minimal build root inside the companion, package-output provenance,
+and transaction recovery remain required. A successful review or isolated
+build will not make the eventual package isolated: once manager verification
+and installation complete, its code joins the shared Archphene Linux trust
+domain.
 
 ## Important limitations
 

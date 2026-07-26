@@ -4,12 +4,14 @@ source "$(dirname "$0")/lib/android-test.sh"
 
 serial=
 apk=
+builder_apk=
 while (($#)); do
   case "$1" in
     --serial) serial="${2:?missing value for --serial}"; shift 2 ;;
     --apk) apk="${2:?missing value for --apk}"; shift 2 ;;
+    --builder-apk) builder_apk="${2:?missing value for --builder-apk}"; shift 2 ;;
     -h|--help)
-      echo "usage: $0 --serial SERIAL --apk PATH"
+      echo "usage: $0 --serial SERIAL --apk PATH --builder-apk PATH"
       exit 0
       ;;
     *) archphene_die "unknown argument: $1" ;;
@@ -17,10 +19,13 @@ while (($#)); do
 done
 [[ -n "$serial" ]] || archphene_die "--serial is required"
 [[ -n "$apk" ]] || archphene_die "--apk is required"
+[[ -n "$builder_apk" ]] || archphene_die "--builder-apk is required"
 
 archphene_test_init "$serial"
 archphene_require_file "$apk"
+archphene_require_file "$builder_apk"
 manager=org.archphene.app.debug
+builder=org.archphene.builder.debug
 package=visual-studio-code-bin
 output_dir="$ARCHPHENE_ROOT/tooling/build/aur-sources"
 mkdir -p "$output_dir"
@@ -38,6 +43,43 @@ local_package_count() {
 }
 
 archphene_adb_run install -r "$apk" >/dev/null
+archphene_adb_run install -r "$builder_apk" >/dev/null
+package_uids="$(
+  archphene_adb_run shell cmd package list packages -U |
+    tr -d '\r'
+)"
+manager_uid="$(
+  sed -nE "s/^package:$manager uid:([0-9]+)$/\\1/p" <<<"$package_uids"
+)"
+builder_uid="$(
+  sed -nE "s/^package:$builder uid:([0-9]+)$/\\1/p" <<<"$package_uids"
+)"
+[[ "$manager_uid" =~ ^[0-9]+$ && "$builder_uid" =~ ^[0-9]+$ ]] ||
+  archphene_die "could not resolve manager and builder UIDs"
+[[ "$manager_uid" != "$builder_uid" ]] ||
+  archphene_die "AUR builder unexpectedly shares the manager UID"
+
+manager_dump="$(archphene_adb_run shell dumpsys package "$manager")"
+builder_dump="$(archphene_adb_run shell dumpsys package "$builder")"
+manager_signature="$(
+  sed -nE 's/.*signatures:\[([^]]+)\].*/\1/p' <<<"$manager_dump" |
+    head -1
+)"
+builder_signature="$(
+  sed -nE 's/.*signatures:\[([^]]+)\].*/\1/p' <<<"$builder_dump" |
+    head -1
+)"
+[[ -n "$manager_signature" && "$manager_signature" == "$builder_signature" ]] ||
+  archphene_die "AUR builder signer does not match the manager"
+[[ "$builder_dump" != *"android.permission.INTERNET"* ]] ||
+  archphene_die "AUR builder unexpectedly requests Android network permission"
+builder_activity="$(
+  archphene_adb_run shell cmd package resolve-activity --brief "$builder" \
+    2>&1 || true
+)"
+[[ "$builder_activity" == *"No activity found"* ]] ||
+  archphene_die "AUR builder unexpectedly publishes an Android launcher activity"
+
 archphene_adb_run shell am force-stop "$manager" >/dev/null
 archphene_adb_run logcat -c
 archphene_adb_run shell monkey -p "$manager" \
@@ -75,12 +117,16 @@ verified_bytes="$(
 )"
 [[ "$verified_bytes" =~ ^[1-9][0-9]+$ ]] ||
   archphene_die "could not parse the verified source size"
+archphene_wait_log \
+  "AUR builder boundary ready: package=$builder uid=$builder_uid context=.*untrusted_app" 30 \
+  'ArchpheneRuntime:I *:S' >/dev/null
 archphene_wait_ui 'Verified source downloads:' aur-sources-result 30
 ui="$ARCHPHENE_UI"
 for pattern in \
   'Verified source downloads:' \
   'HTTPS endpoint[^:]*: https://' \
   'Installed/build disk impact: pending the isolated package build\.' \
+  "Build sandbox: signed companion UID $builder_uid; no network permission or direct manager-data access\\." \
   'code[^<]*\.deb' \
   'direct HTTPS download' \
   'SHA-256: [0-9a-f]{64}'
@@ -116,6 +162,19 @@ actual_sha256="$(
 )"
 [[ "$actual_sha256" == "$expected_sha256" ]] ||
   archphene_die "independent device SHA-256 does not match the reviewed digest"
+builder_marker="$(
+  archphene_adb_run shell run-as "$builder" \
+    cat files/aur-build-workspace/builder-owned |
+    tr -d '\r'
+)"
+[[ "$builder_marker" == "builder:$builder_uid" ]] ||
+  archphene_die "AUR builder did not retain its private workspace marker"
+if archphene_adb_run shell run-as "$manager" \
+  cat "/data/user/0/$builder/files/aur-build-workspace/builder-owned" \
+  >/dev/null 2>&1
+then
+  archphene_die "manager unexpectedly read the builder's private workspace"
+fi
 
 after_count="$(local_package_count)"
 [[ "$after_count" == "$before_count" ]] ||
@@ -133,5 +192,6 @@ fatal_log="$(archphene_adb_run logcat -d -v brief \
 
 archphene_note "Archphene AUR source verification passed on $serial"
 archphene_note "  Rust verified $verified_bytes source bytes"
+archphene_note "  Signed builder UID $builder_uid is separate from manager UID $manager_uid"
 archphene_note "  Pacman state remained at $after_count local database entries"
 archphene_note "  Full-device screenshot: $output_dir/$serial.png"

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application
+        android:allowBackup="false"
+        android:label="Archphene Builder"
+        android:supportsRtl="true">
+
+        <service
+            android:name=".AurBuilderService"
+            android:exported="true"
+            android:permission="org.archphene.permission.BIND_BUILDER"
+            android:stopWithTask="false">
+            <intent-filter>
+                <action android:name="org.archphene.action.BIND_BUILDER" />
+            </intent-filter>
+        </service>
+    </application>
+
+</manifest>

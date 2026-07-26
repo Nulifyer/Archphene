@@ -5,7 +5,9 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.ComponentName
 import android.content.Intent
+import android.content.ServiceConnection
 import android.content.SharedPreferences
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
@@ -18,6 +20,8 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.ParcelFileDescriptor
+import android.os.Parcel
+import android.os.Process
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import android.system.Os
@@ -33,6 +37,8 @@ import java.security.MessageDigest
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import javax.net.ssl.HttpsURLConnection
 import org.archphene.app.MainActivity
 import org.archphene.app.R
@@ -634,6 +640,12 @@ class ArchpheneRuntimeService : Service() {
         val bytes: Long,
         val endpoint: String,
         val cached: Boolean,
+    )
+
+    private data class AurBuilderReport(
+        val packageName: String,
+        val uid: Int,
+        val selinuxContext: String,
     )
 
     private data class AurReviewData(
@@ -4221,17 +4233,28 @@ class ArchpheneRuntimeService : Service() {
                         }
                     }
                     retainedAurSourceEvidence = evidence.toTypedArray()
+                    val builder = probeAurBuilderCompanion()
                     searchStatus =
                         formatAurReview(
                             review,
                             totalVerified,
                             retainedAurSourceEvidence,
+                            builder,
                         )
                     Log.i(
                         TAG,
                         "Verified ${remoteSources.size} AUR source(s) for " +
                             "${review.packageName}: $totalVerified bytes",
                     )
+                    if (builder != null) {
+                        Log.i(
+                            TAG,
+                            "AUR builder boundary ready: package=${builder.packageName} " +
+                                "uid=${builder.uid} context=${builder.selinuxContext}",
+                        )
+                    } else {
+                        Log.i(TAG, "AUR builder companion is not installed")
+                    }
                 } catch (error: Exception) {
                     searchStatus =
                         "AUR source verification failed: " +
@@ -4442,6 +4465,136 @@ class ArchpheneRuntimeService : Service() {
         }
     }
 
+    private fun probeAurBuilderCompanion(): AurBuilderReport? {
+        val builderPackage =
+            if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) {
+                "org.archphene.builder.debug"
+            } else {
+                "org.archphene.builder"
+            }
+        val builderInfo =
+            try {
+                @Suppress("DEPRECATION")
+                packageManager.getPackageInfo(
+                    builderPackage,
+                    PackageManager.GET_PERMISSIONS,
+                )
+            } catch (_: PackageManager.NameNotFoundException) {
+                return null
+            }
+        check(
+            packageManager.checkSignatures(packageName, builderPackage) ==
+                PackageManager.SIGNATURE_MATCH,
+        ) {
+            "Installed AUR builder signer does not match the manager"
+        }
+        check(
+            builderInfo.requestedPermissions?.none { permission ->
+                permission == android.Manifest.permission.INTERNET
+            } != false,
+        ) {
+            "AUR builder must not request network permission"
+        }
+        val builderUid =
+            builderInfo.applicationInfo?.uid
+                ?: throw IllegalStateException("AUR builder has no application UID")
+        check(builderUid != Process.myUid())
+
+        val sentinel = File(filesDir, "aur-builder-manager-sentinel")
+        val outputFile = File(cacheDir, "aur-builder-probe-output")
+        sentinel.writeText("manager-private\n", StandardCharsets.US_ASCII)
+        outputFile.writeBytes(ByteArray(0))
+        val outputDescriptor =
+            ParcelFileDescriptor.open(
+                outputFile,
+                ParcelFileDescriptor.MODE_READ_WRITE,
+            )
+        val connected = CountDownLatch(1)
+        var remote: IBinder? = null
+        var disconnected = false
+        val connection =
+            object : ServiceConnection {
+                override fun onServiceConnected(
+                    name: ComponentName?,
+                    service: IBinder?,
+                ) {
+                    remote = service
+                    connected.countDown()
+                }
+
+                override fun onServiceDisconnected(name: ComponentName?) {
+                    disconnected = true
+                    connected.countDown()
+                }
+            }
+        var bound = false
+        try {
+            bound =
+                bindService(
+                    Intent("org.archphene.action.BIND_BUILDER")
+                        .setPackage(builderPackage),
+                    connection,
+                    BIND_AUTO_CREATE,
+                )
+            if (!bound || !connected.await(10, TimeUnit.SECONDS) || disconnected) {
+                throw IllegalStateException("Could not bind the AUR builder companion")
+            }
+            val endpoint =
+                remote ?: throw IllegalStateException("AUR builder returned no Binder")
+            val request = Parcel.obtain()
+            val reply = Parcel.obtain()
+            try {
+                request.writeInterfaceToken("org.archphene.builder.AurBuilder")
+                request.writeString(sentinel.absolutePath)
+                request.writeFileDescriptor(outputDescriptor.fileDescriptor)
+                if (!endpoint.transact(IBinder.FIRST_CALL_TRANSACTION, request, reply, 0)) {
+                    throw IllegalStateException("AUR builder rejected its boundary probe")
+                }
+                reply.readException()
+                val reportedUid = reply.readInt()
+                val callingUid = reply.readInt()
+                val internetPermission = reply.readBoolean()
+                val directManagerDataReadable = reply.readBoolean()
+                val privateWorkspaceWritable = reply.readBoolean()
+                val outputWriteSucceeded = reply.readBoolean()
+                val selinuxContext = reply.readString().orEmpty()
+                val output = outputFile.readText(StandardCharsets.US_ASCII)
+                check(
+                    reportedUid == builderUid &&
+                        reportedUid != Process.myUid() &&
+                        callingUid == Process.myUid() &&
+                        !internetPermission &&
+                        !directManagerDataReadable &&
+                        privateWorkspaceWritable &&
+                        outputWriteSucceeded &&
+                        output == "builder-output:$reportedUid\n" &&
+                        selinuxContext.length in 1..256 &&
+                        selinuxContext.contains("untrusted_app") &&
+                        selinuxContext.none { character ->
+                            character.isISOControl()
+                        },
+                ) {
+                    "AUR builder companion failed its storage or permission boundary"
+                }
+                return AurBuilderReport(
+                    builderPackage,
+                    reportedUid,
+                    selinuxContext,
+                )
+            } finally {
+                request.recycle()
+                reply.recycle()
+            }
+        } finally {
+            outputDescriptor.close()
+            if (bound) {
+                unbindService(connection)
+            }
+            sentinel.delete()
+            outputFile.delete()
+        }
+    }
+
     private fun parseAurReview(
         source: ByteBuffer,
         length: Int,
@@ -4594,6 +4747,7 @@ class ArchpheneRuntimeService : Service() {
         review: AurReviewData,
         verifiedSourceBytes: Long = 0L,
         sourceEvidence: Array<AurSourceEvidence> = emptyArray(),
+        builder: AurBuilderReport? = null,
     ): String =
         buildString(
             minOf(
@@ -4650,6 +4804,13 @@ class ArchpheneRuntimeService : Service() {
                         .append('\n')
                 }
                 append("Installed/build disk impact: pending the isolated package build.\n")
+                if (builder == null) {
+                    append("Build sandbox: signed companion not installed.\n")
+                } else {
+                    append("Build sandbox: signed companion UID ")
+                        .append(builder.uid)
+                        .append("; no network permission or direct manager-data access.\n")
+                }
             } else {
                 append("Download/build disk estimate: verify sources to measure downloads.\n")
             }

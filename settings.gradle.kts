@@ -16,4 +16,5 @@ dependencyResolutionManagement {
 
 rootProject.name = "Archphene"
 include(":android:app")
+include(":android:builder")
 include(":android:launcher-template")

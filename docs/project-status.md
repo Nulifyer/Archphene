@@ -1027,6 +1027,22 @@ The visually inspected evidence is a full-device screenshot. Installed/build
 disk impact, explicit approval, isolated execution, output provenance, and
 installation remain pending.
 
+The physical Samsung also establishes the build-process boundary selected for
+the next slice. Its stock kernel rejects unprivileged user namespaces and
+mount/network namespace creation. A live Android isolated-process probe had no
+network and could not read manager-private data, but could not create a normal
+workspace through a granted directory descriptor. Archphene therefore now
+includes one hidden same-signer Builder companion APK with no
+launcher Activity or `INTERNET` permission. The current device gate verifies
+manager UID 10430 and builder UID 10345 are distinct, both APK signatures
+match, the builder runs as SELinux `untrusted_app`, owns its private workspace,
+cannot read the manager sentinel, writes through a manager-opened descriptor,
+and cannot be read directly by the manager. The full 211 MiB Code source gate
+then passes through the manager while all 36 pacman database entries remain
+unchanged. This proves the Android boundary only; provisioning the verified
+build root, executing an approved recipe, verifying output provenance, showing
+final disk impact, and installation remain pending.
+
 Code now reaches the packaged Electron executable without a Code-specific
 bridge exception. Translating Arch's standard `/usr/lib/pulseaudio` directory
 into the private-root loader path resolves `libpulsecommon`; Electron then

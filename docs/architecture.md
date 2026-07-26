@@ -20,6 +20,11 @@ Archphene manager runtime Service (one Android UID)
           ▼
 one private Arch root
   /usr  /etc  /var  /opt  /home/archphene  /tmp
+
+Archphene manager ── reviewed read-only inputs / output FD ──▶
+hidden Archphene Builder companion (separate Android UID)
+          │ no Android network permission; disposable private build root
+          └── returned package is re-verified before shared-root installation
 ```
 
 The launcher APK is an Android entry point, not a Linux container. The manager
@@ -39,7 +44,8 @@ single-user Arch installation, subject to Android's outer application sandbox.
 
 Rust owns:
 
-- the shared Arch root, pacman database, package cache, and AUR build area;
+- the shared Arch root, pacman database, official package cache, and retained
+  AUR review/source cache;
 - bounded package resolution, verification, mutation, and durable jobs;
 - desktop-entry discovery and launcher descriptors;
 - Linux process groups, Wayland sessions, terminal state, storage
@@ -57,6 +63,31 @@ Kotlin owns:
 Blocking work stays off Android's main thread. JNI remains coarse-grained and
 passes descriptors, direct buffers, native windows, and bounded snapshots
 instead of object graphs or rendered bitmaps.
+
+### Archphene Builder companion
+
+AUR recipe execution belongs to one hidden companion APK, not to the manager
+UID and not to each desktop application's launcher APK. The companion has a
+separate ordinary Android UID and private storage, requests no `INTERNET`
+permission, publishes no launcher Activity, and accepts only an explicit
+signature-permission Binder call from the matching Archphene manager signer.
+Reviewed snapshots and source files cross as bounded read-only descriptors;
+the package result returns through a manager-opened output descriptor.
+
+This boundary is required because the tested stock Samsung kernel denies user,
+mount, and network namespace creation to the manager app. Android's
+`isolatedProcess` UID removes network and direct manager-data access, but also
+cannot create a conventional build workspace through a granted directory
+descriptor. The companion's private directory supplies that workspace while
+retaining a distinct UID and SELinux `untrusted_app` domain.
+
+The live Samsung boundary probe verifies signer continuity, distinct UIDs, no
+network permission or launcher entry, private workspace writes, denial of
+manager-private paths, descriptor output, and denial of direct manager access
+to builder-private state. It does not yet execute PKGBUILD. A minimal verified
+Arch build root, input manifest, explicit approval, output provenance, and
+post-build package verification remain required before installation can be
+enabled.
 
 ### Thin launcher application
 
