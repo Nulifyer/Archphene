@@ -12,6 +12,7 @@ Notable user-facing changes will be recorded here.
 
 ### Fixed
 
+- Proved durable package-operation recovery across real emulator and Samsung reboots. Work interrupted before mutation now returns at its exact prior progress as Failed with a clear reason and enabled Review action, never a stale Cancel action; the state-preserving gate changes neither the package database nor package cache and tolerates Android-owned post-boot prompts/readiness delays.
 - Completed the generic nested-command device matrix on x86_64 and AArch64, covering an installed `/usr/bin` wrapper, `/usr/lib` shebang script, absolute root-internal symlink, and unmodified ELF. The terminal empty-state copy now reflects an already available shared shell, and its shorter command hint remains readable at the emulator's larger text scale.
 - Updated the signed-package regression for the manager's sentence-case controls, split package activity fields, persistent section selection, populated cache, and Android-owned launcher install/removal confirmations instead of treating those production behaviors as timeouts.
 - Added an unambiguous one-tap “Refresh package catalogs” recovery to durable package activity cards for catalog and trust failures. The signed catalog path now records successful recovery against the exact failed job, survives manager restart, and returns to Review; state-restoring no-network emulator/Samsung gates leave both package databases unchanged.
