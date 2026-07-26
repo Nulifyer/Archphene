@@ -587,6 +587,8 @@ class ArchpheneRuntimeService : Service() {
     private val packageResolutionRequestBuffer = ByteBuffer.allocateDirect(128)
     private val packageResolutionOutputBuffer =
         ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_RESOLUTION_OUTPUT_SIZE)
+    private val aurBuildClosureOutputBuffer =
+        ByteBuffer.allocateDirect(NativeRuntime.AUR_BUILD_CLOSURE_OUTPUT_SIZE)
     private val aurPackageBuffer = ByteBuffer.allocateDirect(128)
     private val aurEndpointBuffer =
         ByteBuffer
@@ -654,6 +656,9 @@ class ArchpheneRuntimeService : Service() {
         val packages: List<ResolvedPayload>,
         val resolutionBytes: ByteArray,
         val downloadBytes: Long,
+        val verifiedPackages: List<VerifiedBuildPackage> = emptyList(),
+        val closureManifest: ByteArray = ByteArray(0),
+        val closureManifestSha256: String = "",
         val cachedPackages: Int = 0,
         val downloadedPackages: Int = 0,
         val verified: Boolean = false,
@@ -661,6 +666,18 @@ class ArchpheneRuntimeService : Service() {
         val packageCount: Int
             get() = packages.size
     }
+
+    private data class VerifiedBuildPackage(
+        val repository: String,
+        val name: String,
+        val version: String,
+        val filename: String,
+        val url: String,
+        val archiveBytes: Long,
+        val archiveSha256: String,
+        val signatureBytes: Long,
+        val signatureSha256: String,
+    )
 
     private data class AurBuilderInput(
         val role: Int,
@@ -4284,7 +4301,8 @@ class ArchpheneRuntimeService : Service() {
                             "build=${buildEnvironment.packageCount} verified packages/" +
                             "${buildEnvironment.downloadBytes} bytes " +
                             "(cached=${buildEnvironment.cachedPackages} " +
-                            "downloaded=${buildEnvironment.downloadedPackages})",
+                            "downloaded=${buildEnvironment.downloadedPackages}) " +
+                            "manifest=${buildEnvironment.closureManifestSha256}",
                     )
                     if (builder != null) {
                         Log.i(
@@ -4810,11 +4828,89 @@ class ArchpheneRuntimeService : Service() {
         ) {
             throw SecurityException("Verified build environment does not match its plan")
         }
+        val closureManifest =
+            synchronized(aurBuildClosureOutputBuffer) {
+                aurBuildClosureOutputBuffer.clear()
+                val outputLength =
+                    NativeRuntime.nativeReadVerifiedAurBuildClosure(
+                        activeHandle,
+                        aurBuildClosureOutputBuffer,
+                    )
+                if (outputLength <= 0) {
+                    throw SecurityException(
+                        readNativeMessage(aurBuildClosureOutputBuffer, outputLength),
+                    )
+                }
+                ByteArray(outputLength).also { output ->
+                    aurBuildClosureOutputBuffer.position(0)
+                    aurBuildClosureOutputBuffer.get(output)
+                }
+            }
+        val closurePackages =
+            decodeVerifiedBuildClosure(closureManifest, environment.packages)
+        val closureManifestSha256 =
+            hexSha256(MessageDigest.getInstance("SHA-256").digest(closureManifest))
         return environment.copy(
+            verifiedPackages = closurePackages,
+            closureManifest = closureManifest,
+            closureManifestSha256 = closureManifestSha256,
             cachedPackages = cachedPackages,
             downloadedPackages = downloadedPackages,
             verified = true,
         )
+    }
+
+    private fun decodeVerifiedBuildClosure(
+        manifest: ByteArray,
+        resolvedPackages: List<ResolvedPayload>,
+    ): List<VerifiedBuildPackage> {
+        require(manifest.isNotEmpty() && manifest.size <= NativeRuntime.AUR_BUILD_CLOSURE_OUTPUT_SIZE)
+        val lines = String(manifest, StandardCharsets.US_ASCII).lines()
+        require(lines.firstOrNull() == "ABPC0001")
+        val packageLines = lines.drop(1).filter { line -> line.isNotEmpty() }
+        require(packageLines.size == resolvedPackages.size + 1)
+        val summary = packageLines.last().split('\t')
+        require(
+            summary.size == 3 &&
+                summary[0] == "summary" &&
+                summary[1].toIntOrNull() == resolvedPackages.size &&
+                summary[2].toLongOrNull() ==
+                resolvedPackages.fold(0L) { total, payload ->
+                    Math.addExact(total, payload.size)
+                },
+        )
+        val packages = ArrayList<VerifiedBuildPackage>(resolvedPackages.size)
+        packageLines.dropLast(1).forEachIndexed { index, line ->
+            val fields = line.split('\t')
+            require(fields.size == 9)
+            val archiveBytes = fields[5].toLongOrNull() ?: error("Invalid archive size")
+            val signatureBytes = fields[7].toLongOrNull() ?: error("Invalid signature size")
+            val resolved = resolvedPackages[index]
+            require(
+                fields[0] == resolved.repository &&
+                    fields[1] == resolved.name &&
+                    fields[2] == resolved.version &&
+                    fields[3] == resolved.filename &&
+                    fields[4] == resolved.url &&
+                    archiveBytes == resolved.size &&
+                    fields[6].matches(SHA256_HEX) &&
+                    signatureBytes in 1..1024L * 1024 &&
+                    fields[8].matches(SHA256_HEX),
+            )
+            packages +=
+                VerifiedBuildPackage(
+                    fields[0],
+                    fields[1],
+                    fields[2],
+                    fields[3],
+                    fields[4],
+                    archiveBytes,
+                    fields[6],
+                    signatureBytes,
+                    fields[8],
+                )
+        }
+        return packages
     }
 
     private fun parseAurReview(
@@ -5049,6 +5145,11 @@ class ArchpheneRuntimeService : Service() {
                         append(" before cache reuse")
                     }
                     append(".\n")
+                    if (buildEnvironment.verified) {
+                        append("Build closure SHA-256: ")
+                            .append(buildEnvironment.closureManifestSha256)
+                            .append('\n')
+                    }
                 }
                 if (builder == null) {
                     append("Build sandbox: signed companion not installed.\n")

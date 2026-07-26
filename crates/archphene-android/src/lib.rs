@@ -90,8 +90,9 @@ mod android {
     use archphene_core::{Lifecycle, PROTOCOL_VERSION, RuntimeError, SNAPSHOT_SIZE};
     use archphene_jobs::{JobError, JobOperation, JobState};
     use archphene_packages::{
-        MAX_MANIFEST_BYTES, MAX_PACKAGE_RESOLUTION_BYTES, MAX_TOOL_OUTPUT_BYTES, PackageResolution,
-        PackageRuntimeError, Repository, RepositoryArchitecture, ToolOutput,
+        MAX_MANIFEST_BYTES, MAX_PACKAGE_RESOLUTION_BYTES, MAX_TOOL_OUTPUT_BYTES,
+        MAX_VERIFIED_PACKAGE_CLOSURE_BYTES, PackageResolution, PackageRuntimeError, Repository,
+        RepositoryArchitecture, ToolOutput, VerifiedPackageClosure,
         aur::{
             MAX_AUR_REVIEW_BYTES, MAX_AUR_RPC_BYTES, MAX_AUR_SNAPSHOT_BYTES, MAX_AUR_SOURCE_BYTES,
             aur_snapshot_path, review_aur_snapshot,
@@ -186,6 +187,22 @@ mod android {
             Err(error) => return copy_package_error(&error, destination),
         };
         let bytes = resolution.as_bytes();
+        if bytes.len() > destination.len() {
+            return ERROR_INTERNAL;
+        }
+        destination[..bytes.len()].copy_from_slice(bytes);
+        i32::try_from(bytes.len()).unwrap_or(i32::MAX)
+    }
+
+    fn copy_verified_package_closure_result(
+        result: Result<VerifiedPackageClosure, PackageRuntimeError>,
+        destination: &mut [u8],
+    ) -> jint {
+        let closure = match result {
+            Ok(closure) => closure,
+            Err(error) => return copy_package_error(&error, destination),
+        };
+        let bytes = closure.as_bytes();
         if bytes.len() > destination.len() {
             return ERROR_INTERNAL;
         }
@@ -1150,6 +1167,83 @@ mod android {
         };
         let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
         copy_package_resolution_result(result, destination)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeReadVerifiedAurBuildClosure(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let Ok(handle) = u64::try_from(handle) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(output_capacity) = environment.get_direct_buffer_capacity(&output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if output_capacity < MAX_VERIFIED_PACKAGE_CLOSURE_BYTES {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let Ok(output_address) = environment.get_direct_buffer_address(&output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if output_address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let result = {
+            let Ok(mut registry) = registry().lock() else {
+                return ERROR_INTERNAL;
+            };
+            let Some(runtime) = registry.runtime_mut(handle) else {
+                return ERROR_INVALID_HANDLE;
+            };
+            runtime.verified_aur_build_closure()
+        };
+        let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
+        copy_verified_package_closure_result(result, destination)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeOpenVerifiedAurBuildPackage(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        package_index: jint,
+        signature: jboolean,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let (Ok(handle), Ok(package_index)) =
+            (u64::try_from(handle), usize::try_from(package_index))
+        else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(output_capacity) = environment.get_direct_buffer_capacity(&output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if package_index >= 512 || output_capacity < MAX_TOOL_OUTPUT_BYTES {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let Ok(output_address) = environment.get_direct_buffer_address(&output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if output_address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
+        let result = {
+            let Ok(mut registry) = registry().lock() else {
+                return ERROR_INTERNAL;
+            };
+            let Some(runtime) = registry.runtime_mut(handle) else {
+                return ERROR_INVALID_HANDLE;
+            };
+            runtime.open_verified_aur_build_package(package_index, signature != JNI_FALSE)
+        };
+        match result {
+            Ok(file) => file.into_raw_fd(),
+            Err(error) => copy_package_error(&error, destination),
+        }
     }
 
     #[unsafe(no_mangle)]

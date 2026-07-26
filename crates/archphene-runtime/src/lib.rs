@@ -13,7 +13,7 @@ use archphene_launcher::{LauncherRegistry, LauncherRegistryError, ReconcileRepor
 use archphene_packages::{
     CatalogDownload, InstalledPackageCatalog, PackagePayloadDownload, PackageResolution,
     PackageRuntime, PackageRuntimeError, PackageTool, Repository, RepositoryArchitecture,
-    ToolOutput,
+    ToolOutput, VerifiedPackageClosure,
     aur::{AurReview, AurSourceDownload, MAX_AUR_SOURCE_BYTES},
     desktop::{DesktopCatalog, ExecArgument},
 };
@@ -42,6 +42,7 @@ pub struct RuntimeHost {
     package_download: Option<PackagePayloadDownload>,
     aur_review: Option<AurReview>,
     aur_build_resolution: Option<PackageResolution>,
+    aur_build_closure: Option<VerifiedPackageClosure>,
     aur_source_download: Option<AurSourceDownload>,
     pty_sessions: PtyRegistry,
     gui_sessions: GuiRegistry,
@@ -202,6 +203,7 @@ impl RuntimeHost {
             package_download: None,
             aur_review: None,
             aur_build_resolution: None,
+            aur_build_closure: None,
             aur_source_download: None,
             pty_sessions: PtyRegistry::new(),
             gui_sessions: GuiRegistry::new(),
@@ -843,6 +845,7 @@ impl RuntimeHost {
     pub fn retain_aur_review(&mut self, review: AurReview) {
         self.aur_source_download = None;
         self.aur_build_resolution = None;
+        self.aur_build_closure = None;
         self.aur_review = Some(review);
     }
 
@@ -952,19 +955,53 @@ impl RuntimeHost {
             .ok_or(PackageRuntimeError::InvalidPath)?
             .resolve_targets_for_fresh_root(&borrowed)?;
         self.aur_build_resolution = Some(resolution.clone());
+        self.aur_build_closure = None;
         Ok(resolution)
     }
 
-    pub fn verify_aur_build_environment(&self) -> Result<PackageResolution, PackageRuntimeError> {
+    pub fn verify_aur_build_environment(
+        &mut self,
+    ) -> Result<PackageResolution, PackageRuntimeError> {
         let resolution = self
             .aur_build_resolution
             .as_ref()
+            .cloned()
             .ok_or(PackageRuntimeError::InvalidPayload)?;
+        let closure = self
+            .package_runtime
+            .as_ref()
+            .ok_or(PackageRuntimeError::InvalidPath)?
+            .verify_resolution(&resolution)?;
+        self.aur_build_closure = Some(closure);
+        Ok(resolution)
+    }
+
+    pub fn verified_aur_build_closure(
+        &self,
+    ) -> Result<VerifiedPackageClosure, PackageRuntimeError> {
+        self.aur_build_closure
+            .clone()
+            .ok_or(PackageRuntimeError::InvalidPayload)
+    }
+
+    pub fn open_verified_aur_build_package(
+        &self,
+        index: usize,
+        signature: bool,
+    ) -> Result<File, PackageRuntimeError> {
+        if self.aur_build_closure.is_none() {
+            return Err(PackageRuntimeError::InvalidPayload);
+        }
         self.package_runtime
             .as_ref()
             .ok_or(PackageRuntimeError::InvalidPath)?
-            .verify_resolution(resolution)?;
-        Ok(resolution.clone())
+            .open_verified_resolution_file(
+                self.aur_build_resolution
+                    .as_ref()
+                    .ok_or(PackageRuntimeError::InvalidPayload)?,
+                index,
+                signature,
+            )
     }
 
     pub fn take_aur_source_download(&mut self) -> Result<AurSourceDownload, PackageRuntimeError> {

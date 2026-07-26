@@ -89,7 +89,12 @@ resolution bytes, then independently reverifies every member before the UI
 calls the closure verified. The ephemeral resolution database is removed after
 each plan. A successful cache-reuse pass on Samsung reverified all 152 members
 without changing the shared pacman database. The closure still must be
-reverified immediately before descriptor handoff to the Builder.
+reverified immediately before descriptor handoff to the Builder. Rust also
+publishes a bounded canonical closure manifest containing each exact
+repository/name/version/URL, archive size and SHA-256, and detached-signature
+size and SHA-256. Kotlin requires it to match the retained resolution
+entry-for-entry and displays the whole-manifest SHA-256; package descriptors
+can be reopened only while that verified retained closure remains present.
 
 Community build execution will use one hidden Archphene Builder companion APK,
 not the manager UID and not one builder per installed Linux application. The

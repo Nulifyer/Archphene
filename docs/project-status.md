@@ -1074,9 +1074,13 @@ name/version/architecture, retains the original resolution, and independently
 reverifies the whole closure before success. A Samsung cache-reuse pass
 reverified all 152 packages, removed the ephemeral database, visibly rendered
 the verified 215 MiB closure, kept Install disabled, and left all 36
-shared-root pacman entries unchanged. Measuring extracted/build space,
-reverification at handoff, and transferring the closure into the Builder
-remain pending.
+shared-root pacman entries unchanged. Rust now also emits a bounded canonical
+manifest with every exact resolution identity, URL, archive size/digest, and
+detached-signature size/digest. Kotlin validates all 152 entries against the
+retained resolution and exposes the whole-manifest SHA-256; Rust will reopen a
+package descriptor only while that closure is retained as verified. Measuring
+extracted/build space, reverification at handoff, and batched transfer into the
+Builder remain pending.
 
 Code now reaches the packaged Electron executable without a Code-specific
 bridge exception. Translating Arch's standard `/usr/lib/pulseaudio` directory

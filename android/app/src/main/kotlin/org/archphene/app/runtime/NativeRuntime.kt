@@ -8,6 +8,7 @@ internal object NativeRuntime {
     const val PACKAGE_MANIFEST_LIMIT = 32 * 1024
     const val PACKAGE_OUTPUT_SIZE = 16 * 1024
     const val PACKAGE_RESOLUTION_OUTPUT_SIZE = 256 * 1024
+    const val AUR_BUILD_CLOSURE_OUTPUT_SIZE = 512 * 1024
     const val AUR_RPC_SIZE = 128 * 1024
     const val AUR_SNAPSHOT_SIZE = 4 * 1024 * 1024
     const val AUR_REVIEW_SIZE = 1024 * 1024
@@ -167,6 +168,16 @@ internal object NativeRuntime {
     ): Int
     external fun nativeVerifyAurBuildEnvironment(
         handle: Long,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeReadVerifiedAurBuildClosure(
+        handle: Long,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeOpenVerifiedAurBuildPackage(
+        handle: Long,
+        packageIndex: Int,
+        signature: Boolean,
         outputBuffer: ByteBuffer,
     ): Int
     external fun nativeReviewAur(

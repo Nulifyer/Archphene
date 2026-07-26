@@ -129,6 +129,7 @@ for pattern in \
   'HTTPS endpoint[^:]*: https://' \
   'Installed/build disk impact: pending the isolated package build\.' \
   'Verified official build environment: [1-9][0-9]* official packages · [1-9][0-9]* MiB archives · [0-9]+ cached · [0-9]+ downloaded\.' \
+  'Build closure SHA-256: [0-9a-f]{64}' \
   "Build sandbox: signed companion UID $builder_uid; no network permission or direct manager-data access; [1-9][0-9]* MiB reviewed inputs staged\\." \
   'code[^<]*\.deb' \
   'direct HTTPS download' \

@@ -5,6 +5,7 @@ pub mod desktop;
 
 use std::ffi::OsString;
 use std::fmt;
+use std::fmt::Write as FmtWrite;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
@@ -15,11 +16,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use archphene_process::{CommandEnvironment, ProcessError};
+use sha2::{Digest, Sha256};
 
 pub const MAX_MANIFEST_BYTES: usize = 32 * 1024;
 pub const MAX_MANIFEST_ENTRIES: usize = 128;
 pub const MAX_TOOL_OUTPUT_BYTES: usize = 16 * 1024;
 pub const MAX_PACKAGE_RESOLUTION_BYTES: usize = 256 * 1024;
+pub const MAX_VERIFIED_PACKAGE_CLOSURE_BYTES: usize = 512 * 1024;
 pub const INSTALLED_PACKAGE_PAGE_SIZE: usize = 60;
 
 const MANIFEST_HEADER: &str = "# org.archphene.package-runtime.v1";
@@ -307,6 +310,11 @@ pub struct PackageResolution {
     bytes: Vec<u8>,
 }
 
+#[derive(Clone, Debug)]
+pub struct VerifiedPackageClosure {
+    bytes: Vec<u8>,
+}
+
 pub struct InstalledPackageCatalog {
     packages: Vec<(String, String, bool)>,
 }
@@ -335,6 +343,16 @@ impl ToolOutput {
 }
 
 impl PackageResolution {
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub fn as_str(&self) -> Result<&str, PackageRuntimeError> {
+        std::str::from_utf8(self.as_bytes()).map_err(|_| PackageRuntimeError::InvalidResolution)
+    }
+}
+
+impl VerifiedPackageClosure {
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
     }
@@ -1734,9 +1752,16 @@ impl PackageRuntime {
     pub fn verify_resolution(
         &self,
         resolution: &PackageResolution,
-    ) -> Result<(usize, u64), PackageRuntimeError> {
+    ) -> Result<VerifiedPackageClosure, PackageRuntimeError> {
         let mut package_count = 0_usize;
         let mut archive_bytes = 0_u64;
+        let mut manifest = String::with_capacity(
+            resolution
+                .as_bytes()
+                .len()
+                .min(MAX_VERIFIED_PACKAGE_CLOSURE_BYTES),
+        );
+        manifest.push_str("ABPC0001\n");
         for line in resolution.as_str()?.lines() {
             let payload = parse_resolved_payload(line)?;
             self.verify_package(
@@ -1754,11 +1779,97 @@ impl PackageRuntime {
             if package_count > 512 {
                 return Err(PackageRuntimeError::OutputLimit);
             }
+            let archive = self
+                .arch_root
+                .join(PACKAGE_CACHE_DIRECTORY)
+                .join(payload.filename);
+            let signature = self
+                .arch_root
+                .join(PACKAGE_CACHE_DIRECTORY)
+                .join(format!("{}.sig", payload.filename));
+            let archive_sha256 = hash_regular_file(&archive, payload.size, payload.size)?;
+            let signature_metadata = fs::symlink_metadata(&signature)?;
+            if signature_metadata.file_type().is_symlink()
+                || !signature_metadata.is_file()
+                || signature_metadata.len() == 0
+                || signature_metadata.len() > PACKAGE_SIGNATURE_LIMIT
+            {
+                return Err(PackageRuntimeError::InvalidPayload);
+            }
+            let signature_sha256 = hash_regular_file(
+                &signature,
+                signature_metadata.len(),
+                PACKAGE_SIGNATURE_LIMIT,
+            )?;
+            writeln!(
+                manifest,
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                payload.repository,
+                payload.name,
+                payload.version,
+                payload.filename,
+                payload.url,
+                payload.size,
+                hex_sha256(&archive_sha256),
+                signature_metadata.len(),
+                hex_sha256(&signature_sha256),
+            )
+            .map_err(|_| PackageRuntimeError::OutputLimit)?;
+            if manifest.len() > MAX_VERIFIED_PACKAGE_CLOSURE_BYTES {
+                return Err(PackageRuntimeError::OutputLimit);
+            }
         }
         if package_count == 0 {
             return Err(PackageRuntimeError::InvalidResolution);
         }
-        Ok((package_count, archive_bytes))
+        writeln!(manifest, "summary\t{package_count}\t{archive_bytes}")
+            .map_err(|_| PackageRuntimeError::OutputLimit)?;
+        if manifest.len() > MAX_VERIFIED_PACKAGE_CLOSURE_BYTES {
+            return Err(PackageRuntimeError::OutputLimit);
+        }
+        Ok(VerifiedPackageClosure {
+            bytes: manifest.into_bytes(),
+        })
+    }
+
+    pub fn open_verified_resolution_file(
+        &self,
+        resolution: &PackageResolution,
+        index: usize,
+        signature: bool,
+    ) -> Result<File, PackageRuntimeError> {
+        let line = resolution
+            .as_str()?
+            .lines()
+            .nth(index)
+            .ok_or(PackageRuntimeError::InvalidPayload)?;
+        let payload = parse_resolved_payload(line)?;
+        self.verify_package(
+            payload.filename,
+            payload.name,
+            payload.version,
+            payload.size,
+        )?;
+        let filename = if signature {
+            format!("{}.sig", payload.filename)
+        } else {
+            payload.filename.to_owned()
+        };
+        let path = self.arch_root.join(PACKAGE_CACHE_DIRECTORY).join(filename);
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(O_NOFOLLOW | O_CLOEXEC)
+            .open(&path)?;
+        let metadata = file.metadata()?;
+        let valid_size = if signature {
+            metadata.len() > 0 && metadata.len() <= PACKAGE_SIGNATURE_LIMIT
+        } else {
+            metadata.len() == payload.size
+        };
+        if !metadata.is_file() || !valid_size {
+            return Err(PackageRuntimeError::InvalidPayload);
+        }
+        Ok(file)
     }
 
     pub fn prepare_verification_keyring(&mut self) -> Result<(), PackageRuntimeError> {
@@ -2381,6 +2492,58 @@ fn prepare_output_path(path: &Path) -> Result<(), PackageRuntimeError> {
     }
 }
 
+fn hash_regular_file(
+    path: &Path,
+    expected_size: u64,
+    maximum_size: u64,
+) -> Result<[u8; 32], PackageRuntimeError> {
+    if expected_size == 0 || expected_size > maximum_size {
+        return Err(PackageRuntimeError::InvalidPayload);
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() != expected_size {
+        return Err(PackageRuntimeError::InvalidPayload);
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW | O_CLOEXEC)
+        .open(path)?;
+    let opened = file.metadata()?;
+    if !opened.is_file() || opened.len() != expected_size {
+        return Err(PackageRuntimeError::InvalidPayload);
+    }
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut total = 0_u64;
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        total = total
+            .checked_add(count as u64)
+            .ok_or(PackageRuntimeError::OutputLimit)?;
+        if total > expected_size {
+            return Err(PackageRuntimeError::InvalidPayload);
+        }
+        digest.update(&buffer[..count]);
+    }
+    if total != expected_size {
+        return Err(PackageRuntimeError::InvalidPayload);
+    }
+    Ok(digest.finalize().into())
+}
+
+fn hex_sha256(value: &[u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(64);
+    for byte in value {
+        output.push(char::from(HEX[usize::from(*byte >> 4)]));
+        output.push(char::from(HEX[usize::from(*byte & 0x0f)]));
+    }
+    output
+}
+
 fn read_output_bytes(path: &Path, maximum: usize) -> Result<Vec<u8>, PackageRuntimeError> {
     let metadata = validate_output_size(path, maximum)?;
     let length = usize::try_from(metadata.len()).map_err(|_| PackageRuntimeError::OutputLimit)?;
@@ -2761,9 +2924,11 @@ fn parse_resolution_output(
 }
 
 struct ResolvedPayload<'a> {
+    repository: &'a str,
     name: &'a str,
     version: &'a str,
     filename: &'a str,
+    url: &'a str,
     size: u64,
 }
 
@@ -2875,9 +3040,11 @@ fn parse_resolved_payload(line: &str) -> Result<ResolvedPayload<'_>, PackageRunt
         return Err(PackageRuntimeError::InvalidResolution);
     }
     Ok(ResolvedPayload {
+        repository,
         name,
         version,
         filename,
+        url,
         size,
     })
 }
