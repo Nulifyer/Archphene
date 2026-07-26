@@ -483,6 +483,9 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         if (isCopyShortcut(keyCode, event)) {
             return copySelection()
         }
+        if (sendModifiedTerminalSequence(keyCode, event)) {
+            return true
+        }
         terminalSequence(keyCode, event.isShiftPressed)?.let { return sendSequence(it) }
         val altGraph = isAltGraph(event)
         val baseCodepoint = textCodepoint(event, altGraph)
@@ -1560,6 +1563,124 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
             KeyEvent.KEYCODE_F12 -> FUNCTION_12
             else -> null
         }
+    }
+
+    private fun sendModifiedTerminalSequence(
+        keyCode: Int,
+        event: KeyEvent,
+    ): Boolean {
+        val modifier =
+            1 +
+                (if (event.isShiftPressed) 1 else 0) +
+                (if (event.isAltPressed) 2 else 0) +
+                (if (event.isCtrlPressed) 4 else 0)
+        if (modifier == 1) {
+            return false
+        }
+        val parameter: Int
+        val finalByte: Byte
+        when (keyCode) {
+            KeyEvent.KEYCODE_DPAD_UP -> {
+                parameter = 1
+                finalByte = 'A'.code.toByte()
+            }
+            KeyEvent.KEYCODE_DPAD_DOWN -> {
+                parameter = 1
+                finalByte = 'B'.code.toByte()
+            }
+            KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                parameter = 1
+                finalByte = 'C'.code.toByte()
+            }
+            KeyEvent.KEYCODE_DPAD_LEFT -> {
+                parameter = 1
+                finalByte = 'D'.code.toByte()
+            }
+            KeyEvent.KEYCODE_MOVE_HOME -> {
+                parameter = 1
+                finalByte = 'H'.code.toByte()
+            }
+            KeyEvent.KEYCODE_MOVE_END -> {
+                parameter = 1
+                finalByte = 'F'.code.toByte()
+            }
+            KeyEvent.KEYCODE_INSERT -> {
+                parameter = 2
+                finalByte = '~'.code.toByte()
+            }
+            KeyEvent.KEYCODE_FORWARD_DEL -> {
+                parameter = 3
+                finalByte = '~'.code.toByte()
+            }
+            KeyEvent.KEYCODE_PAGE_UP -> {
+                parameter = 5
+                finalByte = '~'.code.toByte()
+            }
+            KeyEvent.KEYCODE_PAGE_DOWN -> {
+                parameter = 6
+                finalByte = '~'.code.toByte()
+            }
+            KeyEvent.KEYCODE_F1 -> {
+                parameter = 1
+                finalByte = 'P'.code.toByte()
+            }
+            KeyEvent.KEYCODE_F2 -> {
+                parameter = 1
+                finalByte = 'Q'.code.toByte()
+            }
+            KeyEvent.KEYCODE_F3 -> {
+                parameter = 1
+                finalByte = 'R'.code.toByte()
+            }
+            KeyEvent.KEYCODE_F4 -> {
+                parameter = 1
+                finalByte = 'S'.code.toByte()
+            }
+            KeyEvent.KEYCODE_F5 -> {
+                parameter = 15
+                finalByte = '~'.code.toByte()
+            }
+            KeyEvent.KEYCODE_F6 -> {
+                parameter = 17
+                finalByte = '~'.code.toByte()
+            }
+            KeyEvent.KEYCODE_F7 -> {
+                parameter = 18
+                finalByte = '~'.code.toByte()
+            }
+            KeyEvent.KEYCODE_F8 -> {
+                parameter = 19
+                finalByte = '~'.code.toByte()
+            }
+            KeyEvent.KEYCODE_F9 -> {
+                parameter = 20
+                finalByte = '~'.code.toByte()
+            }
+            KeyEvent.KEYCODE_F10 -> {
+                parameter = 21
+                finalByte = '~'.code.toByte()
+            }
+            KeyEvent.KEYCODE_F11 -> {
+                parameter = 23
+                finalByte = '~'.code.toByte()
+            }
+            KeyEvent.KEYCODE_F12 -> {
+                parameter = 24
+                finalByte = '~'.code.toByte()
+            }
+            else -> return false
+        }
+        var output = 0
+        terminalInputBytes[output++] = ESCAPE_BYTE
+        terminalInputBytes[output++] = '['.code.toByte()
+        if (parameter >= 10) {
+            terminalInputBytes[output++] = ('0'.code + parameter / 10).toByte()
+        }
+        terminalInputBytes[output++] = ('0'.code + parameter % 10).toByte()
+        terminalInputBytes[output++] = ';'.code.toByte()
+        terminalInputBytes[output++] = ('0'.code + modifier).toByte()
+        terminalInputBytes[output++] = finalByte
+        return submitTerminalInput(output)
     }
 
     private fun applicationKeypadSequence(keyCode: Int): ByteArray? =

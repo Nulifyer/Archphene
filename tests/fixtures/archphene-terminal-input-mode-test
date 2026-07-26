@@ -1,0 +1,25 @@
+#!/usr/bin/bash
+set -u
+
+export TERM=xterm-256color
+export LC_ALL=C
+
+capture() {
+  local label="$1" count="$2" reply= index
+  printf '%s-WAIT\r\n' "$label"
+  IFS= read -r -n "$count" reply
+  printf '\r\n%s=' "$label"
+  for ((index = 0; index < ${#reply}; index++)); do
+    printf '%02X' "'${reply:index:1}"
+  done
+  printf '\r\n'
+}
+
+capture NORMAL 3
+tput smkx
+capture APPLICATION 3
+tput rmkx
+capture CONTROL-UP 6
+capture SHIFT-F5 7
+printf 'terminal-input-mode-ready'
+IFS= read -r -n 1
