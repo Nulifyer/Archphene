@@ -735,6 +735,29 @@ static int prepare_runtime_launch(const char *name, const char *requested,
     return 0;
 }
 
+#define RUNTIME_PROGRAM_ENVIRONMENT "ARCHPHENE_RUNTIME_PROGRAM_PATH="
+
+static int prepare_runtime_environment(char *const environment[],
+        const char *program, char entry[PATH_MAX + 34],
+        char *output[4096]) {
+    int written = snprintf(entry, PATH_MAX + 34, "%s%s",
+            RUNTIME_PROGRAM_ENVIRONMENT, program);
+    if (written <= 0 || written >= PATH_MAX + 34) return ENAMETOOLONG;
+    char *const *source = environment == NULL ? environ : environment;
+    size_t output_count = 0;
+    for (size_t index = 0; source[index] != NULL; index++) {
+        if (strncmp(source[index], RUNTIME_PROGRAM_ENVIRONMENT,
+                    sizeof(RUNTIME_PROGRAM_ENVIRONMENT) - 1) == 0) {
+            continue;
+        }
+        if (output_count >= 4094) return E2BIG;
+        output[output_count++] = source[index];
+    }
+    output[output_count++] = entry;
+    output[output_count] = NULL;
+    return 0;
+}
+
 static void complete_managed_maintenance_command(const char *name) {
     /*
      * Arch ships ldconfig as a static PIE, so it cannot participate in the
@@ -795,8 +818,15 @@ static int launch_runtime_executable(const char *name, const char *requested,
         errno = ENOSYS;
         return -1;
     }
-    real(trusted_loader, loader_arguments,
-            environment == NULL ? environ : environment);
+    char program_environment[PATH_MAX + 34];
+    char *runtime_environment[4096];
+    int environment_error = prepare_runtime_environment(environment,
+            launch.program, program_environment, runtime_environment);
+    if (environment_error != 0) {
+        errno = environment_error;
+        return -1;
+    }
+    real(trusted_loader, loader_arguments, runtime_environment);
     return -1;
 }
 
@@ -847,8 +877,13 @@ static int spawn_runtime_executable(pid_t *process, const char *name,
             char *const[], char *const[]);
     function_type real = (function_type)dlsym(RTLD_NEXT, "posix_spawn");
     if (real == NULL) return ENOSYS;
+    char program_environment[PATH_MAX + 34];
+    char *runtime_environment[4096];
+    int environment_error = prepare_runtime_environment(environment,
+            launch.program, program_environment, runtime_environment);
+    if (environment_error != 0) return environment_error;
     return real(process, trusted_loader, file_actions, attributes,
-            loader_arguments, environment == NULL ? environ : environment);
+            loader_arguments, runtime_environment);
 }
 
 static int spawn_runtime_command(pid_t *process, const char *name,

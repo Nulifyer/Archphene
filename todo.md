@@ -261,6 +261,7 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [x] Resolve relative and fake-root absolute symlinks without interpreting them against Android's host root; cap expansion at 40 links and reject loops or traversal above the shared root.
   - [x] Execute bounded nested shebang programs through one installed ELF interpreter, preserve the optional single kernel shebang argument, and reject recursive/non-ELF interpreters. Host exec/spawn probes and the Samsung `/usr/bin` wrapper → `/usr/lib` script → absolute symlink → ELF gate pass.
   - [x] Translate Arch's standard `/usr/lib/pulseaudio` loader path into the private root so unmodified `libpulse` resolves `libpulsecommon` without an application-specific rule.
+  - [x] Preserve normal `/proc/self/exe` semantics across the explicit glibc loader: publish the verified real target on initial launch and replace stale values on every nested `exec`/`posix_spawn`. Host direct/spawn probes and the current Samsung Foot client pass with the refreshed sealed bridge.
   - [ ] Generalize verified absolute/private RUNPATH translation without globally mixing unrelated application-private libraries.
   - [ ] Repeat the nested executable/symlink/script device gate on the x86_64 emulator.
 - [ ] Cache unchanged closure analysis and wrapper inputs so repeat installs do not rescan large package trees.
@@ -309,7 +310,7 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [ ] Add the bounded AUR workflow needed for an equivalent `visual-studio-code-bin` installation on AArch64.
 - [ ] Validate Electron/Chromium multiprocess startup, Ozone Wayland, sandbox behavior, rendering, IME, clipboard, dialogs, file watching, extensions, and lifecycle.
   - [x] Resolve Electron's standard PulseAudio private-library dependency through the generic runtime environment.
-  - [ ] Fix Electron's ICU data-descriptor startup failure; the current x86_64 launch reaches Electron and then aborts with `Invalid file descriptor to ICU data received`.
+  - [ ] Repeat the x86_64 Electron launch with the generic `/proc/self/exe` repair. Chromium's ICU loader derives `icudtl.dat` from the running executable path, and the prior explicit-loader process exposed the loader instead of Electron; host direct/spawn probes and Samsung Foot now pass, but Electron itself remains unvalidated while the emulator is stopped.
 - [ ] Install `dotnet-sdk` through the same shared package system and make `dotnet` available in Code's integrated terminal.
 - [ ] Create a new ASP.NET Core MVC project in shared Arch storage.
 - [ ] Open the project in Code and validate editing, search, Git, terminal PTY, language services, restore/build, and extension-host subprocesses.

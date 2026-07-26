@@ -124,6 +124,8 @@ test -f "$host_loader"
 test -f "$host_libc"
 cp "$(readlink -f /bin/echo)" "$root/usr/lib/archphene-example/real-example"
 chmod 500 "$root/usr/lib/archphene-example/real-example"
+cp "$root/readlink-probe" "$root/usr/lib/archphene-example/readlink-example"
+chmod 500 "$root/usr/lib/archphene-example/readlink-example"
 real_nested_output="$(
   ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
   ARCHPHENE_RUNTIME_LOADER="$host_loader" \
@@ -131,6 +133,22 @@ real_nested_output="$(
   "$root/exec-probe" --direct /usr/lib/archphene-example/real-example
 )"
 test "$real_nested_output" = bridge-arg
+real_program_path="$(
+  ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+  ARCHPHENE_RUNTIME_LOADER="$host_loader" \
+  ARCHPHENE_RUNTIME_LIB="$(dirname "$host_libc")" \
+  ARCHPHENE_RUNTIME_PROGRAM_PATH=/stale/program \
+  "$root/exec-probe" --direct /usr/lib/archphene-example/readlink-example
+)"
+test "$real_program_path" = "$root/usr/lib/archphene-example/readlink-example"
+spawned_program_path="$(
+  ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+  ARCHPHENE_RUNTIME_LOADER="$host_loader" \
+  ARCHPHENE_RUNTIME_LIB="$(dirname "$host_libc")" \
+  ARCHPHENE_RUNTIME_PROGRAM_PATH=/stale/program \
+  "$root/exec-probe" --spawn-path /usr/lib/archphene-example/readlink-example
+)"
+test "$spawned_program_path" = "$root/usr/lib/archphene-example/readlink-example"
 ln -s /usr/lib/archphene-example/real-example "$root/usr/bin/absolute-bare"
 absolute_bare_output="$(
   ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \

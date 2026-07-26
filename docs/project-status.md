@@ -999,6 +999,18 @@ therefore remain unvalidated. A generic policy for other package-private
 absolute RUNPATH trees also remains open; globally mixing arbitrary
 `/usr/lib/<app>` directories would risk resolving the wrong private library.
 
+Source-level tracing identified a generic candidate for that ICU failure.
+Processes started through an explicit glibc loader otherwise expose the loader
+through `/proc/self/exe`, so Electron cannot derive the neighboring
+`icudtl.dat` path. The bridge's existing bounded readlink substitution was not
+wired into the greenfield runtime and remained stale across nested execution.
+Initial commands now publish the verified real program, and every intercepted
+`exec` or `posix_spawn` replaces that value with its newly verified target.
+Host probes prove both direct and spawned target paths, the sealed dual-ABI
+bridges rebuild, and current Samsung Foot still connects and presents. This is
+not yet an Electron success claim; the x86_64 launch must be repeated when the
+emulator is used again.
+
 The same current-source arm64 manager preserves the Samsung shared root at 35
 installed packages and three current Foot launchers. Cached startup completes
 in 255 ms, and a fresh generated Foot launch authenticates generation 328,

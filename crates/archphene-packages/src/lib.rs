@@ -1757,6 +1757,7 @@ impl PackageRuntime {
             .env("ARCHPHENE_RUNTIME_LIB", &self.library_path)
             .env("ARCHPHENE_RUNTIME_COMMAND_DIR", &self.alias_root)
             .env("ARCHPHENE_RUNTIME_ROOT", &self.arch_root)
+            .env("ARCHPHENE_RUNTIME_PROGRAM_PATH", tool_path)
             .stdin(Stdio::null())
             .stdout(Stdio::from(output_file))
             .stderr(Stdio::from(error_file))

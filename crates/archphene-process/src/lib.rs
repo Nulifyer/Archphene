@@ -315,6 +315,7 @@ impl CommandEnvironment {
             .env("ARCHPHENE_RUNTIME_LIB", &self.library_path)
             .env("ARCHPHENE_RUNTIME_COMMAND_DIR", &self.command_directory)
             .env("ARCHPHENE_RUNTIME_ROOT", &self.arch_root)
+            .env("ARCHPHENE_RUNTIME_PROGRAM_PATH", &launch.program)
             .env("ARCHPHENE_FAKE_CHROOT", "1");
         command
     }
@@ -1423,6 +1424,10 @@ mod tests {
             Some(OsStr::new("/var/lib/archphene/fontconfig/fonts.conf")),
         );
         assert_eq!(value("FONTCONFIG_PATH"), Some(OsStr::new("/etc/fonts")));
+        assert_eq!(
+            value("ARCHPHENE_RUNTIME_PROGRAM_PATH"),
+            Some(launch.program.as_os_str()),
+        );
 
         let gui = environment.build_gui_command(&launch, &["--new-window"], "launcher-7.sock");
         let gui_value = |name: &str| {
