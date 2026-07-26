@@ -6,10 +6,12 @@ Notable user-facing changes will be recorded here.
 
 ### Added
 
+- Added explicit forward repair for interrupted official package transactions. Rust retains exact verified install inputs or a removal baseline before pacman mutation, refuses cache cleanup while those inputs are required, and clears the intent only after database and final-state validation. The manager distinguishes safe Retry from required Repair after process death.
 - Added a Downloads inventory for the manager-owned pacman cache with total disk use, package/version grouping, selectable per-package cleanup, and a separately confirmed Clear all action. Cache inspection and deletion are bounded and fail closed in Rust, paged through JNI, and serialized with package work.
 
 ### Fixed
 
+- Updated the signed-package regression for the manager's sentence-case controls, split package activity fields, persistent section selection, populated cache, and Android-owned launcher install/removal confirmations instead of treating those production behaviors as timeouts.
 - Added an unambiguous one-tap “Refresh package catalogs” recovery to durable package activity cards for catalog and trust failures. The signed catalog path now records successful recovery against the exact failed job, survives manager restart, and returns to Review; state-restoring no-network emulator/Samsung gates leave both package databases unchanged.
 - Replaced the AUR package review's unbounded evidence wall with a compact summary and six mutually compact, accessible, selectable sections for sources, trust, build environment, digests, recipe, and build logs. A generated no-network fixture proves collapsed defaults, exact expanded evidence, phone scrolling, unchanged pacman state, and full-device presentation on the x86_64 emulator and physical AArch64 Samsung.
 - Preserved the manager's selected Packages, Files, or Terminal section across a finished Activity, so reopening Archphene after Back returns to a still-running foreground terminal instead of hiding it behind Packages. Refreshed the sentence-case terminal regression contracts, removed assumptions about Bash being the selected shell, and made Android input injection wait for actual field focus.

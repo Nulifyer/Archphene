@@ -358,6 +358,7 @@ class ArchpheneRuntimeService : Service() {
         val packageRecoveryAvailable: Boolean
             get() =
                 jobPackage.isNotEmpty() &&
+                    packageMutationStatus.isEmpty() &&
                     (
                         jobState == NativeRuntime.JOB_FAILED ||
                             jobState == NativeRuntime.JOB_CANCELLED
@@ -370,6 +371,17 @@ class ArchpheneRuntimeService : Service() {
                     !commandActive &&
                     recoveryReviewedJobRevision != jobRevision
 
+        val packageMutationRepairAvailable: Boolean
+            get() =
+                packageMutationStatus.isNotEmpty() &&
+                    jobPackage.isNotEmpty() &&
+                    readyHandle != 0L &&
+                    !catalogRefreshActive &&
+                    !packageCacheActive &&
+                    !searchActive &&
+                    !packageOperationActive &&
+                    !commandActive
+
         val packageCacheRecoveryAvailable: Boolean
             get() = packageCacheRecoveryReady()
 
@@ -381,6 +393,7 @@ class ArchpheneRuntimeService : Service() {
                 when {
                     aurBuildCancellationAvailable -> "Cancel build"
                     packageCancellationAvailable -> "Cancel"
+                    packageMutationRepairAvailable -> "Repair"
                     packageCacheRecoveryAvailable -> "Clear cache"
                     packageCatalogRecoveryAvailable -> "Refresh package catalogs"
                     else -> "Review"
@@ -540,12 +553,19 @@ class ArchpheneRuntimeService : Service() {
 
         fun cancelPackageOperation(): Boolean = requestPackageCancellation()
 
+        fun repairPackageMutation(): Boolean = requestPackageMutationRepair()
+
         fun clearPackageCache(): Boolean = requestPackageCacheCleanup()
 
         fun startDebugPackagePhaseFixture(
             packageName: String,
             holdMillis: Long,
         ): Boolean = requestDebugPackagePhaseFixture(packageName, holdMillis)
+
+        fun startDebugInterruptedRemovalFixture(
+            packageName: String,
+            holdMillis: Long,
+        ): Boolean = requestDebugInterruptedRemovalFixture(packageName, holdMillis)
 
         fun publishDebugAurReviewFixture(packageName: String): Boolean =
             requestDebugAurReviewFixture(packageName)
@@ -767,12 +787,14 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var jobStatus = "No package transaction"
     @Volatile private var jobPersistentId = 0L
     @Volatile private var jobPackage = ""
+    @Volatile private var jobRepository = ""
     @Volatile private var jobOperation = 0
     @Volatile private var jobState = 0
     @Volatile private var jobProgress = 0
     @Volatile private var jobRevision = 0
     @Volatile private var jobMessage = ""
     @Volatile private var jobActivityLabel = ""
+    @Volatile private var packageMutationStatus = ""
     @Volatile private var lastResolvedPackage = ""
     @Volatile private var lastResolvedRepository = ""
     @Volatile private var lastResolvedInstalledVersion = ""
@@ -1604,7 +1626,7 @@ class ArchpheneRuntimeService : Service() {
         private const val PACKAGE_JOB_TEST_CACHE_HOLD_MILLIS = "cache_hold_ms"
         private const val PACKAGE_JOB_TEST_CATALOG_RECOVERY = "catalog_recovery_fixture"
         private const val PACKAGE_JOB_TEST_WORKER_HOLD_MILLIS = "worker_hold_ms"
-        private const val MAX_PACKAGE_JOB_TEST_HOLD_MILLIS = 5_000L
+        private const val MAX_PACKAGE_JOB_TEST_HOLD_MILLIS = 30_000L
         private const val MIN_PACKAGE_PHASE_TEST_HOLD_MILLIS = 750L
         private const val MAX_ANDROID_DNS_SERVERS = 4
         private const val SESSION_NOTIFICATION_ID = 0x4152
@@ -2851,6 +2873,7 @@ class ArchpheneRuntimeService : Service() {
                         refreshDesktopEntries(activeHandle)
                         refreshShellChoices(activeHandle)
                         jobStatus = readLatestPackageJob(activeHandle)
+                        refreshPendingPackageMutation(activeHandle)
                         restorePackageRecovery()
                         mainHandler.post {
                             if (handle != activeHandle) {
@@ -7173,6 +7196,7 @@ class ArchpheneRuntimeService : Service() {
             return false
         }
         jobPersistentId = jobId
+        jobRepository = "aur"
         packageCancellationRequested = false
         packageOperationCancelable = true
         packageOperationActive = true
@@ -7403,6 +7427,7 @@ class ArchpheneRuntimeService : Service() {
             return false
         }
         jobPersistentId = jobId
+        jobRepository = repository
         packageCancellationRequested = false
         packageOperationCancelable = true
         packageOperationActive = true
@@ -7561,6 +7586,7 @@ class ArchpheneRuntimeService : Service() {
                             if (mutationStarted) {
                                 val refreshed = refreshPackageInventory(activeHandle)
                                 refreshShellChoices(activeHandle)
+                                refreshPendingPackageMutation(activeHandle)
                                 refreshed
                             } else {
                                 true
@@ -7655,6 +7681,190 @@ class ArchpheneRuntimeService : Service() {
         }
     }
 
+    private fun refreshPendingPackageMutation(activeHandle: Long) {
+        val packageName = jobPackage
+        if (packageName.isEmpty()) {
+            packageMutationStatus = ""
+            return
+        }
+        val scratch = PackageIoScratch()
+        val packageBytes = packageName.toByteArray(StandardCharsets.UTF_8)
+        scratch.requestBuffer.clear()
+        scratch.requestBuffer.put(packageBytes)
+        scratch.outputBuffer.clear()
+        val length =
+            NativeRuntime.nativePackageCommand(
+                activeHandle,
+                NativeRuntime.PACKAGE_COMMAND_PENDING_MUTATION,
+                scratch.requestBuffer,
+                packageBytes.size,
+                scratch.outputBuffer,
+            )
+        if (length < 0) {
+            packageMutationStatus = ""
+            Log.e(
+                TAG,
+                "Pending package mutation inspection failed: " +
+                    readNativeMessage(scratch.outputBuffer, length),
+            )
+            return
+        }
+        val bytes = ByteArray(length)
+        scratch.outputBuffer.position(0)
+        scratch.outputBuffer.get(bytes)
+        packageMutationStatus = String(bytes, StandardCharsets.UTF_8)
+        if (packageMutationStatus.isNotEmpty()) {
+            packageRecoveryMessageRevision = jobRevision
+            packageRecoveryMessage =
+                "Package mutation was interrupted. Repair re-verifies and completes the " +
+                    "retained transaction."
+        }
+    }
+
+    @Synchronized
+    private fun requestPackageMutationRepair(): Boolean {
+        val activeHandle = readyHandle
+        val packageName = jobPackage
+        val operation = jobOperation
+        if (
+            activeHandle == 0L ||
+            packageMutationStatus.isEmpty() ||
+            packageName.isEmpty() ||
+            operation !in
+                NativeRuntime.JOB_OPERATION_INSTALL..NativeRuntime.JOB_OPERATION_REMOVE ||
+            catalogRefreshActive ||
+            packageCacheActive ||
+            searchActive ||
+            packageOperationActive ||
+            commandActive
+        ) {
+            return false
+        }
+        val outputBuffer = ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
+        val repository = jobRepository.ifEmpty { "recovery" }
+        val requestBytes = "$repository\t$packageName".toByteArray(StandardCharsets.UTF_8)
+        val requestBuffer = ByteBuffer.allocateDirect(requestBytes.size).put(requestBytes)
+        val jobId =
+            NativeRuntime.nativeQueuePackageJob(
+                activeHandle,
+                operation,
+                requestBuffer,
+                requestBytes.size,
+                System.currentTimeMillis(),
+                outputBuffer,
+            )
+        if (jobId <= 0L) {
+            jobStatus = "Could not queue package repair: ${readNativeMessage(outputBuffer, jobId)}"
+            return false
+        }
+        jobPersistentId = jobId
+        jobRepository = repository
+        packageOperationCancelable = false
+        packageOperationActive = true
+        publishPackageJob(
+            packageName,
+            operation,
+            NativeRuntime.JOB_QUEUED,
+            0,
+            "Queued interrupted package repair",
+        )
+        val worker =
+            Thread(
+                {
+                    val scratch = PackageIoScratch()
+                    var phase = 0
+                    var progress = 0
+                    fun record(
+                        state: Int,
+                        nextPhase: Int,
+                        nextProgress: Int,
+                        message: String,
+                    ) {
+                        updatePackageJob(
+                            activeHandle,
+                            jobId,
+                            state,
+                            nextPhase,
+                            nextProgress,
+                            message,
+                            packageName,
+                            scratch,
+                        )
+                        phase = nextPhase
+                        progress = nextProgress
+                    }
+                    try {
+                        record(
+                            NativeRuntime.JOB_RESOLVING,
+                            1,
+                            10,
+                            "Inspecting retained package mutation",
+                        )
+                        record(
+                            NativeRuntime.JOB_VERIFYING,
+                            2,
+                            30,
+                            "Re-verifying retained transaction inputs",
+                        )
+                        record(
+                            NativeRuntime.JOB_INSTALLING,
+                            3,
+                            60,
+                            "Repairing interrupted package transaction",
+                        )
+                        runPackageCommand(
+                            activeHandle,
+                            NativeRuntime.PACKAGE_COMMAND_REPAIR_MUTATION,
+                            packageName,
+                            scratch,
+                        )
+                        refreshPackageInventory(activeHandle)
+                        refreshShellChoices(activeHandle)
+                        packageMutationStatus = ""
+                        record(
+                            NativeRuntime.JOB_COMPLETE,
+                            4,
+                            100,
+                            "Repaired package transaction for $packageName",
+                        )
+                        Log.i(TAG, "Repaired interrupted package transaction for $packageName")
+                    } catch (error: Exception) {
+                        refreshPackageInventory(activeHandle)
+                        refreshShellChoices(activeHandle)
+                        refreshPendingPackageMutation(activeHandle)
+                        val message =
+                            boundedJobMessage(
+                                "Package repair did not finish: " +
+                                    (error.message ?: error.javaClass.simpleName),
+                            )
+                        runCatching {
+                            updatePackageJob(
+                                activeHandle,
+                                jobId,
+                                NativeRuntime.JOB_FAILED,
+                                phase,
+                                progress,
+                                message,
+                                packageName,
+                                scratch,
+                            )
+                        }
+                        Log.e(TAG, "Package mutation repair failed", error)
+                    } finally {
+                        packageOperationActive = false
+                        packageThread = null
+                        startLauncherPublisher(activeHandle)
+                        stopWhenUnobservedAndIdle()
+                    }
+                },
+                "ArchphenePackageRepair",
+            )
+        packageThread = worker
+        worker.start()
+        promoteWorkToForeground()
+        return true
+    }
+
     @Synchronized
     private fun requestPackageRemoval(packageName: String): Boolean {
         val normalized = packageName.trim()
@@ -7693,6 +7903,7 @@ class ArchpheneRuntimeService : Service() {
             return false
         }
         jobPersistentId = jobId
+        jobRepository = repository
         packageCancellationRequested = false
         packageOperationCancelable = true
         packageOperationActive = true
@@ -7786,6 +7997,7 @@ class ArchpheneRuntimeService : Service() {
                             if (mutationStarted) {
                                 val refreshed = refreshPackageInventory(activeHandle)
                                 refreshShellChoices(activeHandle)
+                                refreshPendingPackageMutation(activeHandle)
                                 refreshed
                             } else {
                                 true
@@ -8654,6 +8866,120 @@ class ArchpheneRuntimeService : Service() {
                 "ArchphenePackagePhases",
             )
         schedulePackageWorker(worker, activeHandle)
+        promoteWorkToForeground()
+        return true
+    }
+
+    @Synchronized
+    private fun requestDebugInterruptedRemovalFixture(
+        packageName: String,
+        holdMillis: Long,
+    ): Boolean {
+        val normalized = packageName.trim()
+        val activeHandle = readyHandle
+        if (
+            applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0 ||
+            normalized.isEmpty() ||
+            normalized.length > 96 ||
+            !normalized.all { character ->
+                character.isLowerCase() ||
+                    character.isDigit() ||
+                    character in "@._+-"
+            } ||
+            holdMillis !in 5_000L..MAX_PACKAGE_JOB_TEST_HOLD_MILLIS ||
+            activeHandle == 0L ||
+            catalogRefreshActive ||
+            packageCacheActive ||
+            searchActive ||
+            packageOperationActive ||
+            commandActive
+        ) {
+            return false
+        }
+        val outputBuffer = ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
+        val requestBytes = "extra\t$normalized".toByteArray(StandardCharsets.UTF_8)
+        val requestBuffer = ByteBuffer.allocateDirect(requestBytes.size).put(requestBytes)
+        val jobId =
+            NativeRuntime.nativeQueuePackageJob(
+                activeHandle,
+                NativeRuntime.JOB_OPERATION_REMOVE,
+                requestBuffer,
+                requestBytes.size,
+                System.currentTimeMillis(),
+                outputBuffer,
+            )
+        if (jobId <= 0L) {
+            return false
+        }
+        jobPersistentId = jobId
+        packageOperationCancelable = false
+        packageOperationActive = true
+        publishPackageJob(
+            normalized,
+            NativeRuntime.JOB_OPERATION_REMOVE,
+            NativeRuntime.JOB_QUEUED,
+            0,
+            "Queued interruption recovery fixture",
+        )
+        val worker =
+            Thread(
+                {
+                    val scratch = PackageIoScratch()
+                    try {
+                        updatePackageJob(
+                            activeHandle,
+                            jobId,
+                            NativeRuntime.JOB_RESOLVING,
+                            1,
+                            10,
+                            "Inspecting installed package",
+                            normalized,
+                            scratch,
+                        )
+                        updatePackageJob(
+                            activeHandle,
+                            jobId,
+                            NativeRuntime.JOB_VERIFYING,
+                            2,
+                            30,
+                            "Validating retained removal baseline",
+                            normalized,
+                            scratch,
+                        )
+                        updatePackageJob(
+                            activeHandle,
+                            jobId,
+                            NativeRuntime.JOB_INSTALLING,
+                            3,
+                            60,
+                            "Holding package mutation fixture",
+                            normalized,
+                            scratch,
+                        )
+                        Log.i(TAG, "Debug interrupted removal fixture entered mutation")
+                        Thread.sleep(holdMillis)
+                        updatePackageJob(
+                            activeHandle,
+                            jobId,
+                            NativeRuntime.JOB_FAILED,
+                            3,
+                            60,
+                            "Debug interruption fixture expired",
+                            normalized,
+                            scratch,
+                        )
+                    } catch (_: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                    } finally {
+                        packageOperationActive = false
+                        packageThread = null
+                        stopWhenUnobservedAndIdle()
+                    }
+                },
+                "ArchpheneInterruptedRemovalFixture",
+            )
+        packageThread = worker
+        worker.start()
         promoteWorkToForeground()
         return true
     }
@@ -9590,6 +9916,7 @@ class ArchpheneRuntimeService : Service() {
         if (length == 0) {
             jobPersistentId = 0L
             jobPackage = ""
+            jobRepository = ""
             jobOperation = 0
             jobState = 0
             jobProgress = 0
@@ -9614,6 +9941,7 @@ class ArchpheneRuntimeService : Service() {
         val state = fields[2].toIntOrNull() ?: return "Package journal returned invalid state"
         val progress = fields[4].toIntOrNull() ?: return "Package journal returned invalid progress"
         jobPersistentId = id
+        jobRepository = fields[6]
         publishPackageJob(fields[7], operation, state, progress, fields[8])
         return jobStatus
     }

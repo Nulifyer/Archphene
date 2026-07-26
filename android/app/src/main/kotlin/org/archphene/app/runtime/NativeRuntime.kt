@@ -42,6 +42,8 @@ internal object NativeRuntime {
     const val PACKAGE_COMMAND_REMOVE = 3
     const val PACKAGE_COMMAND_INSTALLED_ORIGIN = 4
     const val PACKAGE_COMMAND_INSTALLATION_BYTES = 5
+    const val PACKAGE_COMMAND_PENDING_MUTATION = 6
+    const val PACKAGE_COMMAND_REPAIR_MUTATION = 7
     const val JOB_QUEUED = 1
     const val JOB_RESOLVING = 2
     const val JOB_DOWNLOADING = 3

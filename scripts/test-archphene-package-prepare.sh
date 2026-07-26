@@ -35,6 +35,67 @@ cleanup() {
 }
 trap cleanup EXIT
 
+wait_for_btop_install() {
+  local name="$1" result_pattern="${2:-Installed}" deadline=$((SECONDS + 180)) ui stable=0
+  while ((SECONDS < deadline)); do
+    ui="$(archphene_capture_ui "$name" 2>/dev/null || true)"
+    if [[ "$ui" == *'package="com.google.android.packageinstaller"'* ]]; then
+      archphene_tap_ui_pattern \
+        "$ui" 'text="Install"[^>]*enabled="true"' 'Install btop launcher APK'
+      sleep 1
+      archphene_adb_run shell monkey -p "$package" \
+        -c android.intent.category.LAUNCHER 1 >/dev/null
+      stable=0
+      continue
+    fi
+    if [[ "$ui" == *"package=\"$package\""* ]] &&
+      archphene_regex_contains \
+        "$ui" 'text="(?:Install|Update) · Complete · 100%"' &&
+      archphene_regex_contains \
+        "$ui" "text=\"(?:$result_pattern) btop [^\"]+\""; then
+      stable=$((stable + 1))
+      if ((stable >= 3)); then
+        ARCHPHENE_UI="$ui"
+        return 0
+      fi
+    else
+      stable=0
+    fi
+    sleep 0.5
+  done
+  archphene_die "timed out waiting for btop and its Android launcher installation"
+}
+
+wait_for_btop_removal() {
+  local name="$1" deadline=$((SECONDS + 120)) ui stable=0
+  while ((SECONDS < deadline)); do
+    ui="$(archphene_capture_ui "$name" 2>/dev/null || true)"
+    if [[ "$ui" == *'package="com.google.android.packageinstaller"'* ]] &&
+      [[ "$ui" == *'Do you want to uninstall this app?'* ]]; then
+      archphene_tap_ui_pattern \
+        "$ui" 'text="OK"[^>]*enabled="true"' 'Uninstall btop launcher APK'
+      sleep 1
+      archphene_adb_run shell monkey -p "$package" \
+        -c android.intent.category.LAUNCHER 1 >/dev/null
+      stable=0
+      continue
+    fi
+    if [[ "$ui" == *"package=\"$package\""* ]] &&
+      archphene_regex_contains "$ui" 'text="Remove · Complete · 100%"' &&
+      archphene_regex_contains "$ui" 'text="Removed btop [^"]+"'; then
+      stable=$((stable + 1))
+      if ((stable >= 3)); then
+        ARCHPHENE_UI="$ui"
+        return 0
+      fi
+    else
+      stable=0
+    fi
+    sleep 0.5
+  done
+  archphene_die "timed out waiting for btop and its Android launcher removal"
+}
+
 if [[ "$skip_install" == false ]]; then
   archphene_require_file "$apk"
   if [[ "$clean_data" == true ]]; then
@@ -50,14 +111,15 @@ archphene_adb_run logcat -c
 archphene_adb_run shell am force-stop "$package" >/dev/null
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
 archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 15 >/dev/null
+archphene_open_manager_section Packages "archphene-prepare-packages-$serial"
 if [[ "$clean_data" == true ]]; then
   archphene_skip_storage_onboarding "archphene-prepare-onboarding-$serial"
 fi
 archphene_wait_ui 'Package catalog (ready|not downloaded)' \
   "archphene-prepare-catalog-$serial" 15
 if ! archphene_regex_contains "$ARCHPHENE_UI" 'Package catalog ready'; then
-  archphene_tap_ui_pattern \
-    "$ARCHPHENE_UI" 'text="REFRESH CATALOGS"' 'refresh catalogs'
+archphene_tap_ui_pattern \
+    "$ARCHPHENE_UI" 'text="(?:REFRESH CATALOGS|Refresh catalogs)"' 'refresh catalogs'
   archphene_wait_ui 'text="Package catalog ready"' \
     "archphene-prepare-catalog-ready-$serial" 60
 fi
@@ -66,7 +128,7 @@ archphene_wait_ui 'text="Package name"' "archphene-prepare-field-$serial" 15
 archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Package name"' 'package name'
 archphene_adb_run shell input text btop >/dev/null
 archphene_wait_ui 'text="btop"' "archphene-prepare-entered-$serial" 10
-archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="DETAILS"' 'package details'
+archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="(?:DETAILS|Details)"' 'package details'
 archphene_wait_ui \
   'text="[^"]*/btop [^"]+.*Dependency closure: [1-9][0-9]* packages' \
   "archphene-prepare-resolution-$serial" 20
@@ -78,12 +140,11 @@ if match is None:
 print(match.group(1))
 ' <<<"$ARCHPHENE_UI")"
 
-archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="INSTALL"' 'install package'
-archphene_wait_ui 'text="btop · (Downloading|Verifying|Installing|Complete) · [1-9][0-9]*%' \
-  "archphene-prepare-active-$serial" 60
-archphene_wait_ui 'text="btop · Complete · 100%.*Installed btop [^"]+"' \
-  "archphene-prepare-complete-$serial" 180
-archphene_wait_log "Installed btop: $closure_count signed packages" 15 >/dev/null
+archphene_tap_ui_pattern \
+  "$ARCHPHENE_UI" 'text="(?:INSTALL|Install|VERIFY|Verify)"' 'install or verify package'
+wait_for_btop_install "archphene-prepare-complete-$serial" "Installed|Verified"
+archphene_wait_log \
+  "(?:Installed|Verified) btop: $closure_count signed packages" 15 >/dev/null
 archphene_adb_run shell run-as "$package" test -x files/arch-root/usr/bin/btop ||
   archphene_die "installed btop executable is missing"
 local_btop="$(archphene_adb_run exec-out run-as "$package" find \
@@ -111,8 +172,8 @@ cache_listing="$(archphene_adb_run exec-out run-as "$package" find "$cache" \
   -maxdepth 1 -type f | tr -d '\r')"
 file_count="$(grep -c . <<<"$cache_listing")"
 expected_count=$((closure_count * 2))
-[[ "$file_count" == "$expected_count" ]] ||
-  archphene_die "unexpected verified cache count: $file_count (wanted $expected_count)"
+((file_count >= expected_count)) ||
+  archphene_die "verified cache is missing closure artifacts: $file_count (need at least $expected_count)"
 [[ "$cache_listing" != *".part"* ]] ||
   archphene_die "temporary package download survived publication"
 while IFS= read -r file; do
@@ -127,15 +188,16 @@ tampered_package="$(grep '/btop-[^/]*\.pkg\.tar\.' <<<"$cache_listing" |
 archphene_adb_run logcat -c
 archphene_adb_run shell run-as "$package" dd if=/dev/zero of="$tampered_package" \
   bs=1 count=1 conv=notrunc >/dev/null 2>&1
-archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="VERIFY"' 'verify tampered cache'
+archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="(?:VERIFY|Verify)"' 'verify tampered cache'
 archphene_wait_log 'Rejected invalid cached package .*package command failed with status' \
   30 >/dev/null
-archphene_wait_ui 'text="btop · Complete · 100%.*Verified btop [^"]+"' \
-  "archphene-prepare-tamper-recovered-$serial" 90
+archphene_wait_ui 'text="Update · Complete · 100%"' \
+  "archphene-prepare-tamper-state-$serial" 90
+archphene_wait_ui 'text="Verified btop [^"]+"' \
+  "archphene-prepare-tamper-recovered-$serial" 15
 
-archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="REMOVE"' 'remove package'
-archphene_wait_ui 'text="btop · Complete · 100%.*Removed btop [^"]+"' \
-  "archphene-remove-complete-$serial" 90
+archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="(?:REMOVE|Remove)"' 'remove package'
+wait_for_btop_removal "archphene-remove-complete-$serial"
 archphene_wait_log 'Removed btop [^ ]+' 15 >/dev/null
 if archphene_adb_run shell run-as "$package" test -e files/arch-root/usr/bin/btop; then
   archphene_die "removed btop executable remains present"
@@ -147,9 +209,8 @@ removed_btop="$(archphene_adb_run exec-out run-as "$package" find \
 archphene_adb_run shell run-as "$package" test -f "$dependency_entry/desc" ||
   archphene_die "conservative removal unexpectedly removed a dependency"
 
-archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="INSTALL"' 'reinstall removed package'
-archphene_wait_ui 'text="btop · Complete · 100%.*Installed btop [^"]+"' \
-  "archphene-reinstall-complete-$serial" 120
+archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="(?:INSTALL|Install)"' 'reinstall removed package'
+wait_for_btop_install "archphene-reinstall-complete-$serial"
 archphene_wait_log 'Installed btop: [1-9][0-9]* signed packages' 15 >/dev/null
 archphene_adb_run shell run-as "$package" test -x files/arch-root/usr/bin/btop ||
   archphene_die "reinstalled btop executable is missing"
@@ -162,8 +223,8 @@ archphene_tap_ui_pattern "$ARCHPHENE_UI" \
 archphene_adb_run shell input text 'btop%s--version' >/dev/null
 archphene_wait_ui 'text="btop --version"' "archphene-command-entered-$serial" 10
 archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null
-archphene_wait_ui 'text="RUN"' "archphene-command-keyboard-dismissed-$serial" 10
-archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="RUN"' 'run Linux command'
+archphene_wait_ui 'text="(?:RUN|Run)"' "archphene-command-keyboard-dismissed-$serial" 10
+archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="(?:RUN|Run)"' 'run Linux command'
 archphene_wait_ui 'text="Exited 0[^"]*btop version' \
   "archphene-command-complete-$serial" 45
 archphene_wait_log 'Linux command btop exited 0' 15 >/dev/null
@@ -173,8 +234,20 @@ archphene_adb_run exec-out screencap -p >"$output_dir/$serial-btop.png"
 archphene_adb_run shell am force-stop "$package" >/dev/null
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
 archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 15 >/dev/null
-archphene_wait_ui 'text="btop · Complete · 100%.*Installed btop [^"]+"' \
-  "archphene-prepare-reused-$serial" 20
+archphene_open_manager_section Packages "archphene-prepare-reused-packages-$serial"
+archphene_wait_ui 'text="Package name"' \
+  "archphene-prepare-reused-field-$serial" 15
+archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Package name"' 'package name'
+archphene_adb_run shell input text btop >/dev/null
+archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null
+archphene_wait_ui 'text="Search results"' \
+  "archphene-prepare-reused-results-$serial" 15
+archphene_tap_ui_pattern \
+  "$ARCHPHENE_UI" 'text="Search results"' 'Search results'
+archphene_wait_ui 'text="Install · Complete · 100%"' \
+  "archphene-prepare-reused-state-$serial" 20
+archphene_wait_ui 'text="Installed btop [^"]+"' \
+  "archphene-prepare-reused-$serial" 15
 
 fatal_log="$(archphene_adb_run logcat -d -v brief \
   -s AndroidRuntime:E libc:F '*:S' 2>/dev/null || true)"

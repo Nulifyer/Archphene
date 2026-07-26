@@ -2058,6 +2058,8 @@ mod android {
             3 => package_runtime.remove(package),
             4 => package_runtime.installed_origin(package),
             5 => package_runtime.installation_bytes(package),
+            6 => package_runtime.pending_mutation(package),
+            7 => package_runtime.repair_pending_mutation(package),
             _ => return ERROR_INVALID_ARGUMENT,
         };
         let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };

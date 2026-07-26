@@ -565,13 +565,31 @@ the local database, and only then deletes the recovered intent. Cache-only
 verify/remove/reinstall and forced restart-recovery gates pass on both devices
 without rewriting package payloads.
 
+Official package mutation recovery is now explicit and forward-only. Rust
+atomically publishes a bounded mode-0600 intent immediately before pacman
+mutation. Install/update intents retain the exact signed resolution and
+explicit targets; removal intents retain the exact installed package/version
+baseline. Startup validates but does not silently execute the intent, leaves
+its verified package inputs unavailable to cache cleanup, and distinguishes an
+interrupted mutation from work that was safe to retry. The manager exposes one
+Repair action, removes a stale lock only inside that explicit path, re-verifies
+the retained transaction, validates pacman's local database, proves the final
+state, and only then clears the intent. A deterministic same-UID `SIGKILL` at
+the committed `strace` removal boundary passes on the x86_64 emulator and
+AArch64 Samsung: both show the failed mutation and Repair action in full-device
+screenshots, complete the removal, clear the intent, and restore `strace`
+through the normal signed package flow. Mid-pacman partial-file/database
+failure injection, exact rollback to older archives, and whole-operation AUR
+recovery remain open.
+
 The generic compatibility layer maps Linux root ownership to the Android app
 UID, copies when SELinux rejects hard links, avoids Android app seccomp's
 blocked `fchmodat2`, and maps generic root-relative mutation calls without
 package-specific changes. The current path validates pacman's local database
 and proves the requested package and version. Scriptlets/hooks remain disabled,
-and real upgrade/replacement, failure injection, rollback/recovery, orphan
-cleanup, and low-storage behavior remain open.
+and real upgrade/replacement, mid-pacman partial-state injection, exact
+rollback, whole-operation AUR recovery, orphan cleanup, and low-storage
+behavior remain open.
 
 Package operations are now user-cancellable while queued, resolving,
 downloading, or verifying. The Activity enables a visible Cancel action

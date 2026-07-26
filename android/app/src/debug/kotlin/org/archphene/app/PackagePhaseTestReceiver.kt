@@ -14,7 +14,7 @@ internal class PackagePhaseTestReceiver : BroadcastReceiver() {
         context: Context,
         intent: Intent,
     ) {
-        if (intent.action != ACTION_START) {
+        if (intent.action != ACTION_START && intent.action != ACTION_START_INTERRUPTED_REMOVAL) {
             return
         }
         val token = intent.getStringExtra(EXTRA_TOKEN)
@@ -40,10 +40,17 @@ internal class PackagePhaseTestReceiver : BroadcastReceiver() {
                 ) {
                     val binder = service as? ArchpheneRuntimeService.LocalBinder
                     val started =
-                        binder?.startDebugPackagePhaseFixture(
-                            packageName,
-                            holdMillis.toLong(),
-                        ) == true
+                        if (intent.action == ACTION_START_INTERRUPTED_REMOVAL) {
+                            binder?.startDebugInterruptedRemovalFixture(
+                                packageName,
+                                holdMillis.toLong(),
+                            ) == true
+                        } else {
+                            binder?.startDebugPackagePhaseFixture(
+                                packageName,
+                                holdMillis.toLong(),
+                            ) == true
+                        }
                     Log.i(TAG, "Started package phases=$started token=$token")
                     applicationContext.unbindService(this)
                     pending.finish()
@@ -72,12 +79,14 @@ internal class PackagePhaseTestReceiver : BroadcastReceiver() {
     private companion object {
         private const val TAG = "ArchphenePackagePhaseProbe"
         private const val ACTION_START = "org.archphene.app.debug.action.START_PACKAGE_PHASES"
+        private const val ACTION_START_INTERRUPTED_REMOVAL =
+            "org.archphene.app.debug.action.START_INTERRUPTED_PACKAGE_REMOVAL"
         private const val EXTRA_TOKEN = "token"
         private const val EXTRA_PACKAGE = "package"
         private const val EXTRA_HOLD_MILLIS = "hold-ms"
         private const val DEFAULT_HOLD_MILLIS = 1_500
         private const val MIN_HOLD_MILLIS = 750
-        private const val MAX_HOLD_MILLIS = 5_000
+        private const val MAX_HOLD_MILLIS = 30_000
         private val TOKEN = Regex("[a-z0-9-]{1,48}")
         private val PACKAGE = Regex("[a-z0-9@._+\\-]{1,96}")
     }

@@ -388,10 +388,15 @@ impl PackageJobs {
         let mut recovered = 0_u32;
         for slot in &mut self.slots {
             if slot.occupied && slot.job.state.is_active() {
+                let interrupted_during_mutation = slot.job.state == JobState::Installing;
                 slot.job.state = JobState::Failed;
                 slot.job.progress = slot.job.progress.min(99);
                 slot.job.updated_millis = now_millis;
-                slot.job.message = BoundedText::new("Interrupted; retry is required")?;
+                slot.job.message = BoundedText::new(if interrupted_during_mutation {
+                    "Interrupted during package mutation; repair is required"
+                } else {
+                    "Interrupted before package mutation; retry is required"
+                })?;
                 recovered = recovered.saturating_add(1);
             }
         }
@@ -755,7 +760,10 @@ mod tests {
         let job = store.jobs().get(queued.id).expect("recovered job");
         assert_eq!(job.state, JobState::Failed);
         assert_eq!(job.progress, 10);
-        assert_eq!(job.message.as_str(), "Interrupted; retry is required");
+        assert_eq!(
+            job.message.as_str(),
+            "Interrupted before package mutation; retry is required"
+        );
     }
 
     #[test]
@@ -772,6 +780,27 @@ mod tests {
             jobs.update(job.id, JobState::Complete, 0, 100, "Done", 3),
             Err(JobError::InvalidTransition)
         ));
+    }
+
+    #[test]
+    fn interrupted_mutation_requires_repair_instead_of_a_plain_retry() {
+        let mut jobs = PackageJobs::new();
+        let job = jobs
+            .begin(JobOperation::Remove, "extra", "btop", 1)
+            .expect("queue job");
+        jobs.update(job.id, JobState::Resolving, 1, 10, "Resolve", 2)
+            .expect("resolve");
+        jobs.update(job.id, JobState::Verifying, 2, 30, "Verify", 3)
+            .expect("verify");
+        jobs.update(job.id, JobState::Installing, 3, 60, "Mutate", 4)
+            .expect("mutate");
+        assert_eq!(jobs.recover_interrupted(5).expect("recover"), 1);
+        let recovered = jobs.get(job.id).expect("recovered job");
+        assert_eq!(recovered.state, JobState::Failed);
+        assert_eq!(
+            recovered.message.as_str(),
+            "Interrupted during package mutation; repair is required"
+        );
     }
 
     #[test]

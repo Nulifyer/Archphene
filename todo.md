@@ -70,7 +70,7 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [ ] Pacman install/update/remove
     - [x] Install a bounded exact official package closure into the shared Arch root only after re-verifying every cached signature and package identity.
     - [x] Adapt the generic runtime to Android app-UID ownership, SELinux hard-link denial, app seccomp's blocked `fchmodat2`, and the explicit-loader environment without modifying individual packages.
-    - [x] Commit dependency-ordered package transactions durably, recover a stale database lock or incomplete current package entry after interruption, and prove the requested package through pacman's local database.
+    - [x] Commit dependency-ordered package transactions durably, recover a stale database lock and explicit install reasons after interruption, and prove the requested package through pacman's local database.
     - [x] Pass clean full-device `btop` install, cache-tamper, process-death, executable, and package-database gates on the x86_64 emulator and AArch64 Samsung.
     - [x] Query exact installed versions, preserve explicit/dependency install reasons, reconcile a current signed package, and conservatively remove only when pacman accepts the non-cascading plan.
     - [x] Pass clean full-device install, verify/tamper recovery, remove, absence, verified-cache reinstall, database-validity, and process-death gates on both targets.
@@ -78,8 +78,9 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
     - [x] Commit the complete prepared archive set through one normal pacman transaction without `--nodeps` or blanket overwrite; persist and recover explicit install reasons across manager death. Cache-only remove/reinstall and restart-recovery gates pass on both targets.
     - [x] Resolve, download, size-check, and commit the same exact target closure; inspect verified `.PKGINFO` installed sizes and reject low storage before mutation with the required and available bytes. A full-device x86_64 `dotnet-sdk` gate rejects a 757 MiB requirement with 454 MiB available, retains its Review job, and leaves no package entries or database lock.
     - [x] Allow cancellation while work is queued, resolving, downloading, or verifying; disconnect an active transfer, delete partial payloads, persist a terminal Cancelled result, and disable cancellation before pacman mutation. Cache-only cancellation and normal-commit regressions pass on both targets.
+    - [x] Publish a bounded mode-0600 mutation intent immediately before official install/update/remove, retain exact verified install inputs or the removal baseline across `SIGKILL`, distinguish pre-mutation Retry from in-mutation Repair, protect retained inputs from cache cleanup, and converge an explicit repair before clearing the intent. A deterministic `SIGKILL` at the committed `strace` removal boundary, repair, database/executable absence, normal reinstall, logs, and full-device visual gate pass on the emulator and Samsung.
     - [ ] Prove a real older-to-newer repository update, including changed dependencies and replacements, on both targets.
-    - [ ] Complete hooks/scriptlets, proven replacement handling, failure rollback/recovery, orphan cleanup, and low-storage recovery.
+    - [ ] Complete hooks/scriptlets, proven replacement handling, mid-pacman partial-file/database failure injection, rollback to exact retained older archives, whole-operation AUR recovery, orphan cleanup, and low-storage recovery.
   - [ ] Terminal/PTY and shared command environment
     - [x] Execute one installed ELF command without a shell through the verified loader and generic path bridge, with bounded names, arguments, output, time, process group, environment, working directory, and symlink resolution.
     - [x] Pass clean `btop --version` execution, scoped-log, and full-device UI gates on the x86_64 emulator and AArch64 Samsung after signed install/remove/reinstall cycles.

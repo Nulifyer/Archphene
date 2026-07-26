@@ -811,6 +811,12 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                             isEnabled = false
                             binder.cancelPackageOperation()
                         }
+                        binder.packageMutationRepairAvailable -> {
+                            isEnabled = false
+                            if (binder.repairPackageMutation()) {
+                                updateStatus()
+                            }
+                        }
                         binder.packageCacheRecoveryAvailable -> {
                             isEnabled = false
                             if (binder.clearPackageCache()) {
@@ -2660,6 +2666,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         val packageActionAvailable =
             binder.aurBuildCancellationAvailable ||
                 binder.packageCancellationAvailable ||
+                binder.packageMutationRepairAvailable ||
+                binder.packageCacheRecoveryAvailable ||
                 binder.packageCatalogRecoveryAvailable ||
                 binder.packageRecoveryAvailable
         setTextIfChanged(cancelButton, binder.packageActivityActionLabel)

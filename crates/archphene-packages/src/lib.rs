@@ -37,6 +37,10 @@ const INSTALL_REASON_INTENT_FILE: &str = "run/package-install-reasons-v1";
 const INSTALL_REASON_INTENT_TEMP_FILE: &str = "run/package-install-reasons-v1.tmp";
 const INSTALL_REASON_INTENT_HEADER: &str = "org.archphene.package-install-reasons.v1";
 const INSTALL_REASON_INTENT_LIMIT: u64 = 64 * 1024;
+const PACKAGE_MUTATION_INTENT_FILE: &str = "run/package-mutation-v1";
+const PACKAGE_MUTATION_INTENT_TEMP_FILE: &str = "run/package-mutation-v1.tmp";
+const PACKAGE_MUTATION_INTENT_HEADER: &str = "org.archphene.package-mutation.v1";
+const PACKAGE_MUTATION_INTENT_LIMIT: u64 = 384 * 1024;
 const PACMAN_CONFIG_FILE: &str = "etc/pacman.conf";
 const PACMAN_CONFIG_TEMP_FILE: &str = "etc/pacman.conf.tmp";
 const AUR_PACMAN_CONFIG_FILE: &str = "etc/pacman-aur.conf";
@@ -328,7 +332,7 @@ pub struct ToolOutput {
     length: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackageResolution {
     bytes: Vec<u8>,
 }
@@ -731,7 +735,9 @@ impl PackageRuntime {
             library_path,
             executable_path,
         };
-        runtime.recover_pending_install_reasons()?;
+        if runtime.read_pending_mutation()?.is_none() {
+            runtime.recover_pending_install_reasons()?;
+        }
         Ok(runtime)
     }
 
@@ -1374,9 +1380,9 @@ impl PackageRuntime {
     pub fn install(&self, package: &str) -> Result<ToolOutput, PackageRuntimeError> {
         let resolution = self.resolve(package)?;
         if package == BASE_PACKAGE {
-            self.install_resolution(&resolution, &[BASE_PACKAGE])?;
+            self.install_resolution(&resolution, &[BASE_PACKAGE], package)?;
         } else {
-            self.install_resolution(&resolution, &[BASE_PACKAGE, package])?;
+            self.install_resolution(&resolution, &[BASE_PACKAGE, package], package)?;
         }
         let installed = self.installed_version(package)?;
         let expected = resolution
@@ -1431,7 +1437,8 @@ impl PackageRuntime {
             }
         }
         let resolution = self.resolve_targets(&targets)?;
-        self.install_resolution(&resolution, &[BASE_PACKAGE])
+        let recovery_target = packages.first().copied().unwrap_or(BASE_PACKAGE);
+        self.install_resolution(&resolution, &[BASE_PACKAGE], recovery_target)
     }
 
     pub fn install_verified_aur_archive(
@@ -1598,6 +1605,7 @@ impl PackageRuntime {
         &self,
         resolution: &PackageResolution,
         explicit_targets: &[&str],
+        recovery_target: &str,
     ) -> Result<(), PackageRuntimeError> {
         let package_count = resolution.as_str()?.lines().count();
         let mut archives = Vec::with_capacity(package_count);
@@ -1672,6 +1680,7 @@ impl PackageRuntime {
             self.run_with_timeout(PackageTool::Pacman, &plan_arguments, TRANSACTION_TIMEOUT)?;
         validate_install_plan(plan.as_str()?, &archives)?;
 
+        self.publish_install_mutation_intent(recovery_target, explicit_targets, resolution)?;
         let has_explicit = archives.iter().any(|archive| archive.explicitly_installed);
         if has_explicit {
             self.publish_install_reason_intent(&archives)?;
@@ -1714,6 +1723,12 @@ impl PackageRuntime {
         if has_explicit {
             self.recover_pending_install_reasons()?;
         }
+        self.validate_local_database()?;
+        let expected = resolved_version(resolution, recovery_target)?;
+        if self.installed_version(recovery_target)?.as_str()? != expected {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        self.clear_pending_mutation()?;
         Ok(())
     }
 
@@ -1753,6 +1768,8 @@ impl PackageRuntime {
         if plan.as_str()?.trim() != package {
             return Err(PackageRuntimeError::InvalidResolution);
         }
+        let installed_version = self.installed_version(package)?;
+        self.publish_remove_mutation_intent(package, installed_version.as_str()?)?;
         let result = self.run_with_timeout(
             PackageTool::Pacman,
             &[
@@ -1778,7 +1795,181 @@ impl PackageRuntime {
         if !self.installed_version(package)?.as_bytes().is_empty() {
             return Err(PackageRuntimeError::InvalidResolution);
         }
+        self.clear_pending_mutation()?;
         Ok(empty_tool_output())
+    }
+
+    pub fn pending_mutation(&self, package: &str) -> Result<ToolOutput, PackageRuntimeError> {
+        if !safe_logical_name(package) {
+            return Err(PackageRuntimeError::InvalidQuery);
+        }
+        let mut output = empty_tool_output();
+        let Some(intent) = self.read_pending_mutation()? else {
+            return Ok(output);
+        };
+        match intent {
+            PackageMutationIntent::Install {
+                request,
+                resolution,
+                ..
+            } if request == package => {
+                let version = resolved_version(&resolution, package)?;
+                output.push(b"install\t")?;
+                output.push(version.as_bytes())?;
+            }
+            PackageMutationIntent::Remove {
+                package: target,
+                version,
+            } if target == package => {
+                output.push(b"remove\t")?;
+                output.push(version.as_bytes())?;
+            }
+            _ => return Err(PackageRuntimeError::Busy),
+        }
+        Ok(output)
+    }
+
+    pub fn repair_pending_mutation(
+        &self,
+        package: &str,
+    ) -> Result<ToolOutput, PackageRuntimeError> {
+        if !safe_logical_name(package) {
+            return Err(PackageRuntimeError::InvalidQuery);
+        }
+        let intent = self
+            .read_pending_mutation()?
+            .ok_or(PackageRuntimeError::InvalidResolution)?;
+        self.recover_database_lock()?;
+        match intent {
+            PackageMutationIntent::Install {
+                request,
+                explicit_targets,
+                resolution,
+            } => {
+                if request != package {
+                    return Err(PackageRuntimeError::Busy);
+                }
+                let explicit = explicit_targets
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>();
+                self.install_resolution(&resolution, &explicit, &request)?;
+                let expected = resolved_version(&resolution, &request)?;
+                let installed = self.installed_version(&request)?;
+                if installed.as_str()? != expected {
+                    return Err(PackageRuntimeError::InvalidResolution);
+                }
+                Ok(installed)
+            }
+            PackageMutationIntent::Remove {
+                package: target,
+                version,
+            } => {
+                if target != package {
+                    return Err(PackageRuntimeError::Busy);
+                }
+                let installed = self.installed_version(&target)?;
+                if installed.as_bytes().is_empty() {
+                    self.validate_local_database()?;
+                    self.clear_pending_mutation()?;
+                    return Ok(empty_tool_output());
+                }
+                if installed.as_str()? != version {
+                    return Err(PackageRuntimeError::InvalidResolution);
+                }
+                self.remove(&target)
+            }
+        }
+    }
+
+    fn publish_install_mutation_intent(
+        &self,
+        request: &str,
+        explicit_targets: &[&str],
+        resolution: &PackageResolution,
+    ) -> Result<(), PackageRuntimeError> {
+        let intent = PackageMutationIntent::Install {
+            request: request.to_owned(),
+            explicit_targets: explicit_targets
+                .iter()
+                .map(|target| (*target).to_owned())
+                .collect(),
+            resolution: resolution.clone(),
+        };
+        self.publish_mutation_intent(&intent)
+    }
+
+    fn publish_remove_mutation_intent(
+        &self,
+        package: &str,
+        version: &str,
+    ) -> Result<(), PackageRuntimeError> {
+        self.publish_mutation_intent(&PackageMutationIntent::Remove {
+            package: package.to_owned(),
+            version: version.to_owned(),
+        })
+    }
+
+    fn publish_mutation_intent(
+        &self,
+        intent: &PackageMutationIntent,
+    ) -> Result<(), PackageRuntimeError> {
+        let content = serialize_package_mutation_intent(intent, self.architecture)?;
+        if let Some(existing) = self.read_pending_mutation()? {
+            let existing = serialize_package_mutation_intent(&existing, self.architecture)?;
+            if existing != content {
+                return Err(PackageRuntimeError::Busy);
+            }
+        }
+        publish_regular_file(
+            &self.arch_root.join(PACKAGE_MUTATION_INTENT_FILE),
+            &self.arch_root.join(PACKAGE_MUTATION_INTENT_TEMP_FILE),
+            content.as_bytes(),
+        )?;
+        File::open(
+            self.arch_root
+                .join(PACKAGE_MUTATION_INTENT_FILE)
+                .parent()
+                .ok_or(PackageRuntimeError::InvalidPath)?,
+        )?
+        .sync_all()?;
+        Ok(())
+    }
+
+    fn read_pending_mutation(&self) -> Result<Option<PackageMutationIntent>, PackageRuntimeError> {
+        let path = self.arch_root.join(PACKAGE_MUTATION_INTENT_FILE);
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(PackageRuntimeError::Io(error)),
+        };
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || metadata.permissions().mode() & 0o077 != 0
+            || metadata.len() == 0
+            || metadata.len() > PACKAGE_MUTATION_INTENT_LIMIT
+        {
+            return Err(PackageRuntimeError::UnsafeEntry(path));
+        }
+        let content = fs::read(&path)?;
+        if content.len() as u64 != metadata.len() {
+            return Err(PackageRuntimeError::SizeMismatch);
+        }
+        let content =
+            std::str::from_utf8(&content).map_err(|_| PackageRuntimeError::InvalidResolution)?;
+        parse_package_mutation_intent(content, self.architecture).map(Some)
+    }
+
+    fn clear_pending_mutation(&self) -> Result<(), PackageRuntimeError> {
+        let path = self.arch_root.join(PACKAGE_MUTATION_INTENT_FILE);
+        match fs::remove_file(&path) {
+            Ok(()) => {
+                File::open(path.parent().ok_or(PackageRuntimeError::InvalidPath)?)?.sync_all()?;
+                Ok(())
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(PackageRuntimeError::Io(error)),
+        }
     }
 
     fn validate_local_database(&self) -> Result<(), PackageRuntimeError> {
@@ -2119,6 +2310,9 @@ impl PackageRuntime {
         &self,
         packages: &[&str],
     ) -> Result<u64, PackageRuntimeError> {
+        if self.read_pending_mutation()?.is_some() {
+            return Err(PackageRuntimeError::Busy);
+        }
         if packages.is_empty() || packages.len() > 256 {
             return Err(PackageRuntimeError::InvalidQuery);
         }
@@ -2143,6 +2337,9 @@ impl PackageRuntime {
     }
 
     pub fn clear_package_cache(&self) -> Result<u64, PackageRuntimeError> {
+        if self.read_pending_mutation()?.is_some() {
+            return Err(PackageRuntimeError::Busy);
+        }
         let (directory, artifacts) = self.scan_package_cache()?;
         let mut reclaimed_bytes = 0_u64;
         for artifact in artifacts {
@@ -3549,6 +3746,162 @@ struct InstallArchive {
     explicitly_installed: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PackageMutationIntent {
+    Install {
+        request: String,
+        explicit_targets: Vec<String>,
+        resolution: PackageResolution,
+    },
+    Remove {
+        package: String,
+        version: String,
+    },
+}
+
+fn serialize_package_mutation_intent(
+    intent: &PackageMutationIntent,
+    architecture: RepositoryArchitecture,
+) -> Result<String, PackageRuntimeError> {
+    let mut content = String::with_capacity(4096);
+    content.push_str(PACKAGE_MUTATION_INTENT_HEADER);
+    content.push('\n');
+    match intent {
+        PackageMutationIntent::Install {
+            request,
+            explicit_targets,
+            resolution,
+        } => {
+            content.push_str("install\t");
+            content.push_str(request);
+            content.push('\n');
+            for target in explicit_targets {
+                content.push_str("explicit\t");
+                content.push_str(target);
+                content.push('\n');
+            }
+            for line in resolution.as_str()?.lines() {
+                content.push_str("archive\t");
+                content.push_str(line);
+                content.push('\n');
+            }
+        }
+        PackageMutationIntent::Remove { package, version } => {
+            content.push_str("remove\t");
+            content.push_str(package);
+            content.push('\t');
+            content.push_str(version);
+            content.push('\n');
+        }
+    }
+    if content.len() as u64 > PACKAGE_MUTATION_INTENT_LIMIT {
+        return Err(PackageRuntimeError::OutputLimit);
+    }
+    parse_package_mutation_intent(&content, architecture)?;
+    Ok(content)
+}
+
+fn parse_package_mutation_intent(
+    input: &str,
+    architecture: RepositoryArchitecture,
+) -> Result<PackageMutationIntent, PackageRuntimeError> {
+    if input.is_empty()
+        || input.len() as u64 > PACKAGE_MUTATION_INTENT_LIMIT
+        || !input.ends_with('\n')
+    {
+        return Err(PackageRuntimeError::InvalidResolution);
+    }
+    let mut lines = input.lines();
+    if lines.next() != Some(PACKAGE_MUTATION_INTENT_HEADER) {
+        return Err(PackageRuntimeError::InvalidResolution);
+    }
+    let operation = lines.next().ok_or(PackageRuntimeError::InvalidResolution)?;
+    if let Some(request) = operation.strip_prefix("install\t") {
+        if !safe_logical_name(request) {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        let mut explicit_targets = Vec::with_capacity(2);
+        let mut resolution_text = String::with_capacity(input.len());
+        let mut reading_archives = false;
+        for line in lines {
+            if let Some(target) = line.strip_prefix("explicit\t") {
+                if reading_archives
+                    || !safe_logical_name(target)
+                    || explicit_targets.len() >= 256
+                    || explicit_targets.iter().any(|entry| entry == target)
+                {
+                    return Err(PackageRuntimeError::InvalidResolution);
+                }
+                explicit_targets.push(target.to_owned());
+            } else if let Some(archive) = line.strip_prefix("archive\t") {
+                reading_archives = true;
+                resolution_text.push_str(archive);
+                resolution_text.push('\n');
+            } else {
+                return Err(PackageRuntimeError::InvalidResolution);
+            }
+        }
+        if explicit_targets.is_empty() || resolution_text.is_empty() {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        let target_refs = explicit_targets
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let resolution = parse_resolution_output(&resolution_text, &target_refs, architecture)?;
+        resolved_version(&resolution, request)?;
+        Ok(PackageMutationIntent::Install {
+            request: request.to_owned(),
+            explicit_targets,
+            resolution,
+        })
+    } else if let Some(removal) = operation.strip_prefix("remove\t") {
+        if lines.next().is_some() {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        let mut fields = removal.split('\t');
+        let package = fields
+            .next()
+            .ok_or(PackageRuntimeError::InvalidResolution)?;
+        let version = fields
+            .next()
+            .ok_or(PackageRuntimeError::InvalidResolution)?;
+        if fields.next().is_some()
+            || !safe_logical_name(package)
+            || version.is_empty()
+            || version.len() > 128
+            || version
+                .bytes()
+                .any(|byte| byte.is_ascii_whitespace() || byte == 0)
+        {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        Ok(PackageMutationIntent::Remove {
+            package: package.to_owned(),
+            version: version.to_owned(),
+        })
+    } else {
+        Err(PackageRuntimeError::InvalidResolution)
+    }
+}
+
+fn resolved_version<'a>(
+    resolution: &'a PackageResolution,
+    package: &str,
+) -> Result<&'a str, PackageRuntimeError> {
+    resolution
+        .as_str()?
+        .lines()
+        .map(parse_resolved_payload)
+        .find_map(|payload| match payload {
+            Ok(payload) if payload.name == package => Some(Ok(payload.version)),
+            Ok(_) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .transpose()?
+        .ok_or(PackageRuntimeError::MissingTarget)
+}
+
 fn parse_install_reason_intent(input: &str) -> Result<Vec<&str>, PackageRuntimeError> {
     if input.len() as u64 > INSTALL_REASON_INTENT_LIMIT {
         return Err(PackageRuntimeError::InvalidResolution);
@@ -4617,6 +4970,56 @@ https://geo.mirror.pkgbuild.com/extra/os/x86_64/{filename}\t{}\n",
     }
 
     #[test]
+    fn package_mutation_intents_are_exact_bounded_and_round_trip() {
+        let resolution = parse_resolution_output(
+            "core\tbase\t3-2\tbase-3-2-any.pkg.tar.zst\t\
+https://geo.mirror.pkgbuild.com/core/os/x86_64/base-3-2-any.pkg.tar.zst\t1024\n\
+extra\tbtop\t1.4.7-1\tbtop-1.4.7-1-x86_64.pkg.tar.zst\t\
+https://geo.mirror.pkgbuild.com/extra/os/x86_64/btop-1.4.7-1-x86_64.pkg.tar.zst\t2048\n",
+            &["base", "btop"],
+            RepositoryArchitecture::X86_64,
+        )
+        .expect("resolution");
+        let install = PackageMutationIntent::Install {
+            request: "btop".to_owned(),
+            explicit_targets: vec!["base".to_owned(), "btop".to_owned()],
+            resolution,
+        };
+        let encoded = serialize_package_mutation_intent(&install, RepositoryArchitecture::X86_64)
+            .expect("serialize install");
+        assert_eq!(
+            parse_package_mutation_intent(&encoded, RepositoryArchitecture::X86_64)
+                .expect("parse install"),
+            install,
+        );
+
+        let removal = PackageMutationIntent::Remove {
+            package: "btop".to_owned(),
+            version: "1.4.7-1".to_owned(),
+        };
+        let encoded = serialize_package_mutation_intent(&removal, RepositoryArchitecture::X86_64)
+            .expect("serialize removal");
+        assert_eq!(
+            parse_package_mutation_intent(&encoded, RepositoryArchitecture::X86_64)
+                .expect("parse removal"),
+            removal,
+        );
+
+        for invalid in [
+            "",
+            "org.archphene.package-mutation.v1\nremove\tbtop\t1.4.7-1",
+            "org.archphene.package-mutation.v1\nremove\t../btop\t1.4.7-1\n",
+            "org.archphene.package-mutation.v1\ninstall\tbtop\narchive\tbad\n",
+            "org.archphene.package-mutation.v1\nremove\tbtop\t1.4.7-1\nextra\n",
+        ] {
+            assert!(matches!(
+                parse_package_mutation_intent(invalid, RepositoryArchitecture::X86_64),
+                Err(PackageRuntimeError::InvalidResolution)
+            ));
+        }
+    }
+
+    #[test]
     fn package_payload_downloads_are_exact_and_atomic() {
         let tree = TestTree::new();
         tree.file("libarchphene_pkg_111111111111111111111111.so", b"loader");
@@ -4757,6 +5160,25 @@ library\tlibarchphene_path_bridge.so\tlibarchphene_pkg_555555555555555555555555.
         fs::write(&btop_signature, b"signature").expect("btop signature");
         fs::write(&glibc_partial, b"partial").expect("glibc partial");
         fs::write(&old_btop, b"old").expect("old btop archive");
+
+        let intent_path = tree.root.join(PACKAGE_MUTATION_INTENT_FILE);
+        fs::write(
+            &intent_path,
+            b"org.archphene.package-mutation.v1\nremove\tbtop\t1.4.7-1\n",
+        )
+        .expect("mutation intent");
+        fs::set_permissions(&intent_path, fs::Permissions::from_mode(0o600))
+            .expect("private mutation intent");
+        assert!(matches!(
+            runtime.clear_package_cache_packages(&["btop"]),
+            Err(PackageRuntimeError::Busy)
+        ));
+        assert!(matches!(
+            runtime.clear_package_cache(),
+            Err(PackageRuntimeError::Busy)
+        ));
+        assert!(btop_archive.exists());
+        fs::remove_file(&intent_path).expect("remove mutation intent");
 
         let inventory = runtime.package_cache_catalog().expect("cache inventory");
         assert_eq!(inventory.total_bytes(), 26);
