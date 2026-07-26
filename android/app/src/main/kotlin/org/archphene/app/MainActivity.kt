@@ -177,7 +177,14 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 savedInstanceState?.getInt(
                     MANAGER_SECTION_STATE,
                     MANAGER_SECTION_PACKAGES,
-                ) ?: MANAGER_SECTION_PACKAGES
+                )
+                    ?: getSharedPreferences(
+                        MANAGER_PREFERENCES,
+                        MODE_PRIVATE,
+                    ).getInt(
+                        MANAGER_SECTION_PREFERENCE,
+                        MANAGER_SECTION_PACKAGES,
+                    )
             ).coerceIn(MANAGER_SECTION_PACKAGES, MANAGER_SECTION_TERMINAL)
         showingInstalledPackages =
             savedInstanceState?.getBoolean(PACKAGE_RESULT_MODE_STATE, true) ?: true
@@ -2521,8 +2528,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 getColorStateList(R.color.manager_navigation_background)
             setTextColor(getColorStateList(R.color.manager_navigation_text))
             setOnClickListener {
-                selectedManagerSection = section
-                updateShellPresentation(runtimeBinder?.sharedShellRunning == true)
+                selectManagerSection(section)
             }
         }
 
@@ -2531,6 +2537,10 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             return
         }
         selectedManagerSection = section
+        getSharedPreferences(MANAGER_PREFERENCES, MODE_PRIVATE)
+            .edit()
+            .putInt(MANAGER_SECTION_PREFERENCE, section)
+            .apply()
         if (::packagePanel.isInitialized) {
             updateShellPresentation(runtimeBinder?.sharedShellRunning == true)
         }
@@ -2731,6 +2741,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         private const val PENDING_IMPORT_URI_STATE = "pending_import_uri"
         private const val PENDING_FOLDER_URI_STATE = "pending_folder_uri"
         private const val PENDING_FOLDER_FLAGS_STATE = "pending_folder_flags"
+        private const val MANAGER_PREFERENCES = "manager_navigation"
+        private const val MANAGER_SECTION_PREFERENCE = "selected_section"
         private const val MANAGER_SECTION_STATE = "manager_section"
         private const val PACKAGE_RESULT_MODE_STATE = "package_result_mode"
         private const val PACKAGE_DETAILS_MODE_STATE = "package_details_mode"

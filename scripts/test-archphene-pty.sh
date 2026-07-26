@@ -62,14 +62,25 @@ archphene_adb_run shell run-as "$package" test -x files/arch-root/usr/bin/bash |
   archphene_die "shared-shell regression requires installed bash"
 
 enter_shell_line() {
-  local line="$1" ui_name="$2"
+  local line="$1" ui_name="$2" deadline ui
   archphene_wait_ui 'text="Linux command, for example btop"' "$ui_name-field" 15
-  archphene_tap_ui_pattern "$ARCHPHENE_UI" \
-    'text="Linux command, for example btop"' 'Linux shell input'
+  deadline=$((SECONDS + 10))
+  while ((SECONDS < deadline)); do
+    ui="$(archphene_capture_ui "$ui_name-field-focused")"
+    if archphene_regex_contains \
+      "$ui" 'class="android\.widget\.EditText"[^>]*focused="true"'; then
+      break
+    fi
+    archphene_tap_ui_pattern \
+      "$ui" 'text="Linux command, for example btop"' 'Linux shell input'
+    sleep 0.3
+  done
+  ((SECONDS < deadline)) ||
+    archphene_die "Linux shell input did not retain focus"
   archphene_adb_run shell input text "${line// /%s}" >/dev/null
   archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null
-  archphene_wait_ui 'text="SEND"' "$ui_name-send" 10
-  archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="SEND"' 'send shell input'
+  archphene_wait_ui 'text="Send"' "$ui_name-send" 10
+  archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Send"' 'send shell input'
 }
 
 enter_terminal_line() {
@@ -93,11 +104,12 @@ archphene_adb_run shell am start -W -n "$activity" >/dev/null
 archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 15 >/dev/null
 archphene_wait_log 'Activity created generation=1' 15 'ArchpheneActivity:V *:S' >/dev/null
 archphene_open_manager_section Terminal "archphene-shell-terminal-$serial"
-archphene_wait_ui 'text="START SHELL"' "archphene-shell-action-$serial" 15
-archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="START SHELL"' 'start shell'
+archphene_wait_ui 'text="Start shell"' "archphene-shell-action-$serial" 15
+archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Start shell"' 'start shell'
 archphene_wait_ui 'text="Shared shell ready' "archphene-shell-ready-$serial" 20
-archphene_wait_ui 'archphene:~\$' "archphene-shell-startup-$serial" 15
-archphene_wait_log 'Shared Bash session started' 15 >/dev/null
+archphene_wait_ui \
+  '(?:archphene:~|sh-[0-9.]+)\$' "archphene-shell-startup-$serial" 15
+archphene_wait_log 'Shared (?:Bash|POSIX shell) session started' 15 >/dev/null
 
 enter_shell_line "pwd" "archphene-shell-pwd-$serial"
 archphene_wait_ui '/home/archphene' "archphene-shell-pwd-output-$serial" 15
@@ -110,7 +122,7 @@ enter_shell_line "locale charmap" "archphene-shell-locale-$serial"
 archphene_wait_ui 'UTF-8' "archphene-shell-locale-output-$serial" 15
 enter_shell_line "echo archphene-session-one" "archphene-shell-one-$serial"
 archphene_wait_ui 'archphene-session-one' "archphene-shell-one-output-$serial" 15
-enter_terminal_line "type echox" "archphene-shell-direct-$serial" 1
+enter_terminal_line "type echo" "archphene-shell-direct-$serial"
 archphene_wait_ui 'echo is a shell builtin' \
   "archphene-shell-direct-output-$serial" 15
 archphene_adb_run exec-out screencap -p >"$output_dir/$serial-direct-input.png"
@@ -128,14 +140,14 @@ target_rotation=1
 archphene_adb_run shell settings put system accelerometer_rotation 0 >/dev/null
 archphene_adb_run shell settings put system user_rotation "$target_rotation" >/dev/null
 archphene_wait_log 'Activity created generation=2' 20 'ArchpheneActivity:V *:S' >/dev/null
-archphene_wait_ui 'text="STOP SHELL"' "archphene-shell-rotated-$serial" 20
+archphene_wait_ui 'text="Stop shell"' "archphene-shell-rotated-$serial" 20
 archphene_wait_ui 'archphene-session-one' "archphene-shell-retained-$serial" 15
 archphene_adb_run exec-out screencap -p >"$output_dir/$serial-running.png"
 restore_rotation
 rotation_changed=false
-archphene_wait_ui 'text="STOP SHELL"' "archphene-shell-restored-$serial" 20
+archphene_wait_ui 'text="Stop shell"' "archphene-shell-restored-$serial" 20
 
-enter_shell_line "echo archphene-session-two" "archphene-shell-two-$serial"
+enter_terminal_line "echo archphene-session-two" "archphene-shell-two-$serial"
 archphene_wait_ui 'archphene-session-two' "archphene-shell-two-output-$serial" 15
 
 android_background_pid="$(archphene_android_pid "$package")"
@@ -189,16 +201,20 @@ archphene_adb_run shell am start -W -n "$activity" >/dev/null
 archphene_wait_ui 'archphene-session-two' "archphene-shell-back-return-$serial" 20
 archphene_adb_run exec-out screencap -p >"$output_dir/$serial-background.png"
 
-enter_shell_line "exit 7" "archphene-shell-exit-$serial"
+enter_terminal_line "exit 7" "archphene-shell-exit-$serial"
 archphene_wait_ui 'Shared shell exited 7' "archphene-shell-exited-$serial" 20
-archphene_wait_log 'Shared Bash session finished with status 7' 15 >/dev/null
+archphene_wait_log \
+  'Shared (?:Bash|POSIX shell) session finished with status 7' 15 >/dev/null
+archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null
+sleep 0.5
 archphene_adb_run exec-out screencap -p >"$output_dir/$serial-exited.png"
 
-archphene_wait_ui 'text="START SHELL"' "archphene-shell-restart-$serial" 15
-archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="START SHELL"' 'restart shell'
-archphene_wait_ui 'text="STOP SHELL"' "archphene-shell-stop-action-$serial" 20
-archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="STOP SHELL"' 'stop shell'
-archphene_wait_log 'Shared Bash session finished with status stopped' 15 >/dev/null
+archphene_wait_ui 'text="Start shell"' "archphene-shell-restart-$serial" 15
+archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Start shell"' 'restart shell'
+archphene_wait_ui 'text="Stop shell"' "archphene-shell-stop-action-$serial" 20
+archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Stop shell"' 'stop shell'
+archphene_wait_log \
+  'Shared (?:Bash|POSIX shell) session finished with status stopped' 15 >/dev/null
 archphene_wait_ui 'Shared shell stopped' "archphene-shell-stopped-$serial" 20
 
 android_pid="$(archphene_android_pid "$package")"

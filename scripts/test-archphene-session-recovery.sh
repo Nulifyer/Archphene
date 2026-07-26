@@ -16,8 +16,8 @@ archphene_adb_run shell pm grant "$package" android.permission.POST_NOTIFICATION
 archphene_adb_run shell am force-stop "$package" >/dev/null
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
 archphene_open_manager_section Terminal "session-recovery-terminal-$serial"
-archphene_wait_ui 'text="START SHELL"' "session-recovery-start-$serial" 20
-archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="START SHELL"' 'start shell'
+archphene_wait_ui 'text="Start shell"' "session-recovery-start-$serial" 20
+archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Start shell"' 'start shell'
 archphene_wait_ui 'archphene:~\$' "session-recovery-ready-$serial" 20
 [[ "$(archphene_adb_run shell run-as "$package" cat "$marker" | tr -d '\r')" == active ]] ||
   archphene_die "active session marker was not published"
@@ -35,12 +35,12 @@ archphene_adb_run shell am start -W -n "$activity" >/dev/null
 archphene_open_manager_section Terminal "session-recovery-restart-terminal-$serial"
 archphene_wait_ui 'The previous Linux session was interrupted' \
   "session-recovery-interrupted-$serial" 20
-archphene_wait_ui 'text="START SHELL"' "session-recovery-restart-$serial" 15
+archphene_wait_ui 'text="Start shell"' "session-recovery-restart-$serial" 15
 archphene_adb_run exec-out screencap -p >"$output"
 
-archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="START SHELL"' 'restart shell'
-archphene_wait_ui 'text="STOP SHELL"' "session-recovery-stop-$serial" 20
-archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="STOP SHELL"' 'stop shell'
+archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Start shell"' 'restart shell'
+archphene_wait_ui 'text="Stop shell"' "session-recovery-stop-$serial" 20
+archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Stop shell"' 'stop shell'
 archphene_wait_ui 'Shared shell stopped' "session-recovery-clean-$serial" 20
 if archphene_adb_run shell run-as "$package" test -e "$marker"; then
   archphene_die "clean session stop left an active marker"

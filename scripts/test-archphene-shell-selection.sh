@@ -92,8 +92,8 @@ select_shell "POSIX shell" "archphene-posix-$serial"
 start_manager "archphene-posix-restart-$serial"
 archphene_open_manager_section Terminal "archphene-posix-terminal-$serial"
 assert_selected_shell "POSIX shell" "archphene-posix-restart-$serial"
-archphene_wait_ui 'text="START SHELL"' "archphene-posix-start-$serial" 15
-archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="START SHELL"' 'start POSIX shell'
+archphene_wait_ui 'text="Start shell"' "archphene-posix-start-$serial" 15
+archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Start shell"' 'start POSIX shell'
 archphene_wait_log 'Shared POSIX shell session started' 20 >/dev/null
 archphene_wait_ui 'text="Shared shell ready"' "archphene-posix-ready-$serial" 20
 archphene_wait_ui 'content-desc="Linux terminal, [0-9]+ columns by [0-9]+ rows"' \
@@ -103,24 +103,24 @@ archphene_wait_ui \
   'class="android.widget.Spinner"[^>]*enabled="false"[^>]*>.*text="POSIX shell"' \
   "archphene-posix-locked-$serial" 10
 archphene_adb_run exec-out screencap -p >"$output_dir/$serial-posix.png"
-archphene_wait_ui 'text="STOP SHELL"' "archphene-posix-stop-$serial" 10
-archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="STOP SHELL"' 'stop POSIX shell'
+archphene_wait_ui 'text="Stop shell"' "archphene-posix-stop-$serial" 10
+archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Stop shell"' 'stop POSIX shell'
 archphene_wait_log 'Shared POSIX shell session finished with status stopped' 20 >/dev/null
 archphene_wait_ui 'Shared shell stopped' "archphene-posix-stopped-$serial" 20
 
 select_shell "Bash" "archphene-bash-$serial"
 start_manager "archphene-bash-restart-$serial"
 assert_selected_shell "Bash" "archphene-bash-restart-$serial"
-archphene_wait_ui 'text="START SHELL"' "archphene-bash-start-$serial" 15
-archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="START SHELL"' 'start Bash'
+archphene_wait_ui 'text="Start shell"' "archphene-bash-start-$serial" 15
+archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Start shell"' 'start Bash'
 archphene_wait_log 'Shared Bash session started' 20 >/dev/null
 archphene_wait_ui 'text="Shared shell ready"' "archphene-bash-ready-$serial" 20
 archphene_wait_ui 'content-desc="Linux terminal, [0-9]+ columns by [0-9]+ rows"' \
   "archphene-bash-terminal-$serial" 20
 archphene_wait_ui 'archphene:~\$' "archphene-bash-prompt-$serial" 20
 archphene_adb_run exec-out screencap -p >"$output_dir/$serial-bash.png"
-archphene_wait_ui 'text="STOP SHELL"' "archphene-bash-stop-$serial" 10
-archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="STOP SHELL"' 'stop Bash'
+archphene_wait_ui 'text="Stop shell"' "archphene-bash-stop-$serial" 10
+archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Stop shell"' 'stop Bash'
 archphene_wait_log 'Shared Bash session finished with status stopped' 20 >/dev/null
 archphene_wait_ui 'Shared shell stopped' "archphene-bash-stopped-$serial" 20
 
@@ -132,7 +132,7 @@ start_manager "archphene-unsafe-shells-$serial"
 archphene_wait_log 'Installed shell catalog unavailable' 20 >/dev/null
 archphene_wait_ui 'text="No supported shell"' \
   "archphene-unsafe-shells-message-$serial" 15
-archphene_wait_ui 'text="START SHELL"[^>]*enabled="false"' \
+archphene_wait_ui 'text="Start shell"[^>]*enabled="false"' \
   "archphene-unsafe-shells-disabled-$serial" 15
 archphene_adb_run exec-out screencap -p >"$output_dir/$serial-unsafe-catalog.png"
 archphene_adb_run shell run-as "$package" chmod "$original_shells_mode" \

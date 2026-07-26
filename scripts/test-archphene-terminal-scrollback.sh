@@ -58,8 +58,8 @@ archphene_adb_run shell am force-stop "$package" >/dev/null
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
 archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 15 >/dev/null
 archphene_open_manager_section Terminal "terminal-scrollback-section-$serial"
-archphene_wait_ui 'text="START SHELL"' "terminal-scrollback-start-$serial" 15
-archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="START SHELL"' 'start shell'
+archphene_wait_ui 'text="Start shell"' "terminal-scrollback-start-$serial" 15
+archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Start shell"' 'start shell'
 archphene_wait_ui 'archphene:~\$' "terminal-scrollback-prompt-$serial" 20
 
 archphene_wait_ui 'text="Linux command, for example btop"' \
@@ -69,8 +69,8 @@ archphene_tap_ui_pattern "$ARCHPHENE_UI" \
 archphene_adb_run shell input text \
   'bash%s/usr/bin/archphene-terminal-scrollback-test' >/dev/null
 archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null
-archphene_wait_ui 'text="SEND"' "terminal-scrollback-send-$serial" 10
-archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="SEND"' 'send shell input'
+archphene_wait_ui 'text="Send"' "terminal-scrollback-send-$serial" 10
+archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Send"' 'send shell input'
 
 archphene_wait_ui 'SCROLL-LIVE-READY' "terminal-scrollback-live-$serial" 40
 archphene_adb_run exec-out screencap -p >"$output_dir/$serial-live.png"

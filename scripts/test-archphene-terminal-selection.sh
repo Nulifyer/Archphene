@@ -61,8 +61,8 @@ enter_shell_line() {
     'text="Linux command, for example btop"' 'Linux shell input'
   archphene_adb_run shell input text "${line// /%s}" >/dev/null
   archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null
-  archphene_wait_ui 'text="SEND"' "$ui_name-send" 10
-  archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="SEND"' 'send shell input'
+  archphene_wait_ui 'text="Send"' "$ui_name-send" 10
+  archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Send"' 'send shell input'
 }
 
 archphene_adb_run logcat -c
@@ -70,8 +70,8 @@ archphene_adb_run shell am force-stop "$package" >/dev/null
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
 archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 15 >/dev/null
 archphene_open_manager_section Terminal "terminal-selection-section-$serial"
-archphene_wait_ui 'text="START SHELL"' "terminal-selection-start-$serial" 15
-archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="START SHELL"' 'start shell'
+archphene_wait_ui 'text="Start shell"' "terminal-selection-start-$serial" 15
+archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Start shell"' 'start shell'
 archphene_wait_ui 'archphene:~\$' "terminal-selection-prompt-$serial" 20
 
 enter_shell_line \
