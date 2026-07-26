@@ -999,16 +999,17 @@ view; it does not make full-screen system monitors compatible where Android
 withholds the underlying metrics.
 
 This is not yet the production terminal promised by the milestone. Consecutive
-soft-wrapped rows that have entered bounded scrollback now join into logical
-lines, reflow at the current width without splitting wide graphemes, and cache
-their width measurement outside resize and line-extension work. Exact-ABI
-portrait-to-landscape gates preserve one manager process and visibly retain
-both ends of a long marker on the emulator and Samsung. The live screen still
-preserves its cursor-adjacent physical window during resize rather than
-reflowing consistently across the live-screen/history boundary. Remaining
-xterm controls, live-screen/history reflow, selection handles/autoscroll and
-ranges stable across history movement, broader non-Latin composing IME
-behavior, and richer accessibility remain
+soft-wrapped rows now join into bounded logical lines across scrollback and the
+live primary screen, reflow at the current width without splitting wide
+graphemes, and cache their width measurement outside resize and line-extension
+work. Resize pulls a trailing history continuation into the live viewport,
+returns only rows above the cursor-preserving viewport to history, preserves
+hard line boundaries, and retains physical-grid semantics for alternate-screen
+TUIs. Exact-ABI portrait-to-landscape gates preserve one manager process and
+visibly reunite a marker that began in portrait history and ended on the live
+screen on both the emulator and Samsung. Remaining xterm controls, selection
+handles/autoscroll and ranges stable across history movement, broader
+non-Latin composing IME behavior, and richer accessibility remain
 required. The temporary command field remains as a fallback above the
 renderer; direct terminal input no longer depends on it.
 

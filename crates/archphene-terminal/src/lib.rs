@@ -269,6 +269,49 @@ impl Scrollback {
         }
     }
 
+    fn take_trailing_soft_line(&mut self, output: &mut Vec<Cell>) -> bool {
+        let Some(line) = self.last_line() else {
+            return false;
+        };
+        if !line.soft_wrapped {
+            return false;
+        }
+        output.reserve(usize::from(line.cells));
+        let mut source = line.start as usize;
+        let mut consumed = 0_usize;
+        for _ in 0..line.cells {
+            let grapheme_len = self.read_byte(source);
+            let stored_length = 12 + usize::from(grapheme_len) * 4;
+            let mut cell = Cell {
+                codepoint: 0,
+                trailing_codepoints: [0; MAX_GRAPHEME_CODEPOINTS - 1],
+                foreground: self.read_u32(source + 4),
+                background: self.read_u32(source + 8),
+                attributes: self.read_byte(source + 2),
+                grapheme_len: grapheme_len.min(MAX_GRAPHEME_CODEPOINTS as u8),
+                width: self.read_byte(source + 1).min(2),
+            };
+            for codepoint_index in 0..usize::from(cell.grapheme_len) {
+                cell.set_codepoint(
+                    codepoint_index,
+                    self.read_u32(source + 12 + codepoint_index * 4),
+                );
+            }
+            output.push(cell);
+            source = (source + stored_length) % self.bytes.len();
+            consumed += stored_length;
+            if consumed >= line.byte_length as usize {
+                break;
+            }
+        }
+        let index = (self.first_line + self.line_count - 1) % self.lines.len();
+        self.lines[index] = StoredLine::default();
+        self.line_count -= 1;
+        self.bytes_used = self.bytes_used.saturating_sub(line.byte_length as usize);
+        self.write_offset = line.start as usize;
+        true
+    }
+
     fn decode_visual_row(
         &self,
         line: StoredLine,
@@ -687,42 +730,65 @@ impl Terminal {
         if rows == self.rows && columns == self.columns {
             return Ok(());
         }
-        let (cells, source_row) = resize_cells(
-            &self.cells,
-            self.rows,
-            self.columns,
-            rows,
-            columns,
-            self.cursor_row,
-        );
-        let (inactive_cells, inactive_source_row) = resize_cells(
-            &self.inactive_cells,
-            self.rows,
-            self.columns,
-            rows,
-            columns,
-            self.inactive_cursor_row,
-        );
-        let row_soft_wrapped = resize_row_flags(&self.row_soft_wrapped, rows, source_row);
-        let inactive_row_soft_wrapped =
-            resize_row_flags(&self.inactive_row_soft_wrapped, rows, inactive_source_row);
-        self.cells = cells;
-        self.inactive_cells = inactive_cells;
-        self.row_soft_wrapped = row_soft_wrapped;
-        self.inactive_row_soft_wrapped = inactive_row_soft_wrapped;
-        self.scrollback.reflow(columns);
+        if self.alternate_active {
+            let (cells, source_row) = resize_cells(
+                &self.cells,
+                self.rows,
+                self.columns,
+                rows,
+                columns,
+                self.cursor_row,
+            );
+            let (inactive_cells, inactive_source_row) = resize_cells(
+                &self.inactive_cells,
+                self.rows,
+                self.columns,
+                rows,
+                columns,
+                self.inactive_cursor_row,
+            );
+            self.cells = cells;
+            self.inactive_cells = inactive_cells;
+            self.row_soft_wrapped = resize_row_flags(&self.row_soft_wrapped, rows, source_row);
+            self.inactive_row_soft_wrapped =
+                resize_row_flags(&self.inactive_row_soft_wrapped, rows, inactive_source_row);
+            self.cursor_row = self.cursor_row.saturating_sub(source_row).min(rows - 1);
+            self.cursor_column = self.cursor_column.min(columns - 1);
+            self.inactive_cursor_row = self
+                .inactive_cursor_row
+                .saturating_sub(inactive_source_row)
+                .min(rows - 1);
+            self.inactive_cursor_column = self.inactive_cursor_column.min(columns - 1);
+            self.scrollback.reflow(columns);
+        } else {
+            let (inactive_cells, inactive_source_row) = resize_cells(
+                &self.inactive_cells,
+                self.rows,
+                self.columns,
+                rows,
+                columns,
+                self.inactive_cursor_row,
+            );
+            self.inactive_cells = inactive_cells;
+            self.inactive_row_soft_wrapped =
+                resize_row_flags(&self.inactive_row_soft_wrapped, rows, inactive_source_row);
+            self.inactive_cursor_row = self
+                .inactive_cursor_row
+                .saturating_sub(inactive_source_row)
+                .min(rows - 1);
+            self.inactive_cursor_column = self.inactive_cursor_column.min(columns - 1);
+            let (cells, wrapped, cursor_row, cursor_column) =
+                self.reflow_primary_screen(rows, columns);
+            self.cells = cells;
+            self.row_soft_wrapped = wrapped;
+            self.cursor_row = cursor_row;
+            self.cursor_column = cursor_column;
+        }
         self.rows = rows;
         self.columns = columns;
-        self.cursor_row = self.cursor_row.saturating_sub(source_row).min(rows - 1);
-        self.cursor_column = self.cursor_column.min(columns - 1);
         self.wrap_pending = false;
         self.scroll_top = 0;
         self.scroll_bottom = rows - 1;
-        self.inactive_cursor_row = self
-            .inactive_cursor_row
-            .saturating_sub(inactive_source_row)
-            .min(rows - 1);
-        self.inactive_cursor_column = self.inactive_cursor_column.min(columns - 1);
         self.inactive_wrap_pending = false;
         self.inactive_scroll_top = 0;
         self.inactive_scroll_bottom = rows - 1;
@@ -730,6 +796,154 @@ impl Terminal {
         self.dirty_end = rows;
         self.revision = self.revision.saturating_add(1);
         Ok(())
+    }
+
+    fn reflow_primary_screen(
+        &mut self,
+        rows: u16,
+        columns: u16,
+    ) -> (Vec<Cell>, Vec<bool>, u16, u16) {
+        let old_columns = usize::from(self.columns);
+        let mut logical_cells = Vec::new();
+        self.scrollback.take_trailing_soft_line(&mut logical_cells);
+        let mut line_starts = Vec::with_capacity(usize::from(self.rows) + 2);
+        line_starts.push(0);
+
+        let last_nonblank = (0..self.rows).rev().find(|row| {
+            let start = usize::from(*row) * old_columns;
+            self.cells[start..start + old_columns]
+                .iter()
+                .any(|cell| *cell != Cell::blank())
+        });
+        let last_wrapped = self
+            .row_soft_wrapped
+            .iter()
+            .rposition(|wrapped| *wrapped)
+            .map(|row| (row + 1).min(usize::from(self.rows) - 1) as u16);
+        let last_row = self
+            .cursor_row
+            .max(last_nonblank.unwrap_or(0))
+            .max(last_wrapped.unwrap_or(0));
+        let mut cursor_source = None;
+        let mut cursor_fixed_column = None;
+        for row in 0..=last_row {
+            let start = usize::from(row) * old_columns;
+            let source = &self.cells[start..start + old_columns];
+            let soft = self.row_soft_wrapped[usize::from(row)];
+            let line_has_content = logical_cells.len() > *line_starts.last().unwrap_or(&0);
+            let meaningful = source
+                .iter()
+                .rposition(|cell| *cell != Cell::blank())
+                .map_or(1, |column| column + 1);
+            let mut length = if soft { old_columns } else { meaningful };
+            if row == self.cursor_row {
+                let empty_hard_line =
+                    !soft && meaningful == 1 && source[0] == Cell::blank() && !line_has_content;
+                if empty_hard_line {
+                    cursor_source = Some(logical_cells.len());
+                    cursor_fixed_column = Some(self.cursor_column.min(columns - 1));
+                } else {
+                    length = length.max(usize::from(self.cursor_column) + 1);
+                    cursor_source = Some(logical_cells.len() + usize::from(self.cursor_column));
+                }
+            }
+            logical_cells.extend_from_slice(&source[..length]);
+            if !soft {
+                line_starts.push(logical_cells.len());
+            }
+        }
+        if *line_starts.last().unwrap_or(&0) != logical_cells.len() {
+            line_starts.push(logical_cells.len());
+        }
+        let capacity = logical_cells
+            .len()
+            .saturating_mul(2)
+            .max(usize::from(rows) * usize::from(columns));
+        let mut visual = Vec::with_capacity(capacity);
+        let mut visual_wrapped = Vec::new();
+        let mut cursor_visual = None;
+        for line in line_starts.windows(2) {
+            let mut column = 0_u16;
+            for (source_index, cell) in logical_cells
+                .iter()
+                .copied()
+                .enumerate()
+                .take(line[1])
+                .skip(line[0])
+            {
+                if cell.width == 0 {
+                    continue;
+                }
+                let width = u16::from(cell.width.clamp(1, 2)).min(columns);
+                if column != 0 && column.saturating_add(width) > columns {
+                    visual.resize(visual.len() + usize::from(columns - column), Cell::blank());
+                    visual_wrapped.push(true);
+                    column = 0;
+                }
+                if cursor_source == Some(source_index) {
+                    cursor_visual = Some((visual_wrapped.len() as u32, column.min(columns - 1)));
+                }
+                visual.push(cell);
+                if width == 2 {
+                    visual.push(Cell::continuation(
+                        cell.foreground,
+                        cell.background,
+                        cell.attributes,
+                    ));
+                }
+                column += width;
+            }
+            visual.resize(
+                visual.len() + usize::from(columns.saturating_sub(column)),
+                Cell::blank(),
+            );
+            visual_wrapped.push(false);
+        }
+
+        let (cursor_visual_row, mut cursor_visual_column) =
+            cursor_visual.unwrap_or((0, self.cursor_column.min(columns - 1)));
+        if let Some(column) = cursor_fixed_column {
+            cursor_visual_column = column;
+        }
+        let desired_cursor_row = self.cursor_row.min(rows - 1);
+        let mut first_visual_row = cursor_visual_row.saturating_sub(u32::from(desired_cursor_row));
+        let total_rows = visual_wrapped.len() as u32;
+        let bottom_start = total_rows.saturating_sub(u32::from(rows));
+        first_visual_row = first_visual_row.max(bottom_start.min(cursor_visual_row));
+        let leading_blank_rows = u32::from(desired_cursor_row).saturating_sub(cursor_visual_row);
+
+        self.scrollback.reflow(columns);
+        for visual_row in 0..first_visual_row {
+            let start = visual_row as usize * usize::from(columns);
+            self.scrollback.append_line(
+                &visual[start..start + usize::from(columns)],
+                visual_wrapped[visual_row as usize],
+                columns,
+            );
+        }
+
+        let mut replacement = vec![Cell::blank(); usize::from(rows) * usize::from(columns)];
+        let mut replacement_wrapped = vec![false; usize::from(rows)];
+        let available_rows = total_rows.saturating_sub(first_visual_row);
+        let copied_rows = available_rows.min(u32::from(rows).saturating_sub(leading_blank_rows));
+        for offset in 0..copied_rows {
+            let source_row = first_visual_row + offset;
+            let destination_row = leading_blank_rows + offset;
+            let source_start = source_row as usize * usize::from(columns);
+            let destination_start = destination_row as usize * usize::from(columns);
+            replacement[destination_start..destination_start + usize::from(columns)]
+                .copy_from_slice(&visual[source_start..source_start + usize::from(columns)]);
+            replacement_wrapped[destination_row as usize] = visual_wrapped[source_row as usize];
+        }
+        let cursor_row = leading_blank_rows
+            .saturating_add(cursor_visual_row.saturating_sub(first_visual_row))
+            .min(u32::from(rows - 1)) as u16;
+        (
+            replacement,
+            replacement_wrapped,
+            cursor_row,
+            cursor_visual_column,
+        )
     }
 
     fn feed_byte(&mut self, byte: u8) {
@@ -2048,6 +2262,50 @@ mod tests {
         terminal.write_view_damage(&mut damage, 2).unwrap();
         assert_eq!(damage_text(&damage, 0, 4), "efgh");
         assert_eq!(damage_text(&damage, 1, 4), "ijkl");
+        assert_eq!(text(&terminal, 0), "mnop");
+        assert_eq!(text(&terminal, 1), "qrs ");
+        assert_eq!(terminal.cursor(), (1, 3));
+
+        terminal.resize(2, 6).unwrap();
+        assert_eq!(terminal.history_rows(), 2);
+        assert_eq!(text(&terminal, 0), "mnopqr");
+        assert_eq!(text(&terminal, 1), "s     ");
+        assert_eq!(terminal.cursor(), (1, 1));
+    }
+
+    #[test]
+    fn widening_reflows_one_logical_line_across_history_and_live_screen() {
+        let mut terminal = Terminal::new(2, 6).unwrap();
+        terminal.feed(b"abcdefghijklmnopqrs");
+        assert_eq!(terminal.history_rows(), 2);
+        assert_eq!(terminal.cursor(), (1, 1));
+
+        terminal.resize(2, 10).unwrap();
+        assert_eq!(terminal.history_rows(), 0);
+        assert_eq!(text(&terminal, 0), "abcdefghij");
+        assert_eq!(text(&terminal, 1), "klmnopqrs ");
+        assert_eq!(terminal.cursor(), (1, 9));
+        assert!(terminal.row_soft_wrapped[0]);
+        assert!(!terminal.row_soft_wrapped[1]);
+    }
+
+    #[test]
+    fn boundary_reflow_keeps_wide_graphemes_whole_and_cursor_visible() {
+        let mut terminal = Terminal::new(2, 4).unwrap();
+        terminal.feed("界界界界界".as_bytes());
+        assert_eq!(terminal.history_rows(), 1);
+
+        terminal.resize(2, 6).unwrap();
+        assert_eq!(terminal.history_rows(), 0);
+        for column in [0, 2, 4] {
+            assert_eq!(terminal.cell(0, column).unwrap().codepoint, '界' as u32);
+            assert_eq!(terminal.cell(0, column + 1).unwrap().width, 0);
+        }
+        for column in [0, 2] {
+            assert_eq!(terminal.cell(1, column).unwrap().codepoint, '界' as u32);
+            assert_eq!(terminal.cell(1, column + 1).unwrap().width, 0);
+        }
+        assert_eq!(terminal.cursor(), (1, 4));
     }
 
     #[test]
@@ -2084,10 +2342,10 @@ mod tests {
         terminal.feed(b"abc\r\ndef\r\n");
         assert_eq!(terminal.history_rows(), 1);
         terminal.resize(2, 2).unwrap();
-        assert_eq!(terminal.history_rows(), 2);
+        assert_eq!(terminal.history_rows(), 3);
 
         let mut damage = vec![0_u8; MAX_DAMAGE_BYTES];
-        terminal.write_view_damage(&mut damage, 2).unwrap();
+        terminal.write_view_damage(&mut damage, 3).unwrap();
         assert_eq!(damage_text(&damage, 0, 2), "ab");
         assert_eq!(damage_text(&damage, 1, 2), "c ");
     }

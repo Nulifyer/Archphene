@@ -2,13 +2,13 @@
 set -euo pipefail
 
 tput clear
+rows="$(tput lines)"
+for ((line = 1; line <= rows - 2; line++)); do
+  printf 'REFLOW-PREFIX-%03d\r\n' "$line"
+done
 printf 'REFLOW-BEGIN-'
 for ((chunk = 1; chunk <= 12; chunk++)); do
   printf '%02d-abcdefghij-' "$chunk"
 done
-printf 'REFLOW-END\r\n'
-for ((line = 1; line <= 80; line++)); do
-  printf 'REFLOW-FILL-%03d\r\n' "$line"
-done
-printf 'REFLOW-LIVE-READY'
+printf 'REFLOW-END'
 IFS= read -r -n 1

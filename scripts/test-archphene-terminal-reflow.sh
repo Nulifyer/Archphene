@@ -74,7 +74,7 @@ archphene_adb_run shell input text \
 archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null
 archphene_wait_ui 'text="Send"' "terminal-reflow-send-$serial" 10
 archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Send"' 'send shell input'
-archphene_wait_ui 'REFLOW-LIVE-READY' "terminal-reflow-live-$serial" 40
+archphene_wait_ui 'REFLOW-END' "terminal-reflow-live-tail-$serial" 40
 
 manager_pid="$(
   archphene_adb_run shell pidof "$package" | tr -d '\r'
@@ -106,35 +106,10 @@ done
 [[ -n "${columns:-}" && "$columns" -gt "$rows" ]] ||
   archphene_die "terminal did not reach a landscape grid"
 
-read -r terminal_x terminal_y <<<"$(
-  python3 -c '
-import re, sys
-m = re.search(
-    r"content-desc=\"Linux terminal, [0-9]+ columns by [0-9]+ rows\""
-    r"[^>]*bounds=\"\[(\d+),(\d+)\]\[(\d+),(\d+)\]\"",
-    sys.stdin.read(),
-)
-if not m:
-    raise SystemExit("terminal bounds missing")
-x1, y1, x2, y2 = map(int, m.groups())
-print((x1 + x2) // 2, (y1 + y2) // 2)
-' <<<"$landscape_ui"
-)"
-
-found=false
-for attempt in $(seq 1 40); do
-  archphene_adb_run shell input mouse scroll "$terminal_x" "$terminal_y" \
-    --axis VSCROLL,3 >/dev/null
-  candidate="$(archphene_capture_ui \
-    "terminal-reflow-history-$serial-$attempt" 2>/dev/null || true)"
-  if archphene_regex_contains "$candidate" 'REFLOW-BEGIN-' &&
-      archphene_regex_contains "$candidate" 'REFLOW-END'; then
-    found=true
-    break
-  fi
-done
-[[ "$found" == true ]] ||
-  archphene_die "joined reflow marker was not visible after landscape resize"
+archphene_regex_contains "$landscape_ui" 'REFLOW-BEGIN-' &&
+  archphene_regex_contains "$landscape_ui" 'REFLOW-END' ||
+  archphene_die \
+    "history/live marker endpoints were not both visible after landscape resize"
 
 archphene_adb_run exec-out screencap -p >"$output"
 after_pid="$(
@@ -153,6 +128,6 @@ fatal_log="$(
 trap - EXIT
 cleanup
 archphene_note "Archphene logical terminal reflow passed on $serial"
-archphene_note "  Joined marker survived portrait history and landscape reflow"
+archphene_note "  One marker crossed portrait history/live state and rejoined in landscape"
 archphene_note "  Stable manager PID: $manager_pid; landscape grid: ${columns}x${rows}"
 archphene_note "  Full-device screenshot: $output"
