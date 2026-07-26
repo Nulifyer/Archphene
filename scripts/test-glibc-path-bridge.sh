@@ -58,6 +58,9 @@ gcc -O2 -Wall -Wextra -Werror \
 gcc -O2 -Wall -Wextra -Werror \
   -o "$root/temporary-probe" \
   native/archphene-glibc-path-bridge/temporary_probe.c
+gcc -O2 -Wall -Wextra -Werror \
+  -o "$root/kernel-view-probe" \
+  native/archphene-glibc-path-bridge/kernel_view_probe.c
 export LD_PRELOAD="$output"
 export ARCHPHENE_RUNTIME_ROOT="$root"
 export XDG_RUNTIME_DIR="$root/runtime"
@@ -99,6 +102,9 @@ test "$(
 test "$(
   ARCHPHENE_FAKE_CHROOT=1 "$root/temporary-probe"
 )" = temporary-directory-ok
+test "$(
+  ARCHPHENE_FAKE_CHROOT=1 "$root/kernel-view-probe"
+)" = kernel-view-ok
 test "$(
   ARCHPHENE_FAKE_CHROOT=1 ARCHPHENE_SUPERVISED_PROCESS_GROUP=1 \
     "$root/pty-probe"

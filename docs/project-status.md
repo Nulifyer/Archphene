@@ -981,13 +981,22 @@ filesystem uid/gid as root while Android's kernel continues enforcing the real
 app UID. The source contract, host identity probe, sealed exact-ABI bridges,
 installed `tput`, scoped logs, and device gates pass.
 
-Trying the installed full-screen `btop` then exposed the next independent
-compatibility boundary. Stock Android SELinux denies the app access to
-`/proc/stat`; btop now gets beyond terminal/identity initialization but exits
-when it cannot parse CPU statistics. Archphene still needs a bounded
-sandbox-scoped `/proc`, `/sys`, and `/dev` view that represents its Linux
-environment without leaking Android-wide processes or pretending unavailable
-kernel metrics are reliable.
+Trying the installed full-screen `btop` exposed an independent compatibility
+boundary: stock Android SELinux denies an ordinary app access to `/proc/stat`,
+so btop gets beyond terminal and identity initialization but exits when it
+cannot parse global CPU statistics. Archphene does not bypass that policy or
+fabricate CPU telemetry.
+
+The generic path bridge now bounds the kernel filesystem view that is actually
+reliable. `readdir`, `readdir64`, `scandir`, `scandir64`, and direct
+`getdents64` enumeration of `/proc` omit every numeric process whose status is
+unreadable to the app UID, preventing Android-wide PID disclosure while
+retaining Archphene's same-UID process tree. `/proc/self`, CPU-topology sysfs,
+safe character devices, and the private shared-memory mapping remain available.
+Host contracts and exact x86_64/AArch64 probes pass on the emulator and
+physical Samsung with full-device captures. This safely completes the bounded
+view; it does not make full-screen system monitors compatible where Android
+withholds the underlying metrics.
 
 This is not yet the production terminal promised by the milestone. Bounded
 physical-row scrollback is implemented, but resizing still preserves the

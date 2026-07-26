@@ -83,6 +83,8 @@ GLIBC_2.17 {
         execvpe;
         readlink;
         readlinkat;
+        readdir;
+        readdir64;
         semctl;
         semget;
         semop;

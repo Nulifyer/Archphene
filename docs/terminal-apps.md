@@ -52,8 +52,8 @@ Each shell request has a bounded unique identifier and atomically published requ
 
 The Terminal companion uses an ordinary Android application UID. It does not receive root or platform-signature permissions.
 
-- Android denies ordinary apps access to files such as `/proc/stat`. btop reaches its real Linux collector but cannot display unrestricted device-wide telemetry without a privileged broker, root/ADB delegation, or OS support.
-- Archphene does not synthesize misleading telemetry or bypass Android policy. A future broker may expose metrics available through public Android APIs and must label the restricted view.
+- The path bridge filters `/proc` process enumeration to numeric entries whose status the Terminal UID can actually read, preserving the same-UID Archphene process tree without disclosing Android-wide PIDs. Reliable `/proc/self`, CPU-topology sysfs, safe character devices, and private shared memory remain available.
+- Android still denies ordinary apps global files such as `/proc/stat`. btop reaches its real Linux collector but cannot display unrestricted device-wide telemetry without a privileged broker, root/ADB delegation, or OS support. Archphene neither synthesizes misleading telemetry nor bypasses Android policy; any future public-API broker must label its restricted view.
 - Android permissions are requested only by explicit bridge actions. A Linux syscall cannot directly trigger an Android runtime permission prompt.
 - The Terminal UID exposes visible files in its Linux home as **Archphene Home** through an Android `DocumentsProvider`. Android Files, document pickers, and share targets can receive URI grants without broad storage permission.
 - Dotfiles such as `.config` and `.cache`, runtime packs, and manager state remain hidden and app-private. Linux commands can use visible home paths without a prompt; Android apps reach them only through Android's document grant model.

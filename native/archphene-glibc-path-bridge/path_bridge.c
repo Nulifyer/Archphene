@@ -15,6 +15,7 @@
 #include <spawn.h>
 #include <stdatomic.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -241,6 +242,98 @@ long archphene_syscall_readlink(
 }
 #endif
 
+struct archphene_linux_dirent64 {
+    uint64_t inode;
+    int64_t offset;
+    unsigned short record_length;
+    unsigned char type;
+    char name[];
+};
+
+static bool numeric_process_name(const char *name) {
+    if (name == NULL || name[0] == '\0') return false;
+    for (const unsigned char *cursor = (const unsigned char *)name;
+            *cursor != '\0'; cursor++) {
+        if (*cursor < (unsigned char)'0' || *cursor > (unsigned char)'9') {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool proc_root_descriptor(int descriptor) {
+    typedef ssize_t (*readlink_type)(const char *, char *, size_t);
+    readlink_type real_readlink = (readlink_type)dlsym(RTLD_NEXT, "readlink");
+    if (descriptor < 0 || real_readlink == NULL) return false;
+    char link[64];
+    int written = snprintf(link, sizeof(link), "/proc/self/fd/%d", descriptor);
+    if (written <= 0 || (size_t)written >= sizeof(link)) return false;
+    char target[PATH_MAX];
+    ssize_t length = real_readlink(link, target, sizeof(target) - 1);
+    if (length <= 0 || (size_t)length >= sizeof(target)) return false;
+    target[length] = '\0';
+    return strcmp(target, "/proc") == 0;
+}
+
+static bool proc_root_path(const char *path) {
+    if (path == NULL || strncmp(path, "/proc", sizeof("/proc") - 1) != 0) {
+        return false;
+    }
+    path += sizeof("/proc") - 1;
+    while (*path == '/') path++;
+    return *path == '\0';
+}
+
+static bool visible_proc_entry(int proc_descriptor, const char *name) {
+    if (!numeric_process_name(name)) return true;
+    typedef int (*openat_type)(int, const char *, int, ...);
+    openat_type real_openat = (openat_type)dlsym(RTLD_NEXT, "openat");
+    if (real_openat == NULL) return false;
+    char status[NAME_MAX + sizeof("/status")];
+    int written = snprintf(status, sizeof(status), "%s/status", name);
+    if (written <= 0 || (size_t)written >= sizeof(status)) return false;
+    int descriptor = real_openat(proc_descriptor, status,
+            O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (descriptor < 0) return false;
+    close(descriptor);
+    return true;
+}
+
+#ifdef __NR_getdents64
+__attribute__((used, visibility("hidden")))
+long archphene_syscall_getdents64(
+        int directory, void *buffer, size_t size) {
+    typedef long (*syscall_type)(long, ...);
+    syscall_type real = (syscall_type)archphene_real_syscall_function;
+    if (real == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    long result = real(__NR_getdents64, directory, buffer, size);
+    if (result <= 0 || !proc_root_descriptor(directory)) return result;
+    size_t input = 0;
+    size_t output = 0;
+    while (input < (size_t)result) {
+        struct archphene_linux_dirent64 *entry =
+                (struct archphene_linux_dirent64 *)((char *)buffer + input);
+        size_t minimum = offsetof(struct archphene_linux_dirent64, name) + 1;
+        if (entry->record_length < minimum
+                || entry->record_length > (size_t)result - input) {
+            errno = EIO;
+            return -1;
+        }
+        if (visible_proc_entry(directory, entry->name)) {
+            if (output != input) {
+                memmove((char *)buffer + output, entry, entry->record_length);
+            }
+            output += entry->record_length;
+        }
+        input += entry->record_length;
+    }
+    return (long)output;
+}
+#endif
+
 #if defined(__aarch64__)
 __asm__(
     ".text\n"
@@ -251,6 +344,10 @@ __asm__(
     "b.eq 1f\n"
     "cmp x0, #" ARCHPHENE_STRINGIFY(__NR_readlinkat) "\n"
     "b.eq 3f\n"
+#ifdef __NR_getdents64
+    "cmp x0, #" ARCHPHENE_STRINGIFY(__NR_getdents64) "\n"
+    "b.eq 4f\n"
+#endif
     "adrp x16, archphene_real_syscall_function\n"
     "ldr x16, [x16, #:lo12:archphene_real_syscall_function]\n"
     "cbz x16, 2f\n"
@@ -267,6 +364,13 @@ __asm__(
     "mov x2, x3\n"
     "mov x3, x4\n"
     "b archphene_syscall_readlinkat\n"
+#ifdef __NR_getdents64
+    "4:\n"
+    "mov x0, x1\n"
+    "mov x1, x2\n"
+    "mov x2, x3\n"
+    "b archphene_syscall_getdents64\n"
+#endif
     "2:\n"
     "mov x0, #-" ARCHPHENE_STRINGIFY(ENOSYS) "\n"
     "ret\n"
@@ -285,6 +389,10 @@ __asm__(
     "je 4f\n"
     "cmpq $" ARCHPHENE_STRINGIFY(__NR_creat) ", %rdi\n"
     "je 5f\n"
+#ifdef __NR_getdents64
+    "cmpq $" ARCHPHENE_STRINGIFY(__NR_getdents64) ", %rdi\n"
+    "je 6f\n"
+#endif
     "movq archphene_real_syscall_function(%rip), %rax\n"
     "testq %rax, %rax\n"
     "je 2f\n"
@@ -310,6 +418,13 @@ __asm__(
     "movq %rsi, %rdi\n"
     "movq %rdx, %rsi\n"
     "jmp archphene_syscall_creat\n"
+#ifdef __NR_getdents64
+    "6:\n"
+    "movq %rsi, %rdi\n"
+    "movq %rdx, %rsi\n"
+    "movq %rcx, %rdx\n"
+    "jmp archphene_syscall_getdents64\n"
+#endif
     "2:\n"
     "movq $-" ARCHPHENE_STRINGIFY(ENOSYS) ", %rax\n"
     "ret\n"
@@ -3083,6 +3198,62 @@ DIR *opendir(const char *path) {
     return real(target);
 }
 
+struct dirent *readdir(DIR *directory) {
+    typedef struct dirent *(*function_type)(DIR *);
+    function_type real = RESOLVE(function_type, "readdir");
+    if (real == NULL) {
+        errno = ENOSYS;
+        return NULL;
+    }
+    bool filter = proc_root_descriptor(dirfd(directory));
+    struct dirent *entry;
+    do {
+        entry = real(directory);
+    } while (filter && entry != NULL
+            && !visible_proc_entry(dirfd(directory), entry->d_name));
+    return entry;
+}
+
+struct dirent64 *readdir64(DIR *directory) {
+    typedef struct dirent64 *(*function_type)(DIR *);
+    function_type real = RESOLVE(function_type, "readdir64");
+    if (real == NULL) {
+        errno = ENOSYS;
+        return NULL;
+    }
+    bool filter = proc_root_descriptor(dirfd(directory));
+    struct dirent64 *entry;
+    do {
+        entry = real(directory);
+    } while (filter && entry != NULL
+            && !visible_proc_entry(dirfd(directory), entry->d_name));
+    return entry;
+}
+
+static _Thread_local int proc_scandir_descriptor = -1;
+static _Thread_local int (*proc_scandir_filter)(const struct dirent *);
+static _Thread_local int (*proc_scandir64_filter)(const struct dirent64 *);
+
+static int filtered_proc_scandir_entry(const struct dirent *entry) {
+    return visible_proc_entry(proc_scandir_descriptor, entry->d_name)
+            && (proc_scandir_filter == NULL || proc_scandir_filter(entry));
+}
+
+static int filtered_proc_scandir64_entry(const struct dirent64 *entry) {
+    return visible_proc_entry(proc_scandir_descriptor, entry->d_name)
+            && (proc_scandir64_filter == NULL || proc_scandir64_filter(entry));
+}
+
+static int open_proc_root(void) {
+    typedef int (*open_type)(const char *, int, ...);
+    open_type real_open = RESOLVE(open_type, "open");
+    if (real_open == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    return real_open("/proc", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+}
+
 int scandir(const char *path, struct dirent ***entries,
         int (*filter)(const struct dirent *),
         int (*compare)(const struct dirent **, const struct dirent **)) {
@@ -3095,7 +3266,20 @@ int scandir(const char *path, struct dirent ***entries,
     const char *target = translate_follow_path(path, buffer, &translated);
     if (target == NULL) return -1;
     REQUIRE_REAL(real);
-    return real(target, entries, filter, compare);
+    if (!proc_root_path(target)) return real(target, entries, filter, compare);
+    int descriptor = open_proc_root();
+    if (descriptor < 0) return -1;
+    int previous_descriptor = proc_scandir_descriptor;
+    int (*previous_filter)(const struct dirent *) = proc_scandir_filter;
+    proc_scandir_descriptor = descriptor;
+    proc_scandir_filter = filter;
+    int result = real(target, entries, filtered_proc_scandir_entry, compare);
+    int saved_errno = errno;
+    proc_scandir_descriptor = previous_descriptor;
+    proc_scandir_filter = previous_filter;
+    close(descriptor);
+    errno = saved_errno;
+    return result;
 }
 
 int scandir64(const char *path, struct dirent64 ***entries,
@@ -3110,7 +3294,20 @@ int scandir64(const char *path, struct dirent64 ***entries,
     const char *target = translate_follow_path(path, buffer, &translated);
     if (target == NULL) return -1;
     REQUIRE_REAL(real);
-    return real(target, entries, filter, compare);
+    if (!proc_root_path(target)) return real(target, entries, filter, compare);
+    int descriptor = open_proc_root();
+    if (descriptor < 0) return -1;
+    int previous_descriptor = proc_scandir_descriptor;
+    int (*previous_filter)(const struct dirent64 *) = proc_scandir64_filter;
+    proc_scandir_descriptor = descriptor;
+    proc_scandir64_filter = filter;
+    int result = real(target, entries, filtered_proc_scandir64_entry, compare);
+    int saved_errno = errno;
+    proc_scandir_descriptor = previous_descriptor;
+    proc_scandir64_filter = previous_filter;
+    close(descriptor);
+    errno = saved_errno;
+    return result;
 }
 
 int inotify_add_watch(int descriptor, const char *path, uint32_t mask) {

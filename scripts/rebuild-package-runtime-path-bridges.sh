@@ -71,14 +71,14 @@ missing_arm_functions="$(
 for symbol in bind chroot connect execve fchmodat fstat fstatat getcwd \
     getpwnam_r getpwuid_r \
     linkat mkdir msgctl msgget msgrcv msgsnd posix_spawn posix_spawnp renameat \
-    semctl semget semop semtimedop setfsgid setfsuid stat statx symlinkat \
+    readdir readdir64 semctl semget semop semtimedop setfsgid setfsuid stat statx symlinkat \
     unlinkat; do
   grep -Eq " $symbol$" "$work/x86-symbols.txt" ||
     archphene_die "refreshed x86_64 bridge is missing $symbol"
 done
 for symbol in bind chroot connect execve fchmodat getcwd getpwnam_r \
     getpwuid_r linkat mkdir msgctl msgget msgrcv msgsnd posix_spawn \
-    posix_spawnp renameat semctl semget semop semtimedop setfsgid setfsuid \
+    posix_spawnp readdir readdir64 renameat semctl semget semop semtimedop setfsgid setfsuid \
     symlinkat unlinkat; do
   grep -Eq "$symbol@@GLIBC_2\\.17" "$work/arm-symbols.txt" ||
     archphene_die "refreshed AArch64 bridge is missing $symbol@GLIBC_2.17"
