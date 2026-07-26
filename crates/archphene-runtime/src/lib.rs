@@ -1228,6 +1228,29 @@ impl RuntimeHost {
             .map_err(PackageRuntimeError::from)
     }
 
+    pub fn write_terminal_selection(
+        &mut self,
+        handle: u64,
+        output: &mut [u8],
+        origin_epoch: u64,
+        start_row: u32,
+        start_column: u16,
+        end_row: u32,
+        end_column: u16,
+    ) -> Result<usize, PackageRuntimeError> {
+        self.pty_sessions
+            .write_terminal_selection(
+                handle,
+                output,
+                origin_epoch,
+                start_row,
+                start_column,
+                end_row,
+                end_column,
+            )
+            .map_err(PackageRuntimeError::from)
+    }
+
     pub fn resize_pty(
         &mut self,
         handle: u64,

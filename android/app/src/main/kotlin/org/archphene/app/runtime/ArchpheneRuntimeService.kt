@@ -639,6 +639,38 @@ class ArchpheneRuntimeService : Service() {
             )
         }
 
+        fun copySharedShellTerminalSelection(
+            originEpoch: Long,
+            startRow: Int,
+            startColumn: Int,
+            endRow: Int,
+            endColumn: Int,
+        ): String? {
+            val activeHandle = readyHandle
+            val activePty = shellHandle
+            if (activeHandle == 0L || activePty == 0L) {
+                return null
+            }
+            shellTerminalSelectionBuffer.clear()
+            val length =
+                NativeRuntime.nativeCopyTerminalSelection(
+                    activeHandle,
+                    activePty,
+                    originEpoch,
+                    startRow,
+                    startColumn,
+                    endRow,
+                    endColumn,
+                    shellTerminalSelectionBuffer,
+                )
+            if (length < 0 || length > shellTerminalSelectionBytes.size) {
+                return null
+            }
+            shellTerminalSelectionBuffer.position(0)
+            shellTerminalSelectionBuffer.get(shellTerminalSelectionBytes, 0, length)
+            return String(shellTerminalSelectionBytes, 0, length, Charsets.UTF_8)
+        }
+
         fun toggleSharedShell(): Boolean = requestSharedShellToggle()
     }
 
@@ -859,6 +891,12 @@ class ArchpheneRuntimeService : Service() {
         ByteBuffer
             .allocateDirect(NativeRuntime.TERMINAL_DAMAGE_SIZE)
             .order(ByteOrder.LITTLE_ENDIAN)
+    }
+    private val shellTerminalSelectionBuffer: ByteBuffer by lazy(LazyThreadSafetyMode.NONE) {
+        ByteBuffer.allocateDirect(NativeRuntime.TERMINAL_SELECTION_SIZE)
+    }
+    private val shellTerminalSelectionBytes by lazy(LazyThreadSafetyMode.NONE) {
+        ByteArray(NativeRuntime.TERMINAL_SELECTION_SIZE)
     }
 
     private data class ResolvedPayload(

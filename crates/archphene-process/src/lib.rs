@@ -16,7 +16,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use archphene_terminal::{
-    MAX_COLUMNS, MAX_DAMAGE_BYTES, MAX_ROWS, MIN_COLUMNS, MIN_ROWS, Terminal,
+    MAX_COLUMNS, MAX_DAMAGE_BYTES, MAX_ROWS, MAX_SELECTION_BYTES, MIN_COLUMNS, MIN_ROWS, Terminal,
 };
 
 pub const MAX_COMMAND_NAME_BYTES: usize = 128;
@@ -34,6 +34,7 @@ pub const MAX_GUI_LOG_BYTES: usize = 16 * 1024;
 pub const MAX_BATCH_LOG_BYTES: usize = 64 * 1024;
 pub const BATCH_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 pub const MAX_TERMINAL_DAMAGE_BYTES: usize = MAX_DAMAGE_BYTES;
+pub const MAX_TERMINAL_SELECTION_BYTES: usize = MAX_SELECTION_BYTES;
 pub const MAX_WAYLAND_DISPLAY_BYTES: usize = 64;
 
 const MAX_SYMLINKS: usize = 16;
@@ -838,6 +839,27 @@ impl PtySession {
         .map_err(|_| ProcessError::InvalidArgument)
     }
 
+    pub fn write_terminal_selection(
+        &mut self,
+        output: &mut [u8],
+        origin_epoch: u64,
+        start_row: u32,
+        start_column: u16,
+        end_row: u32,
+        end_column: u16,
+    ) -> Result<usize, ProcessError> {
+        self.terminal
+            .write_selection(
+                output,
+                origin_epoch,
+                start_row,
+                start_column,
+                end_row,
+                end_column,
+            )
+            .map_err(|_| ProcessError::InvalidArgument)
+    }
+
     pub fn close(&mut self) {
         let _ = self.waiter.signal();
         self.finish();
@@ -992,6 +1014,26 @@ impl PtyRegistry {
     ) -> Result<usize, ProcessError> {
         self.session_mut(handle)?
             .write_terminal_damage(output, full_snapshot, viewport_offset)
+    }
+
+    pub fn write_terminal_selection(
+        &mut self,
+        handle: u64,
+        output: &mut [u8],
+        origin_epoch: u64,
+        start_row: u32,
+        start_column: u16,
+        end_row: u32,
+        end_column: u16,
+    ) -> Result<usize, ProcessError> {
+        self.session_mut(handle)?.write_terminal_selection(
+            output,
+            origin_epoch,
+            start_row,
+            start_column,
+            end_row,
+            end_column,
+        )
     }
 
     pub fn exit_status(&mut self, handle: u64) -> Result<Option<i32>, ProcessError> {

@@ -102,7 +102,8 @@ mod android {
     };
     use archphene_process::{
         MAX_COMMAND_ARGUMENTS, MAX_COMMAND_OUTPUT_BYTES, MAX_COMMAND_REQUEST_BYTES,
-        MAX_PTY_TRANSFER_BYTES, MAX_TERMINAL_DAMAGE_BYTES, ProcessError,
+        MAX_PTY_TRANSFER_BYTES, MAX_TERMINAL_DAMAGE_BYTES, MAX_TERMINAL_SELECTION_BYTES,
+        ProcessError,
     };
     use archphene_storage::{OpenMode, StorageError};
     use jni::JNIEnv;
@@ -3137,6 +3138,73 @@ mod android {
             destination,
             full_snapshot != JNI_FALSE,
             viewport_offset,
+        ) {
+            Ok(length) => i32::try_from(length).unwrap_or(i32::MAX),
+            Err(_) => ERROR_PROCESS,
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeCopyTerminalSelection(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        pty_handle: jlong,
+        origin_epoch: jlong,
+        start_row: jint,
+        start_column: jint,
+        end_row: jint,
+        end_column: jint,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let (
+            Ok(handle),
+            Ok(pty_handle),
+            Ok(origin_epoch),
+            Ok(start_row),
+            Ok(start_column),
+            Ok(end_row),
+            Ok(end_column),
+        ) = (
+            u64::try_from(handle),
+            u64::try_from(pty_handle),
+            u64::try_from(origin_epoch),
+            u32::try_from(start_row),
+            u16::try_from(start_column),
+            u32::try_from(end_row),
+            u16::try_from(end_column),
+        )
+        else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(output_capacity) = environment.get_direct_buffer_capacity(&output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if output_capacity < MAX_TERMINAL_SELECTION_BYTES {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let Ok(output_address) = environment.get_direct_buffer_address(&output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if output_address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let destination =
+            unsafe { slice::from_raw_parts_mut(output_address, MAX_TERMINAL_SELECTION_BYTES) };
+        let Ok(mut registry) = registry().lock() else {
+            return ERROR_INTERNAL;
+        };
+        let Some(runtime) = registry.runtime_mut(handle) else {
+            return ERROR_INVALID_HANDLE;
+        };
+        match runtime.write_terminal_selection(
+            pty_handle,
+            destination,
+            origin_epoch,
+            start_row,
+            start_column,
+            end_row,
+            end_column,
         ) {
             Ok(length) => i32::try_from(length).unwrap_or(i32::MAX),
             Err(_) => ERROR_PROCESS,

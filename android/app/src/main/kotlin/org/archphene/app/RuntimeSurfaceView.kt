@@ -144,13 +144,19 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
     private var terminalRevision = Long.MIN_VALUE
     private var sourceRevision = Long.MIN_VALUE
     private var historyRows = 0
+    private var historyOriginEpoch = 0L
     private var viewportOffset = 0
     private var scrollRowRemainder = 0f
-    private var selectionAnchor = NO_SELECTION
-    private var selectionExtent = NO_SELECTION
-    private var selectionTouchCell = NO_SELECTION
-    private var selectionInitialExtent = NO_SELECTION
+    private var selectionStart = NO_SELECTION
+    private var selectionEnd = NO_SELECTION
+    private var selectionInitialStart = NO_SELECTION
+    private var selectionInitialEnd = NO_SELECTION
+    private var selectionOriginEpoch = 0L
+    private var selectionDragEndpoint = SELECTION_DRAG_NONE
     private var selectionDragging = false
+    private var selectionAutoScrollDirection = 0
+    private var selectionAutoScrollFrame = 0
+    private var selectionAutoScrollX = 0f
     private var needsFullSnapshot = true
     private var composingText = ""
     private val terminalInputConnection by lazy(LazyThreadSafetyMode.NONE) {
@@ -167,6 +173,19 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         ceil((textPaint.fontMetrics.descent - textPaint.fontMetrics.ascent).toDouble())
             .toFloat()
             .coerceAtLeast(1f)
+    private val selectionHandleRadius =
+        TypedValue.applyDimension(
+            TypedValue.COMPLEX_UNIT_DIP,
+            SELECTION_HANDLE_RADIUS_DP,
+            resources.displayMetrics,
+        )
+    private val selectionHandleTouchRadius =
+        TypedValue.applyDimension(
+            TypedValue.COMPLEX_UNIT_DIP,
+            SELECTION_HANDLE_TOUCH_RADIUS_DP,
+            resources.displayMetrics,
+        )
+    private val selectionAutoScrollRunnable = Runnable { runSelectionAutoScroll() }
 
     var onTerminalSizeChanged: ((rows: Int, columns: Int) -> Unit)? = null
 
@@ -205,6 +224,7 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
                 canvas.drawRenderNode(node)
             }
         }
+        drawSelectionHandles(canvas)
         drawComposingText(canvas)
         if (previewingPinch) {
             canvas.restore()
@@ -233,9 +253,13 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
     override fun onTouchEvent(event: MotionEvent): Boolean {
         if (event.actionMasked == MotionEvent.ACTION_DOWN) {
             scrollRowRemainder = 0f
+            beginSelectionHandleDrag(event.x, event.y)
         }
-        scaleGestureDetector.onTouchEvent(event)
-        gestureDetector.onTouchEvent(event)
+        val selectionOwnedGesture = selectionDragging
+        if (!selectionOwnedGesture) {
+            scaleGestureDetector.onTouchEvent(event)
+            gestureDetector.onTouchEvent(event)
+        }
         val kind =
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN ->
@@ -255,15 +279,21 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         )
         if (selectionDragging) {
             when (event.actionMasked) {
-                MotionEvent.ACTION_MOVE -> extendSelection(event.x, event.y)
+                MotionEvent.ACTION_MOVE -> {
+                    extendSelection(event.x, event.y)
+                    updateSelectionAutoScroll(event.x, event.y)
+                }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
                     extendSelection(event.getX(pointerIndex), event.getY(pointerIndex))
+                    stopSelectionAutoScroll()
                     selectionDragging = false
+                    selectionDragEndpoint = SELECTION_DRAG_NONE
                     showTerminalContextMenu()
                 }
                 MotionEvent.ACTION_CANCEL -> {
+                    stopSelectionAutoScroll()
                     selectionDragging = false
-                    clearSelection()
+                    selectionDragEndpoint = SELECTION_DRAG_NONE
                 }
             }
         }
@@ -349,6 +379,7 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
     }
 
     override fun onDetachedFromWindow() {
+        stopSelectionAutoScroll()
         pastePopup?.dismiss()
         super.onDetachedFromWindow()
     }
@@ -359,6 +390,7 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         info.isEditable = false
         info.isMultiLine = true
         info.isScrollable = historyRows > 0
+        info.isSelected = hasSelection()
         if (rows != 0 && columns != 0) {
             val snapshot = accessibilitySnapshot()
             info.text =
@@ -558,7 +590,8 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
             dirtyStart !in 0..nextRows ||
             dirtyEnd !in dirtyStart..nextRows ||
             nextHistoryRows < 0 ||
-            nextViewportOffset !in 0..nextHistoryRows
+            nextViewportOffset !in 0..nextHistoryRows ||
+            damageBuffer.getLong(40) <= 0L
         ) {
             return false
         }
@@ -569,19 +602,24 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
             return false
         }
         val nextTerminalRevision = damageBuffer.getLong(24)
+        val nextHistoryOriginEpoch = damageBuffer.getLong(40)
         if (terminalRevision != Long.MIN_VALUE && nextTerminalRevision < terminalRevision) {
             return false
         }
-        if (
-            hasSelection() &&
-            (
-                dirtyStart < dirtyEnd ||
-                    nextRows != rows ||
-                    nextColumns != columns ||
-                    nextViewportOffset != viewportOffset
-            )
-        ) {
-            clearSelection()
+        if (hasSelection()) {
+            val selectedEndRow = selectionEnd / columns
+            val changedSelectedScreen =
+                nextTerminalRevision > terminalRevision &&
+                    selectedEndRow >= historyRows.toLong()
+            if (
+                nextHistoryOriginEpoch != selectionOriginEpoch ||
+                nextRows != rows ||
+                nextColumns != columns ||
+                nextHistoryRows < historyRows ||
+                changedSelectedScreen
+            ) {
+                clearSelection()
+            }
         }
         if (viewportOffset > 0 && nextHistoryRows > historyRows) {
             val anchoredOffset =
@@ -590,6 +628,7 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
                     .toInt()
             if (anchoredOffset != nextViewportOffset) {
                 historyRows = nextHistoryRows
+                historyOriginEpoch = nextHistoryOriginEpoch
                 viewportOffset = anchoredOffset
                 needsFullSnapshot = true
                 return true
@@ -621,6 +660,7 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         cursorVisible = terminalFlags and CURSOR_VISIBLE_FLAG != 0
         terminalRevision = nextTerminalRevision
         historyRows = nextHistoryRows
+        historyOriginEpoch = nextHistoryOriginEpoch
         viewportOffset = nextViewportOffset
         var offset = DAMAGE_HEADER_SIZE
         for (row in dirtyStart until dirtyEnd) {
@@ -747,13 +787,13 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
             runStart = runEnd
         }
         if (hasSelection()) {
-            val first = minOf(selectionAnchor, selectionExtent)
-            val last = maxOf(selectionAnchor, selectionExtent)
-            val rowFirst = row * columns
+            val documentRow = visibleDocumentRow(row)
+            val rowFirst = documentRow * columns
             val rowLast = rowFirst + columns - 1
-            if (first <= rowLast && last >= rowFirst) {
-                val firstColumn = (first - rowFirst).coerceAtLeast(0)
-                val lastColumn = (last - rowFirst).coerceAtMost(columns - 1)
+            if (selectionStart <= rowLast && selectionEnd >= rowFirst) {
+                val firstColumn = (selectionStart - rowFirst).coerceAtLeast(0).toInt()
+                val lastColumn =
+                    (selectionEnd - rowFirst).coerceAtMost((columns - 1).toLong()).toInt()
                 backgroundPaint.color = SELECTION_OVERLAY
                 canvas.drawRect(
                     CONTENT_PADDING + firstColumn * cellWidth,
@@ -886,46 +926,19 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         if (!hasSelection()) {
             return false
         }
-        val first = minOf(selectionAnchor, selectionExtent)
-        val last = maxOf(selectionAnchor, selectionExtent)
-        val firstRow = first / columns
-        val lastRow = last / columns
-        val builder =
-            StringBuilder(
-                (last - first + lastRow - firstRow)
-                    .coerceAtMost(MAX_CLIPBOARD_CHARACTERS),
-            )
-        for (row in firstRow..lastRow) {
-            val firstColumn = if (row == firstRow) first % columns else 0
-            val lastColumn = if (row == lastRow) last % columns else columns - 1
-            for (column in firstColumn..lastColumn) {
-                val cell = row * columns + column
-                if (glyphWidths[cell].toInt() == 0) {
-                    continue
-                }
-                val glyphStart = cell * MAX_GRAPHEME_CODEPOINTS
-                val glyphLength = glyphLengths[cell].toInt() and 0xff
-                for (index in 0 until glyphLength) {
-                    val codepoint = glyphCodepoints[glyphStart + index]
-                    if (
-                        builder.length + Character.charCount(codepoint) >
-                        MAX_CLIPBOARD_CHARACTERS
-                    ) {
-                        return false
-                    }
-                    builder.appendCodePoint(codepoint)
-                }
-            }
-            if (row != lastRow) {
-                if (builder.length >= MAX_CLIPBOARD_CHARACTERS) {
-                    return false
-                }
-                builder.append('\n')
-            }
-        }
+        val firstRow = (selectionStart / columns).toInt()
+        val lastRow = (selectionEnd / columns).toInt()
+        val text =
+            runtimeBinder?.copySharedShellTerminalSelection(
+                selectionOriginEpoch,
+                firstRow,
+                (selectionStart % columns).toInt(),
+                lastRow,
+                (selectionEnd % columns).toInt(),
+            ) ?: return false
         val clipboard = context.getSystemService(ClipboardManager::class.java) ?: return false
         clipboard.setPrimaryClip(
-            ClipData.newPlainText(context.getString(R.string.app_name), builder),
+            ClipData.newPlainText(context.getString(R.string.app_name), text),
         )
         clearSelection()
         return true
@@ -948,10 +961,14 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
                 last++
             }
         }
-        selectionAnchor = first
-        selectionExtent = last
-        selectionTouchCell = cell
-        selectionInitialExtent = last
+        val documentRow = visibleDocumentRow(cell / columns)
+        val documentRowStart = documentRow * columns
+        selectionStart = documentRowStart + first % columns
+        selectionEnd = documentRowStart + last % columns
+        selectionInitialStart = selectionStart
+        selectionInitialEnd = selectionEnd
+        selectionOriginEpoch = historyOriginEpoch
+        selectionDragEndpoint = SELECTION_DRAG_WORD
         selectionDragging = true
         recordSelectionRows()
     }
@@ -960,18 +977,202 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         x: Float,
         y: Float,
     ) {
-        val cell = cellAtPosition(x, y) ?: return
-        val nextExtent =
-            if (cell == selectionTouchCell) {
-                selectionInitialExtent
-            } else {
-                cell
+        val cell = documentCellAtPosition(x, y) ?: return
+        val oldStart = selectionStart
+        val oldEnd = selectionEnd
+        when (selectionDragEndpoint) {
+            SELECTION_DRAG_WORD -> {
+                when {
+                    cell < selectionInitialStart -> {
+                        selectionStart = cell
+                        selectionEnd = selectionInitialEnd
+                    }
+                    cell > selectionInitialEnd -> {
+                        selectionStart = selectionInitialStart
+                        selectionEnd = cell
+                    }
+                    else -> {
+                        selectionStart = selectionInitialStart
+                        selectionEnd = selectionInitialEnd
+                    }
+                }
             }
-        if (nextExtent == selectionExtent) {
+            SELECTION_DRAG_START -> {
+                if (cell <= selectionEnd) {
+                    selectionStart = cell
+                } else {
+                    selectionStart = selectionEnd
+                    selectionEnd = cell
+                    selectionDragEndpoint = SELECTION_DRAG_END
+                }
+            }
+            SELECTION_DRAG_END -> {
+                if (cell >= selectionStart) {
+                    selectionEnd = cell
+                } else {
+                    selectionEnd = selectionStart
+                    selectionStart = cell
+                    selectionDragEndpoint = SELECTION_DRAG_START
+                }
+            }
+        }
+        if (selectionStart == oldStart && selectionEnd == oldEnd) {
             return
         }
-        selectionExtent = nextExtent
         recordSelectionRows()
+    }
+
+    private fun beginSelectionHandleDrag(
+        x: Float,
+        y: Float,
+    ): Boolean {
+        if (!hasSelection()) {
+            return false
+        }
+        selectionDragEndpoint =
+            when {
+                isNearSelectionHandle(selectionStart, true, x, y) -> SELECTION_DRAG_START
+                isNearSelectionHandle(selectionEnd, false, x, y) -> SELECTION_DRAG_END
+                else -> return false
+            }
+        selectionInitialStart = selectionStart
+        selectionInitialEnd = selectionEnd
+        selectionDragging = true
+        parent?.requestDisallowInterceptTouchEvent(true)
+        return true
+    }
+
+    private fun drawSelectionHandles(canvas: Canvas) {
+        if (!hasSelection()) {
+            return
+        }
+        backgroundPaint.color = SELECTION_HANDLE_COLOR
+        drawSelectionHandle(canvas, selectionStart, true)
+        if (selectionEnd != selectionStart) {
+            drawSelectionHandle(canvas, selectionEnd, false)
+        }
+    }
+
+    private fun drawSelectionHandle(
+        canvas: Canvas,
+        cell: Long,
+        start: Boolean,
+    ) {
+        val documentRow = cell / columns
+        val visibleRow = documentRow - firstVisibleDocumentRow()
+        if (visibleRow !in 0 until rows.toLong()) {
+            return
+        }
+        val column = (cell % columns).toInt()
+        val visibleCell = visibleRow.toInt() * columns + column
+        val cellSpan =
+            if (!start && glyphWidths[visibleCell].toInt() == 2) {
+                2
+            } else {
+                1
+            }
+        val x =
+            (
+                CONTENT_PADDING +
+                    (column + if (start) 0 else cellSpan) * cellWidth
+            ).coerceIn(
+                selectionHandleRadius,
+                (width - selectionHandleRadius).coerceAtLeast(selectionHandleRadius),
+            )
+        val y =
+            CONTENT_PADDING +
+                (visibleRow + 1).toFloat() * cellHeight -
+                selectionHandleRadius
+        canvas.drawCircle(x, y, selectionHandleRadius, backgroundPaint)
+    }
+
+    private fun isNearSelectionHandle(
+        cell: Long,
+        start: Boolean,
+        x: Float,
+        y: Float,
+    ): Boolean {
+        val documentRow = cell / columns
+        val visibleRow = documentRow - firstVisibleDocumentRow()
+        if (visibleRow !in 0 until rows.toLong()) {
+            return false
+        }
+        val column = (cell % columns).toInt()
+        val visibleCell = visibleRow.toInt() * columns + column
+        val cellSpan =
+            if (!start && glyphWidths[visibleCell].toInt() == 2) {
+                2
+            } else {
+                1
+            }
+        val handleX =
+            (
+                CONTENT_PADDING +
+                    (column + if (start) 0 else cellSpan) * cellWidth
+            ).coerceIn(
+                selectionHandleRadius,
+                (width - selectionHandleRadius).coerceAtLeast(selectionHandleRadius),
+            )
+        val handleY =
+            CONTENT_PADDING +
+                (visibleRow + 1).toFloat() * cellHeight -
+                selectionHandleRadius
+        val deltaX = x - handleX
+        val deltaY = y - handleY
+        return deltaX * deltaX + deltaY * deltaY <=
+            selectionHandleTouchRadius * selectionHandleTouchRadius
+    }
+
+    private fun updateSelectionAutoScroll(
+        x: Float,
+        y: Float,
+    ) {
+        val direction =
+            when {
+                y < CONTENT_PADDING && viewportOffset < historyRows -> 1
+                y > height - CONTENT_PADDING && viewportOffset > 0 -> -1
+                else -> 0
+            }
+        selectionAutoScrollX = x
+        if (direction == selectionAutoScrollDirection) {
+            return
+        }
+        removeCallbacks(selectionAutoScrollRunnable)
+        selectionAutoScrollDirection = direction
+        selectionAutoScrollFrame = 0
+        if (direction != 0) {
+            postOnAnimation(selectionAutoScrollRunnable)
+        }
+    }
+
+    private fun runSelectionAutoScroll() {
+        val direction = selectionAutoScrollDirection
+        if (!selectionDragging || direction == 0) {
+            return
+        }
+        selectionAutoScrollFrame++
+        if (selectionAutoScrollFrame < SELECTION_AUTO_SCROLL_FRAME_INTERVAL) {
+            postOnAnimation(selectionAutoScrollRunnable)
+            return
+        }
+        selectionAutoScrollFrame = 0
+        val oldOffset = viewportOffset
+        setViewportOffset(viewportOffset + direction)
+        if (viewportOffset == oldOffset) {
+            stopSelectionAutoScroll()
+            return
+        }
+        extendSelection(
+            selectionAutoScrollX,
+            if (direction > 0) CONTENT_PADDING else height - CONTENT_PADDING,
+        )
+        postOnAnimation(selectionAutoScrollRunnable)
+    }
+
+    private fun stopSelectionAutoScroll() {
+        selectionAutoScrollDirection = 0
+        selectionAutoScrollFrame = 0
+        removeCallbacks(selectionAutoScrollRunnable)
     }
 
     private fun cellAtPosition(
@@ -996,22 +1197,41 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         return rowStart + column
     }
 
+    private fun documentCellAtPosition(
+        x: Float,
+        y: Float,
+    ): Long? {
+        val visibleCell = cellAtPosition(x, y) ?: return null
+        return visibleDocumentRow(visibleCell / columns) * columns +
+            visibleCell % columns
+    }
+
+    private fun firstVisibleDocumentRow(): Long =
+        historyRows.toLong() - viewportOffset
+
+    private fun visibleDocumentRow(row: Int): Long =
+        firstVisibleDocumentRow() + row
+
     private fun hasSelection(): Boolean =
-        selectionAnchor != NO_SELECTION &&
-            selectionExtent != NO_SELECTION &&
+        selectionStart != NO_SELECTION &&
+            selectionEnd != NO_SELECTION &&
             rows != 0 &&
             columns != 0 &&
-            selectionAnchor < rows * columns &&
-            selectionExtent < rows * columns
+            selectionOriginEpoch == historyOriginEpoch &&
+            selectionStart <= selectionEnd &&
+            selectionEnd < (historyRows.toLong() + rows) * columns
 
     private fun clearSelection() {
         if (!hasSelection() && !selectionDragging) {
             return
         }
-        selectionAnchor = NO_SELECTION
-        selectionExtent = NO_SELECTION
-        selectionTouchCell = NO_SELECTION
-        selectionInitialExtent = NO_SELECTION
+        stopSelectionAutoScroll()
+        selectionStart = NO_SELECTION
+        selectionEnd = NO_SELECTION
+        selectionInitialStart = NO_SELECTION
+        selectionInitialEnd = NO_SELECTION
+        selectionOriginEpoch = 0L
+        selectionDragEndpoint = SELECTION_DRAG_NONE
         selectionDragging = false
         recordSelectionRows()
     }
@@ -1151,6 +1371,7 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
     }
 
     private fun sendSequence(sequence: ByteArray): Boolean {
+        clearSelection()
         returnToLiveView()
         return runtimeBinder?.submitTerminalInput(sequence, sequence.size) == true
     }
@@ -1479,12 +1700,16 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         terminalRevision = Long.MIN_VALUE
         sourceRevision = Long.MIN_VALUE
         historyRows = 0
+        historyOriginEpoch = 0L
         viewportOffset = 0
         scrollRowRemainder = 0f
-        selectionAnchor = NO_SELECTION
-        selectionExtent = NO_SELECTION
-        selectionTouchCell = NO_SELECTION
-        selectionInitialExtent = NO_SELECTION
+        stopSelectionAutoScroll()
+        selectionStart = NO_SELECTION
+        selectionEnd = NO_SELECTION
+        selectionInitialStart = NO_SELECTION
+        selectionInitialEnd = NO_SELECTION
+        selectionOriginEpoch = 0L
+        selectionDragEndpoint = SELECTION_DRAG_NONE
         selectionDragging = false
         needsFullSnapshot = true
         composingText = ""
@@ -1556,7 +1781,6 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         if (nextOffset == viewportOffset) {
             return true
         }
-        clearSelection()
         viewportOffset = nextOffset
         needsFullSnapshot = true
         invalidate()
@@ -1589,7 +1813,14 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         private const val TEXT_SIZE_SMALLER = 0
         private const val TEXT_SIZE_RESET = 1
         private const val TEXT_SIZE_LARGER = 2
-        private const val NO_SELECTION = -1
+        private const val NO_SELECTION = -1L
+        private const val SELECTION_DRAG_NONE = 0
+        private const val SELECTION_DRAG_WORD = 1
+        private const val SELECTION_DRAG_START = 2
+        private const val SELECTION_DRAG_END = 3
+        private const val SELECTION_AUTO_SCROLL_FRAME_INTERVAL = 3
+        private const val SELECTION_HANDLE_RADIUS_DP = 7f
+        private const val SELECTION_HANDLE_TOUCH_RADIUS_DP = 24f
         private const val MENU_TEXT_SMALLER = 0x415201
         private const val MENU_TEXT_RESET = 0x415202
         private const val MENU_TEXT_LARGER = 0x415203
@@ -1597,8 +1828,8 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         private const val CURSOR_HEIGHT = 2f
         private const val UNDERLINE_HEIGHT = 1f
         private const val DAMAGE_MAGIC = 0x4d525441
-        private const val DAMAGE_VERSION = 4
-        private const val DAMAGE_HEADER_SIZE = 40
+        private const val DAMAGE_VERSION = 5
+        private const val DAMAGE_HEADER_SIZE = 48
         private const val DAMAGE_CELL_SIZE = 76
         private const val MAX_GRAPHEME_CODEPOINTS = 16
         private const val MAX_GRAPHEME_UTF16_UNITS = MAX_GRAPHEME_CODEPOINTS * 2
@@ -1631,6 +1862,7 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         private const val CURSOR_COLOR = 0xff7dd3fc.toInt()
         private const val COMPOSING_BACKGROUND = 0xff31363b.toInt()
         private const val SELECTION_OVERLAY = 0x667dd3fc
+        private const val SELECTION_HANDLE_COLOR = 0xff7dd3fc.toInt()
         private const val REPLACEMENT_CHARACTER = '\ufffd'
         private val ESCAPE_BYTE = 0x1b.toByte()
         private val CARRIAGE_RETURN_BYTE = 0x0d.toByte()

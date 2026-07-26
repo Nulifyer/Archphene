@@ -8,11 +8,12 @@ pub const MAX_ROWS: u16 = 200;
 pub const MIN_COLUMNS: u16 = 2;
 pub const MAX_COLUMNS: u16 = 400;
 pub const MAX_GRAPHEME_CODEPOINTS: usize = 16;
-pub const DAMAGE_PROTOCOL_VERSION: u32 = 4;
-pub const DAMAGE_HEADER_SIZE: usize = 40;
+pub const DAMAGE_PROTOCOL_VERSION: u32 = 5;
+pub const DAMAGE_HEADER_SIZE: usize = 48;
 pub const DAMAGE_CELL_SIZE: usize = 76;
 pub const MAX_DAMAGE_BYTES: usize =
     DAMAGE_HEADER_SIZE + MAX_ROWS as usize * MAX_COLUMNS as usize * DAMAGE_CELL_SIZE;
+pub const MAX_SELECTION_BYTES: usize = 8 * 1024;
 pub const SCROLLBACK_BYTE_LIMIT: usize = 4 * 1024 * 1024;
 pub const SCROLLBACK_LINE_LIMIT: usize = 4 * 1024;
 const DAMAGE_MAGIC: u32 = u32::from_le_bytes(*b"ATRM");
@@ -85,6 +86,7 @@ impl Cell {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TerminalError {
     InvalidSize,
+    InvalidSelection,
     OutputTooSmall,
 }
 
@@ -106,6 +108,7 @@ struct Scrollback {
     line_count: usize,
     write_offset: usize,
     bytes_used: usize,
+    origin_epoch: u64,
 }
 
 impl Scrollback {
@@ -117,6 +120,7 @@ impl Scrollback {
             line_count: 0,
             write_offset: 0,
             bytes_used: 0,
+            origin_epoch: 1,
         }
     }
 
@@ -211,6 +215,19 @@ impl Scrollback {
             if visual_row < first_visual_row.saturating_add(line_rows) {
                 self.decode_visual_row(line, visual_row - first_visual_row, columns, output);
                 return true;
+            }
+            first_visual_row = first_visual_row.saturating_add(line_rows);
+        }
+        false
+    }
+
+    fn visual_row_soft_wrapped(&self, visual_row: u32, columns: u16) -> bool {
+        let mut first_visual_row = 0_u32;
+        for line in self.line_iter() {
+            let line_rows = u32::from(self.line_visual_rows(line, columns));
+            if visual_row < first_visual_row.saturating_add(line_rows) {
+                let row_in_line = visual_row - first_visual_row;
+                return row_in_line + 1 < line_rows || line.soft_wrapped;
             }
             first_visual_row = first_visual_row.saturating_add(line_rows);
         }
@@ -377,6 +394,7 @@ impl Scrollback {
         self.lines[self.first_line] = StoredLine::default();
         self.first_line = (self.first_line + 1) % self.lines.len();
         self.line_count -= 1;
+        self.origin_epoch = self.origin_epoch.saturating_add(1);
     }
 
     fn write_byte(&mut self, value: u8) {
@@ -592,6 +610,101 @@ impl Terminal {
         self.scrollback.visual_rows(self.columns)
     }
 
+    pub const fn history_origin_epoch(&self) -> u64 {
+        self.scrollback.origin_epoch
+    }
+
+    pub fn write_selection(
+        &mut self,
+        output: &mut [u8],
+        origin_epoch: u64,
+        start_row: u32,
+        start_column: u16,
+        end_row: u32,
+        end_column: u16,
+    ) -> Result<usize, TerminalError> {
+        let history_rows = self.history_rows();
+        let total_rows = history_rows.saturating_add(u32::from(self.rows));
+        if output.is_empty()
+            || output.len() > MAX_SELECTION_BYTES
+            || origin_epoch != self.history_origin_epoch()
+            || start_row > end_row
+            || end_row >= total_rows
+            || start_column >= self.columns
+            || end_column >= self.columns
+            || (start_row == end_row && start_column > end_column)
+        {
+            return Err(TerminalError::InvalidSelection);
+        }
+        let mut output_length = 0_usize;
+        for row in start_row..=end_row {
+            if !self.fill_combined_row(row, history_rows) {
+                return Err(TerminalError::InvalidSelection);
+            }
+            let first_column = if row == start_row { start_column } else { 0 };
+            let last_column = if row == end_row {
+                end_column
+            } else {
+                self.columns - 1
+            };
+            let row_cells =
+                &self.view_row_scratch[usize::from(first_column)..=usize::from(last_column)];
+            let retained_cells = row_cells
+                .iter()
+                .rposition(|cell| !cell_is_text_blank(*cell))
+                .map_or(0, |index| index + 1);
+            for cell in &row_cells[..retained_cells] {
+                if cell.width == 0 {
+                    continue;
+                }
+                for index in 0..usize::from(cell.grapheme_len) {
+                    let Some(character) = char::from_u32(cell.codepoint(index)) else {
+                        return Err(TerminalError::InvalidSelection);
+                    };
+                    let mut encoded = [0_u8; 4];
+                    let bytes = character.encode_utf8(&mut encoded).as_bytes();
+                    if output_length + bytes.len() > output.len() {
+                        return Err(TerminalError::OutputTooSmall);
+                    }
+                    output[output_length..output_length + bytes.len()].copy_from_slice(bytes);
+                    output_length += bytes.len();
+                }
+            }
+            if row != end_row && !self.combined_row_soft_wrapped(row, history_rows) {
+                if output_length == output.len() {
+                    return Err(TerminalError::OutputTooSmall);
+                }
+                output[output_length] = b'\n';
+                output_length += 1;
+            }
+        }
+        Ok(output_length)
+    }
+
+    fn fill_combined_row(&mut self, row: u32, history_rows: u32) -> bool {
+        if row < history_rows {
+            self.scrollback
+                .fill_visual_row(row, self.columns, &mut self.view_row_scratch)
+        } else {
+            let screen_row = row - history_rows;
+            if screen_row >= u32::from(self.rows) {
+                return false;
+            }
+            let start = usize::try_from(screen_row).unwrap() * usize::from(self.columns);
+            self.view_row_scratch[..usize::from(self.columns)]
+                .copy_from_slice(&self.cells[start..start + usize::from(self.columns)]);
+            true
+        }
+    }
+
+    fn combined_row_soft_wrapped(&self, row: u32, history_rows: u32) -> bool {
+        if row < history_rows {
+            self.scrollback.visual_row_soft_wrapped(row, self.columns)
+        } else {
+            self.row_soft_wrapped[(row - history_rows) as usize]
+        }
+    }
+
     pub fn write_view_damage(
         &mut self,
         output: &mut [u8],
@@ -717,6 +830,7 @@ impl Terminal {
         output[24..32].copy_from_slice(&self.revision.to_le_bytes());
         output[32..36].copy_from_slice(&history_rows.to_le_bytes());
         output[36..40].copy_from_slice(&viewport_offset.to_le_bytes());
+        output[40..48].copy_from_slice(&self.history_origin_epoch().to_le_bytes());
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
@@ -1959,6 +2073,10 @@ fn normalize_cell_row(cells: &mut [Cell], columns: u16, row: u16) {
     }
 }
 
+fn cell_is_text_blank(cell: Cell) -> bool {
+    cell.width == 1 && cell.grapheme_len == 1 && cell.codepoint == u32::from(' ')
+}
+
 fn write_wire_cell(output: &mut [u8], offset: usize, cell: Cell) {
     for codepoint_index in 0..MAX_GRAPHEME_CODEPOINTS {
         let start = offset + codepoint_index * 4;
@@ -2215,6 +2333,44 @@ mod tests {
         assert_eq!(damage_text(&damage, 0, 8), "one     ");
         assert_eq!(damage_text(&damage, 1, 8), "two     ");
         assert_eq!(damage_text(&damage, 2, 8), "three   ");
+    }
+
+    #[test]
+    fn selection_spans_history_and_live_rows_without_soft_wrap_newlines() {
+        let mut terminal = Terminal::new(3, 8).unwrap();
+        terminal.feed(b"abcdefghijk\r\nsecond\r\nthird\r\nfourth");
+        assert!(terminal.history_rows() >= 2);
+        let history_rows = terminal.history_rows();
+        let mut output = [0_u8; MAX_SELECTION_BYTES];
+        let length = terminal
+            .write_selection(
+                &mut output,
+                terminal.history_origin_epoch(),
+                0,
+                0,
+                history_rows,
+                5,
+            )
+            .unwrap();
+        let selected = std::str::from_utf8(&output[..length]).unwrap();
+        assert_eq!(selected, "abcdefghijk\nsecond");
+    }
+
+    #[test]
+    fn selection_rejects_stale_history_origin_after_eviction() {
+        let mut terminal = Terminal::new(2, MAX_COLUMNS).unwrap();
+        let origin = terminal.history_origin_epoch();
+        let line = vec![b'x'; usize::from(MAX_COLUMNS)];
+        for _ in 0..5_000 {
+            terminal.feed(&line);
+            terminal.feed(b"\r\n");
+        }
+        assert!(terminal.history_origin_epoch() > origin);
+        let mut output = [0_u8; 32];
+        assert_eq!(
+            terminal.write_selection(&mut output, origin, 0, 0, 0, 0),
+            Err(TerminalError::InvalidSelection)
+        );
     }
 
     #[test]

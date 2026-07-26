@@ -1010,11 +1010,25 @@ returns only rows above the cursor-preserving viewport to history, preserves
 hard line boundaries, and retains physical-grid semantics for alternate-screen
 TUIs. Exact-ABI portrait-to-landscape gates preserve one manager process and
 visibly reunite a marker that began in portrait history and ended on the live
-screen on both the emulator and Samsung. Remaining xterm controls, selection
-handles/autoscroll and ranges stable across history movement, semantic
-selection, and richer accessibility remain required. The temporary command
-field remains as a fallback above the renderer; direct terminal input no
-longer depends on it.
+screen on both the emulator and Samsung.
+
+Selection now uses bounded coordinates in the combined scrollback/live
+document instead of transient viewport-cell indexes. Damage protocol v5
+publishes a scrollback-origin epoch; appending output preserves historical
+ranges, while actual ring eviction, resize, or selected live-screen mutation
+invalidates them rather than copying unrelated cells. Rust serializes at most
+8 KiB of selected UTF-8 directly from stored history and the live grid,
+omitting newlines across soft wraps, through one Service-owned direct buffer.
+Android renders fully visible endpoint handles with 48 dp hit regions, permits
+endpoint crossing, preserves selection while the viewport moves, and performs
+preallocated, three-frame-throttled edge autoscroll. Accessibility exposes the
+selected state and Copy action. Exact x86_64 emulator and AArch64 Samsung gates
+prove long-press selection, off-screen/back stability, rendered-handle
+discovery and drag, edge autoscroll into old history, exact clipboard
+paste-back, scoped fatal logs, and inspected full-device frames. Remaining
+xterm controls and richer terminal accessibility are still required. The
+temporary command field remains as a fallback above the renderer; direct
+terminal input no longer depends on it.
 
 The validated prototype below remains reference evidence until replacement
 vertical slices pass equivalent gates. Installed prototype state is no longer a

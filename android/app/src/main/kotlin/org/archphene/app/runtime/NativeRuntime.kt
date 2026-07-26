@@ -21,7 +21,8 @@ internal object NativeRuntime {
     const val COMMAND_REQUEST_LIMIT = 16 * 1024
     const val DNS_REQUEST_LIMIT = 512
     const val LAUNCHER_REVIEW_REQUEST_LIMIT = 32 * 1024
-    const val TERMINAL_DAMAGE_SIZE = 6_080_040
+    const val TERMINAL_DAMAGE_SIZE = 6_080_048
+    const val TERMINAL_SELECTION_SIZE = 8 * 1024
     const val ERROR_INVALID_STATE = -3
 
     const val LIFECYCLE_RUNNING = 2
@@ -359,6 +360,16 @@ internal object NativeRuntime {
         ptyHandle: Long,
         fullSnapshot: Boolean,
         viewportOffset: Int,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeCopyTerminalSelection(
+        handle: Long,
+        ptyHandle: Long,
+        originEpoch: Long,
+        startRow: Int,
+        startColumn: Int,
+        endRow: Int,
+        endColumn: Int,
         outputBuffer: ByteBuffer,
     ): Int
     external fun nativeWaitPty(

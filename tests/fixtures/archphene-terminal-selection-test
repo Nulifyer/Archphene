@@ -2,5 +2,8 @@
 set -euo pipefail
 
 tput clear
+for ((index = 1; index <= 60; index++)); do
+  printf 'SELECTION-HISTORY-%02d\r\n' "$index"
+done
 printf 'COPY-SELECTION-MARKER'
 IFS= read -r -n 1
