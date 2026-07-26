@@ -814,9 +814,12 @@ IME, types a command containing a deliberate final error, removes it through
 the hardware Backspace route, executes it through Enter, and waits for a Bash
 builtin result that did not appear in the typed command. This passes on the API
 36 emulator and physical Samsung, including scoped fatal logs and visually
-inspected full-device IME screenshots. This automated injection validates the
-hardware-style Android key route; broader OEM/non-Latin composing and commit
-behavior still needs dedicated coverage.
+inspected full-device IME screenshots. A separate deterministic composing gate
+keeps one full-editor InputConnection, replaces an in-progress Japanese
+candidate locally, exposes that preedit separately to Android accessibility,
+and proves that Japanese, CJK, an emoji modifier, and a ZWJ sequence do not
+reach Bash until finish. It then commits the exact UTF-8 result and clears the
+preedit on both exact-ABI devices, with full-device before/after evidence.
 
 The terminal core now owns preallocated primary and alternate grids of the
 current bounded dimensions. DEC private modes `47`, `1047`, and `1049` switch
@@ -1008,10 +1011,10 @@ hard line boundaries, and retains physical-grid semantics for alternate-screen
 TUIs. Exact-ABI portrait-to-landscape gates preserve one manager process and
 visibly reunite a marker that began in portrait history and ended on the live
 screen on both the emulator and Samsung. Remaining xterm controls, selection
-handles/autoscroll and ranges stable across history movement, broader
-non-Latin composing IME behavior, and richer accessibility remain
-required. The temporary command field remains as a fallback above the
-renderer; direct terminal input no longer depends on it.
+handles/autoscroll and ranges stable across history movement, semantic
+selection, and richer accessibility remain required. The temporary command
+field remains as a fallback above the renderer; direct terminal input no
+longer depends on it.
 
 The validated prototype below remains reference evidence until replacement
 vertical slices pass equivalent gates. Installed prototype state is no longer a

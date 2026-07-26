@@ -19,6 +19,7 @@ import android.text.Editable
 import android.text.TextUtils
 import android.text.TextWatcher
 import android.text.format.Formatter
+import android.util.Base64
 import android.util.Log
 import android.view.Choreographer
 import android.view.Gravity
@@ -1588,6 +1589,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         setContentView(layout)
         updateShellPresentation(false)
         showDebugAurReview(intent)
+        showDebugTerminalIme(intent)
         startService(Intent(this, ArchpheneRuntimeService::class.java))
         val restoredImport =
             savedInstanceState
@@ -1676,6 +1678,62 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         setIntent(intent)
         queueIncomingImport(intent)
         showDebugAurReview(intent)
+        showDebugTerminalIme(intent)
+    }
+
+    private fun showDebugTerminalIme(source: Intent) {
+        if (
+            !debugRuntimeEvidenceEnabled ||
+            source.action != DEBUG_TERMINAL_IME_ACTION
+        ) {
+            return
+        }
+        val composing = decodeDebugUtf8Extra(source, DEBUG_IME_COMPOSING_EXTRA)
+        val committed = decodeDebugUtf8Extra(source, DEBUG_IME_COMMIT_EXTRA)
+        val finish = source.getBooleanExtra(DEBUG_IME_FINISH_EXTRA, false)
+        source.action = null
+        runtimeSurface.post {
+            runtimeSurface.requestFocus()
+            var accepted = true
+            if (composing != null) {
+                accepted = runtimeSurface.debugSetComposingText(composing)
+            }
+            if (finish) {
+                accepted = runtimeSurface.debugFinishComposingText() && accepted
+            }
+            if (committed != null) {
+                accepted = runtimeSurface.debugCommitText(committed) && accepted
+            }
+            runtimeSurface.sendAccessibilityEvent(
+                android.view.accessibility.AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
+            )
+            Log.i(
+                TAG,
+                "Debug terminal IME operation accepted=$accepted " +
+                    "composing=${composing != null} finish=$finish " +
+                    "commit=${committed != null}",
+            )
+        }
+    }
+
+    private fun decodeDebugUtf8Extra(
+        source: Intent,
+        name: String,
+    ): String? {
+        val encoded = source.getStringExtra(name) ?: return null
+        if (encoded.length !in 1..MAX_DEBUG_IME_BASE64) {
+            return null
+        }
+        val bytes =
+            try {
+                Base64.decode(encoded, Base64.NO_WRAP)
+            } catch (_: IllegalArgumentException) {
+                return null
+            }
+        if (bytes.isEmpty() || bytes.size > MAX_DEBUG_IME_UTF8) {
+            return null
+        }
+        return bytes.toString(Charsets.UTF_8)
     }
 
     private fun showDebugAurReview(source: Intent) {
@@ -3128,6 +3186,13 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         private const val DEBUG_SHOW_AUR_REVIEW_ACTION =
             "org.archphene.app.debug.action.SHOW_AUR_REVIEW"
         private const val DEBUG_AUR_PACKAGE_EXTRA = "package"
+        private const val DEBUG_TERMINAL_IME_ACTION =
+            "org.archphene.app.debug.action.TERMINAL_IME"
+        private const val DEBUG_IME_COMPOSING_EXTRA = "composing_base64"
+        private const val DEBUG_IME_COMMIT_EXTRA = "commit_base64"
+        private const val DEBUG_IME_FINISH_EXTRA = "finish"
+        private const val MAX_DEBUG_IME_BASE64 = 4 * 1024
+        private const val MAX_DEBUG_IME_UTF8 = 2 * 1024
         private var activityGeneration = 0
     }
 }

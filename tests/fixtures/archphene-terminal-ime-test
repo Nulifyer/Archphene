@@ -1,0 +1,6 @@
+#!/usr/bin/bash
+set -euo pipefail
+
+printf 'IME-WAITING\r\n'
+IFS= read -r value
+printf 'IME-RESULT:%s\r\n' "$value"

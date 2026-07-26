@@ -153,6 +153,9 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
     private var selectionDragging = false
     private var needsFullSnapshot = true
     private var composingText = ""
+    private val terminalInputConnection by lazy(LazyThreadSafetyMode.NONE) {
+        TerminalInputConnection()
+    }
     private var pastePopup: PopupMenu? = null
     private var runtimeBinder: ArchpheneRuntimeService.LocalBinder? = null
     private var pendingPinchTextSp = terminalTextSp.toFloat()
@@ -357,7 +360,16 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         info.isMultiLine = true
         info.isScrollable = historyRows > 0
         if (rows != 0 && columns != 0) {
-            info.text = accessibilitySnapshot()
+            val snapshot = accessibilitySnapshot()
+            info.text =
+                if (composingText.isEmpty()) {
+                    snapshot
+                } else {
+                    "$snapshot\n${context.getString(
+                        R.string.terminal_composing_text,
+                        composingText,
+                    )}"
+                }
         }
         if (hasSelection()) {
             info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_COPY)
@@ -404,8 +416,17 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
                 EditorInfo.IME_FLAG_NO_FULLSCREEN
         outAttrs.initialSelStart = 0
         outAttrs.initialSelEnd = 0
-        return TerminalInputConnection()
+        return terminalInputConnection
     }
+
+    internal fun debugSetComposingText(text: String): Boolean =
+        terminalInputConnection.setComposingText(text, 1)
+
+    internal fun debugFinishComposingText(): Boolean =
+        terminalInputConnection.finishComposingText()
+
+    internal fun debugCommitText(text: String): Boolean =
+        terminalInputConnection.commitText(text, 1)
 
     override fun onKeyDown(
         keyCode: Int,

@@ -95,6 +95,7 @@
     <string name="launcher_review_later">Not now</string>
     <string name="launcher_review_skip">Skip all</string>
     <string name="linux_session_display">Linux session display</string>
+    <string name="terminal_composing_text">Composing text: %1$s</string>
     <string name="terminal_accessibility_dimensions">Linux terminal, %1$d columns by %2$d rows</string>
     <string name="terminal_text_smaller">Text smaller</string>
     <string name="terminal_text_larger">Text larger</string>
