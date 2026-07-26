@@ -285,7 +285,18 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 setOnClickListener {
                     hideKeyboard(searchInput)
                     showPackageDetails()
-                    if (runtimeBinder?.reviewAurPackage(searchInput.text.toString()) != true) {
+                    val packageName = searchInput.text.toString().trim()
+                    val binder = runtimeBinder
+                    val accepted =
+                        if (
+                            binder?.aurSourcesAvailable == true &&
+                            binder.aurReviewedPackage == packageName
+                        ) {
+                            binder.verifyAurSources(packageName)
+                        } else {
+                            binder?.reviewAurPackage(packageName) == true
+                        }
+                    if (!accepted) {
                         searchStatusView.setText(R.string.aur_review_unavailable)
                     }
                 }
@@ -2153,14 +2164,37 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
 
     private fun updatePackageSelectionActions() {
         val binder = runtimeBinder
+        if (binder == null) {
+            installButton.isEnabled = false
+            removeButton.isEnabled = false
+            aurReviewButton.isEnabled = false
+            return
+        }
         val exactSelection =
-            binder != null &&
-                packageSearchInput.text.toString().trim() == binder.resolvedPackageName
+            packageSearchInput.text.toString().trim() == binder.resolvedPackageName
         installButton.isEnabled = exactSelection && binder.packagePrimaryActionAvailable
         removeButton.isEnabled = exactSelection && binder.packageRemoveAvailable
+        val aurPackage = packageSearchInput.text.toString().trim()
+        val sourcesAvailable =
+            binder.aurSourcesAvailable && binder.aurReviewedPackage == aurPackage
+        aurReviewButton.setText(
+            if (sourcesAvailable) R.string.verify_sources else R.string.aur,
+        )
+        aurReviewButton.contentDescription =
+            getString(
+                if (sourcesAvailable) {
+                    R.string.verify_sources_description
+                } else {
+                    R.string.aur_review_description
+                },
+            )
         aurReviewButton.isEnabled =
-            packageSearchInput.text.toString().trim().isNotEmpty() &&
-                binder?.aurReviewAvailable == true
+            aurPackage.isNotEmpty() &&
+                if (sourcesAvailable) {
+                    binder.aurSourcesAvailable
+                } else {
+                    binder.aurReviewAvailable
+                }
     }
 
     private fun updatePackageActivity() {

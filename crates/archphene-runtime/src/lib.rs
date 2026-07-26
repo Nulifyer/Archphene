@@ -12,6 +12,7 @@ use archphene_launcher::{LauncherRegistry, LauncherRegistryError, ReconcileRepor
 use archphene_packages::{
     CatalogDownload, InstalledPackageCatalog, PackagePayloadDownload, PackageRuntime,
     PackageRuntimeError, PackageTool, Repository, RepositoryArchitecture, ToolOutput,
+    aur::{AurReview, AurSourceDownload, MAX_AUR_SOURCE_BYTES},
     desktop::{DesktopCatalog, ExecArgument},
 };
 use archphene_process::{GuiRegistry, MAX_COMMAND_ARGUMENTS, ProcessError, PtyRegistry, PtyWaiter};
@@ -37,6 +38,8 @@ pub struct RuntimeHost {
     launcher_registry: Option<LauncherRegistry>,
     catalog_download: Option<CatalogDownload>,
     package_download: Option<PackagePayloadDownload>,
+    aur_review: Option<AurReview>,
+    aur_source_download: Option<AurSourceDownload>,
     pty_sessions: PtyRegistry,
     gui_sessions: GuiRegistry,
     session_marker: Option<PathBuf>,
@@ -194,6 +197,8 @@ impl RuntimeHost {
             launcher_registry: None,
             catalog_download: None,
             package_download: None,
+            aur_review: None,
+            aur_source_download: None,
             pty_sessions: PtyRegistry::new(),
             gui_sessions: GuiRegistry::new(),
             session_marker: None,
@@ -829,6 +834,78 @@ impl RuntimeHost {
 
     pub fn cancel_package_download(&mut self) {
         self.package_download = None;
+    }
+
+    pub fn retain_aur_review(&mut self, review: AurReview) {
+        self.aur_source_download = None;
+        self.aur_review = Some(review);
+    }
+
+    pub fn begin_aur_source_download(
+        &mut self,
+        source_index: usize,
+        maximum_size: u64,
+    ) -> Result<(File, String, String), PackageRuntimeError> {
+        if self.aur_source_download.is_some() {
+            return Err(PackageRuntimeError::Busy);
+        }
+        if maximum_size == 0 || maximum_size > MAX_AUR_SOURCE_BYTES {
+            return Err(PackageRuntimeError::InvalidPayload);
+        }
+        let source = self
+            .aur_review
+            .as_ref()
+            .and_then(|review| review.sources.get(source_index))
+            .ok_or(PackageRuntimeError::InvalidPayload)?;
+        if source.local || source.insecure_transport {
+            return Err(PackageRuntimeError::InvalidPayload);
+        }
+        let endpoint = source
+            .remote_url
+            .as_ref()
+            .ok_or(PackageRuntimeError::InvalidPayload)?
+            .clone();
+        let expected_sha256 = source.sha256.ok_or(PackageRuntimeError::InvalidPayload)?;
+        let filename = source.filename.clone();
+        let download = self
+            .package_runtime
+            .as_ref()
+            .ok_or(PackageRuntimeError::InvalidPath)?
+            .begin_aur_source_download(&filename, expected_sha256, maximum_size)?;
+        let file = download.duplicate_file()?;
+        self.aur_source_download = Some(download);
+        Ok((file, endpoint, filename))
+    }
+
+    pub fn aur_source_cache_candidate(
+        &self,
+        source_index: usize,
+    ) -> Result<(PackageRuntime, String, [u8; 32]), PackageRuntimeError> {
+        let source = self
+            .aur_review
+            .as_ref()
+            .and_then(|review| review.sources.get(source_index))
+            .ok_or(PackageRuntimeError::InvalidPayload)?;
+        if source.local || source.insecure_transport || source.remote_url.is_none() {
+            return Err(PackageRuntimeError::InvalidPayload);
+        }
+        let expected_sha256 = source.sha256.ok_or(PackageRuntimeError::InvalidPayload)?;
+        let package_runtime = self
+            .package_runtime
+            .as_ref()
+            .ok_or(PackageRuntimeError::InvalidPath)?
+            .clone();
+        Ok((package_runtime, source.filename.clone(), expected_sha256))
+    }
+
+    pub fn take_aur_source_download(&mut self) -> Result<AurSourceDownload, PackageRuntimeError> {
+        self.aur_source_download
+            .take()
+            .ok_or(PackageRuntimeError::InvalidPayload)
+    }
+
+    pub fn cancel_aur_source_download(&mut self) {
+        self.aur_source_download = None;
     }
 
     pub fn clear_package_cache(&self) -> Result<u64, PackageRuntimeError> {

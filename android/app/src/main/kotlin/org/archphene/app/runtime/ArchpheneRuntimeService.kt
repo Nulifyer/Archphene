@@ -100,6 +100,20 @@ class ArchpheneRuntimeService : Service() {
                     !packageOperationActive &&
                     !commandActive
 
+        val aurReviewedPackage: String
+            get() = retainedAurReview?.packageName.orEmpty()
+
+        val aurSourcesAvailable: Boolean
+            get() =
+                retainedAurReview?.sources?.any { source ->
+                    !source.local && source.remoteUrl != null
+                } == true &&
+                    readyHandle != 0L &&
+                    !catalogRefreshActive &&
+                    !searchActive &&
+                    !packageOperationActive &&
+                    !commandActive
+
         internal val installedPackages: InstalledPackageSnapshot
             get() = installedPackageSnapshot
 
@@ -363,6 +377,9 @@ class ArchpheneRuntimeService : Service() {
         fun reviewAurPackage(packageName: String): Boolean =
             requestAurReview(packageName)
 
+        fun verifyAurSources(packageName: String): Boolean =
+            requestAurSourceVerification(packageName)
+
         fun installPackage(packageName: String): Boolean =
             requestPackageInstall(packageName)
 
@@ -469,6 +486,9 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var catalogStatus = "Package catalog not downloaded"
     @Volatile private var searchActive = false
     @Volatile private var searchStatus = "Search the official Arch repositories"
+    @Volatile private var retainedAurReview: AurReviewData? = null
+    @Volatile private var retainedAurVerifiedBytes = 0L
+    @Volatile private var retainedAurSourceEvidence: Array<AurSourceEvidence> = emptyArray()
     @Volatile
     private var installedPackageSnapshot =
         InstalledPackageSnapshot(
@@ -562,7 +582,10 @@ class ArchpheneRuntimeService : Service() {
     private val packageResolutionOutputBuffer =
         ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_RESOLUTION_OUTPUT_SIZE)
     private val aurPackageBuffer = ByteBuffer.allocateDirect(128)
-    private val aurEndpointBuffer = ByteBuffer.allocateDirect(4096)
+    private val aurEndpointBuffer =
+        ByteBuffer
+            .allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
+            .order(ByteOrder.LITTLE_ENDIAN)
     private val aurRpcBuffer: ByteBuffer by lazy(LazyThreadSafetyMode.NONE) {
         ByteBuffer.allocateDirect(NativeRuntime.AUR_RPC_SIZE)
     }
@@ -599,8 +622,18 @@ class ArchpheneRuntimeService : Service() {
     private data class AurSourceReview(
         val architecture: String,
         val expression: String,
+        val filename: String,
+        val remoteUrl: String?,
+        val local: Boolean,
         val sha256: String?,
         val insecureTransport: Boolean,
+    )
+
+    private data class AurSourceEvidence(
+        val filename: String,
+        val bytes: Long,
+        val endpoint: String,
+        val cached: Boolean,
     )
 
     private data class AurReviewData(
@@ -1156,7 +1189,11 @@ class ArchpheneRuntimeService : Service() {
         private const val SHELL_FIELD_LIMIT = 64
         private const val AVAILABLE_PACKAGE_LIMIT = 100
         private val AUR_PACKAGE_NAME = Regex("[A-Za-z0-9@+._-]{1,128}")
+        private val AUR_SOURCE_FILENAME = Regex("[A-Za-z0-9@+,._-]{1,240}")
         private const val HEX_DIGITS = "0123456789abcdef"
+        private const val AUR_REDIRECT_LIMIT = 5
+        private const val AUR_STORAGE_RESERVE_BYTES = 64L * 1024 * 1024
+        private const val AUR_TOTAL_SOURCE_MAX_BYTES = 8L * 1024 * 1024 * 1024
         private const val SHELL_PREFERENCES = "terminal"
         private const val SHELL_PREFERENCE_ID = "shared_shell_id"
         private const val PACKAGE_RECOVERY_PREFERENCES = "package_recovery"
@@ -3599,6 +3636,9 @@ class ArchpheneRuntimeService : Service() {
             return false
         }
         searchActive = true
+        retainedAurReview = null
+        retainedAurVerifiedBytes = 0L
+        retainedAurSourceEvidence = emptyArray()
         searchStatus = "Searching for $normalized"
         publishAvailablePackageStatus(searchStatus)
         Thread(
@@ -3867,6 +3907,9 @@ class ArchpheneRuntimeService : Service() {
             return false
         }
         searchActive = true
+        retainedAurReview = null
+        retainedAurVerifiedBytes = 0L
+        retainedAurSourceEvidence = emptyArray()
         lastResolvedPackage = ""
         lastResolvedRepository = ""
         lastResolvedInstalledVersion = ""
@@ -3950,6 +3993,7 @@ class ArchpheneRuntimeService : Service() {
                         )
                     }
                     val review = parseAurReview(aurReviewBuffer, reviewLength)
+                    retainedAurReview = review
                     searchStatus = formatAurReview(review)
                     Log.i(
                         TAG,
@@ -4035,13 +4079,376 @@ class ArchpheneRuntimeService : Service() {
         }
     }
 
+    @Synchronized
+    private fun requestAurSourceVerification(packageName: String): Boolean {
+        val normalized = packageName.trim()
+        val review = retainedAurReview
+        val activeHandle = readyHandle
+        if (
+            activeHandle == 0L ||
+            review == null ||
+            normalized != review.packageName ||
+            catalogRefreshActive ||
+            searchActive ||
+            packageOperationActive ||
+            commandActive
+        ) {
+            searchStatus = "Review this exact AUR package before verifying its sources"
+            return false
+        }
+        val remoteSources =
+            review.sources.withIndex().filter { (_, source) -> !source.local }
+        if (
+            remoteSources.isEmpty() ||
+            remoteSources.any { (_, source) ->
+                source.remoteUrl == null ||
+                    source.sha256 == null ||
+                    source.insecureTransport
+            }
+        ) {
+            searchStatus =
+                "Source verification requires direct HTTPS sources with SHA-256 checksums"
+            return false
+        }
+        searchActive = true
+        retainedAurVerifiedBytes = 0L
+        retainedAurSourceEvidence = emptyArray()
+        searchStatus = "Preparing ${remoteSources.size} reviewed AUR source download(s)"
+        Thread(
+            {
+                try {
+                    var totalVerified = 0L
+                    val evidence = ArrayList<AurSourceEvidence>(remoteSources.size)
+                    remoteSources.forEachIndexed { remoteIndex, (sourceIndex, source) ->
+                        val initialEndpoint =
+                            source.remoteUrl
+                                ?: throw SecurityException("AUR source has no HTTPS endpoint")
+                        aurEndpointBuffer.clear()
+                        val cachedSize =
+                            NativeRuntime.nativeVerifiedCachedAurSourceSize(
+                                activeHandle,
+                                sourceIndex,
+                                aurEndpointBuffer,
+                            )
+                        if (cachedSize < 0L) {
+                            throw SecurityException(
+                                readNativeMessage(aurEndpointBuffer, cachedSize.toInt()),
+                            )
+                        }
+                        if (cachedSize > 0L) {
+                            totalVerified = Math.addExact(totalVerified, cachedSize)
+                            if (totalVerified > AUR_TOTAL_SOURCE_MAX_BYTES) {
+                                throw SecurityException(
+                                    "AUR sources exceed the total download limit",
+                                )
+                            }
+                            retainedAurVerifiedBytes = totalVerified
+                            evidence +=
+                                AurSourceEvidence(
+                                    source.filename,
+                                    cachedSize,
+                                    initialEndpoint,
+                                    true,
+                                )
+                            searchStatus =
+                                "Verified cached source ${remoteIndex + 1}/" +
+                                    "${remoteSources.size}: ${source.filename}"
+                            return@forEachIndexed
+                        }
+                        val connection = openAurSourceConnection(initialEndpoint)
+                        try {
+                            val declaredLength = connection.contentLengthLong
+                            if (
+                                declaredLength == 0L ||
+                                declaredLength > NativeRuntime.AUR_SOURCE_MAX_SIZE
+                            ) {
+                                throw SecurityException("AUR source has an invalid size")
+                            }
+                            val remainingTotal =
+                                AUR_TOTAL_SOURCE_MAX_BYTES - totalVerified
+                            if (remainingTotal <= 0L || declaredLength > remainingTotal) {
+                                throw SecurityException(
+                                    "AUR sources exceed the total download limit",
+                                )
+                            }
+                            val maximumSize =
+                                if (declaredLength > 0L) {
+                                    declaredLength
+                                } else {
+                                    minOf(
+                                        NativeRuntime.AUR_SOURCE_MAX_SIZE,
+                                        remainingTotal,
+                                    )
+                                }
+                            if (
+                                declaredLength > 0L &&
+                                declaredLength + AUR_STORAGE_RESERVE_BYTES > filesDir.usableSpace
+                            ) {
+                                throw IllegalStateException(
+                                    "Not enough private storage for ${source.filename}",
+                                )
+                            }
+                            val verified =
+                                downloadAndVerifyAurSource(
+                                    activeHandle,
+                                    sourceIndex,
+                                    source,
+                                    connection,
+                                    maximumSize,
+                                    declaredLength,
+                                    remoteIndex + 1,
+                                    remoteSources.size,
+                                )
+                            totalVerified = Math.addExact(totalVerified, verified)
+                            if (totalVerified > AUR_TOTAL_SOURCE_MAX_BYTES) {
+                                throw SecurityException(
+                                    "AUR sources exceed the total download limit",
+                                )
+                            }
+                            retainedAurVerifiedBytes = totalVerified
+                            evidence +=
+                                AurSourceEvidence(
+                                    source.filename,
+                                    verified,
+                                    connection.url.toString(),
+                                    false,
+                                )
+                        } finally {
+                            if (activePackageConnection === connection) {
+                                activePackageConnection = null
+                            }
+                            connection.disconnect()
+                        }
+                    }
+                    retainedAurSourceEvidence = evidence.toTypedArray()
+                    searchStatus =
+                        formatAurReview(
+                            review,
+                            totalVerified,
+                            retainedAurSourceEvidence,
+                        )
+                    Log.i(
+                        TAG,
+                        "Verified ${remoteSources.size} AUR source(s) for " +
+                            "${review.packageName}: $totalVerified bytes",
+                    )
+                } catch (error: Exception) {
+                    searchStatus =
+                        "AUR source verification failed: " +
+                            (error.message ?: error.javaClass.simpleName)
+                    Log.e(TAG, "AUR source verification failed", error)
+                } finally {
+                    activePackageConnection = null
+                    searchActive = false
+                    stopWhenUnobservedAndIdle()
+                }
+            },
+            "ArchpheneAurSources",
+        ).start()
+        promoteWorkToForeground()
+        return true
+    }
+
+    private fun openAurSourceConnection(initialEndpoint: String): HttpsURLConnection {
+        var endpoint = validateAurSourceEndpoint(initialEndpoint)
+        val visited = LinkedHashSet<String>(AUR_REDIRECT_LIMIT + 1)
+        repeat(AUR_REDIRECT_LIMIT + 1) {
+            val exactEndpoint = endpoint.toString()
+            if (!visited.add(exactEndpoint)) {
+                throw SecurityException("AUR source redirect loop")
+            }
+            val connection = endpoint.openConnection() as HttpsURLConnection
+            activePackageConnection = connection
+            val status =
+                try {
+                    connection.instanceFollowRedirects = false
+                    connection.connectTimeout = 15_000
+                    connection.readTimeout = 120_000
+                    connection.setRequestProperty("Accept-Encoding", "identity")
+                    connection.responseCode
+                } catch (error: Exception) {
+                    connection.disconnect()
+                    if (activePackageConnection === connection) {
+                        activePackageConnection = null
+                    }
+                    throw error
+                }
+            when (status) {
+                HttpsURLConnection.HTTP_OK -> {
+                    val encoding = connection.contentEncoding
+                    if (encoding != null && !encoding.equals("identity", ignoreCase = true)) {
+                        connection.disconnect()
+                        throw SecurityException("AUR source used unexpected content encoding")
+                    }
+                    return connection
+                }
+                HttpsURLConnection.HTTP_MOVED_PERM,
+                HttpsURLConnection.HTTP_MOVED_TEMP,
+                HttpsURLConnection.HTTP_SEE_OTHER,
+                307,
+                308,
+                -> {
+                    val location = connection.getHeaderField("Location")
+                    if (location == null) {
+                        connection.disconnect()
+                        if (activePackageConnection === connection) {
+                            activePackageConnection = null
+                        }
+                        throw SecurityException("AUR source redirect has no location")
+                    }
+                    val next =
+                        try {
+                            validateAurSourceEndpoint(URL(endpoint, location).toString())
+                        } catch (error: Exception) {
+                            connection.disconnect()
+                            if (activePackageConnection === connection) {
+                                activePackageConnection = null
+                            }
+                            throw error
+                        }
+                    connection.disconnect()
+                    if (activePackageConnection === connection) {
+                        activePackageConnection = null
+                    }
+                    endpoint = next
+                }
+                else -> {
+                    connection.disconnect()
+                    throw IllegalStateException("AUR source server returned HTTP $status")
+                }
+            }
+        }
+        throw SecurityException("AUR source exceeded the redirect limit")
+    }
+
+    private fun validateAurSourceEndpoint(value: String): URL {
+        require(
+            value.isNotEmpty() &&
+                value.length <= 4 * 1024 &&
+                value.all { character ->
+                    character.code in 0x21..0x7e && character != '\\'
+                },
+        )
+        val endpoint = URL(value)
+        require(
+            endpoint.toString() == value &&
+                endpoint.protocol == "https" &&
+                endpoint.host.isNotEmpty() &&
+                endpoint.userInfo == null &&
+                (endpoint.port == -1 || endpoint.port == 443) &&
+                endpoint.ref == null,
+        )
+        return endpoint
+    }
+
+    private fun downloadAndVerifyAurSource(
+        activeHandle: Long,
+        sourceIndex: Int,
+        source: AurSourceReview,
+        connection: HttpsURLConnection,
+        maximumSize: Long,
+        declaredLength: Long,
+        ordinal: Int,
+        totalSources: Int,
+    ): Long {
+        aurEndpointBuffer.clear()
+        val descriptor =
+            NativeRuntime.nativeBeginAurSourceDownload(
+                activeHandle,
+                sourceIndex,
+                maximumSize,
+                aurEndpointBuffer,
+            )
+        if (descriptor < 0) {
+            throw IllegalStateException(readNativeMessage(aurEndpointBuffer, descriptor))
+        }
+        var finishAttempted = false
+        val parcelDescriptor = ParcelFileDescriptor.adoptFd(descriptor)
+        try {
+            val nativePlan = aurEndpointBuffer.duplicate().order(ByteOrder.LITTLE_ENDIAN)
+            nativePlan.position(0)
+            val endpointLength = nativePlan.int
+            val filenameLength = nativePlan.int
+            require(
+                endpointLength in 1..(4 * 1024) &&
+                    filenameLength in 1..240 &&
+                    endpointLength + filenameLength <= nativePlan.remaining(),
+            )
+            val endpointBytes = ByteArray(endpointLength)
+            val filenameBytes = ByteArray(filenameLength)
+            nativePlan.get(endpointBytes)
+            nativePlan.get(filenameBytes)
+            val nativeEndpoint = String(endpointBytes, StandardCharsets.US_ASCII)
+            val nativeFilename = String(filenameBytes, StandardCharsets.US_ASCII)
+            require(nativeEndpoint == source.remoteUrl && nativeFilename == source.filename)
+            var total = 0L
+            var nextProgress = 1024L * 1024
+            ParcelFileDescriptor.AutoCloseOutputStream(parcelDescriptor).use { output ->
+                connection.inputStream.use { input ->
+                    while (true) {
+                        if (Thread.currentThread().isInterrupted) {
+                            throw InterruptedException("AUR source download interrupted")
+                        }
+                        val count = input.read(aurTransferBuffer)
+                        if (count < 0) {
+                            break
+                        }
+                        total = Math.addExact(total, count.toLong())
+                        if (total > maximumSize) {
+                            throw SecurityException("AUR source exceeds its size limit")
+                        }
+                        output.write(aurTransferBuffer, 0, count)
+                        if (total >= nextProgress) {
+                            searchStatus =
+                                "Downloading source $ordinal/$totalSources: " +
+                                    "${source.filename} · ${formatStorageBytes(total)}"
+                            nextProgress = total + 1024L * 1024
+                        }
+                    }
+                    output.flush()
+                }
+            }
+            if (total == 0L || declaredLength >= 0L && total != declaredLength) {
+                throw SecurityException("AUR source is empty or truncated")
+            }
+            aurEndpointBuffer.clear()
+            val verified =
+                NativeRuntime.nativeFinishAurSourceDownload(
+                    activeHandle,
+                    true,
+                    aurEndpointBuffer,
+                )
+            finishAttempted = true
+            if (verified < 0L) {
+                throw SecurityException(
+                    readNativeMessage(aurEndpointBuffer, verified.toInt()),
+                )
+            }
+            require(verified == total)
+            return verified
+        } finally {
+            try {
+                parcelDescriptor.close()
+            } catch (_: Exception) {
+            }
+            if (!finishAttempted) {
+                aurEndpointBuffer.clear()
+                NativeRuntime.nativeFinishAurSourceDownload(
+                    activeHandle,
+                    false,
+                    aurEndpointBuffer,
+                )
+            }
+        }
+    }
+
     private fun parseAurReview(
         source: ByteBuffer,
         length: Int,
     ): AurReviewData {
         require(length in 1..NativeRuntime.AUR_REVIEW_SIZE)
         val reader = AurWireReader(source, length)
-        require(reader.bytes(8).contentEquals("ARVW0001".toByteArray(StandardCharsets.US_ASCII)))
+        require(reader.bytes(8).contentEquals("ARVW0002".toByteArray(StandardCharsets.US_ASCII)))
         reader.bytes(32)
         val snapshotSha256Bytes = reader.bytes(32)
         require(snapshotSha256Bytes.any { byte -> byte != 0.toByte() })
@@ -4108,6 +4515,15 @@ class ArchpheneRuntimeService : Service() {
                         architecture == "aarch64",
                 )
                 val expression = reader.string(4 * 1024)
+                val filename = reader.string(240)
+                require(filename.matches(AUR_SOURCE_FILENAME))
+                val kind = reader.byte()
+                require(kind in 1..3)
+                val remoteUrl = reader.string(4 * 1024, allowEmpty = true)
+                require((kind == 2) == remoteUrl.isNotEmpty())
+                if (remoteUrl.isNotEmpty()) {
+                    validateAurSourceEndpoint(remoteUrl)
+                }
                 val hasSha256 = reader.byte()
                 require(hasSha256 in 0..1)
                 val sha256 =
@@ -4121,6 +4537,9 @@ class ArchpheneRuntimeService : Service() {
                 AurSourceReview(
                     architecture,
                     expression,
+                    filename,
+                    remoteUrl.ifEmpty { null },
+                    kind == 1,
                     sha256,
                     insecure == 1,
                 )
@@ -4171,7 +4590,11 @@ class ArchpheneRuntimeService : Service() {
         )
     }
 
-    private fun formatAurReview(review: AurReviewData): String =
+    private fun formatAurReview(
+        review: AurReviewData,
+        verifiedSourceBytes: Long = 0L,
+        sourceEvidence: Array<AurSourceEvidence> = emptyArray(),
+    ): String =
         buildString(
             minOf(
                 NativeRuntime.AUR_REVIEW_SIZE,
@@ -4207,7 +4630,29 @@ class ArchpheneRuntimeService : Service() {
                 .append(if (review.insecureSources) "yes" else "none")
                 .append('\n')
             append("Android permissions: none requested at this review stage.\n")
-            append("Download/build disk estimate: not available until source resolution.\n")
+            if (verifiedSourceBytes > 0L) {
+                append("Verified source downloads: ")
+                    .append(formatStorageBytes(verifiedSourceBytes))
+                    .append('\n')
+                sourceEvidence.forEach { evidence ->
+                    append("• ")
+                        .append(evidence.filename)
+                        .append(": ")
+                        .append(formatStorageBytes(evidence.bytes))
+                        .append(
+                            if (evidence.cached) {
+                                "\n  Reviewed HTTPS endpoint (cached): "
+                            } else {
+                                "\n  Resolved HTTPS endpoint: "
+                            },
+                        )
+                        .append(evidence.endpoint)
+                        .append('\n')
+                }
+                append("Installed/build disk impact: pending the isolated package build.\n")
+            } else {
+                append("Download/build disk estimate: verify sources to measure downloads.\n")
+            }
             if (review.licenses.isNotEmpty()) {
                 append("\nLicenses\n")
                 review.licenses.forEach { value -> append("• ").append(value).append('\n') }
@@ -4219,6 +4664,15 @@ class ArchpheneRuntimeService : Service() {
                     append('[').append(source.architecture).append("] ")
                 }
                 append(source.expression).append('\n')
+                append("  File: ").append(source.filename).append(" · ")
+                    .append(
+                        when {
+                            source.local -> "included in AUR snapshot"
+                            source.remoteUrl != null -> "direct HTTPS download"
+                            else -> "unsupported source transport"
+                        },
+                    )
+                    .append('\n')
                 append("  SHA-256: ").append(source.sha256 ?: "SKIP").append('\n')
                 if (source.insecureTransport) {
                     append("  Warning: insecure transport\n")

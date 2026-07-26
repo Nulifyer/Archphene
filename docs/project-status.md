@@ -1008,9 +1008,24 @@ warning, shared trust domain, maintainer, cgit commit, snapshot SHA-256,
 AArch64 sources and checksums, dependencies, build functions, install script,
 and exact PKGBUILD. A live full-device Samsung gate reviewed the current
 `visual-studio-code-bin` candidate while keeping official Install disabled and
-preserving all 36 local pacman-database entries. This does not yet download and
-verify remote upstream sources, resolve installed disk impact, run an
-unprivileged build, or install an AUR result.
+preserving all 36 local pacman-database entries. At that review stage, installed
+disk impact, an unprivileged build, and AUR result installation remained
+pending.
+
+The next AUR boundary now resolves each architecture-selected declaration as a
+snapshot-local source, supported direct-HTTPS source, or unsupported transport.
+Supported remote sources require a bounded safe filename and SHA-256. Android
+follows at most five HTTPS-only redirects and streams into a Rust-owned private
+cache descriptor; Rust re-reads the complete file, hashes it, and atomically
+promotes only matching bytes. Verified cache entries are rehashed before reuse,
+while a tampered entry is discarded. On the physical Samsung, the current Code
+AArch64 source downloaded as 220,653,390 bytes (211 MiB), matched
+`4b67f4e83154dfb281ed5e8ed7be03d9ce3c489bb00c8653c5207d61744d864b`,
+then passed a cache-reuse run and an independent device `sha256sum`. Both runs
+kept official Install disabled and preserved all 36 pacman database entries.
+The visually inspected evidence is a full-device screenshot. Installed/build
+disk impact, explicit approval, isolated execution, output provenance, and
+installation remain pending.
 
 Code now reaches the packaged Electron executable without a Code-specific
 bridge exception. Translating Arch's standard `/usr/lib/pulseaudio` directory
@@ -1052,7 +1067,7 @@ retains an explicit terminal message across every later Surface attachment;
 two consecutive physical-device runs prove no process exists before the
 wrapper is explicitly closed and reopened.
 The visually inspected evidence is a full-device screenshot rather than an
-app-only frame. The complete Rust workspace passes 181 tests, including the
+app-only frame. The complete Rust workspace passes 184 tests, including the
 large-resolution, raw-signature-status, empty-files-record, loader-path, JNI,
 compositor, terminal, storage, AUR snapshot, and warmed-allocation regressions.
 

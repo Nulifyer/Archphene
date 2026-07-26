@@ -93,8 +93,8 @@ mod android {
         MAX_MANIFEST_BYTES, MAX_PACKAGE_RESOLUTION_BYTES, MAX_TOOL_OUTPUT_BYTES, PackageResolution,
         PackageRuntimeError, Repository, RepositoryArchitecture, ToolOutput,
         aur::{
-            MAX_AUR_REVIEW_BYTES, MAX_AUR_RPC_BYTES, MAX_AUR_SNAPSHOT_BYTES, aur_snapshot_path,
-            review_aur_snapshot,
+            MAX_AUR_REVIEW_BYTES, MAX_AUR_RPC_BYTES, MAX_AUR_SNAPSHOT_BYTES, MAX_AUR_SOURCE_BYTES,
+            aur_snapshot_path, review_aur_snapshot,
         },
     };
     use archphene_process::{
@@ -1183,12 +1183,191 @@ mod android {
         let snapshot =
             unsafe { slice::from_raw_parts(snapshot_address.cast_const(), snapshot_length) };
         let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
-        match review_aur_snapshot(rpc, snapshot, package, architecture) {
-            Ok(review) => match review.write_wire(destination) {
-                Ok(length) => i32::try_from(length).unwrap_or(ERROR_INTERNAL),
-                Err(error) => copy_package_error(&error, destination),
-            },
-            Err(error) => copy_package_error(&error, destination),
+        let review = match review_aur_snapshot(rpc, snapshot, package, architecture) {
+            Ok(review) => review,
+            Err(error) => return copy_package_error(&error, destination),
+        };
+        let length = match review.write_wire(destination) {
+            Ok(length) => length,
+            Err(error) => return copy_package_error(&error, destination),
+        };
+        let Ok(mut registry) = registry().lock() else {
+            return ERROR_INTERNAL;
+        };
+        let Some(runtime) = registry.runtime_mut(handle) else {
+            return ERROR_INVALID_HANDLE;
+        };
+        runtime.retain_aur_review(review);
+        i32::try_from(length).unwrap_or(ERROR_INTERNAL)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeVerifiedCachedAurSourceSize(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        source_index: jint,
+        output_buffer: JByteBuffer,
+    ) -> jlong {
+        let (Ok(handle), Ok(source_index)) = (u64::try_from(handle), usize::try_from(source_index))
+        else {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        };
+        let Ok(output_capacity) = environment.get_direct_buffer_capacity(&output_buffer) else {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        };
+        if source_index >= 64 || output_capacity < MAX_TOOL_OUTPUT_BYTES {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        }
+        let Ok(output_address) = environment.get_direct_buffer_address(&output_buffer) else {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        };
+        if output_address.is_null() {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        }
+        let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
+        let (package_runtime, filename, expected_sha256) = {
+            let Ok(mut registry) = registry().lock() else {
+                return i64::from(ERROR_INTERNAL);
+            };
+            let Some(runtime) = registry.runtime_mut(handle) else {
+                return i64::from(ERROR_INVALID_HANDLE);
+            };
+            match runtime.aur_source_cache_candidate(source_index) {
+                Ok(candidate) => candidate,
+                Err(error) => return i64::from(copy_package_error(&error, destination)),
+            }
+        };
+        match package_runtime.verified_aur_source_size(
+            &filename,
+            expected_sha256,
+            MAX_AUR_SOURCE_BYTES,
+        ) {
+            Ok(Some(length)) => i64::try_from(length).unwrap_or(i64::from(ERROR_INTERNAL)),
+            Ok(None) => 0,
+            Err(error) => i64::from(copy_package_error(&error, destination)),
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeBeginAurSourceDownload(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        source_index: jint,
+        maximum_size: jlong,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let (Ok(handle), Ok(source_index), Ok(maximum_size)) = (
+            u64::try_from(handle),
+            usize::try_from(source_index),
+            u64::try_from(maximum_size),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(output_capacity) = environment.get_direct_buffer_capacity(&output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if source_index >= 64
+            || maximum_size == 0
+            || maximum_size > MAX_AUR_SOURCE_BYTES
+            || output_capacity < MAX_TOOL_OUTPUT_BYTES
+        {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let Ok(output_address) = environment.get_direct_buffer_address(&output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if output_address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
+        let Ok(mut registry) = registry().lock() else {
+            return ERROR_INTERNAL;
+        };
+        let Some(runtime) = registry.runtime_mut(handle) else {
+            return ERROR_INVALID_HANDLE;
+        };
+        let (file, endpoint, filename) =
+            match runtime.begin_aur_source_download(source_index, maximum_size) {
+                Ok(result) => result,
+                Err(error) => return copy_package_error(&error, destination),
+            };
+        let Some(length) = 8_usize
+            .checked_add(endpoint.len())
+            .and_then(|length| length.checked_add(filename.len()))
+        else {
+            runtime.cancel_aur_source_download();
+            return ERROR_INTERNAL;
+        };
+        if length > destination.len() {
+            runtime.cancel_aur_source_download();
+            return ERROR_INTERNAL;
+        }
+        let Ok(endpoint_length) = u32::try_from(endpoint.len()) else {
+            runtime.cancel_aur_source_download();
+            return ERROR_INTERNAL;
+        };
+        let Ok(filename_length) = u32::try_from(filename.len()) else {
+            runtime.cancel_aur_source_download();
+            return ERROR_INTERNAL;
+        };
+        destination[..4].copy_from_slice(&endpoint_length.to_le_bytes());
+        destination[4..8].copy_from_slice(&filename_length.to_le_bytes());
+        destination[8..8 + endpoint.len()].copy_from_slice(endpoint.as_bytes());
+        destination[8 + endpoint.len()..length].copy_from_slice(filename.as_bytes());
+        file.into_raw_fd()
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeFinishAurSourceDownload(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        success: jboolean,
+        output_buffer: JByteBuffer,
+    ) -> jlong {
+        let Ok(handle) = u64::try_from(handle) else {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        };
+        let Ok(output_capacity) = environment.get_direct_buffer_capacity(&output_buffer) else {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        };
+        if output_capacity < MAX_TOOL_OUTPUT_BYTES {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        }
+        let Ok(output_address) = environment.get_direct_buffer_address(&output_buffer) else {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        };
+        if output_address.is_null() {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        }
+        let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
+        if success == JNI_FALSE {
+            let Ok(mut registry) = registry().lock() else {
+                return i64::from(ERROR_INTERNAL);
+            };
+            let Some(runtime) = registry.runtime_mut(handle) else {
+                return i64::from(ERROR_INVALID_HANDLE);
+            };
+            runtime.cancel_aur_source_download();
+            return 0;
+        }
+        let download = {
+            let Ok(mut registry) = registry().lock() else {
+                return i64::from(ERROR_INTERNAL);
+            };
+            let Some(runtime) = registry.runtime_mut(handle) else {
+                return i64::from(ERROR_INVALID_HANDLE);
+            };
+            match runtime.take_aur_source_download() {
+                Ok(download) => download,
+                Err(error) => return i64::from(copy_package_error(&error, destination)),
+            }
+        };
+        match download.finish() {
+            Ok(length) => i64::try_from(length).unwrap_or(i64::from(ERROR_INTERNAL)),
+            Err(error) => i64::from(copy_package_error(&error, destination)),
         }
     }
 

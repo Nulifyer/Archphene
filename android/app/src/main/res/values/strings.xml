@@ -31,6 +31,8 @@
     <string name="aur">AUR</string>
     <string name="aur_review_description">Review this community AUR package</string>
     <string name="aur_review_unavailable">AUR review is unavailable or the package name is invalid</string>
+    <string name="verify_sources">Verify</string>
+    <string name="verify_sources_description">Download and verify reviewed AUR sources</string>
     <string name="install">Install</string>
     <string name="remove">Remove</string>
     <string name="cancel">Cancel</string>

@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::fmt;
-use std::io::Read;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path};
 
 use flate2::read::GzDecoder;
@@ -17,10 +19,12 @@ pub const MAX_AUR_PKGBUILD_BYTES: usize = 256 * 1024;
 pub const MAX_AUR_REVIEW_BYTES: usize = 1024 * 1024;
 pub const MAX_AUR_SOURCES: usize = 64;
 pub const MAX_AUR_DEPENDENCIES: usize = 256;
+pub const MAX_AUR_SOURCE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 const MAX_AUR_SNAPSHOT_ENTRIES: usize = 128;
 const MAX_AUR_SNAPSHOT_EXPANDED_BYTES: usize = 8 * 1024 * 1024;
 const MAX_AUR_SNAPSHOT_ENTRY_BYTES: u64 = 512 * 1024;
+const AUR_SOURCE_CACHE_DIRECTORY: &str = "var/cache/archphene/aur-sources";
 const MAX_NAME_BYTES: usize = 128;
 const MAX_VERSION_BYTES: usize = 128;
 const MAX_DESCRIPTION_BYTES: usize = 2 * 1024;
@@ -39,6 +43,9 @@ pub enum AurBuildStep {
 pub struct AurSource {
     pub expression: String,
     pub architecture: Option<String>,
+    pub filename: String,
+    pub remote_url: Option<String>,
+    pub local: bool,
     pub sha256: Option<[u8; 32]>,
     pub insecure_transport: bool,
 }
@@ -69,6 +76,16 @@ pub struct AurReview {
     pub snapshot_commit: Option<String>,
     pub pkgbuild: Vec<u8>,
     pub install_script_contents: Option<Vec<u8>>,
+}
+
+#[derive(Debug)]
+pub struct AurSourceDownload {
+    file: File,
+    temporary: std::path::PathBuf,
+    destination: std::path::PathBuf,
+    expected_sha256: [u8; 32],
+    maximum_size: u64,
+    active: bool,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -111,6 +128,160 @@ impl fmt::Display for AurReviewError {
 }
 
 impl std::error::Error for AurReviewError {}
+
+impl AurSourceDownload {
+    pub(super) fn begin(
+        arch_root: &Path,
+        filename: &str,
+        expected_sha256: [u8; 32],
+        maximum_size: u64,
+    ) -> Result<Self, super::PackageRuntimeError> {
+        if !safe_source_filename(filename)
+            || expected_sha256 == [0; 32]
+            || maximum_size == 0
+            || maximum_size > MAX_AUR_SOURCE_BYTES
+        {
+            return Err(super::PackageRuntimeError::InvalidPayload);
+        }
+        let cache_root = arch_root.join("var/cache");
+        require_directory(&cache_root)?;
+        let archphene_cache = cache_root.join("archphene");
+        create_or_require_directory(&archphene_cache)?;
+        let directory = arch_root.join(AUR_SOURCE_CACHE_DIRECTORY);
+        create_or_require_directory(&directory)?;
+        let digest = hex_sha256(&expected_sha256);
+        let destination_name = format!("{digest}-{filename}");
+        let temporary_name = format!("{destination_name}.part");
+        let destination = directory.join(destination_name);
+        let temporary = directory.join(temporary_name);
+        super::prepare_output_path(&temporary)?;
+        let file = OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        Ok(Self {
+            file,
+            temporary,
+            destination,
+            expected_sha256,
+            maximum_size,
+            active: true,
+        })
+    }
+
+    pub fn duplicate_file(&self) -> Result<File, super::PackageRuntimeError> {
+        Ok(self.file.try_clone()?)
+    }
+
+    pub fn finish(mut self) -> Result<u64, super::PackageRuntimeError> {
+        let length = verify_source_file(&mut self.file, self.expected_sha256, self.maximum_size)?;
+        self.file.sync_all()?;
+        match fs::symlink_metadata(&self.destination) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                return Err(super::PackageRuntimeError::UnsafeEntry(
+                    self.destination.clone(),
+                ));
+            }
+            Ok(_) => fs::remove_file(&self.destination)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(super::PackageRuntimeError::Io(error)),
+        }
+        fs::rename(&self.temporary, &self.destination)?;
+        self.active = false;
+        File::open(
+            self.destination
+                .parent()
+                .ok_or(super::PackageRuntimeError::InvalidPath)?,
+        )?
+        .sync_all()?;
+        Ok(length)
+    }
+
+    pub(super) fn verified_cache_size(
+        arch_root: &Path,
+        filename: &str,
+        expected_sha256: [u8; 32],
+        maximum_size: u64,
+    ) -> Result<Option<u64>, super::PackageRuntimeError> {
+        if !safe_source_filename(filename)
+            || expected_sha256 == [0; 32]
+            || maximum_size == 0
+            || maximum_size > MAX_AUR_SOURCE_BYTES
+        {
+            return Err(super::PackageRuntimeError::InvalidPayload);
+        }
+        let destination = arch_root
+            .join(AUR_SOURCE_CACHE_DIRECTORY)
+            .join(format!("{}-{filename}", hex_sha256(&expected_sha256)));
+        let metadata = match fs::symlink_metadata(&destination) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(super::PackageRuntimeError::Io(error)),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(super::PackageRuntimeError::UnsafeEntry(destination));
+        }
+        let mut file = File::open(&destination)?;
+        match verify_source_file(&mut file, expected_sha256, maximum_size) {
+            Ok(length) => Ok(Some(length)),
+            Err(super::PackageRuntimeError::InvalidPayload) => {
+                drop(file);
+                fs::remove_file(&destination)?;
+                File::open(
+                    destination
+                        .parent()
+                        .ok_or(super::PackageRuntimeError::InvalidPath)?,
+                )?
+                .sync_all()?;
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+impl Drop for AurSourceDownload {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = fs::remove_file(&self.temporary);
+        }
+    }
+}
+
+fn verify_source_file(
+    file: &mut File,
+    expected_sha256: [u8; 32],
+    maximum_size: u64,
+) -> Result<u64, super::PackageRuntimeError> {
+    let metadata = file.metadata()?;
+    let length = metadata.len();
+    if !metadata.is_file() || length == 0 || length > maximum_size {
+        return Err(super::PackageRuntimeError::InvalidPayload);
+    }
+    file.seek(SeekFrom::Start(0))?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut total = 0_u64;
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        total = total
+            .checked_add(u64::try_from(count).map_err(|_| super::PackageRuntimeError::OutputLimit)?)
+            .ok_or(super::PackageRuntimeError::OutputLimit)?;
+        if total > maximum_size {
+            return Err(super::PackageRuntimeError::InvalidPayload);
+        }
+        digest.update(&buffer[..count]);
+    }
+    if total != length || <[u8; 32]>::from(digest.finalize()) != expected_sha256 {
+        return Err(super::PackageRuntimeError::InvalidPayload);
+    }
+    Ok(length)
+}
 
 pub fn aur_snapshot_path<'a>(
     rpc_bytes: &'a [u8],
@@ -316,7 +487,7 @@ impl AurReview {
             destination,
             position: 0,
         };
-        writer.bytes(b"ARVW0001")?;
+        writer.bytes(b"ARVW0002")?;
         writer.bytes(&self.review_sha256)?;
         writer.bytes(&self.snapshot_sha256.unwrap_or([0; 32]))?;
         writer.u64(self.last_modified)?;
@@ -364,6 +535,15 @@ impl AurReview {
         for source in &self.sources {
             writer.string(source.architecture.as_deref().unwrap_or(""))?;
             writer.string(&source.expression)?;
+            writer.string(&source.filename)?;
+            writer.u8(if source.local {
+                1
+            } else if source.remote_url.is_some() {
+                2
+            } else {
+                3
+            })?;
+            writer.string(source.remote_url.as_deref().unwrap_or(""))?;
             writer.u8(u8::from(source.sha256.is_some()))?;
             if let Some(sha256) = source.sha256 {
                 writer.bytes(&sha256)?;
@@ -556,13 +736,10 @@ fn verify_snapshot_files(
         return Err(AurReviewError::InvalidSnapshot("missing install script"));
     }
     for source in &review.sources {
-        let location = source
-            .expression
-            .split_once("::")
-            .map_or(source.expression.as_str(), |(_, location)| location);
-        if location.contains("://") {
+        if !source.local {
             continue;
         }
+        let (_, location) = split_source_expression(&source.expression)?;
         let path = safe_snapshot_path(location)?;
         let bytes = files
             .get(path)
@@ -762,9 +939,16 @@ fn append_sources(
         } else {
             Some(parse_sha256(hash)?)
         };
+        let (alias, location) = split_source_expression(expression)?;
+        let local = !location.contains("://");
+        let remote_url = (!local && valid_https_source_url(location)).then(|| location.to_owned());
+        let filename = source_filename(alias, location, local)?;
         output.push(AurSource {
             expression: expression.clone(),
             architecture: architecture.map(str::to_owned),
+            filename,
+            remote_url,
+            local,
             sha256,
             insecure_transport: source_uses_insecure_transport(expression),
         });
@@ -773,15 +957,133 @@ fn append_sources(
 }
 
 fn source_uses_insecure_transport(expression: &str) -> bool {
-    let location = expression
-        .split_once("::")
-        .map_or(expression, |(_, location)| location);
+    let location = split_source_expression(expression).map_or(expression, |(_, location)| location);
     location.starts_with("http://")
         || location.starts_with("git://")
         || location.contains("://")
             && !location.starts_with("https://")
             && !location.starts_with("git+https://")
             && !location.starts_with("ssh://")
+}
+
+fn split_source_expression(expression: &str) -> Result<(Option<&str>, &str), AurReviewError> {
+    validate_bounded_value(expression, MAX_FIELD_BYTES)?;
+    let Some((possible_alias, location)) = expression.split_once("::") else {
+        return Ok((None, expression));
+    };
+    if possible_alias.contains("://") {
+        return Ok((None, expression));
+    }
+    if possible_alias.is_empty() || location.is_empty() || location.contains('\n') {
+        return Err(AurReviewError::InvalidSrcInfo);
+    }
+    Ok((Some(possible_alias), location))
+}
+
+fn source_filename(
+    alias: Option<&str>,
+    location: &str,
+    local: bool,
+) -> Result<String, AurReviewError> {
+    let candidate = if let Some(alias) = alias {
+        alias
+    } else if local {
+        safe_snapshot_path(location)?
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or(AurReviewError::InvalidSrcInfo)?
+    } else {
+        let path = location.split(['?', '#']).next().unwrap_or_default();
+        path.rsplit('/')
+            .next()
+            .filter(|value| !value.is_empty())
+            .ok_or(AurReviewError::InvalidSrcInfo)?
+    };
+    if !safe_source_filename(candidate) {
+        return Err(AurReviewError::InvalidSrcInfo);
+    }
+    Ok(candidate.to_owned())
+}
+
+fn valid_https_source_url(location: &str) -> bool {
+    let Some(authority_and_path) = location.strip_prefix("https://") else {
+        return false;
+    };
+    if authority_and_path.is_empty()
+        || location.len() > MAX_FIELD_BYTES
+        || !location.is_ascii()
+        || location
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace() || byte == b'\\')
+        || location.contains('#')
+    {
+        return false;
+    }
+    let authority = authority_and_path
+        .split(['/', '?'])
+        .next()
+        .unwrap_or_default();
+    valid_https_authority(authority)
+}
+
+fn valid_https_authority(authority: &str) -> bool {
+    if authority.is_empty() || authority.contains('@') {
+        return false;
+    }
+    if let Some(ipv6) = authority.strip_prefix('[') {
+        let Some((address, remainder)) = ipv6.split_once(']') else {
+            return false;
+        };
+        return !address.is_empty() && (remainder.is_empty() || remainder == ":443");
+    }
+    match authority.rsplit_once(':') {
+        Some((host, "443")) => !host.is_empty() && !host.contains(':'),
+        Some(_) => false,
+        None => true,
+    }
+}
+
+fn safe_source_filename(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 240
+        && value != "."
+        && value != ".."
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'@' | b'+' | b',' | b'.' | b'_' | b'-')
+        })
+}
+
+fn require_directory(path: &Path) -> Result<(), super::PackageRuntimeError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(super::PackageRuntimeError::UnsafeEntry(path.to_path_buf()));
+    }
+    Ok(())
+}
+
+fn create_or_require_directory(path: &Path) -> Result<(), super::PackageRuntimeError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(super::PackageRuntimeError::UnsafeEntry(path.to_path_buf()));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(path)?;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+        }
+        Err(error) => return Err(super::PackageRuntimeError::Io(error)),
+    }
+    Ok(())
+}
+
+fn hex_sha256(value: &[u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(64);
+    for byte in value {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
 }
 
 fn parse_sha256(value: &str) -> Result<[u8; 32], AurReviewError> {
@@ -931,7 +1233,11 @@ mod tests {
     use super::*;
     use flate2::Compression;
     use flate2::write::GzEncoder;
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use tar::{Builder, Header};
+
+    static TEST_ROOT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
     const RPC: &[u8] = br#"{
       "resultcount": 1,
@@ -1026,6 +1332,16 @@ package() {
             .expect("finish gzip")
     }
 
+    fn temporary_root(label: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "archphene-aur-{label}-{}-{}",
+            std::process::id(),
+            TEST_ROOT_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::create_dir_all(root.join("var/cache")).expect("cache root");
+        root
+    }
+
     #[test]
     fn reviews_visual_studio_code_for_aarch64() {
         assert_eq!(
@@ -1044,6 +1360,15 @@ package() {
         assert_eq!(review.maintainer.as_deref(), Some("dcelasun"));
         assert_eq!(review.sources.len(), 2);
         assert_eq!(review.sources[1].architecture.as_deref(), Some("aarch64"));
+        assert_eq!(review.sources[0].filename, "visual-studio-code-bin.sh");
+        assert!(review.sources[0].local);
+        assert_eq!(review.sources[0].remote_url, None);
+        assert_eq!(review.sources[1].filename, "code.deb");
+        assert_eq!(
+            review.sources[1].remote_url.as_deref(),
+            Some("https://update.code.visualstudio.com/arm64")
+        );
+        assert!(!review.sources[1].local);
         assert_eq!(review.unverified_source_count, 0);
         assert_eq!(review.insecure_source_count, 0);
         assert_eq!(
@@ -1081,7 +1406,7 @@ package() {
         let mut wire = vec![0_u8; MAX_AUR_REVIEW_BYTES];
         let wire_length = review.write_wire(&mut wire).expect("review wire");
         assert!(wire_length < wire.len());
-        assert_eq!(&wire[..8], b"ARVW0001");
+        assert_eq!(&wire[..8], b"ARVW0002");
         assert!(
             wire[..wire_length]
                 .windows(PKGBUILD.len())
@@ -1103,6 +1428,80 @@ package() {
     }
 
     #[test]
+    fn stages_and_hashes_one_bounded_remote_source() {
+        let root = temporary_root("source-download");
+        let expected: [u8; 32] = Sha256::digest(b"verified source").into();
+        let download =
+            AurSourceDownload::begin(&root, "code.deb", expected, 1024).expect("begin source");
+        let mut output = download.duplicate_file().expect("source descriptor");
+        output.write_all(b"verified source").expect("write source");
+        drop(output);
+        assert_eq!(download.finish().expect("finish source"), 15);
+        let digest = hex_sha256(&expected);
+        assert_eq!(
+            fs::read(
+                root.join(AUR_SOURCE_CACHE_DIRECTORY)
+                    .join(format!("{digest}-code.deb")),
+            )
+            .expect("verified source"),
+            b"verified source",
+        );
+        assert_eq!(
+            AurSourceDownload::verified_cache_size(
+                &root,
+                "code.deb",
+                expected,
+                MAX_AUR_SOURCE_BYTES,
+            )
+            .expect("cached source"),
+            Some(15),
+        );
+        fs::write(
+            root.join(AUR_SOURCE_CACHE_DIRECTORY)
+                .join(format!("{digest}-code.deb")),
+            b"tampered",
+        )
+        .expect("tamper cache");
+        assert_eq!(
+            AurSourceDownload::verified_cache_size(
+                &root,
+                "code.deb",
+                expected,
+                MAX_AUR_SOURCE_BYTES,
+            )
+            .expect("discard tampered source"),
+            None,
+        );
+        fs::remove_dir_all(root).expect("remove test root");
+    }
+
+    #[test]
+    fn rejects_tampered_or_unsafe_remote_source_staging() {
+        let root = temporary_root("source-rejection");
+        let expected: [u8; 32] = Sha256::digest(b"expected").into();
+        let download = AurSourceDownload::begin(&root, "source.tar.zst", expected, 1024)
+            .expect("begin source");
+        let mut output = download.duplicate_file().expect("source descriptor");
+        output.write_all(b"tampered").expect("write source");
+        drop(output);
+        assert!(matches!(
+            download.finish(),
+            Err(super::super::PackageRuntimeError::InvalidPayload)
+        ));
+        assert!(matches!(
+            AurSourceDownload::begin(&root, "../escape", expected, 1024),
+            Err(super::super::PackageRuntimeError::InvalidPayload)
+        ));
+        assert!(
+            !root
+                .join(AUR_SOURCE_CACHE_DIRECTORY)
+                .join(format!("{}-source.tar.zst.part", hex_sha256(&expected)))
+                .exists()
+        );
+        fs::remove_dir_all(root).expect("remove test root");
+    }
+
+    #[test]
     fn selects_only_the_requested_architecture_sources() {
         let review = review_aur_package(
             RPC,
@@ -1115,6 +1514,29 @@ package() {
         assert_eq!(review.sources.len(), 2);
         assert_eq!(review.sources[1].architecture.as_deref(), Some("x86_64"));
         assert!(review.sources[1].expression.ends_with("/x64"));
+    }
+
+    #[test]
+    fn accepts_only_bounded_direct_https_source_locations() {
+        assert!(valid_https_source_url(
+            "https://update.code.visualstudio.com/1.130.0/linux-deb-arm64/stable"
+        ));
+        assert!(valid_https_source_url(
+            "https://example.org:443/source.tar.zst"
+        ));
+        assert!(!valid_https_source_url("http://example.org/source.tar.zst"));
+        assert!(!valid_https_source_url(
+            "https://user@example.org/source.tar.zst"
+        ));
+        assert!(!valid_https_source_url(
+            "https://example.org:8443/source.tar.zst"
+        ));
+        assert!(!valid_https_source_url(
+            "https://example.org/source.tar.zst#fragment"
+        ));
+        assert!(!valid_https_source_url(
+            "https://example.org\\source.tar.zst"
+        ));
     }
 
     #[test]

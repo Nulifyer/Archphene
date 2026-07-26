@@ -11,6 +11,7 @@ internal object NativeRuntime {
     const val AUR_RPC_SIZE = 128 * 1024
     const val AUR_SNAPSHOT_SIZE = 4 * 1024 * 1024
     const val AUR_REVIEW_SIZE = 1024 * 1024
+    const val AUR_SOURCE_MAX_SIZE = 4L * 1024 * 1024 * 1024
     const val INSTALLED_PACKAGE_PAGE_SIZE = 60
     const val INSTALLED_PACKAGE_LIMIT = 4096
     const val DESKTOP_ENTRY_LIMIT = 256
@@ -179,6 +180,22 @@ internal object NativeRuntime {
         rpcLength: Int,
         outputBuffer: ByteBuffer,
     ): Int
+    external fun nativeBeginAurSourceDownload(
+        handle: Long,
+        sourceIndex: Int,
+        maximumSize: Long,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeVerifiedCachedAurSourceSize(
+        handle: Long,
+        sourceIndex: Int,
+        outputBuffer: ByteBuffer,
+    ): Long
+    external fun nativeFinishAurSourceDownload(
+        handle: Long,
+        success: Boolean,
+        outputBuffer: ByteBuffer,
+    ): Long
     external fun nativePackageCommand(
         handle: Long,
         action: Int,

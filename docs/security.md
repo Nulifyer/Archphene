@@ -62,13 +62,22 @@ architecture-selected sources and checksums, dependencies, visible build
 functions, install script, and exact PKGBUILD. Review does not enable the
 official-package Install action or mutate pacman state.
 
-The current review path still does not execute PKGBUILD, download and verify
-remote upstream sources, resolve a final installed-size estimate, or install
-its result. Capability analysis, explicit build approval, an unprivileged
-disposable build environment, package-output provenance, and transaction
-recovery remain required. A successful review will not make the eventual
-package isolated: once installed, its code joins the shared Archphene Linux
-trust domain.
+For supported direct-HTTPS sources, Rust derives one bounded cache filename and
+the expected SHA-256 from the retained review. Android follows at most five
+HTTPS-only redirects without ambient package credentials and streams into a
+Rust-owned private-cache descriptor. Rust then re-reads the complete file,
+enforces per-source and aggregate limits, and verifies SHA-256 before an atomic
+cache promotion. Cached bytes are rehashed before reuse; a mismatched cache
+entry is deleted and downloaded again. Snapshot-local files remain covered by
+the snapshot review. Insecure, unsupported, or `SKIP` remote sources fail
+closed until their separate verification mechanism exists.
+
+The current path still does not execute PKGBUILD, resolve a final installed-size
+estimate, or install its result. Capability analysis, explicit build approval,
+an unprivileged disposable build environment, package-output provenance, and
+transaction recovery remain required. A successful review will not make the
+eventual package isolated: once installed, its code joins the shared Archphene
+Linux trust domain.
 
 ## Important limitations
 

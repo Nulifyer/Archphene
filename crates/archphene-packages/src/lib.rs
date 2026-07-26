@@ -1467,6 +1467,29 @@ impl PackageRuntime {
         })
     }
 
+    pub fn begin_aur_source_download(
+        &self,
+        filename: &str,
+        expected_sha256: [u8; 32],
+        maximum_size: u64,
+    ) -> Result<aur::AurSourceDownload, PackageRuntimeError> {
+        aur::AurSourceDownload::begin(&self.arch_root, filename, expected_sha256, maximum_size)
+    }
+
+    pub fn verified_aur_source_size(
+        &self,
+        filename: &str,
+        expected_sha256: [u8; 32],
+        maximum_size: u64,
+    ) -> Result<Option<u64>, PackageRuntimeError> {
+        aur::AurSourceDownload::verified_cache_size(
+            &self.arch_root,
+            filename,
+            expected_sha256,
+            maximum_size,
+        )
+    }
+
     pub fn clear_package_cache(&self) -> Result<u64, PackageRuntimeError> {
         let directory = self.arch_root.join(PACKAGE_CACHE_DIRECTORY);
         let metadata = fs::symlink_metadata(&directory)?;
