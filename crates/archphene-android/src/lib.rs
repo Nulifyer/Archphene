@@ -81,7 +81,8 @@ fn decode_handle(handle: u64) -> Option<(usize, u32)> {
 mod android {
     #![allow(unsafe_code)]
 
-    use std::os::fd::IntoRawFd;
+    use std::fs::File;
+    use std::os::fd::{BorrowedFd, IntoRawFd};
     use std::path::Path;
     use std::slice;
     use std::sync::{Mutex, OnceLock};
@@ -104,7 +105,7 @@ mod android {
     };
     use archphene_storage::{OpenMode, StorageError};
     use jni::JNIEnv;
-    use jni::objects::{JByteBuffer, JClass};
+    use jni::objects::{JByteBuffer, JClass, JString};
     use jni::sys::{JNI_FALSE, JNI_TRUE, jboolean, jint, jlong};
 
     use super::RuntimeRegistry;
@@ -120,6 +121,8 @@ mod android {
     const ERROR_STORAGE: jint = -9;
     const ERROR_LAUNCHER: jint = -10;
     const MAX_STORAGE_REQUEST_BYTES: usize = 4 * 1024;
+    const BUILT_PACKAGE_REPORT_BYTES: usize = 64;
+    const BUILT_PACKAGE_REPORT_MAGIC: &[u8; 8] = b"ABMV0001";
     const PTY_EVENT_READABLE: jint = 1;
     const PTY_EVENT_WRITABLE: jint = 1 << 1;
     const PTY_EVENT_HANGUP: jint = 1 << 2;
@@ -129,6 +132,34 @@ mod android {
 
     fn registry() -> &'static Mutex<RuntimeRegistry> {
         REGISTRY.get_or_init(|| Mutex::new(RuntimeRegistry::new()))
+    }
+
+    fn java_string(environment: &mut JNIEnv, value: &JString) -> Result<String, jint> {
+        environment
+            .get_string(value)
+            .map(Into::into)
+            .map_err(|_| ERROR_INVALID_ARGUMENT)
+    }
+
+    fn parse_sha256(value: &str) -> Result<[u8; 32], jint> {
+        if value.len() != 64 {
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+        let mut digest = [0_u8; 32];
+        for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+            let high = hex_value(pair[0]).ok_or(ERROR_INVALID_ARGUMENT)?;
+            let low = hex_value(pair[1]).ok_or(ERROR_INVALID_ARGUMENT)?;
+            digest[index] = (high << 4) | low;
+        }
+        Ok(digest)
+    }
+
+    const fn hex_value(value: u8) -> Option<u8> {
+        match value {
+            b'0'..=b'9' => Some(value - b'0'),
+            b'a'..=b'f' => Some(value - b'a' + 10),
+            _ => None,
+        }
     }
 
     fn ranges_overlap(
@@ -1247,6 +1278,214 @@ mod android {
     }
 
     #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeVerifyAurBuiltPackage(
+        mut environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        descriptor: jint,
+        filename: JString,
+        package_base: JString,
+        package_name: JString,
+        version: JString,
+        architecture: JString,
+        closure_sha256: JString,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let Ok(handle) = u64::try_from(handle) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if descriptor < 0 {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let (
+            Ok(filename),
+            Ok(package_base),
+            Ok(package_name),
+            Ok(version),
+            Ok(architecture),
+            Ok(closure_sha256),
+        ) = (
+            java_string(&mut environment, &filename),
+            java_string(&mut environment, &package_base),
+            java_string(&mut environment, &package_name),
+            java_string(&mut environment, &version),
+            java_string(&mut environment, &architecture),
+            java_string(&mut environment, &closure_sha256),
+        )
+        else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(closure_sha256) = parse_sha256(&closure_sha256) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let (Ok(output_capacity), Ok(output_address)) = (
+            environment.get_direct_buffer_capacity(&output_buffer),
+            environment.get_direct_buffer_address(&output_buffer),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if output_capacity < BUILT_PACKAGE_REPORT_BYTES || output_address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        // SAFETY: JNI verified this direct buffer has the complete fixed report capacity.
+        let output =
+            unsafe { slice::from_raw_parts_mut(output_address, BUILT_PACKAGE_REPORT_BYTES) };
+        output.fill(0);
+        let closure = {
+            let Ok(mut registry) = registry().lock() else {
+                return ERROR_INTERNAL;
+            };
+            let Some(runtime) = registry.runtime_mut(handle) else {
+                return ERROR_INVALID_HANDLE;
+            };
+            match runtime.verified_aur_build_closure() {
+                Ok(closure) => closure,
+                Err(error) => return copy_package_error(&error, output),
+            }
+        };
+        // SAFETY: The descriptor is borrowed only for dup. Kotlin retains the
+        // original ParcelFileDescriptor for the duration of this call.
+        let borrowed = unsafe { BorrowedFd::borrow_raw(descriptor) };
+        let Ok(owned) = rustix::io::dup(borrowed) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let mut archive = File::from(owned);
+        let report = match archphene_builder::verify_copied_built_package(
+            &mut archive,
+            &filename,
+            &package_base,
+            &package_name,
+            &version,
+            &architecture,
+            closure.as_bytes(),
+            closure_sha256,
+        ) {
+            Ok(report) => report,
+            Err(error) => return copy_package_error(&error, output),
+        };
+        let Ok(build_package_count) = u32::try_from(report.build_package_count) else {
+            return ERROR_INTERNAL;
+        };
+        output[..8].copy_from_slice(BUILT_PACKAGE_REPORT_MAGIC);
+        output[8..16].copy_from_slice(&report.archive_bytes.to_le_bytes());
+        output[16..24].copy_from_slice(&report.installed_bytes.to_le_bytes());
+        output[24..28].copy_from_slice(&build_package_count.to_le_bytes());
+        output[32..64].copy_from_slice(&report.sha256);
+        BUILT_PACKAGE_REPORT_BYTES as jint
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeInstallAurBuiltPackage(
+        mut environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        descriptor: jint,
+        filename: JString,
+        package_base: JString,
+        package_name: JString,
+        version: JString,
+        architecture: JString,
+        closure_sha256: JString,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let Ok(handle) = u64::try_from(handle) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if descriptor < 0 {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let (
+            Ok(filename),
+            Ok(package_base),
+            Ok(package_name),
+            Ok(version),
+            Ok(architecture),
+            Ok(closure_sha256),
+        ) = (
+            java_string(&mut environment, &filename),
+            java_string(&mut environment, &package_base),
+            java_string(&mut environment, &package_name),
+            java_string(&mut environment, &version),
+            java_string(&mut environment, &architecture),
+            java_string(&mut environment, &closure_sha256),
+        )
+        else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(closure_sha256) = parse_sha256(&closure_sha256) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let (Ok(output_capacity), Ok(output_address)) = (
+            environment.get_direct_buffer_capacity(&output_buffer),
+            environment.get_direct_buffer_address(&output_buffer),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if output_capacity < MAX_TOOL_OUTPUT_BYTES || output_address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        // SAFETY: JNI verified the direct output-buffer capacity.
+        let output = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
+        output.fill(0);
+        let (closure, dependencies, package_runtime) = {
+            let Ok(mut registry) = registry().lock() else {
+                return ERROR_INTERNAL;
+            };
+            let Some(runtime) = registry.runtime_mut(handle) else {
+                return ERROR_INVALID_HANDLE;
+            };
+            let closure = match runtime.verified_aur_build_closure() {
+                Ok(closure) => closure,
+                Err(error) => return copy_package_error(&error, output),
+            };
+            let dependencies =
+                match runtime.verified_aur_runtime_dependencies(&package_name, &version) {
+                    Ok(dependencies) => dependencies,
+                    Err(error) => return copy_package_error(&error, output),
+                };
+            let Some(package_runtime) = runtime.package_runtime().cloned() else {
+                return ERROR_INVALID_STATE;
+            };
+            (closure, dependencies, package_runtime)
+        };
+        // SAFETY: The descriptor is borrowed only for dup. Kotlin retains the
+        // original ParcelFileDescriptor for the duration of this call.
+        let borrowed = unsafe { BorrowedFd::borrow_raw(descriptor) };
+        let Ok(owned) = rustix::io::dup(borrowed) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let mut archive = File::from(owned);
+        let report = match archphene_builder::verify_copied_built_package(
+            &mut archive,
+            &filename,
+            &package_base,
+            &package_name,
+            &version,
+            &architecture,
+            closure.as_bytes(),
+            closure_sha256,
+        ) {
+            Ok(report) => report,
+            Err(error) => return copy_package_error(&error, output),
+        };
+        let dependency_names: Vec<&str> = dependencies.iter().map(String::as_str).collect();
+        if let Err(error) = package_runtime.install_dependencies(&dependency_names) {
+            return copy_package_error(&error, output);
+        }
+        copy_tool_result(
+            package_runtime.install_verified_aur_archive(
+                &mut archive,
+                &report.filename,
+                &package_name,
+                &version,
+                report.archive_bytes,
+                report.sha256,
+            ),
+            output,
+        )
+    }
+
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeReviewAur(
         environment: JNIEnv,
         _class: JClass,
@@ -1770,6 +2009,7 @@ mod android {
             1 => package_runtime.installed_version(package),
             2 => package_runtime.install(package),
             3 => package_runtime.remove(package),
+            4 => package_runtime.installed_origin(package),
             _ => return ERROR_INVALID_ARGUMENT,
         };
         let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };

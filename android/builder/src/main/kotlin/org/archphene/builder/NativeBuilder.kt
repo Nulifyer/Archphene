@@ -10,6 +10,7 @@ internal object NativeBuilder {
     const val ERROR_OUTPUT_BYTES = 512
     const val RUNTIME_OUTPUT_BYTES = 16 * 1024
     const val BUILD_POLL_OUTPUT_BYTES = 16 + 64 * 1024
+    const val BUILT_PACKAGE_REPORT_BYTES = 304
 
     init {
         System.loadLibrary("archphene_builder")
@@ -104,4 +105,15 @@ internal object NativeBuilder {
     external fun nativePollBuild(outputBuffer: ByteBuffer): Int
 
     external fun nativeCancelBuild(): Boolean
+
+    external fun nativeVerifyAndCopyBuiltPackage(
+        filesDirectory: String,
+        packageBase: String,
+        packageName: String,
+        version: String,
+        architecture: String,
+        closureSha256: String,
+        outputDescriptor: Int,
+        outputBuffer: ByteBuffer,
+    ): Int
 }

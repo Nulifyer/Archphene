@@ -7,7 +7,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::fmt::Write as FmtWrite;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Component, Path, PathBuf};
@@ -28,7 +28,7 @@ pub const INSTALLED_PACKAGE_PAGE_SIZE: usize = 60;
 const MANIFEST_HEADER: &str = "# org.archphene.package-runtime.v1";
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const TRANSACTION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-const MAX_PACKAGE_TRANSACTION_OUTPUT_BYTES: usize = 256 * 1024;
+const MAX_PACKAGE_TRANSACTION_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 const ALIAS_DIRECTORY: &str = "run/package-runtime-v1";
 const OUTPUT_FILE: &str = "run/package-command-output.tmp";
 const INSTALL_REASON_INTENT_FILE: &str = "run/package-install-reasons-v1";
@@ -37,6 +37,8 @@ const INSTALL_REASON_INTENT_HEADER: &str = "org.archphene.package-install-reason
 const INSTALL_REASON_INTENT_LIMIT: u64 = 64 * 1024;
 const PACMAN_CONFIG_FILE: &str = "etc/pacman.conf";
 const PACMAN_CONFIG_TEMP_FILE: &str = "etc/pacman.conf.tmp";
+const AUR_PACMAN_CONFIG_FILE: &str = "etc/pacman-aur.conf";
+const AUR_PACMAN_CONFIG_TEMP_FILE: &str = "etc/pacman-aur.conf.tmp";
 const CATALOG_DIRECTORY: &str = "var/lib/pacman/sync";
 const AUR_BUILD_DATABASE_DIRECTORY: &str = "run/aur-build-database-v1";
 const CORE_CATALOG_LIMIT: u64 = 8 * 1024 * 1024;
@@ -44,6 +46,7 @@ const EXTRA_CATALOG_LIMIT: u64 = 64 * 1024 * 1024;
 const PACKAGE_ARCHIVE_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
 const PACKAGE_SIGNATURE_LIMIT: u64 = 1024 * 1024;
 const PACKAGE_CACHE_DIRECTORY: &str = "var/cache/pacman/pkg";
+const AUR_PACKAGE_CACHE_DIRECTORY: &str = "var/cache/archphene/aur-packages";
 const PACKAGE_TRUST_DIRECTORY: &str = "run/package-trust-v1";
 const PACKAGE_TRUST_STATE: &str = "source-v1";
 const PACKAGE_TRUST_STATE_LIMIT: u64 = 512;
@@ -94,6 +97,23 @@ impl RepositoryArchitecture {
             Self::X86_64 => X86_64_PACMAN_CONFIG,
             Self::Aarch64 => AARCH64_PACMAN_CONFIG,
         }
+    }
+
+    fn aur_pacman_config(self) -> Vec<u8> {
+        let source = self.pacman_config();
+        let required = b"LocalFileSigLevel = Required";
+        let optional = b"LocalFileSigLevel = Optional";
+        let Some(offset) = source
+            .windows(required.len())
+            .position(|window| window == required)
+        else {
+            return Vec::new();
+        };
+        let mut output = Vec::with_capacity(source.len());
+        output.extend_from_slice(&source[..offset]);
+        output.extend_from_slice(optional);
+        output.extend_from_slice(&source[offset + required.len()..]);
+        output
     }
 
     const fn catalog_url(self, repository: Repository) -> &'static str {
@@ -212,7 +232,7 @@ pub enum PackageRuntimeError {
     NotInstalled,
     InvalidPayload,
     InvalidSignature,
-    ToolFailed(i32, ToolOutput),
+    ToolFailed(i32, Box<ToolOutput>),
     Process(ProcessError),
     Io(io::Error),
 }
@@ -603,6 +623,15 @@ impl PackageRuntime {
             &arch_root.join(PACMAN_CONFIG_TEMP_FILE),
             architecture.pacman_config(),
         )?;
+        let aur_pacman_config = architecture.aur_pacman_config();
+        if aur_pacman_config.is_empty() {
+            return Err(PackageRuntimeError::InvalidManifest);
+        }
+        publish_regular_file(
+            &arch_root.join(AUR_PACMAN_CONFIG_FILE),
+            &arch_root.join(AUR_PACMAN_CONFIG_TEMP_FILE),
+            &aur_pacman_config,
+        )?;
         let mut library_path = alias_root.as_os_str().to_os_string();
         library_path.push(":");
         library_path.push(native_root.as_os_str());
@@ -946,6 +975,78 @@ impl PackageRuntime {
         }
     }
 
+    pub fn installed_origin(&self, package: &str) -> Result<ToolOutput, PackageRuntimeError> {
+        if !safe_logical_name(package) {
+            return Err(PackageRuntimeError::InvalidQuery);
+        }
+        let local = self.arch_root.join("var/lib/pacman/local");
+        let metadata = fs::symlink_metadata(&local)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(PackageRuntimeError::UnsafeEntry(local));
+        }
+        let mut count = 0_usize;
+        let mut matched = None;
+        for entry in fs::read_dir(&local)? {
+            count = count.saturating_add(1);
+            if count > LOCAL_DATABASE_ENTRY_LIMIT {
+                return Err(PackageRuntimeError::OutputLimit);
+            }
+            let entry = entry?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)?;
+            if entry.file_name() == "ALPM_DB_VERSION"
+                && metadata.is_file()
+                && !metadata.file_type().is_symlink()
+            {
+                continue;
+            }
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(PackageRuntimeError::UnsafeEntry(path));
+            }
+            let description = path.join("desc");
+            let metadata = fs::symlink_metadata(&description)?;
+            if metadata.file_type().is_symlink()
+                || !metadata.is_file()
+                || metadata.len() == 0
+                || metadata.len() > LOCAL_DESCRIPTION_LIMIT
+            {
+                return Err(PackageRuntimeError::UnsafeEntry(description));
+            }
+            let file = OpenOptions::new()
+                .read(true)
+                .custom_flags(O_NOFOLLOW | O_CLOEXEC)
+                .open(&description)?;
+            let opened = file.metadata()?;
+            if !opened.is_file() || opened.len() != metadata.len() {
+                return Err(PackageRuntimeError::UnsafeEntry(description));
+            }
+            let mut contents =
+                String::with_capacity(usize::try_from(metadata.len()).unwrap_or(4096).min(4096));
+            file.take(LOCAL_DESCRIPTION_LIMIT + 1)
+                .read_to_string(&mut contents)?;
+            if u64::try_from(contents.len()).map_err(|_| PackageRuntimeError::OutputLimit)?
+                != metadata.len()
+            {
+                return Err(PackageRuntimeError::SizeMismatch);
+            }
+            if local_description_field(&contents, "%NAME%")? != Some(package) {
+                continue;
+            }
+            if matched.is_some() {
+                return Err(PackageRuntimeError::InvalidResolution);
+            }
+            matched = Some(match local_description_field(&contents, "%VALIDATION%")? {
+                Some("none") => "aur",
+                Some("pgp") => "official",
+                _ => return Err(PackageRuntimeError::InvalidResolution),
+            });
+        }
+        let origin = matched.ok_or(PackageRuntimeError::NotInstalled)?;
+        let mut output = empty_tool_output();
+        output.push(origin.as_bytes())?;
+        Ok(output)
+    }
+
     pub fn installed_package_catalog(
         &self,
     ) -> Result<InstalledPackageCatalog, PackageRuntimeError> {
@@ -1161,6 +1262,198 @@ impl PackageRuntime {
 
     pub fn install(&self, package: &str) -> Result<ToolOutput, PackageRuntimeError> {
         let resolution = self.resolve(package)?;
+        self.install_resolution(&resolution, Some(package))?;
+        let installed = self.installed_version(package)?;
+        let expected = resolution
+            .as_str()?
+            .lines()
+            .map(parse_resolved_payload)
+            .find_map(|payload| match payload {
+                Ok(payload) if payload.name == package => Some(Ok(payload.version)),
+                Ok(_) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .transpose()?
+            .ok_or(PackageRuntimeError::MissingTarget)?;
+        if installed.as_str()? != expected {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        Ok(installed)
+    }
+
+    pub fn install_dependencies(&self, packages: &[&str]) -> Result<(), PackageRuntimeError> {
+        if packages.is_empty() {
+            return Ok(());
+        }
+        let resolution = self.resolve_targets(packages)?;
+        self.install_resolution(&resolution, None)
+    }
+
+    pub fn install_verified_aur_archive(
+        &self,
+        source: &mut File,
+        filename: &str,
+        package: &str,
+        version: &str,
+        expected_bytes: u64,
+        expected_sha256: [u8; 32],
+    ) -> Result<ToolOutput, PackageRuntimeError> {
+        if !safe_package_filename(filename)
+            || !safe_logical_name(package)
+            || version.is_empty()
+            || version.len() > 128
+            || version
+                .bytes()
+                .any(|byte| byte.is_ascii_whitespace() || byte == 0)
+            || expected_bytes == 0
+            || expected_bytes > PACKAGE_ARCHIVE_LIMIT
+        {
+            return Err(PackageRuntimeError::InvalidPayload);
+        }
+        let source_metadata = source.metadata()?;
+        if !source_metadata.is_file() || source_metadata.len() != expected_bytes {
+            return Err(PackageRuntimeError::InvalidPayload);
+        }
+        let directory = self.arch_root.join(AUR_PACKAGE_CACHE_DIRECTORY);
+        prepare_private_directory(&directory)?;
+        let digest = hex_sha256(&expected_sha256);
+        let destination = directory.join(format!("{digest}-{filename}"));
+        let temporary = directory.join(format!(".{digest}.part"));
+        prepare_output_path(&temporary)?;
+        match fs::symlink_metadata(&destination) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                return Err(PackageRuntimeError::UnsafeEntry(destination));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(PackageRuntimeError::Io(error)),
+        }
+        let result = (|| {
+            source.seek(SeekFrom::Start(0))?;
+            let mut output = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .mode(0o600)
+                .open(&temporary)?;
+            let mut hasher = Sha256::new();
+            let mut buffer = [0_u8; 64 * 1024];
+            let mut copied = 0_u64;
+            loop {
+                let count = source.read(&mut buffer)?;
+                if count == 0 {
+                    break;
+                }
+                copied = copied
+                    .checked_add(count as u64)
+                    .ok_or(PackageRuntimeError::OutputLimit)?;
+                if copied > expected_bytes {
+                    return Err(PackageRuntimeError::InvalidPayload);
+                }
+                hasher.update(&buffer[..count]);
+                output.write_all(&buffer[..count])?;
+            }
+            if copied != expected_bytes || <[u8; 32]>::from(hasher.finalize()) != expected_sha256 {
+                return Err(PackageRuntimeError::InvalidPayload);
+            }
+            output.sync_all()?;
+            drop(output);
+            fs::rename(&temporary, &destination)?;
+            File::open(&directory)?.sync_all()?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
+
+        let config_path = self.arch_root.join(AUR_PACMAN_CONFIG_FILE);
+        let config = config_path
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let root = self
+            .arch_root
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let database_path = self.arch_root.join("var/lib/pacman");
+        let database = database_path
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let cache_path = self.arch_root.join(PACKAGE_CACHE_DIRECTORY);
+        let cache = cache_path
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let archive_path = destination
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let archives = [InstallArchive {
+            path: archive_path.to_owned(),
+            name: package.to_owned(),
+            version: version.to_owned(),
+            explicitly_installed: true,
+        }];
+        let plan = self.run_with_timeout(
+            PackageTool::Pacman,
+            &[
+                "--config",
+                config,
+                "--root",
+                root,
+                "--dbpath",
+                database,
+                "--cachedir",
+                cache,
+                "--noconfirm",
+                "--noprogressbar",
+                "-U",
+                "--print",
+                "--print-format",
+                "%n\t%v",
+                archive_path,
+            ],
+            TRANSACTION_TIMEOUT,
+        )?;
+        validate_install_plan(plan.as_str()?, &archives)?;
+        self.publish_install_reason_intent(&archives)?;
+        if let Err(error) = self.run_bytes_with_timeout(
+            PackageTool::Pacman,
+            &[
+                "--config",
+                config,
+                "--root",
+                root,
+                "--dbpath",
+                database,
+                "--cachedir",
+                cache,
+                "--noconfirm",
+                "--noprogressbar",
+                "--noscriptlet",
+                "--needed",
+                "--asdeps",
+                "-U",
+                archive_path,
+            ],
+            TRANSACTION_TIMEOUT,
+            MAX_PACKAGE_TRANSACTION_OUTPUT_BYTES,
+            false,
+        ) {
+            self.recover_database_lock()?;
+            self.recover_pending_install_reasons()?;
+            return Err(error);
+        }
+        self.recover_pending_install_reasons()?;
+        let installed = self.installed_version(package)?;
+        if installed.as_str()? != version {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        Ok(installed)
+    }
+
+    fn install_resolution(
+        &self,
+        resolution: &PackageResolution,
+        explicit_target: Option<&str>,
+    ) -> Result<(), PackageRuntimeError> {
         let package_count = resolution.as_str()?.lines().count();
         let mut archives = Vec::with_capacity(package_count);
         for line in resolution.as_str()?.lines() {
@@ -1182,7 +1475,7 @@ impl PackageRuntime {
                     .to_owned(),
                 name: payload.name.to_owned(),
                 version: payload.version.to_owned(),
-                explicitly_installed: payload.name == package,
+                explicitly_installed: explicit_target == Some(payload.name),
             });
         }
         if archives.is_empty() || archives.len() > 256 {
@@ -1234,7 +1527,10 @@ impl PackageRuntime {
             self.run_with_timeout(PackageTool::Pacman, &plan_arguments, TRANSACTION_TIMEOUT)?;
         validate_install_plan(plan.as_str()?, &archives)?;
 
-        self.publish_install_reason_intent(&archives)?;
+        let has_explicit = archives.iter().any(|archive| archive.explicitly_installed);
+        if has_explicit {
+            self.publish_install_reason_intent(&archives)?;
+        }
         let mut transaction_arguments = vec![
             "--config",
             config,
@@ -1262,19 +1558,15 @@ impl PackageRuntime {
             false,
         ) {
             self.recover_database_lock()?;
-            self.recover_pending_install_reasons()?;
+            if has_explicit {
+                self.recover_pending_install_reasons()?;
+            }
             return Err(error);
         }
-        self.recover_pending_install_reasons()?;
-        let installed = self.installed_version(package)?;
-        let expected = archives
-            .iter()
-            .find(|archive| archive.name == package)
-            .ok_or(PackageRuntimeError::MissingTarget)?;
-        if installed.as_str()? != expected.version {
-            return Err(PackageRuntimeError::InvalidResolution);
+        if has_explicit {
+            self.recover_pending_install_reasons()?;
         }
-        Ok(installed)
+        Ok(())
     }
 
     pub fn remove(&self, package: &str) -> Result<ToolOutput, PackageRuntimeError> {
@@ -2090,7 +2382,7 @@ impl PackageRuntime {
         if !status.success() {
             let mut output = empty_tool_output();
             output.push(&bytes)?;
-            return Err(PackageRuntimeError::ToolFailed(code, output));
+            return Err(PackageRuntimeError::ToolFailed(code, Box::new(output)));
         }
         Ok(bytes)
     }
@@ -2362,6 +2654,41 @@ fn prepare_alias_directory(path: &Path) -> Result<(), PackageRuntimeError> {
         fs::remove_file(entry.path())?;
     }
     Ok(())
+}
+
+fn prepare_private_directory(path: &Path) -> Result<(), PackageRuntimeError> {
+    let parent = path.parent().ok_or(PackageRuntimeError::InvalidPath)?;
+    match fs::symlink_metadata(parent) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(PackageRuntimeError::UnsafeEntry(parent.to_path_buf()));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let grandparent = parent.parent().ok_or(PackageRuntimeError::InvalidPath)?;
+            let metadata = fs::symlink_metadata(grandparent)?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(PackageRuntimeError::UnsafeEntry(grandparent.to_path_buf()));
+            }
+            fs::create_dir(parent)?;
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+        }
+        Err(error) => return Err(PackageRuntimeError::Io(error)),
+    }
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            Err(PackageRuntimeError::UnsafeEntry(path.to_path_buf()))
+        }
+        Ok(_) => {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::create_dir(path)?;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+            Ok(())
+        }
+        Err(error) => Err(PackageRuntimeError::Io(error)),
+    }
 }
 
 fn verified_source(
@@ -3618,6 +3945,46 @@ extra\tdotnet-sdk-8.0\t8.0.29.sdk129-1\tThe .NET Core SDK\n"
         assert!(matches!(
             local_description_field("%REASON%\n1\n%REASON%\n0\n", "%REASON%"),
             Err(PackageRuntimeError::InvalidResolution)
+        ));
+    }
+
+    #[test]
+    fn installed_package_origin_distinguishes_repository_and_local_archives() {
+        let tree = TestTree::new();
+        let runtime = tree.package_runtime();
+        tree.local_package("signed-tool-1.0-1", "signed-tool", b"%FILES%\n");
+        tree.local_package("aur-tool-1.0-1", "aur-tool", b"%FILES%\n");
+        fs::write(
+            tree.root
+                .join("var/lib/pacman/local/signed-tool-1.0-1/desc"),
+            b"%NAME%\nsigned-tool\n\n%VERSION%\n1.0-1\n\n%VALIDATION%\npgp\n",
+        )
+        .expect("signed description");
+        fs::write(
+            tree.root.join("var/lib/pacman/local/aur-tool-1.0-1/desc"),
+            b"%NAME%\naur-tool\n\n%VERSION%\n1.0-1\n\n%VALIDATION%\nnone\n",
+        )
+        .expect("AUR description");
+
+        assert_eq!(
+            runtime
+                .installed_origin("signed-tool")
+                .expect("official origin")
+                .as_str()
+                .expect("official UTF-8"),
+            "official",
+        );
+        assert_eq!(
+            runtime
+                .installed_origin("aur-tool")
+                .expect("AUR origin")
+                .as_str()
+                .expect("AUR UTF-8"),
+            "aur",
+        );
+        assert!(matches!(
+            runtime.installed_origin("missing-tool"),
+            Err(PackageRuntimeError::NotInstalled)
         ));
     }
 

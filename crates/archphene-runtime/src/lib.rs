@@ -938,8 +938,9 @@ impl RuntimeHost {
             .ok_or(PackageRuntimeError::InvalidPayload)?;
         let mut targets = BTreeSet::from(["base-devel".to_owned()]);
         for dependency in review
-            .make_dependencies
+            .dependencies
             .iter()
+            .chain(review.make_dependencies.iter())
             .chain(review.check_dependencies.iter())
         {
             let name = aur_dependency_name(dependency)?;
@@ -982,6 +983,30 @@ impl RuntimeHost {
         self.aur_build_closure
             .clone()
             .ok_or(PackageRuntimeError::InvalidPayload)
+    }
+
+    pub fn verified_aur_runtime_dependencies(
+        &self,
+        package_name: &str,
+        version: &str,
+    ) -> Result<Vec<String>, PackageRuntimeError> {
+        if self.aur_build_closure.is_none() {
+            return Err(PackageRuntimeError::InvalidPayload);
+        }
+        let review = self
+            .aur_review
+            .as_ref()
+            .filter(|review| review.package_name == package_name && review.version == version)
+            .ok_or(PackageRuntimeError::InvalidPayload)?;
+        let mut dependencies = Vec::with_capacity(review.dependencies.len());
+        for dependency in &review.dependencies {
+            let name = aur_dependency_name(dependency)?;
+            if dependencies.iter().any(|existing| existing == name) {
+                continue;
+            }
+            dependencies.push(name.to_owned());
+        }
+        Ok(dependencies)
     }
 
     pub fn open_verified_aur_build_package(

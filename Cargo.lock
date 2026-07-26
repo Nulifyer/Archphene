@@ -12,6 +12,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 name = "archphene-android"
 version = "0.1.0"
 dependencies = [
+ "archphene-builder",
  "archphene-core",
  "archphene-jobs",
  "archphene-packages",
@@ -19,6 +20,7 @@ dependencies = [
  "archphene-runtime",
  "archphene-storage",
  "jni",
+ "rustix",
 ]
 
 [[package]]

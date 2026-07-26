@@ -55,6 +55,7 @@ class AurBuilderService : Service() {
                             TRANSACTION_START_BUILD -> startBuild(data, reply)
                             TRANSACTION_POLL_BUILD -> pollBuild(reply)
                             TRANSACTION_CANCEL_BUILD -> cancelBuild(reply)
+                            TRANSACTION_VERIFY_OUTPUT -> verifyOutput(data, reply)
                             else -> return super.onTransact(code, data, reply, flags)
                         }
                     } catch (error: Exception) {
@@ -464,6 +465,79 @@ class AurBuilderService : Service() {
         reply.writeBoolean(cancelled)
     }
 
+    @Synchronized
+    private fun verifyOutput(
+        data: Parcel,
+        reply: Parcel,
+    ) {
+        val packageBase = data.readString().orEmpty()
+        val packageName = data.readString().orEmpty()
+        val version = data.readString().orEmpty()
+        val architecture = data.readString().orEmpty()
+        val closureSha256 = data.readString().orEmpty()
+        require(closureSha256.matches(SHA256))
+        val destination =
+            data.readFileDescriptor()
+                ?: throw IllegalArgumentException("Missing verified-output descriptor")
+        destination.use { descriptor ->
+            val output =
+                ByteBuffer
+                    .allocateDirect(NativeBuilder.BUILT_PACKAGE_REPORT_BYTES)
+                    .order(ByteOrder.LITTLE_ENDIAN)
+            val result =
+                NativeBuilder.nativeVerifyAndCopyBuiltPackage(
+                    filesDir.absolutePath,
+                    packageBase,
+                    packageName,
+                    version,
+                    architecture,
+                    closureSha256,
+                    descriptor.fd,
+                    output,
+                )
+            check(result in 65..NativeBuilder.BUILT_PACKAGE_REPORT_BYTES) {
+                "Builder output verification failed: ${readNativeMessage(output, result)}"
+            }
+            val magic = ByteArray(8)
+            output.position(0)
+            output.get(magic)
+            check(String(magic, Charsets.US_ASCII) == "ABOP0001")
+            val archiveBytes = output.getLong(8)
+            val installedBytes = output.getLong(16)
+            val buildPackageCount = output.getInt(24)
+            val filenameLength = output.getInt(28)
+            val sha256 = ByteArray(32)
+            output.position(32)
+            output.get(sha256)
+            check(
+                archiveBytes > 0L &&
+                    installedBytes > 0L &&
+                    buildPackageCount > 0 &&
+                    filenameLength in 1..(NativeBuilder.BUILT_PACKAGE_REPORT_BYTES - 64) &&
+                    result == 64 + filenameLength,
+            )
+            val filename = ByteArray(filenameLength)
+            output.position(64)
+            output.get(filename)
+            reply.writeNoException()
+            reply.writeString(String(filename, Charsets.UTF_8))
+            reply.writeLong(archiveBytes)
+            reply.writeLong(installedBytes)
+            reply.writeInt(buildPackageCount)
+            reply.writeString(hexSha256(sha256))
+        }
+    }
+
+    private fun hexSha256(value: ByteArray): String {
+        require(value.size == 32)
+        return buildString(64) {
+            value.forEach { byte ->
+                append(HEX_DIGITS[(byte.toInt() ushr 4) and 0x0f])
+                append(HEX_DIGITS[byte.toInt() and 0x0f])
+            }
+        }
+    }
+
     private fun readRuntimeManifest(): ByteArray {
         val architecture =
             when (Build.SUPPORTED_ABIS.firstOrNull()) {
@@ -713,6 +787,7 @@ class AurBuilderService : Service() {
         const val TRANSACTION_START_BUILD = IBinder.FIRST_CALL_TRANSACTION + 11
         const val TRANSACTION_POLL_BUILD = IBinder.FIRST_CALL_TRANSACTION + 12
         const val TRANSACTION_CANCEL_BUILD = IBinder.FIRST_CALL_TRANSACTION + 13
+        const val TRANSACTION_VERIFY_OUTPUT = IBinder.FIRST_CALL_TRANSACTION + 14
         private const val ROLE_SNAPSHOT = 0
         private const val ROLE_SOURCE = 1
         private const val MAX_INPUTS = 65

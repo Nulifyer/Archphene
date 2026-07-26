@@ -9,6 +9,7 @@ internal object NativeRuntime {
     const val PACKAGE_OUTPUT_SIZE = 16 * 1024
     const val PACKAGE_RESOLUTION_OUTPUT_SIZE = 256 * 1024
     const val AUR_BUILD_CLOSURE_OUTPUT_SIZE = 512 * 1024
+    const val BUILT_PACKAGE_REPORT_SIZE = 64
     const val AUR_RPC_SIZE = 128 * 1024
     const val AUR_SNAPSHOT_SIZE = 4 * 1024 * 1024
     const val AUR_REVIEW_SIZE = 1024 * 1024
@@ -37,6 +38,7 @@ internal object NativeRuntime {
     const val PACKAGE_COMMAND_INSTALLED_VERSION = 1
     const val PACKAGE_COMMAND_INSTALL = 2
     const val PACKAGE_COMMAND_REMOVE = 3
+    const val PACKAGE_COMMAND_INSTALLED_ORIGIN = 4
     const val JOB_QUEUED = 1
     const val JOB_RESOLVING = 2
     const val JOB_DOWNLOADING = 3
@@ -178,6 +180,28 @@ internal object NativeRuntime {
         handle: Long,
         packageIndex: Int,
         signature: Boolean,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeVerifyAurBuiltPackage(
+        handle: Long,
+        descriptor: Int,
+        filename: String,
+        packageBase: String,
+        packageName: String,
+        version: String,
+        architecture: String,
+        closureSha256: String,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeInstallAurBuiltPackage(
+        handle: Long,
+        descriptor: Int,
+        filename: String,
+        packageBase: String,
+        packageName: String,
+        version: String,
+        architecture: String,
+        closureSha256: String,
         outputBuffer: ByteBuffer,
     ): Int
     external fun nativeReviewAur(

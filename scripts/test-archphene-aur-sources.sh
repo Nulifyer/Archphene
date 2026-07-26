@@ -39,6 +39,34 @@ cleanup() {
 }
 trap cleanup EXIT
 
+dismiss_launcher_installers() {
+  local mode="$1" deadline=$((SECONDS + 30)) ui stable=0 action
+  while ((SECONDS < deadline)); do
+    ui="$(archphene_capture_ui "aur-launcher-installer-$mode" 2>/dev/null || true)"
+    if [[ "$ui" == *'package="com.google.android.packageinstaller"'* ]]; then
+      action=Cancel
+      if [[ "$mode" == install-code && "$ui" == *'text="Visual Studio Code"'* ]]; then
+        action=Install
+      fi
+      archphene_tap_ui_pattern \
+        "$ui" "text=\"$action\"[^>]*enabled=\"true\"" "$action launcher APK"
+      sleep 1
+      archphene_adb_run shell monkey -p "$manager" \
+        -c android.intent.category.LAUNCHER 1 >/dev/null
+      stable=0
+      continue
+    fi
+    if [[ "$ui" == *"package=\"$manager\""* ]]; then
+      stable=$((stable + 1))
+      ((stable >= 3)) && return 0
+    else
+      stable=0
+    fi
+    sleep 0.5
+  done
+  archphene_die "launcher installer handoffs did not settle"
+}
+
 local_package_count() {
   archphene_adb_run shell run-as "$manager" \
     ls files/arch-root/var/lib/pacman/local |
@@ -103,6 +131,7 @@ archphene_adb_run shell am force-stop "$manager" >/dev/null
 archphene_adb_run logcat -c
 archphene_adb_run shell monkey -p "$manager" \
   -c android.intent.category.LAUNCHER 1 >/dev/null
+dismiss_launcher_installers cancel
 archphene_wait_ui 'text="Archphene is ready"' aur-sources-ready 30
 before_count="$(local_package_count)"
 [[ "$before_count" =~ ^[1-9][0-9]*$ ]] ||
@@ -429,13 +458,21 @@ archphene_tap_ui_pattern \
   "$ARCHPHENE_UI" 'text="Build"[^>]*enabled="true"' "Build"
 build_log="$(
   archphene_wait_log \
-    "AUR build completed for $package $reviewed_version" 900 \
+    "AUR build completed and independently verified for $package $reviewed_version:" 900 \
     'ArchpheneRuntime:I *:S'
 )"
 [[ -n "$build_log" ]] ||
-  archphene_die "isolated AUR build did not report completion"
+  archphene_die "isolated AUR build did not report independent verification"
+manager_package_sha256="$(
+  sed -nE \
+    "s/.*independently verified for $package $reviewed_version: [^ ]+ [1-9][0-9]* bytes ([0-9a-f]{64}).*/\\1/p" \
+    <<<"$build_log" |
+    tail -1
+)"
+[[ "$manager_package_sha256" =~ ^[0-9a-f]{64}$ ]] ||
+  archphene_die "could not parse the manager-verified package digest"
 archphene_wait_ui \
-  "Built $package $reviewed_version; verifying output next" \
+  "Built and verified $package $reviewed_version" \
   aur-build-complete 30
 builder_packages="$(
   archphene_adb_run shell run-as "$builder" sh -c \
@@ -485,14 +522,76 @@ actual_build_package_count="$(
 [[ "$actual_build_package_count" == "$builder_closure_count" &&
    "$actual_build_packages" == "$expected_build_packages" ]] ||
   archphene_die "built Code package does not record its exact verified build closure"
+manager_package="$(
+  archphene_adb_run shell run-as "$manager" find cache -maxdepth 1 -type f \
+    -name "'.aur-$package-*.pkg'" |
+    tr -d '\r' |
+    tail -1
+)"
+[[ -n "$manager_package" ]] ||
+  archphene_die "manager did not retain the independently verified package"
+manager_actual_sha256="$(
+  archphene_adb_run shell run-as "$manager" sha256sum "$manager_package" |
+    awk '{ print $1 }' |
+    tr -d '\r'
+)"
+builder_actual_sha256="$(
+  archphene_adb_run shell run-as "$builder" sha256sum "$builder_package" |
+    awk '{ print $1 }' |
+    tr -d '\r'
+)"
+[[ "$manager_actual_sha256" == "$manager_package_sha256" &&
+   "$manager_actual_sha256" == "$builder_actual_sha256" ]] ||
+  archphene_die "manager-owned output does not match the independently verified Builder archive"
 
 after_count="$(local_package_count)"
 [[ "$after_count" == "$before_count" ]] ||
   archphene_die "isolated AUR build mutated the manager pacman database"
 
 archphene_wait_ui \
-  "Built $package $reviewed_version; verifying output next" \
+  "Built and verified $package $reviewed_version" \
   aur-sources-final-render 15
+archphene_regex_contains "$ARCHPHENE_UI" 'text="Built"[^>]*enabled="false"' ||
+  archphene_die "verified AUR result does not expose a terminal Built state"
+archphene_regex_contains "$ARCHPHENE_UI" 'text="(?:Install|Update)"[^>]*enabled="true"' ||
+  archphene_die "verified AUR package did not enable Install or Update"
+archphene_tap_ui_pattern \
+  "$ARCHPHENE_UI" 'text="(?:Install|Update)"[^>]*enabled="true"' "Install or Update"
+install_log="$(
+  archphene_wait_log \
+    "Installed verified AUR package $package $reviewed_version \\($manager_package_sha256\\)" \
+    900 'ArchpheneRuntime:I *:S'
+)"
+[[ -n "$install_log" ]] ||
+  archphene_die "verified AUR package install did not report completion"
+dismiss_launcher_installers install-code
+archphene_wait_ui \
+  "Installed $package $reviewed_version" \
+  aur-install-complete 60
+installed_count="$(local_package_count)"
+[[ "$installed_count" =~ ^[1-9][0-9]*$ && "$installed_count" -ge "$before_count" ]] ||
+  archphene_die "verified AUR install did not update the shared pacman database"
+archphene_adb_run shell run-as "$manager" test -e \
+  files/arch-root/usr/bin/code ||
+  archphene_die "verified AUR install omitted the Code executable"
+archphene_adb_run shell run-as "$manager" test -f \
+  files/arch-root/usr/share/applications/code.desktop ||
+  archphene_die "verified AUR install omitted the Code desktop entry"
+durable_package="$(
+  archphene_adb_run shell run-as "$manager" sh -c \
+    "'find files/arch-root/var/cache/archphene/aur-packages -maxdepth 1 -type f -name \"$manager_package_sha256-*\"'" |
+    tr -d '\r' |
+    tail -1
+)"
+[[ -n "$durable_package" ]] ||
+  archphene_die "verified AUR archive was not durably published before install"
+durable_sha256="$(
+  archphene_adb_run shell run-as "$manager" sha256sum "$durable_package" |
+    awk '{ print $1 }' |
+    tr -d '\r'
+)"
+[[ "$durable_sha256" == "$manager_package_sha256" ]] ||
+  archphene_die "durably retained AUR package digest changed"
 resumed_activity="$(
   archphene_adb_run shell dumpsys activity activities |
     tr -d '\r' |
@@ -517,5 +616,7 @@ archphene_note "  Builder reverified $builder_closure_count archive/signature pa
 archphene_note "  Builder provisioned $builder_root_entries verified entries ($builder_root_bytes bytes)"
 archphene_note "  Builder prepared $builder_recipe_entries reviewed recipe entries and $builder_recipe_source_bytes source bytes"
 archphene_note "  Builder completed makepkg and recorded all $builder_closure_count build packages"
-archphene_note "  Pacman state remained at $after_count local database entries"
+archphene_note "  Manager independently reverified and retained package $manager_package_sha256"
+archphene_note "  Build left pacman state at $after_count entries; verified install produced $installed_count"
+archphene_note "  Installed Code executable and desktop entry into the shared Arch root"
 archphene_note "  Full-device screenshot: $output_dir/$serial.png"

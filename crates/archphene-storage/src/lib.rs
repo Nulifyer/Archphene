@@ -899,7 +899,7 @@ pub fn validate_visible_name(name: &str) -> Result<(), StorageError> {
 }
 
 pub fn open_document(root: &Path, document_id: &str, mode: OpenMode) -> Result<File, StorageError> {
-    if !mode.read && !mode.write || mode.truncate && !mode.write || mode.append && !mode.write {
+    if (mode.append || mode.truncate || !mode.read) && !mode.write {
         return Err(StorageError::InvalidDocument);
     }
     if mode.truncate && mode.append {
@@ -1094,7 +1094,7 @@ pub fn delete_document(root: &Path, document_id: &str) -> Result<(), StorageErro
 }
 
 fn parse_document_id(document_id: &str) -> Result<Vec<&str>, StorageError> {
-    if document_id.as_bytes().len() > MAX_DOCUMENT_ID_BYTES {
+    if document_id.len() > MAX_DOCUMENT_ID_BYTES {
         return Err(StorageError::InvalidDocument);
     }
     if document_id == HOME_DOCUMENT_ID {
@@ -1114,7 +1114,7 @@ fn parse_document_id(document_id: &str) -> Result<Vec<&str>, StorageError> {
 }
 
 fn parse_mirror_path(relative_path: &str) -> Result<Vec<&str>, StorageError> {
-    if relative_path.is_empty() || relative_path.as_bytes().len() > MAX_MIRROR_PATH_BYTES {
+    if relative_path.is_empty() || relative_path.len() > MAX_MIRROR_PATH_BYTES {
         return Err(StorageError::InvalidDocument);
     }
     let segments: Vec<&str> = relative_path.split('/').collect();

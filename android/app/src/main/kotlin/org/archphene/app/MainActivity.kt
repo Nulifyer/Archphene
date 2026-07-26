@@ -66,6 +66,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private lateinit var packageJobProgressTrack: LinearLayout
     private lateinit var packageJobProgressFill: View
     private lateinit var packageJobProgressRemainder: View
+    private lateinit var packageJobContainer: View
     private var packageJobRenderedProgress = 0
     private lateinit var commandStatusView: TextView
     private lateinit var storageStatusView: TextView
@@ -731,6 +732,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     ),
                 )
             }
+        packageJobContainer = jobRow
         storageStatusView =
             TextView(this).apply {
                 setTextColor(getColor(R.color.archphene_on_surface))
@@ -2190,8 +2192,11 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             binder.aurSourcesAvailable && binder.aurReviewedPackage == aurPackage
         val buildAvailable =
             binder.aurBuildAvailable && binder.aurReviewedPackage == aurPackage
+        val builtAvailable =
+            binder.aurInstallAvailable && binder.aurReviewedPackage == aurPackage
         aurReviewButton.setText(
             when {
+                builtAvailable -> R.string.built
                 buildAvailable -> R.string.build
                 sourcesAvailable -> R.string.verify_sources
                 else -> R.string.aur
@@ -2200,6 +2205,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         aurReviewButton.contentDescription =
             getString(
                 when {
+                    builtAvailable -> R.string.built_aur_description
                     buildAvailable -> R.string.build_aur_description
                     sourcesAvailable -> R.string.verify_sources_description
                     else -> R.string.aur_review_description
@@ -2208,6 +2214,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         aurReviewButton.isEnabled =
             aurPackage.isNotEmpty() &&
                 when {
+                    builtAvailable -> false
                     buildAvailable -> binder.aurBuildAvailable
                     sourcesAvailable -> binder.aurSourcesAvailable
                     else -> binder.aurReviewAvailable
@@ -2217,7 +2224,29 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private fun updatePackageActivity() {
         val binder = runtimeBinder
         val packageName = binder?.packageJobName.orEmpty()
-        if (binder == null || packageName.isEmpty()) {
+        val terminal =
+            when (binder?.packageJobState) {
+                NativeRuntime.JOB_COMPLETE,
+                NativeRuntime.JOB_FAILED,
+                NativeRuntime.JOB_CANCELLED,
+                -> true
+                else -> false
+            }
+        val selectedPackage = packageSearchInput.text.toString().trim()
+        val visible =
+            binder != null &&
+                packageName.isNotEmpty() &&
+                (
+                    !terminal ||
+                        (
+                            binder.packageTerminalActivityVisible &&
+                                selectedPackage == packageName
+                        )
+                )
+        if (packageJobContainer.visibility != if (visible) View.VISIBLE else View.GONE) {
+            packageJobContainer.visibility = if (visible) View.VISIBLE else View.GONE
+        }
+        if (!visible) {
             setTextIfChanged(packageJobTitleView, getString(R.string.package_activity_heading))
             setTextIfChanged(packageJobActivityView, "")
             if (packageJobProgressTrack.visibility != View.INVISIBLE) {

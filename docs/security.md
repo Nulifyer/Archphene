@@ -72,31 +72,30 @@ entry is deleted and downloaded again. Snapshot-local files remain covered by
 the snapshot review. Insecure, unsupported, or `SKIP` remote sources fail
 closed until their separate verification mechanism exists.
 
-The reviewed recipe's complete `makedepends` and `checkdepends` are normalized
-only by removing validated version operators, then resolved together with the
-official `base-devel` package in one bounded pacman plan. An unavailable
-official target fails closed; recursive AUR build dependencies are not yet
-accepted. Resolution uses an ephemeral manager-owned database containing the
-current sync catalogs and no local installed-package state; resolving against
-the shared root would incorrectly omit packages an empty Builder root needs.
-On the current Samsung AArch64 catalogs, the Code candidate resolves to 152
-official packages and 224,514,136 archive bytes.
+The reviewed recipe's complete runtime `depends`, `makedepends`, and
+`checkdepends` are normalized only by removing validated version operators,
+then resolved together with the official `base-devel` package in one bounded
+pacman plan. An unavailable official target fails closed; recursive AUR
+dependencies are not yet accepted. Resolution uses an ephemeral manager-owned
+database containing the current sync catalogs and no local installed-package
+state; resolving against the shared root would incorrectly omit packages an
+empty Builder root needs. On the current Samsung AArch64 catalogs, the Code
+candidate resolves to 250 official packages and 321,419,288 archive bytes.
 
 The manager downloads each exact archive and detached signature into its
 bounded package cache. Rust requires the pinned architecture signer and exact
 package name, version, and architecture metadata, retains the original
 resolution bytes, then independently reverifies every member before the UI
 calls the closure verified. The ephemeral resolution database is removed after
-each plan. A successful cache-reuse pass on Samsung reverified all 152 members
-without changing the shared pacman database. The closure still must be
-reverified immediately before descriptor handoff to the Builder. Rust also
+each plan. The successful Samsung gate reverified all 250 members before
+descriptor handoff to the Builder. Rust also
 publishes a bounded canonical closure manifest containing each exact
 repository/name/version/URL, archive size and SHA-256, and detached-signature
 size and SHA-256. Kotlin requires it to match the retained resolution
 entry-for-entry and displays the whole-manifest SHA-256; package descriptors
 can be reopened only while that verified retained closure remains present.
 
-Community build execution will use one hidden Archphene Builder companion APK,
+Community build execution uses one hidden Archphene Builder companion APK,
 not the manager UID and not one builder per installed Linux application. The
 companion is signed by the same release identity as the manager, has a distinct
 ordinary Android UID and private storage, requests no Android network
@@ -110,8 +109,8 @@ Rust-owned: no-follow directory descriptors remove hostile prior state and the
 legacy Kotlin workspace, fixed-buffer copies verify exact lengths and digests,
 and finish rehashes every staged file before publication. Host tests cover
 symlink substitution and post-stage tampering; the Samsung upgrade gate removes
-the old 211 MiB tree and republishes the exact inputs. Package output will later
-return through a manager-opened descriptor.
+the old 211 MiB tree and republishes the exact inputs. Verified package output
+returns through a manager-opened descriptor.
 
 Before that Rust session opens reusable storage on Android, it scans a bounded
 view of `/proc` for the Builder's unique UID. Every other candidate is paired
@@ -138,9 +137,8 @@ paths/types, and provisions a disposable private Arch root through Rust. Root
 reuse is reset with no-follow directory-FD traversal; Android-forbidden hard
 links become bounded regular copies. A filesystem sync precedes publication of
 a closure-bound root manifest. The physical Samsung recovery gate provisions
-152 packages, 48,271 verified archive entries, and 1,221,416,416 expanded
-bytes, including executable `bash`, `makepkg`, and `fakeroot`, without changing
-the shared pacman database.
+250 packages, 66,878 verified archive entries, and 1,744,478,772 expanded
+bytes, including executable `bash`, `makepkg`, and `fakeroot`.
 
 The Builder's small packaged execution runtime is independently
 content-addressed: Rust validates its manifest, digest-bearing filenames,
@@ -152,16 +150,22 @@ permission. Rust first kills stale same-UID processes, resets the recipe
 through no-follow descriptors, then retains a bounded process group with
 timeout, capped logs, cancellation, and deterministic reap.
 
-The test-side verifier confirms the output's exact reviewed name/version/ABI,
-nonzero 1,079,048,720-byte installed size, and `.BUILDINFO` equality with all
-152 signed official build packages. This does not yet authorize installation:
-the product must enumerate the now-hostile output through no-follow
-descriptors, verify package metadata and provenance in Rust, copy only the
-accepted archive through a manager-owned descriptor, reverify it under the
-manager UID, and commit it through a recoverable shared-root transaction. A
-successful isolated build will not make the eventual package isolated: once
-manager verification and installation complete, its code joins the shared
-Archphene Linux trust domain.
+Builder Rust now enumerates the hostile output through no-follow directory
+descriptors, rejects substitutions, links, unexpected archives, unsafe tar
+entries, and mismatched `.PKGINFO`/`.BUILDINFO`, and copies only the accepted
+archive through a manager-owned descriptor while hashing it. The manager
+independently applies the same Rust verifier against the retained 250-package
+closure, then installs signed official runtime dependencies and the reviewed
+local package through one recoverable pacman transaction. Official repository
+signatures remain required; only the already verified local AUR archive uses
+the generated pacman configuration's optional local-file signature policy.
+Scriptlets are disabled, the exact transaction plan is checked, install reasons
+are recoverable, and the installed version is verified afterward. The physical
+Samsung gate completed this path for current `visual-studio-code-bin`, retaining
+the archive under SHA-256
+`51e44c87e8ffbe9b7f3c441bfad6ab8e2fdff1d9f0402d0fa27b94d9a11d3c5c`.
+The installed package is not isolated: it joins the shared Archphene Linux
+trust domain.
 
 ## Important limitations
 
@@ -175,8 +179,11 @@ Archphene Linux trust domain.
   production-client coverage remain incomplete. Legacy per-wrapper runtime-pack
   results are historical evidence, not substitutes for those production gates.
 - Durable jobs already represent package and future launcher phases without
-  renumbering persisted v1 states. Real launcher installation results reconcile
-  across manager death; AUR build and package-mutation recovery remain pending.
+  renumbering persisted v1 states. Real launcher installation results and
+  official/AUR package mutations reconcile across manager death. The transient
+  verified-built-package capability still requires a rebuild after manager
+  process death; bounded no-follow startup cleanup removes the now-unusable
+  transient output.
 - The shared Rust Wayland compositor enforces the currently implemented object, role, configure, buffer, popup, subsurface, input, and teardown contracts on x86_64 and AArch64. It still needs broader protocol coverage, independent security review, and sustained parser fuzzing before it should be treated as a hardened general compositor boundary.
 - GrapheneOS-specific hardening has not been validated on a supported Pixel.
 - Running on stock Android does not provide GrapheneOS firmware, verified boot policy, exploit mitigations, or security updates.

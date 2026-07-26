@@ -1058,10 +1058,10 @@ Builder workspace has not become hostile. Before execution is enabled, its
 reuse path must move to no-follow directory-FD Rust operations and supervise
 all same-UID descendants.
 
-The current AUR slice also resolves the complete official build environment in
-one bounded pacman plan: `base-devel` plus all reviewed `makedepends` and
-`checkdepends`, with validated version constraints removed only for repository
-lookup. The initial 130-package result was correctly rejected as incomplete:
+The initial AUR build-environment slice resolved one bounded pacman plan:
+`base-devel` plus all reviewed `makedepends` and `checkdepends`, with validated
+version constraints removed only for repository lookup. The initial
+130-package result was correctly rejected as incomplete:
 it used the manager's installed-package database and omitted dependencies an
 empty Builder root still needs. Resolution now copies current sync catalogs
 into an ephemeral manager-owned database with no local package state. The live
@@ -1107,7 +1107,7 @@ extraction exposed this Android behavior; the recovery run then provisioned all
 152 packages, 48,271 archive entries, and 1,221,416,416 bytes with executable
 `bash`, `makepkg`, and `fakeroot`, while the shared pacman database stayed at
 36 entries. The gate captures the full Samsung display. The retained completed
-transaction card still consumes too much of the phone review and remains a
+transaction card still consumed too much of the phone review and became a
 tracked UX defect.
 
 The verified Builder execution bridge now reaches that root without packaging
@@ -1151,8 +1151,9 @@ hard-link copying, fortified fake-root `realpath`, and the standard `alpm`
 account. The final Samsung run builds
 `visual-studio-code-bin-1.130.0-1-aarch64.pkg.tar.xz`; its `.PKGINFO` reports
 1,079,048,720 installed bytes and its `.BUILDINFO` exactly records all 152
-signed build packages. Product-side hostile-output enumeration, descriptor
-copying, and manager re-verification remain the next trust boundary.
+signed build packages. At that point, product-side hostile-output enumeration,
+descriptor copying, and manager re-verification remained the next trust
+boundary.
 
 The stale-process half of Builder supervision now has physical evidence.
 Before Rust opens reusable Builder state on Android, it scans at most 4,096
@@ -1162,6 +1163,36 @@ fails closed if any remains runnable after bounded retries. The Samsung gate
 creates an orphaned `sleep` as Builder UID 10345 before service startup and
 proves it is terminated while manager UID 10430 completes the entire review
 gate.
+
+That trust boundary and generic AArch64 install are now complete. Runtime
+`depends` join `base-devel`, `makedepends`, and `checkdepends`, yielding a
+250-package, 321,419,288-byte current Code closure. The Builder provisions
+66,878 verified entries totaling 1,744,478,772 bytes, reruns the reviewed
+recipe, then Rust safely enumerates hostile output, validates exact
+`.PKGINFO`/`.BUILDINFO` provenance, and copies only the selected archive through
+a manager-owned descriptor. The manager independently reverifies the copy and
+retained closure, installs the signed official runtime dependencies, retains
+the AUR archive content-addressed, and commits it through pacman with exact
+plan/version postconditions and durable mutation recovery. The physical
+Samsung gate installed `visual-studio-code-bin-1.130.0-1`, retained archive
+SHA-256
+`51e44c87e8ffbe9b7f3c441bfad6ab8e2fdff1d9f0402d0fa27b94d9a11d3c5c`,
+and found `/usr/bin/code` plus `code.desktop` in the shared root. It also proves
+Builder UID 10345 remains distinct from manager UID 10430, all 250
+archive/signature pairs are reverified, the final pacman database has 194
+entries, and the compact full-device UI no longer exposes raw makepkg output or
+an unrelated terminal activity card. The exact rebuilt manager also removed six
+unrecoverable stale output copies on startup, reducing its transient cache from
+1.2 GiB to 3.5 KiB, then installed the generated Visual Studio Code Android
+launcher through Android's confirmation UI. After another manager restart,
+bounded no-follow pacman-local inspection identifies its `none` validation
+origin, renders an honest disabled Installed action, and enables conservative
+Remove instead of failing official-repository resolution. The physical audit
+also exposed that cancelled dependency launcher prompts are resubmitted after a
+manager restart; explicit retry/dismiss and batch selection are now tracked UX
+work. Recursive AUR dependencies, the
+install-script/scriptlet policy, verified-output retention across manager
+process death, and actual Electron/Code launch remain open.
 
 Code now reaches the packaged Electron executable without a Code-specific
 bridge exception. Translating Arch's standard `/usr/lib/pulseaudio` directory

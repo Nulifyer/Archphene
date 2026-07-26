@@ -346,7 +346,7 @@ pub(super) fn retain_reviewed_snapshot(
     }
     fs::rename(&temporary, &destination)?;
     File::open(&directory)?.sync_all()?;
-    Ok(u64::try_from(bytes.len()).map_err(|_| super::PackageRuntimeError::OutputLimit)?)
+    u64::try_from(bytes.len()).map_err(|_| super::PackageRuntimeError::OutputLimit)
 }
 
 pub(super) fn open_reviewed_snapshot(

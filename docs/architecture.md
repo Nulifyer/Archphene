@@ -77,22 +77,24 @@ reviewed-input directory through no-follow directory descriptors, removes the
 legacy Kotlin-owned workspace on upgrade without following substitutions,
 streams and hashes each regular descriptor through a fixed buffer, reverifies
 all staged bytes, and atomically publishes a canonical Builder-private input
-manifest without executing recipe code. The package result will return through
-a manager-opened output descriptor.
+manifest without executing recipe code. Builder output is later treated as
+hostile, verified in Rust, and copied through a manager-opened output
+descriptor.
 
 Before opening that reusable state on Android, Builder Rust scans the bounded
 process table for its unique UID, pairs each other process with its kernel start
 time, rechecks that identity before signaling, and fails closed until no prior
 same-UID process remains runnable. This handles a recipe that outlives a prior
 service without trusting a Builder-writable PID file. The active build path
-will additionally own one process group so normal completion, cancellation,
-timeout, and service teardown can kill and reap its direct child.
+additionally owns one process group so normal completion, cancellation,
+timeout, and service teardown kill and reap its direct child.
 
 The manager resolves the official build environment as one bounded transaction
-containing `base-devel` plus the reviewed recipe's `makedepends` and
-`checkdepends`. It uses current repository catalogs with an empty ephemeral
-local database rather than the shared root's installed-package state. The
-current Code AArch64 plan is 152 packages and 224,514,136 archive bytes. The
+containing `base-devel` plus the reviewed recipe's runtime `depends`,
+`makedepends`, and `checkdepends`. It uses current repository catalogs with an
+empty ephemeral local database rather than the shared root's installed-package
+state. The current Code AArch64 plan is 250 packages and 321,419,288 archive
+bytes. The
 manager downloads every exact archive and detached signature, Rust verifies
 the pinned signer and package identity, retains the exact resolution, and
 reverifies the full closure before reporting it. The resulting canonical
@@ -110,8 +112,9 @@ atomically publishes a closure-bound root manifest. It also derives a
 Builder-private pacman local index from each already signed package's exact
 `.PKGINFO`, including the versioned ALPM database marker; this lets unmodified
 makepkg record the real build closure without borrowing shared-root state. The
-current Samsung Code gate provisions all 152 packages, 48,271 verified archive
-entries, and 1,221,416,416 expanded bytes without changing the shared root.
+current Samsung Code gate provisions all 250 packages, 66,878 verified archive
+entries, and 1,744,478,772 expanded bytes before the separately authorized
+shared-root install.
 
 The Builder APK also carries only the content-addressed patched loader,
 loader dependencies, and path bridge needed to enter that root; it does not
@@ -141,10 +144,17 @@ published root containing executable `bash`, `makepkg`, and `fakeroot`, stale
 same-UID cleanup, explicit Build approval, bounded process-group execution,
 live logs, cancellation plumbing, and normal reap. The current Code output has
 exact name/version/AArch64 metadata, a 1,079,048,720-byte installed size, and a
-`.BUILDINFO` set equal to the 152-package signed closure. That inspection is
-still a test-side assertion: hostile output enumeration, Rust verification,
-manager-owned descriptor copying, manager-side re-verification, and
-installation remain disabled.
+`.BUILDINFO` set equal to the 250-package signed closure. Builder Rust enumerates
+the output with no-follow directory descriptors, rejects substitutions, links,
+unexpected archives, unsafe tar entries, and mismatched `.PKGINFO` or
+`.BUILDINFO`, then copies only the selected archive through a manager-owned
+descriptor while hashing it. The manager independently applies the same
+verifier to the copied archive and retained closure. It installs signed
+official runtime dependencies, atomically retains the verified AUR archive by
+SHA-256, and commits that local archive through pacman with scriptlets disabled
+and exact plan/version postconditions. The physical Samsung gate completed this
+path for current `visual-studio-code-bin`, retaining SHA-256
+`51e44c87e8ffbe9b7f3c441bfad6ab8e2fdff1d9f0402d0fa27b94d9a11d3c5c`.
 
 ### Thin launcher application
 

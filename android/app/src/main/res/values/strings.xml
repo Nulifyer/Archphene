@@ -35,6 +35,8 @@
     <string name="verify_sources_description">Download and verify reviewed AUR sources</string>
     <string name="build">Build</string>
     <string name="build_aur_description">Build the exact verified AUR package offline</string>
+    <string name="built">Built</string>
+    <string name="built_aur_description">The verified AUR package is ready to install</string>
     <string name="install">Install</string>
     <string name="remove">Remove</string>
     <string name="cancel">Cancel</string>

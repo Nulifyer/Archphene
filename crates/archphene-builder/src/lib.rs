@@ -56,6 +56,8 @@ const MAX_REVIEWED_INPUT_MANIFEST_BYTES: usize = 16 * 1024;
 const MAX_RECIPE_ENTRIES: u64 = 128;
 const MAX_RECIPE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_PACKAGE_INFO_BYTES: usize = 64 * 1024;
+const MAX_BUILD_INFO_BYTES: usize = 256 * 1024;
+const MAX_BUILT_PACKAGES: usize = 32;
 const EXPECTED_MANIFEST_NAME: &str = "expected-manifest";
 const PUBLISHED_MANIFEST_NAME: &str = "manifest";
 const SESSION_MANIFEST_NAME: &str = "session";
@@ -215,6 +217,15 @@ pub struct RecipeWorkspace {
 
 pub struct AurBuildSession {
     process: Box<BatchProcess>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BuiltPackageReport {
+    pub filename: String,
+    pub archive_bytes: u64,
+    pub installed_bytes: u64,
+    pub sha256: [u8; 32],
+    pub build_package_count: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -846,6 +857,501 @@ impl AurBuildSession {
     pub fn cancel(&mut self) {
         self.process.close();
     }
+}
+
+#[derive(Debug)]
+struct BuiltPackageMetadata {
+    name: String,
+    installed_bytes: u64,
+    build_package_count: usize,
+}
+
+pub fn verify_and_copy_built_package(
+    files_directory: &Path,
+    package_base: &str,
+    package_name: &str,
+    version: &str,
+    architecture: &str,
+    expected_closure_sha256: [u8; 32],
+    output: &mut File,
+) -> Result<BuiltPackageReport, BuilderError> {
+    terminate_stale_builder_processes()?;
+    if !safe_name(package_base)
+        || !safe_name(package_name)
+        || version.is_empty()
+        || version.len() > 128
+        || version.bytes().any(|byte| !(0x21..=0x7e).contains(&byte))
+        || !matches!(architecture, "aarch64" | "x86_64")
+    {
+        return Err(BuilderError::InvalidArgument);
+    }
+    let output_metadata = output.metadata()?;
+    if !output_metadata.is_file() {
+        return Err(BuilderError::InvalidInput);
+    }
+    output.set_len(0)?;
+    output.seek(SeekFrom::Start(0))?;
+
+    let files = openat(
+        CWD,
+        files_directory,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let workspace = open_directory(&files, WORKSPACE_NAME)?;
+    let closure = open_directory(&workspace, CLOSURE_NAME)?;
+    let manifest = read_bounded_regular_file(
+        &closure,
+        PUBLISHED_MANIFEST_NAME,
+        MAX_CLOSURE_MANIFEST_BYTES,
+    )?;
+    if sha256_bytes(&manifest) != expected_closure_sha256 {
+        return Err(BuilderError::InvalidInput);
+    }
+    let expected_packages = parse_manifest(&manifest)?;
+    let root = open_directory(&workspace, BUILD_ROOT_NAME)?;
+    let home = open_directory(&root, "home")?;
+    let archphene = open_directory(&home, "archphene")?;
+    let build = open_directory(&archphene, BUILD_SESSION_NAME)?;
+    let recipe = open_directory(&build, package_base)?;
+
+    let mut package_names = Vec::<CString>::new();
+    for entry in Dir::read_from(&recipe)? {
+        let entry = entry?;
+        let raw = entry.file_name().to_bytes();
+        if raw == b"." || raw == b".." {
+            continue;
+        }
+        if raw.is_empty() || raw.len() > 240 || raw.contains(&b'/') || raw.contains(&0) {
+            return Err(BuilderError::UnsafeWorkspace);
+        }
+        let Ok(name) = std::str::from_utf8(raw) else {
+            return Err(BuilderError::UnsafeWorkspace);
+        };
+        if !name.contains(".pkg.tar.") {
+            continue;
+        }
+        if !safe_filename(name) || package_names.len() >= MAX_BUILT_PACKAGES {
+            return Err(BuilderError::InvalidArchive);
+        }
+        package_names.push(CString::new(raw).map_err(|_| BuilderError::UnsafeWorkspace)?);
+    }
+    if package_names.is_empty() {
+        return Err(BuilderError::InvalidArchive);
+    }
+    package_names.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+
+    let mut selected = None;
+    let mut seen_output_names = Vec::<String>::with_capacity(package_names.len());
+    for archive_name in package_names {
+        let descriptor = openat(
+            &recipe,
+            &archive_name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        let mut archive = File::from(descriptor);
+        let metadata = archive.metadata()?;
+        if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_ARCHIVE_BYTES {
+            return Err(BuilderError::InvalidArchive);
+        }
+        let archive_name = archive_name
+            .to_str()
+            .map_err(|_| BuilderError::InvalidArchive)?
+            .to_owned();
+        let built = inspect_built_package_archive(
+            &mut archive,
+            &archive_name,
+            package_base,
+            version,
+            architecture,
+            &expected_packages,
+        )?;
+        if seen_output_names.iter().any(|name| name == &built.name) {
+            return Err(BuilderError::InvalidArchive);
+        }
+        seen_output_names.push(built.name.clone());
+        if built.name == package_name {
+            if selected.is_some() {
+                return Err(BuilderError::InvalidArchive);
+            }
+            selected = Some((archive_name, archive, metadata.len(), built));
+        }
+    }
+    let Some((filename, mut archive, archive_bytes, metadata)) = selected else {
+        return Err(BuilderError::InvalidArchive);
+    };
+
+    let result = (|| {
+        archive.seek(SeekFrom::Start(0))?;
+        let mut digest = Sha256::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        let mut total = 0_u64;
+        loop {
+            let count = archive.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            total = total
+                .checked_add(count as u64)
+                .ok_or(BuilderError::OutputLimit)?;
+            if total > archive_bytes {
+                return Err(BuilderError::InvalidArchive);
+            }
+            digest.update(&buffer[..count]);
+            output.write_all(&buffer[..count])?;
+        }
+        if total != archive_bytes {
+            return Err(BuilderError::InvalidArchive);
+        }
+        output.sync_all()?;
+        output.seek(SeekFrom::Start(0))?;
+        Ok(BuiltPackageReport {
+            filename,
+            archive_bytes,
+            installed_bytes: metadata.installed_bytes,
+            sha256: digest.finalize().into(),
+            build_package_count: metadata.build_package_count,
+        })
+    })();
+    if result.is_err() {
+        let _ = output.set_len(0);
+        let _ = output.seek(SeekFrom::Start(0));
+    }
+    result
+}
+
+pub fn verify_copied_built_package(
+    archive: &mut File,
+    filename: &str,
+    package_base: &str,
+    package_name: &str,
+    version: &str,
+    architecture: &str,
+    closure_manifest: &[u8],
+    expected_closure_sha256: [u8; 32],
+) -> Result<BuiltPackageReport, BuilderError> {
+    if !safe_name(package_base)
+        || !safe_name(package_name)
+        || !safe_filename(filename)
+        || version.is_empty()
+        || version.len() > 128
+        || version.bytes().any(|byte| !(0x21..=0x7e).contains(&byte))
+        || !matches!(architecture, "aarch64" | "x86_64")
+        || closure_manifest.is_empty()
+        || closure_manifest.len() > MAX_CLOSURE_MANIFEST_BYTES
+        || sha256_bytes(closure_manifest) != expected_closure_sha256
+    {
+        return Err(BuilderError::InvalidInput);
+    }
+    let metadata = archive.metadata()?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_ARCHIVE_BYTES {
+        return Err(BuilderError::InvalidArchive);
+    }
+    let expected_packages = parse_manifest(closure_manifest)?;
+    let built = inspect_built_package_archive(
+        archive,
+        filename,
+        package_base,
+        version,
+        architecture,
+        &expected_packages,
+    )?;
+    if built.name != package_name {
+        return Err(BuilderError::InvalidArchive);
+    }
+    archive.seek(SeekFrom::Start(0))?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut total = 0_u64;
+    loop {
+        let count = archive.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        total = total
+            .checked_add(count as u64)
+            .ok_or(BuilderError::OutputLimit)?;
+        if total > metadata.len() {
+            return Err(BuilderError::InvalidArchive);
+        }
+        digest.update(&buffer[..count]);
+    }
+    if total != metadata.len() {
+        return Err(BuilderError::InvalidArchive);
+    }
+    archive.seek(SeekFrom::Start(0))?;
+    Ok(BuiltPackageReport {
+        filename: filename.to_owned(),
+        archive_bytes: total,
+        installed_bytes: built.installed_bytes,
+        sha256: digest.finalize().into(),
+        build_package_count: built.build_package_count,
+    })
+}
+
+fn inspect_built_package_archive(
+    archive: &mut File,
+    filename: &str,
+    expected_base: &str,
+    expected_version: &str,
+    expected_architecture: &str,
+    expected_packages: &[ExpectedPackage],
+) -> Result<BuiltPackageMetadata, BuilderError> {
+    archive.seek(SeekFrom::Start(0))?;
+    if filename.ends_with(".pkg.tar.xz") {
+        inspect_built_package_tar(
+            XzDecoder::new(archive),
+            filename,
+            expected_base,
+            expected_version,
+            expected_architecture,
+            expected_packages,
+        )
+    } else if filename.ends_with(".pkg.tar.zst") {
+        let decoder = zstd::stream::read::Decoder::new(archive)?;
+        inspect_built_package_tar(
+            decoder,
+            filename,
+            expected_base,
+            expected_version,
+            expected_architecture,
+            expected_packages,
+        )
+    } else {
+        Err(BuilderError::InvalidArchive)
+    }
+}
+
+fn inspect_built_package_tar(
+    reader: impl Read,
+    filename: &str,
+    expected_base: &str,
+    expected_version: &str,
+    expected_architecture: &str,
+    expected_packages: &[ExpectedPackage],
+) -> Result<BuiltPackageMetadata, BuilderError> {
+    let mut archive = Archive::new(reader);
+    let mut package_info = None;
+    let mut build_info = None;
+    let mut entry_count = 0_u64;
+    let mut expanded_bytes = 0_u64;
+    for entry in archive.entries()? {
+        let entry = entry?;
+        let path = entry.path()?.into_owned();
+        validate_archive_path(&path)?;
+        let entry_type = entry.header().entry_type();
+        validate_archive_entry_type(entry_type)?;
+        entry_count = checked_entries(entry_count, 1)?;
+        if entry_type.is_file() {
+            let bytes = entry.header().size()?;
+            if bytes > MAX_ARCHIVE_ENTRY_BYTES {
+                return Err(BuilderError::OutputLimit);
+            }
+            expanded_bytes = checked_expanded_bytes(expanded_bytes, bytes)?;
+        } else if entry_type.is_symlink() || entry_type.is_hard_link() {
+            let target = entry
+                .link_name()?
+                .ok_or(BuilderError::InvalidArchive)?
+                .into_owned();
+            validate_archive_link(&target, entry_type.is_hard_link())?;
+        }
+        let target = match path.as_os_str().as_bytes() {
+            b".PKGINFO" => (&mut package_info, MAX_PACKAGE_INFO_BYTES),
+            b".BUILDINFO" => (&mut build_info, MAX_BUILD_INFO_BYTES),
+            _ => continue,
+        };
+        if target.0.is_some()
+            || !entry_type.is_file()
+            || entry.header().size()? == 0
+            || entry.header().size()? > target.1 as u64
+        {
+            return Err(BuilderError::InvalidArchive);
+        }
+        let mut bytes = Vec::with_capacity(entry.header().size()? as usize);
+        entry.take((target.1 + 1) as u64).read_to_end(&mut bytes)?;
+        if bytes.is_empty() || bytes.len() > target.1 {
+            return Err(BuilderError::InvalidArchive);
+        }
+        *target.0 = Some(bytes);
+    }
+    if entry_count == 0 || expanded_bytes == 0 {
+        return Err(BuilderError::InvalidArchive);
+    }
+    let package_info = package_info.ok_or(BuilderError::InvalidArchive)?;
+    let build_info = build_info.ok_or(BuilderError::InvalidArchive)?;
+    let (name, installed_bytes) = validate_built_package_info(
+        &package_info,
+        filename,
+        expected_base,
+        expected_version,
+        expected_architecture,
+    )?;
+    let build_package_count = validate_built_build_info(
+        &build_info,
+        &name,
+        expected_base,
+        expected_version,
+        expected_architecture,
+        expected_packages,
+    )?;
+    Ok(BuiltPackageMetadata {
+        name,
+        installed_bytes,
+        build_package_count,
+    })
+}
+
+fn validate_built_package_info(
+    package_info: &[u8],
+    filename: &str,
+    expected_base: &str,
+    expected_version: &str,
+    expected_architecture: &str,
+) -> Result<(String, u64), BuilderError> {
+    let text = std::str::from_utf8(package_info).map_err(|_| BuilderError::InvalidArchive)?;
+    let mut name = None;
+    let mut base = None;
+    let mut version = None;
+    let mut architecture = None;
+    let mut installed_bytes = None;
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once(" = ") else {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            return Err(BuilderError::InvalidArchive);
+        };
+        let destination = match key {
+            "pkgname" => Some(&mut name),
+            "pkgbase" => Some(&mut base),
+            "pkgver" => Some(&mut version),
+            "arch" => Some(&mut architecture),
+            _ => None,
+        };
+        if let Some(destination) = destination
+            && destination.replace(value).is_some()
+        {
+            return Err(BuilderError::InvalidArchive);
+        }
+        if key == "size"
+            && installed_bytes
+                .replace(
+                    value
+                        .parse::<u64>()
+                        .map_err(|_| BuilderError::InvalidArchive)?,
+                )
+                .is_some()
+        {
+            return Err(BuilderError::InvalidArchive);
+        }
+    }
+    let name = name.ok_or(BuilderError::InvalidArchive)?;
+    let installed_bytes = installed_bytes.ok_or(BuilderError::InvalidArchive)?;
+    if !safe_name(name)
+        || base != Some(expected_base)
+        || version != Some(expected_version)
+        || architecture != Some(expected_architecture)
+        || installed_bytes == 0
+        || installed_bytes > MAX_EXPANDED_BYTES
+    {
+        return Err(BuilderError::InvalidArchive);
+    }
+    let suffix = if filename.ends_with(".pkg.tar.xz") {
+        ".pkg.tar.xz"
+    } else if filename.ends_with(".pkg.tar.zst") {
+        ".pkg.tar.zst"
+    } else {
+        return Err(BuilderError::InvalidArchive);
+    };
+    if filename.strip_suffix(suffix)
+        != Some(format!("{name}-{expected_version}-{expected_architecture}").as_str())
+    {
+        return Err(BuilderError::InvalidArchive);
+    }
+    Ok((name.to_owned(), installed_bytes))
+}
+
+fn validate_built_build_info(
+    build_info: &[u8],
+    expected_name: &str,
+    expected_base: &str,
+    expected_version: &str,
+    expected_architecture: &str,
+    expected_packages: &[ExpectedPackage],
+) -> Result<usize, BuilderError> {
+    let text = std::str::from_utf8(build_info).map_err(|_| BuilderError::InvalidArchive)?;
+    let mut format = None;
+    let mut name = None;
+    let mut base = None;
+    let mut version = None;
+    let mut architecture = None;
+    let mut installed = Vec::<String>::with_capacity(expected_packages.len());
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once(" = ") else {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            return Err(BuilderError::InvalidArchive);
+        };
+        let destination = match key {
+            "format" => Some(&mut format),
+            "pkgname" => Some(&mut name),
+            "pkgbase" => Some(&mut base),
+            "pkgver" => Some(&mut version),
+            "pkgarch" => Some(&mut architecture),
+            _ => None,
+        };
+        if let Some(destination) = destination
+            && destination.replace(value).is_some()
+        {
+            return Err(BuilderError::InvalidArchive);
+        }
+        if key == "installed" {
+            if value.is_empty()
+                || value.len() > 384
+                || value.bytes().any(|byte| {
+                    !(byte.is_ascii_alphanumeric()
+                        || matches!(byte, b'@' | b'+' | b':' | b'.' | b'_' | b'-'))
+                })
+                || installed.len() >= MAX_CLOSURE_PACKAGES
+            {
+                return Err(BuilderError::InvalidArchive);
+            }
+            installed.push(value.to_owned());
+        }
+    }
+    if format != Some("2")
+        || name != Some(expected_name)
+        || base != Some(expected_base)
+        || version != Some(expected_version)
+        || architecture != Some(expected_architecture)
+    {
+        return Err(BuilderError::InvalidArchive);
+    }
+    let mut expected = Vec::<String>::with_capacity(expected_packages.len());
+    for package in expected_packages {
+        let package_architecture =
+            package_filename_architecture(&package.filename).ok_or(BuilderError::InvalidArchive)?;
+        expected.push(format!(
+            "{}-{}-{package_architecture}",
+            package.name, package.version,
+        ));
+    }
+    installed.sort();
+    expected.sort();
+    if installed != expected {
+        return Err(BuilderError::InvalidArchive);
+    }
+    Ok(installed.len())
+}
+
+fn package_filename_architecture(filename: &str) -> Option<&str> {
+    let stem = filename
+        .strip_suffix(".pkg.tar.xz")
+        .or_else(|| filename.strip_suffix(".pkg.tar.zst"))?;
+    let architecture = stem.rsplit_once('-')?.1;
+    matches!(architecture, "any" | "aarch64" | "x86_64").then_some(architecture)
 }
 
 pub fn prepare_recipe_workspace(
@@ -2251,6 +2757,8 @@ mod android {
     const BUILD_POLL_LOG_BYTES: usize = 64 * 1024;
     const BUILD_POLL_OUTPUT_BYTES: usize = BUILD_POLL_HEADER_BYTES + BUILD_POLL_LOG_BYTES;
     const BUILD_POLL_MAGIC: &[u8; 8] = b"ABBP0001";
+    const BUILT_PACKAGE_REPORT_BYTES: usize = 304;
+    const BUILT_PACKAGE_REPORT_MAGIC: &[u8; 8] = b"ABOP0001";
     const RUNTIME_OUTPUT_BYTES: usize = 16 * 1024;
 
     static REVIEWED_INPUTS: OnceLock<Mutex<Option<ReviewedInputSession>>> = OnceLock::new();
@@ -3012,6 +3520,86 @@ mod android {
             Err(_) => JNI_FALSE,
         }
     }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_builder_NativeBuilder_nativeVerifyAndCopyBuiltPackage(
+        mut environment: JNIEnv,
+        _class: JClass,
+        files_directory: JString,
+        package_base: JString,
+        package_name: JString,
+        version: JString,
+        architecture: JString,
+        closure_sha256: JString,
+        output_descriptor: jint,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let (
+            Ok(files_directory),
+            Ok(package_base),
+            Ok(package_name),
+            Ok(version),
+            Ok(architecture),
+            Ok(closure_sha256),
+        ) = (
+            java_string(&mut environment, &files_directory),
+            java_string(&mut environment, &package_base),
+            java_string(&mut environment, &package_name),
+            java_string(&mut environment, &version),
+            java_string(&mut environment, &architecture),
+            java_string(&mut environment, &closure_sha256),
+        )
+        else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(closure_sha256) = parse_sha256(&closure_sha256) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let (Ok(capacity), Ok(address), Ok(mut output_file)) = (
+            environment.get_direct_buffer_capacity(&output_buffer),
+            environment.get_direct_buffer_address(&output_buffer),
+            duplicate_file(output_descriptor),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if capacity < BUILT_PACKAGE_REPORT_BYTES || address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        // SAFETY: JNI verified the direct diagnostic/report buffer capacity.
+        let output = unsafe { slice::from_raw_parts_mut(address, capacity) };
+        output.fill(0);
+        match super::verify_and_copy_built_package(
+            Path::new(&files_directory),
+            &package_base,
+            &package_name,
+            &version,
+            &architecture,
+            closure_sha256,
+            &mut output_file,
+        ) {
+            Ok(report) => {
+                let Ok(build_package_count) = u32::try_from(report.build_package_count) else {
+                    return ERROR_BUILDER;
+                };
+                let filename = report.filename.as_bytes();
+                let Ok(filename_length) = u32::try_from(filename.len()) else {
+                    return ERROR_BUILDER;
+                };
+                if filename.is_empty() || filename.len() > BUILT_PACKAGE_REPORT_BYTES - 64 {
+                    return ERROR_BUILDER;
+                }
+                output[..8].copy_from_slice(BUILT_PACKAGE_REPORT_MAGIC);
+                output[8..16].copy_from_slice(&report.archive_bytes.to_le_bytes());
+                output[16..24].copy_from_slice(&report.installed_bytes.to_le_bytes());
+                output[24..28].copy_from_slice(&build_package_count.to_le_bytes());
+                output[28..32].copy_from_slice(&filename_length.to_le_bytes());
+                output[32..64].copy_from_slice(&report.sha256);
+                output[64..64 + filename.len()].copy_from_slice(filename);
+                i32::try_from(64 + filename.len()).unwrap_or(ERROR_BUILDER)
+            }
+            Err(error) => copy_builder_error(&error, output),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3019,7 +3607,7 @@ mod tests {
     use super::*;
     use flate2::Compression;
     use flate2::write::GzEncoder;
-    use std::fs;
+    use std::fs::{self, OpenOptions};
     use std::io::Cursor;
     use std::sync::atomic::{AtomicU64, Ordering};
     use tar::Header;
@@ -3128,6 +3716,59 @@ summary\t1\t{}\n",
             )
             .expect("stage package");
         session.finish().expect("publish closure");
+        digest
+    }
+
+    fn built_package_archive(installed: &str) -> Vec<u8> {
+        let encoder = XzEncoder::new(Vec::new(), 6);
+        let mut builder = tar::Builder::new(encoder);
+        builder.mode(tar::HeaderMode::Deterministic);
+        append_file(
+            &mut builder,
+            ".BUILDINFO",
+            0o644,
+            format!(
+                "format = 2\n\
+                 pkgname = example-bin\n\
+                 pkgbase = example-bin\n\
+                 pkgver = 1.2.3-1\n\
+                 pkgarch = aarch64\n\
+                 installed = {installed}\n",
+            )
+            .as_bytes(),
+        );
+        append_file(
+            &mut builder,
+            ".PKGINFO",
+            0o644,
+            b"pkgname = example-bin\n\
+              pkgbase = example-bin\n\
+              pkgver = 1.2.3-1\n\
+              size = 7\n\
+              arch = aarch64\n",
+        );
+        append_file(&mut builder, "usr/bin/example", 0o755, b"example");
+        let encoder = builder.into_inner().expect("finish tar archive");
+        encoder.finish().expect("finish xz archive")
+    }
+
+    fn built_output_fixture(directory: &Path, archive: &[u8]) -> [u8; 32] {
+        let closure_archive = package_archive(|builder| {
+            append_file(builder, "usr/bin/build-tool", 0o755, b"tool\n");
+        });
+        let digest = stage_fixture_closure(directory, &closure_archive, b"signature");
+        let root = directory.join(WORKSPACE_NAME).join(BUILD_ROOT_NAME);
+        ArchRoot::bootstrap(&root).expect("build root");
+        let recipe = root
+            .join("home/archphene")
+            .join(BUILD_SESSION_NAME)
+            .join("example-bin");
+        fs::create_dir_all(&recipe).expect("recipe directory");
+        fs::write(
+            recipe.join("example-bin-1.2.3-1-aarch64.pkg.tar.xz"),
+            archive,
+        )
+        .expect("built package");
         digest
     }
 
@@ -3615,6 +4256,115 @@ summary\t1\t{}\n",
         .expect("published root manifest");
         assert!(root_manifest.starts_with("ABBR0001\nclosure="));
         assert!(root_manifest.contains("\npackages=1\n"));
+        fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn verifies_and_copies_only_exact_provenanced_build_output() {
+        let directory = test_directory();
+        let archive = built_package_archive("base-devel-1-1-any");
+        let closure = built_output_fixture(&directory, &archive);
+        let destination = directory.join("manager-output");
+        let mut output = OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&destination)
+            .expect("manager output");
+        let report = verify_and_copy_built_package(
+            &directory,
+            "example-bin",
+            "example-bin",
+            "1.2.3-1",
+            "aarch64",
+            closure,
+            &mut output,
+        )
+        .expect("verified built output");
+        assert_eq!(report.filename, "example-bin-1.2.3-1-aarch64.pkg.tar.xz");
+        assert_eq!(report.archive_bytes, archive.len() as u64);
+        assert_eq!(report.installed_bytes, 7);
+        assert_eq!(report.sha256, sha256_bytes(&archive));
+        assert_eq!(report.build_package_count, 1);
+        assert_eq!(fs::read(destination).expect("copied output"), archive);
+        let manifest = fs::read(
+            directory
+                .join(WORKSPACE_NAME)
+                .join(CLOSURE_NAME)
+                .join(PUBLISHED_MANIFEST_NAME),
+        )
+        .expect("retained manager closure");
+        let manager_report = verify_copied_built_package(
+            &mut output,
+            &report.filename,
+            "example-bin",
+            "example-bin",
+            "1.2.3-1",
+            "aarch64",
+            &manifest,
+            closure,
+        )
+        .expect("manager independently verified output");
+        assert_eq!(manager_report.archive_bytes, report.archive_bytes);
+        assert_eq!(manager_report.installed_bytes, report.installed_bytes);
+        assert_eq!(manager_report.sha256, report.sha256);
+        assert_eq!(
+            manager_report.build_package_count,
+            report.build_package_count
+        );
+        fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn rejects_output_that_omits_the_exact_signed_build_closure() {
+        let directory = test_directory();
+        let archive = built_package_archive("substituted-9-9-aarch64");
+        let closure = built_output_fixture(&directory, &archive);
+        let destination = directory.join("manager-output");
+        let mut output = File::create(&destination).expect("manager output");
+        assert!(
+            verify_and_copy_built_package(
+                &directory,
+                "example-bin",
+                "example-bin",
+                "1.2.3-1",
+                "aarch64",
+                closure,
+                &mut output,
+            )
+            .is_err(),
+        );
+        assert_eq!(fs::metadata(destination).expect("empty output").len(), 0);
+        fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn rejects_a_symlink_substituted_build_output() {
+        let directory = test_directory();
+        let archive = built_package_archive("base-devel-1-1-any");
+        let closure = built_output_fixture(&directory, &archive);
+        let recipe = directory
+            .join(WORKSPACE_NAME)
+            .join(BUILD_ROOT_NAME)
+            .join("home/archphene")
+            .join(BUILD_SESSION_NAME)
+            .join("example-bin");
+        let package = recipe.join("example-bin-1.2.3-1-aarch64.pkg.tar.xz");
+        fs::remove_file(&package).expect("remove package");
+        std::os::unix::fs::symlink("/outside", &package).expect("hostile package link");
+        let mut output = File::create(directory.join("manager-output")).expect("manager output");
+        assert!(
+            verify_and_copy_built_package(
+                &directory,
+                "example-bin",
+                "example-bin",
+                "1.2.3-1",
+                "aarch64",
+                closure,
+                &mut output,
+            )
+            .is_err(),
+        );
         fs::remove_dir_all(directory).expect("cleanup");
     }
 

@@ -32,6 +32,8 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
+import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.net.URL
 import java.security.MessageDigest
 import java.time.Instant
@@ -123,6 +125,17 @@ class ArchpheneRuntimeService : Service() {
         val aurBuildAvailable: Boolean
             get() =
                 retainedAurBuilderReport?.packageName != null &&
+                    retainedAurReview != null &&
+                    retainedAurBuiltPackage == null &&
+                    readyHandle != 0L &&
+                    !catalogRefreshActive &&
+                    !searchActive &&
+                    !packageOperationActive &&
+                    !commandActive
+
+        val aurInstallAvailable: Boolean
+            get() =
+                retainedAurBuiltPackage != null &&
                     retainedAurReview != null &&
                     readyHandle != 0L &&
                     !catalogRefreshActive &&
@@ -236,7 +249,19 @@ class ArchpheneRuntimeService : Service() {
                     !searchActive &&
                     !packageOperationActive &&
                     !commandActive &&
-                    !terminalJobRequiresReview(lastResolvedPackage)
+                    (
+                        (
+                            lastResolvedRepository != "aur" &&
+                                !terminalJobRequiresReview(lastResolvedPackage)
+                        ) ||
+                            (
+                                retainedAurBuiltPackage != null &&
+                                    retainedAurReview?.packageName == lastResolvedPackage
+                            )
+                    )
+
+        val packageTerminalActivityVisible: Boolean
+            get() = !searchActive && !aurBuildActive
 
         val packageRemoveAvailable: Boolean
             get() =
@@ -406,7 +431,14 @@ class ArchpheneRuntimeService : Service() {
         fun cancelAurBuild(): Boolean = requestAurBuildCancellation()
 
         fun installPackage(packageName: String): Boolean =
-            requestPackageInstall(packageName)
+            if (
+                retainedAurBuiltPackage != null &&
+                retainedAurReview?.packageName == packageName.trim()
+            ) {
+                requestAurPackageInstall(packageName)
+            } else {
+                requestPackageInstall(packageName)
+            }
 
         fun removePackage(packageName: String): Boolean =
             requestPackageRemoval(packageName)
@@ -515,6 +547,7 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var retainedAurVerifiedBytes = 0L
     @Volatile private var retainedAurSourceEvidence: Array<AurSourceEvidence> = emptyArray()
     @Volatile private var retainedAurBuilderReport: AurBuilderReport? = null
+    @Volatile private var retainedAurBuiltPackage: AurBuiltPackage? = null
     @Volatile private var aurBuildActive = false
     @Volatile private var aurBuildCancelable = false
     @Volatile private var aurBuildCancellationRequested = false
@@ -693,6 +726,16 @@ class ArchpheneRuntimeService : Service() {
 
     private data class AurBuildPoll(
         val exitStatus: Int,
+        val logs: String,
+    )
+
+    private data class AurBuiltPackage(
+        val filename: String,
+        val archiveBytes: Long,
+        val installedBytes: Long,
+        val buildPackageCount: Int,
+        val sha256: String,
+        val file: File,
         val logs: String,
     )
 
@@ -1000,6 +1043,7 @@ class ArchpheneRuntimeService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        removeStaleAurBuildOutputs()
         createSessionNotificationChannel()
         if (NativeRuntime.nativeProtocolVersion() != NativeRuntime.PROTOCOL_VERSION) {
             Log.e(TAG, "Native protocol version mismatch")
@@ -1013,6 +1057,32 @@ class ArchpheneRuntimeService : Service() {
             return
         }
         startBootstrap(handle)
+    }
+
+    private fun removeStaleAurBuildOutputs() {
+        var removed = 0
+        try {
+            Files.newDirectoryStream(cacheDir.toPath(), AUR_BUILD_OUTPUT_GLOB).use { entries ->
+                for (path in entries) {
+                    if (removed >= MAX_STALE_AUR_BUILD_OUTPUTS) {
+                        Log.w(TAG, "Stopped bounded stale AUR output cleanup")
+                        break
+                    }
+                    if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
+                        Log.w(TAG, "Ignored unsafe stale AUR output: ${path.fileName}")
+                        continue
+                    }
+                    if (Files.deleteIfExists(path)) {
+                        removed++
+                    }
+                }
+            }
+        } catch (error: Exception) {
+            Log.w(TAG, "Could not clean stale AUR build output", error)
+        }
+        if (removed != 0) {
+            Log.i(TAG, "Removed $removed stale AUR build output files")
+        }
     }
 
     @Synchronized
@@ -1285,6 +1355,8 @@ class ArchpheneRuntimeService : Service() {
         private const val AVAILABLE_PACKAGE_LIMIT = 100
         private val AUR_PACKAGE_NAME = Regex("[A-Za-z0-9@+._-]{1,128}")
         private val AUR_SOURCE_FILENAME = Regex("[A-Za-z0-9@+,._-]{1,240}")
+        private val AUR_BUILT_PACKAGE_FILENAME =
+            Regex("[A-Za-z0-9@+:._-]{1,240}\\.pkg\\.tar\\.(xz|zst)")
         private val SHA256_HEX = Regex("[0-9a-f]{64}")
         private const val HEX_DIGITS = "0123456789abcdef"
         private const val AUR_BUILDER_INPUT_SNAPSHOT = 0
@@ -1315,9 +1387,13 @@ class ArchpheneRuntimeService : Service() {
             IBinder.FIRST_CALL_TRANSACTION + 12
         private const val AUR_BUILDER_TRANSACTION_CANCEL_BUILD =
             IBinder.FIRST_CALL_TRANSACTION + 13
+        private const val AUR_BUILDER_TRANSACTION_VERIFY_OUTPUT =
+            IBinder.FIRST_CALL_TRANSACTION + 14
         private const val AUR_BUILDER_PACKAGE_BATCH = 8
         private const val AUR_BUILD_POLL_MILLIS = 100L
         private const val AUR_BUILD_VISIBLE_LOG_CHARACTERS = 8 * 1024
+        private const val AUR_BUILD_OUTPUT_GLOB = ".aur-*.pkg"
+        private const val MAX_STALE_AUR_BUILD_OUTPUTS = 64
         private const val AUR_REDIRECT_LIMIT = 5
         private const val AUR_STORAGE_RESERVE_BYTES = 64L * 1024 * 1024
         private const val AUR_TOTAL_SOURCE_MAX_BYTES = 8L * 1024 * 1024 * 1024
@@ -3767,6 +3843,8 @@ class ArchpheneRuntimeService : Service() {
         retainedAurVerifiedBytes = 0L
         retainedAurSourceEvidence = emptyArray()
         retainedAurBuilderReport = null
+        retainedAurBuiltPackage?.file?.delete()
+        retainedAurBuiltPackage = null
         searchStatus = "Searching for $normalized"
         publishAvailablePackageStatus(searchStatus)
         Thread(
@@ -4002,9 +4080,47 @@ class ArchpheneRuntimeService : Service() {
                         "Resolved $normalized: ${packages.size} packages, $totalBytes bytes",
                     )
                 } catch (error: Exception) {
-                    searchStatus =
-                        "Package resolution failed: ${error.message ?: error.javaClass.simpleName}"
-                    Log.e(TAG, "Package resolution failed", error)
+                    val installedVersion =
+                        runCatching {
+                            installedPackageVersion(activeHandle, normalized)
+                        }.getOrDefault("")
+                    val installedOrigin =
+                        if (installedVersion.isEmpty()) {
+                            ""
+                        } else {
+                            runCatching {
+                                installedPackageOrigin(activeHandle, normalized)
+                            }.getOrDefault("")
+                        }
+                    if (installedOrigin == "aur") {
+                        lastResolvedPackage = normalized
+                        lastResolvedRepository = "aur"
+                        lastResolvedInstalledVersion = installedVersion
+                        lastResolvedAvailableVersion = installedVersion
+                        primaryActionLabel = "Installed"
+                        removeAvailable = true
+                        val removalRetry =
+                            normalized == jobPackage &&
+                                (
+                                    jobState == NativeRuntime.JOB_FAILED ||
+                                        jobState == NativeRuntime.JOB_CANCELLED
+                                ) &&
+                                jobOperation == NativeRuntime.JOB_OPERATION_REMOVE
+                        removeActionLabel = if (removalRetry) "Retry" else "Remove"
+                        if (removalRetry) {
+                            recoveryReviewedJobRevision = jobRevision
+                        }
+                        searchStatus =
+                            "aur/$normalized $installedVersion\n" +
+                                "Installed from a locally verified AUR build\n" +
+                                "Review AUR to check the current available version"
+                        Log.i(TAG, "Resolved installed AUR package $normalized $installedVersion")
+                    } else {
+                        searchStatus =
+                            "Package resolution failed: " +
+                                (error.message ?: error.javaClass.simpleName)
+                        Log.e(TAG, "Package resolution failed", error)
+                    }
                 } finally {
                     searchActive = false
                     stopWhenUnobservedAndIdle()
@@ -4039,6 +4155,8 @@ class ArchpheneRuntimeService : Service() {
         retainedAurVerifiedBytes = 0L
         retainedAurSourceEvidence = emptyArray()
         retainedAurBuilderReport = null
+        retainedAurBuiltPackage?.file?.delete()
+        retainedAurBuiltPackage = null
         lastResolvedPackage = ""
         lastResolvedRepository = ""
         lastResolvedInstalledVersion = ""
@@ -4243,6 +4361,8 @@ class ArchpheneRuntimeService : Service() {
         retainedAurVerifiedBytes = 0L
         retainedAurSourceEvidence = emptyArray()
         retainedAurBuilderReport = null
+        retainedAurBuiltPackage?.file?.delete()
+        retainedAurBuiltPackage = null
         searchStatus = "Preparing ${remoteSources.size} reviewed AUR source download(s)"
         Thread(
             {
@@ -4441,21 +4561,33 @@ class ArchpheneRuntimeService : Service() {
         aurBuildActive = true
         aurBuildCancelable = true
         aurBuildCancellationRequested = false
+        retainedAurBuiltPackage?.file?.delete()
+        retainedAurBuiltPackage = null
         searchStatus = "Starting isolated offline build for ${review.packageName}"
         Thread(
             {
                 try {
                     val result = runAurBuilderBuild(review, builder)
+                    retainedAurBuiltPackage?.file?.delete()
+                    retainedAurBuiltPackage = result
+                    lastResolvedPackage = review.packageName
+                    lastResolvedRepository = "aur"
+                    lastResolvedInstalledVersion =
+                        installedPackageVersion(readyHandle, review.packageName)
+                    lastResolvedAvailableVersion = review.version
+                    primaryActionLabel =
+                        if (lastResolvedInstalledVersion.isEmpty()) "Install" else "Update"
+                    removeAvailable = lastResolvedInstalledVersion.isNotEmpty()
                     searchStatus =
-                        if (result.logs.isEmpty()) {
-                            "Built ${review.packageName} ${review.version}; verifying output next"
-                        } else {
-                            "Built ${review.packageName} ${review.version}; verifying output next\n" +
-                                result.logs
-                        }
+                        "Built and verified ${review.packageName} ${review.version} · " +
+                            "${formatStorageBytes(result.archiveBytes)} package · " +
+                            "${result.buildPackageCount} signed build dependencies"
                     Log.i(
                         TAG,
-                        "AUR build completed for ${review.packageName} ${review.version}",
+                        "AUR build completed and independently verified for " +
+                            "${review.packageName} ${review.version}: " +
+                            "${result.filename} ${result.archiveBytes} bytes " +
+                            "${result.sha256}",
                     )
                 } catch (error: Exception) {
                     searchStatus =
@@ -4496,9 +4628,17 @@ class ArchpheneRuntimeService : Service() {
     private fun runAurBuilderBuild(
         review: AurReviewData,
         builder: AurBuilderReport,
-    ): AurBuildPoll {
+    ): AurBuiltPackage {
         check(builder.inputManifestSha256.matches(SHA256_HEX))
         check(builder.closureManifestSha256.matches(SHA256_HEX))
+        val activeHandle = readyHandle
+        check(activeHandle != 0L)
+        val architecture =
+            when (Build.SUPPORTED_ABIS.firstOrNull()) {
+                "x86_64" -> "x86_64"
+                "arm64-v8a" -> "aarch64"
+                else -> throw IllegalStateException("Unsupported Android ABI")
+            }
         check(
             packageManager.checkSignatures(packageName, builder.packageName) ==
                 PackageManager.SIGNATURE_MATCH,
@@ -4580,7 +4720,19 @@ class ArchpheneRuntimeService : Service() {
                         AurBuildPoll(exitStatus, visible)
                     }
                 if (poll.logs.isNotEmpty()) {
-                    searchStatus = "Building ${review.packageName}\n${poll.logs}"
+                    val phase =
+                        poll.logs
+                            .lineSequence()
+                            .map(String::trim)
+                            .lastOrNull(String::isNotEmpty)
+                            ?.take(160)
+                            .orEmpty()
+                    searchStatus =
+                        if (phase.isEmpty()) {
+                            "Building ${review.packageName}"
+                        } else {
+                            "Building ${review.packageName} · $phase"
+                        }
                 }
                 if (poll.exitStatus >= 0) {
                     buildStarted = false
@@ -4588,7 +4740,67 @@ class ArchpheneRuntimeService : Service() {
                         "makepkg exited ${poll.exitStatus}" +
                             if (poll.logs.isEmpty()) "" else "\n${poll.logs}"
                     }
-                    return poll
+                    searchStatus = "Verifying ${review.packageName} build output"
+                    val outputFile =
+                        File.createTempFile(
+                            ".aur-${review.packageName}-",
+                            ".pkg",
+                            cacheDir,
+                        )
+                    try {
+                        val builderOutput =
+                            ParcelFileDescriptor.open(
+                                outputFile,
+                                ParcelFileDescriptor.MODE_READ_WRITE or
+                                    ParcelFileDescriptor.MODE_TRUNCATE,
+                            ).use { destination ->
+                                transactAurBuilder(
+                                    endpoint,
+                                    AUR_BUILDER_TRANSACTION_VERIFY_OUTPUT,
+                                    { request ->
+                                        request.writeString(review.packageBase)
+                                        request.writeString(review.packageName)
+                                        request.writeString(review.version)
+                                        request.writeString(architecture)
+                                        request.writeString(builder.closureManifestSha256)
+                                        request.writeFileDescriptor(destination.fileDescriptor)
+                                    },
+                                ) { reply ->
+                                    AurBuiltPackage(
+                                        filename = reply.readString().orEmpty(),
+                                        archiveBytes = reply.readLong(),
+                                        installedBytes = reply.readLong(),
+                                        buildPackageCount = reply.readInt(),
+                                        sha256 = reply.readString().orEmpty(),
+                                        file = outputFile,
+                                        logs = poll.logs,
+                                    )
+                                }.also { report ->
+                                    check(
+                                        report.filename.matches(AUR_BUILT_PACKAGE_FILENAME) &&
+                                            report.archiveBytes > 0L &&
+                                            report.installedBytes > 0L &&
+                                            report.buildPackageCount == builder.closurePackageCount &&
+                                            report.sha256.matches(SHA256_HEX) &&
+                                            outputFile.length() == report.archiveBytes,
+                                    ) {
+                                        "Builder returned an invalid package-output report"
+                                    }
+                                    verifyManagerOwnedAurPackage(
+                                        activeHandle,
+                                        review,
+                                        architecture,
+                                        builder.closureManifestSha256,
+                                        destination,
+                                        report,
+                                    )
+                                }
+                            }
+                        return builderOutput
+                    } catch (error: Exception) {
+                        outputFile.delete()
+                        throw error
+                    }
                 }
                 Thread.sleep(AUR_BUILD_POLL_MILLIS)
             }
@@ -4607,6 +4819,53 @@ class ArchpheneRuntimeService : Service() {
             if (bound) {
                 unbindService(connection)
             }
+        }
+    }
+
+    private fun verifyManagerOwnedAurPackage(
+        activeHandle: Long,
+        review: AurReviewData,
+        architecture: String,
+        closureSha256: String,
+        descriptor: ParcelFileDescriptor,
+        builderReport: AurBuiltPackage,
+    ) {
+        val output =
+            ByteBuffer
+                .allocateDirect(NativeRuntime.BUILT_PACKAGE_REPORT_SIZE)
+                .order(ByteOrder.LITTLE_ENDIAN)
+        val result =
+            NativeRuntime.nativeVerifyAurBuiltPackage(
+                activeHandle,
+                descriptor.fd,
+                builderReport.filename,
+                review.packageBase,
+                review.packageName,
+                review.version,
+                architecture,
+                closureSha256,
+                output,
+            )
+        check(result == NativeRuntime.BUILT_PACKAGE_REPORT_SIZE) {
+            "Manager rejected Builder output: ${readNativeMessage(output, result)}"
+        }
+        val magic = ByteArray(8)
+        output.position(0)
+        output.get(magic)
+        check(String(magic, StandardCharsets.US_ASCII) == "ABMV0001")
+        val archiveBytes = output.getLong(8)
+        val installedBytes = output.getLong(16)
+        val buildPackageCount = output.getInt(24)
+        val digest = ByteArray(32)
+        output.position(32)
+        output.get(digest)
+        check(
+            archiveBytes == builderReport.archiveBytes &&
+                installedBytes == builderReport.installedBytes &&
+                buildPackageCount == builderReport.buildPackageCount &&
+                hexSha256(digest) == builderReport.sha256,
+        ) {
+            "Manager package verification disagrees with Builder"
         }
     }
 
@@ -6003,6 +6262,31 @@ class ArchpheneRuntimeService : Service() {
         return String(bytes, StandardCharsets.UTF_8)
     }
 
+    private fun installedPackageOrigin(
+        activeHandle: Long,
+        packageName: String,
+    ): String {
+        val packageBytes = packageName.toByteArray(StandardCharsets.UTF_8)
+        val packageBuffer = ByteBuffer.allocateDirect(packageBytes.size)
+        packageBuffer.put(packageBytes)
+        val outputBuffer = ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
+        val outputLength =
+            NativeRuntime.nativePackageCommand(
+                activeHandle,
+                NativeRuntime.PACKAGE_COMMAND_INSTALLED_ORIGIN,
+                packageBuffer,
+                packageBytes.size,
+                outputBuffer,
+            )
+        if (outputLength <= 0) {
+            throw IllegalStateException(readNativeMessage(outputBuffer, outputLength))
+        }
+        val bytes = ByteArray(outputLength)
+        outputBuffer.position(0)
+        outputBuffer.get(bytes)
+        return String(bytes, StandardCharsets.UTF_8)
+    }
+
     private fun discoverShells(activeHandle: Long): List<ShellChoice> {
         val outputBuffer = ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
         val outputLength = NativeRuntime.nativeDiscoverShells(activeHandle, outputBuffer)
@@ -6100,6 +6384,248 @@ class ArchpheneRuntimeService : Service() {
             shellPhase = "No supported installed shell"
             Log.w(TAG, "Installed shell catalog unavailable", error)
         }
+    }
+
+    @Synchronized
+    private fun requestAurPackageInstall(packageName: String): Boolean {
+        val normalized = packageName.trim()
+        val review = retainedAurReview
+        val built = retainedAurBuiltPackage
+        val builder = retainedAurBuilderReport
+        val activeHandle = readyHandle
+        if (
+            activeHandle == 0L ||
+            review == null ||
+            built == null ||
+            builder == null ||
+            normalized != review.packageName ||
+            !built.file.isFile ||
+            built.file.length() != built.archiveBytes ||
+            catalogRefreshActive ||
+            searchActive ||
+            packageOperationActive ||
+            commandActive
+        ) {
+            jobStatus = "Build and verify this exact AUR package before installing it"
+            return false
+        }
+        val architecture =
+            when (Build.SUPPORTED_ABIS.firstOrNull()) {
+                "x86_64" -> "x86_64"
+                "arm64-v8a" -> "aarch64"
+                else -> {
+                    jobStatus = "Unsupported Android ABI"
+                    return false
+                }
+            }
+        val operation =
+            if (lastResolvedInstalledVersion.isEmpty()) {
+                NativeRuntime.JOB_OPERATION_INSTALL
+            } else {
+                NativeRuntime.JOB_OPERATION_UPDATE
+            }
+        val outputBuffer = ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
+        val requestBytes = "aur\t$normalized".toByteArray(StandardCharsets.UTF_8)
+        val requestBuffer = ByteBuffer.allocateDirect(requestBytes.size).put(requestBytes)
+        val jobId =
+            NativeRuntime.nativeQueuePackageJob(
+                activeHandle,
+                operation,
+                requestBuffer,
+                requestBytes.size,
+                System.currentTimeMillis(),
+                outputBuffer,
+            )
+        if (jobId <= 0) {
+            jobStatus = "Could not queue AUR install: ${readNativeMessage(outputBuffer, jobId)}"
+            return false
+        }
+        jobPersistentId = jobId
+        packageCancellationRequested = false
+        packageOperationCancelable = true
+        packageOperationActive = true
+        publishPackageJob(
+            normalized,
+            operation,
+            NativeRuntime.JOB_QUEUED,
+            0,
+            "Queued verified AUR package",
+        )
+        val worker =
+            Thread(
+                {
+                    val scratch = PackageIoScratch()
+                    var recordedPhase = 0
+                    var recordedProgress = 0
+                    fun record(
+                        state: Int,
+                        phase: Int,
+                        progress: Int,
+                        message: String,
+                    ) {
+                        updatePackageJob(
+                            activeHandle,
+                            jobId,
+                            state,
+                            phase,
+                            progress,
+                            message,
+                            normalized,
+                            scratch,
+                        )
+                        recordedPhase = phase
+                        recordedProgress = progress
+                    }
+                    try {
+                        throwIfPackageCancelled()
+                        record(
+                            NativeRuntime.JOB_RESOLVING,
+                            1,
+                            5,
+                            "Resolving reviewed runtime dependencies",
+                        )
+                        throwIfPackageCancelled()
+                        record(
+                            NativeRuntime.JOB_VERIFYING,
+                            2,
+                            15,
+                            "Reverifying built package and signed dependency closure",
+                        )
+                        if (!enterPackageCommit()) {
+                            throw InterruptedException("Package operation cancelled")
+                        }
+                        record(
+                            NativeRuntime.JOB_INSTALLING,
+                            3,
+                            35,
+                            "Installing verified dependencies and AUR package",
+                        )
+                        val nativeOutput =
+                            ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
+                        val installedVersion =
+                            ParcelFileDescriptor.open(
+                                built.file,
+                                ParcelFileDescriptor.MODE_READ_ONLY,
+                            ).use { descriptor ->
+                                val length =
+                                    NativeRuntime.nativeInstallAurBuiltPackage(
+                                        activeHandle,
+                                        descriptor.fd,
+                                        built.filename,
+                                        review.packageBase,
+                                        review.packageName,
+                                        review.version,
+                                        architecture,
+                                        builder.closureManifestSha256,
+                                        nativeOutput,
+                                    )
+                                if (length <= 0 || length > NativeRuntime.PACKAGE_OUTPUT_SIZE) {
+                                    throw IllegalStateException(
+                                        readNativeMessage(nativeOutput, length),
+                                    )
+                                }
+                                val bytes = ByteArray(length)
+                                nativeOutput.position(0)
+                                nativeOutput.get(bytes)
+                                String(bytes, StandardCharsets.UTF_8)
+                            }
+                        check(installedVersion == review.version) {
+                            "Installed AUR version does not match the reviewed build"
+                        }
+                        refreshPackageInventory(activeHandle)
+                        refreshShellChoices(activeHandle)
+                        record(
+                            NativeRuntime.JOB_COMPLETE,
+                            4,
+                            100,
+                            "Installed ${review.packageName} ${review.version}",
+                        )
+                        built.file.delete()
+                        retainedAurBuiltPackage = null
+                        lastResolvedInstalledVersion = review.version
+                        lastResolvedAvailableVersion = review.version
+                        primaryActionLabel = "Installed"
+                        removeAvailable = true
+                        searchStatus =
+                            "Installed verified AUR package ${review.packageName} ${review.version}"
+                        Log.i(
+                            TAG,
+                            "Installed verified AUR package ${review.packageName} " +
+                                "${review.version} (${built.sha256})",
+                        )
+                    } catch (error: Exception) {
+                        val cancelled =
+                            error is InterruptedException || packageCancellationRequested
+                        val mutationStarted = !cancelled && recordedPhase >= 3
+                        val refreshed =
+                            if (mutationStarted) {
+                                val inventory = refreshPackageInventory(activeHandle)
+                                refreshShellChoices(activeHandle)
+                                inventory
+                            } else {
+                                true
+                            }
+                        val failureMessage =
+                            boundedJobMessage(
+                                if (cancelled) {
+                                    "Cancelled before package mutation"
+                                } else {
+                                    PackageFailureDiagnostics.install(
+                                        error,
+                                        mutationStarted,
+                                        refreshed,
+                                    )
+                                },
+                            )
+                        try {
+                            updatePackageJob(
+                                activeHandle,
+                                jobId,
+                                if (cancelled) {
+                                    NativeRuntime.JOB_CANCELLED
+                                } else {
+                                    NativeRuntime.JOB_FAILED
+                                },
+                                recordedPhase,
+                                recordedProgress,
+                                failureMessage,
+                                normalized,
+                                scratch,
+                            )
+                        } catch (updateError: Exception) {
+                            publishPackageJob(
+                                normalized,
+                                operation,
+                                if (cancelled) {
+                                    NativeRuntime.JOB_CANCELLED
+                                } else {
+                                    NativeRuntime.JOB_FAILED
+                                },
+                                recordedProgress,
+                                boundedJobMessage(
+                                    "$failureMessage Activity journal update failed; " +
+                                        "restart Archphene.",
+                                ),
+                            )
+                            jobStatus =
+                                "AUR install failed and journal update failed: " +
+                                    (updateError.message ?: updateError.javaClass.simpleName)
+                        }
+                        Log.e(TAG, "Verified AUR package install failed", error)
+                    } finally {
+                        packageOperationCancelable = false
+                        packageCancellationRequested = false
+                        packageOperationActive = false
+                        packageThread = null
+                        startLauncherPublisher(activeHandle)
+                        stopWhenUnobservedAndIdle()
+                    }
+                },
+                "ArchpheneAurInstall",
+            )
+        schedulePackageWorker(worker, activeHandle)
+        promoteWorkToForeground()
+        return true
     }
 
     @Synchronized
@@ -6394,7 +6920,7 @@ class ArchpheneRuntimeService : Service() {
             commandActive ||
             normalized != lastResolvedPackage ||
             installedVersion.isEmpty() ||
-            (repository != "core" && repository != "extra")
+            (repository != "core" && repository != "extra" && repository != "aur")
         ) {
             jobStatus = "Open Details for an installed package before removing it"
             return false
