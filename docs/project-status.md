@@ -1016,6 +1016,9 @@ installed packages and three current Foot launchers. Cached startup completes
 in 255 ms, and a fresh generated Foot launch authenticates generation 328,
 starts the manager-owned Linux process, connects the real Wayland client,
 presents its first 1080×2202 frame, and resizes cleanly for the Samsung IME.
+Pressing Home detaches that Surface with `close=false`; the observed manager
+and wrapper PIDs remain unchanged, and resume reattaches session 1 with its
+readable frame intact.
 The visually inspected evidence is a full-device screenshot rather than an
 app-only frame. The complete Rust workspace passes 174 tests, including the
 large-resolution, raw-signature-status, empty-files-record, loader-path, JNI,
