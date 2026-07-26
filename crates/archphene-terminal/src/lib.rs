@@ -14,6 +14,7 @@ pub const DAMAGE_CELL_SIZE: usize = 76;
 pub const MAX_DAMAGE_BYTES: usize =
     DAMAGE_HEADER_SIZE + MAX_ROWS as usize * MAX_COLUMNS as usize * DAMAGE_CELL_SIZE;
 pub const MAX_SELECTION_BYTES: usize = 8 * 1024;
+pub const MAX_REPLY_BYTES: usize = 64 * 1024;
 pub const SCROLLBACK_BYTE_LIMIT: usize = 4 * 1024 * 1024;
 pub const SCROLLBACK_LINE_LIMIT: usize = 4 * 1024;
 const DAMAGE_MAGIC: u32 = u32::from_le_bytes(*b"ATRM");
@@ -485,6 +486,7 @@ pub struct Terminal {
     csi_value: u16,
     csi_has_value: bool,
     csi_private: bool,
+    csi_unsupported: bool,
     string_bytes: usize,
     utf8_codepoint: u32,
     utf8_minimum: u32,
@@ -495,6 +497,9 @@ pub struct Terminal {
     dirty_start: u16,
     dirty_end: u16,
     revision: u64,
+    reply_bytes: Vec<u8>,
+    reply_start: usize,
+    reply_length: usize,
 }
 
 impl Terminal {
@@ -548,6 +553,7 @@ impl Terminal {
             csi_value: 0,
             csi_has_value: false,
             csi_private: false,
+            csi_unsupported: false,
             string_bytes: 0,
             utf8_codepoint: 0,
             utf8_minimum: 0,
@@ -558,6 +564,9 @@ impl Terminal {
             dirty_start: 0,
             dirty_end: rows,
             revision: 1,
+            reply_bytes: vec![0; MAX_REPLY_BYTES],
+            reply_start: 0,
+            reply_length: 0,
         })
     }
 
@@ -836,6 +845,22 @@ impl Terminal {
     pub fn feed(&mut self, bytes: &[u8]) {
         for &byte in bytes {
             self.feed_byte(byte);
+        }
+    }
+
+    pub fn pending_reply(&self) -> &[u8] {
+        let contiguous = self
+            .reply_length
+            .min(MAX_REPLY_BYTES.saturating_sub(self.reply_start));
+        &self.reply_bytes[self.reply_start..self.reply_start + contiguous]
+    }
+
+    pub fn consume_reply(&mut self, length: usize) {
+        let consumed = length.min(self.reply_length);
+        self.reply_start = (self.reply_start + consumed) % MAX_REPLY_BYTES;
+        self.reply_length -= consumed;
+        if self.reply_length == 0 {
+            self.reply_start = 0;
         }
     }
 
@@ -1202,6 +1227,7 @@ impl Terminal {
                 self.tab_stops[usize::from(self.cursor_column)] = true;
             }
             b'M' => self.reverse_index(),
+            b'Z' => self.queue_reply(b"\x1b[?1;2c"),
             b'c' => self.reset(),
             _ => {}
         }
@@ -1219,12 +1245,14 @@ impl Terminal {
             }
             b';' => self.push_csi_parameter(),
             b'?' if self.csi_count == 0 && !self.csi_has_value => self.csi_private = true,
+            0x20..=0x2f | b':' | b'<' | b'=' | b'>' | b'?' => {
+                self.csi_unsupported = true;
+            }
             0x40..=0x7e => {
                 self.push_csi_parameter();
                 self.execute_csi(byte);
                 self.parser_state = ParserState::Ground;
             }
-            0x20..=0x3f => {}
             _ => self.parser_state = ParserState::Ground,
         }
     }
@@ -1235,6 +1263,7 @@ impl Terminal {
         self.csi_value = 0;
         self.csi_has_value = false;
         self.csi_private = false;
+        self.csi_unsupported = false;
     }
 
     fn push_csi_parameter(&mut self) {
@@ -1259,6 +1288,9 @@ impl Terminal {
     }
 
     fn execute_csi(&mut self, final_byte: u8) {
+        if self.csi_unsupported {
+            return;
+        }
         if self.csi_private {
             self.execute_private_csi(final_byte);
             return;
@@ -1332,6 +1364,10 @@ impl Terminal {
             }
             b'g' => self.clear_tab_stops(self.csi_parameters[0]),
             b'm' => self.select_graphics(),
+            b'n' => self.report_device_status(),
+            b'c' if self.csi_count == 1 && self.csi_parameters[0] == 0 => {
+                self.queue_reply(b"\x1b[?1;2c");
+            }
             b'h' | b'l' => self.execute_ansi_mode(final_byte == b'h'),
             b'r' => {
                 let top = self.parameter(0, 1).saturating_sub(1).min(self.rows - 1);
@@ -1359,6 +1395,12 @@ impl Terminal {
     }
 
     fn execute_private_csi(&mut self, final_byte: u8) {
+        if final_byte == b'n' {
+            if self.csi_count == 1 && self.csi_parameters[0] == 6 {
+                self.report_cursor_position(true);
+            }
+            return;
+        }
         if final_byte != b'h' && final_byte != b'l' {
             return;
         }
@@ -1414,6 +1456,51 @@ impl Terminal {
             self.application_cursor = enabled;
             self.mark_dirty(self.cursor_row);
         }
+    }
+
+    fn report_device_status(&mut self) {
+        if self.csi_count != 1 {
+            return;
+        }
+        match self.csi_parameters[0] {
+            5 => self.queue_reply(b"\x1b[0n"),
+            6 => self.report_cursor_position(false),
+            _ => {}
+        }
+    }
+
+    fn report_cursor_position(&mut self, private: bool) {
+        let mut response = [0_u8; 16];
+        let mut length = 0;
+        response[length..length + 2].copy_from_slice(b"\x1b[");
+        length += 2;
+        if private {
+            response[length] = b'?';
+            length += 1;
+        }
+        let row = if self.origin_mode {
+            self.cursor_row.saturating_sub(self.scroll_top) + 1
+        } else {
+            self.cursor_row + 1
+        };
+        length += write_decimal(&mut response[length..], row);
+        response[length] = b';';
+        length += 1;
+        length += write_decimal(&mut response[length..], self.cursor_column + 1);
+        response[length] = b'R';
+        length += 1;
+        self.queue_reply(&response[..length]);
+    }
+
+    fn queue_reply(&mut self, reply: &[u8]) {
+        if reply.len() > MAX_REPLY_BYTES - self.reply_length {
+            return;
+        }
+        let write_start = (self.reply_start + self.reply_length) % MAX_REPLY_BYTES;
+        let first = reply.len().min(MAX_REPLY_BYTES - write_start);
+        self.reply_bytes[write_start..write_start + first].copy_from_slice(&reply[..first]);
+        self.reply_bytes[..reply.len() - first].copy_from_slice(&reply[first..]);
+        self.reply_length += reply.len();
     }
 
     fn set_application_keypad(&mut self, enabled: bool) {
@@ -2087,6 +2174,24 @@ fn write_wire_cell(output: &mut [u8], offset: usize, cell: Cell) {
     output[offset + 72] = cell.attributes;
     output[offset + 73] = cell.width;
     output[offset + 74] = cell.grapheme_len;
+}
+
+fn write_decimal(output: &mut [u8], value: u16) -> usize {
+    let mut reversed = [0_u8; 5];
+    let mut value = value;
+    let mut length = 0;
+    loop {
+        reversed[length] = b'0' + (value % 10) as u8;
+        length += 1;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    for index in 0..length {
+        output[index] = reversed[length - index - 1];
+    }
+    length
 }
 
 fn validate_size(rows: u16, columns: u16) -> Result<(), TerminalError> {
@@ -2814,6 +2919,49 @@ mod tests {
         terminal.feed(b"ok\x1b]0;secret\x07\x1bPignored\x1b\\!");
         assert_eq!(text(&terminal, 0), "ok!         ");
         assert_eq!(terminal.take_dirty_rows(), Some((0, 1)));
+    }
+
+    #[test]
+    fn device_queries_publish_bounded_ordered_replies() {
+        let mut terminal = Terminal::new(24, 80).unwrap();
+        terminal.feed(b"\x1b[c\x1b[5n\x1b[4;9H\x1b[6n\x1bZ");
+        assert_eq!(
+            terminal.pending_reply(),
+            b"\x1b[?1;2c\x1b[0n\x1b[4;9R\x1b[?1;2c"
+        );
+        terminal.consume_reply(10);
+        assert_eq!(terminal.pending_reply(), b"n\x1b[4;9R\x1b[?1;2c");
+        terminal.consume_reply(usize::MAX);
+        assert!(terminal.pending_reply().is_empty());
+    }
+
+    #[test]
+    fn unsupported_device_query_forms_do_not_impersonate_primary_da() {
+        let mut terminal = Terminal::new(24, 80).unwrap();
+        terminal.feed(b"\x1b[>c\x1b[=c\x1b[0;1c\x1b[0$c");
+        assert!(terminal.pending_reply().is_empty());
+    }
+
+    #[test]
+    fn reply_ring_preserves_order_across_wrap_and_rejects_partial_overflow() {
+        let mut terminal = Terminal::new(24, 80).unwrap();
+        terminal.queue_reply(&vec![b'x'; MAX_REPLY_BYTES]);
+        terminal.consume_reply(MAX_REPLY_BYTES - 2);
+        terminal.queue_reply(b"abcdef");
+        assert_eq!(terminal.pending_reply(), b"xx");
+        terminal.consume_reply(2);
+        assert_eq!(terminal.pending_reply(), b"abcdef");
+        terminal.queue_reply(&vec![b'y'; MAX_REPLY_BYTES]);
+        terminal.consume_reply(6);
+        assert!(terminal.pending_reply().is_empty());
+    }
+
+    #[test]
+    fn cursor_reports_follow_dec_origin_mode() {
+        let mut terminal = Terminal::new(10, 20).unwrap();
+        terminal.feed(b"\x1b[3;8r\x1b[?6h\x1b[4;7H\x1b[6n\x1b[?6n");
+        assert_eq!(terminal.cursor(), (5, 6));
+        assert_eq!(terminal.pending_reply(), b"\x1b[4;7R\x1b[?4;7R");
     }
 
     #[test]

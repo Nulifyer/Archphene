@@ -778,6 +778,7 @@ impl PtySession {
             }
             Ok(length) => {
                 self.terminal.feed(&output[..length]);
+                self.flush_terminal_replies()?;
                 Ok(length)
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(0),
@@ -793,11 +794,26 @@ impl PtySession {
         if input.is_empty() || input.len() > MAX_PTY_TRANSFER_BYTES {
             return Err(ProcessError::InvalidArgument);
         }
+        if !self.flush_terminal_replies()? {
+            return Ok(0);
+        }
         match self.master.write(input) {
             Ok(length) => Ok(length),
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(0),
             Err(error) => Err(ProcessError::Io(error)),
         }
+    }
+
+    fn flush_terminal_replies(&mut self) -> Result<bool, ProcessError> {
+        while !self.terminal.pending_reply().is_empty() {
+            match self.master.write(self.terminal.pending_reply()) {
+                Ok(0) => return Ok(false),
+                Ok(length) => self.terminal.consume_reply(length),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
+                Err(error) => return Err(ProcessError::Io(error)),
+            }
+        }
+        Ok(true)
     }
 
     pub fn resize(&mut self, rows: u16, columns: u16) -> Result<(), ProcessError> {
@@ -2013,5 +2029,42 @@ mod tests {
             2
         );
         assert_eq!(damage[first_cell + 72] & 1, 1);
+    }
+
+    #[test]
+    fn terminal_queries_round_trip_through_the_real_pty() {
+        let (master, mut slave) = system::open_pty(24, 80).expect("PTY pair");
+        let status = Command::new("stty")
+            .args(["raw", "-echo", "min", "0", "time", "10"])
+            .stdin(Stdio::from(
+                slave.try_clone().expect("PTY configuration input"),
+            ))
+            .status()
+            .expect("configure raw PTY");
+        assert!(status.success(), "stty could not configure the test PTY");
+        let waiter = PtyWaiter::new(&master).expect("PTY waiter");
+        let mut session = PtySession {
+            master,
+            waiter,
+            child: None,
+            exit_status: None,
+            rows: 24,
+            columns: 80,
+            terminal: Terminal::new(24, 80).expect("terminal state"),
+        };
+        slave
+            .write_all(b"\x1b[c\x1b[5n\x1b[4;9H\x1b[6n")
+            .expect("terminal queries");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut output = [0_u8; 64];
+        while Instant::now() < deadline {
+            if session.read(&mut output).expect("PTY output") != 0 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        let mut reply = [0_u8; 64];
+        let reply_length = slave.read(&mut reply).expect("terminal reply");
+        assert_eq!(&reply[..reply_length], b"\x1b[?1;2c\x1b[0n\x1b[4;9R");
     }
 }
