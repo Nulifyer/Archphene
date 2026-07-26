@@ -82,6 +82,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private lateinit var terminalNavigationButton: Button
     private lateinit var installButton: Button
     private lateinit var removeButton: Button
+    private lateinit var aurReviewButton: Button
     private lateinit var cancelButton: Button
     private lateinit var commandButton: Button
     private lateinit var ptyButton: Button
@@ -277,6 +278,18 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     runtimeBinder?.resolvePackage(searchInput.text.toString())
                 }
             }
+        aurReviewButton =
+            Button(this).apply {
+                setText(R.string.aur)
+                contentDescription = getString(R.string.aur_review_description)
+                setOnClickListener {
+                    hideKeyboard(searchInput)
+                    showPackageDetails()
+                    if (runtimeBinder?.reviewAurPackage(searchInput.text.toString()) != true) {
+                        searchStatusView.setText(R.string.aur_review_unavailable)
+                    }
+                }
+            }
         installButton =
             Button(this).apply {
                 setText(R.string.install)
@@ -345,6 +358,14 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 )
                 addView(
                     detailsButton,
+                    LinearLayout.LayoutParams(
+                        0,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        1f,
+                    ),
+                )
+                addView(
+                    aurReviewButton,
                     LinearLayout.LayoutParams(
                         0,
                         ViewGroup.LayoutParams.MATCH_PARENT,
@@ -2092,6 +2113,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         if (binder == null) {
             installButton.isEnabled = false
             removeButton.isEnabled = false
+            aurReviewButton.isEnabled = false
             cancelButton.isEnabled = false
             cancelButton.visibility = View.GONE
             commandButton.isEnabled = false
@@ -2136,6 +2158,9 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 packageSearchInput.text.toString().trim() == binder.resolvedPackageName
         installButton.isEnabled = exactSelection && binder.packagePrimaryActionAvailable
         removeButton.isEnabled = exactSelection && binder.packageRemoveAvailable
+        aurReviewButton.isEnabled =
+            packageSearchInput.text.toString().trim().isNotEmpty() &&
+                binder?.aurReviewAvailable == true
     }
 
     private fun updatePackageActivity() {

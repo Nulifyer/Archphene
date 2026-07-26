@@ -1001,9 +1001,16 @@ SHA-256; and reports dependencies, install-script presence, insecure or
 unverified sources, and visible PKGBUILD functions. The current live
 `visual-studio-code-bin` `1.130.0-1` snapshot passes for AArch64 with 13 runtime
 dependencies, two selected sources, exact SHA-256 values, no insecure
-transport, and no unverified source. This does not yet download upstream
-sources, render the Android review screen, run an unprivileged build, or
-install an AUR result.
+transport, and no unverified source. The Android manager now fetches the exact
+RPC endpoint and only the Rust-approved snapshot path, transports the bounded
+review through a versioned binary JNI wire, and renders the community trust
+warning, shared trust domain, maintainer, cgit commit, snapshot SHA-256,
+AArch64 sources and checksums, dependencies, build functions, install script,
+and exact PKGBUILD. A live full-device Samsung gate reviewed the current
+`visual-studio-code-bin` candidate while keeping official Install disabled and
+preserving all 36 local pacman-database entries. This does not yet download and
+verify remote upstream sources, resolve installed disk impact, run an
+unprivileged build, or install an AUR result.
 
 Code now reaches the packaged Electron executable without a Code-specific
 bridge exception. Translating Arch's standard `/usr/lib/pulseaudio` directory

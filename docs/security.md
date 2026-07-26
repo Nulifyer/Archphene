@@ -54,12 +54,21 @@ install script. It records both the exact snapshot SHA-256 and the AUR cgit
 commit advertised in the snapshot's PAX header, and reports every selected
 source without treating that advertised commit as an official Arch signature.
 
-The current review core does not execute PKGBUILD, download upstream sources,
-or install its result. On-device transport, full source/build/permission/disk
-review UI, source verification, an unprivileged disposable build environment,
-package-output provenance, and user approval remain required. A successful
-review will not make the eventual package isolated: once installed, its code
-joins the shared Archphene Linux trust domain.
+The manager now fetches the exact AUR RPC endpoint and only the snapshot path
+accepted by Rust, over Android HTTPS without ambient credentials. A versioned,
+bounded binary JNI result drives an on-device review showing the community
+trust warning, shared trust domain, maintainer, cgit commit, snapshot digest,
+architecture-selected sources and checksums, dependencies, visible build
+functions, install script, and exact PKGBUILD. Review does not enable the
+official-package Install action or mutate pacman state.
+
+The current review path still does not execute PKGBUILD, download and verify
+remote upstream sources, resolve a final installed-size estimate, or install
+its result. Capability analysis, explicit build approval, an unprivileged
+disposable build environment, package-output provenance, and transaction
+recovery remain required. A successful review will not make the eventual
+package isolated: once installed, its code joins the shared Archphene Linux
+trust domain.
 
 ## Important limitations
 

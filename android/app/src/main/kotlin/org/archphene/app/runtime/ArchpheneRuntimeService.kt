@@ -26,9 +26,11 @@ import android.util.Log
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 import java.net.URL
 import java.security.MessageDigest
+import java.time.Instant
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.net.ssl.HttpsURLConnection
@@ -89,6 +91,14 @@ class ArchpheneRuntimeService : Service() {
 
         val packageSearchStatus: String
             get() = searchStatus
+
+        val aurReviewAvailable: Boolean
+            get() =
+                readyHandle != 0L &&
+                    !catalogRefreshActive &&
+                    !searchActive &&
+                    !packageOperationActive &&
+                    !commandActive
 
         internal val installedPackages: InstalledPackageSnapshot
             get() = installedPackageSnapshot
@@ -350,6 +360,9 @@ class ArchpheneRuntimeService : Service() {
         fun resolvePackage(packageName: String): Boolean =
             requestPackageResolution(packageName)
 
+        fun reviewAurPackage(packageName: String): Boolean =
+            requestAurReview(packageName)
+
         fun installPackage(packageName: String): Boolean =
             requestPackageInstall(packageName)
 
@@ -548,6 +561,20 @@ class ArchpheneRuntimeService : Service() {
     private val packageResolutionRequestBuffer = ByteBuffer.allocateDirect(128)
     private val packageResolutionOutputBuffer =
         ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_RESOLUTION_OUTPUT_SIZE)
+    private val aurPackageBuffer = ByteBuffer.allocateDirect(128)
+    private val aurEndpointBuffer = ByteBuffer.allocateDirect(4096)
+    private val aurRpcBuffer: ByteBuffer by lazy(LazyThreadSafetyMode.NONE) {
+        ByteBuffer.allocateDirect(NativeRuntime.AUR_RPC_SIZE)
+    }
+    private val aurSnapshotBuffer: ByteBuffer by lazy(LazyThreadSafetyMode.NONE) {
+        ByteBuffer.allocateDirect(NativeRuntime.AUR_SNAPSHOT_SIZE)
+    }
+    private val aurReviewBuffer: ByteBuffer by lazy(LazyThreadSafetyMode.NONE) {
+        ByteBuffer
+            .allocateDirect(NativeRuntime.AUR_REVIEW_SIZE)
+            .order(ByteOrder.LITTLE_ENDIAN)
+    }
+    private val aurTransferBuffer = ByteArray(64 * 1024)
     private val launcherAuthorizationRequestBuffer = ByteBuffer.allocateDirect(256)
     private val launcherAuthorizationOutputBuffer = ByteBuffer.allocateDirect(512)
     private val launcherAuthorizationOutputBytes = ByteArray(512)
@@ -568,6 +595,108 @@ class ArchpheneRuntimeService : Service() {
         val url: String,
         val size: Long,
     )
+
+    private data class AurSourceReview(
+        val architecture: String,
+        val expression: String,
+        val sha256: String?,
+        val insecureTransport: Boolean,
+    )
+
+    private data class AurReviewData(
+        val packageBase: String,
+        val packageName: String,
+        val version: String,
+        val description: String,
+        val maintainer: String,
+        val projectUrl: String,
+        val snapshotPath: String,
+        val snapshotCommit: String,
+        val snapshotSha256: String,
+        val lastModified: Long,
+        val outOfDate: Boolean,
+        val licenses: Array<String>,
+        val dependencies: Array<String>,
+        val makeDependencies: Array<String>,
+        val checkDependencies: Array<String>,
+        val sources: Array<AurSourceReview>,
+        val validPgpKeys: Array<String>,
+        val buildSteps: Array<String>,
+        val installScript: String,
+        val pkgbuild: String,
+        val installScriptContents: String,
+        val unverifiedSources: Boolean,
+        val insecureSources: Boolean,
+    )
+
+    private class AurWireReader(
+        source: ByteBuffer,
+        length: Int,
+    ) {
+        private val buffer =
+            source
+                .duplicate()
+                .order(ByteOrder.LITTLE_ENDIAN)
+                .apply {
+                    position(0)
+                    limit(length)
+                }
+        private val decoder =
+            StandardCharsets.UTF_8
+                .newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+
+        fun byte(): Int {
+            require(buffer.remaining() >= 1)
+            return buffer.get().toInt() and 0xff
+        }
+
+        fun int(): Int {
+            require(buffer.remaining() >= Int.SIZE_BYTES)
+            return buffer.getInt()
+        }
+
+        fun long(): Long {
+            require(buffer.remaining() >= Long.SIZE_BYTES)
+            return buffer.getLong()
+        }
+
+        fun bytes(length: Int): ByteArray {
+            require(length >= 0 && length <= buffer.remaining())
+            return ByteArray(length).also(buffer::get)
+        }
+
+        fun blob(maximumBytes: Int): ByteArray {
+            val length = int()
+            require(length in 0..maximumBytes)
+            return bytes(length)
+        }
+
+        fun string(
+            maximumBytes: Int,
+            allowEmpty: Boolean = false,
+            allowMultiline: Boolean = false,
+        ): String {
+            val bytes = blob(maximumBytes)
+            require(allowEmpty || bytes.isNotEmpty())
+            decoder.reset()
+            val value = decoder.decode(ByteBuffer.wrap(bytes)).toString()
+            require(
+                value.none { character ->
+                    character == '\u0000' ||
+                        character == '\r' ||
+                        (
+                            character.isISOControl() &&
+                                !(allowMultiline && character in "\n\t")
+                        )
+                },
+            )
+            return value
+        }
+
+        fun exhausted(): Boolean = !buffer.hasRemaining()
+    }
 
     private data class ShellChoice(
         val id: String,
@@ -1026,6 +1155,8 @@ class ArchpheneRuntimeService : Service() {
         private const val SHELL_CHOICE_LIMIT = 8
         private const val SHELL_FIELD_LIMIT = 64
         private const val AVAILABLE_PACKAGE_LIMIT = 100
+        private val AUR_PACKAGE_NAME = Regex("[A-Za-z0-9@+._-]{1,128}")
+        private const val HEX_DIGITS = "0123456789abcdef"
         private const val SHELL_PREFERENCES = "terminal"
         private const val SHELL_PREFERENCE_ID = "shared_shell_id"
         private const val PACKAGE_RECOVERY_PREFERENCES = "package_recovery"
@@ -2062,7 +2193,7 @@ class ArchpheneRuntimeService : Service() {
     private fun workNotification(): Notification {
         val text =
             when {
-                packageOperationActive -> R.string.work_notification_packages
+                packageOperationActive || searchActive -> R.string.work_notification_packages
                 catalogRefreshActive -> R.string.work_notification_catalogs
                 commandActive -> R.string.work_notification_command
                 else -> R.string.work_notification_storage
@@ -3714,6 +3845,450 @@ class ArchpheneRuntimeService : Service() {
             "ArchpheneResolve",
         ).start()
         return true
+    }
+
+    @Synchronized
+    private fun requestAurReview(packageName: String): Boolean {
+        val normalized = packageName.trim()
+        val activeHandle = readyHandle
+        if (
+            activeHandle == 0L ||
+            catalogRefreshActive ||
+            searchActive ||
+            packageOperationActive ||
+            commandActive ||
+            normalized.length !in 1..128 ||
+            normalized.any { character ->
+                character.code > 0x7f ||
+                    (!character.isLetterOrDigit() && character !in "@._+-")
+            }
+        ) {
+            searchStatus = "Enter one exact AUR package name"
+            return false
+        }
+        searchActive = true
+        lastResolvedPackage = ""
+        lastResolvedRepository = ""
+        lastResolvedInstalledVersion = ""
+        lastResolvedAvailableVersion = ""
+        removeAvailable = false
+        searchStatus = "Downloading the AUR review for $normalized"
+        Thread(
+            {
+                try {
+                    val packageBytes = normalized.toByteArray(StandardCharsets.US_ASCII)
+                    aurPackageBuffer.clear()
+                    aurPackageBuffer.put(packageBytes)
+                    val rpcEndpoint = "https://aur.archlinux.org/rpc/v5/info/$normalized"
+                    val rpcLength =
+                        downloadAurObject(
+                            rpcEndpoint,
+                            aurRpcBuffer,
+                            NativeRuntime.AUR_RPC_SIZE,
+                        )
+                    aurEndpointBuffer.clear()
+                    val pathLength =
+                        NativeRuntime.nativeResolveAurSnapshotPath(
+                            activeHandle,
+                            aurPackageBuffer,
+                            packageBytes.size,
+                            aurRpcBuffer,
+                            rpcLength,
+                            aurEndpointBuffer,
+                        )
+                    if (pathLength <= 0) {
+                        throw IllegalStateException(
+                            readNativeMessage(aurEndpointBuffer, pathLength),
+                        )
+                    }
+                    if (pathLength > aurEndpointBuffer.capacity()) {
+                        throw SecurityException("Native AUR snapshot path exceeds its limit")
+                    }
+                    val pathBytes = ByteArray(pathLength)
+                    aurEndpointBuffer.position(0)
+                    aurEndpointBuffer.get(pathBytes)
+                    val snapshotPath = String(pathBytes, StandardCharsets.US_ASCII)
+                    if (
+                        !snapshotPath.startsWith("/cgit/aur.git/snapshot/") ||
+                        !snapshotPath.endsWith(".tar.gz") ||
+                        snapshotPath.any { character ->
+                            character.code > 0x7f ||
+                                (!character.isLetterOrDigit() &&
+                                    character !in "/@._+-")
+                        }
+                    ) {
+                        throw SecurityException("Native AUR snapshot path is invalid")
+                    }
+                    val snapshotLength =
+                        downloadAurObject(
+                            "https://aur.archlinux.org$snapshotPath",
+                            aurSnapshotBuffer,
+                            NativeRuntime.AUR_SNAPSHOT_SIZE,
+                        )
+                    val architecture =
+                        when (Build.SUPPORTED_ABIS.firstOrNull()) {
+                            "x86_64" -> NativeRuntime.REPOSITORY_X86_64
+                            "arm64-v8a" -> NativeRuntime.REPOSITORY_AARCH64
+                            else -> throw IllegalStateException("Unsupported Android ABI")
+                        }
+                    aurReviewBuffer.clear()
+                    val reviewLength =
+                        NativeRuntime.nativeReviewAur(
+                            activeHandle,
+                            architecture,
+                            aurPackageBuffer,
+                            packageBytes.size,
+                            aurRpcBuffer,
+                            rpcLength,
+                            aurSnapshotBuffer,
+                            snapshotLength,
+                            aurReviewBuffer,
+                        )
+                    if (reviewLength <= 0) {
+                        throw IllegalStateException(
+                            readNativeMessage(aurReviewBuffer, reviewLength),
+                        )
+                    }
+                    val review = parseAurReview(aurReviewBuffer, reviewLength)
+                    searchStatus = formatAurReview(review)
+                    Log.i(
+                        TAG,
+                        "Reviewed AUR ${review.packageName} ${review.version} " +
+                            "commit=${review.snapshotCommit}",
+                    )
+                } catch (error: Exception) {
+                    searchStatus =
+                        "AUR review failed: ${error.message ?: error.javaClass.simpleName}"
+                    Log.e(TAG, "AUR review failed", error)
+                } finally {
+                    activePackageConnection = null
+                    searchActive = false
+                    stopWhenUnobservedAndIdle()
+                }
+            },
+            "ArchpheneAurReview",
+        ).start()
+        promoteWorkToForeground()
+        return true
+    }
+
+    private fun downloadAurObject(
+        expectedEndpoint: String,
+        destination: ByteBuffer,
+        maximumBytes: Int,
+    ): Int {
+        val endpoint = URL(expectedEndpoint)
+        if (
+            endpoint.toString() != expectedEndpoint ||
+            endpoint.protocol != "https" ||
+            endpoint.host != "aur.archlinux.org" ||
+            endpoint.userInfo != null ||
+            endpoint.port != -1 ||
+            endpoint.ref != null ||
+            endpoint.query != null
+        ) {
+            throw SecurityException("Invalid AUR endpoint")
+        }
+        destination.clear()
+        val connection = endpoint.openConnection() as HttpsURLConnection
+        activePackageConnection = connection
+        try {
+            connection.instanceFollowRedirects = false
+            connection.connectTimeout = 15_000
+            connection.readTimeout = 30_000
+            connection.setRequestProperty("Accept-Encoding", "identity")
+            if (connection.responseCode != HttpsURLConnection.HTTP_OK) {
+                throw IllegalStateException(
+                    "AUR server returned HTTP ${connection.responseCode}",
+                )
+            }
+            val declaredLength = connection.contentLengthLong
+            if (declaredLength == 0L || declaredLength > maximumBytes) {
+                throw SecurityException("AUR object has an invalid size")
+            }
+            var total = 0
+            connection.inputStream.use { input ->
+                while (true) {
+                    if (Thread.currentThread().isInterrupted) {
+                        throw InterruptedException("AUR review interrupted")
+                    }
+                    val count = input.read(aurTransferBuffer)
+                    if (count < 0) {
+                        break
+                    }
+                    total = Math.addExact(total, count)
+                    if (total > maximumBytes || count > destination.remaining()) {
+                        throw SecurityException("AUR object exceeds its size limit")
+                    }
+                    destination.put(aurTransferBuffer, 0, count)
+                }
+            }
+            if (total == 0 || declaredLength >= 0 && declaredLength != total.toLong()) {
+                throw SecurityException("AUR object is empty or truncated")
+            }
+            return total
+        } finally {
+            if (activePackageConnection === connection) {
+                activePackageConnection = null
+            }
+            connection.disconnect()
+        }
+    }
+
+    private fun parseAurReview(
+        source: ByteBuffer,
+        length: Int,
+    ): AurReviewData {
+        require(length in 1..NativeRuntime.AUR_REVIEW_SIZE)
+        val reader = AurWireReader(source, length)
+        require(reader.bytes(8).contentEquals("ARVW0001".toByteArray(StandardCharsets.US_ASCII)))
+        reader.bytes(32)
+        val snapshotSha256Bytes = reader.bytes(32)
+        require(snapshotSha256Bytes.any { byte -> byte != 0.toByte() })
+        val lastModified = reader.long()
+        require(lastModified > 0)
+        val flags = reader.int()
+        require(flags and 0x1f.inv() == 0)
+        val licenseCount = boundedAurCount(reader.int(), 32)
+        val dependencyCount = boundedAurCount(reader.int(), 256)
+        val makeDependencyCount = boundedAurCount(reader.int(), 256)
+        val checkDependencyCount = boundedAurCount(reader.int(), 256)
+        val sourceCount = boundedAurCount(reader.int(), 64)
+        val pgpKeyCount = boundedAurCount(reader.int(), 32)
+        val buildStepCount = boundedAurCount(reader.int(), 4)
+        val packageBase = reader.string(128)
+        val packageName = reader.string(128)
+        val version = reader.string(128)
+        val description = reader.string(2 * 1024, allowEmpty = true)
+        val maintainer = reader.string(128, allowEmpty = true)
+        val projectUrl = reader.string(4 * 1024, allowEmpty = true)
+        val snapshotPath = reader.string(4 * 1024)
+        val snapshotCommit = reader.string(64)
+        val installScript = reader.string(4 * 1024, allowEmpty = true)
+        val pkgbuild =
+            decodeAurScript(reader.blob(256 * 1024), allowEmpty = false)
+        val installScriptContents =
+            decodeAurScript(reader.blob(512 * 1024), allowEmpty = true)
+        require(packageBase.matches(AUR_PACKAGE_NAME))
+        require(packageName.matches(AUR_PACKAGE_NAME))
+        require(version.none(Char::isWhitespace))
+        require(
+            snapshotCommit.length == 40 &&
+                snapshotCommit.all { character ->
+                    character in '0'..'9' ||
+                        character in 'a'..'f' ||
+                        character in 'A'..'F'
+                },
+        )
+        require(
+            snapshotPath == "/cgit/aur.git/snapshot/$packageBase.tar.gz",
+        )
+        require((flags and (1 shl 1) != 0) == maintainer.isEmpty())
+        require((flags and (1 shl 2) != 0) == installScript.isNotEmpty())
+        require(installScript.isEmpty() == installScriptContents.isEmpty())
+
+        fun strings(
+            count: Int,
+            maximumBytes: Int,
+        ): Array<String> =
+            Array(count) {
+                reader.string(maximumBytes)
+            }
+
+        val licenses = strings(licenseCount, 4 * 1024)
+        val dependencies = strings(dependencyCount, 4 * 1024)
+        val makeDependencies = strings(makeDependencyCount, 4 * 1024)
+        val checkDependencies = strings(checkDependencyCount, 4 * 1024)
+        val sources =
+            Array(sourceCount) {
+                val architecture = reader.string(16, allowEmpty = true)
+                require(
+                    architecture.isEmpty() ||
+                        architecture == "x86_64" ||
+                        architecture == "aarch64",
+                )
+                val expression = reader.string(4 * 1024)
+                val hasSha256 = reader.byte()
+                require(hasSha256 in 0..1)
+                val sha256 =
+                    if (hasSha256 == 1) {
+                        hexSha256(reader.bytes(32))
+                    } else {
+                        null
+                    }
+                val insecure = reader.byte()
+                require(insecure in 0..1)
+                AurSourceReview(
+                    architecture,
+                    expression,
+                    sha256,
+                    insecure == 1,
+                )
+            }
+        val validPgpKeys = strings(pgpKeyCount, 4 * 1024)
+        val seenSteps = BooleanArray(5)
+        val buildSteps =
+            Array(buildStepCount) {
+                val code = reader.byte()
+                require(code in 1..4 && !seenSteps[code])
+                seenSteps[code] = true
+                when (code) {
+                    1 -> "prepare"
+                    2 -> "build"
+                    3 -> "check"
+                    else -> "package"
+                }
+            }
+        require(reader.exhausted())
+        val unverifiedSources = sources.any { sourceReview -> sourceReview.sha256 == null }
+        val insecureSources = sources.any { sourceReview -> sourceReview.insecureTransport }
+        require((flags and (1 shl 3) != 0) == unverifiedSources)
+        require((flags and (1 shl 4) != 0) == insecureSources)
+        return AurReviewData(
+            packageBase,
+            packageName,
+            version,
+            description,
+            maintainer,
+            projectUrl,
+            snapshotPath,
+            snapshotCommit.lowercase(),
+            hexSha256(snapshotSha256Bytes),
+            lastModified,
+            flags and 1 != 0,
+            licenses,
+            dependencies,
+            makeDependencies,
+            checkDependencies,
+            sources,
+            validPgpKeys,
+            buildSteps,
+            installScript,
+            pkgbuild,
+            installScriptContents,
+            unverifiedSources,
+            insecureSources,
+        )
+    }
+
+    private fun formatAurReview(review: AurReviewData): String =
+        buildString(
+            minOf(
+                NativeRuntime.AUR_REVIEW_SIZE,
+                review.pkgbuild.length + review.installScriptContents.length + 4096,
+            ),
+        ) {
+            append("AUR community package\n\n")
+            append(review.packageName).append(' ').append(review.version).append('\n')
+            if (review.description.isNotEmpty()) {
+                append(review.description).append('\n')
+            }
+            append("Maintainer: ")
+                .append(review.maintainer.ifEmpty { "Orphaned" })
+                .append('\n')
+            if (review.projectUrl.isNotEmpty()) {
+                append("Project: ").append(review.projectUrl).append('\n')
+            }
+            append("AUR updated: ")
+                .append(Instant.ofEpochSecond(review.lastModified))
+                .append(if (review.outOfDate) " · flagged out of date\n" else "\n")
+            append("\nTrust\n")
+            append("Community PKGBUILD; not an official signed Arch package.\n")
+            append(
+                "If installed, it joins the shared Archphene Linux environment and can " +
+                    "access its files and toolchain.\n",
+            )
+            append("AUR commit: ").append(review.snapshotCommit).append('\n')
+            append("Snapshot SHA-256: ").append(review.snapshotSha256).append('\n')
+            append("Unverified sources: ")
+                .append(if (review.unverifiedSources) "yes" else "none")
+                .append('\n')
+            append("Insecure source transports: ")
+                .append(if (review.insecureSources) "yes" else "none")
+                .append('\n')
+            append("Android permissions: none requested at this review stage.\n")
+            append("Download/build disk estimate: not available until source resolution.\n")
+            if (review.licenses.isNotEmpty()) {
+                append("\nLicenses\n")
+                review.licenses.forEach { value -> append("• ").append(value).append('\n') }
+            }
+            append("\nSources\n")
+            review.sources.forEach { source ->
+                append("• ")
+                if (source.architecture.isNotEmpty()) {
+                    append('[').append(source.architecture).append("] ")
+                }
+                append(source.expression).append('\n')
+                append("  SHA-256: ").append(source.sha256 ?: "SKIP").append('\n')
+                if (source.insecureTransport) {
+                    append("  Warning: insecure transport\n")
+                }
+            }
+            appendAurValues("Runtime dependencies", review.dependencies)
+            appendAurValues("Build dependencies", review.makeDependencies)
+            appendAurValues("Check dependencies", review.checkDependencies)
+            if (review.validPgpKeys.isNotEmpty()) {
+                appendAurValues("Valid PGP keys", review.validPgpKeys)
+            }
+            append("\nVisible build functions\n")
+            review.buildSteps.forEach { step -> append("• ").append(step).append('\n') }
+            if (review.installScript.isNotEmpty()) {
+                append("\nInstall script: ").append(review.installScript).append('\n')
+                append(review.installScriptContents).append('\n')
+            }
+            append("\nPKGBUILD\n")
+            append(review.pkgbuild)
+        }
+
+    private fun StringBuilder.appendAurValues(
+        heading: String,
+        values: Array<String>,
+    ) {
+        if (values.isEmpty()) {
+            return
+        }
+        append('\n').append(heading).append('\n')
+        values.forEach { value -> append("• ").append(value).append('\n') }
+    }
+
+    private fun boundedAurCount(
+        value: Int,
+        maximum: Int,
+    ): Int {
+        require(value in 0..maximum)
+        return value
+    }
+
+    private fun decodeAurScript(
+        bytes: ByteArray,
+        allowEmpty: Boolean,
+    ): String {
+        require(allowEmpty || bytes.isNotEmpty())
+        val decoder =
+            StandardCharsets.UTF_8
+                .newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+        val value = decoder.decode(ByteBuffer.wrap(bytes)).toString()
+        require(
+            value.none { character ->
+                character == '\u0000' ||
+                    character == '\r' ||
+                    (character.isISOControl() && character !in "\n\t")
+            },
+        )
+        return value
+    }
+
+    private fun hexSha256(bytes: ByteArray): String {
+        require(bytes.size == 32)
+        val output = CharArray(64)
+        bytes.forEachIndexed { index, byte ->
+            val value = byte.toInt() and 0xff
+            output[index * 2] = HEX_DIGITS[value ushr 4]
+            output[index * 2 + 1] = HEX_DIGITS[value and 0x0f]
+        }
+        return String(output)
     }
 
     private fun resolvePayloads(

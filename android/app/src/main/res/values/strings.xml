@@ -28,6 +28,9 @@
     <string name="package_name_hint">Package name</string>
     <string name="search">Search</string>
     <string name="details">Details</string>
+    <string name="aur">AUR</string>
+    <string name="aur_review_description">Review this community AUR package</string>
+    <string name="aur_review_unavailable">AUR review is unavailable or the package name is invalid</string>
     <string name="install">Install</string>
     <string name="remove">Remove</string>
     <string name="cancel">Cancel</string>

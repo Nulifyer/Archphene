@@ -14,6 +14,7 @@ pub const MAX_AUR_RPC_BYTES: usize = 128 * 1024;
 pub const MAX_AUR_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_AUR_SRCINFO_BYTES: usize = 256 * 1024;
 pub const MAX_AUR_PKGBUILD_BYTES: usize = 256 * 1024;
+pub const MAX_AUR_REVIEW_BYTES: usize = 1024 * 1024;
 pub const MAX_AUR_SOURCES: usize = 64;
 pub const MAX_AUR_DEPENDENCIES: usize = 256;
 
@@ -66,6 +67,8 @@ pub struct AurReview {
     pub review_sha256: [u8; 32],
     pub snapshot_sha256: Option<[u8; 32]>,
     pub snapshot_commit: Option<String>,
+    pub pkgbuild: Vec<u8>,
+    pub install_script_contents: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -109,6 +112,13 @@ impl fmt::Display for AurReviewError {
 
 impl std::error::Error for AurReviewError {}
 
+pub fn aur_snapshot_path<'a>(
+    rpc_bytes: &'a [u8],
+    requested_package: &str,
+) -> Result<&'a str, AurReviewError> {
+    Ok(parse_rpc(rpc_bytes, requested_package)?.snapshot_path)
+}
+
 pub fn review_aur_snapshot(
     rpc_bytes: &[u8],
     snapshot_bytes: &[u8],
@@ -139,6 +149,10 @@ pub fn review_aur_snapshot(
     verify_snapshot_files(&review, &snapshot.files)?;
     review.snapshot_sha256 = Some(Sha256::digest(snapshot_bytes).into());
     review.snapshot_commit = Some(snapshot.commit);
+    review.install_script_contents = review
+        .install_script
+        .as_deref()
+        .and_then(|path| snapshot.files.get(Path::new(path)).cloned());
     Ok(review)
 }
 
@@ -288,7 +302,129 @@ pub fn review_aur_package(
         review_sha256,
         snapshot_sha256: None,
         snapshot_commit: None,
+        pkgbuild: pkgbuild_bytes.to_vec(),
+        install_script_contents: None,
     })
+}
+
+impl AurReview {
+    pub fn write_wire(&self, destination: &mut [u8]) -> Result<usize, AurReviewError> {
+        if destination.len() < MAX_AUR_REVIEW_BYTES {
+            return Err(AurReviewError::SizeLimit("review output"));
+        }
+        let mut writer = WireWriter {
+            destination,
+            position: 0,
+        };
+        writer.bytes(b"ARVW0001")?;
+        writer.bytes(&self.review_sha256)?;
+        writer.bytes(&self.snapshot_sha256.unwrap_or([0; 32]))?;
+        writer.u64(self.last_modified)?;
+        writer.u32(
+            u32::from(self.out_of_date)
+                | (u32::from(self.maintainer.is_none()) << 1)
+                | (u32::from(self.install_script.is_some()) << 2)
+                | (u32::from(self.unverified_source_count > 0) << 3)
+                | (u32::from(self.insecure_source_count > 0) << 4),
+        )?;
+        for count in [
+            self.licenses.len(),
+            self.dependencies.len(),
+            self.make_dependencies.len(),
+            self.check_dependencies.len(),
+            self.sources.len(),
+            self.valid_pgp_keys.len(),
+            self.build_steps.len(),
+        ] {
+            writer.u32(u32::try_from(count).map_err(|_| AurReviewError::Limit("wire count"))?)?;
+        }
+        writer.string(&self.package_base)?;
+        writer.string(&self.package_name)?;
+        writer.string(&self.version)?;
+        writer.string(&self.description)?;
+        writer.string(self.maintainer.as_deref().unwrap_or(""))?;
+        writer.string(self.project_url.as_deref().unwrap_or(""))?;
+        writer.string(&self.snapshot_path)?;
+        writer.string(self.snapshot_commit.as_deref().unwrap_or(""))?;
+        writer.string(self.install_script.as_deref().unwrap_or(""))?;
+        writer.blob(&self.pkgbuild)?;
+        writer.blob(self.install_script_contents.as_deref().unwrap_or_default())?;
+        for value in &self.licenses {
+            writer.string(value)?;
+        }
+        for value in &self.dependencies {
+            writer.string(value)?;
+        }
+        for value in &self.make_dependencies {
+            writer.string(value)?;
+        }
+        for value in &self.check_dependencies {
+            writer.string(value)?;
+        }
+        for source in &self.sources {
+            writer.string(source.architecture.as_deref().unwrap_or(""))?;
+            writer.string(&source.expression)?;
+            writer.u8(u8::from(source.sha256.is_some()))?;
+            if let Some(sha256) = source.sha256 {
+                writer.bytes(&sha256)?;
+            }
+            writer.u8(u8::from(source.insecure_transport))?;
+        }
+        for value in &self.valid_pgp_keys {
+            writer.string(value)?;
+        }
+        for step in &self.build_steps {
+            writer.u8(match step {
+                AurBuildStep::Prepare => 1,
+                AurBuildStep::Build => 2,
+                AurBuildStep::Check => 3,
+                AurBuildStep::Package => 4,
+            })?;
+        }
+        Ok(writer.position)
+    }
+}
+
+struct WireWriter<'a> {
+    destination: &'a mut [u8],
+    position: usize,
+}
+
+impl WireWriter<'_> {
+    fn u8(&mut self, value: u8) -> Result<(), AurReviewError> {
+        self.bytes(&[value])
+    }
+
+    fn u32(&mut self, value: u32) -> Result<(), AurReviewError> {
+        self.bytes(&value.to_le_bytes())
+    }
+
+    fn u64(&mut self, value: u64) -> Result<(), AurReviewError> {
+        self.bytes(&value.to_le_bytes())
+    }
+
+    fn string(&mut self, value: &str) -> Result<(), AurReviewError> {
+        self.blob(value.as_bytes())
+    }
+
+    fn blob(&mut self, value: &[u8]) -> Result<(), AurReviewError> {
+        self.u32(u32::try_from(value.len()).map_err(|_| AurReviewError::SizeLimit("wire field"))?)?;
+        self.bytes(value)
+    }
+
+    fn bytes(&mut self, value: &[u8]) -> Result<(), AurReviewError> {
+        let end = self
+            .position
+            .checked_add(value.len())
+            .ok_or(AurReviewError::SizeLimit("review output"))?;
+        let target = self
+            .destination
+            .get_mut(self.position..end)
+            .ok_or(AurReviewError::SizeLimit("review output"))?;
+        target.copy_from_slice(value);
+        self.position = end;
+        Ok(())
+    }
 }
 
 struct Snapshot {
@@ -892,6 +1028,10 @@ package() {
 
     #[test]
     fn reviews_visual_studio_code_for_aarch64() {
+        assert_eq!(
+            aur_snapshot_path(RPC, "visual-studio-code-bin").expect("snapshot path"),
+            "/cgit/aur.git/snapshot/visual-studio-code-bin.tar.gz",
+        );
         let review = review_aur_package(
             RPC,
             SRCINFO,
@@ -932,7 +1072,21 @@ package() {
             review.snapshot_commit.as_deref(),
             Some("0123456789abcdef0123456789abcdef01234567")
         );
+        assert_eq!(review.pkgbuild, PKGBUILD);
+        assert_eq!(
+            review.install_script_contents.as_deref(),
+            Some(&b"post_install() { true; }\n"[..])
+        );
         assert_eq!(review.sources.len(), 2);
+        let mut wire = vec![0_u8; MAX_AUR_REVIEW_BYTES];
+        let wire_length = review.write_wire(&mut wire).expect("review wire");
+        assert!(wire_length < wire.len());
+        assert_eq!(&wire[..8], b"ARVW0001");
+        assert!(
+            wire[..wire_length]
+                .windows(PKGBUILD.len())
+                .any(|window| window == PKGBUILD)
+        );
 
         let tampered = snapshot(b"abd");
         assert_eq!(

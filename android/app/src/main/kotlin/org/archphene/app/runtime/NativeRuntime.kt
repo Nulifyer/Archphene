@@ -8,6 +8,9 @@ internal object NativeRuntime {
     const val PACKAGE_MANIFEST_LIMIT = 32 * 1024
     const val PACKAGE_OUTPUT_SIZE = 16 * 1024
     const val PACKAGE_RESOLUTION_OUTPUT_SIZE = 256 * 1024
+    const val AUR_RPC_SIZE = 128 * 1024
+    const val AUR_SNAPSHOT_SIZE = 4 * 1024 * 1024
+    const val AUR_REVIEW_SIZE = 1024 * 1024
     const val INSTALLED_PACKAGE_PAGE_SIZE = 60
     const val INSTALLED_PACKAGE_LIMIT = 4096
     const val DESKTOP_ENTRY_LIMIT = 256
@@ -155,6 +158,25 @@ internal object NativeRuntime {
         handle: Long,
         packageBuffer: ByteBuffer,
         packageLength: Int,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeReviewAur(
+        handle: Long,
+        architecture: Int,
+        packageBuffer: ByteBuffer,
+        packageLength: Int,
+        rpcBuffer: ByteBuffer,
+        rpcLength: Int,
+        snapshotBuffer: ByteBuffer,
+        snapshotLength: Int,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeResolveAurSnapshotPath(
+        handle: Long,
+        packageBuffer: ByteBuffer,
+        packageLength: Int,
+        rpcBuffer: ByteBuffer,
+        rpcLength: Int,
         outputBuffer: ByteBuffer,
     ): Int
     external fun nativePackageCommand(

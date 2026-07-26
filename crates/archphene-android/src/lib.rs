@@ -92,6 +92,10 @@ mod android {
     use archphene_packages::{
         MAX_MANIFEST_BYTES, MAX_PACKAGE_RESOLUTION_BYTES, MAX_TOOL_OUTPUT_BYTES, PackageResolution,
         PackageRuntimeError, Repository, RepositoryArchitecture, ToolOutput,
+        aur::{
+            MAX_AUR_REVIEW_BYTES, MAX_AUR_RPC_BYTES, MAX_AUR_SNAPSHOT_BYTES, aur_snapshot_path,
+            review_aur_snapshot,
+        },
     };
     use archphene_process::{
         MAX_COMMAND_ARGUMENTS, MAX_COMMAND_OUTPUT_BYTES, MAX_COMMAND_REQUEST_BYTES,
@@ -124,6 +128,21 @@ mod android {
 
     fn registry() -> &'static Mutex<RuntimeRegistry> {
         REGISTRY.get_or_init(|| Mutex::new(RuntimeRegistry::new()))
+    }
+
+    fn ranges_overlap(
+        first: usize,
+        first_length: usize,
+        second: usize,
+        second_length: usize,
+    ) -> bool {
+        let Some(first_end) = first.checked_add(first_length) else {
+            return true;
+        };
+        let Some(second_end) = second.checked_add(second_length) else {
+            return true;
+        };
+        first < second_end && second < first_end
     }
 
     fn runtime_error(error: RuntimeError) -> jint {
@@ -1061,6 +1080,204 @@ mod android {
         let result = package_runtime.resolve(package);
         let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
         copy_package_resolution_result(result, destination)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeReviewAur(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        architecture: jint,
+        package_buffer: JByteBuffer,
+        package_length: jint,
+        rpc_buffer: JByteBuffer,
+        rpc_length: jint,
+        snapshot_buffer: JByteBuffer,
+        snapshot_length: jint,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let (Ok(handle), Ok(package_length), Ok(rpc_length), Ok(snapshot_length)) = (
+            u64::try_from(handle),
+            usize::try_from(package_length),
+            usize::try_from(rpc_length),
+            usize::try_from(snapshot_length),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let architecture = match architecture {
+            1 => RepositoryArchitecture::X86_64,
+            2 => RepositoryArchitecture::Aarch64,
+            _ => return ERROR_INVALID_ARGUMENT,
+        };
+        let (Ok(package_capacity), Ok(rpc_capacity), Ok(snapshot_capacity), Ok(output_capacity)) = (
+            environment.get_direct_buffer_capacity(&package_buffer),
+            environment.get_direct_buffer_capacity(&rpc_buffer),
+            environment.get_direct_buffer_capacity(&snapshot_buffer),
+            environment.get_direct_buffer_capacity(&output_buffer),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if package_length == 0
+            || package_length > package_capacity
+            || package_length > 128
+            || rpc_length == 0
+            || rpc_length > rpc_capacity
+            || rpc_length > MAX_AUR_RPC_BYTES
+            || snapshot_length == 0
+            || snapshot_length > snapshot_capacity
+            || snapshot_length > MAX_AUR_SNAPSHOT_BYTES
+            || output_capacity < MAX_AUR_REVIEW_BYTES
+        {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let (Ok(package_address), Ok(rpc_address), Ok(snapshot_address), Ok(output_address)) = (
+            environment.get_direct_buffer_address(&package_buffer),
+            environment.get_direct_buffer_address(&rpc_buffer),
+            environment.get_direct_buffer_address(&snapshot_buffer),
+            environment.get_direct_buffer_address(&output_buffer),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if package_address.is_null()
+            || rpc_address.is_null()
+            || snapshot_address.is_null()
+            || output_address.is_null()
+            || ranges_overlap(
+                output_address as usize,
+                output_capacity,
+                package_address as usize,
+                package_length,
+            )
+            || ranges_overlap(
+                output_address as usize,
+                output_capacity,
+                rpc_address as usize,
+                rpc_length,
+            )
+            || ranges_overlap(
+                output_address as usize,
+                output_capacity,
+                snapshot_address as usize,
+                snapshot_length,
+            )
+        {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        {
+            let Ok(mut registry) = registry().lock() else {
+                return ERROR_INTERNAL;
+            };
+            let Some(runtime) = registry.runtime_mut(handle) else {
+                return ERROR_INVALID_HANDLE;
+            };
+            if runtime.package_runtime().is_none() {
+                return ERROR_INVALID_STATE;
+            }
+        }
+        let package_bytes =
+            unsafe { slice::from_raw_parts(package_address.cast_const(), package_length) };
+        let Ok(package) = str::from_utf8(package_bytes) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let rpc = unsafe { slice::from_raw_parts(rpc_address.cast_const(), rpc_length) };
+        let snapshot =
+            unsafe { slice::from_raw_parts(snapshot_address.cast_const(), snapshot_length) };
+        let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
+        match review_aur_snapshot(rpc, snapshot, package, architecture) {
+            Ok(review) => match review.write_wire(destination) {
+                Ok(length) => i32::try_from(length).unwrap_or(ERROR_INTERNAL),
+                Err(error) => copy_package_error(&error, destination),
+            },
+            Err(error) => copy_package_error(&error, destination),
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeResolveAurSnapshotPath(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        package_buffer: JByteBuffer,
+        package_length: jint,
+        rpc_buffer: JByteBuffer,
+        rpc_length: jint,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let (Ok(handle), Ok(package_length), Ok(rpc_length)) = (
+            u64::try_from(handle),
+            usize::try_from(package_length),
+            usize::try_from(rpc_length),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let (Ok(package_capacity), Ok(rpc_capacity), Ok(output_capacity)) = (
+            environment.get_direct_buffer_capacity(&package_buffer),
+            environment.get_direct_buffer_capacity(&rpc_buffer),
+            environment.get_direct_buffer_capacity(&output_buffer),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if package_length == 0
+            || package_length > package_capacity
+            || package_length > 128
+            || rpc_length == 0
+            || rpc_length > rpc_capacity
+            || rpc_length > MAX_AUR_RPC_BYTES
+            || output_capacity < 4096
+        {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let (Ok(package_address), Ok(rpc_address), Ok(output_address)) = (
+            environment.get_direct_buffer_address(&package_buffer),
+            environment.get_direct_buffer_address(&rpc_buffer),
+            environment.get_direct_buffer_address(&output_buffer),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if package_address.is_null()
+            || rpc_address.is_null()
+            || output_address.is_null()
+            || ranges_overlap(
+                output_address as usize,
+                output_capacity,
+                package_address as usize,
+                package_length,
+            )
+            || ranges_overlap(
+                output_address as usize,
+                output_capacity,
+                rpc_address as usize,
+                rpc_length,
+            )
+        {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        {
+            let Ok(mut registry) = registry().lock() else {
+                return ERROR_INTERNAL;
+            };
+            let Some(runtime) = registry.runtime_mut(handle) else {
+                return ERROR_INVALID_HANDLE;
+            };
+            if runtime.package_runtime().is_none() {
+                return ERROR_INVALID_STATE;
+            }
+        }
+        let package_bytes =
+            unsafe { slice::from_raw_parts(package_address.cast_const(), package_length) };
+        let Ok(package) = str::from_utf8(package_bytes) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let rpc = unsafe { slice::from_raw_parts(rpc_address.cast_const(), rpc_length) };
+        let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
+        match aur_snapshot_path(rpc, package) {
+            Ok(path) if path.len() <= destination.len() => {
+                destination[..path.len()].copy_from_slice(path.as_bytes());
+                i32::try_from(path.len()).unwrap_or(ERROR_INTERNAL)
+            }
+            Ok(_) => ERROR_INTERNAL,
+            Err(error) => copy_package_error(&error, destination),
+        }
     }
 
     #[unsafe(no_mangle)]
