@@ -295,12 +295,12 @@ and rejects cycles or traversal above it. A bounded 256-byte shebang parser
 allows one installed ELF interpreter and the kernel's optional single
 interpreter argument; recursive or non-ELF interpreters fail closed. Host
 probes cover direct and spawned nested scripts, shebang arguments, bare PATH
-scripts, valid relative/absolute links, loops, and escapes. Both exact-ABI APKs
-build with the refreshed bridge. The physical Samsung gate now executes the
-complete `/usr/bin` wrapper → `/usr/lib` script → absolute root-internal symlink
-→ ELF chain and returns the real Bash version in a visually inspected
-full-device capture without a fatal log. The x86_64 device repetition remains
-open.
+scripts, valid relative/absolute links, loops, and escapes. Exact-ABI manager
+builds now execute the complete `/usr/bin` wrapper → `/usr/lib` script →
+absolute root-internal symlink → ELF chain on both the x86_64 emulator and
+physical AArch64 Samsung. Both return the real architecture-specific Bash
+version, remove every fixture, emit no fatal log, and pass visually inspected
+full-device captures.
 
 The launcher template no longer embeds AGP's repository-wide
 `META-INF/version-control-info.textproto`. That metadata made the authenticated

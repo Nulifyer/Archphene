@@ -62,10 +62,10 @@ archphene_wait_ui 'text="Start shell"' "terminal-unicode-start-$serial" 15
 archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Start shell"' 'start shell'
 archphene_wait_ui 'archphene:~\$' "terminal-unicode-prompt-$serial" 20
 
-archphene_wait_ui 'text="Linux command, for example btop"' \
+archphene_wait_ui 'text="Command, e.g. btop"' \
   "terminal-unicode-field-$serial" 15
 archphene_tap_ui_pattern "$ARCHPHENE_UI" \
-  'text="Linux command, for example btop"' 'Linux shell input'
+  'text="Command, e.g. btop"' 'Linux shell input'
 archphene_adb_run shell input text \
   'bash%s/usr/bin/archphene-terminal-unicode-modes-test' >/dev/null
 archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null

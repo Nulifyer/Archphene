@@ -295,7 +295,7 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [x] Translate Arch's standard `/usr/lib/pulseaudio` loader path into the private root so unmodified `libpulse` resolves `libpulsecommon` without an application-specific rule.
   - [x] Preserve normal `/proc/self/exe` semantics across the explicit glibc loader: publish the verified real target on initial launch and replace stale values on every nested `exec`/`posix_spawn`. Host direct/spawn probes and the current Samsung Foot client pass with the refreshed sealed bridge.
   - [ ] Generalize verified absolute/private RUNPATH translation without globally mixing unrelated application-private libraries.
-  - [ ] Repeat the nested executable/symlink/script device gate on the x86_64 emulator.
+  - [x] Repeat the nested executable/symlink/script device gate on the x86_64 emulator. Exact-ABI manager builds now pass the complete `/usr/bin` wrapper → `/usr/lib` script → absolute root-internal symlink → ELF chain, real Bash output, fixture cleanup, fatal-log check, and visually inspected full-device capture on both targets.
 - [ ] Cache unchanged closure analysis and wrapper inputs so repeat installs do not rescan large package trees.
 - [ ] Complete and validate the separate 16 KB-aligned x86_64 package/runtime strategy before enabling transactions there.
 

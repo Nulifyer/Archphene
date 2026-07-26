@@ -55,10 +55,10 @@ archphene_adb_run shell run-as "$package" chmod 755 "$installed_fixture"
 
 enter_shell_line() {
   local line="$1" ui_name="$2"
-  archphene_wait_ui 'text="Linux command, for example btop"' \
+  archphene_wait_ui 'text="Command, e.g. btop"' \
     "$ui_name-field" 15
   archphene_tap_ui_pattern "$ARCHPHENE_UI" \
-    'text="Linux command, for example btop"' 'Linux shell input'
+    'text="Command, e.g. btop"' 'Linux shell input'
   archphene_adb_run shell input text "${line// /%s}" >/dev/null
   archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null
   archphene_wait_ui 'text="Send"' "$ui_name-send" 10

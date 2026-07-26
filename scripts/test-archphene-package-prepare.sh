@@ -216,10 +216,10 @@ archphene_adb_run shell run-as "$package" test -x files/arch-root/usr/bin/btop |
   archphene_die "reinstalled btop executable is missing"
 
 archphene_open_manager_section Terminal "archphene-prepare-terminal-$serial"
-archphene_wait_ui 'text="Linux command, for example btop"' \
+archphene_wait_ui 'text="Command, e.g. btop"' \
   "archphene-command-field-$serial" 15
 archphene_tap_ui_pattern "$ARCHPHENE_UI" \
-  'text="Linux command, for example btop"' 'Linux command'
+  'text="Command, e.g. btop"' 'Linux command'
 archphene_adb_run shell input text 'btop%s--version' >/dev/null
 archphene_wait_ui 'text="btop --version"' "archphene-command-entered-$serial" 10
 archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null

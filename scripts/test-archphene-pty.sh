@@ -63,7 +63,7 @@ archphene_adb_run shell run-as "$package" test -x files/arch-root/usr/bin/bash |
 
 enter_shell_line() {
   local line="$1" ui_name="$2" deadline ui
-  archphene_wait_ui 'text="Linux command, for example btop"' "$ui_name-field" 15
+  archphene_wait_ui 'text="Command, e.g. btop"' "$ui_name-field" 15
   deadline=$((SECONDS + 10))
   while ((SECONDS < deadline)); do
     ui="$(archphene_capture_ui "$ui_name-field-focused")"
@@ -72,7 +72,7 @@ enter_shell_line() {
       break
     fi
     archphene_tap_ui_pattern \
-      "$ui" 'text="Linux command, for example btop"' 'Linux shell input'
+      "$ui" 'text="Command, e.g. btop"' 'Linux shell input'
     sleep 0.3
   done
   ((SECONDS < deadline)) ||

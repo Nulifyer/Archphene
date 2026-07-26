@@ -11,6 +11,7 @@ Notable user-facing changes will be recorded here.
 
 ### Fixed
 
+- Completed the generic nested-command device matrix on x86_64 and AArch64, covering an installed `/usr/bin` wrapper, `/usr/lib` shebang script, absolute root-internal symlink, and unmodified ELF. The terminal empty-state copy now reflects an already available shared shell, and its shorter command hint remains readable at the emulator's larger text scale.
 - Updated the signed-package regression for the manager's sentence-case controls, split package activity fields, persistent section selection, populated cache, and Android-owned launcher install/removal confirmations instead of treating those production behaviors as timeouts.
 - Added an unambiguous one-tap “Refresh package catalogs” recovery to durable package activity cards for catalog and trust failures. The signed catalog path now records successful recovery against the exact failed job, survives manager restart, and returns to Review; state-restoring no-network emulator/Samsung gates leave both package databases unchanged.
 - Replaced the AUR package review's unbounded evidence wall with a compact summary and six mutually compact, accessible, selectable sections for sources, trust, build environment, digests, recipe, and build logs. A generated no-network fixture proves collapsed defaults, exact expanded evidence, phone scrolling, unchanged pacman state, and full-device presentation on the x86_64 emulator and physical AArch64 Samsung.
