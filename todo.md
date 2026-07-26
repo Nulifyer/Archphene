@@ -246,6 +246,7 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [x] Recover a bounded stale database lock and durable explicit-install-reason intent after interruption.
   - [x] Preserve pacman install reasons, validate the local database after mutation, and support conservative non-cascading removal with exact postcondition checks.
   - [x] Cancel safely before the commit boundary, including active-transfer disconnect, partial-file cleanup, durable Cancelled state, and exact installed/cache postconditions.
+  - [x] Support large bounded dependency closures and transaction transcripts without widening every command response: a reusable dedicated 256 KiB direct resolution buffer carries the current 198-package Code closure, successful pacman output is size-checked without a large heap copy, failure diagnostics remain capped at 16 KiB, and detached-signature status parsing accepts non-UTF-8 human diagnostics while requiring exact GnuPG status tokens.
   - [ ] Add hooks/scriptlets, proven upgrades/replacements, failure rollback/recovery, orphan cleanup, and storage-failure recovery.
 - [ ] Add a bounded AUR workflow suitable for packages such as `visual-studio-code-bin`.
   - [ ] Show source, PKGBUILD, maintainer, signatures/checksums, build steps, permissions, and disk impact before installation.
@@ -259,6 +260,8 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [x] Resolve regular nested executables through the verified loader only when their canonical path remains inside the shared root, their executable mode is present, and they are not group/world writable. Host tests cover real ELF execution, spawn, access, escape, and writable-file rejection; a full-device Samsung gate proves a package-owned `/usr/bin` Bash wrapper launching an unmodified ELF from `/usr/lib`.
   - [x] Resolve relative and fake-root absolute symlinks without interpreting them against Android's host root; cap expansion at 40 links and reject loops or traversal above the shared root.
   - [x] Execute bounded nested shebang programs through one installed ELF interpreter, preserve the optional single kernel shebang argument, and reject recursive/non-ELF interpreters. Host exec/spawn probes and the Samsung `/usr/bin` wrapper → `/usr/lib` script → absolute symlink → ELF gate pass.
+  - [x] Translate Arch's standard `/usr/lib/pulseaudio` loader path into the private root so unmodified `libpulse` resolves `libpulsecommon` without an application-specific rule.
+  - [ ] Generalize verified absolute/private RUNPATH translation without globally mixing unrelated application-private libraries.
   - [ ] Repeat the nested executable/symlink/script device gate on the x86_64 emulator.
 - [ ] Cache unchanged closure analysis and wrapper inputs so repeat installs do not rescan large package trees.
 - [ ] Complete and validate the separate 16 KB-aligned x86_64 package/runtime strategy before enabling transactions there.
@@ -302,7 +305,11 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
 ## P0 - VS Code and .NET daily-use milestone
 
 - [ ] Install Code through the generic package/AUR pipeline with no Code-specific bridge exceptions.
+  - [x] On x86_64, the generic official-package path installs the current 198-package, 428 MiB Code closure, discovers four desktop entries, publishes four generated launchers, and reaches the packaged Electron executable.
+  - [ ] Add the bounded AUR workflow needed for an equivalent `visual-studio-code-bin` installation on AArch64.
 - [ ] Validate Electron/Chromium multiprocess startup, Ozone Wayland, sandbox behavior, rendering, IME, clipboard, dialogs, file watching, extensions, and lifecycle.
+  - [x] Resolve Electron's standard PulseAudio private-library dependency through the generic runtime environment.
+  - [ ] Fix Electron's ICU data-descriptor startup failure; the current x86_64 launch reaches Electron and then aborts with `Invalid file descriptor to ICU data received`.
 - [ ] Install `dotnet-sdk` through the same shared package system and make `dotnet` available in Code's integrated terminal.
 - [ ] Create a new ASP.NET Core MVC project in shared Arch storage.
 - [ ] Open the project in Code and validate editing, search, Git, terminal PTY, language services, restore/build, and extension-host subprocesses.

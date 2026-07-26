@@ -545,6 +545,9 @@ class ArchpheneRuntimeService : Service() {
     private val desktopEntryOutputBuffer =
         ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
     private val desktopEntryOutputBytes = ByteArray(NativeRuntime.PACKAGE_OUTPUT_SIZE)
+    private val packageResolutionRequestBuffer = ByteBuffer.allocateDirect(128)
+    private val packageResolutionOutputBuffer =
+        ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_RESOLUTION_OUTPUT_SIZE)
     private val launcherAuthorizationRequestBuffer = ByteBuffer.allocateDirect(256)
     private val launcherAuthorizationOutputBuffer = ByteBuffer.allocateDirect(512)
     private val launcherAuthorizationOutputBytes = ByteArray(512)
@@ -3142,6 +3145,10 @@ class ArchpheneRuntimeService : Service() {
                     offset,
                     output,
                 )
+            if (length == NativeRuntime.ERROR_INVALID_STATE && offset == 0) {
+                Log.i(TAG, "Launcher registry is unavailable; reconciliation paused")
+                return emptyList()
+            }
             check(length in 1..bytes.size) {
                 "Could not read launcher registry: $length"
             }
@@ -3430,12 +3437,14 @@ class ArchpheneRuntimeService : Service() {
     ): String = readNativeMessage(buffer, result.coerceAtLeast(Int.MIN_VALUE.toLong()).toInt())
 
     private fun readCString(buffer: ByteBuffer): String {
+        var length = 0
+        while (length < buffer.capacity() && buffer.get(length) != 0.toByte()) {
+            length += 1
+        }
+        val bytes = ByteArray(length)
         buffer.position(0)
-        val bytes = ByteArray(buffer.capacity())
         buffer.get(bytes)
-        val terminator = bytes.indexOf(0)
-        val length = if (terminator >= 0) terminator else bytes.size
-        return String(bytes, 0, length, StandardCharsets.UTF_8)
+        return String(bytes, StandardCharsets.UTF_8)
     }
 
     @Synchronized
@@ -3712,22 +3721,28 @@ class ArchpheneRuntimeService : Service() {
         packageName: String,
     ): List<ResolvedPayload> {
         val packageBytes = packageName.toByteArray(StandardCharsets.UTF_8)
-        val packageBuffer = ByteBuffer.allocateDirect(packageBytes.size)
-        packageBuffer.put(packageBytes)
-        val outputBuffer = ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
-        val outputLength =
-            NativeRuntime.nativeResolvePackage(
-                activeHandle,
-                packageBuffer,
-                packageBytes.size,
-                outputBuffer,
-            )
-        if (outputLength <= 0) {
-            throw IllegalStateException(readNativeMessage(outputBuffer, outputLength))
-        }
-        val bytes = ByteArray(outputLength)
-        outputBuffer.position(0)
-        outputBuffer.get(bytes)
+        val bytes =
+            synchronized(packageResolutionOutputBuffer) {
+                packageResolutionRequestBuffer.clear()
+                packageResolutionRequestBuffer.put(packageBytes)
+                packageResolutionOutputBuffer.clear()
+                val outputLength =
+                    NativeRuntime.nativeResolvePackage(
+                        activeHandle,
+                        packageResolutionRequestBuffer,
+                        packageBytes.size,
+                        packageResolutionOutputBuffer,
+                    )
+                if (outputLength <= 0) {
+                    throw IllegalStateException(
+                        readNativeMessage(packageResolutionOutputBuffer, outputLength),
+                    )
+                }
+                ByteArray(outputLength).also { output ->
+                    packageResolutionOutputBuffer.position(0)
+                    packageResolutionOutputBuffer.get(output)
+                }
+            }
         val packages = ArrayList<ResolvedPayload>()
         String(bytes, StandardCharsets.UTF_8)
             .lineSequence()

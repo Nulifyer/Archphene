@@ -976,14 +976,38 @@ appearance/interaction cases also pass on Samsung, including manager light/dark
 override, real Material You widget pixels, and stable-process Mousepad changes
 from 100%/18 dp to 200%/22 dp with independent 32/48 dp interaction targets.
 
-The first real Code-OSS transaction resolved, signature-verified, extracted,
-and classified its 36-package closure, but its original attempt failed closed
-before wrapper creation on an absolute icon symlink into `/usr/lib/code`.
-That generic blocker is now addressed without a Code-specific bypass:
-root-contained `/usr/lib/<app>` executables, scripts, and fake-root symlinks
-are launchable through the verified loader, while package icon symlinks are
-normalized and embedded in the Android wrapper. The complete Code transaction
-and Electron/Chromium runtime still need to be rerun and validated end to end.
+The current real Code-OSS transaction on x86_64 completes through the generic
+official-package path. Pacman resolves, downloads, detached-signature verifies,
+and installs its current 198-package, 428 MiB closure; desktop discovery then
+publishes four generated Android launchers, including Code - OSS. This run
+closed four general package-engine gaps: dependency resolution now has a
+separate bounded, Service-reused 256 KiB direct response rather than exceeding
+the general 16 KiB command channel; GnuPG machine status is parsed as raw bytes so a valid
+signature is not rejected because a human diagnostic contains non-UTF-8;
+successful large transaction output is bounded but discarded without a large
+heap copy; and legitimate zero-byte pacman `files` records no longer make an
+otherwise complete desktop scan appear truncated. A genuinely truncated scan
+still pauses launcher reconciliation rather than mutating the registry from
+incomplete evidence.
+
+Code now reaches the packaged Electron executable without a Code-specific
+bridge exception. Translating Arch's standard `/usr/lib/pulseaudio` directory
+into the private-root loader path resolves `libpulsecommon`; Electron then
+aborts with `Invalid file descriptor to ICU data received`. Electron/Chromium
+multiprocess startup, Ozone rendering, sandboxing, and the daily-use workflow
+therefore remain unvalidated. A generic policy for other package-private
+absolute RUNPATH trees also remains open; globally mixing arbitrary
+`/usr/lib/<app>` directories would risk resolving the wrong private library.
+
+The same current-source arm64 manager preserves the Samsung shared root at 35
+installed packages and three current Foot launchers. Cached startup completes
+in 255 ms, and a fresh generated Foot launch authenticates generation 328,
+starts the manager-owned Linux process, connects the real Wayland client,
+presents its first 1080×2202 frame, and resizes cleanly for the Samsung IME.
+The visually inspected evidence is a full-device screenshot rather than an
+app-only frame. The complete Rust workspace passes 174 tests, including the
+large-resolution, raw-signature-status, empty-files-record, loader-path, JNI,
+compositor, terminal, storage, and warmed-allocation regressions.
 
 ## Validated
 

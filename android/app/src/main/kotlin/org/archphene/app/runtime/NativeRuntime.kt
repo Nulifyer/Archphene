@@ -7,12 +7,14 @@ internal object NativeRuntime {
     const val SNAPSHOT_SIZE = 64
     const val PACKAGE_MANIFEST_LIMIT = 32 * 1024
     const val PACKAGE_OUTPUT_SIZE = 16 * 1024
+    const val PACKAGE_RESOLUTION_OUTPUT_SIZE = 256 * 1024
     const val INSTALLED_PACKAGE_PAGE_SIZE = 60
     const val INSTALLED_PACKAGE_LIMIT = 4096
     const val DESKTOP_ENTRY_LIMIT = 256
     const val LAUNCHER_PROCESS_LOG_SIZE = 16 * 1024
     const val COMMAND_REQUEST_LIMIT = 16 * 1024
     const val TERMINAL_DAMAGE_SIZE = 6_080_040
+    const val ERROR_INVALID_STATE = -3
 
     const val LIFECYCLE_RUNNING = 2
     const val LIFECYCLE_SUSPENDED = 3

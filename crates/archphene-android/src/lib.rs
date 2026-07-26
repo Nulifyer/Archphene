@@ -90,8 +90,8 @@ mod android {
     use archphene_core::{Lifecycle, PROTOCOL_VERSION, RuntimeError, SNAPSHOT_SIZE};
     use archphene_jobs::{JobError, JobOperation, JobState};
     use archphene_packages::{
-        MAX_MANIFEST_BYTES, MAX_TOOL_OUTPUT_BYTES, PackageRuntimeError, Repository,
-        RepositoryArchitecture, ToolOutput,
+        MAX_MANIFEST_BYTES, MAX_PACKAGE_RESOLUTION_BYTES, MAX_TOOL_OUTPUT_BYTES, PackageResolution,
+        PackageRuntimeError, Repository, RepositoryArchitecture, ToolOutput,
     };
     use archphene_process::{
         MAX_COMMAND_ARGUMENTS, MAX_COMMAND_OUTPUT_BYTES, MAX_COMMAND_REQUEST_BYTES,
@@ -151,6 +151,22 @@ mod android {
             }
         };
         let bytes = output.as_bytes();
+        if bytes.len() > destination.len() {
+            return ERROR_INTERNAL;
+        }
+        destination[..bytes.len()].copy_from_slice(bytes);
+        i32::try_from(bytes.len()).unwrap_or(i32::MAX)
+    }
+
+    fn copy_package_resolution_result(
+        result: Result<PackageResolution, PackageRuntimeError>,
+        destination: &mut [u8],
+    ) -> jint {
+        let resolution = match result {
+            Ok(resolution) => resolution,
+            Err(error) => return copy_package_error(&error, destination),
+        };
+        let bytes = resolution.as_bytes();
         if bytes.len() > destination.len() {
             return ERROR_INTERNAL;
         }
@@ -1012,7 +1028,7 @@ mod android {
         if package_length == 0
             || package_length > package_capacity
             || package_length > 128
-            || output_capacity < MAX_TOOL_OUTPUT_BYTES
+            || output_capacity < MAX_PACKAGE_RESOLUTION_BYTES
         {
             return ERROR_INVALID_ARGUMENT;
         }
@@ -1044,7 +1060,7 @@ mod android {
         };
         let result = package_runtime.resolve(package);
         let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
-        copy_tool_result(result, destination)
+        copy_package_resolution_result(result, destination)
     }
 
     #[unsafe(no_mangle)]

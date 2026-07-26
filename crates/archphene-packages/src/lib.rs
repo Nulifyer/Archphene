@@ -18,11 +18,13 @@ use archphene_process::{CommandEnvironment, ProcessError};
 pub const MAX_MANIFEST_BYTES: usize = 32 * 1024;
 pub const MAX_MANIFEST_ENTRIES: usize = 128;
 pub const MAX_TOOL_OUTPUT_BYTES: usize = 16 * 1024;
+pub const MAX_PACKAGE_RESOLUTION_BYTES: usize = 256 * 1024;
 pub const INSTALLED_PACKAGE_PAGE_SIZE: usize = 60;
 
 const MANIFEST_HEADER: &str = "# org.archphene.package-runtime.v1";
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const TRANSACTION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const MAX_PACKAGE_TRANSACTION_OUTPUT_BYTES: usize = 256 * 1024;
 const ALIAS_DIRECTORY: &str = "run/package-runtime-v1";
 const OUTPUT_FILE: &str = "run/package-command-output.tmp";
 const INSTALL_REASON_INTENT_FILE: &str = "run/package-install-reasons-v1";
@@ -298,6 +300,10 @@ pub struct ToolOutput {
     length: usize,
 }
 
+pub struct PackageResolution {
+    bytes: Vec<u8>,
+}
+
 pub struct InstalledPackageCatalog {
     packages: Vec<(String, String, bool)>,
 }
@@ -322,6 +328,16 @@ impl ToolOutput {
         self.bytes[self.length..end].copy_from_slice(bytes);
         self.length = end;
         Ok(())
+    }
+}
+
+impl PackageResolution {
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub fn as_str(&self) -> Result<&str, PackageRuntimeError> {
+        std::str::from_utf8(self.as_bytes()).map_err(|_| PackageRuntimeError::InvalidResolution)
     }
 }
 
@@ -571,6 +587,12 @@ impl PackageRuntime {
         library_path.push(native_root.as_os_str());
         library_path.push(":");
         library_path.push(arch_root.join("usr/lib").as_os_str());
+        // Arch's libpulse uses an absolute /usr/lib/pulseaudio RUNPATH for
+        // libpulsecommon. The Android host cannot resolve that root-absolute
+        // path, so expose the standard Arch system-library directory through
+        // the verified loader just like /usr/lib itself.
+        library_path.push(":");
+        library_path.push(arch_root.join("usr/lib/pulseaudio").as_os_str());
         let mut executable_path = alias_root.as_os_str().to_os_string();
         executable_path.push(":");
         executable_path.push(arch_root.join("usr/bin").as_os_str());
@@ -729,7 +751,7 @@ impl PackageRuntime {
         parse_search_output(raw.as_str()?)
     }
 
-    pub fn resolve(&self, package: &str) -> Result<ToolOutput, PackageRuntimeError> {
+    pub fn resolve(&self, package: &str) -> Result<PackageResolution, PackageRuntimeError> {
         if !safe_logical_name(package) || !self.catalogs_ready() {
             return Err(if self.catalogs_ready() {
                 PackageRuntimeError::InvalidQuery
@@ -749,7 +771,7 @@ impl PackageRuntime {
         let database = database_path
             .to_str()
             .ok_or(PackageRuntimeError::InvalidPath)?;
-        let raw = self.run(
+        let raw = self.run_bytes_with_timeout(
             PackageTool::Pacman,
             &[
                 "--config",
@@ -764,8 +786,12 @@ impl PackageRuntime {
                 "%r\t%n\t%v\t%f\t%l\t%s",
                 package,
             ],
+            COMMAND_TIMEOUT,
+            MAX_PACKAGE_RESOLUTION_BYTES,
+            true,
         )?;
-        parse_resolution_output(raw.as_str()?, package, self.architecture)
+        let raw = std::str::from_utf8(&raw).map_err(|_| PackageRuntimeError::InvalidResolution)?;
+        parse_resolution_output(raw, package, self.architecture)
     }
 
     pub fn installed_version(&self, package: &str) -> Result<ToolOutput, PackageRuntimeError> {
@@ -967,7 +993,6 @@ impl PackageRuntime {
             };
             if files_metadata.file_type().is_symlink()
                 || !files_metadata.is_file()
-                || files_metadata.len() == 0
                 || files_metadata.len() > LOCAL_FILES_LIMIT
             {
                 catalog.truncated = true;
@@ -1110,10 +1135,12 @@ impl PackageRuntime {
             "-U",
         ];
         transaction_arguments.extend(archives.iter().map(|archive| archive.path.as_str()));
-        if let Err(error) = self.run_with_timeout(
+        if let Err(error) = self.run_bytes_with_timeout(
             PackageTool::Pacman,
             &transaction_arguments,
             TRANSACTION_TIMEOUT,
+            MAX_PACKAGE_TRANSACTION_OUTPUT_BYTES,
+            false,
         ) {
             self.recover_database_lock()?;
             self.recover_pending_install_reasons()?;
@@ -1539,7 +1566,7 @@ impl PackageRuntime {
             PackageTool::Gpgv,
             &["--keyring", keyring, "--status-fd", "1", signature, package],
         )?;
-        validate_signature_status(output.as_str()?, self.architecture)?;
+        validate_signature_status(output.as_bytes(), self.architecture)?;
         let package_info = self.run(PackageTool::Bsdtar, &["-xOf", package, ".PKGINFO"])?;
         validate_package_info(
             package_info.as_str()?,
@@ -1685,6 +1712,21 @@ impl PackageRuntime {
         arguments: &[&str],
         timeout: Duration,
     ) -> Result<ToolOutput, PackageRuntimeError> {
+        let bytes =
+            self.run_bytes_with_timeout(tool, arguments, timeout, MAX_TOOL_OUTPUT_BYTES, true)?;
+        let mut output = empty_tool_output();
+        output.push(&bytes)?;
+        Ok(output)
+    }
+
+    fn run_bytes_with_timeout(
+        &self,
+        tool: PackageTool,
+        arguments: &[&str],
+        timeout: Duration,
+        success_limit: usize,
+        capture_success: bool,
+    ) -> Result<Vec<u8>, PackageRuntimeError> {
         let tool_path = self.tools[tool.index()]
             .as_ref()
             .ok_or(PackageRuntimeError::MissingEntry(tool.logical_name()))?;
@@ -1733,17 +1775,28 @@ impl PackageRuntime {
             thread::sleep(Duration::from_millis(20));
         };
 
-        let result = read_output(&output_path);
+        let result = if status.success() && !capture_success {
+            validate_output_size(&output_path, success_limit).map(|_| Vec::new())
+        } else {
+            let output_limit = if status.success() {
+                success_limit
+            } else {
+                MAX_TOOL_OUTPUT_BYTES
+            };
+            read_output_bytes(&output_path, output_limit)
+        };
         let _ = fs::remove_file(&output_path);
-        let output = result?;
+        let bytes = result?;
         let code = status
             .code()
             .or_else(|| status.signal().map(|signal| -signal))
             .unwrap_or(-1);
         if !status.success() {
+            let mut output = empty_tool_output();
+            output.push(&bytes)?;
             return Err(PackageRuntimeError::ToolFailed(code, output));
         }
-        Ok(output)
+        Ok(bytes)
     }
 
     pub fn alias_root(&self) -> &Path {
@@ -2143,17 +2196,20 @@ fn prepare_output_path(path: &Path) -> Result<(), PackageRuntimeError> {
     }
 }
 
-fn read_output(path: &Path) -> Result<ToolOutput, PackageRuntimeError> {
+fn read_output_bytes(path: &Path, maximum: usize) -> Result<Vec<u8>, PackageRuntimeError> {
+    let metadata = validate_output_size(path, maximum)?;
+    let length = usize::try_from(metadata.len()).map_err(|_| PackageRuntimeError::OutputLimit)?;
+    let mut output = vec![0_u8; length];
+    File::open(path)?.read_exact(&mut output)?;
+    Ok(output)
+}
+
+fn validate_output_size(path: &Path, maximum: usize) -> Result<fs::Metadata, PackageRuntimeError> {
     let metadata = fs::metadata(path)?;
-    if metadata.len() > MAX_TOOL_OUTPUT_BYTES as u64 {
+    if metadata.len() > maximum as u64 {
         return Err(PackageRuntimeError::OutputLimit);
     }
-    let mut output = ToolOutput {
-        bytes: [0; MAX_TOOL_OUTPUT_BYTES],
-        length: usize::try_from(metadata.len()).map_err(|_| PackageRuntimeError::OutputLimit)?,
-    };
-    File::open(path)?.read_exact(&mut output.bytes[..output.length])?;
-    Ok(output)
+    Ok(metadata)
 }
 
 fn catalog_file_ready(path: &Path, maximum: u64) -> bool {
@@ -2442,10 +2498,9 @@ fn parse_resolution_output(
     input: &str,
     target: &str,
     architecture: RepositoryArchitecture,
-) -> Result<ToolOutput, PackageRuntimeError> {
-    let mut output = ToolOutput {
-        bytes: [0; MAX_TOOL_OUTPUT_BYTES],
-        length: 0,
+) -> Result<PackageResolution, PackageRuntimeError> {
+    let mut output = PackageResolution {
+        bytes: Vec::with_capacity(input.len().min(MAX_PACKAGE_RESOLUTION_BYTES)),
     };
     let mut contains_target = false;
     let mut count = 0_usize;
@@ -2502,8 +2557,8 @@ fn parse_resolution_output(
             .into_iter()
             .enumerate()
         {
-            output.push(field.as_bytes())?;
-            output.push(if index == 5 { b"\n" } else { b"\t" })?;
+            resolution_push(&mut output, field.as_bytes())?;
+            resolution_push(&mut output, if index == 5 { b"\n" } else { b"\t" })?;
         }
     }
     if count == 0 || !contains_target {
@@ -2634,7 +2689,26 @@ fn parse_resolved_payload(line: &str) -> Result<ResolvedPayload<'_>, PackageRunt
     })
 }
 
-fn resolution_contains(output: &ToolOutput, package: &str) -> Result<bool, PackageRuntimeError> {
+fn resolution_push(
+    output: &mut PackageResolution,
+    bytes: &[u8],
+) -> Result<(), PackageRuntimeError> {
+    let end = output
+        .bytes
+        .len()
+        .checked_add(bytes.len())
+        .ok_or(PackageRuntimeError::OutputLimit)?;
+    if end > MAX_PACKAGE_RESOLUTION_BYTES {
+        return Err(PackageRuntimeError::OutputLimit);
+    }
+    output.bytes.extend_from_slice(bytes);
+    Ok(())
+}
+
+fn resolution_contains(
+    output: &PackageResolution,
+    package: &str,
+) -> Result<bool, PackageRuntimeError> {
     Ok(output.as_str()?.lines().any(|line| {
         let mut fields = line.split('\t');
         fields.next().is_some() && fields.next() == Some(package)
@@ -2657,35 +2731,38 @@ fn safe_package_cache_filename(value: &str) -> bool {
 }
 
 fn validate_signature_status(
-    output: &str,
+    output: &[u8],
     architecture: RepositoryArchitecture,
 ) -> Result<(), PackageRuntimeError> {
-    if output.lines().any(|line| {
-        [
-            "[GNUPG:] BADSIG",
-            "[GNUPG:] ERRSIG",
-            "[GNUPG:] REVKEYSIG",
-            "[GNUPG:] EXPKEYSIG",
-            "[GNUPG:] KEYEXPIRED",
-            "[GNUPG:] SIGEXPIRED",
-        ]
-        .into_iter()
-        .any(|status| line.contains(status))
+    let status_lines = || {
+        output
+            .split(|byte| *byte == b'\n')
+            .filter_map(|line| line.strip_prefix(b"[GNUPG:] "))
+    };
+    if status_lines().any(|line| {
+        let token = line
+            .split(|byte| byte.is_ascii_whitespace())
+            .next()
+            .unwrap_or_default();
+        matches!(
+            token,
+            b"BADSIG" | b"ERRSIG" | b"REVKEYSIG" | b"EXPKEYSIG" | b"KEYEXPIRED" | b"SIGEXPIRED"
+        )
     }) {
         return Err(PackageRuntimeError::InvalidSignature);
     }
-    let signer = output.lines().find_map(|line| {
-        line.split_once("[GNUPG:] VALIDSIG ")
-            .and_then(|(_, fields)| fields.split_ascii_whitespace().next())
+    let signer = status_lines().find_map(|line| {
+        line.strip_prefix(b"VALIDSIG ")
+            .and_then(|fields| fields.split(|byte| byte.is_ascii_whitespace()).next())
     });
     let Some(signer) = signer else {
         return Err(PackageRuntimeError::InvalidSignature);
     };
     if !matches!(signer.len(), 40 | 64)
         || !signer
-            .bytes()
+            .iter()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_lowercase())
-        || architecture == RepositoryArchitecture::Aarch64 && signer != AARCH64_BUILD_KEY
+        || architecture == RepositoryArchitecture::Aarch64 && signer != AARCH64_BUILD_KEY.as_bytes()
     {
         return Err(PackageRuntimeError::InvalidSignature);
     }
@@ -2852,6 +2929,14 @@ library\tlibalpm.so.16\tlibarchphene_pkg_333333333333333333333333.so\t7\n";
                 & 0o7777,
             0o600
         );
+        assert!(
+            runtime.library_path.as_encoded_bytes().ends_with(
+                tree.root
+                    .join("usr/lib/pulseaudio")
+                    .as_os_str()
+                    .as_encoded_bytes()
+            )
+        );
     }
 
     #[test]
@@ -2875,6 +2960,7 @@ library\tlibalpm.so.16\tlibarchphene_pkg_333333333333333333333333.so\t7\n";
             "backup-only",
             b"%FILES%\nusr/bin/backup-only\n\n%BACKUP%\nusr/share/applications/editor.desktop\n",
         );
+        tree.local_package("metadata-only-1.0-1", "metadata-only", b"");
         let runtime = tree.package_runtime();
         let catalog = runtime.desktop_catalog().expect("owned desktop catalog");
         assert_eq!(catalog.entries.len(), 1);
@@ -3277,6 +3363,29 @@ extra\tdotnet-sdk\t10.0.10.sdk110-1\tdotnet-sdk-10.0.10.sdk110-1-x86_64.pkg.tar.
     }
 
     #[test]
+    fn package_resolution_supports_large_bounded_closures() {
+        let mut input = String::new();
+        for index in 0..200 {
+            let name = if index == 199 {
+                "code".to_owned()
+            } else {
+                format!("dependency-{index:03}")
+            };
+            let filename = format!("{name}-1.0.{index}-1-x86_64.pkg.tar.zst");
+            input.push_str(&format!(
+                "extra\t{name}\t1.0.{index}-1\t{filename}\t\
+https://geo.mirror.pkgbuild.com/extra/os/x86_64/{filename}\t{}\n",
+                1024 + index,
+            ));
+        }
+        assert!(input.len() > MAX_TOOL_OUTPUT_BYTES);
+        let parsed = parse_resolution_output(&input, "code", RepositoryArchitecture::X86_64)
+            .expect("large bounded resolution");
+        assert_eq!(parsed.as_str().expect("UTF-8"), input);
+        assert!(parsed.as_bytes().len() < MAX_PACKAGE_RESOLUTION_BYTES);
+    }
+
+    #[test]
     fn install_preflight_accepts_only_resolved_name_version_pairs() {
         let archives = [
             InstallArchive {
@@ -3465,29 +3574,49 @@ library\tlibarchphene_path_bridge.so\tlibarchphene_pkg_555555555555555555555555.
         let x86_signer = "0123456789ABCDEF0123456789ABCDEF01234567";
         assert!(
             validate_signature_status(
-                &format!("[GNUPG:] VALIDSIG {x86_signer} 2026 0 0 0 0 0 0 0\n"),
+                format!("[GNUPG:] VALIDSIG {x86_signer} 2026 0 0 0 0 0 0 0\n").as_bytes(),
                 RepositoryArchitecture::X86_64,
             )
             .is_ok()
         );
         assert!(matches!(
             validate_signature_status(
-                "[GNUPG:] BADSIG 0123456789ABCDEF bad\n",
+                b"[GNUPG:] BADSIG 0123456789ABCDEF bad\n",
                 RepositoryArchitecture::X86_64,
             ),
             Err(PackageRuntimeError::InvalidSignature)
         ));
         assert!(matches!(
             validate_signature_status(
-                &format!("[GNUPG:] VALIDSIG {x86_signer} 2026 0 0 0 0 0 0 0\n"),
+                format!("[GNUPG:] VALIDSIG {x86_signer} 2026 0 0 0 0 0 0 0\n").as_bytes(),
                 RepositoryArchitecture::Aarch64,
             ),
             Err(PackageRuntimeError::InvalidSignature)
         ));
         assert!(
             validate_signature_status(
-                &format!("[GNUPG:] VALIDSIG {AARCH64_BUILD_KEY} 2026 0 0 0 0 0 0 0\n"),
+                format!("[GNUPG:] VALIDSIG {AARCH64_BUILD_KEY} 2026 0 0 0 0 0 0 0\n").as_bytes(),
                 RepositoryArchitecture::Aarch64,
+            )
+            .is_ok()
+        );
+
+        let mut non_utf8_diagnostic = b"gpgv: Good signature from \"Packager ".to_vec();
+        non_utf8_diagnostic.extend_from_slice(&[0xc3, 0x28]);
+        non_utf8_diagnostic.extend_from_slice(
+            format!("\"\n[GNUPG:] VALIDSIG {x86_signer} 2026 0 0 0 0 0 0 0\n").as_bytes(),
+        );
+        assert!(
+            validate_signature_status(&non_utf8_diagnostic, RepositoryArchitecture::X86_64,)
+                .is_ok()
+        );
+        assert!(
+            validate_signature_status(
+                format!(
+                    "[GNUPG:] BADSIGNOT ignored\n[GNUPG:] VALIDSIG {x86_signer} 2026 0 0 0 0 0 0 0\n"
+                )
+                .as_bytes(),
+                RepositoryArchitecture::X86_64,
             )
             .is_ok()
         );
