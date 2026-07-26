@@ -650,6 +650,11 @@ class ArchpheneRuntimeService : Service() {
         val inputManifestSha256: String,
     )
 
+    private data class AurBuildEnvironment(
+        val packageCount: Int,
+        val downloadBytes: Long,
+    )
+
     private data class AurBuilderInput(
         val role: Int,
         val filename: String,
@@ -4246,6 +4251,7 @@ class ArchpheneRuntimeService : Service() {
                         }
                     }
                     retainedAurSourceEvidence = evidence.toTypedArray()
+                    val buildEnvironment = resolveAurBuildEnvironment(activeHandle)
                     val builder =
                         probeAurBuilderCompanion(
                             activeHandle,
@@ -4258,11 +4264,14 @@ class ArchpheneRuntimeService : Service() {
                             totalVerified,
                             retainedAurSourceEvidence,
                             builder,
+                            buildEnvironment,
                         )
                     Log.i(
                         TAG,
-                        "Verified ${remoteSources.size} AUR source(s) for " +
-                            "${review.packageName}: $totalVerified bytes",
+                            "Verified ${remoteSources.size} AUR source(s) for " +
+                            "${review.packageName}: $totalVerified bytes; " +
+                            "build=${buildEnvironment.packageCount} packages/" +
+                            "${buildEnvironment.downloadBytes} bytes",
                     )
                     if (builder != null) {
                         Log.i(
@@ -4699,6 +4708,34 @@ class ArchpheneRuntimeService : Service() {
         }
     }
 
+    private fun resolveAurBuildEnvironment(activeHandle: Long): AurBuildEnvironment {
+        val bytes =
+            synchronized(packageResolutionOutputBuffer) {
+                packageResolutionOutputBuffer.clear()
+                val outputLength =
+                    NativeRuntime.nativeResolveAurBuildEnvironment(
+                        activeHandle,
+                        packageResolutionOutputBuffer,
+                    )
+                if (outputLength <= 0) {
+                    throw IllegalStateException(
+                        readNativeMessage(packageResolutionOutputBuffer, outputLength),
+                    )
+                }
+                ByteArray(outputLength).also { output ->
+                    packageResolutionOutputBuffer.position(0)
+                    packageResolutionOutputBuffer.get(output)
+                }
+            }
+        val packages = decodeResolvedPayloads(bytes, 512)
+        require(packages.any { payload -> payload.name == "base-devel" })
+        val totalBytes =
+            packages.fold(0L) { total, payload ->
+                Math.addExact(total, payload.size)
+            }
+        return AurBuildEnvironment(packages.size, totalBytes)
+    }
+
     private fun parseAurReview(
         source: ByteBuffer,
         length: Int,
@@ -4852,6 +4889,7 @@ class ArchpheneRuntimeService : Service() {
         verifiedSourceBytes: Long = 0L,
         sourceEvidence: Array<AurSourceEvidence> = emptyArray(),
         builder: AurBuilderReport? = null,
+        buildEnvironment: AurBuildEnvironment? = null,
     ): String =
         buildString(
             minOf(
@@ -4908,6 +4946,13 @@ class ArchpheneRuntimeService : Service() {
                         .append('\n')
                 }
                 append("Installed/build disk impact: pending the isolated package build.\n")
+                if (buildEnvironment != null) {
+                    append("Official build environment plan: ")
+                        .append(buildEnvironment.packageCount)
+                        .append(" official packages · ")
+                        .append(formatStorageBytes(buildEnvironment.downloadBytes))
+                        .append(" download before cache reuse.\n")
+                }
                 if (builder == null) {
                     append("Build sandbox: signed companion not installed.\n")
                 } else {
@@ -5039,6 +5084,18 @@ class ArchpheneRuntimeService : Service() {
                     packageResolutionOutputBuffer.get(output)
                 }
             }
+        val packages = decodeResolvedPayloads(bytes, 256)
+        if (packages.none { payload -> payload.name == packageName }) {
+            throw IllegalStateException("Resolved packages omit the requested target")
+        }
+        return packages
+    }
+
+    private fun decodeResolvedPayloads(
+        bytes: ByteArray,
+        maximumPackages: Int,
+    ): List<ResolvedPayload> {
+        require(maximumPackages in 1..512)
         val packages = ArrayList<ResolvedPayload>()
         String(bytes, StandardCharsets.UTF_8)
             .lineSequence()
@@ -5059,13 +5116,11 @@ class ArchpheneRuntimeService : Service() {
                         size = size,
                     ),
                 )
-                if (packages.size > 256) {
+                if (packages.size > maximumPackages) {
                     throw IllegalStateException("Package closure exceeds its limit")
                 }
             }
-        if (packages.none { payload -> payload.name == packageName }) {
-            throw IllegalStateException("Resolved packages omit the requested target")
-        }
+        require(packages.isNotEmpty())
         return packages
     }
 

@@ -128,6 +128,7 @@ for pattern in \
   'Verified source downloads:' \
   'HTTPS endpoint[^:]*: https://' \
   'Installed/build disk impact: pending the isolated package build\.' \
+  'Official build environment plan: [1-9][0-9]* official packages · [1-9][0-9]* MiB download before cache reuse\.' \
   "Build sandbox: signed companion UID $builder_uid; no network permission or direct manager-data access; [1-9][0-9]* MiB reviewed inputs staged\\." \
   'code[^<]*\.deb' \
   'direct HTTPS download' \
@@ -215,10 +216,18 @@ resumed_activity="$(
 )"
 [[ "$resumed_activity" == *"$manager"* ]] ||
   archphene_die "Archphene manager is not the resumed Activity before screenshot"
-archphene_adb_run shell screencap -p /sdcard/archphene-aur-sources.png
-archphene_adb_run pull /sdcard/archphene-aur-sources.png \
-  "$output_dir/$serial.png" >/dev/null
-archphene_adb_run shell rm /sdcard/archphene-aur-sources.png
+read -r screen_width screen_height < <(
+  archphene_adb_run shell wm size |
+    sed -n 's/.*: \([0-9][0-9]*\)x\([0-9][0-9]*\).*/\1 \2/p' |
+    tail -n1
+)
+archphene_adb_run shell input swipe \
+  "$((screen_width / 2))" "$((screen_height * 3 / 4))" \
+  "$((screen_width / 2))" "$((screen_height * 2 / 3))" 600
+archphene_wait_ui \
+  'Official build environment plan:' aur-sources-plan-render 15
+sleep 1
+archphene_adb_run exec-out screencap -p >"$output_dir/$serial.png"
 
 fatal_log="$(archphene_adb_run logcat -d -v brief \
   -s AndroidRuntime:E libc:F '*:S' 2>/dev/null || true)"

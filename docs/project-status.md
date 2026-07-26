@@ -1058,6 +1058,16 @@ Builder workspace has not become hostile. Before execution is enabled, its
 reuse path must move to no-follow directory-FD Rust operations and supervise
 all same-UID descendants.
 
+The current AUR slice also resolves the complete official build environment in
+one bounded pacman plan: `base-devel` plus all reviewed `makedepends` and
+`checkdepends`, with validated version constraints removed only for repository
+lookup. The live Samsung AArch64 candidate resolves to 130 official packages
+and 187,488,456 download bytes before cache reuse. The manager renders this
+plan without changing the 36-entry shared-root pacman database or enabling
+Install. These are resolution metadata; downloading every exact archive and
+detached signature, re-verifying identity/signers, measuring extracted/build
+space, and transferring a verified closure into the Builder remain pending.
+
 Code now reaches the packaged Electron executable without a Code-specific
 bridge exception. Translating Arch's standard `/usr/lib/pulseaudio` directory
 into the private-root loader path resolves `libpulsecommon`; Electron then

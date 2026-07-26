@@ -76,6 +76,14 @@ The current staging path rehashes them on both sides and publishes a canonical
 Builder-private input manifest without executing recipe code. The package
 result will return through a manager-opened output descriptor.
 
+The manager resolves the official build environment as one bounded transaction
+containing `base-devel` plus the reviewed recipe's `makedepends` and
+`checkdepends`. The current Code AArch64 plan is 130 packages and 187,488,456
+download bytes before cache reuse. That plan does not mutate the shared root
+and does not claim archive verification; exact package downloads, detached
+signature checks, Builder-root extraction, and installed/build/output disk
+measurements remain separate gates.
+
 This boundary is required because the tested stock Samsung kernel denies user,
 mount, and network namespace creation to the manager app. Android's
 `isolatedProcess` UID removes network and direct manager-data access, but also

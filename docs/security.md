@@ -72,6 +72,16 @@ entry is deleted and downloaded again. Snapshot-local files remain covered by
 the snapshot review. Insecure, unsupported, or `SKIP` remote sources fail
 closed until their separate verification mechanism exists.
 
+The reviewed recipe's complete `makedepends` and `checkdepends` are normalized
+only by removing validated version operators, then resolved together with the
+official `base-devel` package in one bounded pacman plan. An unavailable
+official target fails closed; recursive AUR build dependencies are not yet
+accepted. On the current Samsung AArch64 catalogs, the Code candidate resolves
+to 130 official packages and 187,488,456 download bytes before cache reuse.
+This is a metadata plan, not a signature claim: each exact archive and detached
+signature still must be downloaded and reverified before it can enter the
+Builder root.
+
 Community build execution will use one hidden Archphene Builder companion APK,
 not the manager UID and not one builder per installed Linux application. The
 companion is signed by the same release identity as the manager, has a distinct

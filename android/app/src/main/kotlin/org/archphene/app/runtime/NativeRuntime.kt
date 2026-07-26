@@ -161,6 +161,10 @@ internal object NativeRuntime {
         packageLength: Int,
         outputBuffer: ByteBuffer,
     ): Int
+    external fun nativeResolveAurBuildEnvironment(
+        handle: Long,
+        outputBuffer: ByteBuffer,
+    ): Int
     external fun nativeReviewAur(
         handle: Long,
         architecture: Int,

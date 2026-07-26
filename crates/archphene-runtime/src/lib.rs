@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -10,8 +11,9 @@ use archphene_core::{Lifecycle, Runtime, RuntimeError};
 use archphene_jobs::{JobError, JobOperation, JobState, PackageJob, PackageJobStore};
 use archphene_launcher::{LauncherRegistry, LauncherRegistryError, ReconcileReport, WrapperStatus};
 use archphene_packages::{
-    CatalogDownload, InstalledPackageCatalog, PackagePayloadDownload, PackageRuntime,
-    PackageRuntimeError, PackageTool, Repository, RepositoryArchitecture, ToolOutput,
+    CatalogDownload, InstalledPackageCatalog, PackagePayloadDownload, PackageResolution,
+    PackageRuntime, PackageRuntimeError, PackageTool, Repository, RepositoryArchitecture,
+    ToolOutput,
     aur::{AurReview, AurSourceDownload, MAX_AUR_SOURCE_BYTES},
     desktop::{DesktopCatalog, ExecArgument},
 };
@@ -921,6 +923,30 @@ impl RuntimeHost {
             .open_reviewed_aur_snapshot(&review.package_base, expected_sha256)
     }
 
+    pub fn resolve_aur_build_environment(&self) -> Result<PackageResolution, PackageRuntimeError> {
+        let review = self
+            .aur_review
+            .as_ref()
+            .ok_or(PackageRuntimeError::InvalidPayload)?;
+        let mut targets = BTreeSet::from(["base-devel".to_owned()]);
+        for dependency in review
+            .make_dependencies
+            .iter()
+            .chain(review.check_dependencies.iter())
+        {
+            let name = aur_dependency_name(dependency)?;
+            targets.insert(name.to_owned());
+            if targets.len() > 256 {
+                return Err(PackageRuntimeError::OutputLimit);
+            }
+        }
+        let borrowed: Vec<&str> = targets.iter().map(String::as_str).collect();
+        self.package_runtime
+            .as_ref()
+            .ok_or(PackageRuntimeError::InvalidPath)?
+            .resolve_targets(&borrowed)
+    }
+
     pub fn take_aur_source_download(&mut self) -> Result<AurSourceDownload, PackageRuntimeError> {
         self.aur_source_download
             .take()
@@ -1088,6 +1114,23 @@ fn remove_session_marker(path: &Path) -> io::Result<()> {
     }
 }
 
+fn aur_dependency_name(value: &str) -> Result<&str, PackageRuntimeError> {
+    let end = value
+        .bytes()
+        .position(|byte| matches!(byte, b'<' | b'=' | b'>'))
+        .unwrap_or(value.len());
+    let name = &value[..end];
+    if name.is_empty()
+        || name.len() > 128
+        || !name.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'@' | b'+' | b'.' | b'_' | b'-')
+        })
+    {
+        return Err(PackageRuntimeError::InvalidQuery);
+    }
+    Ok(name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1096,6 +1139,22 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_ID: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn aur_dependency_names_are_bounded_and_drop_version_constraints() {
+        assert_eq!(
+            aur_dependency_name("cmake>=4.0").expect("versioned dependency"),
+            "cmake"
+        );
+        assert_eq!(
+            aur_dependency_name("python-build").expect("plain dependency"),
+            "python-build"
+        );
+        assert!(matches!(
+            aur_dependency_name("../escape"),
+            Err(PackageRuntimeError::InvalidQuery)
+        ));
+    }
 
     #[test]
     fn successful_bootstrap_sets_the_snapshot_status_flag() {

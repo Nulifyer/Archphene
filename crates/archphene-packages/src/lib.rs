@@ -753,7 +753,22 @@ impl PackageRuntime {
     }
 
     pub fn resolve(&self, package: &str) -> Result<PackageResolution, PackageRuntimeError> {
-        if !safe_logical_name(package) || !self.catalogs_ready() {
+        self.resolve_targets(&[package])
+    }
+
+    pub fn resolve_targets(
+        &self,
+        packages: &[&str],
+    ) -> Result<PackageResolution, PackageRuntimeError> {
+        if packages.is_empty()
+            || packages.len() > 256
+            || packages.iter().any(|package| !safe_logical_name(package))
+            || packages
+                .iter()
+                .enumerate()
+                .any(|(index, package)| packages[..index].contains(package))
+            || !self.catalogs_ready()
+        {
             return Err(if self.catalogs_ready() {
                 PackageRuntimeError::InvalidQuery
             } else {
@@ -772,27 +787,29 @@ impl PackageRuntime {
         let database = database_path
             .to_str()
             .ok_or(PackageRuntimeError::InvalidPath)?;
+        let mut arguments = Vec::with_capacity(12 + packages.len());
+        arguments.extend_from_slice(&[
+            "--config",
+            config,
+            "--root",
+            root,
+            "--dbpath",
+            database,
+            "-S",
+            "--print",
+            "--print-format",
+            "%r\t%n\t%v\t%f\t%l\t%s",
+        ]);
+        arguments.extend_from_slice(packages);
         let raw = self.run_bytes_with_timeout(
             PackageTool::Pacman,
-            &[
-                "--config",
-                config,
-                "--root",
-                root,
-                "--dbpath",
-                database,
-                "-S",
-                "--print",
-                "--print-format",
-                "%r\t%n\t%v\t%f\t%l\t%s",
-                package,
-            ],
+            &arguments,
             COMMAND_TIMEOUT,
             MAX_PACKAGE_RESOLUTION_BYTES,
             true,
         )?;
         let raw = std::str::from_utf8(&raw).map_err(|_| PackageRuntimeError::InvalidResolution)?;
-        parse_resolution_output(raw, package, self.architecture)
+        parse_resolution_output(raw, packages, self.architecture)
     }
 
     pub fn installed_version(&self, package: &str) -> Result<ToolOutput, PackageRuntimeError> {
@@ -2551,13 +2568,19 @@ fn append_search_result(
 
 fn parse_resolution_output(
     input: &str,
-    target: &str,
+    targets: &[&str],
     architecture: RepositoryArchitecture,
 ) -> Result<PackageResolution, PackageRuntimeError> {
     let mut output = PackageResolution {
         bytes: Vec::with_capacity(input.len().min(MAX_PACKAGE_RESOLUTION_BYTES)),
     };
-    let mut contains_target = false;
+    if targets.is_empty()
+        || targets.len() > 256
+        || targets.iter().any(|target| !safe_logical_name(target))
+    {
+        return Err(PackageRuntimeError::InvalidQuery);
+    }
+    let mut contains_targets = vec![false; targets.len()];
     let mut count = 0_usize;
     for line in input.lines() {
         if line.is_empty() {
@@ -2604,10 +2627,12 @@ fn parse_resolution_output(
             return Err(PackageRuntimeError::InvalidResolution);
         }
         count += 1;
-        if count > 256 {
+        if count > 512 {
             return Err(PackageRuntimeError::OutputLimit);
         }
-        contains_target |= name == target;
+        for (index, target) in targets.iter().enumerate() {
+            contains_targets[index] |= name == *target;
+        }
         for (index, field) in [repository, name, version, filename, url, size]
             .into_iter()
             .enumerate()
@@ -2616,7 +2641,7 @@ fn parse_resolution_output(
             resolution_push(&mut output, if index == 5 { b"\n" } else { b"\t" })?;
         }
     }
-    if count == 0 || !contains_target {
+    if count == 0 || contains_targets.iter().any(|contains| !contains) {
         return Err(PackageRuntimeError::MissingTarget);
     }
     Ok(output)
@@ -3399,18 +3424,25 @@ fixture-064\t1.0.64-1\t1\nfixture-065\t1.0.65-1\t0\n",
     fn package_resolution_output_is_strict_and_contains_target() {
         let input = "core\tglibc\t2.42+r33+gde5fe48316ed-1\tglibc-2.42+r33+gde5fe48316ed-1-x86_64.pkg.tar.zst\thttps://geo.mirror.pkgbuild.com/core/os/x86_64/glibc-2.42+r33+gde5fe48316ed-1-x86_64.pkg.tar.zst\t10158024\n\
 extra\tdotnet-sdk\t10.0.10.sdk110-1\tdotnet-sdk-10.0.10.sdk110-1-x86_64.pkg.tar.zst\thttps://geo.mirror.pkgbuild.com/extra/os/x86_64/dotnet-sdk-10.0.10.sdk110-1-x86_64.pkg.tar.zst\t123456789\n";
-        let parsed = parse_resolution_output(input, "dotnet-sdk", RepositoryArchitecture::X86_64)
-            .expect("valid resolution");
+        let parsed =
+            parse_resolution_output(input, &["dotnet-sdk"], RepositoryArchitecture::X86_64)
+                .expect("valid resolution");
         assert_eq!(parsed.as_str().expect("utf-8"), input);
+        parse_resolution_output(
+            input,
+            &["glibc", "dotnet-sdk"],
+            RepositoryArchitecture::X86_64,
+        )
+        .expect("multi-target resolution");
 
         assert!(matches!(
-            parse_resolution_output(input, "btop", RepositoryArchitecture::X86_64,),
+            parse_resolution_output(input, &["btop"], RepositoryArchitecture::X86_64,),
             Err(PackageRuntimeError::MissingTarget)
         ));
         assert!(matches!(
             parse_resolution_output(
                 "extra\tbtop\t1.4.4-1\tbtop-1.4.4-1-aarch64.pkg.tar.xz\thttps://example.com/btop-1.4.4-1-aarch64.pkg.tar.xz\t123456\n",
-                "btop",
+                &["btop"],
                 RepositoryArchitecture::Aarch64,
             ),
             Err(PackageRuntimeError::InvalidResolution)
@@ -3434,7 +3466,7 @@ https://geo.mirror.pkgbuild.com/extra/os/x86_64/{filename}\t{}\n",
             ));
         }
         assert!(input.len() > MAX_TOOL_OUTPUT_BYTES);
-        let parsed = parse_resolution_output(&input, "code", RepositoryArchitecture::X86_64)
+        let parsed = parse_resolution_output(&input, &["code"], RepositoryArchitecture::X86_64)
             .expect("large bounded resolution");
         assert_eq!(parsed.as_str().expect("UTF-8"), input);
         assert!(parsed.as_bytes().len() < MAX_PACKAGE_RESOLUTION_BYTES);

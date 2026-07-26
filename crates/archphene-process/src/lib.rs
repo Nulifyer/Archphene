@@ -20,7 +20,7 @@ use archphene_terminal::{
 };
 
 pub const MAX_COMMAND_NAME_BYTES: usize = 128;
-pub const MAX_COMMAND_ARGUMENTS: usize = 32;
+pub const MAX_COMMAND_ARGUMENTS: usize = 512;
 pub const MAX_COMMAND_ARGUMENT_BYTES: usize = 4 * 1024;
 pub const MAX_COMMAND_REQUEST_BYTES: usize = 16 * 1024;
 pub const MAX_COMMAND_OUTPUT_BYTES: usize = 15 * 1024;
