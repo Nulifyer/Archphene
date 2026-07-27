@@ -22,6 +22,7 @@ import android.view.Surface
 import android.view.inputmethod.EditorInfo
 import org.archphene.app.appearance.LinuxAppearanceOverrides
 import org.archphene.app.appearance.LinuxAppearancePreferences
+import org.archphene.app.performance.PerformanceMetrics
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -57,7 +58,11 @@ class LauncherSessionService : Service() {
         var densityDpi = DEFAULT_DENSITY_DPI
         var fontScaleMillis = DEFAULT_FONT_SCALE_MILLIS
         var attachmentFramesLogged = 0
-        var lastPresentationSignature = Long.MIN_VALUE
+        val presentationBuffer =
+            ByteBuffer
+                .allocateDirect(
+                    NativeLauncherCompositor.PRESENTATION_COMPONENTS * Int.SIZE_BYTES,
+                ).order(ByteOrder.LITTLE_ENDIAN)
         var inputLogged = false
         var clipboardLogged = false
         var androidPasteLogged = false
@@ -721,6 +726,7 @@ class LauncherSessionService : Service() {
         data: Parcel,
     ): Int {
         val session = authorizedSession(callingUid, sessionId) ?: return RESULT_UNAUTHORIZED
+        var latestInputTimeMillis = 0L
         synchronized(session) {
             if (count > MAX_INPUT_RECORDS - session.inputCount) {
                 return RESULT_BUSY
@@ -743,6 +749,17 @@ class LauncherSessionService : Service() {
                 ) {
                     return RESULT_INVALID
                 }
+                val eventTime =
+                    inputEventTime(
+                        session.inputRecords[start],
+                        session.inputRecords[start + 1],
+                        session.inputRecords[start + 2],
+                        session.inputRecords[start + 3],
+                        session.inputRecords[start + 4],
+                    )
+                if (eventTime != 0) {
+                    latestInputTimeMillis = expandInputEventTime(eventTime)
+                }
             }
             session.inputCount += count
             if (!session.inputPosted) {
@@ -750,6 +767,7 @@ class LauncherSessionService : Service() {
                 surfaceHandler.post(checkNotNull(session.inputDrain))
             }
         }
+        PerformanceMetrics.noteLauncherInput(latestInputTimeMillis)
         return RESULT_OK
     }
 
@@ -1083,6 +1101,39 @@ class LauncherSessionService : Service() {
             else -> false
         }
 
+    private fun inputEventTime(
+        kind: Int,
+        a: Int,
+        b: Int,
+        c: Int,
+        d: Int,
+    ): Int =
+        when (kind) {
+            INPUT_TOUCH_DOWN,
+            INPUT_TOUCH_MOTION,
+            -> d
+            INPUT_TOUCH_UP -> b
+            INPUT_KEY,
+            INPUT_POINTER_MOTION,
+            INPUT_POINTER_BUTTON,
+            INPUT_POINTER_AXIS,
+            -> c
+            INPUT_POINTER_BUTTON_LEGACY -> b
+            else -> 0
+        }
+
+    private fun expandInputEventTime(lowBits: Int): Long {
+        val now = SystemClock.uptimeMillis()
+        val low = lowBits.toLong() and UINT_MASK
+        var candidate = (now and UINT_HIGH_MASK) or low
+        if (candidate > now + INT_RANGE_MILLIS) {
+            candidate -= UINT_RANGE_MILLIS
+        } else if (candidate < now - INT_RANGE_MILLIS) {
+            candidate += UINT_RANGE_MILLIS
+        }
+        return candidate
+    }
+
     private fun drainInput(session: Session) {
         val count =
             synchronized(session) {
@@ -1091,6 +1142,9 @@ class LauncherSessionService : Service() {
                 for (index in 0 until count * INPUT_FIELDS) {
                     session.inputBuffer.putInt(session.inputRecords[index])
                 }
+                PerformanceMetrics.recordCompositorKotlinCopy(
+                    count * INPUT_FIELDS * Int.SIZE_BYTES,
+                )
                 session.inputBuffer.position(0)
                 session.inputCount = 0
                 session.inputPosted = false
@@ -1363,64 +1417,18 @@ class LauncherSessionService : Service() {
                 notifyStatus(session, STATUS_RUNNING, session.authorization.label)
             }
             if (result and NativeLauncherCompositor.FLAG_FRAME_PRESENTED != 0) {
-                val selectedWidth = compositor.presentationComponent(0)
-                val selectedHeight = compositor.presentationComponent(1)
-                val surfaceWidth = compositor.presentationComponent(2)
-                val surfaceHeight = compositor.presentationComponent(3)
-                val originalWidth = compositor.presentationComponent(4)
-                val originalHeight = compositor.presentationComponent(5)
-                val logicalWidth = compositor.presentationComponent(6)
-                val logicalHeight = compositor.presentationComponent(7)
-                val bufferScale = compositor.presentationComponent(8)
-                val signature =
-                    originalWidth.toLong().shl(48) xor
-                        originalHeight.toLong().shl(32) xor
-                        logicalWidth.toLong().shl(16) xor
-                        logicalHeight.toLong() xor
-                        bufferScale.toLong().shl(8)
+                PerformanceMetrics.noteLauncherFrame(SystemClock.uptimeMillis())
                 if (
                     session.attachmentFramesLogged < MAX_ATTACHMENT_FRAME_LOGS ||
-                    signature != session.lastPresentationSignature
+                    result and NativeLauncherCompositor.FLAG_PRESENTATION_CHANGED != 0
                 ) {
-                    session.attachmentFramesLogged += 1
-                    session.lastPresentationSignature = signature
-                    Log.i(
-                        TAG,
-                        "Presented Linux frame session=${session.id} " +
-                            "attachmentFrame=${session.attachmentFramesLogged} " +
-                            "selected=${selectedWidth}x$selectedHeight " +
-                            "surface=${surfaceWidth}x$surfaceHeight " +
-                            "original=${originalWidth}x$originalHeight " +
-                            "logical=${logicalWidth}x$logicalHeight " +
-                            "reasons=$bufferScale," +
-                            "${compositor.presentationComponent(9)} " +
-                            "output=${compositor.presentationComponent(10)}x" +
-                            "${compositor.presentationComponent(11)} " +
-                            "mode=${compositor.presentationComponent(12)}x" +
-                            "${compositor.presentationComponent(13)} " +
-                            "commit=${compositor.presentationComponent(14)} " +
-                            "ack=${compositor.presentationComponent(15)} " +
-                            "serial=${compositor.presentationComponent(16)} " +
-                            "pending=${compositor.presentationComponent(17)} " +
-                            "outputEvents=${compositor.presentationComponent(18)} " +
-                            "outputBinds=${compositor.presentationComponent(19)} " +
-                            "geometry=${compositor.presentationComponent(20)}," +
-                            "${compositor.presentationComponent(21)} " +
-                            "${compositor.presentationComponent(22)}x" +
-                            "${compositor.presentationComponent(23)} " +
-                            "root=${compositor.presentationComponent(24)}," +
-                            "${compositor.presentationComponent(25)} " +
-                            "${compositor.presentationComponent(26)}x" +
-                            "${compositor.presentationComponent(27)} " +
-                            "content=${compositor.presentationComponent(28)}," +
-                            "${compositor.presentationComponent(29)} " +
-                            "${compositor.presentationComponent(30)}x" +
-                            "${compositor.presentationComponent(31)}",
-                    )
+                    logPresentationSnapshot(session, compositor)
                 }
             }
-            pumpClipboardTransfers(session, compositor)
-            pumpImeState(session, compositor)
+            pumpClipboardTransfers(session, compositor, result)
+            if (result and NativeLauncherCompositor.FLAG_IME_CHANGED != 0) {
+                pumpImeState(session, compositor)
+            }
             pollLinuxProcess(session)
             surfaceHandler.postDelayed(
                 this,
@@ -1429,16 +1437,81 @@ class LauncherSessionService : Service() {
         }
     }
 
-    private fun pumpClipboardTransfers(
+    private fun Session.presentationComponent(component: Int): Int =
+        presentationBuffer.getInt(component * Int.SIZE_BYTES)
+
+    private fun logPresentationSnapshot(
         session: Session,
         compositor: NativeLauncherCompositor,
     ) {
-        if (compositor.takeLinuxClipboardClear()) {
+        session.presentationBuffer.clear()
+        if (!compositor.copyPresentationSnapshot(session.presentationBuffer)) {
+            session.attachmentFramesLogged = MAX_ATTACHMENT_FRAME_LOGS
+            Log.w(TAG, "Could not read presentation snapshot session=${session.id}")
+            return
+        }
+        session.attachmentFramesLogged += 1
+        val selectedWidth = session.presentationComponent(0)
+        val selectedHeight = session.presentationComponent(1)
+        val surfaceWidth = session.presentationComponent(2)
+        val surfaceHeight = session.presentationComponent(3)
+        val originalWidth = session.presentationComponent(4)
+        val originalHeight = session.presentationComponent(5)
+        val logicalWidth = session.presentationComponent(6)
+        val logicalHeight = session.presentationComponent(7)
+        val bufferScale = session.presentationComponent(8)
+        Log.i(
+            TAG,
+            "Presented Linux frame session=${session.id} " +
+                "attachmentFrame=${session.attachmentFramesLogged} " +
+                "selected=${selectedWidth}x$selectedHeight " +
+                "surface=${surfaceWidth}x$surfaceHeight " +
+                "original=${originalWidth}x$originalHeight " +
+                "logical=${logicalWidth}x$logicalHeight " +
+                "reasons=$bufferScale," +
+                "${session.presentationComponent(9)} " +
+                "output=${session.presentationComponent(10)}x" +
+                "${session.presentationComponent(11)} " +
+                "mode=${session.presentationComponent(12)}x" +
+                "${session.presentationComponent(13)} " +
+                "commit=${session.presentationComponent(14)} " +
+                "ack=${session.presentationComponent(15)} " +
+                "serial=${session.presentationComponent(16)} " +
+                "pending=${session.presentationComponent(17)} " +
+                "outputEvents=${session.presentationComponent(18)} " +
+                "outputBinds=${session.presentationComponent(19)} " +
+                "geometry=${session.presentationComponent(20)}," +
+                "${session.presentationComponent(21)} " +
+                "${session.presentationComponent(22)}x" +
+                "${session.presentationComponent(23)} " +
+                "root=${session.presentationComponent(24)}," +
+                "${session.presentationComponent(25)} " +
+                "${session.presentationComponent(26)}x" +
+                "${session.presentationComponent(27)} " +
+                "content=${session.presentationComponent(28)}," +
+                "${session.presentationComponent(29)} " +
+                "${session.presentationComponent(30)}x" +
+                "${session.presentationComponent(31)}",
+        )
+    }
+
+    private fun pumpClipboardTransfers(
+        session: Session,
+        compositor: NativeLauncherCompositor,
+        events: Int,
+    ) {
+        if (
+            events and NativeLauncherCompositor.FLAG_LINUX_CLIPBOARD_CLEAR != 0 &&
+            compositor.takeLinuxClipboardClear()
+        ) {
             val revision = session.clipboardRevision.inc().coerceAtLeast(1)
             session.clipboardRevision = revision
             publishLinuxClipboard(session, compositor, revision, null)
         }
-        if (!session.linuxCopyInFlight) {
+        if (
+            !session.linuxCopyInFlight &&
+            events and NativeLauncherCompositor.FLAG_LINUX_COPY_PENDING != 0
+        ) {
             val descriptor = compositor.takeLinuxCopyFd()
             if (descriptor >= 0) {
                 val revision = session.clipboardRevision.inc().coerceAtLeast(1)
@@ -1488,7 +1561,10 @@ class LauncherSessionService : Service() {
             }
         }
 
-        if (!session.androidPasteInFlight) {
+        if (
+            !session.androidPasteInFlight &&
+            events and NativeLauncherCompositor.FLAG_ANDROID_PASTE_PENDING != 0
+        ) {
             val clipboard = synchronized(this) { session.androidClipboard }
             if (clipboard != null) {
                 val descriptor = compositor.takeAndroidPasteFd()
@@ -1909,6 +1985,10 @@ class LauncherSessionService : Service() {
         private const val MAX_INPUT_RECORDS = 32
         private const val MAX_ATTACHMENT_FRAME_LOGS = 4
         private const val INPUT_FIELDS = 6
+        private const val UINT_MASK = 0xffff_ffffL
+        private const val UINT_HIGH_MASK = -0x1_0000_0000L
+        private const val UINT_RANGE_MILLIS = 0x1_0000_0000L
+        private const val INT_RANGE_MILLIS = 0x8000_0000L
         private const val MAX_TOUCHES = 32
         private const val MIN_INPUT_COORDINATE = -8192
         private const val MAX_INPUT_COORDINATE = 16384

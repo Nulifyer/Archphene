@@ -627,10 +627,37 @@ struct TextInputState {
     commit_count: u32,
 }
 
+#[derive(PartialEq, Eq)]
 struct SurroundingText {
     text: String,
     cursor: i32,
     anchor: i32,
+}
+
+fn apply_text_input_commit(text_state: &mut TextInputState, another_enabled: bool) -> bool {
+    let mut changed = false;
+    if let Some(enabled) = text_state.pending_enabled.take() {
+        let enabled = enabled && !another_enabled;
+        changed |= text_state.enabled != enabled
+            || text_state.surrounding_text.is_some()
+            || text_state.content_type != (0, 0);
+        text_state.enabled = enabled;
+        text_state.surrounding_text = None;
+        text_state.content_type = (0, 0);
+        text_state.cursor_rectangle = None;
+    }
+    if let Some(surrounding_text) = text_state.pending_surrounding_text.take() {
+        changed |= text_state.surrounding_text.as_ref() != Some(&surrounding_text);
+        text_state.surrounding_text = Some(surrounding_text);
+    }
+    if let Some(content_type) = text_state.pending_content_type.take() {
+        changed |= text_state.content_type != content_type;
+        text_state.content_type = content_type;
+    }
+    if let Some(cursor_rectangle) = text_state.pending_cursor_rectangle.take() {
+        text_state.cursor_rectangle = Some(cursor_rectangle);
+    }
+    changed
 }
 
 #[derive(Default)]
@@ -1579,6 +1606,8 @@ struct LauncherSurfaceCompositor {
     buffer_width: i32,
     buffer_height: i32,
     last_presented_commit: u32,
+    last_presentation_signature: Option<[i32; 5]>,
+    last_reported_ime_serial: Option<u32>,
 }
 
 #[cfg(target_os = "android")]
@@ -1617,6 +1646,8 @@ impl LauncherSurfaceCompositor {
         self.buffer_width = logical_width;
         self.buffer_height = logical_height;
         self.last_presented_commit = u32::MAX;
+        self.last_presentation_signature = None;
+        self.last_reported_ime_serial = None;
         configure_launcher_output_resolved(&mut self.core, width, height, density_dpi);
         0
     }
@@ -1639,6 +1670,25 @@ impl LauncherSurfaceCompositor {
             self.last_presented_commit = commit;
             self.core.present_frame(time);
             flags |= 1 << 1;
+            let signature = launcher_presentation_signature(&self.core.state);
+            if self.last_presentation_signature != Some(signature) {
+                self.last_presentation_signature = Some(signature);
+                flags |= 1 << 2;
+            }
+        }
+        if self.core.state.pending_linux_clipboard_clear {
+            flags |= 1 << 3;
+        }
+        if !self.core.state.pending_linux_copy_fds.is_empty() {
+            flags |= 1 << 4;
+        }
+        if !self.core.state.pending_android_paste_fds.is_empty() {
+            flags |= 1 << 5;
+        }
+        let ime_serial = self.core.ime_change_serial();
+        if self.last_reported_ime_serial != Some(ime_serial) {
+            self.last_reported_ime_serial = Some(ime_serial);
+            flags |= 1 << 6;
         }
         flags
     }
@@ -2261,6 +2311,25 @@ fn launcher_presentation_component(state: &CompositorState, component: i32) -> i
         }),
         _ => -1,
     }
+}
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn launcher_presentation_signature(state: &CompositorState) -> [i32; 5] {
+    let root = state.root_surface.as_ref().and_then(surface_frame);
+    let original = root.as_ref().map(original_buffer_frame);
+    let buffer_scale = state
+        .root_surface
+        .as_ref()
+        .and_then(|surface| surface.data::<SurfaceData>())
+        .map(|data| data.inner.lock().unwrap_or_else(|error| error.into_inner()))
+        .map_or(0, |surface| surface.committed_buffer_scale);
+    [
+        original.as_ref().map_or(0, |frame| frame.width as i32),
+        original.as_ref().map_or(0, |frame| frame.height as i32),
+        root.as_ref().map_or(0, |frame| frame.width as i32),
+        root.as_ref().map_or(0, |frame| frame.height as i32),
+        buffer_scale,
+    ]
 }
 
 #[cfg(target_os = "android")]
@@ -4130,21 +4199,7 @@ impl Dispatch<ZwpTextInputV3, TextInputData> for CompositorState {
                     return;
                 }
                 let was_enabled = text_state.enabled;
-                if let Some(enabled) = text_state.pending_enabled.take() {
-                    text_state.enabled = enabled && !another_enabled;
-                    text_state.surrounding_text = None;
-                    text_state.content_type = (0, 0);
-                    text_state.cursor_rectangle = None;
-                }
-                if let Some(surrounding_text) = text_state.pending_surrounding_text.take() {
-                    text_state.surrounding_text = Some(surrounding_text);
-                }
-                if let Some(content_type) = text_state.pending_content_type.take() {
-                    text_state.content_type = content_type;
-                }
-                if let Some(cursor_rectangle) = text_state.pending_cursor_rectangle.take() {
-                    text_state.cursor_rectangle = Some(cursor_rectangle);
-                }
+                let changed = apply_text_input_commit(&mut text_state, another_enabled);
                 if text_state.enabled && !was_enabled {
                     state.ime_active = true;
                     state.ime_show_requests = state.ime_show_requests.saturating_add(1);
@@ -4152,7 +4207,9 @@ impl Dispatch<ZwpTextInputV3, TextInputData> for CompositorState {
                     state.ime_active = false;
                     state.ime_hide_requests = state.ime_hide_requests.saturating_add(1);
                 }
-                state.ime_change_serial = state.ime_change_serial.wrapping_add(1);
+                if changed {
+                    state.ime_change_serial = state.ime_change_serial.wrapping_add(1);
+                }
             }
             _ => {}
         }
@@ -12358,6 +12415,8 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
         buffer_width: 0,
         buffer_height: 0,
         last_presented_commit: u32::MAX,
+        last_presentation_signature: None,
+        last_reported_ime_serial: None,
     })
 }
 
@@ -12414,16 +12473,34 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
 
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
-pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativePresentationComponent(
-    _environment: *mut std::ffi::c_void,
-    _owner: *mut std::ffi::c_void,
+pub extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_nativeCopyPresentationSnapshot(
+    environment: JNIEnv,
+    _owner: JObject,
     handle: i64,
-    component: i32,
+    output: JByteBuffer,
 ) -> i32 {
     let Some(compositor) = launcher_compositor(handle) else {
         return -1;
     };
-    launcher_presentation_component(&compositor.core.state, component)
+    const COMPONENTS: usize = 32;
+    const BYTES: usize = COMPONENTS * std::mem::size_of::<i32>();
+    let (Ok(capacity), Ok(address)) = (
+        environment.get_direct_buffer_capacity(&output),
+        environment.get_direct_buffer_address(&output),
+    ) else {
+        return -2;
+    };
+    if capacity < BYTES || address.is_null() {
+        return -2;
+    }
+    let output = unsafe { std::slice::from_raw_parts_mut(address, BYTES) };
+    for (component, destination) in output.chunks_exact_mut(4).enumerate() {
+        destination.copy_from_slice(
+            &launcher_presentation_component(&compositor.core.state, component as i32)
+                .to_le_bytes(),
+        );
+    }
+    COMPONENTS as i32
 }
 
 #[cfg(target_os = "android")]
@@ -14531,6 +14608,47 @@ mod tests {
         state.pending_window_geometry = Some(second);
         assert!(state.commit_window_geometry());
         assert_eq!(state.committed_window_geometry, Some(second));
+    }
+
+    #[test]
+    fn text_input_commit_only_reports_android_visible_changes() {
+        let mut state = TextInputState {
+            pending_enabled: Some(true),
+            ..TextInputState::default()
+        };
+        assert!(apply_text_input_commit(&mut state, false));
+        assert!(state.enabled);
+
+        state.pending_surrounding_text = Some(SurroundingText {
+            text: "hello".to_owned(),
+            cursor: 5,
+            anchor: 5,
+        });
+        state.pending_content_type = Some((3, 7));
+        assert!(apply_text_input_commit(&mut state, false));
+
+        state.pending_surrounding_text = Some(SurroundingText {
+            text: "hello".to_owned(),
+            cursor: 5,
+            anchor: 5,
+        });
+        state.pending_content_type = Some((3, 7));
+        state.pending_cursor_rectangle = Some((1, 2, 3, 4));
+        assert!(!apply_text_input_commit(&mut state, false));
+        assert_eq!(state.cursor_rectangle, Some((1, 2, 3, 4)));
+
+        state.pending_surrounding_text = Some(SurroundingText {
+            text: "hello!".to_owned(),
+            cursor: 6,
+            anchor: 6,
+        });
+        assert!(apply_text_input_commit(&mut state, false));
+
+        state.pending_enabled = Some(false);
+        assert!(apply_text_input_commit(&mut state, false));
+        assert!(!state.enabled);
+        assert!(state.surrounding_text.is_none());
+        assert_eq!(state.content_type, (0, 0));
     }
 
     #[test]

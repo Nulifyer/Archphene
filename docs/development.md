@@ -56,6 +56,30 @@ profiles. Defaults reject cold launch over 1.5 seconds, retained launch over
 more than 64 threads or 256 descriptors, any idle child process, frame p95 over
 250 ms, or more than 50% jank in the short navigation sample.
 
+Run the active Terminal and native-Wayland transaction gate with an exact-ABI
+manager APK and the currently installed manager-generated Foot launcher:
+
+```bash
+./scripts/test-archphene-active-performance.sh \
+  --serial emulator-5554 \
+  --apk tooling/build/apk/app-debug-x86_64.apk \
+  --launcher-package <generated-foot-package>
+./scripts/test-archphene-active-performance.sh \
+  --serial <adb-serial> \
+  --apk tooling/build/apk/app-debug-arm64-v8a.apk \
+  --launcher-package <generated-foot-package>
+```
+
+The debug-only authenticated probe resets immediately before one hardware-key
+transaction. It counts Terminal and compositor JNI calls by role, direct-buffer
+bytes, JNI array copies, and explicit Kotlin payload copies; records ART
+allocated-byte/object and GC deltas; and measures hardware-event-to-Android-draw
+or `ANativeWindow` post latency. The gate also applies active PSS/RSS, heap,
+thread, descriptor, process, frame, latency, allocation, and JNI-call ceilings.
+It compares full-device frames and writes JSON plus Terminal and Foot PNGs under
+`tooling/build/active-performance/<serial>/`. Counters are dormant outside an
+explicit debug reset and the receiver is absent from release builds.
+
 ## Foot manager-session workflow
 
 Run the complete current-architecture Foot workflow with the matching APK and

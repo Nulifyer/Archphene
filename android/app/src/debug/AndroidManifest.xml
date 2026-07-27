@@ -40,5 +40,8 @@
         <receiver
             android:name=".TerminalQueryTestReceiver"
             android:exported="true" />
+        <receiver
+            android:name=".PerformanceTestReceiver"
+            android:exported="true" />
     </application>
 </manifest>

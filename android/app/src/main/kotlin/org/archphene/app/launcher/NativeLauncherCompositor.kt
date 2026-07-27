@@ -3,6 +3,7 @@ package org.archphene.app.launcher
 import android.view.Surface
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
+import org.archphene.app.performance.PerformanceMetrics
 
 /**
  * Narrow Kotlin owner for one manager-side Wayland compositor.
@@ -19,13 +20,19 @@ internal class NativeLauncherCompositor(
 ) : AutoCloseable {
     private val ownerThread = Thread.currentThread()
     private var handle =
-        nativeCreate(
-            socketPath.toByteArray(StandardCharsets.UTF_8),
-            width,
-            height,
-            densityDpi,
-            geometryPercent,
-        )
+        socketPath.toByteArray(StandardCharsets.UTF_8).let { socketBytes ->
+            nativeCreate(
+                socketBytes,
+                width,
+                height,
+                densityDpi,
+                geometryPercent,
+            ).also {
+                PerformanceMetrics.recordCompositorJni(
+                    arrayCopyBytes = socketBytes.size,
+                )
+            }
+        }
 
     init {
         check(handle != 0L) { "Could not create launcher compositor" }
@@ -39,20 +46,24 @@ internal class NativeLauncherCompositor(
         geometryPercent: Int,
     ): Boolean {
         val current = ownerHandle()
-        return nativeAttachSurface(
-            current,
-            surface,
-            width,
-            height,
-            densityDpi,
-            geometryPercent,
-        ) == 0
+        val result =
+            nativeAttachSurface(
+                current,
+                surface,
+                width,
+                height,
+                densityDpi,
+                geometryPercent,
+            )
+        PerformanceMetrics.recordCompositorJni()
+        return result == 0
     }
 
     fun detach() {
         val current = ownerHandle()
         if (current != 0L) {
             nativeDetachSurface(current)
+            PerformanceMetrics.recordCompositorJni()
         }
     }
 
@@ -61,7 +72,9 @@ internal class NativeLauncherCompositor(
         return if (current == 0L) {
             RESULT_CLOSED
         } else {
-            nativeRequestClose(current)
+            nativeRequestClose(current).also {
+                PerformanceMetrics.recordCompositorJni()
+            }
         }
     }
 
@@ -69,6 +82,7 @@ internal class NativeLauncherCompositor(
         val current = ownerHandle()
         if (current != 0L) {
             nativeSetHostActive(current, active)
+            PerformanceMetrics.recordCompositorJni()
         }
     }
 
@@ -76,6 +90,7 @@ internal class NativeLauncherCompositor(
         val current = ownerHandle()
         if (current != 0L) {
             nativeSetClipboardActive(current, active)
+            PerformanceMetrics.recordCompositorJni()
         }
     }
 
@@ -84,7 +99,9 @@ internal class NativeLauncherCompositor(
         return if (current == 0L) {
             RESULT_CLOSED
         } else {
-            nativeOfferAndroidClipboardText(current)
+            nativeOfferAndroidClipboardText(current).also {
+                PerformanceMetrics.recordCompositorJni()
+            }
         }
     }
 
@@ -93,7 +110,9 @@ internal class NativeLauncherCompositor(
         return if (current == 0L) {
             RESULT_CLOSED
         } else {
-            nativeClearAndroidClipboard(current)
+            nativeClearAndroidClipboard(current).also {
+                PerformanceMetrics.recordCompositorJni()
+            }
         }
     }
 
@@ -102,7 +121,9 @@ internal class NativeLauncherCompositor(
         return if (current == 0L) {
             RESULT_CLOSED
         } else {
-            nativeTakeAndroidPasteFd(current)
+            nativeTakeAndroidPasteFd(current).also {
+                PerformanceMetrics.recordCompositorJni()
+            }
         }
     }
 
@@ -111,13 +132,20 @@ internal class NativeLauncherCompositor(
         return if (current == 0L) {
             RESULT_CLOSED
         } else {
-            nativeTakeLinuxCopyFd(current)
+            nativeTakeLinuxCopyFd(current).also {
+                PerformanceMetrics.recordCompositorJni()
+            }
         }
     }
 
     fun takeLinuxClipboardClear(): Boolean {
         val current = ownerHandle()
-        return current != 0L && nativeTakeLinuxClipboardClear(current)
+        if (current == 0L) {
+            return false
+        }
+        val result = nativeTakeLinuxClipboardClear(current)
+        PerformanceMetrics.recordCompositorJni()
+        return result
     }
 
     fun imeChangeSerial(): Int {
@@ -125,13 +153,20 @@ internal class NativeLauncherCompositor(
         return if (current == 0L) {
             RESULT_CLOSED
         } else {
-            nativeImeChangeSerial(current)
+            nativeImeChangeSerial(current).also {
+                PerformanceMetrics.recordCompositorJni()
+            }
         }
     }
 
     fun imeActive(): Boolean {
         val current = ownerHandle()
-        return current != 0L && nativeImeActive(current)
+        if (current == 0L) {
+            return false
+        }
+        val result = nativeImeActive(current)
+        PerformanceMetrics.recordCompositorJni()
+        return result
     }
 
     fun imeSurroundingTextLength(): Int {
@@ -139,7 +174,9 @@ internal class NativeLauncherCompositor(
         return if (current == 0L) {
             RESULT_CLOSED
         } else {
-            nativeImeSurroundingTextLength(current)
+            nativeImeSurroundingTextLength(current).also {
+                PerformanceMetrics.recordCompositorJni()
+            }
         }
     }
 
@@ -151,7 +188,11 @@ internal class NativeLauncherCompositor(
         return if (current == 0L) {
             RESULT_CLOSED
         } else {
-            nativeCopyImeSurroundingText(current, output, capacity)
+            nativeCopyImeSurroundingText(current, output, capacity).also { result ->
+                PerformanceMetrics.recordCompositorJni(
+                    directOutputBytes = result.coerceAtLeast(0),
+                )
+            }
         }
     }
 
@@ -160,7 +201,9 @@ internal class NativeLauncherCompositor(
         return if (current == 0L) {
             RESULT_CLOSED
         } else {
-            nativeImeStateComponent(current, component)
+            nativeImeStateComponent(current, component).also {
+                PerformanceMetrics.recordCompositorJni()
+            }
         }
     }
 
@@ -175,7 +218,11 @@ internal class NativeLauncherCompositor(
         return if (current == 0L) {
             RESULT_CLOSED
         } else {
-            nativeImeText(current, operation, input, length, cursorBegin, cursorEnd)
+            nativeImeText(current, operation, input, length, cursorBegin, cursorEnd).also {
+                PerformanceMetrics.recordCompositorJni(
+                    directInputBytes = length,
+                )
+            }
         }
     }
 
@@ -187,7 +234,9 @@ internal class NativeLauncherCompositor(
         return if (current == 0L) {
             RESULT_CLOSED
         } else {
-            nativeImeDeleteSurrounding(current, beforeBytes, afterBytes)
+            nativeImeDeleteSurrounding(current, beforeBytes, afterBytes).also {
+                PerformanceMetrics.recordCompositorJni()
+            }
         }
     }
 
@@ -199,7 +248,9 @@ internal class NativeLauncherCompositor(
         return if (current == 0L) {
             RESULT_CLOSED
         } else {
-            nativeImeEditorAction(current, action, timeMillis)
+            nativeImeEditorAction(current, action, timeMillis).also {
+                PerformanceMetrics.recordCompositorJni()
+            }
         }
     }
 
@@ -210,7 +261,11 @@ internal class NativeLauncherCompositor(
         timeoutMillis: Int,
     ): Int {
         requireClipboardThread()
-        return nativeReadClipboardFd(descriptor, output, capacity, timeoutMillis)
+        return nativeReadClipboardFd(descriptor, output, capacity, timeoutMillis).also { result ->
+            PerformanceMetrics.recordCompositorJni(
+                directOutputBytes = result.coerceAtLeast(0),
+            )
+        }
     }
 
     fun writeClipboardFd(
@@ -220,7 +275,11 @@ internal class NativeLauncherCompositor(
         timeoutMillis: Int,
     ): Int {
         requireClipboardThread()
-        return nativeWriteClipboardFd(descriptor, input, length, timeoutMillis)
+        return nativeWriteClipboardFd(descriptor, input, length, timeoutMillis).also {
+            PerformanceMetrics.recordCompositorJni(
+                directInputBytes = length,
+            )
+        }
     }
 
     /**
@@ -232,17 +291,25 @@ internal class NativeLauncherCompositor(
         return if (current == 0L) {
             RESULT_CLOSED
         } else {
-            nativeDispatchAndPresent(current, timeMillis)
+            nativeDispatchAndPresent(current, timeMillis).also {
+                PerformanceMetrics.recordCompositorJni(
+                    kind = PerformanceMetrics.COMPOSITOR_DISPATCH,
+                )
+            }
         }
     }
 
-    fun presentationComponent(component: Int): Int {
+    fun copyPresentationSnapshot(output: ByteBuffer): Boolean {
         val current = ownerHandle()
-        return if (current == 0L) {
-            RESULT_CLOSED
-        } else {
-            nativePresentationComponent(current, component)
+        if (current == 0L) {
+            return false
         }
+        val result = nativeCopyPresentationSnapshot(current, output)
+        PerformanceMetrics.recordCompositorJni(
+            directOutputBytes = result.coerceAtLeast(0) * Int.SIZE_BYTES,
+            kind = PerformanceMetrics.COMPOSITOR_SNAPSHOT,
+        )
+        return result == PRESENTATION_COMPONENTS
     }
 
     fun submitInput(
@@ -253,7 +320,12 @@ internal class NativeLauncherCompositor(
         return if (current == 0L) {
             RESULT_CLOSED
         } else {
-            nativeInputBatch(current, input, recordCount)
+            nativeInputBatch(current, input, recordCount).also {
+                PerformanceMetrics.recordCompositorJni(
+                    directInputBytes = recordCount * INPUT_RECORD_BYTES,
+                    kind = PerformanceMetrics.COMPOSITOR_INPUT,
+                )
+            }
         }
     }
 
@@ -262,6 +334,7 @@ internal class NativeLauncherCompositor(
         handle = 0L
         if (current != 0L) {
             nativeDestroy(current)
+            PerformanceMetrics.recordCompositorJni()
         }
     }
 
@@ -376,9 +449,9 @@ internal class NativeLauncherCompositor(
         timeMillis: Int,
     ): Int
 
-    private external fun nativePresentationComponent(
+    private external fun nativeCopyPresentationSnapshot(
         handle: Long,
-        component: Int,
+        output: ByteBuffer,
     ): Int
 
     private external fun nativeInputBatch(
@@ -390,9 +463,16 @@ internal class NativeLauncherCompositor(
     private external fun nativeDestroy(handle: Long)
 
     companion object {
+        private const val INPUT_RECORD_BYTES = 6 * Int.SIZE_BYTES
+        const val PRESENTATION_COMPONENTS = 32
         const val RESULT_CLOSED = -1
         const val FLAG_CLIENT_CONNECTED = 1
         const val FLAG_FRAME_PRESENTED = 1 shl 1
+        const val FLAG_PRESENTATION_CHANGED = 1 shl 2
+        const val FLAG_LINUX_CLIPBOARD_CLEAR = 1 shl 3
+        const val FLAG_LINUX_COPY_PENDING = 1 shl 4
+        const val FLAG_ANDROID_PASTE_PENDING = 1 shl 5
+        const val FLAG_IME_CHANGED = 1 shl 6
 
         init {
             System.loadLibrary("archphene_compositor")

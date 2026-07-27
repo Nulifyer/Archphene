@@ -79,6 +79,18 @@ clipboard-worker transfer, pointer selection, scrollback, live resize, close,
 force-stop cleanup, and cold relaunch pass with inspected full-device evidence
 on both exact ABIs.
 
+Active performance is now measured at the actual shared-runtime boundaries.
+Debug-only dormant counters distinguish Terminal and compositor JNI calls,
+direct-buffer traffic, JNI array copies, and explicit Kotlin payload copies;
+the device probe also samples ART allocation/object/GC deltas and measures raw
+hardware-event-to-Terminal-draw or Wayland-present latency. Presentation
+diagnostics use one 128-byte direct-buffer snapshot instead of 32 scalar JNI
+queries, while dispatch flags avoid unchanged clipboard and IME polling. The
+budgeted one-second Terminal and Foot gate passes on the exact x86_64 emulator
+and AArch64 Samsung with zero GC, bounded memory/process resources, rendered
+frame differences, and inspected full-device captures. Multi-minute warmed
+soak, thermal, and battery evidence remains a release task.
+
 At 840 dp and wider, the same stateful controls are composed once into a
 persistent navigation rail, a two-column package workspace, side-by-side file
 actions, and a terminal surface that consumes the remaining display. A
@@ -1608,7 +1620,7 @@ crates additionally deny unsafe outside their existing explicit boundary
 modules. Every exported compositor JNI symbol and its Java
 array/direct-buffer/surface/bitmap conversion is now visibly enclosed in one
 documented boundary module. The workspace passes Clippy with warnings denied,
-all 259 Rust tests, and optimized Android builds for both exact ABIs.
+all 260 Rust tests, and optimized Android builds for both exact ABIs.
 The remaining raw-pointer handles are now gone: fixed synchronized registries
 cap core/probe instances at eight and generated-launcher instances at four,
 encode a slot plus generation into each positive opaque handle, and reject

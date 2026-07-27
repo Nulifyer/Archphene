@@ -9,6 +9,7 @@ import android.graphics.Paint
 import android.graphics.RenderNode
 import android.graphics.Typeface
 import android.os.Bundle
+import android.os.SystemClock
 import android.text.InputType
 import android.util.TypedValue
 import android.view.GestureDetector
@@ -27,6 +28,7 @@ import android.widget.PopupMenu
 import java.nio.ByteBuffer
 import kotlin.math.ceil
 import kotlin.math.roundToInt
+import org.archphene.app.performance.PerformanceMetrics
 import org.archphene.app.runtime.ArchpheneRuntimeService
 import org.archphene.app.runtime.InputBatch
 import org.archphene.app.runtime.NativeRuntime
@@ -227,6 +229,7 @@ internal class RuntimeSurfaceView(
         if (previewingPinch) {
             canvas.restore()
         }
+        PerformanceMetrics.noteTerminalFrame(SystemClock.uptimeMillis())
     }
 
     override fun onSizeChanged(
@@ -484,7 +487,9 @@ internal class RuntimeSurfaceView(
         if (sendModifiedTerminalSequence(keyCode, event)) {
             return true
         }
-        terminalSequence(keyCode, event.isShiftPressed)?.let { return sendSequence(it) }
+        terminalSequence(keyCode, event.isShiftPressed)?.let {
+            return sendSequence(it, event.eventTime)
+        }
         val altGraph = isAltGraph(event)
         val baseCodepoint = textCodepoint(event, altGraph)
         if (baseCodepoint == 0) {
@@ -494,7 +499,7 @@ internal class RuntimeSurfaceView(
             val control = controlCodepoint(baseCodepoint)
             if (control >= 0) {
                 terminalInputBytes[0] = control.toByte()
-                return submitTerminalInput(1)
+                return submitTerminalInput(1, event.eventTime)
             }
         }
         var offset = 0
@@ -502,7 +507,7 @@ internal class RuntimeSurfaceView(
             terminalInputBytes[offset++] = ESCAPE_BYTE
         }
         val encoded = encodeCodepoint(baseCodepoint, terminalInputBytes, offset)
-        return encoded != 0 && submitTerminalInput(offset + encoded)
+        return encoded != 0 && submitTerminalInput(offset + encoded, event.eventTime)
     }
 
     override fun onKeyUp(
@@ -1387,16 +1392,30 @@ internal class RuntimeSurfaceView(
         return output
     }
 
-    private fun submitTerminalInput(length: Int): Boolean {
+    private fun submitTerminalInput(
+        length: Int,
+        eventTimeMillis: Long = SystemClock.uptimeMillis(),
+    ): Boolean {
         clearSelection()
         returnToLiveView()
-        return runtimeBinder?.submitTerminalInput(terminalInputBytes, length) == true
+        val accepted = runtimeBinder?.submitTerminalInput(terminalInputBytes, length) == true
+        if (accepted) {
+            PerformanceMetrics.noteTerminalInput(eventTimeMillis)
+        }
+        return accepted
     }
 
-    private fun sendSequence(sequence: ByteArray): Boolean {
+    private fun sendSequence(
+        sequence: ByteArray,
+        eventTimeMillis: Long = SystemClock.uptimeMillis(),
+    ): Boolean {
         clearSelection()
         returnToLiveView()
-        return runtimeBinder?.submitTerminalInput(sequence, sequence.size) == true
+        val accepted = runtimeBinder?.submitTerminalInput(sequence, sequence.size) == true
+        if (accepted) {
+            PerformanceMetrics.noteTerminalInput(eventTimeMillis)
+        }
+        return accepted
     }
 
     private fun encodedLength(codepoint: Int): Int =
@@ -1690,7 +1709,7 @@ internal class RuntimeSurfaceView(
         terminalInputBytes[output++] = ';'.code.toByte()
         terminalInputBytes[output++] = ('0'.code + modifier).toByte()
         terminalInputBytes[output++] = finalByte
-        return submitTerminalInput(output)
+        return submitTerminalInput(output, event.eventTime)
     }
 
     private fun applicationKeypadSequence(keyCode: Int): ByteArray? =

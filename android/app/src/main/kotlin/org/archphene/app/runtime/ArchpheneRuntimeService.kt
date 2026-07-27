@@ -55,6 +55,7 @@ import org.archphene.app.launcher.LauncherApkAssembler
 import org.archphene.app.launcher.LauncherApkRequest
 import org.archphene.app.launcher.LauncherApkSigner
 import org.archphene.app.launcher.LauncherPackageInstaller
+import org.archphene.app.performance.PerformanceMetrics
 
 internal class InstalledPackageSnapshot(
     val names: Array<String>,
@@ -658,13 +659,18 @@ class ArchpheneRuntimeService : Service() {
                 return 0
             }
             shellTerminalDamageBuffer.clear()
-            return NativeRuntime.nativeReadTerminalDamage(
-                activeHandle,
-                activePty,
-                fullSnapshot,
-                viewportOffset,
-                shellTerminalDamageBuffer,
-            )
+            return NativeRuntime
+                .nativeReadTerminalDamage(
+                    activeHandle,
+                    activePty,
+                    fullSnapshot,
+                    viewportOffset,
+                    shellTerminalDamageBuffer,
+                ).also { length ->
+                    PerformanceMetrics.recordTerminalJni(
+                        directOutputBytes = length.coerceAtLeast(0),
+                    )
+                }
         }
 
         fun copySharedShellTerminalSelection(
@@ -691,11 +697,15 @@ class ArchpheneRuntimeService : Service() {
                     endColumn,
                     shellTerminalSelectionBuffer,
                 )
+            PerformanceMetrics.recordTerminalJni(
+                directOutputBytes = length.coerceAtLeast(0),
+            )
             if (length < 0 || length > shellTerminalSelectionBytes.size) {
                 return null
             }
             shellTerminalSelectionBuffer.position(0)
             shellTerminalSelectionBuffer.get(shellTerminalSelectionBytes, 0, length)
+            PerformanceMetrics.recordTerminalKotlinCopy(length)
             return String(shellTerminalSelectionBytes, 0, length, Charsets.UTF_8)
         }
 
@@ -1818,6 +1828,7 @@ class ArchpheneRuntimeService : Service() {
         packageConnection?.disconnect()
         if (activeHandle != 0L && activePty != 0L) {
             NativeRuntime.nativeWakePty(activeHandle, activePty)
+            PerformanceMetrics.recordTerminalJni()
         }
         if (activeHandle != 0L && cancelFolderMirror) {
             if (cancelFolderSync) {
@@ -11242,6 +11253,7 @@ class ArchpheneRuntimeService : Service() {
             return false
         }
         val result = NativeRuntime.nativeWakePty(readyHandle, shellHandle)
+        PerformanceMetrics.recordTerminalJni()
         if (result < 0) {
             shellPhase = "Could not wake the shared shell"
             return false
@@ -11266,7 +11278,9 @@ class ArchpheneRuntimeService : Service() {
             shellPhase = "Shared shell input queue is full"
             return false
         }
+        PerformanceMetrics.recordTerminalKotlinCopy(length)
         val result = NativeRuntime.nativeWakePty(readyHandle, shellHandle)
+        PerformanceMetrics.recordTerminalJni()
         if (result < 0) {
             shellPhase = "Could not wake the shared shell"
             return false
@@ -11305,6 +11319,7 @@ class ArchpheneRuntimeService : Service() {
                 rows,
                 columns,
             )
+        PerformanceMetrics.recordTerminalJni()
         if (result == 0) {
             shellTerminalRevision.incrementAndGet()
         }
@@ -11339,6 +11354,9 @@ class ArchpheneRuntimeService : Service() {
                     initialColumns,
                     outputBuffer,
                 )
+            PerformanceMetrics.recordTerminalJni(
+                directInputBytes = requestBytes.size,
+            )
             if (ptyHandle <= 0) {
                 throw IllegalStateException(readNativeMessage(outputBuffer, ptyHandle))
             }
@@ -11355,8 +11373,10 @@ class ArchpheneRuntimeService : Service() {
             while (!shellStopRequested) {
                 val queued = shellInput.peek(writeBytes)
                 if (queued != 0) {
+                    PerformanceMetrics.recordTerminalKotlinCopy(queued)
                     writeBuffer.clear()
                     writeBuffer.put(writeBytes, 0, queued)
+                    PerformanceMetrics.recordTerminalKotlinCopy(queued)
                     val written =
                         NativeRuntime.nativePtyIo(
                             activeHandle,
@@ -11365,6 +11385,9 @@ class ArchpheneRuntimeService : Service() {
                             writeBuffer,
                             queued,
                         )
+                    PerformanceMetrics.recordTerminalJni(
+                        directInputBytes = queued,
+                    )
                     if (written < 0) {
                         throw IllegalStateException("Could not write to the shared shell")
                     }
@@ -11385,6 +11408,9 @@ class ArchpheneRuntimeService : Service() {
                             readBuffer,
                             SHELL_IO_BYTES,
                         )
+                    PerformanceMetrics.recordTerminalJni(
+                        directOutputBytes = read.coerceAtLeast(0),
+                    )
                     if (read < 0) {
                         throw IllegalStateException("Could not read from the shared shell")
                     }
@@ -11393,11 +11419,14 @@ class ArchpheneRuntimeService : Service() {
                     }
                     readBuffer.position(0)
                     readBuffer.get(readBytes, 0, read)
+                    PerformanceMetrics.recordTerminalKotlinCopy(read)
                     shellOutput.append(readBytes, read)
+                    PerformanceMetrics.recordTerminalKotlinCopy(read)
                     shellTerminalRevision.incrementAndGet()
                 }
                 val encodedStatus =
                     NativeRuntime.nativePtyExitStatus(activeHandle, ptyHandle)
+                PerformanceMetrics.recordTerminalJni()
                 if (encodedStatus < 0) {
                     throw IllegalStateException("Could not read the shared shell exit status")
                 }
@@ -11413,6 +11442,7 @@ class ArchpheneRuntimeService : Service() {
                             ptyHandle,
                             writePending,
                         )
+                    PerformanceMetrics.recordTerminalJni()
                     val knownEvents =
                         NativeRuntime.PTY_EVENT_READABLE or
                             NativeRuntime.PTY_EVENT_WRITABLE or
@@ -11434,6 +11464,7 @@ class ArchpheneRuntimeService : Service() {
         } finally {
             if (ptyHandle > 0) {
                 NativeRuntime.nativeClosePty(activeHandle, ptyHandle)
+                PerformanceMetrics.recordTerminalJni()
             }
             synchronized(this) {
                 shellHandle = 0L
@@ -11509,6 +11540,7 @@ class ArchpheneRuntimeService : Service() {
         }
         if (activeHandle != 0L && ptyHandle != 0L) {
             NativeRuntime.nativeWakePty(activeHandle, ptyHandle)
+            PerformanceMetrics.recordTerminalJni()
         }
         if (waitForWorker && worker !== Thread.currentThread()) {
             try {
