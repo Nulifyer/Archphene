@@ -380,6 +380,8 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [x] On physical AArch64, review, build, independently verify, and atomically install the six-output `dotnet-core-bin` split package through the normal AUR UI. Samsung runs SDK 10.0.302, creates/restores/builds/runs an MVC project in shared Home, serves it to the Android browser, and reaps the Kestrel descendant when the shell is stopped.
 - [x] Create a new ASP.NET Core MVC project in shared Arch storage.
 - [ ] Open the project in Code and validate editing, search, Git, terminal PTY, language services, restore/build, and extension-host subprocesses.
+  - [ ] Restore the generic Qt/GTK appearance bridge in the current Rust/Kotlin launch path. The settings modules and former prototype policy still exist, but `archphene-process` currently publishes neither the GTK settings/module variables nor Qt control/theme variables. A full-device Samsung Code capture shows the resulting native GTK folder chooser in the wrong light theme with unusably small text and controls beside the correctly scaled dark Electron UI.
+  - [ ] Fix and regress the Samsung Code native folder chooser's header actions. Folder rows select and navigate, but the visible Open and Cancel actions do not activate through touch, mouse-source injection, or keyboard activation, blocking the normal user flow before the shared `ArchpheneMvp` folder can open.
 - [ ] Run the project under the debugger, stop at breakpoints, inspect state, continue, and restart.
 - [x] Open the served localhost URL in Android's browser and validate routing back to the running Linux process.
 - [ ] Validate the workflow with touch/IME on a phone and keyboard/mouse on tablet or external display.
