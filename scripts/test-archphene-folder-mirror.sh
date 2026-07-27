@@ -152,12 +152,22 @@ archphene_wait_ui_unwrapped \
   "Synced 0 change\\(s\\): 0 pulled, 0 pushed, 0 conflict\\(s\\), 0 deletion\\(s\\) deferred" \
   "folder-mirror-noop-sync-$serial" 30
 wait_receiver "$action_verify" "No-op sync retained exact baseline"
+archphene_wait_ui 'text="(?:HISTORY|History)"[^>]*enabled="true"' \
+  "folder-sync-history-$serial" 15
+archphene_tap_ui_pattern \
+  "$ARCHPHENE_UI" 'text="(?:HISTORY|History)"[^>]*enabled="true"' "Sync history"
+archphene_wait_ui 'text="Project sync history"' \
+  "folder-sync-history-dialog-$serial" 15
+archphene_regex_contains "$ARCHPHENE_UI" 'text=".*Completed.*Synced 0 change' ||
+  archphene_die "project sync history omitted the durable completed result"
+archphene_adb_run exec-out screencap -p >"$output_dir/$serial-history.png"
+archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="OK"' "Close sync history"
 
 sync_button() {
-  archphene_wait_ui 'text="(?:SYNC|Sync)"[^>]*enabled="true"' \
+  archphene_wait_ui 'text="(?:SYNC|Sync|RETRY|Retry)"[^>]*enabled="true"' \
     "folder-sync-action-$serial" 20
   archphene_tap_ui_pattern \
-    "$ARCHPHENE_UI" 'text="(?:SYNC|Sync)"[^>]*enabled="true"' "Sync folder"
+    "$ARCHPHENE_UI" 'text="(?:SYNC|Sync|RETRY|Retry)"[^>]*enabled="true"' "Sync folder"
 }
 
 set_sync_hold() {
@@ -176,6 +186,8 @@ restart_manager_files() {
   archphene_open_manager_section Files "folder-sync-restart-files-$serial"
   archphene_wait_ui 'text="(?:SYNC|Sync)"[^>]*enabled="true"' \
     "folder-sync-restart-ready-$serial" 20
+  archphene_wait_ui 'text="(?:HISTORY|History)"[^>]*enabled="true"' \
+    "folder-sync-restart-history-$serial" 15
 }
 
 local_project="files/arch-root/home/archphene/Projects/$folder"

@@ -104,6 +104,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private lateinit var folderButton: Button
     private lateinit var folderMirrorButton: Button
     private lateinit var folderDisconnectButton: Button
+    private lateinit var folderHistoryButton: Button
     private lateinit var shellSpinner: Spinner
     private lateinit var shellAdapter: ArrayAdapter<String>
     private val snapshot = RuntimeSnapshot()
@@ -1002,12 +1003,36 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     runtimeBinder?.mirrorAndroidFolder()
                 }
             }
+        folderHistoryButton =
+            Button(this).apply {
+                setText(R.string.sync_history)
+                isEnabled = false
+                visibility = View.GONE
+                setOnClickListener { showProjectSyncHistory() }
+            }
         val folderRow =
             LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 setBackgroundColor(getColor(R.color.archphene_surface_variant))
                 addView(
-                    folderStatusView,
+                    LinearLayout(this@MainActivity).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        addView(
+                            folderStatusView,
+                            LinearLayout.LayoutParams(
+                                0,
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                1f,
+                            ),
+                        )
+                        addView(
+                            folderHistoryButton,
+                            LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.WRAP_CONTENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                            ),
+                        )
+                    },
                     LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         0,
@@ -2841,6 +2866,33 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         setTextIfChanged(folderMirrorButton, binder.folderMirrorActionLabel)
         folderMirrorButton.isEnabled = binder.folderMirrorAvailable
         folderDisconnectButton.isEnabled = binder.folderDisconnectAvailable
+        folderHistoryButton.isEnabled = binder.folderSyncHistoryAvailable
+        setVisibilityIfChanged(
+            folderHistoryButton,
+            if (binder.folderSyncHistoryAvailable) View.VISIBLE else View.GONE,
+        )
+    }
+
+    private fun showProjectSyncHistory() {
+        val binder = runtimeBinder ?: return
+        if (!binder.folderSyncHistoryAvailable) {
+            return
+        }
+        val builder =
+            AlertDialog
+                .Builder(this)
+                .setTitle(R.string.sync_history_title)
+                .setMessage(binder.folderSyncHistoryText)
+                .setPositiveButton(android.R.string.ok, null)
+        if (
+            binder.folderMirrorActionLabel == "Retry" &&
+            binder.folderMirrorAvailable
+        ) {
+            builder.setNeutralButton(R.string.retry_sync) { _, _ ->
+                binder.mirrorAndroidFolder()
+            }
+        }
+        builder.show()
     }
 
     private fun updatePackageSelectionActions() {

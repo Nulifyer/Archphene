@@ -12,6 +12,7 @@ dependencies {
     // work. Use the valid library jar rather than Build Tools 36's malformed
     // command-line apksigner bundle, whose manifest CRC breaks R8 transforms.
     implementation("com.android.tools.build:apksig:9.3.0")
+    testImplementation("junit:junit:4.13.2")
 }
 
 android {
