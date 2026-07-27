@@ -58,6 +58,8 @@ class LauncherSessionService : Service() {
         var lastPresentationSignature = Long.MIN_VALUE
         var inputLogged = false
         var clipboardLogged = false
+        var androidPasteLogged = false
+        var linuxCopyLogged = false
         val inputRecords = IntArray(MAX_INPUT_RECORDS * INPUT_FIELDS)
         val inputBuffer =
             ByteBuffer
@@ -1322,6 +1324,7 @@ class LauncherSessionService : Service() {
                             MAX_CLIPBOARD_BYTES,
                             CLIPBOARD_IO_TIMEOUT_MILLIS,
                         )
+                    val transferThread = Thread.currentThread().name
                     val text =
                         if (length >= 0) {
                             session.clipboardReadBuffer.position(0)
@@ -1341,6 +1344,14 @@ class LauncherSessionService : Service() {
                         } else if (text == null) {
                             Log.w(TAG, "Rejected invalid Linux clipboard text session=${session.id}")
                         } else {
+                            if (!session.linuxCopyLogged) {
+                                session.linuxCopyLogged = true
+                                Log.i(
+                                    TAG,
+                                    "Read first Linux clipboard transfer session=${session.id} " +
+                                        "bytes=$length on $transferThread",
+                                )
+                            }
                             publishLinuxClipboard(session, compositor, revision, text)
                         }
                     }
@@ -1365,13 +1376,21 @@ class LauncherSessionService : Service() {
                                 clipboard.size,
                                 CLIPBOARD_IO_TIMEOUT_MILLIS,
                             )
+                        val transferThread = Thread.currentThread().name
                         surfaceHandler.post {
                             session.androidPasteInFlight = false
                             if (result != clipboard.size) {
                                 Log.w(
                                     TAG,
                                     "Android clipboard write failed session=${session.id} " +
-                                        "result=$result",
+                                    "result=$result",
+                                )
+                            } else if (!session.androidPasteLogged) {
+                                session.androidPasteLogged = true
+                                Log.i(
+                                    TAG,
+                                    "Wrote first Android clipboard transfer session=${session.id} " +
+                                        "bytes=$result on $transferThread",
                                 )
                             }
                         }

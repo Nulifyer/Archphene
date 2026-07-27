@@ -17,6 +17,7 @@ internal class NativeLauncherCompositor(
     densityDpi: Int,
     geometryPercent: Int,
 ) : AutoCloseable {
+    private val ownerThread = Thread.currentThread()
     private var handle =
         nativeCreate(
             socketPath.toByteArray(StandardCharsets.UTF_8),
@@ -36,104 +37,132 @@ internal class NativeLauncherCompositor(
         height: Int,
         densityDpi: Int,
         geometryPercent: Int,
-    ): Boolean =
-        nativeAttachSurface(
-            handle,
+    ): Boolean {
+        val current = ownerHandle()
+        return nativeAttachSurface(
+            current,
             surface,
             width,
             height,
             densityDpi,
             geometryPercent,
         ) == 0
+    }
 
     fun detach() {
-        if (handle != 0L) {
-            nativeDetachSurface(handle)
+        val current = ownerHandle()
+        if (current != 0L) {
+            nativeDetachSurface(current)
         }
     }
 
-    fun requestClose(): Int =
-        if (handle == 0L) {
+    fun requestClose(): Int {
+        val current = ownerHandle()
+        return if (current == 0L) {
             RESULT_CLOSED
         } else {
-            nativeRequestClose(handle)
+            nativeRequestClose(current)
         }
+    }
 
     fun setHostActive(active: Boolean) {
-        if (handle != 0L) {
-            nativeSetHostActive(handle, active)
+        val current = ownerHandle()
+        if (current != 0L) {
+            nativeSetHostActive(current, active)
         }
     }
 
     fun setClipboardActive(active: Boolean) {
-        if (handle != 0L) {
-            nativeSetClipboardActive(handle, active)
+        val current = ownerHandle()
+        if (current != 0L) {
+            nativeSetClipboardActive(current, active)
         }
     }
 
-    fun offerAndroidClipboardText(): Int =
-        if (handle == 0L) {
+    fun offerAndroidClipboardText(): Int {
+        val current = ownerHandle()
+        return if (current == 0L) {
             RESULT_CLOSED
         } else {
-            nativeOfferAndroidClipboardText(handle)
+            nativeOfferAndroidClipboardText(current)
         }
+    }
 
-    fun clearAndroidClipboard(): Int =
-        if (handle == 0L) {
+    fun clearAndroidClipboard(): Int {
+        val current = ownerHandle()
+        return if (current == 0L) {
             RESULT_CLOSED
         } else {
-            nativeClearAndroidClipboard(handle)
+            nativeClearAndroidClipboard(current)
         }
+    }
 
-    fun takeAndroidPasteFd(): Int =
-        if (handle == 0L) {
+    fun takeAndroidPasteFd(): Int {
+        val current = ownerHandle()
+        return if (current == 0L) {
             RESULT_CLOSED
         } else {
-            nativeTakeAndroidPasteFd(handle)
+            nativeTakeAndroidPasteFd(current)
         }
+    }
 
-    fun takeLinuxCopyFd(): Int =
-        if (handle == 0L) {
+    fun takeLinuxCopyFd(): Int {
+        val current = ownerHandle()
+        return if (current == 0L) {
             RESULT_CLOSED
         } else {
-            nativeTakeLinuxCopyFd(handle)
+            nativeTakeLinuxCopyFd(current)
         }
+    }
 
-    fun takeLinuxClipboardClear(): Boolean =
-        handle != 0L && nativeTakeLinuxClipboardClear(handle)
+    fun takeLinuxClipboardClear(): Boolean {
+        val current = ownerHandle()
+        return current != 0L && nativeTakeLinuxClipboardClear(current)
+    }
 
-    fun imeChangeSerial(): Int =
-        if (handle == 0L) {
+    fun imeChangeSerial(): Int {
+        val current = ownerHandle()
+        return if (current == 0L) {
             RESULT_CLOSED
         } else {
-            nativeImeChangeSerial(handle)
+            nativeImeChangeSerial(current)
         }
+    }
 
-    fun imeActive(): Boolean = handle != 0L && nativeImeActive(handle)
+    fun imeActive(): Boolean {
+        val current = ownerHandle()
+        return current != 0L && nativeImeActive(current)
+    }
 
-    fun imeSurroundingTextLength(): Int =
-        if (handle == 0L) {
+    fun imeSurroundingTextLength(): Int {
+        val current = ownerHandle()
+        return if (current == 0L) {
             RESULT_CLOSED
         } else {
-            nativeImeSurroundingTextLength(handle)
+            nativeImeSurroundingTextLength(current)
         }
+    }
 
     fun copyImeSurroundingText(
         output: ByteBuffer,
         capacity: Int,
-    ): Int =
-        if (handle == 0L) {
+    ): Int {
+        val current = ownerHandle()
+        return if (current == 0L) {
             RESULT_CLOSED
         } else {
-            nativeCopyImeSurroundingText(handle, output, capacity)
+            nativeCopyImeSurroundingText(current, output, capacity)
         }
+    }
 
-    fun imeStateComponent(component: Int): Int =
-        if (handle == 0L) {
+    fun imeStateComponent(component: Int): Int {
+        val current = ownerHandle()
+        return if (current == 0L) {
             RESULT_CLOSED
         } else {
-            nativeImeStateComponent(handle, component)
+            nativeImeStateComponent(current, component)
         }
+    }
 
     fun submitImeText(
         operation: Int,
@@ -141,80 +170,111 @@ internal class NativeLauncherCompositor(
         length: Int,
         cursorBegin: Int,
         cursorEnd: Int,
-    ): Int =
-        if (handle == 0L) {
+    ): Int {
+        val current = ownerHandle()
+        return if (current == 0L) {
             RESULT_CLOSED
         } else {
-            nativeImeText(handle, operation, input, length, cursorBegin, cursorEnd)
+            nativeImeText(current, operation, input, length, cursorBegin, cursorEnd)
         }
+    }
 
     fun deleteImeSurrounding(
         beforeBytes: Int,
         afterBytes: Int,
-    ): Int =
-        if (handle == 0L) {
+    ): Int {
+        val current = ownerHandle()
+        return if (current == 0L) {
             RESULT_CLOSED
         } else {
-            nativeImeDeleteSurrounding(handle, beforeBytes, afterBytes)
+            nativeImeDeleteSurrounding(current, beforeBytes, afterBytes)
         }
+    }
 
     fun submitImeEditorAction(
         action: Int,
         timeMillis: Int,
-    ): Int =
-        if (handle == 0L) {
+    ): Int {
+        val current = ownerHandle()
+        return if (current == 0L) {
             RESULT_CLOSED
         } else {
-            nativeImeEditorAction(handle, action, timeMillis)
+            nativeImeEditorAction(current, action, timeMillis)
         }
+    }
 
     fun readClipboardFd(
         descriptor: Int,
         output: ByteBuffer,
         capacity: Int,
         timeoutMillis: Int,
-    ): Int = nativeReadClipboardFd(descriptor, output, capacity, timeoutMillis)
+    ): Int {
+        requireClipboardThread()
+        return nativeReadClipboardFd(descriptor, output, capacity, timeoutMillis)
+    }
 
     fun writeClipboardFd(
         descriptor: Int,
         input: ByteBuffer,
         length: Int,
         timeoutMillis: Int,
-    ): Int = nativeWriteClipboardFd(descriptor, input, length, timeoutMillis)
+    ): Int {
+        requireClipboardThread()
+        return nativeWriteClipboardFd(descriptor, input, length, timeoutMillis)
+    }
 
     /**
      * Dispatches pending Wayland traffic and presents only when a new surface
      * commit is available. The return flags are stable for diagnostics.
      */
-    fun dispatchAndPresent(timeMillis: Int): Int =
-        if (handle == 0L) {
+    fun dispatchAndPresent(timeMillis: Int): Int {
+        val current = ownerHandle()
+        return if (current == 0L) {
             RESULT_CLOSED
         } else {
-            nativeDispatchAndPresent(handle, timeMillis)
+            nativeDispatchAndPresent(current, timeMillis)
         }
+    }
 
-    fun presentationComponent(component: Int): Int =
-        if (handle == 0L) {
+    fun presentationComponent(component: Int): Int {
+        val current = ownerHandle()
+        return if (current == 0L) {
             RESULT_CLOSED
         } else {
-            nativePresentationComponent(handle, component)
+            nativePresentationComponent(current, component)
         }
+    }
 
     fun submitInput(
         input: ByteBuffer,
         recordCount: Int,
-    ): Int =
-        if (handle == 0L) {
+    ): Int {
+        val current = ownerHandle()
+        return if (current == 0L) {
             RESULT_CLOSED
         } else {
-            nativeInputBatch(handle, input, recordCount)
+            nativeInputBatch(current, input, recordCount)
         }
+    }
 
     override fun close() {
-        val current = handle
+        val current = ownerHandle()
         handle = 0L
         if (current != 0L) {
             nativeDestroy(current)
+        }
+    }
+
+    private fun ownerHandle(): Long {
+        check(Thread.currentThread() === ownerThread) {
+            "Launcher compositor state accessed outside its owner thread"
+        }
+        return handle
+    }
+
+    private fun requireClipboardThread() {
+        check(Thread.currentThread() !== ownerThread) {
+            "Blocking clipboard descriptor I/O must not run on the compositor thread"
         }
     }
 

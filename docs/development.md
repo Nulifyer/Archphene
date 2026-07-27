@@ -94,6 +94,22 @@ It verifies that Back removes the manager from the foreground promptly, native
 cancellation and worker draining complete on `ArchpheneShutdown`, and teardown
 emits neither an Archphene-owned StrictMode violation nor a fatal event.
 
+Use a currently published generated launcher to enforce compositor ownership
+and exercise the off-thread clipboard descriptor path:
+
+```bash
+./scripts/test-launcher-thread-ownership.sh \
+  --serial <adb-serial> \
+  --apk tooling/build/apk/app-debug-<abi>.apk \
+  --package org.archphene.linux.p<descriptor-id>
+```
+
+The device clipboard must contain text; the gate reads but does not replace it.
+It requires authenticated Surface attachment, input, a presented Wayland frame,
+and a successful Android-to-Linux transfer explicitly reported from
+`ArchpheneLauncherClipboard`. It archives the scoped log and a full-device
+screenshot.
+
 ## Build in Linux
 
 Use the Podman launcher:

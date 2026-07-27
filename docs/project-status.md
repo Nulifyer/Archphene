@@ -59,7 +59,13 @@ moves connection cancellation, tracked-worker draining, synchronization
 cleanup, lifecycle transitions, and native destruction onto a bounded
 `ArchpheneShutdown` worker. The repeatable gate leaves the foreground in 48 ms
 on the emulator and 99 ms on Samsung and observes no Archphene StrictMode or
-fatal event. Compositor and active-session thread assertions remain open.
+fatal event. The manager-side Wayland compositor now records its creating
+thread and rejects every state/JNI call from another thread; blocking clipboard
+descriptor I/O is conversely rejected on that compositor owner. Current
+generated Foot launchers pass authenticated Surface/input/frame and off-thread
+Android-to-Linux clipboard gates with visually inspected full-device captures
+on both exact ABIs. Active package/synchronization/session assertions and
+migration of the legacy Foot debug-hook workflow remain open.
 
 At 840 dp and wider, the same stateful controls are composed once into a
 persistent navigation rail, a two-column package workspace, side-by-side file
