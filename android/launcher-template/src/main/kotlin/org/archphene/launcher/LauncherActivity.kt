@@ -22,6 +22,7 @@ import android.os.Parcel
 import android.os.ParcelFileDescriptor
 import android.os.RemoteException
 import android.os.SystemClock
+import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import android.text.Editable
 import android.text.InputType
@@ -43,6 +44,9 @@ import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
 import android.widget.FrameLayout
 import android.widget.TextView
+import java.io.BufferedOutputStream
+import java.io.DataOutputStream
+import java.io.IOException
 import kotlin.math.roundToInt
 
 class LauncherActivity :
@@ -203,7 +207,7 @@ class LauncherActivity :
                             if (
                                 requestId <= 0 ||
                                 operation !in
-                                    DOCUMENT_OPERATION_SAVE..DOCUMENT_OPERATION_OPEN_MULTIPLE ||
+                                    DOCUMENT_OPERATION_SAVE..DOCUMENT_OPERATION_DIRECTORY ||
                                 title.isNullOrBlank() ||
                                 title.length > MAX_DOCUMENT_TITLE_UTF16 ||
                                 suggestedName == null ||
@@ -224,21 +228,24 @@ class LauncherActivity :
                                 return@runCatching false
                             }
                             handler.post {
-                                if (operation == DOCUMENT_OPERATION_SAVE) {
-                                    beginDocumentSave(
-                                        requestId,
-                                        title,
-                                        suggestedName,
-                                        mimeType,
-                                    )
-                                } else {
-                                    beginDocumentOpen(
-                                        requestId,
-                                        title,
-                                        mimeType,
-                                        operation == DOCUMENT_OPERATION_OPEN_MULTIPLE,
-                                    )
-                                }
+                                    when (operation) {
+                                        DOCUMENT_OPERATION_SAVE ->
+                                            beginDocumentSave(
+                                                requestId,
+                                                title,
+                                                suggestedName,
+                                                mimeType,
+                                            )
+                                        DOCUMENT_OPERATION_DIRECTORY ->
+                                            beginDirectoryOpen(requestId, title)
+                                        else ->
+                                            beginDocumentOpen(
+                                                requestId,
+                                                title,
+                                                mimeType,
+                                                operation == DOCUMENT_OPERATION_OPEN_MULTIPLE,
+                                            )
+                                    }
                             }
                             true
                         }
@@ -548,7 +555,7 @@ class LauncherActivity :
         pendingDocumentOperation = 0
         if (
             requestId <= 0 ||
-            operation !in DOCUMENT_OPERATION_SAVE..DOCUMENT_OPERATION_OPEN_MULTIPLE
+            operation !in DOCUMENT_OPERATION_SAVE..DOCUMENT_OPERATION_DIRECTORY
         ) {
             return
         }
@@ -610,6 +617,8 @@ class LauncherActivity :
                         )
                     }
                 }
+            } else if (operation == DOCUMENT_OPERATION_DIRECTORY) {
+                sendDirectoryResult(requestId, resultIntent)
             } else {
                 sendOpenDocumentResults(requestId, operation, resultIntent)
             }
@@ -1647,6 +1656,65 @@ class LauncherActivity :
         }
     }
 
+    private fun beginDirectoryOpen(
+        requestId: Int,
+        title: String,
+    ) {
+        if (
+            requestId <= 0 ||
+            sessionId <= 0 ||
+            title.isBlank() ||
+            title.length > MAX_DOCUMENT_TITLE_UTF16
+        ) {
+            sendDocumentResult(
+                requestId,
+                DOCUMENT_OPERATION_DIRECTORY,
+                DOCUMENT_RESULT_FAILED,
+                null,
+                "",
+                false,
+            )
+            return
+        }
+        pendingDocumentRequestId = requestId
+        pendingDocumentOperation = DOCUMENT_OPERATION_DIRECTORY
+        val intent =
+            Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+                putExtra(Intent.EXTRA_TITLE, title)
+                addFlags(
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        Intent.FLAG_GRANT_PREFIX_URI_PERMISSION,
+                )
+            }
+        try {
+            startActivityForResult(intent, DOCUMENT_OPEN_REQUEST_CODE)
+        } catch (error: ActivityNotFoundException) {
+            pendingDocumentRequestId = 0
+            pendingDocumentOperation = 0
+            Log.w(TAG, "No Android directory provider is available", error)
+            sendDocumentResult(
+                requestId,
+                DOCUMENT_OPERATION_DIRECTORY,
+                DOCUMENT_RESULT_FAILED,
+                null,
+                "",
+                false,
+            )
+        } catch (error: RuntimeException) {
+            pendingDocumentRequestId = 0
+            pendingDocumentOperation = 0
+            Log.w(TAG, "Could not open Android directory chooser", error)
+            sendDocumentResult(
+                requestId,
+                DOCUMENT_OPERATION_DIRECTORY,
+                DOCUMENT_RESULT_FAILED,
+                null,
+                "",
+                false,
+            )
+        }
+    }
+
     private fun beginDocumentOpen(
         requestId: Int,
         title: String,
@@ -1723,7 +1791,7 @@ class LauncherActivity :
         pendingDocumentOperation = 0
         if (
             requestId > 0 &&
-            operation in DOCUMENT_OPERATION_SAVE..DOCUMENT_OPERATION_OPEN_MULTIPLE
+            operation in DOCUMENT_OPERATION_SAVE..DOCUMENT_OPERATION_DIRECTORY
         ) {
             sendDocumentResult(
                 requestId,
@@ -1832,6 +1900,243 @@ class LauncherActivity :
         }
     }
 
+    private fun sendDirectoryResult(
+        requestId: Int,
+        resultIntent: Intent,
+    ) {
+        val treeUri = resultIntent.data
+        val rootUri =
+            treeUri?.let { uri ->
+                runCatching {
+                    DocumentsContract.buildDocumentUriUsingTree(
+                        uri,
+                        DocumentsContract.getTreeDocumentId(uri),
+                    )
+                }.getOrNull()
+            }
+        val displayName = rootUri?.let(::queryDocumentName)
+        if (
+            treeUri == null ||
+            !DocumentsContract.isTreeUri(treeUri) ||
+            displayName == null
+        ) {
+            sendDocumentResult(
+                requestId,
+                DOCUMENT_OPERATION_DIRECTORY,
+                DOCUMENT_RESULT_FAILED,
+                null,
+                "",
+                false,
+            )
+            return
+        }
+        val pipe =
+            runCatching { ParcelFileDescriptor.createPipe() }
+                .getOrElse { error ->
+                    Log.w(TAG, "Could not create Android directory stream", error)
+                    sendDocumentResult(
+                        requestId,
+                        DOCUMENT_OPERATION_DIRECTORY,
+                        DOCUMENT_RESULT_FAILED,
+                        null,
+                        "",
+                        false,
+                    )
+                    return
+                }
+        val reader = pipe[0]
+        val writer = pipe[1]
+        val producer =
+            Thread(
+                {
+                    runCatching {
+                        ParcelFileDescriptor.AutoCloseOutputStream(writer).use { stream ->
+                            DataOutputStream(BufferedOutputStream(stream, DIRECTORY_BUFFER_BYTES))
+                                .use { output ->
+                                    writeDirectoryStream(treeUri, output)
+                                }
+                        }
+                    }.onFailure { error ->
+                        if (error !is IOException || error.message != "Broken pipe") {
+                            Log.w(TAG, "Android directory stream failed", error)
+                        }
+                    }
+                },
+                "ArchpheneDirectoryStream",
+            ).apply {
+                isDaemon = true
+            }
+        try {
+            producer.start()
+        } catch (error: RuntimeException) {
+            reader.close()
+            writer.close()
+            Log.w(TAG, "Could not start Android directory stream", error)
+            sendDocumentResult(
+                requestId,
+                DOCUMENT_OPERATION_DIRECTORY,
+                DOCUMENT_RESULT_FAILED,
+                null,
+                "",
+                false,
+            )
+            return
+        }
+        reader.use {
+            if (
+                !sendDocumentResult(
+                    requestId,
+                    DOCUMENT_OPERATION_DIRECTORY,
+                    DOCUMENT_RESULT_SUCCESS,
+                    it,
+                    displayName,
+                    false,
+                )
+            ) {
+                Log.w(TAG, "Could not submit Android directory stream")
+            }
+        }
+    }
+
+    private fun writeDirectoryStream(
+        treeUri: Uri,
+        output: DataOutputStream,
+    ) {
+        output.write(DIRECTORY_STREAM_MAGIC)
+        val visited = HashSet<String>()
+        val counters = longArrayOf(0L, 0L)
+        val buffer = ByteArray(DIRECTORY_BUFFER_BYTES)
+        writeDirectoryChildren(
+            treeUri,
+            DocumentsContract.getTreeDocumentId(treeUri),
+            "",
+            0,
+            visited,
+            counters,
+            buffer,
+            output,
+        )
+        output.writeByte(DIRECTORY_RECORD_END)
+        output.flush()
+    }
+
+    private fun writeDirectoryChildren(
+        treeUri: Uri,
+        parentDocumentId: String,
+        prefix: String,
+        depth: Int,
+        visited: MutableSet<String>,
+        counters: LongArray,
+        buffer: ByteArray,
+        output: DataOutputStream,
+    ) {
+        check(depth <= MAX_DIRECTORY_DEPTH) { "Android directory is too deep" }
+        check(visited.add(parentDocumentId)) { "Android directory contains a cycle" }
+        val children =
+            DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentDocumentId)
+        val directories = ArrayList<DirectoryChild>()
+        contentResolver.query(
+            children,
+            arrayOf(
+                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                DocumentsContract.Document.COLUMN_MIME_TYPE,
+            ),
+            null,
+            null,
+            null,
+        )?.use { cursor ->
+            while (cursor.moveToNext()) {
+                check(depth < MAX_DIRECTORY_DEPTH) {
+                    "Android directory is too deep"
+                }
+                counters[0]++
+                check(counters[0] <= MAX_DIRECTORY_ENTRIES) {
+                    "Android directory has too many entries"
+                }
+                val documentId =
+                    cursor.getString(0)?.takeIf(String::isNotEmpty)
+                        ?: error("Android provider returned no document ID")
+                val name =
+                    cursor.getString(1)?.takeIf(::safePortalFolderName)
+                        ?: error("Android provider returned an unsafe name")
+                val relativePath = if (prefix.isEmpty()) name else "$prefix/$name"
+                val pathBytes = relativePath.toByteArray(Charsets.UTF_8)
+                check(pathBytes.size in 1..MAX_DIRECTORY_PATH_BYTES) {
+                    "Android directory path is too long"
+                }
+                val mimeType = cursor.getString(2).orEmpty()
+                if (mimeType == DocumentsContract.Document.MIME_TYPE_DIR) {
+                    writeDirectoryPath(output, DIRECTORY_RECORD_DIRECTORY, pathBytes)
+                    directories += DirectoryChild(documentId, relativePath)
+                } else {
+                    writeDirectoryPath(output, DIRECTORY_RECORD_FILE, pathBytes)
+                    val documentUri =
+                        DocumentsContract.buildDocumentUriUsingTree(treeUri, documentId)
+                    contentResolver.openFileDescriptor(documentUri, "r")?.use { descriptor ->
+                        ParcelFileDescriptor.AutoCloseInputStream(descriptor).use { input ->
+                            var fileBytes = 0L
+                            while (true) {
+                                val count = input.read(buffer)
+                                if (count < 0) break
+                                if (count == 0) continue
+                                fileBytes = Math.addExact(fileBytes, count.toLong())
+                                counters[1] = Math.addExact(counters[1], count.toLong())
+                                check(fileBytes <= MAX_DIRECTORY_FILE_BYTES) {
+                                    "Android directory file is too large"
+                                }
+                                check(counters[1] <= MAX_DIRECTORY_TOTAL_BYTES) {
+                                    "Android directory is too large"
+                                }
+                                output.writeByte(DIRECTORY_RECORD_DATA)
+                                output.writeInt(count)
+                                output.write(buffer, 0, count)
+                            }
+                        }
+                    } ?: error("Android provider returned no file descriptor")
+                    output.writeByte(DIRECTORY_RECORD_FILE_END)
+                }
+            }
+        } ?: error("Android provider did not return directory children")
+        for (directory in directories) {
+            writeDirectoryChildren(
+                treeUri,
+                directory.documentId,
+                directory.relativePath,
+                depth + 1,
+                visited,
+                counters,
+                buffer,
+                output,
+            )
+        }
+    }
+
+    private fun writeDirectoryPath(
+        output: DataOutputStream,
+        record: Int,
+        path: ByteArray,
+    ) {
+        output.writeByte(record)
+        output.writeShort(path.size)
+        output.write(path)
+    }
+
+    private fun safePortalFolderName(name: String): Boolean =
+        safeDocumentName(name) &&
+            name.none { character ->
+                character == '\u061c' ||
+                    character == '\u200e' ||
+                    character == '\u200f' ||
+                    character in '\u202a'..'\u202e' ||
+                    character in '\u2066'..'\u2069'
+            }
+
+    private data class DirectoryChild(
+        val documentId: String,
+        val relativePath: String,
+    )
+
     private fun sendOpenDocumentBatch(
         requestId: Int,
         operation: Int,
@@ -1923,12 +2228,15 @@ class LauncherActivity :
         if (
             activeSession <= 0 ||
             requestId <= 0 ||
-            operation !in DOCUMENT_OPERATION_SAVE..DOCUMENT_OPERATION_OPEN_MULTIPLE ||
+            operation !in DOCUMENT_OPERATION_SAVE..DOCUMENT_OPERATION_DIRECTORY ||
             result !in DOCUMENT_RESULT_SUCCESS..DOCUMENT_RESULT_FAILED ||
             (result == DOCUMENT_RESULT_SUCCESS) != (descriptor != null) ||
             (operation == DOCUMENT_OPERATION_OPEN_MULTIPLE &&
                 result == DOCUMENT_RESULT_SUCCESS) ||
             (operation == DOCUMENT_OPERATION_OPEN &&
+                result == DOCUMENT_RESULT_SUCCESS &&
+                !safeDocumentName(displayName)) ||
+            (operation == DOCUMENT_OPERATION_DIRECTORY &&
                 result == DOCUMENT_RESULT_SUCCESS &&
                 !safeDocumentName(displayName))
         ) {
@@ -1946,6 +2254,8 @@ class LauncherActivity :
                 if (operation == DOCUMENT_OPERATION_OPEN) {
                     parcel.writeString(displayName)
                     parcel.writeInt(if (writable) 1 else 0)
+                } else if (operation == DOCUMENT_OPERATION_DIRECTORY) {
+                    parcel.writeString(displayName)
                 }
                 descriptor.writeToParcel(parcel, 0)
             }
@@ -1956,6 +2266,9 @@ class LauncherActivity :
                 }
         } catch (error: RemoteException) {
             Log.w(TAG, "Could not submit Android document result", error)
+            false
+        } catch (error: RuntimeException) {
+            Log.w(TAG, "Android document result was rejected", error)
             false
         } finally {
             reply.recycle()
@@ -2003,7 +2316,7 @@ class LauncherActivity :
         private const val CAPABILITIES_V2 = "c:wayland,input,ime,clipboard,documents"
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
         private const val INTERFACE = "org.archphene.launcher.ISessionV2"
-        private const val PROTOCOL_VERSION = 3
+        private const val PROTOCOL_VERSION = 4
         private const val TRANSACTION_OPEN = IBinder.FIRST_CALL_TRANSACTION
         private const val TRANSACTION_CLOSE = IBinder.FIRST_CALL_TRANSACTION + 1
         private const val TRANSACTION_ATTACH_SURFACE = IBinder.FIRST_CALL_TRANSACTION + 2
@@ -2051,6 +2364,7 @@ class LauncherActivity :
         private const val DOCUMENT_OPERATION_SAVE = 1
         private const val DOCUMENT_OPERATION_OPEN = 2
         private const val DOCUMENT_OPERATION_OPEN_MULTIPLE = 3
+        private const val DOCUMENT_OPERATION_DIRECTORY = 4
         private const val DOCUMENT_RESULT_SUCCESS = 1
         private const val DOCUMENT_RESULT_CANCELLED = 2
         private const val DOCUMENT_RESULT_FAILED = 3
@@ -2058,6 +2372,28 @@ class LauncherActivity :
         private const val MAX_DOCUMENT_TITLE_UTF16 = 128
         private const val MAX_DOCUMENT_NAME_UTF16 = 255
         private const val MAX_DOCUMENT_MIME_UTF16 = 128
+        private const val MAX_DIRECTORY_ENTRIES = 10_000L
+        private const val MAX_DIRECTORY_DEPTH = 64
+        private const val MAX_DIRECTORY_PATH_BYTES = 4 * 1024
+        private const val MAX_DIRECTORY_FILE_BYTES = 2L * 1024 * 1024 * 1024
+        private const val MAX_DIRECTORY_TOTAL_BYTES = 16L * 1024 * 1024 * 1024
+        private const val DIRECTORY_BUFFER_BYTES = 64 * 1024
+        private const val DIRECTORY_RECORD_END = 0
+        private const val DIRECTORY_RECORD_DIRECTORY = 1
+        private const val DIRECTORY_RECORD_FILE = 2
+        private const val DIRECTORY_RECORD_DATA = 3
+        private const val DIRECTORY_RECORD_FILE_END = 4
+        private val DIRECTORY_STREAM_MAGIC =
+            byteArrayOf(
+                'A'.code.toByte(),
+                'R'.code.toByte(),
+                'C'.code.toByte(),
+                'F'.code.toByte(),
+                'O'.code.toByte(),
+                'L'.code.toByte(),
+                'D'.code.toByte(),
+                '1'.code.toByte(),
+            )
         private const val MAX_IME_ACTION = 64
         private const val MAX_IME_PURPOSE = 13
         private const val IME_COMMIT = 1

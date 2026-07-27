@@ -300,32 +300,9 @@ int archphene_android_open_file(
     return result;
 }
 
-int archphene_android_open_files(
-        const char *title, const char *mime_type, int multiple,
-        char *uris, size_t uri_stride, size_t max_uris, size_t *uri_count,
-        char *response, size_t response_size) {
-    char encoded_title[MAX_FIELD * 2];
-    char encoded_mime[MAX_FIELD * 2];
-    char request[MAX_REQUEST];
-    if (base64url(title, encoded_title, sizeof(encoded_title)) != 0
-            || base64url(mime_type, encoded_mime, sizeof(encoded_mime)) != 0
-            || uris == NULL || uri_stride < 2 || max_uris == 0
-            || max_uris > 32 || uri_count == NULL) {
-        errno = EINVAL;
-        return -1;
-    }
-    *uri_count = 0;
-    int length = snprintf(request, sizeof(request),
-            multiple
-                ? "ARCHPHENE/3\tOPEN_FILES\t%s\t%s"
-                : "ARCHPHENE/2\tOPEN_FILE\t%s\t%s",
-            encoded_title, encoded_mime);
-    if (length <= 0 || (size_t)length >= sizeof(request)) {
-        errno = ENOSPC;
-        return -1;
-    }
-    int result = broker_request(request, response, response_size);
-    if (result != 0) return result;
+static int decode_uri_response(
+        int multiple, char *uris, size_t uri_stride, size_t max_uris,
+        size_t *uri_count, char *response) {
     char *save = NULL;
     char *status = strtok_r(response, "\t", &save);
     char *encoded_count = strtok_r(NULL, "\t", &save);
@@ -354,6 +331,64 @@ int archphene_android_open_files(
     }
     *uri_count = (size_t)count;
     return 0;
+}
+
+int archphene_android_open_files(
+        const char *title, const char *mime_type, int multiple,
+        char *uris, size_t uri_stride, size_t max_uris, size_t *uri_count,
+        char *response, size_t response_size) {
+    char encoded_title[MAX_FIELD * 2];
+    char encoded_mime[MAX_FIELD * 2];
+    char request[MAX_REQUEST];
+    if (base64url(title, encoded_title, sizeof(encoded_title)) != 0
+            || base64url(mime_type, encoded_mime, sizeof(encoded_mime)) != 0
+            || uris == NULL || uri_stride < 2 || max_uris == 0
+            || max_uris > 32 || uri_count == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    *uri_count = 0;
+    int length = snprintf(request, sizeof(request),
+            multiple
+                ? "ARCHPHENE/3\tOPEN_FILES\t%s\t%s"
+                : "ARCHPHENE/2\tOPEN_FILE\t%s\t%s",
+            encoded_title, encoded_mime);
+    if (length <= 0 || (size_t)length >= sizeof(request)) {
+        errno = ENOSPC;
+        return -1;
+    }
+    int result = broker_request(request, response, response_size);
+    if (result != 0) return result;
+    return decode_uri_response(
+            multiple, uris, uri_stride, max_uris, uri_count, response);
+}
+
+int archphene_android_open_directory(
+        const char *title, char *uri, size_t uri_size,
+        char *response, size_t response_size) {
+    char encoded_title[MAX_FIELD * 2];
+    char request[MAX_REQUEST];
+    if (base64url(title, encoded_title, sizeof(encoded_title)) != 0
+            || uri == NULL || uri_size < 2) {
+        errno = EINVAL;
+        return -1;
+    }
+    int length = snprintf(request, sizeof(request),
+            "ARCHPHENE/4\tOPEN_DIRECTORY\t%s", encoded_title);
+    if (length <= 0 || (size_t)length >= sizeof(request)) {
+        errno = ENOSPC;
+        return -1;
+    }
+    int result = broker_request(request, response, response_size);
+    if (result != 0) return result;
+    size_t count = 0;
+    result = decode_uri_response(
+            0, uri, uri_size, 1, &count, response);
+    if (result == 0 && count != 1) {
+        errno = EPROTO;
+        return -1;
+    }
+    return result;
 }
 
 int archphene_android_request_audio_input(char *response, size_t response_size) {

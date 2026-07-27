@@ -121,6 +121,13 @@ internal object NativeRuntime {
         requestLength: Int,
         outputBuffer: ByteBuffer,
     ): Int
+    external fun nativeImportPortalFolder(
+        handle: Long,
+        requestBuffer: ByteBuffer,
+        requestLength: Int,
+        sourceDescriptor: Int,
+        outputBuffer: ByteBuffer,
+    ): Int
     external fun nativeAddProjectMirrorDirectory(
         handle: Long,
         requestBuffer: ByteBuffer,

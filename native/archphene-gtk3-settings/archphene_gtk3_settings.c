@@ -62,6 +62,8 @@ static GSList *portal_files;
 enum {
     ARCHPHENE_GTK_FILE_CHOOSER_ACTION_OPEN = 0,
     ARCHPHENE_GTK_FILE_CHOOSER_ACTION_SAVE = 1,
+    ARCHPHENE_GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER = 2,
+    ARCHPHENE_GTK_FILE_CHOOSER_ACTION_CREATE_FOLDER = 3,
     ARCHPHENE_GTK_RESPONSE_ACCEPT = -3,
     ARCHPHENE_GTK_RESPONSE_OK = -5,
     ARCHPHENE_GTK_RESPONSE_CANCEL = -6,
@@ -491,9 +493,13 @@ G_MODULE_EXPORT gint gtk_dialog_run(gpointer dialog)
 
     gint action = get_action.function(dialog);
     if (action != ARCHPHENE_GTK_FILE_CHOOSER_ACTION_OPEN
-            && action != ARCHPHENE_GTK_FILE_CHOOSER_ACTION_SAVE) {
+            && action != ARCHPHENE_GTK_FILE_CHOOSER_ACTION_SAVE
+            && action != ARCHPHENE_GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER
+            && action != ARCHPHENE_GTK_FILE_CHOOSER_ACTION_CREATE_FOLDER) {
         return original.function(dialog);
     }
+    int folder = action == ARCHPHENE_GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER
+            || action == ARCHPHENE_GTK_FILE_CHOOSER_ACTION_CREATE_FOLDER;
     clear_portal_files();
     gchar *name = action == ARCHPHENE_GTK_FILE_CHOOSER_ACTION_SAVE
             ? get_name.function(dialog) : NULL;
@@ -501,11 +507,16 @@ G_MODULE_EXPORT gint gtk_dialog_run(gpointer dialog)
     gpointer native = native_new.function(
             title == NULL || title[0] == '\0'
                 ? (action == ARCHPHENE_GTK_FILE_CHOOSER_ACTION_SAVE
-                    ? "Save Linux document" : "Open Linux document")
+                    ? "Save Linux document"
+                    : (folder
+                        ? "Open Android folder" : "Open Linux document"))
                 : title,
             get_parent.function(dialog),
             action,
-            action == ARCHPHENE_GTK_FILE_CHOOSER_ACTION_SAVE ? "_Save" : "_Open",
+            action == ARCHPHENE_GTK_FILE_CHOOSER_ACTION_SAVE
+                ? "_Save"
+                : (folder
+                    ? "_Select" : "_Open"),
             "_Cancel");
     if (native == NULL) {
         g_free(name);
@@ -515,13 +526,19 @@ G_MODULE_EXPORT gint gtk_dialog_run(gpointer dialog)
         if (name != NULL && name[0] != '\0') set_name.function(native, name);
         set_overwrite.function(native, get_overwrite.function(dialog));
     } else {
-        set_multiple.function(native, get_multiple.function(dialog));
+        set_multiple.function(
+                native,
+                action == ARCHPHENE_GTK_FILE_CHOOSER_ACTION_OPEN
+                    && get_multiple.function(dialog));
     }
     g_free(name);
 
-    write_diagnostic(action == ARCHPHENE_GTK_FILE_CHOOSER_ACTION_SAVE
-            ? "Delegating GTK3 SaveFile to the Android portal\n"
-            : "Delegating GTK3 OpenFile to the Android portal\n");
+    write_diagnostic(
+            action == ARCHPHENE_GTK_FILE_CHOOSER_ACTION_SAVE
+                ? "Delegating GTK3 SaveFile to the Android portal\n"
+                : (folder
+                    ? "Delegating GTK3 folder selection to the Android portal\n"
+                    : "Delegating GTK3 OpenFile to the Android portal\n"));
     gint response = native_run.function(native);
     gchar *response_status = g_strdup_printf(
             "File portal native response: %d\n", response);
@@ -633,9 +650,12 @@ G_MODULE_EXPORT gint gtk_dialog_run(gpointer dialog)
         g_free(status);
         return ARCHPHENE_GTK_RESPONSE_CANCEL;
     }
-    write_diagnostic(action == ARCHPHENE_GTK_FILE_CHOOSER_ACTION_SAVE
-            ? "File portal SaveFile selection applied\n"
-            : "File portal OpenFile selection applied\n");
+    write_diagnostic(
+            action == ARCHPHENE_GTK_FILE_CHOOSER_ACTION_SAVE
+                ? "File portal SaveFile selection applied\n"
+                : (folder
+                    ? "File portal folder selection applied\n"
+                    : "File portal OpenFile selection applied\n"));
     return ARCHPHENE_GTK_RESPONSE_ACCEPT;
 }
 

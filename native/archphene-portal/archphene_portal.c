@@ -881,20 +881,20 @@ static void handle_open_file(DBusConnection *connection, DBusMessage *request) {
     char fallback_response[64] = "ERROR\tOUT_OF_MEMORY";
     char *response = calloc(MAX_OPEN_RESPONSE, 1);
     int result = -1;
-    if (!directory && response != NULL) {
-        result = archphene_android_open_files(
-                title, "*/*", multiple ? 1 : 0,
-                &uris[0][0], sizeof(uris[0]), 32, &uri_count,
-                response, MAX_OPEN_RESPONSE);
+    if (response != NULL) {
+        if (directory) {
+            result = archphene_android_open_directory(
+                    title, &uris[0][0], sizeof(uris[0]),
+                    response, MAX_OPEN_RESPONSE);
+            if (result == 0) uri_count = 1;
+        } else {
+            result = archphene_android_open_files(
+                    title, "*/*", multiple ? 1 : 0,
+                    &uris[0][0], sizeof(uris[0]), 32, &uri_count,
+                    response, MAX_OPEN_RESPONSE);
+        }
     } else {
         if (response == NULL) response = fallback_response;
-        if (directory) {
-            snprintf(
-                    response,
-                    response == fallback_response
-                        ? sizeof(fallback_response) : MAX_OPEN_RESPONSE,
-                    "ERROR\tUNSUPPORTED_SELECTION");
-        }
     }
     uint32_t portal_response =
             result == 0 ? 0u : (strcmp(response, "CANCEL") == 0 ? 1u : 2u);

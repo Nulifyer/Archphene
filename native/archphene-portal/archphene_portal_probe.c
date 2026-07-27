@@ -52,9 +52,21 @@ static dbus_bool_t append_string_property(DBusMessageIter *dict,
             && dbus_message_iter_close_container(dict, &entry);
 }
 
-static uint32_t wait_request_response(DBusConnection *connection,
-        const char *path, const char *label) {
-    for (int attempt = 0; attempt < 50; attempt++) {
+static dbus_bool_t append_bool_property(DBusMessageIter *dict,
+        const char *key, dbus_bool_t value) {
+    DBusMessageIter entry;
+    DBusMessageIter variant;
+    return dbus_message_iter_open_container(dict, DBUS_TYPE_DICT_ENTRY, NULL, &entry)
+            && dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &key)
+            && dbus_message_iter_open_container(&entry, DBUS_TYPE_VARIANT, "b", &variant)
+            && dbus_message_iter_append_basic(&variant, DBUS_TYPE_BOOLEAN, &value)
+            && dbus_message_iter_close_container(&entry, &variant)
+            && dbus_message_iter_close_container(dict, &entry);
+}
+
+static uint32_t wait_request_response_attempts(DBusConnection *connection,
+        const char *path, const char *label, int attempts) {
+    for (int attempt = 0; attempt < attempts; attempt++) {
         dbus_connection_read_write(connection, 100);
         DBusMessage *message;
         while ((message = dbus_connection_pop_message(connection)) != NULL) {
@@ -91,6 +103,11 @@ static uint32_t wait_request_response(DBusConnection *connection,
     }
     fprintf(stderr, "FAIL %s: response signal timeout\n", label);
     exit(1);
+}
+
+static uint32_t wait_request_response(DBusConnection *connection,
+        const char *path, const char *label) {
+    return wait_request_response_attempts(connection, path, label, 50);
 }
 
 static uint32_t portal_version(DBusConnection *connection,
@@ -431,6 +448,61 @@ static void prepare_print(DBusConnection *connection) {
     printf("PASS portal PreparePrint accepted\n");
 }
 
+static void open_directory(DBusConnection *connection) {
+    const char *parent = "";
+    const char *title = "Choose an Android project folder";
+    const char *token_key = "handle_token";
+    const char *token = "archphene_directory_probe";
+    const char *directory_key = "directory";
+    dbus_bool_t directory = TRUE;
+    DBusMessage *request = dbus_message_new_method_call(
+            PORTAL_NAME, PORTAL_PATH,
+            "org.freedesktop.portal.FileChooser", "OpenFile");
+    DBusMessageIter arguments;
+    DBusMessageIter options;
+    if (request == NULL) {
+        fprintf(stderr, "FAIL portal folder: allocation\n");
+        exit(1);
+    }
+    dbus_message_iter_init_append(request, &arguments);
+    if (!dbus_message_iter_append_basic(&arguments, DBUS_TYPE_STRING, &parent)
+            || !dbus_message_iter_append_basic(&arguments, DBUS_TYPE_STRING, &title)
+            || !dbus_message_iter_open_container(
+                    &arguments, DBUS_TYPE_ARRAY, "{sv}", &options)
+            || !append_string_property(&options, token_key, token)
+            || !append_bool_property(&options, directory_key, directory)
+            || !dbus_message_iter_close_container(&arguments, &options)) {
+        dbus_message_unref(request);
+        fprintf(stderr, "FAIL portal folder: arguments\n");
+        exit(1);
+    }
+    DBusMessage *reply = call(connection, request, "portal folder");
+    DBusMessageIter output;
+    const char *response_path = NULL;
+    if (!dbus_message_iter_init(reply, &output)
+            || dbus_message_iter_get_arg_type(&output) != DBUS_TYPE_OBJECT_PATH) {
+        dbus_message_unref(reply);
+        fprintf(stderr, "FAIL portal folder: wrong reply\n");
+        exit(1);
+    }
+    dbus_message_iter_get_basic(&output, &response_path);
+    char path_copy[256];
+    if (response_path == NULL || strlen(response_path) >= sizeof(path_copy)) {
+        dbus_message_unref(reply);
+        fprintf(stderr, "FAIL portal folder: invalid response path\n");
+        exit(1);
+    }
+    strcpy(path_copy, response_path);
+    dbus_message_unref(reply);
+    uint32_t response = wait_request_response_attempts(
+            connection, path_copy, "portal folder", 1800);
+    if (response != 0) {
+        fprintf(stderr, "FAIL portal folder: response=%u\n", response);
+        exit(1);
+    }
+    printf("PASS portal folder selected\n");
+}
+
 static void print_pdf(DBusConnection *connection, const char *path, uint32_t expected_response);
 static void print_pipe(DBusConnection *connection) {
     int descriptors[2];
@@ -747,7 +819,7 @@ static void settings_contract(DBusConnection *connection) {
 
 int main(int argc, char **argv) {
     if (argc < 2 || argc > 3) {
-        fprintf(stderr, "usage: %s contract|settings|notify|withdraw [classic-id] | open URI | print PDF | print-pipe | camera-access | camera-open\n",
+        fprintf(stderr, "usage: %s contract|settings|open-directory|notify|withdraw [classic-id] | open URI | print PDF | print-pipe | camera-access | camera-open\n",
                 argv[0]);
         return 2;
     }
@@ -768,6 +840,8 @@ int main(int argc, char **argv) {
         prepare_print(connection);
     } else if (strcmp(argv[1], "settings") == 0 && argc == 2) {
         settings_contract(connection);
+    } else if (strcmp(argv[1], "open-directory") == 0 && argc == 2) {
+        open_directory(connection);
     } else if (strcmp(argv[1], "notify") == 0 && argc == 2) {
         notify(connection);
     } else if (strcmp(argv[1], "withdraw") == 0) {

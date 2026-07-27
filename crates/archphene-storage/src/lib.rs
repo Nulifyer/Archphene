@@ -188,6 +188,13 @@ const IMPORT_STAGING_FILE: &str = "pending";
 const MAX_IMPORT_COLLISIONS: u32 = 999;
 const MIRROR_STAGING_DIRECTORY: &str = ".archphene-mirror-pending";
 const SYNC_MANIFEST_MAGIC: &[u8; 8] = b"ARCSYNC1";
+const PORTAL_FOLDER_MAGIC: &[u8; 8] = b"ARCFOLD1";
+const PORTAL_FOLDER_END: u8 = 0;
+const PORTAL_FOLDER_DIRECTORY: u8 = 1;
+const PORTAL_FOLDER_FILE: u8 = 2;
+const PORTAL_FOLDER_DATA: u8 = 3;
+const PORTAL_FOLDER_FILE_END: u8 = 4;
+const MAX_PORTAL_FOLDER_CHUNK_BYTES: usize = 64 * 1024;
 const SYNC_MANIFEST_VERSION: u32 = 1;
 const SYNC_MANIFEST_HEADER_BYTES: usize = 36;
 const SYNC_MANIFEST_ENTRY_HEADER_BYTES: usize = 44;
@@ -273,6 +280,13 @@ struct MirrorSyncBaseline {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MirrorImportReport {
+    pub entries: u32,
+    pub bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PortalFolderImportReport {
+    pub display_name: String,
     pub entries: u32,
     pub bytes: u64,
 }
@@ -1518,6 +1532,22 @@ impl MirrorImport {
         Self::begin_inner(home, project_name, None)
     }
 
+    pub fn begin_numbered(
+        home: &Path,
+        requested_name: &str,
+    ) -> Result<(Self, String), StorageError> {
+        validate_visible_name(requested_name)?;
+        for ordinal in 1..=MAX_IMPORT_COLLISIONS {
+            let candidate = directory_collision_name(requested_name, ordinal)?;
+            match Self::begin(home, &candidate) {
+                Ok(import) => return Ok((import, candidate)),
+                Err(StorageError::MirrorExists) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(StorageError::ImportCollision)
+    }
+
     pub fn begin_with_sync_baseline(
         arch_root: &Path,
         project_name: &str,
@@ -1624,6 +1654,19 @@ impl MirrorImport {
         {
             return Err(StorageError::InvalidDocument);
         }
+        let mut source = sys::duplicate(source_descriptor)?;
+        self.add_file_from_reader(relative_path, &mut source, expected_bytes)
+    }
+
+    fn add_file_from_reader<R: Read>(
+        &mut self,
+        relative_path: &str,
+        source: &mut R,
+        expected_bytes: Option<u64>,
+    ) -> Result<u64, StorageError> {
+        if expected_bytes.is_some_and(|size| size > MAX_MIRROR_FILE_BYTES) {
+            return Err(StorageError::InvalidDocument);
+        }
         self.reserve_entry()?;
         let segments = parse_mirror_path(relative_path)?;
         let (parent, leaf) = open_mirror_parent(&self.staging, &segments)?;
@@ -1633,7 +1676,6 @@ impl MirrorImport {
             sys::O_WRONLY | sys::O_CREAT | sys::O_EXCL | sys::O_CLOEXEC | sys::O_NOFOLLOW,
             0o600,
         )?;
-        let mut source = sys::duplicate(source_descriptor)?;
         let result = (|| {
             let mut copied = 0_u64;
             let mut digest = Sha256::new();
@@ -1687,6 +1729,50 @@ impl MirrorImport {
         })
     }
 
+    pub fn add_portal_folder_from_fd(
+        &mut self,
+        source_descriptor: RawFd,
+    ) -> Result<(), StorageError> {
+        if source_descriptor < 0 {
+            return Err(StorageError::InvalidDocument);
+        }
+        let mut source = sys::duplicate(source_descriptor)?;
+        self.add_portal_folder_stream(&mut source)
+    }
+
+    fn add_portal_folder_stream<R: Read>(&mut self, source: &mut R) -> Result<(), StorageError> {
+        let mut magic = [0_u8; PORTAL_FOLDER_MAGIC.len()];
+        read_portal_folder_exact(source, &mut magic)?;
+        if magic != *PORTAL_FOLDER_MAGIC {
+            return Err(StorageError::InvalidDocument);
+        }
+        loop {
+            let record = read_portal_folder_byte(source)?;
+            match record {
+                PORTAL_FOLDER_END => {
+                    let mut trailing = [0_u8; 1];
+                    if source.read(&mut trailing)? != 0 {
+                        return Err(StorageError::InvalidDocument);
+                    }
+                    return Ok(());
+                }
+                PORTAL_FOLDER_DIRECTORY => {
+                    let path = read_portal_folder_path(source)?;
+                    self.add_directory(&path)?;
+                }
+                PORTAL_FOLDER_FILE => {
+                    let path = read_portal_folder_path(source)?;
+                    let mut file = PortalFolderFileReader::new(source);
+                    self.add_file_from_reader(&path, &mut file, None)?;
+                    if !file.finished {
+                        return Err(StorageError::InvalidDocument);
+                    }
+                }
+                _ => return Err(StorageError::InvalidDocument),
+            }
+        }
+    }
+
     pub fn finish(mut self) -> Result<MirrorImportReport, StorageError> {
         self.check_cancelled()?;
         self.staging.sync_all()?;
@@ -1733,6 +1819,112 @@ impl MirrorImport {
             Ok(())
         }
     }
+}
+
+pub fn import_portal_folder_stream<R: Read>(
+    home: &Path,
+    requested_name: &str,
+    source: &mut R,
+) -> Result<PortalFolderImportReport, StorageError> {
+    let (mut import, display_name) = MirrorImport::begin_numbered(home, requested_name)?;
+    import.add_portal_folder_stream(source)?;
+    let report = import.finish()?;
+    Ok(PortalFolderImportReport {
+        display_name,
+        entries: report.entries,
+        bytes: report.bytes,
+    })
+}
+
+struct PortalFolderFileReader<'a, R> {
+    source: &'a mut R,
+    remaining: usize,
+    finished: bool,
+}
+
+impl<'a, R: Read> PortalFolderFileReader<'a, R> {
+    fn new(source: &'a mut R) -> Self {
+        Self {
+            source,
+            remaining: 0,
+            finished: false,
+        }
+    }
+}
+
+impl<R: Read> Read for PortalFolderFileReader<'_, R> {
+    fn read(&mut self, destination: &mut [u8]) -> io::Result<usize> {
+        if destination.is_empty() || self.finished {
+            return Ok(0);
+        }
+        while self.remaining == 0 {
+            match read_portal_folder_byte_io(self.source)? {
+                PORTAL_FOLDER_DATA => {
+                    let mut encoded = [0_u8; 4];
+                    read_portal_folder_exact_io(self.source, &mut encoded)?;
+                    self.remaining = usize::try_from(u32::from_be_bytes(encoded))
+                        .map_err(|_| invalid_portal_folder_data())?;
+                    if self.remaining == 0 || self.remaining > MAX_PORTAL_FOLDER_CHUNK_BYTES {
+                        return Err(invalid_portal_folder_data());
+                    }
+                }
+                PORTAL_FOLDER_FILE_END => {
+                    self.finished = true;
+                    return Ok(0);
+                }
+                _ => return Err(invalid_portal_folder_data()),
+            }
+        }
+        let count = destination.len().min(self.remaining);
+        read_portal_folder_exact_io(self.source, &mut destination[..count])?;
+        self.remaining -= count;
+        Ok(count)
+    }
+}
+
+fn read_portal_folder_path<R: Read>(source: &mut R) -> Result<String, StorageError> {
+    let mut encoded_length = [0_u8; 2];
+    read_portal_folder_exact(source, &mut encoded_length)?;
+    let length = usize::from(u16::from_be_bytes(encoded_length));
+    if length == 0 || length > MAX_MIRROR_PATH_BYTES {
+        return Err(StorageError::InvalidDocument);
+    }
+    let mut path = vec![0_u8; length];
+    read_portal_folder_exact(source, &mut path)?;
+    String::from_utf8(path).map_err(|_| StorageError::InvalidDocument)
+}
+
+fn read_portal_folder_byte<R: Read>(source: &mut R) -> Result<u8, StorageError> {
+    let mut value = [0_u8; 1];
+    read_portal_folder_exact(source, &mut value)?;
+    Ok(value[0])
+}
+
+fn read_portal_folder_exact<R: Read>(
+    source: &mut R,
+    destination: &mut [u8],
+) -> Result<(), StorageError> {
+    read_portal_folder_exact_io(source, destination).map_err(|error| {
+        if error.kind() == io::ErrorKind::UnexpectedEof {
+            StorageError::InvalidDocument
+        } else {
+            StorageError::Io(error)
+        }
+    })
+}
+
+fn read_portal_folder_byte_io<R: Read>(source: &mut R) -> io::Result<u8> {
+    let mut value = [0_u8; 1];
+    read_portal_folder_exact_io(source, &mut value)?;
+    Ok(value[0])
+}
+
+fn read_portal_folder_exact_io<R: Read>(source: &mut R, destination: &mut [u8]) -> io::Result<()> {
+    source.read_exact(destination)
+}
+
+fn invalid_portal_folder_data() -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, "invalid portal folder stream")
 }
 
 impl Drop for MirrorImport {
@@ -2217,6 +2409,25 @@ fn collision_name(display_name: &str, ordinal: u32) -> Result<String, StorageErr
     Ok(format!("{}{}{}", &base[..boundary], suffix, extension))
 }
 
+fn directory_collision_name(display_name: &str, ordinal: u32) -> Result<String, StorageError> {
+    if ordinal == 1 {
+        return Ok(display_name.to_owned());
+    }
+    let suffix = format!(" ({ordinal})");
+    if suffix.len() >= MAX_DOCUMENT_NAME_BYTES {
+        return Err(StorageError::InvalidDocument);
+    }
+    let maximum_base = MAX_DOCUMENT_NAME_BYTES - suffix.len();
+    let mut boundary = display_name.len().min(maximum_base);
+    while boundary > 0 && !display_name.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    if boundary == 0 {
+        return Err(StorageError::InvalidDocument);
+    }
+    Ok(format!("{}{}", &display_name[..boundary], suffix))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2506,6 +2717,137 @@ mod tests {
             b"fn main() {}\n",
         );
         assert!(!home.0.join("Projects/.archphene-mirror-pending").exists());
+    }
+
+    #[test]
+    fn portal_folder_stream_publishes_nested_files_and_numbers_collisions() {
+        let home = TestDirectory::new();
+        fs::create_dir(home.0.join("Projects")).expect("projects");
+        let mut encoded = PORTAL_FOLDER_MAGIC.to_vec();
+        append_portal_path(&mut encoded, PORTAL_FOLDER_DIRECTORY, ".git");
+        append_portal_path(&mut encoded, PORTAL_FOLDER_FILE, ".git/config");
+        append_portal_data(&mut encoded, b"[core]\n");
+        append_portal_data(&mut encoded, b"\trepositoryformatversion = 0\n");
+        encoded.push(PORTAL_FOLDER_FILE_END);
+        append_portal_path(&mut encoded, PORTAL_FOLDER_FILE, "empty.txt");
+        encoded.push(PORTAL_FOLDER_FILE_END);
+        encoded.push(PORTAL_FOLDER_END);
+
+        let report =
+            import_portal_folder_stream(&home.0, "AndroidProject", &mut encoded.as_slice())
+                .expect("first import");
+        assert_eq!(
+            report,
+            PortalFolderImportReport {
+                display_name: "AndroidProject".to_owned(),
+                entries: 3,
+                bytes: 36,
+            }
+        );
+        assert_eq!(
+            fs::read(home.0.join("Projects/AndroidProject/.git/config")).expect("config"),
+            b"[core]\n\trepositoryformatversion = 0\n"
+        );
+        assert_eq!(
+            fs::metadata(home.0.join("Projects/AndroidProject/empty.txt"))
+                .expect("empty")
+                .len(),
+            0
+        );
+
+        let collision =
+            import_portal_folder_stream(&home.0, "AndroidProject", &mut encoded.as_slice())
+                .expect("collision import");
+        assert_eq!(collision.display_name, "AndroidProject (2)");
+        assert!(
+            home.0
+                .join("Projects/AndroidProject (2)/.git/config")
+                .is_file()
+        );
+
+        import_portal_folder_stream(&home.0, "Android.Project", &mut encoded.as_slice())
+            .expect("dotted import");
+        let dotted_collision =
+            import_portal_folder_stream(&home.0, "Android.Project", &mut encoded.as_slice())
+                .expect("dotted collision import");
+        assert_eq!(dotted_collision.display_name, "Android.Project (2)");
+    }
+
+    #[test]
+    fn portal_folder_stream_rejects_malformed_records_and_rolls_back() {
+        let home = TestDirectory::new();
+        fs::create_dir(home.0.join("Projects")).expect("projects");
+
+        let mut traversal = PORTAL_FOLDER_MAGIC.to_vec();
+        append_portal_path(&mut traversal, PORTAL_FOLDER_DIRECTORY, "../escape");
+        traversal.push(PORTAL_FOLDER_END);
+        assert!(
+            import_portal_folder_stream(&home.0, "Traversal", &mut traversal.as_slice()).is_err()
+        );
+
+        let mut oversized_chunk = PORTAL_FOLDER_MAGIC.to_vec();
+        append_portal_path(&mut oversized_chunk, PORTAL_FOLDER_FILE, "payload.bin");
+        oversized_chunk.push(PORTAL_FOLDER_DATA);
+        oversized_chunk.extend_from_slice(
+            &u32::try_from(MAX_PORTAL_FOLDER_CHUNK_BYTES + 1)
+                .expect("bounded test chunk")
+                .to_be_bytes(),
+        );
+        assert!(
+            import_portal_folder_stream(&home.0, "Oversized", &mut oversized_chunk.as_slice())
+                .is_err()
+        );
+
+        let mut zero_chunk = PORTAL_FOLDER_MAGIC.to_vec();
+        append_portal_path(&mut zero_chunk, PORTAL_FOLDER_FILE, "payload.bin");
+        zero_chunk.push(PORTAL_FOLDER_DATA);
+        zero_chunk.extend_from_slice(&0_u32.to_be_bytes());
+        assert!(
+            import_portal_folder_stream(&home.0, "ZeroChunk", &mut zero_chunk.as_slice()).is_err()
+        );
+
+        let mut trailing = PORTAL_FOLDER_MAGIC.to_vec();
+        trailing.push(PORTAL_FOLDER_END);
+        trailing.push(0xff);
+        assert!(
+            import_portal_folder_stream(&home.0, "Trailing", &mut trailing.as_slice()).is_err()
+        );
+
+        let mut incomplete = PORTAL_FOLDER_MAGIC.to_vec();
+        append_portal_path(&mut incomplete, PORTAL_FOLDER_FILE, "incomplete.txt");
+        append_portal_data(&mut incomplete, b"partial");
+        assert!(
+            import_portal_folder_stream(&home.0, "Incomplete", &mut incomplete.as_slice()).is_err()
+        );
+
+        let projects = home.0.join("Projects");
+        assert!(!projects.join("Traversal").exists());
+        assert!(!projects.join("Oversized").exists());
+        assert!(!projects.join("ZeroChunk").exists());
+        assert!(!projects.join("Trailing").exists());
+        assert!(!projects.join("Incomplete").exists());
+        assert!(!projects.join(MIRROR_STAGING_DIRECTORY).exists());
+        assert!(!home.0.parent().expect("parent").join("escape").exists());
+    }
+
+    fn append_portal_path(encoded: &mut Vec<u8>, record: u8, path: &str) {
+        encoded.push(record);
+        encoded.extend_from_slice(
+            &u16::try_from(path.len())
+                .expect("bounded test path")
+                .to_be_bytes(),
+        );
+        encoded.extend_from_slice(path.as_bytes());
+    }
+
+    fn append_portal_data(encoded: &mut Vec<u8>, data: &[u8]) {
+        encoded.push(PORTAL_FOLDER_DATA);
+        encoded.extend_from_slice(
+            &u32::try_from(data.len())
+                .expect("bounded test data")
+                .to_be_bytes(),
+        );
+        encoded.extend_from_slice(data);
     }
 
     #[test]

@@ -313,6 +313,25 @@ impl RuntimeHost {
         Ok(())
     }
 
+    pub fn begin_portal_folder_import(
+        &mut self,
+        requested_name: &str,
+    ) -> Result<String, StorageError> {
+        if self.mirror_import.is_some() || self.mirror_cancellation.is_some() {
+            return Err(StorageError::MirrorBusy);
+        }
+        let home = self
+            .arch_root
+            .as_ref()
+            .ok_or(StorageError::InvalidRoot)?
+            .path()
+            .join("home/archphene");
+        let (mirror, display_name) = MirrorImport::begin_numbered(&home, requested_name)?;
+        self.mirror_cancellation = Some(mirror.cancellation());
+        self.mirror_import = Some(mirror);
+        Ok(display_name)
+    }
+
     pub fn add_mirror_directory(&mut self, relative_path: &str) -> Result<(), StorageError> {
         self.mirror_import
             .as_mut()

@@ -23,7 +23,7 @@
     {
       "name": "libarchphene_gtk3_settings.so",
       "bytes": 18632,
-      "sha256": "5825d8ec33296f0f64ed2ee109c1902378ad854d92cb7edd26d6b257904f66a1"
+      "sha256": "9895b8b9bc5bd2c93286ad953a6128b1143560e35baf453ca7d2e9b25a8f79a4"
     }
   ],
   "additionalArchitectures": [
@@ -56,7 +56,7 @@
         {
           "name": "libarchphene_gtk3_settings.so",
           "bytes": 67768,
-          "sha256": "c54169d8e147839768df65cbe2633157d43037a10418d65b865d9fc3a299880c"
+          "sha256": "cf136b46634f1796bc23791e7b601f6b3f4d99edfb438de9725643206c2ae2b0"
         }
       ]
     }

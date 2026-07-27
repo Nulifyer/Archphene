@@ -619,6 +619,13 @@ class ArchpheneRuntimeService : Service() {
 
         fun importAndroidDocument(uri: Uri): Boolean = requestDocumentImport(uri)
 
+        fun importPortalFolder(
+            displayName: String,
+            descriptor: ParcelFileDescriptor,
+        ): String? = requestPortalFolderImport(displayName, descriptor)
+
+        fun cancelPortalFolderImport(): Boolean = requestPortalFolderImportCancellation()
+
         fun exportLinuxDocument(
             sourceUri: Uri,
             destinationUri: Uri,
@@ -1009,6 +1016,7 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var folderMirrorRunning = false
     @Volatile private var folderSyncRunning = false
     @Volatile private var folderMirrorCancellationRequested = false
+    @Volatile private var portalFolderImportActive = false
     @Volatile private var folderOnboardingNeeded = false
     @Volatile private var folderStatus = "Loading Android folder access…"
     @Volatile private var projectSyncHistoryAvailable = false
@@ -2103,6 +2111,7 @@ class ArchpheneRuntimeService : Service() {
         private const val MAX_MIRROR_DEPTH = 64
         private const val MAX_MIRROR_PATH_BYTES = 4 * 1024
         private const val MAX_MIRROR_FILE_BYTES = 2L * 1024 * 1024 * 1024
+        private const val MAX_MIRROR_TOTAL_BYTES = 16L * 1024 * 1024 * 1024
         private const val PROJECT_SYNC_PROVIDER_DEADLINE_MILLIS = 30_000L
         private const val SYNC_TEST_PREFERENCES = "project_sync_test"
         private const val SYNC_TEST_PHASE = "hold_phase"
@@ -2443,6 +2452,73 @@ class ArchpheneRuntimeService : Service() {
         } else {
             ""
         }
+    }
+
+    private fun requestPortalFolderImport(
+        displayName: String,
+        descriptor: ParcelFileDescriptor,
+    ): String? {
+        requireRuntimeWorker("Portal folder import")
+        val activeHandle = readyHandle
+        if (
+            activeHandle == 0L ||
+            !safeProjectName(displayName) ||
+            !PROCESS_STORAGE_ACTIVE.compareAndSet(false, true)
+        ) {
+            return null
+        }
+        portalFolderImportActive = true
+        return try {
+            val request = ByteBuffer.allocateDirect(MAX_MIRROR_PATH_BYTES)
+            val output = ByteBuffer.allocateDirect(NativeRuntime.STORAGE_OUTPUT_SIZE)
+            val requestLength = putUtf8Request(request, displayName)
+            val result =
+                NativeRuntime.nativeImportPortalFolder(
+                    activeHandle,
+                    request,
+                    requestLength,
+                    descriptor.fd,
+                    output,
+                )
+            if (result < 0) {
+                Log.e(TAG, "Portal folder import failed: ${readNativeMessage(output, result)}")
+                return null
+            }
+            val report = readCString(output).split('\t')
+            val importedName = report.getOrNull(0)?.takeIf(::safeProjectName)
+            val entries =
+                report.getOrNull(1)?.toIntOrNull()?.takeIf {
+                    it in 0..MAX_MIRROR_ENTRIES
+                }
+            val bytes =
+                report.getOrNull(2)?.toLongOrNull()?.takeIf {
+                    it in 0..MAX_MIRROR_TOTAL_BYTES
+                }
+            if (report.size != 3 || importedName == null || entries == null || bytes == null) {
+                Log.e(TAG, "Portal folder import returned an invalid report")
+                return null
+            }
+            Log.i(
+                TAG,
+                "Portal folder imported name=$importedName entries=$entries bytes=$bytes",
+            )
+            "/home/archphene/Projects/$importedName"
+        } catch (error: Exception) {
+            NativeRuntime.nativeCancelProjectMirror(activeHandle)
+            NativeRuntime.nativeAbortProjectMirror(activeHandle)
+            Log.e(TAG, "Portal folder import failed", error)
+            null
+        } finally {
+            portalFolderImportActive = false
+            PROCESS_STORAGE_ACTIVE.set(false)
+        }
+    }
+
+    private fun requestPortalFolderImportCancellation(): Boolean {
+        val activeHandle = readyHandle
+        return portalFolderImportActive &&
+            activeHandle != 0L &&
+            NativeRuntime.nativeCancelProjectMirror(activeHandle)
     }
 
     @Synchronized

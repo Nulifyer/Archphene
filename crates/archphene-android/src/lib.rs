@@ -912,6 +912,80 @@ mod android {
     }
 
     #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeImportPortalFolder(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        request_buffer: JByteBuffer,
+        request_length: jint,
+        source_descriptor: jint,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let Ok(handle) = u64::try_from(handle) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if source_descriptor < 0 {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let Ok(output) = storage_output(&environment, &output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(request) = storage_request(&environment, &request_buffer, request_length, 1) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let (display_name, mut mirror) = {
+            let Ok(mut registry) = registry().lock() else {
+                return ERROR_INTERNAL;
+            };
+            let Some(runtime) = registry.runtime_mut(handle) else {
+                return ERROR_INVALID_HANDLE;
+            };
+            let display_name = match runtime.begin_portal_folder_import(&request[0]) {
+                Ok(value) => value,
+                Err(error) => return copy_storage_error(&error, output),
+            };
+            let mirror = match runtime.take_mirror_import() {
+                Ok(value) => value,
+                Err(error) => {
+                    runtime.abort_mirror_import();
+                    return copy_storage_error(&error, output);
+                }
+            };
+            (display_name, mirror)
+        };
+        if let Err(error) = mirror.add_portal_folder_from_fd(source_descriptor) {
+            drop(mirror);
+            if let Ok(mut registry) = registry().lock()
+                && let Some(runtime) = registry.runtime_mut(handle)
+            {
+                runtime.abort_mirror_import();
+            }
+            return copy_storage_error(&error, output);
+        }
+        let result = {
+            let Ok(mut registry) = registry().lock() else {
+                return ERROR_INTERNAL;
+            };
+            let Some(runtime) = registry.runtime_mut(handle) else {
+                return ERROR_INVALID_HANDLE;
+            };
+            if let Err(error) = runtime.restore_mirror_import(mirror) {
+                runtime.abort_mirror_import();
+                Err(error)
+            } else {
+                runtime.finish_mirror_import()
+            }
+        };
+        match result {
+            Ok(report) => copy_storage_value(
+                &format!("{}\t{}\t{}", display_name, report.entries, report.bytes),
+                output,
+            ),
+            Err(error) => copy_storage_error(&error, output),
+        }
+    }
+
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeAddProjectMirrorDirectory(
         environment: JNIEnv,
         _class: JClass,

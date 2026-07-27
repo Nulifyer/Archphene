@@ -43,6 +43,12 @@ internal data class LauncherPortalOpenResult(
     val cancelled: Boolean,
 )
 
+internal data class LauncherPortalDirectoryResult(
+    val descriptor: ParcelFileDescriptor?,
+    val displayName: String,
+    val cancelled: Boolean,
+)
+
 /**
  * One private XDG portal frontend for one authenticated visible launcher.
  *
@@ -59,6 +65,9 @@ internal class LauncherPortalBridge(
     private val accent: Int,
     private val requestSave: (String, String, String) -> LauncherPortalSaveResult,
     private val requestOpen: (String, String, Boolean) -> LauncherPortalOpenResult,
+    private val requestDirectory: (String) -> LauncherPortalDirectoryResult,
+    private val importDirectory: (String, ParcelFileDescriptor) -> String?,
+    private val cancelDirectoryImport: () -> Unit,
 ) : Closeable {
     private class ActiveSave(
         val staging: File,
@@ -221,7 +230,11 @@ internal class LauncherPortalBridge(
                 val fields = request.split('\t')
                 if (
                     fields.isEmpty() ||
-                    (fields[0] != "ARCHPHENE/2" && fields[0] != "ARCHPHENE/3")
+                    (
+                        fields[0] != "ARCHPHENE/2" &&
+                            fields[0] != "ARCHPHENE/3" &&
+                            fields[0] != "ARCHPHENE/4"
+                    )
                 ) {
                     writeResponse(client, "ERROR\tUNSUPPORTED")
                     return
@@ -230,6 +243,7 @@ internal class LauncherPortalBridge(
                     "SAVE_FILE" -> handleSaveRequest(client, fields)
                     "OPEN_FILE" -> handleOpenRequest(client, fields, multiple = false)
                     "OPEN_FILES" -> handleOpenRequest(client, fields, multiple = true)
+                    "OPEN_DIRECTORY" -> handleDirectoryRequest(client, fields)
                     else -> writeResponse(client, "ERROR\tUNSUPPORTED")
                 }
             }.onFailure { error ->
@@ -323,6 +337,42 @@ internal class LauncherPortalBridge(
                 }
             },
         )
+    }
+
+    private fun handleDirectoryRequest(
+        client: LocalSocket,
+        fields: List<String>,
+    ) {
+        if (fields.size != 3 || fields[0] != "ARCHPHENE/4") {
+            writeResponse(client, "ERROR\tINVALID_REQUEST")
+            return
+        }
+        val title = decodeField(fields[2], MAX_NAME_BYTES)
+        if (title == null) {
+            writeResponse(client, "ERROR\tINVALID_REQUEST")
+            return
+        }
+        val result = requestDirectory(title)
+        val descriptor = result.descriptor
+        if (descriptor == null) {
+            writeResponse(client, if (result.cancelled) "CANCEL" else "ERROR\tFAILED")
+            return
+        }
+        val uri =
+            runCatching {
+                descriptor.use {
+                    val logicalPath =
+                        importDirectory(result.displayName, it)
+                            ?: error("Could not import the selected Android folder")
+                    Uri.Builder().scheme("file").path(logicalPath).build().toString()
+                }
+            }.getOrElse { error ->
+                runCatching { descriptor.close() }
+                Log.e(TAG, "Could not import portal folder session=$sessionId", error)
+                writeResponse(client, "ERROR\tFAILED")
+                return
+            }
+        writeResponse(client, "OK\t1\t${encodeField(uri)}")
     }
 
     @Synchronized
@@ -536,6 +586,7 @@ internal class LauncherPortalBridge(
             mirrorThread = null
         }
         runCatching { localServer?.close() }
+        runCatching { cancelDirectoryImport() }
         joinWorker(mirrorWorker)
         joinWorker(brokerWorker)
         for (save in saves) {
