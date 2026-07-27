@@ -1567,8 +1567,12 @@ removal, and slot-reuse semantics. Direct tests cover those state transitions,
 and `unsafe_op_in_unsafe_fn` is enforced across every production Rust crate
 that contains unsafe operations. Builder, manager JNI, process, and storage
 crates additionally deny unsafe outside their existing explicit boundary
-modules; decomposing the compositor's remaining broad FFI/syscall region stays
-open.
+modules. Every exported compositor JNI symbol and its Java
+array/direct-buffer/surface/bitmap conversion is now visibly enclosed in one
+documented boundary module. The workspace passes Clippy with warnings denied,
+all 257 Rust tests, and optimized Android builds for both exact ABIs.
+Replacing the compositor boundary's raw-pointer handles and splitting its
+remaining syscall/native-window FFI stay open.
 
 The visually inspected evidence is a full-device screenshot rather than an
 app-only frame. The complete Rust workspace passes 257 tests, including the

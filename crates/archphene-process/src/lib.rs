@@ -1029,6 +1029,9 @@ impl PtySession {
         .map_err(|_| ProcessError::InvalidArgument)
     }
 
+    // Selection endpoints stay primitive across the coarse process/terminal
+    // boundary and write directly into the caller's reusable output buffer.
+    #[allow(clippy::too_many_arguments)]
     pub fn write_terminal_selection(
         &mut self,
         output: &mut [u8],
@@ -1206,6 +1209,9 @@ impl PtyRegistry {
             .write_terminal_damage(output, full_snapshot, viewport_offset)
     }
 
+    // The registry forwards the same primitive endpoints into the selected
+    // session without allocating or copying an aggregate request.
+    #[allow(clippy::too_many_arguments)]
     pub fn write_terminal_selection(
         &mut self,
         handle: u64,

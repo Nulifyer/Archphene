@@ -6,6 +6,7 @@ Notable user-facing changes will be recorded here.
 
 ### Added
 
+- Enclosed every exported compositor JNI symbol and its Java array/direct-buffer/surface/bitmap conversion in one documented boundary module, and cleared the workspace's strict Clippy findings without adding hot-path aggregates. Clippy with warnings denied, all 257 Rust tests, and optimized x86_64/AArch64 Android compositor builds pass; raw-pointer handle replacement and the remaining syscall/native-window FFI split remain explicitly tracked.
 - Added live project-synchronization progress that reports only real actions and distinguishes pushes to Android, pulls into Archphene, deletions on either side, and conflict preservation with running result counts. The complete transaction, cancellation, conflict, and forced-death recovery matrix plus visually inspected full-device progress frames pass on the exact x86_64 emulator and AArch64 Samsung.
 - Tightened Rust unsafe-code enforcement: every production crate containing unsafe operations now denies implicit unsafe work inside unsafe functions, and the Builder, Android JNI, process, and storage crates deny unsafe outside their explicit boundary modules. Host checks are warning-free; the compositor still has a separately tracked module-confinement audit.
 - Documented the production Android/Linux filesystem boundary, current backup/export routes, grant revocation, destructive uninstall consequences, and the exact compatibility limits of running one shared Arch userspace under Android's kernel, SELinux, seccomp, permissions, and lifecycle.

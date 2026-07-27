@@ -1584,6 +1584,9 @@ impl RuntimeHost {
             .map_err(PackageRuntimeError::from)
     }
 
+    // Preserve primitive selection coordinates through the coarse runtime
+    // boundary and write directly into the caller's reusable buffer.
+    #[allow(clippy::too_many_arguments)]
     pub fn write_terminal_selection(
         &mut self,
         handle: u64,

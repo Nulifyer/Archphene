@@ -1023,6 +1023,9 @@ pub fn verify_and_copy_built_package(
     result
 }
 
+// Keep reviewed identity fields explicit at this trust boundary so callers
+// cannot accidentally verify a package against a partially populated object.
+#[allow(clippy::too_many_arguments)]
 pub fn verify_copied_built_package(
     archive: &mut File,
     filename: &str,

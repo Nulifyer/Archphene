@@ -1572,8 +1572,11 @@ fn scale_launcher_coordinate(value: i32, logical: i32, physical: i32) -> i32 {
     } else {
         numerator.saturating_sub(half)
     };
-    i32::try_from(rounded / i64::from(physical))
-        .unwrap_or_else(|_| if value < 0 { i32::MIN } else { i32::MAX })
+    i32::try_from(rounded / i64::from(physical)).unwrap_or(if value < 0 {
+        i32::MIN
+    } else {
+        i32::MAX
+    })
 }
 
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
@@ -3276,7 +3279,7 @@ fn queue_linux_drag(state: &mut CompositorState, source: &WlDataSource) -> bool 
     };
     source.target(Some(mime_type.clone()));
     if source.version() >= 3 {
-        source.action(wl_data_device_manager::DndAction::Copy.into());
+        source.action(wl_data_device_manager::DndAction::Copy);
     }
     source.send(mime_type.clone(), write_end.as_fd());
     state.pending_linux_drag_fds.push_back(read_end);
@@ -5880,9 +5883,8 @@ impl Dispatch<WlCallback, ()> for CompositorState {
         _handle: &DisplayHandle,
         _data_init: &mut DataInit<'_, Self>,
     ) {
-        match request {
-            _ => unreachable!("wl_callback has no client requests"),
-        }
+        let _ = request;
+        unreachable!("wl_callback has no client requests")
     }
 }
 
@@ -6146,6 +6148,9 @@ fn surface_content_size(surface: &WlSurface, frame: &CommittedFrame) -> (u32, u3
         .unwrap_or((frame.width, frame.height))
 }
 
+// Geometry inputs stay primitive in this hot path; grouping them would not
+// reduce the protocol state that must be validated together.
+#[allow(clippy::too_many_arguments)]
 fn calculate_toplevel_layout(
     output_width: i32,
     output_height: i32,
@@ -6413,6 +6418,9 @@ fn scale_input_coordinate(value: f64, target_extent: i32, source_extent: u32) ->
     }
 }
 
+// Recursive hit testing carries one bounded transform/clip context without
+// allocating an intermediate node object per surface.
+#[allow(clippy::too_many_arguments)]
 fn surface_tree_pointer_target(
     state: &CompositorState,
     surface: &WlSurface,
@@ -6863,6 +6871,9 @@ fn subsurface_position(surface: &WlSurface) -> Option<(i32, i32)> {
     )
 }
 
+// Recursive composition carries one bounded transform/clip context without
+// allocating an intermediate node object per surface.
+#[allow(clippy::too_many_arguments)]
 fn blend_surface_tree(
     state: &CompositorState,
     destination: &mut CommittedFrame,
@@ -8272,8 +8283,8 @@ impl CompositorCore {
             offer.offer(mime_type);
         }
         if offer.version() >= 3 {
-            offer.source_actions(wl_data_device_manager::DndAction::Copy.into());
-            offer.action(wl_data_device_manager::DndAction::Copy.into());
+            offer.source_actions(wl_data_device_manager::DndAction::Copy);
+            offer.action(wl_data_device_manager::DndAction::Copy);
         }
         let serial = self.next_input_serial();
         let (local_x, local_y) = self.pointer_local_coordinates(&surface, x, y);
@@ -8583,7 +8594,7 @@ impl CompositorCore {
             wl_keyboard::KeyState::Released
         };
         for keyboard in &keyboards {
-            keyboard.key(serial, time, key, key_state.into());
+            keyboard.key(serial, time, key, key_state);
         }
         if pressed {
             self.state.pressed_keys.push(key);
@@ -8630,7 +8641,7 @@ impl CompositorCore {
             Self::keyboard_modifier_mask(&self.state.pressed_keys) | self.state.reported_modifiers;
         let serial = self.next_input_serial();
         for keyboard in &keyboards {
-            keyboard.key(serial, time, key, wl_keyboard::KeyState::Pressed.into());
+            keyboard.key(serial, time, key, wl_keyboard::KeyState::Pressed);
         }
         if modifiers != previous_modifiers {
             for keyboard in &keyboards {
@@ -9277,7 +9288,7 @@ impl CompositorCore {
             wl_pointer::ButtonState::Released
         };
         for pointer in pointers {
-            pointer.button(serial, time, button, button_state.into());
+            pointer.button(serial, time, button, button_state);
             if pointer.version() >= 5 {
                 pointer.frame();
             }
@@ -9887,6 +9898,20 @@ impl Drop for CompositorCore {
         }
     }
 }
+
+/// Raw JNI entry points.
+///
+/// All exported Java symbols are enclosed here, including their conversion of
+/// Java-owned handles, arrays, direct buffers, surfaces, and bitmaps. Existing
+/// null/length/range checks stay next to that conversion before control reaches
+/// the compositor core. The remaining raw-pointer handle replacement and
+/// syscall/window-FFI split stay explicit in `todo.md`; this module boundary
+/// does not claim those later safety steps are complete.
+#[allow(clippy::missing_safety_doc)]
+#[rustfmt::skip]
+mod jni_exports {
+    use super::*;
+
 #[unsafe(no_mangle)]
 pub extern "C" fn archphene_compositor_protocol_version() -> u32 {
     1
@@ -13374,7 +13399,7 @@ mod tests {
         ] {
             assert!(!safe_runtime_program_name(name), "{name:?}");
         }
-        assert!(!safe_runtime_program_name(&vec![b'a'; 129]));
+        assert!(!safe_runtime_program_name(&[b'a'; 129]));
     }
 
     #[test]
@@ -13971,15 +13996,17 @@ mod tests {
 
     #[test]
     fn intersects_committed_input_region_with_surface_bounds() {
-        let mut surface = SurfaceState::default();
-        surface.committed_input_region = Some(RegionState {
-            operations: vec![RegionOperation::Add(RegionRectangle {
-                x: 1,
-                y: 0,
-                width: 2,
-                height: 2,
-            })],
-        });
+        let surface = SurfaceState {
+            committed_input_region: Some(RegionState {
+                operations: vec![RegionOperation::Add(RegionRectangle {
+                    x: 1,
+                    y: 0,
+                    width: 2,
+                    height: 2,
+                })],
+            }),
+            ..SurfaceState::default()
+        };
 
         assert!(!surface_accepts_pointer(&surface, 0.0, 1.0, 2, 2));
         assert!(surface_accepts_pointer(&surface, 1.0, 1.0, 2, 2));
@@ -14000,9 +14027,10 @@ mod tests {
             width: 640,
             height: 360,
         };
-        let mut state = XdgSurfaceState::default();
-
-        state.pending_window_geometry = Some(first);
+        let mut state = XdgSurfaceState {
+            pending_window_geometry: Some(first),
+            ..XdgSurfaceState::default()
+        };
         assert_eq!(state.committed_window_geometry, None);
         assert!(state.commit_window_geometry());
         assert_eq!(state.committed_window_geometry, Some(first));
@@ -14017,11 +14045,8 @@ mod tests {
 
     #[test]
     fn accepts_clients_from_owned_filesystem_socket_and_cleans_it_up() {
-        let socket = std::env::temp_dir().join(format!(
-            "archphene-compositor-{}-{}.sock",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let socket =
+            std::env::temp_dir().join(format!("archphene-compositor-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&socket);
         let mut core = CompositorCore::new().expect("Wayland display");
         core.bind_socket(&socket).expect("bind socket");
@@ -14342,7 +14367,7 @@ mod tests {
     fn maps_fitted_output_coordinates_back_to_surface_coordinates() {
         assert_eq!(scale_input_coordinate(0.0, 1080, 1492), 0.0);
         assert!((scale_input_coordinate(540.0, 1080, 1492) - 746.0).abs() < 0.001);
-        assert!((scale_input_coordinate(1626.0, 1692, 2257) - 2168.960_993).abs() < 0.001);
+        assert!((scale_input_coordinate(1626.0, 1692, 2257) - 2_168.960_993).abs() < 0.001);
     }
 
     #[test]
@@ -14522,4 +14547,6 @@ mod tests {
         assert!(XKB_KEYMAP.starts_with(b"xkb_keymap {"));
         assert!(XKB_KEYMAP.ends_with(b"};\n\0"));
     }
+}
+
 }

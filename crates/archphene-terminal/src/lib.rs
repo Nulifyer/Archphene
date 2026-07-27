@@ -799,6 +799,9 @@ impl Terminal {
         Ok(required)
     }
 
+    // Keep the fixed wire fields primitive so this warmed path needs no
+    // temporary aggregate or heap allocation.
+    #[allow(clippy::too_many_arguments)]
     fn write_damage_header(
         &self,
         output: &mut [u8],
