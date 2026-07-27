@@ -652,9 +652,10 @@ preflight without rewriting or downloading package payloads on the x86_64
 emulator and AArch64 Samsung. Pacman now commits the complete prepared archive
 set through one normal dependency-checking transaction; the former per-package
 `--nodeps` and blanket-overwrite mutations are gone. New packages enter as
-dependencies, while a bounded mode-0600 intent preserves every existing
-explicit package plus the requested target and restores those reasons
-idempotently after manager death. Startup rejects malformed, oversized,
+dependencies. A fresh user-requested install marks its target explicit, while
+an update preserves the target's existing explicit/dependency reason. A bounded
+mode-0600 intent preserves every explicit package selected by that operation
+and restores those reasons idempotently after manager death. Startup rejects malformed, oversized,
 symlinked, or broadly writable intents, removes a stale database lock, validates
 the local database, and only then deletes the recovered intent. Cache-only
 verify/remove/reinstall and forced restart-recovery gates pass on both devices
@@ -681,8 +682,9 @@ The generic compatibility layer maps Linux root ownership to the Android app
 UID, copies when SELinux rejects hard links, avoids Android app seccomp's
 blocked `fchmodat2`, and maps generic root-relative mutation calls without
 package-specific changes. The current path validates pacman's local database
-and proves the requested package and version. Scriptlets/hooks remain disabled,
-and real upgrade/replacement, mid-pacman partial-state injection, exact
+and proves the requested package and version. A real AArch64 older-to-newer
+upgrade now passes; the x86_64 replay and replacement coverage remain open.
+Scriptlets/hooks remain disabled, and replacement, mid-pacman partial-state injection, exact
 rollback, whole-operation AUR recovery, orphan cleanup, and low-storage
 behavior remain open.
 
@@ -706,15 +708,28 @@ fails if dependents make that unsafe, removes only the requested target, then
 proves both its executable and local database record are absent. Dependencies
 remain installed for the pending orphan-cleanup policy.
 
+The update command now has a distinct Rust/JNI path instead of reusing fresh
+installation semantics. On July 27, a signed cached AArch64
+`libsysprof-capture` 50.0-2.1 dependency was established as the older baseline
+and updated through the normal Samsung manager UI to 50.0-3. Pacman's local
+record retained `%REASON%=1`, no lock or partial payload remained, and the
+search-result row changed from the older-version warning to Installed in the
+same completion revision. The reusable gate derives the APK's exact pacman
+payload, uses pacman only to establish the signed older test baseline, and
+captures the real manager review/completion as full-device screenshots. The
+x86_64 emulator currently lacks a retained older signed archive, so its replay
+is pending an explicitly supplied archive rather than silently downloading one.
+
 Clean nine-package `btop` transaction cycles pass on the x86_64 emulator and
 AArch64 Samsung. Both gates deliberately corrupt the target archive, prove
 rejection, redownload and reverify it, remove the package conservatively, prove
 its executable and database entry are gone, reinstall from the verified cache,
 and prove the durable Complete result survives manager process death. Full-
 device screenshots also verify the responsive closure view and state-driven
-actions. A real older-to-newer repository upgrade, hooks/scriptlets,
-closure-wide rollback, cancellation, orphan cleanup, and low-storage recovery
-remain open, so this is not yet a complete production transaction engine.
+actions. The physical AArch64 older-to-newer update now passes; x86_64 replay,
+replacement handling, hooks/scriptlets, closure-wide rollback, orphan cleanup,
+and low-storage recovery remain open, so this is not yet a complete production
+transaction engine.
 
 A first shared-command slice is also connected. A separate Rust process crate
 resolves one exact installed command under `/usr/bin`, follows at most 16

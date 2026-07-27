@@ -1516,6 +1516,25 @@ impl PackageRuntime {
         Ok(installed)
     }
 
+    pub fn update(&self, package: &str) -> Result<ToolOutput, PackageRuntimeError> {
+        if self.installed_version(package)?.as_bytes().is_empty() {
+            return Err(PackageRuntimeError::NotInstalled);
+        }
+        let resolution = self.resolve(package)?;
+        // An update must retain the local database's existing install reasons.
+        // install_resolution starts every archive as a dependency, keeps base
+        // explicit, then promotes only packages already recorded as explicit.
+        // In particular, selecting an installed dependency in the manager must
+        // not silently turn it into a user-owned package.
+        self.install_resolution(&resolution, &[BASE_PACKAGE], package)?;
+        let installed = self.installed_version(package)?;
+        let expected = resolved_version(&resolution, package)?;
+        if installed.as_str()? != expected {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        Ok(installed)
+    }
+
     pub fn installation_bytes(&self, package: &str) -> Result<ToolOutput, PackageRuntimeError> {
         let resolution = self.resolve(package)?;
         let mut total = 0_u64;
@@ -5672,6 +5691,49 @@ https://geo.mirror.pkgbuild.com/extra/os/x86_64/{filename}\t{}\n",
                 Err(PackageRuntimeError::InvalidResolution)
             ));
         }
+    }
+
+    #[test]
+    fn update_reason_preparation_preserves_explicit_and_dependency_packages() {
+        let tree = TestTree::new();
+        let runtime = tree.package_runtime();
+        tree.local_package("explicit-tool-1.0-1", "explicit-tool", b"%FILES%\n");
+        tree.local_dependency_package("dependency-tool-1.0-1", "dependency-tool", b"%FILES%\n");
+        let mut archives = [
+            InstallArchive {
+                path: "/cache/base.pkg.tar.zst".to_owned(),
+                name: BASE_PACKAGE.to_owned(),
+                version: "3-2".to_owned(),
+                explicitly_installed: true,
+            },
+            InstallArchive {
+                path: "/cache/explicit-tool.pkg.tar.zst".to_owned(),
+                name: "explicit-tool".to_owned(),
+                version: "2.0-1".to_owned(),
+                explicitly_installed: false,
+            },
+            InstallArchive {
+                path: "/cache/dependency-tool.pkg.tar.zst".to_owned(),
+                name: "dependency-tool".to_owned(),
+                version: "2.0-1".to_owned(),
+                explicitly_installed: false,
+            },
+            InstallArchive {
+                path: "/cache/new-dependency.pkg.tar.zst".to_owned(),
+                name: "new-dependency".to_owned(),
+                version: "1.0-1".to_owned(),
+                explicitly_installed: false,
+            },
+        ];
+
+        runtime
+            .preserve_explicit_install_reasons(&mut archives)
+            .expect("preserve existing reasons");
+
+        assert!(archives[0].explicitly_installed);
+        assert!(archives[1].explicitly_installed);
+        assert!(!archives[2].explicitly_installed);
+        assert!(!archives[3].explicitly_installed);
     }
 
     #[test]

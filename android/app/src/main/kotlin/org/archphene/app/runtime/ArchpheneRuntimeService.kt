@@ -9115,7 +9115,11 @@ class ArchpheneRuntimeService : Service() {
                         )
                         runPackageCommand(
                             activeHandle,
-                            NativeRuntime.PACKAGE_COMMAND_INSTALL,
+                            if (operation == NativeRuntime.JOB_OPERATION_UPDATE) {
+                                NativeRuntime.PACKAGE_COMMAND_UPDATE
+                            } else {
+                                NativeRuntime.PACKAGE_COMMAND_INSTALL
+                            },
                             normalized,
                             scratch,
                         )
@@ -9139,6 +9143,10 @@ class ArchpheneRuntimeService : Service() {
                         removeActionLabel = "Remove"
                         removeAvailable = true
                         searchStatus = withInstalledStatus(searchStatus, target.version)
+                        publishAvailablePackageInstalledVersion(
+                            target.name,
+                            target.version,
+                        )
                         Log.i(
                             TAG,
                             when {
@@ -9571,6 +9579,7 @@ class ArchpheneRuntimeService : Service() {
                         removeActionLabel = "Remove"
                         removeAvailable = false
                         searchStatus = withInstalledStatus(searchStatus, "")
+                        publishAvailablePackageInstalledVersion(normalized, "")
                         record(
                             NativeRuntime.JOB_COMPLETE,
                             4,
@@ -10664,6 +10673,18 @@ class ArchpheneRuntimeService : Service() {
                 "Installed: $installedVersion"
             }
         return lines.joinToString("\n")
+    }
+
+    private fun publishAvailablePackageInstalledVersion(
+        packageName: String,
+        installedVersion: String,
+    ) {
+        availablePackageSnapshot =
+            reconcileAvailablePackageInstalledVersion(
+                availablePackageSnapshot,
+                packageName,
+                installedVersion,
+            )
     }
 
     private fun updatePackageJob(
