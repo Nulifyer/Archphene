@@ -399,6 +399,8 @@ public final class MainActivity extends Activity {
         long core = 0;
         try {
             if (nativeProtocolVersion() != 1) throw new IllegalStateException("protocol version");
+            org.archphene.app.launcher.NativeLauncherCompositor.verifyHandleRegistry(
+                    getCacheDir());
             core = nativeCreateCore();
             if (core == 0) throw new IllegalStateException("display creation");
             ParcelFileDescriptor[] pair = ParcelFileDescriptor.createSocketPair();
@@ -464,13 +466,25 @@ public final class MainActivity extends Activity {
                 dispatch(core);
                 readFrameCommitUntilSync(input, 12, 14, 15);
                 readDeleteId(input, 15);
-                if (nativePendingFrameCallbackCount(core) != 1
-                        || nativePendingDamageCount(core) != 1
-                        || nativeSurfaceCommitCount(core) != 1
-                        || nativeLastFrameWidth(core) != 4
-                        || nativeLastFrameHeight(core) != 2
-                        || nativeLastFrameChecksum(core) != 656) {
-                    throw new IllegalStateException("wl_surface commit did not snapshot the SHM frame");
+                int pendingFrames = nativePendingFrameCallbackCount(core);
+                int pendingDamage = nativePendingDamageCount(core);
+                int surfaceCommits = nativeSurfaceCommitCount(core);
+                int frameWidth = nativeLastFrameWidth(core);
+                int frameHeight = nativeLastFrameHeight(core);
+                int frameChecksum = nativeLastFrameChecksum(core);
+                if (pendingFrames != 1
+                        || pendingDamage != 1
+                        || surfaceCommits != 1
+                        || frameWidth != 4
+                        || frameHeight != 2
+                        || frameChecksum != 656) {
+                    throw new IllegalStateException(
+                            "wl_surface commit did not snapshot the SHM frame"
+                                    + " callbacks=" + pendingFrames
+                                    + " damage=" + pendingDamage
+                                    + " commits=" + surfaceCommits
+                                    + " frame=" + frameWidth + "x" + frameHeight
+                                    + " checksum=" + frameChecksum);
                 }
                 renderedFrame = Bitmap.createBitmap(4, 2, Bitmap.Config.ARGB_8888);
                 if (nativeCopyLastFrameToBitmap(core, renderedFrame) != 0
@@ -1471,7 +1485,7 @@ public final class MainActivity extends Activity {
             renderedFrame = runViewportProbe(frameView);
             passed = true;
             message = "Native Wayland compositor passed\n"
-                    + "registry, Android bitmap, xdg toplevel, keyboard input, "
+                    + "generation-checked JNI handles, registry, Android bitmap, xdg toplevel, keyboard input, "
                     + "damage-batched buffer scale/transform, viewporter/fractional scaling, Choreographer-paced frames, MotionEvent pointer/wheel/touch input, cursor surfaces, pointer gestures, nested popup grabs, synchronized subsurface trees, "
                     + "committed parent geometry, demand-driven clipboard, and Android InputConnection UTF-8 text-input v3 lifecycle complete";
         } catch (Exception error) {

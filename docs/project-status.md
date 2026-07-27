@@ -1570,12 +1570,19 @@ crates additionally deny unsafe outside their existing explicit boundary
 modules. Every exported compositor JNI symbol and its Java
 array/direct-buffer/surface/bitmap conversion is now visibly enclosed in one
 documented boundary module. The workspace passes Clippy with warnings denied,
-all 257 Rust tests, and optimized Android builds for both exact ABIs.
-Replacing the compositor boundary's raw-pointer handles and splitting its
-remaining syscall/native-window FFI stay open.
+all 259 Rust tests, and optimized Android builds for both exact ABIs.
+The remaining raw-pointer handles are now gone: fixed synchronized registries
+cap core/probe instances at eight and generated-launcher instances at four,
+encode a slot plus generation into each positive opaque handle, and reject
+exhaustion, stale use, double destroy, and stale-after-reuse without allocating
+per call. Direct tests and an exact JNI-name Android probe pass those cases on
+both maintained ABIs. That probe also caught and fixed non-tiled direct Wayland
+surfaces being expanded to the default 320×160 output instead of retaining
+their exact client raster. Splitting the remaining syscall/native-window FFI
+stays open.
 
 The visually inspected evidence is a full-device screenshot rather than an
-app-only frame. The complete Rust workspace passes 257 tests, including the
+app-only frame. The complete Rust workspace passes 259 tests, including the
 large-resolution, raw-signature-status, empty-files-record, loader-path, JNI,
 compositor, terminal, storage, AUR snapshot, and warmed-allocation regressions.
 
@@ -1613,7 +1620,7 @@ aliases to the corresponding private home directories. The Files page explains
 the Archphene Home and snapshot boundary, DocumentsProvider CRUD/security gates
 pass on x86_64 and AArch64, and a full-device Samsung Foot/Bash run reads an
 Android-side Shared fixture through the Linux alias. The complete Rust workspace
-passes 257 tests; Android debug lint and the minified release build pass.
+passes 259 tests; Android debug lint and the minified release build pass.
 
 The manager's new Share action opens at Archphene Home, selects only its own
 bounded regular provider documents, excludes Archphene as a circular target,

@@ -7014,14 +7014,22 @@ fn update_composited_frame(state: &mut CompositorState) {
         return;
     };
     let previous_frame = state.last_frame.take();
-    let output_width = u32::try_from(state.output_mode_width)
-        .ok()
-        .filter(|width| *width > 0)
-        .unwrap_or(layout.output_width);
-    let output_height = u32::try_from(state.output_mode_height)
-        .ok()
-        .filter(|height| *height > 0)
-        .unwrap_or(layout.output_height);
+    let output_width = if state.tile_toplevels {
+        u32::try_from(state.output_mode_width)
+            .ok()
+            .filter(|width| *width > 0)
+            .unwrap_or(layout.output_width)
+    } else {
+        layout.output_width
+    };
+    let output_height = if state.tile_toplevels {
+        u32::try_from(state.output_mode_height)
+            .ok()
+            .filter(|height| *height > 0)
+            .unwrap_or(layout.output_height)
+    } else {
+        layout.output_height
+    };
     let prefer_original_buffers =
         output_width != layout.output_width || output_height != layout.output_height;
     let scale_x = |value: i32| {
@@ -9912,6 +9920,155 @@ impl Drop for CompositorCore {
 mod jni_exports {
     use super::*;
 
+const JNI_HANDLE_INDEX_BITS: u32 = 16;
+const JNI_HANDLE_INDEX_MASK: u64 = u16::MAX as u64;
+const JNI_HANDLE_GENERATION_MAX: u64 = (i64::MAX as u64) >> JNI_HANDLE_INDEX_BITS;
+
+struct JniHandleSlot<T> {
+    generation: u64,
+    value: Option<T>,
+}
+
+struct JniHandleRegistry<T, const N: usize> {
+    slots: [JniHandleSlot<T>; N],
+}
+
+impl<T, const N: usize> JniHandleRegistry<T, N> {
+    fn new() -> Self {
+        Self {
+            slots: std::array::from_fn(|_| JniHandleSlot {
+                generation: 0,
+                value: None,
+            }),
+        }
+    }
+
+    fn insert(&mut self, value: T) -> Option<i64> {
+        let index = self
+            .slots
+            .iter()
+            .position(|slot| slot.value.is_none() && slot.generation < JNI_HANDLE_GENERATION_MAX)?;
+        let slot = &mut self.slots[index];
+        let encoded_index = u16::try_from(index.checked_add(1)?).ok()?;
+        slot.generation += 1;
+        let raw =
+            (slot.generation << JNI_HANDLE_INDEX_BITS) | u64::from(encoded_index);
+        let handle = i64::try_from(raw).ok()?;
+        slot.value = Some(value);
+        Some(handle)
+    }
+
+    fn index(&self, handle: i64) -> Option<usize> {
+        let raw = u64::try_from(handle).ok()?;
+        let generation = raw >> JNI_HANDLE_INDEX_BITS;
+        let encoded_index = u16::try_from(raw & JNI_HANDLE_INDEX_MASK).ok()?;
+        let index = usize::from(encoded_index.checked_sub(1)?);
+        let slot = self.slots.get(index)?;
+        (generation != 0 && slot.generation == generation && slot.value.is_some())
+            .then_some(index)
+    }
+
+    fn take(&mut self, handle: i64) -> Option<T> {
+        let index = self.index(handle)?;
+        self.slots[index].value.take()
+    }
+}
+
+struct JniHandleGuard<'a, T, const N: usize> {
+    registry: std::sync::MutexGuard<'a, JniHandleRegistry<T, N>>,
+    index: usize,
+}
+
+impl<T, const N: usize> std::ops::Deref for JniHandleGuard<'_, T, N> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        self.registry.slots[self.index]
+            .value
+            .as_ref()
+            .expect("validated JNI handle slot")
+    }
+}
+
+impl<T, const N: usize> std::ops::DerefMut for JniHandleGuard<'_, T, N> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.registry.slots[self.index]
+            .value
+            .as_mut()
+            .expect("validated JNI handle slot")
+    }
+}
+
+const MAX_CORE_COMPOSITORS: usize = 8;
+
+fn core_compositors() -> &'static Mutex<JniHandleRegistry<CompositorCore, MAX_CORE_COMPOSITORS>> {
+    static REGISTRY: std::sync::OnceLock<
+        Mutex<JniHandleRegistry<CompositorCore, MAX_CORE_COMPOSITORS>>,
+    > = std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(JniHandleRegistry::new()))
+}
+
+fn register_core_compositor(compositor: CompositorCore) -> i64 {
+    core_compositors()
+        .lock()
+        .ok()
+        .and_then(|mut registry| registry.insert(compositor))
+        .unwrap_or(0)
+}
+
+fn core_compositor(
+    handle: i64,
+) -> Option<JniHandleGuard<'static, CompositorCore, MAX_CORE_COMPOSITORS>> {
+    let registry = core_compositors().lock().ok()?;
+    let index = registry.index(handle)?;
+    Some(JniHandleGuard { registry, index })
+}
+
+fn remove_core_compositor(handle: i64) -> Option<CompositorCore> {
+    core_compositors().lock().ok()?.take(handle)
+}
+
+#[cfg(target_os = "android")]
+const MAX_LAUNCHER_COMPOSITORS: usize = 4;
+
+// LauncherSurfaceCompositor owns one retained ANativeWindow reference. Android
+// permits ANativeWindow use across threads, and every access is serialized by
+// the registry mutex before the reference is released on removal.
+#[cfg(target_os = "android")]
+unsafe impl Send for LauncherSurfaceCompositor {}
+
+#[cfg(target_os = "android")]
+fn launcher_compositors(
+) -> &'static Mutex<JniHandleRegistry<LauncherSurfaceCompositor, MAX_LAUNCHER_COMPOSITORS>> {
+    static REGISTRY: std::sync::OnceLock<
+        Mutex<JniHandleRegistry<LauncherSurfaceCompositor, MAX_LAUNCHER_COMPOSITORS>>,
+    > = std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(JniHandleRegistry::new()))
+}
+
+#[cfg(target_os = "android")]
+fn register_launcher_compositor(compositor: LauncherSurfaceCompositor) -> i64 {
+    launcher_compositors()
+        .lock()
+        .ok()
+        .and_then(|mut registry| registry.insert(compositor))
+        .unwrap_or(0)
+}
+
+#[cfg(target_os = "android")]
+fn launcher_compositor(
+    handle: i64,
+) -> Option<JniHandleGuard<'static, LauncherSurfaceCompositor, MAX_LAUNCHER_COMPOSITORS>> {
+    let registry = launcher_compositors().lock().ok()?;
+    let index = registry.index(handle)?;
+    Some(JniHandleGuard { registry, index })
+}
+
+#[cfg(target_os = "android")]
+fn remove_launcher_compositor(handle: i64) -> Option<LauncherSurfaceCompositor> {
+    launcher_compositors().lock().ok()?.take(handle)
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn archphene_compositor_protocol_version() -> u32 {
     1
@@ -9931,7 +10088,7 @@ pub extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeCre
     _activity: *mut std::ffi::c_void,
 ) -> i64 {
     match CompositorCore::new() {
-        Ok(core) => Box::into_raw(Box::new(core)) as i64,
+        Ok(core) => register_core_compositor(core),
         Err(_) => 0,
     }
 }
@@ -9943,7 +10100,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     handle: i64,
     fd: i32,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     match core.adopt_client(fd) {
@@ -10071,7 +10228,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     core.take_linux_drag_fd()
@@ -10083,7 +10240,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     match core.take_linux_drag_mime_type().as_deref() {
@@ -10101,7 +10258,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     handle: i64,
     accepted: u8,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.finish_linux_drag(accepted != 0)).unwrap_or(i32::MAX)
@@ -10116,7 +10273,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     y: i32,
     time: i32,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.android_drag_motion(f64::from(x), f64::from(y), time as u32))
@@ -10130,7 +10287,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     handle: i64,
     value: jbyteArray,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     let Some(text) = java_byte_array(environment, value) else {
@@ -10146,7 +10303,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     handle: i64,
     value: jbyteArray,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     let Some(uri_list) = java_byte_array(environment, value) else {
@@ -10161,7 +10318,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.cancel_android_drag()).unwrap_or(i32::MAX)
@@ -10189,7 +10346,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     match core.dispatch_once() {
@@ -10204,7 +10361,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.compositor_bind_count()).unwrap_or(i32::MAX)
@@ -10216,7 +10373,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.subcompositor_bind_count()).unwrap_or(i32::MAX)
@@ -10228,7 +10385,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.subsurface_count()).unwrap_or(i32::MAX)
@@ -10240,7 +10397,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.xdg_wm_base_bind_count()).unwrap_or(i32::MAX)
@@ -10252,7 +10409,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.xdg_positioner_count()).unwrap_or(i32::MAX)
@@ -10264,7 +10421,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.xdg_positioner_request_count()).unwrap_or(i32::MAX)
@@ -10276,7 +10433,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.xdg_popup_count()).unwrap_or(i32::MAX)
@@ -10288,7 +10445,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.xdg_popup_done_count()).unwrap_or(i32::MAX)
@@ -10300,7 +10457,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.xdg_popup_grab_depth()).unwrap_or(i32::MAX)
@@ -10312,7 +10469,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.dismiss_popups()).unwrap_or(i32::MAX)
@@ -10324,7 +10481,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.xdg_surface_count()).unwrap_or(i32::MAX)
@@ -10336,7 +10493,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.xdg_toplevel_count()).unwrap_or(i32::MAX)
@@ -10348,7 +10505,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.xdg_ack_count()).unwrap_or(i32::MAX)
@@ -10362,7 +10519,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     width: i32,
     height: i32,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.configure_focused_toplevel(width, height)).unwrap_or(i32::MAX)
@@ -10374,7 +10531,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.focused_pending_configure_count()).unwrap_or(i32::MAX)
@@ -10386,7 +10543,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.output_bind_count()).unwrap_or(i32::MAX)
@@ -10398,7 +10555,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.output_count()).unwrap_or(i32::MAX)
@@ -10410,7 +10567,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.output_event_count()).unwrap_or(i32::MAX)
@@ -10425,7 +10582,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     height: i32,
     scale: i32,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.configure_output(width, height, scale)).unwrap_or(i32::MAX)
@@ -10437,7 +10594,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.seat_bind_count()).unwrap_or(i32::MAX)
@@ -10449,7 +10606,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.data_device_manager_bind_count()).unwrap_or(i32::MAX)
@@ -10461,7 +10618,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.data_source_count()).unwrap_or(i32::MAX)
@@ -10473,7 +10630,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.data_device_count()).unwrap_or(i32::MAX)
@@ -10485,7 +10642,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.data_offer_count()).unwrap_or(i32::MAX)
@@ -10498,7 +10655,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     handle: i64,
     active: u8,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.set_clipboard_active(active != 0)).unwrap_or(i32::MAX)
@@ -10510,7 +10667,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.offer_android_clipboard_text()).unwrap_or(i32::MAX)
@@ -10522,7 +10679,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     core.take_android_paste_fd()
@@ -10534,7 +10691,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     core.take_linux_copy_fd()
@@ -10546,7 +10703,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.text_input_manager_bind_count()).unwrap_or(i32::MAX)
@@ -10558,7 +10715,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.text_input_count()).unwrap_or(i32::MAX)
@@ -10570,7 +10727,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.ime_active()).unwrap_or(i32::MAX)
@@ -10582,7 +10739,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.ime_show_request_count()).unwrap_or(i32::MAX)
@@ -10594,7 +10751,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.ime_hide_request_count()).unwrap_or(i32::MAX)
@@ -10606,7 +10763,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     core.ime_surrounding_text_length()
@@ -10618,7 +10775,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     core.ime_surrounding_cursor()
@@ -10630,7 +10787,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     core.ime_surrounding_anchor()
@@ -10642,7 +10799,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     core.ime_content_hint()
@@ -10654,7 +10811,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     core.ime_content_purpose()
@@ -10668,7 +10825,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     component: i32,
 ) -> i32 {
     let (Some(core), Ok(component)) = (
-        unsafe { (handle as *mut CompositorCore).as_ref() },
+        core_compositor(handle),
         usize::try_from(component),
     ) else {
         return -1;
@@ -10723,7 +10880,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     handle: i64,
     destination: jbyteArray,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     let Some(text) = core.ime_surrounding_text() else {
@@ -10744,7 +10901,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     else {
         return -2;
     };
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.ime_commit_text(text)).unwrap_or(i32::MAX)
@@ -10764,7 +10921,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     else {
         return -2;
     };
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.ime_set_preedit(text, cursor_begin, cursor_end)).unwrap_or(i32::MAX)
@@ -10780,7 +10937,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     let Ok(action) = u32::try_from(action) else {
         return -2;
     };
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.ime_editor_action(action, time as u32)).unwrap_or(i32::MAX)
@@ -11934,7 +12091,7 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
         return 0;
     }
     configure_launcher_output(&mut core, width, height, density_dpi, geometry_percent);
-    Box::into_raw(Box::new(LauncherSurfaceCompositor {
+    register_launcher_compositor(LauncherSurfaceCompositor {
         core,
         window: ptr::null_mut(),
         surface_width: width,
@@ -11942,7 +12099,7 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
         buffer_width: 0,
         buffer_height: 0,
         last_presented_commit: u32::MAX,
-    })) as i64
+    })
 }
 
 #[cfg(target_os = "android")]
@@ -11957,7 +12114,7 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
     density_dpi: i32,
     geometry_percent: i32,
 ) -> i32 {
-    let Some(compositor) = (unsafe { (handle as *mut LauncherSurfaceCompositor).as_mut() }) else {
+    let Some(mut compositor) = launcher_compositor(handle) else {
         return -1;
     };
     compositor.attach_surface(
@@ -11977,7 +12134,7 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
     _owner: *mut std::ffi::c_void,
     handle: i64,
 ) {
-    if let Some(compositor) = unsafe { (handle as *mut LauncherSurfaceCompositor).as_mut() } {
+    if let Some(mut compositor) = launcher_compositor(handle) {
         compositor.detach_surface();
     }
 }
@@ -11989,7 +12146,7 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
     _owner: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(compositor) = (unsafe { (handle as *mut LauncherSurfaceCompositor).as_mut() }) else {
+    let Some(compositor) = launcher_compositor(handle) else {
         return -1;
     };
     i32::try_from(compositor.core.close_all_windows()).unwrap_or(i32::MAX)
@@ -12003,7 +12160,7 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
     handle: i64,
     component: i32,
 ) -> i32 {
-    let Some(compositor) = (unsafe { (handle as *mut LauncherSurfaceCompositor).as_ref() }) else {
+    let Some(compositor) = launcher_compositor(handle) else {
         return -1;
     };
     launcher_presentation_component(&compositor.core.state, component)
@@ -12017,7 +12174,7 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
     handle: i64,
     active: jboolean,
 ) {
-    if let Some(compositor) = unsafe { (handle as *mut LauncherSurfaceCompositor).as_mut() } {
+    if let Some(mut compositor) = launcher_compositor(handle) {
         compositor.core.set_host_active(active != 0);
     }
 }
@@ -12030,7 +12187,7 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
     handle: i64,
     active: jboolean,
 ) {
-    if let Some(compositor) = unsafe { (handle as *mut LauncherSurfaceCompositor).as_mut() } {
+    if let Some(mut compositor) = launcher_compositor(handle) {
         compositor.core.set_clipboard_active(active != 0);
     }
 }
@@ -12042,7 +12199,7 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
     _owner: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(compositor) = (unsafe { (handle as *mut LauncherSurfaceCompositor).as_mut() }) else {
+    let Some(mut compositor) = launcher_compositor(handle) else {
         return -1;
     };
     i32::try_from(compositor.core.offer_android_clipboard_text()).unwrap_or(i32::MAX)
@@ -12055,7 +12212,7 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
     _owner: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(compositor) = (unsafe { (handle as *mut LauncherSurfaceCompositor).as_mut() }) else {
+    let Some(mut compositor) = launcher_compositor(handle) else {
         return -1;
     };
     i32::try_from(compositor.core.clear_android_clipboard()).unwrap_or(i32::MAX)
@@ -12068,7 +12225,7 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
     _owner: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(compositor) = (unsafe { (handle as *mut LauncherSurfaceCompositor).as_mut() }) else {
+    let Some(mut compositor) = launcher_compositor(handle) else {
         return -1;
     };
     compositor.core.take_android_paste_fd()
@@ -12081,7 +12238,7 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
     _owner: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(compositor) = (unsafe { (handle as *mut LauncherSurfaceCompositor).as_mut() }) else {
+    let Some(mut compositor) = launcher_compositor(handle) else {
         return -1;
     };
     compositor.core.take_linux_copy_fd()
@@ -12094,7 +12251,7 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
     _owner: *mut std::ffi::c_void,
     handle: i64,
 ) -> jboolean {
-    let Some(compositor) = (unsafe { (handle as *mut LauncherSurfaceCompositor).as_mut() }) else {
+    let Some(mut compositor) = launcher_compositor(handle) else {
         return 0;
     };
     jboolean::from(compositor.core.take_linux_clipboard_clear())
@@ -12107,7 +12264,7 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
     _owner: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(compositor) = (unsafe { (handle as *mut LauncherSurfaceCompositor).as_ref() }) else {
+    let Some(compositor) = launcher_compositor(handle) else {
         return -1;
     };
     compositor.core.ime_change_serial() as i32
@@ -12120,7 +12277,7 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
     _owner: *mut std::ffi::c_void,
     handle: i64,
 ) -> jboolean {
-    let Some(compositor) = (unsafe { (handle as *mut LauncherSurfaceCompositor).as_ref() }) else {
+    let Some(compositor) = launcher_compositor(handle) else {
         return 0;
     };
     jboolean::from(compositor.core.ime_active() != 0)
@@ -12133,7 +12290,7 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
     _owner: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(compositor) = (unsafe { (handle as *mut LauncherSurfaceCompositor).as_ref() }) else {
+    let Some(compositor) = launcher_compositor(handle) else {
         return -1;
     };
     compositor.core.ime_surrounding_text_length()
@@ -12148,7 +12305,7 @@ pub extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_
     output: JByteBuffer,
     capacity: i32,
 ) -> i32 {
-    let Some(compositor) = (unsafe { (handle as *mut LauncherSurfaceCompositor).as_ref() }) else {
+    let Some(compositor) = launcher_compositor(handle) else {
         return -1;
     };
     let Some(text) = compositor.core.ime_surrounding_text() else {
@@ -12177,7 +12334,7 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
     handle: i64,
     component: i32,
 ) -> i32 {
-    let Some(compositor) = (unsafe { (handle as *mut LauncherSurfaceCompositor).as_ref() }) else {
+    let Some(compositor) = launcher_compositor(handle) else {
         return -1;
     };
     match component {
@@ -12223,7 +12380,7 @@ pub extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_
     let Some(text) = launcher_ime_text(&environment, &input, length) else {
         return -2;
     };
-    let Some(compositor) = (unsafe { (handle as *mut LauncherSurfaceCompositor).as_mut() }) else {
+    let Some(mut compositor) = launcher_compositor(handle) else {
         return -1;
     };
     let result = match operation {
@@ -12247,8 +12404,8 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
     before_bytes: i32,
     after_bytes: i32,
 ) -> i32 {
-    let (Some(compositor), Ok(before_bytes), Ok(after_bytes)) = (
-        unsafe { (handle as *mut LauncherSurfaceCompositor).as_mut() },
+    let (Some(mut compositor), Ok(before_bytes), Ok(after_bytes)) = (
+        launcher_compositor(handle),
         u32::try_from(before_bytes),
         u32::try_from(after_bytes),
     ) else {
@@ -12271,8 +12428,8 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
     action: i32,
     time_millis: i32,
 ) -> i32 {
-    let (Some(compositor), Ok(action)) = (
-        unsafe { (handle as *mut LauncherSurfaceCompositor).as_mut() },
+    let (Some(mut compositor), Ok(action)) = (
+        launcher_compositor(handle),
         u32::try_from(action),
     ) else {
         return -2;
@@ -12358,7 +12515,7 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
     handle: i64,
     time_millis: i32,
 ) -> i32 {
-    let Some(compositor) = (unsafe { (handle as *mut LauncherSurfaceCompositor).as_mut() }) else {
+    let Some(mut compositor) = launcher_compositor(handle) else {
         return -1;
     };
     compositor.dispatch_and_present(time_millis as u32)
@@ -12375,8 +12532,8 @@ pub extern "system" fn Java_org_archphene_app_launcher_NativeLauncherCompositor_
 ) -> i32 {
     const RECORD_BYTES: usize = 24;
     const MAX_RECORDS: usize = 32;
-    let (Some(compositor), Ok(record_count)) = (
-        unsafe { (handle as *mut LauncherSurfaceCompositor).as_mut() },
+    let (Some(mut compositor), Ok(record_count)) = (
+        launcher_compositor(handle),
         usize::try_from(record_count),
     ) else {
         return -1;
@@ -12431,9 +12588,7 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
     _owner: *mut std::ffi::c_void,
     handle: i64,
 ) {
-    if handle > 0 {
-        drop(unsafe { Box::from_raw(handle as *mut LauncherSurfaceCompositor) });
-    }
+    drop(remove_launcher_compositor(handle));
 }
 
 #[unsafe(no_mangle)]
@@ -12453,7 +12608,7 @@ pub unsafe extern "system" fn Java_org_archphene_bridge_NativeCompositor_nativeC
     if core.bind_socket(Path::new(&socket_path)).is_err() {
         return 0;
     }
-    Box::into_raw(Box::new(core)) as i64
+    register_core_compositor(core)
 }
 
 #[unsafe(no_mangle)]
@@ -12468,7 +12623,7 @@ pub unsafe extern "system" fn Java_org_archphene_bridge_NativeCompositor_nativeI
     d: i32,
     e: i32,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     let value = match command {
@@ -12611,7 +12766,7 @@ pub unsafe extern "system" fn Java_org_archphene_bridge_NativeCompositor_nativeB
     a: i32,
     b: i32,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     match command {
@@ -12671,11 +12826,11 @@ pub unsafe extern "system" fn Java_org_archphene_bridge_NativeCompositor_nativeB
     a: i32,
     bitmap: *mut std::ffi::c_void,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     match command {
-        1 => copy_last_frame_to_bitmap(core, environment, bitmap),
+        1 => copy_last_frame_to_bitmap(&core, environment, bitmap),
         2 => core
             .state
             .cursor_frame
@@ -12695,9 +12850,7 @@ pub unsafe extern "system" fn Java_org_archphene_bridge_NativeCompositor_nativeD
     _class: *mut std::ffi::c_void,
     handle: i64,
 ) {
-    if handle > 0 {
-        drop(unsafe { Box::from_raw(handle as *mut CompositorCore) });
-    }
+    drop(remove_core_compositor(handle));
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_nativeImeDeleteSurrounding(
@@ -12712,7 +12865,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     else {
         return -2;
     };
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.ime_delete_surrounding(before_length, after_length)).unwrap_or(i32::MAX)
@@ -12723,7 +12876,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.pending_frame_callback_count()).unwrap_or(i32::MAX)
@@ -12735,7 +12888,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.pending_damage_count()).unwrap_or(i32::MAX)
@@ -12751,7 +12904,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     let Ok(component) = u32::try_from(component) else {
         return 0;
     };
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     core.pending_damage_component(component)
@@ -12764,7 +12917,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     handle: i64,
     time: i32,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.present_frame(time as u32)).unwrap_or(i32::MAX)
@@ -12776,7 +12929,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.pointer_count()).unwrap_or(i32::MAX)
@@ -12790,7 +12943,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     fingers: i32,
     time: i32,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.swipe_begin(fingers.max(0) as u32, time as u32)).unwrap_or(i32::MAX)
@@ -12805,7 +12958,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     dy_milli: i32,
     time: i32,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.swipe_update(
@@ -12824,7 +12977,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     cancelled: bool,
     time: i32,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.swipe_end(cancelled, time as u32)).unwrap_or(i32::MAX)
@@ -12838,7 +12991,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     fingers: i32,
     time: i32,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.pinch_begin(fingers.max(0) as u32, time as u32)).unwrap_or(i32::MAX)
@@ -12855,7 +13008,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     rotation_milli: i32,
     time: i32,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.pinch_update(
@@ -12876,7 +13029,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     cancelled: bool,
     time: i32,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.pinch_end(cancelled, time as u32)).unwrap_or(i32::MAX)
@@ -12890,7 +13043,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     fingers: i32,
     time: i32,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.hold_begin(fingers.max(0) as u32, time as u32)).unwrap_or(i32::MAX)
@@ -12904,7 +13057,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     cancelled: bool,
     time: i32,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.hold_end(cancelled, time as u32)).unwrap_or(i32::MAX)
@@ -12916,7 +13069,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.gesture_event_count()).unwrap_or(i32::MAX)
@@ -12927,7 +13080,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     core.pointer_enter_serial() as i32
@@ -12938,7 +13091,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.cursor_width()).unwrap_or(i32::MAX)
@@ -12950,7 +13103,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.cursor_height()).unwrap_or(i32::MAX)
@@ -12963,7 +13116,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     handle: i64,
     component: i32,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     core.cursor_hotspot_component(component as u32)
@@ -12976,7 +13129,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     handle: i64,
     bitmap: *mut std::ffi::c_void,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     let Some(frame) = core.state.cursor_frame.as_ref() else {
@@ -12998,7 +13151,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.touch_count()).unwrap_or(i32::MAX)
@@ -13010,7 +13163,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.touch_event_count()).unwrap_or(i32::MAX)
@@ -13026,7 +13179,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     y: i32,
     time: i32,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.touch_down(id, f64::from(x), f64::from(y), time as u32)).unwrap_or(i32::MAX)
@@ -13042,7 +13195,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     y: i32,
     time: i32,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.touch_motion(id, f64::from(x), f64::from(y), time as u32))
@@ -13057,7 +13210,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     id: i32,
     time: i32,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.touch_up(id, time as u32)).unwrap_or(i32::MAX)
@@ -13069,7 +13222,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.touch_cancel()).unwrap_or(i32::MAX)
@@ -13080,7 +13233,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.keyboard_count()).unwrap_or(i32::MAX)
@@ -13092,7 +13245,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.keyboard_event_count()).unwrap_or(i32::MAX)
@@ -13107,7 +13260,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     pressed: u8,
     time: i32,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     let Ok(key) = u32::try_from(key) else {
@@ -13122,7 +13275,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.pointer_event_count()).unwrap_or(i32::MAX)
@@ -13137,7 +13290,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     y: i32,
     time: i32,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.pointer_motion(f64::from(x), f64::from(y), time as u32)).unwrap_or(i32::MAX)
@@ -13151,7 +13304,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     pressed: u8,
     time: i32,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.pointer_button(pressed != 0, time as u32)).unwrap_or(i32::MAX)
@@ -13166,7 +13319,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     vertical_milli: i32,
     time: i32,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.pointer_axis(
@@ -13183,7 +13336,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_mut() }) else {
+    let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.pointer_leave()).unwrap_or(i32::MAX)
@@ -13194,7 +13347,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.shm_bind_count()).unwrap_or(i32::MAX)
@@ -13205,7 +13358,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.shm_pool_count()).unwrap_or(i32::MAX)
@@ -13217,7 +13370,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.shm_buffer_count()).unwrap_or(i32::MAX)
@@ -13229,7 +13382,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.last_buffer_checksum()).unwrap_or(i32::MAX)
@@ -13241,7 +13394,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.surface_count()).unwrap_or(i32::MAX)
@@ -13253,7 +13406,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.surface_commit_count()).unwrap_or(i32::MAX)
@@ -13265,7 +13418,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.last_frame_width()).unwrap_or(i32::MAX)
@@ -13277,7 +13430,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.last_frame_height()).unwrap_or(i32::MAX)
@@ -13289,7 +13442,7 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
     i32::try_from(core.last_frame_checksum()).unwrap_or(i32::MAX)
@@ -13303,10 +13456,10 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     handle: i64,
     bitmap: *mut std::ffi::c_void,
 ) -> i32 {
-    let Some(core) = (unsafe { (handle as *mut CompositorCore).as_ref() }) else {
+    let Some(core) = core_compositor(handle) else {
         return -1;
     };
-    copy_last_frame_to_bitmap(core, environment, bitmap)
+    copy_last_frame_to_bitmap(&core, environment, bitmap)
 }
 
 #[unsafe(no_mangle)]
@@ -13315,15 +13468,92 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     _activity: *mut std::ffi::c_void,
     handle: i64,
 ) {
-    if !handle.is_positive() {
-        return;
-    }
-    drop(unsafe { Box::from_raw(handle as *mut CompositorCore) });
+    drop(remove_core_compositor(handle));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jni_handle_registry_is_bounded_and_rejects_stale_generations() {
+        let mut registry = JniHandleRegistry::<u32, 2>::new();
+        let first = registry.insert(11).expect("first handle");
+        let second = registry.insert(22).expect("second handle");
+        assert!(first > 0);
+        assert!(second > 0);
+        assert_eq!(registry.insert(33), None);
+        assert_eq!(registry.take(first), Some(11));
+        assert_eq!(registry.index(first), None);
+
+        let replacement = registry.insert(33).expect("reused slot");
+        assert_ne!(replacement, first);
+        assert_eq!(registry.index(first), None);
+        assert_eq!(
+            registry.slots[registry.index(replacement).expect("replacement index")].value,
+            Some(33)
+        );
+        assert_eq!(registry.take(second), Some(22));
+        assert_eq!(registry.take(second), None);
+        assert_eq!(registry.index(0), None);
+        assert_eq!(registry.index(-1), None);
+
+        let mut retired = JniHandleRegistry::<u32, 1>::new();
+        retired.slots[0].generation = JNI_HANDLE_GENERATION_MAX;
+        assert_eq!(retired.insert(44), None);
+    }
+
+    #[test]
+    fn compositor_jni_handle_rejects_use_after_destroy() {
+        let handle =
+            Java_org_archphene_compositorprobe_MainActivity_nativeCreateCore(
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+        assert!(handle > 0);
+        assert_eq!(
+            unsafe {
+                Java_org_archphene_compositorprobe_MainActivity_nativeCompositorBindCount(
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    handle,
+                )
+            },
+            0
+        );
+        unsafe {
+            Java_org_archphene_compositorprobe_MainActivity_nativeDestroyCore(
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                handle,
+            );
+        }
+        assert_eq!(
+            unsafe {
+                Java_org_archphene_compositorprobe_MainActivity_nativeCompositorBindCount(
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    handle,
+                )
+            },
+            -1
+        );
+
+        let replacement =
+            Java_org_archphene_compositorprobe_MainActivity_nativeCreateCore(
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+        assert!(replacement > 0);
+        assert_ne!(replacement, handle);
+        unsafe {
+            Java_org_archphene_compositorprobe_MainActivity_nativeDestroyCore(
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                replacement,
+            );
+        }
+    }
 
     #[test]
     fn runtime_execution_registry_is_bounded_and_reuses_slots() {
