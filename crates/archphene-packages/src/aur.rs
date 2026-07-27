@@ -95,6 +95,7 @@ pub struct AurReview {
     pub out_of_date: bool,
     pub licenses: Vec<String>,
     pub dependencies: Vec<String>,
+    pub required_packages: Vec<String>,
     pub make_dependencies: Vec<String>,
     pub check_dependencies: Vec<String>,
     pub sources: Vec<AurSource>,
@@ -506,6 +507,8 @@ struct SrcInfo {
     architectures: Vec<String>,
     licenses: Vec<String>,
     dependencies: Vec<String>,
+    package_dependencies: BTreeMap<String, Vec<String>>,
+    package_provides: BTreeMap<String, Vec<String>>,
     make_dependencies: Vec<String>,
     check_dependencies: Vec<String>,
     sources: Vec<String>,
@@ -550,6 +553,8 @@ pub fn review_aur_package(
     {
         return Err(AurReviewError::UnsupportedArchitecture);
     }
+    let required_packages = required_split_packages(&srcinfo, requested_package)?;
+    let dependencies = required_runtime_dependencies(&srcinfo, &required_packages)?;
 
     let mut sources = Vec::with_capacity(
         srcinfo
@@ -607,7 +612,8 @@ pub fn review_aur_package(
         last_modified: rpc.last_modified,
         out_of_date: rpc.out_of_date.is_some(),
         licenses: srcinfo.licenses,
-        dependencies: srcinfo.dependencies,
+        dependencies,
+        required_packages,
         make_dependencies: srcinfo.make_dependencies,
         check_dependencies: srcinfo.check_dependencies,
         sources,
@@ -633,7 +639,7 @@ impl AurReview {
             destination,
             position: 0,
         };
-        writer.bytes(b"ARVW0003")?;
+        writer.bytes(b"ARVW0004")?;
         writer.bytes(&self.review_sha256)?;
         writer.bytes(&self.snapshot_sha256.unwrap_or([0; 32]))?;
         writer.u64(self.last_modified)?;
@@ -647,6 +653,7 @@ impl AurReview {
         for count in [
             self.licenses.len(),
             self.dependencies.len(),
+            self.required_packages.len(),
             self.make_dependencies.len(),
             self.check_dependencies.len(),
             self.sources.len(),
@@ -670,6 +677,9 @@ impl AurReview {
             writer.string(value)?;
         }
         for value in &self.dependencies {
+            writer.string(value)?;
+        }
+        for value in &self.required_packages {
             writer.string(value)?;
         }
         for value in &self.make_dependencies {
@@ -969,6 +979,7 @@ fn parse_srcinfo(
     let mut info = SrcInfo::default();
     let mut current_package: Option<&str> = None;
     let depends_architecture = format!("depends_{architecture}");
+    let provides_architecture = format!("provides_{architecture}");
     let make_dependencies_architecture = format!("makedepends_{architecture}");
     let check_dependencies_architecture = format!("checkdepends_{architecture}");
     let sources_architecture = format!("source_{architecture}");
@@ -996,9 +1007,38 @@ fn parse_srcinfo(
         if key == "pkgname" {
             validate_package_name(value)?;
             current_package = Some(value);
+            if info.package_dependencies.len() >= MAX_AUR_DEPENDENCIES
+                && !info.package_dependencies.contains_key(value)
+            {
+                return Err(AurReviewError::Limit("split packages"));
+            }
+            info.package_dependencies
+                .entry(value.to_owned())
+                .or_default();
+            info.package_provides.entry(value.to_owned()).or_default();
             if value == requested_package {
                 info.package_seen = true;
             }
+            continue;
+        }
+        if key == "depends" || key == depends_architecture {
+            let dependencies = if let Some(package) = current_package {
+                info.package_dependencies
+                    .get_mut(package)
+                    .ok_or(AurReviewError::InvalidSrcInfo)?
+            } else {
+                &mut info.dependencies
+            };
+            push_limited(dependencies, value, MAX_AUR_DEPENDENCIES, "dependencies")?;
+            continue;
+        }
+        if key == "provides" || key == provides_architecture {
+            let package = current_package.ok_or(AurReviewError::InvalidSrcInfo)?;
+            let provides = info
+                .package_provides
+                .get_mut(package)
+                .ok_or(AurReviewError::InvalidSrcInfo)?;
+            push_limited(provides, value, MAX_AUR_DEPENDENCIES, "provides")?;
             continue;
         }
         let applies = current_package.is_none() || current_package == Some(requested_package);
@@ -1014,12 +1054,6 @@ fn parse_srcinfo(
             "epoch" if current_package.is_none() => set_once(&mut info.epoch, value)?,
             "arch" => push_limited(&mut info.architectures, value, 16, "architectures")?,
             "license" => push_limited(&mut info.licenses, value, 32, "licenses")?,
-            "depends" => push_limited(
-                &mut info.dependencies,
-                value,
-                MAX_AUR_DEPENDENCIES,
-                "dependencies",
-            )?,
             "makedepends" => push_limited(
                 &mut info.make_dependencies,
                 value,
@@ -1047,12 +1081,6 @@ fn parse_srcinfo(
             )?,
             "validpgpkeys" => push_limited(&mut info.valid_pgp_keys, value, 32, "PGP keys")?,
             "install" => set_once(&mut info.install_script, value)?,
-            _ if key == depends_architecture => push_limited(
-                &mut info.dependencies,
-                value,
-                MAX_AUR_DEPENDENCIES,
-                "dependencies",
-            )?,
             _ if key == make_dependencies_architecture => push_limited(
                 &mut info.make_dependencies,
                 value,
@@ -1352,6 +1380,114 @@ fn srcinfo_version(info: &SrcInfo) -> Result<String, AurReviewError> {
     Ok(version)
 }
 
+fn required_split_packages(
+    info: &SrcInfo,
+    requested_package: &str,
+) -> Result<Vec<String>, AurReviewError> {
+    if !info.package_dependencies.contains_key(requested_package) {
+        return Err(AurReviewError::InvalidSrcInfo);
+    }
+    let mut required = std::collections::BTreeSet::new();
+    let mut pending = vec![requested_package];
+    while let Some(package) = pending.pop() {
+        if !required.insert(package.to_owned()) {
+            continue;
+        }
+        if required.len() > MAX_AUR_DEPENDENCIES {
+            return Err(AurReviewError::Limit("required split packages"));
+        }
+        let dependencies = info
+            .package_dependencies
+            .get(package)
+            .ok_or(AurReviewError::InvalidSrcInfo)?;
+        for dependency in dependencies {
+            let name = dependency_name(dependency)?;
+            if let Some(provider) = split_provider(info, name)?
+                && !required.contains(provider)
+            {
+                pending.push(provider);
+            }
+        }
+    }
+    Ok(required.into_iter().collect())
+}
+
+fn required_runtime_dependencies(
+    info: &SrcInfo,
+    required_packages: &[String],
+) -> Result<Vec<String>, AurReviewError> {
+    let mut dependencies = Vec::new();
+    for dependency in &info.dependencies {
+        if !dependency_is_internal(info, required_packages, dependency)? {
+            push_limited(
+                &mut dependencies,
+                dependency,
+                MAX_AUR_DEPENDENCIES,
+                "dependencies",
+            )?;
+        }
+    }
+    for package in required_packages {
+        for dependency in info
+            .package_dependencies
+            .get(package)
+            .ok_or(AurReviewError::InvalidSrcInfo)?
+        {
+            if !dependency_is_internal(info, required_packages, dependency)? {
+                push_limited(
+                    &mut dependencies,
+                    dependency,
+                    MAX_AUR_DEPENDENCIES,
+                    "dependencies",
+                )?;
+            }
+        }
+    }
+    Ok(dependencies)
+}
+
+fn dependency_is_internal(
+    info: &SrcInfo,
+    required_packages: &[String],
+    dependency: &str,
+) -> Result<bool, AurReviewError> {
+    let name = dependency_name(dependency)?;
+    Ok(split_provider(info, name)?
+        .is_some_and(|provider| required_packages.iter().any(|package| package == provider)))
+}
+
+fn split_provider<'a>(
+    info: &'a SrcInfo,
+    dependency: &str,
+) -> Result<Option<&'a str>, AurReviewError> {
+    let mut provider = info
+        .package_dependencies
+        .get_key_value(dependency)
+        .map(|(package, _)| package.as_str());
+    for (package, declarations) in &info.package_provides {
+        for declaration in declarations {
+            if dependency_name(declaration)? != dependency {
+                continue;
+            }
+            if provider.is_some_and(|existing| existing != package) {
+                return Err(AurReviewError::InvalidSrcInfo);
+            }
+            provider = Some(package.as_str());
+        }
+    }
+    Ok(provider)
+}
+
+fn dependency_name(value: &str) -> Result<&str, AurReviewError> {
+    let end = value
+        .bytes()
+        .position(|byte| matches!(byte, b'<' | b'=' | b'>'))
+        .unwrap_or(value.len());
+    let name = &value[..end];
+    validate_package_name(name)?;
+    Ok(name)
+}
+
 fn checked_text<'a>(
     bytes: &'a [u8],
     limit: usize,
@@ -1525,9 +1661,10 @@ package() {
 
 pkgname = dotnet-runtime-bin
 	depends = runtime-only-dependency
+	provides = dotnet-runtime
 
 pkgname = dotnet-sdk-bin
-	depends = dotnet-runtime-bin
+	depends = dotnet-runtime>=10.0
 "#;
 
     const SPLIT_PKGBUILD: &[u8] = br#"package_dotnet-runtime-bin() {
@@ -1685,7 +1822,11 @@ package_dotnet-sdk-bin() {
             review.snapshot_path,
             "/cgit/aur.git/snapshot/dotnet-core-bin.tar.gz"
         );
-        assert_eq!(review.dependencies, vec!["dotnet-runtime-bin"]);
+        assert_eq!(review.dependencies, vec!["runtime-only-dependency"]);
+        assert_eq!(
+            review.required_packages,
+            vec!["dotnet-runtime-bin", "dotnet-sdk-bin"]
+        );
         assert_eq!(review.sources.len(), 1);
         assert_eq!(review.sources[0].architecture.as_deref(), Some("aarch64"));
         assert!(matches!(
@@ -1727,7 +1868,7 @@ package_dotnet-sdk-bin() {
         let mut wire = vec![0_u8; MAX_AUR_REVIEW_BYTES];
         let wire_length = review.write_wire(&mut wire).expect("review wire");
         assert!(wire_length < wire.len());
-        assert_eq!(&wire[..8], b"ARVW0003");
+        assert_eq!(&wire[..8], b"ARVW0004");
         assert!(
             wire[..wire_length]
                 .windows(PKGBUILD.len())

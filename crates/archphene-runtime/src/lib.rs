@@ -1056,6 +1056,13 @@ impl RuntimeHost {
             .chain(review.check_dependencies.iter())
         {
             let name = aur_dependency_name(dependency)?;
+            if review
+                .required_packages
+                .iter()
+                .any(|package| package == name)
+            {
+                continue;
+            }
             targets.insert(name.to_owned());
             if targets.len() > 256 {
                 return Err(PackageRuntimeError::OutputLimit);
@@ -1113,12 +1120,38 @@ impl RuntimeHost {
         let mut dependencies = Vec::with_capacity(review.dependencies.len());
         for dependency in &review.dependencies {
             let name = aur_dependency_name(dependency)?;
+            if review
+                .required_packages
+                .iter()
+                .any(|package| package == name)
+            {
+                continue;
+            }
             if dependencies.iter().any(|existing| existing == name) {
                 continue;
             }
             dependencies.push(name.to_owned());
         }
         Ok(dependencies)
+    }
+
+    pub fn verified_aur_required_packages(
+        &self,
+        package_name: &str,
+        version: &str,
+    ) -> Result<Vec<String>, PackageRuntimeError> {
+        if self.aur_build_closure.is_none() {
+            return Err(PackageRuntimeError::InvalidPayload);
+        }
+        let review = self
+            .aur_review
+            .as_ref()
+            .filter(|review| review.package_name == package_name && review.version == version)
+            .ok_or(PackageRuntimeError::InvalidPayload)?;
+        if review.required_packages.is_empty() || review.required_packages.len() > 256 {
+            return Err(PackageRuntimeError::InvalidPayload);
+        }
+        Ok(review.required_packages.clone())
     }
 
     pub fn open_verified_aur_build_package(

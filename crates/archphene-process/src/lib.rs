@@ -1235,11 +1235,13 @@ fn resolve_installed_command(root: &Path, command: &str) -> Result<PathBuf, Proc
         if metadata.file_type().is_symlink() {
             let target = fs::read_link(&path)?;
             let candidate = if target.is_absolute() {
-                root.join(
-                    target
-                        .strip_prefix("/")
-                        .map_err(|_| ProcessError::UnsafeCommand(path.clone()))?,
-                )
+                physical_target_under_root(root, &target)?.unwrap_or_else(|| {
+                    root.join(
+                        target
+                            .strip_prefix("/")
+                            .expect("absolute paths always have a root prefix"),
+                    )
+                })
             } else {
                 path.parent()
                     .ok_or_else(|| ProcessError::UnsafeCommand(path.clone()))?
@@ -1254,6 +1256,29 @@ fn resolve_installed_command(root: &Path, command: &str) -> Result<PathBuf, Proc
         return Ok(path);
     }
     Err(ProcessError::UnsafeCommand(path))
+}
+
+fn physical_target_under_root(root: &Path, target: &Path) -> Result<Option<PathBuf>, ProcessError> {
+    let root_metadata = fs::metadata(root)?;
+    let mut ancestor = Some(target);
+    while let Some(path) = ancestor {
+        match fs::metadata(path) {
+            Ok(metadata)
+                if metadata.dev() == root_metadata.dev()
+                    && metadata.ino() == root_metadata.ino() =>
+            {
+                let relative = target
+                    .strip_prefix(path)
+                    .map_err(|_| ProcessError::UnsafeCommand(target.to_path_buf()))?;
+                return Ok(Some(root.join(relative)));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(ProcessError::Io(error)),
+        }
+        ancestor = path.parent();
+    }
+    Ok(None)
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -1382,6 +1407,14 @@ impl Drop for TemporaryOutput {
 }
 
 fn terminate_process_group(child: &mut std::process::Child) {
+    let descendants = system::descendant_processes(child.id()).unwrap_or_default();
+    // Interactive shells legitimately put foreground jobs in their own
+    // process groups. Capture and terminate the bounded descendant tree before
+    // reaping the shell leader so those jobs cannot become Android PID 1
+    // orphans when the user closes the shared session.
+    for process in descendants.into_iter().rev() {
+        let _ = system::signal_process_if_same(process, 9);
+    }
     if system::kill_process_group(child.id()).is_err() {
         let _ = child.kill();
     }
@@ -1398,7 +1431,7 @@ fn exit_code(status: std::process::ExitStatus) -> i32 {
 mod system {
     use super::PtyWaitEvent;
     use std::ffi::CStr;
-    use std::fs::{File, OpenOptions};
+    use std::fs::{self, File, OpenOptions};
     use std::io;
     use std::os::fd::AsRawFd;
     use std::os::raw::{c_char, c_int, c_ulong};
@@ -1417,6 +1450,15 @@ mod system {
     const POLLERR: i16 = 0x0008;
     const POLLHUP: i16 = 0x0010;
     const POLLNVAL: i16 = 0x0020;
+    const MAX_PROCESSES_SCANNED: usize = 8192;
+    const MAX_DESCENDANT_PROCESSES: usize = 512;
+    const MAX_PROCESS_STAT_BYTES: u64 = 4096;
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub struct ProcessIdentity {
+        pub(super) process: u32,
+        pub(super) start_time: u64,
+    }
 
     #[repr(C)]
     struct PollDescriptor {
@@ -1445,6 +1487,42 @@ mod system {
 
     pub fn kill_process_group(group: u32) -> io::Result<()> {
         signal_process_group(group, 9)
+    }
+
+    pub fn signal_process(process: u32, signal: i32) -> io::Result<()> {
+        let process = i32::try_from(process)
+            .ok()
+            .filter(|process| *process > 0)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+        if !(1..=64).contains(&signal) {
+            return Err(io::Error::from(io::ErrorKind::InvalidInput));
+        }
+        // SAFETY: `process` is a positive PID discovered below the exact child
+        // tree, and a valid signal has no pointer or lifetime requirements.
+        if unsafe { kill(process, signal) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    pub fn signal_process_if_same(process: ProcessIdentity, signal: i32) -> io::Result<()> {
+        let stat = match read_process_stat(process.process) {
+            Ok(stat) => stat,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        if process_fields(&stat).map(|(_, start_time)| start_time) != Some(process.start_time) {
+            return Ok(());
+        }
+        signal_process(process.process, signal)
     }
 
     pub fn signal_process_group(group: u32, signal: i32) -> io::Result<()> {
@@ -1481,6 +1559,134 @@ mod system {
             Some(1) => Ok(true),
             _ => Err(error),
         }
+    }
+
+    #[cfg(test)]
+    pub fn process_exists(process: u32) -> io::Result<bool> {
+        let process = i32::try_from(process)
+            .ok()
+            .filter(|process| *process > 0)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+        // SAFETY: signal zero only checks the exact positive PID.
+        if unsafe { kill(process, 0) } == 0 {
+            let stat = fs::read_to_string(format!("/proc/{process}/stat"))?;
+            return Ok(process_state(&stat) != Some("Z"));
+        }
+        let error = io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(3) => Ok(false),
+            Some(1) => Ok(true),
+            _ => Err(error),
+        }
+    }
+
+    pub fn descendant_processes(root: u32) -> io::Result<Vec<ProcessIdentity>> {
+        if root == 0 {
+            return Err(io::Error::from(io::ErrorKind::InvalidInput));
+        }
+        let mut relationships = Vec::with_capacity(256);
+        let mut scanned = 0_usize;
+        for entry in fs::read_dir("/proc")? {
+            scanned = scanned
+                .checked_add(1)
+                .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+            if scanned > MAX_PROCESSES_SCANNED {
+                return Err(io::Error::from(io::ErrorKind::InvalidData));
+            }
+            let entry = entry?;
+            let Some(process) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<u32>().ok())
+                .filter(|process| *process > 0)
+            else {
+                continue;
+            };
+            let stat = match read_process_stat(process) {
+                Ok(stat) => stat,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+                    ) =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let Some((parent, start_time)) = process_fields(&stat) else {
+                continue;
+            };
+            relationships.push((
+                ProcessIdentity {
+                    process,
+                    start_time,
+                },
+                parent,
+            ));
+        }
+
+        let mut tree = Vec::with_capacity(32);
+        tree.push(root);
+        let mut cursor = 0_usize;
+        while cursor < tree.len() {
+            let parent = tree[cursor];
+            for (process, candidate_parent) in &relationships {
+                if *candidate_parent == parent && !tree.contains(&process.process) {
+                    if tree.len() > MAX_DESCENDANT_PROCESSES {
+                        return Err(io::Error::from(io::ErrorKind::InvalidData));
+                    }
+                    tree.push(process.process);
+                }
+            }
+            cursor += 1;
+        }
+        tree.remove(0);
+        let descendants = tree
+            .into_iter()
+            .filter_map(|process| {
+                relationships
+                    .iter()
+                    .find_map(|(identity, _)| (identity.process == process).then_some(*identity))
+            })
+            .collect();
+        Ok(descendants)
+    }
+
+    #[cfg(test)]
+    pub(super) fn process_parent(stat: &str) -> Option<u32> {
+        process_fields(stat).map(|(parent, _)| parent)
+    }
+
+    fn process_fields(stat: &str) -> Option<(u32, u64)> {
+        let (_, fields) = stat.rsplit_once(") ")?;
+        let mut fields = fields.split_ascii_whitespace();
+        let state = fields.next()?;
+        if state.len() != 1 {
+            return None;
+        }
+        let parent = fields.next()?.parse::<u32>().ok()?;
+        let start_time = fields.nth(17)?.parse::<u64>().ok()?;
+        Some((parent, start_time))
+    }
+
+    fn read_process_stat(process: u32) -> io::Result<String> {
+        let stat_path = format!("/proc/{process}/stat");
+        let metadata = fs::symlink_metadata(&stat_path)?;
+        if !metadata.is_file() || metadata.len() > MAX_PROCESS_STAT_BYTES {
+            return Err(io::Error::from(io::ErrorKind::InvalidData));
+        }
+        let stat = fs::read_to_string(stat_path)?;
+        if stat.is_empty() || stat.len() as u64 > MAX_PROCESS_STAT_BYTES {
+            return Err(io::Error::from(io::ErrorKind::InvalidData));
+        }
+        Ok(stat)
+    }
+
+    #[cfg(test)]
+    fn process_state(stat: &str) -> Option<&str> {
+        let (_, fields) = stat.rsplit_once(") ")?;
+        fields.split_ascii_whitespace().next()
     }
 
     pub fn open_pty(rows: u16, columns: u16) -> io::Result<(File, File)> {
@@ -1674,6 +1880,15 @@ mod tests {
         );
         assert_eq!(
             resolve_installed_command(&root.0, "absolute").expect("absolute resolution"),
+            root.0.join("usr/bin/real-command")
+        );
+        symlink(
+            root.0.join("usr/bin/real-command"),
+            root.0.join("usr/bin/physical"),
+        )
+        .expect("physical root link");
+        assert_eq!(
+            resolve_installed_command(&root.0, "physical").expect("physical resolution"),
             root.0.join("usr/bin/real-command")
         );
     }
@@ -2026,6 +2241,70 @@ mod tests {
         assert_eq!(process.exit_status().expect("final status"), Some(7));
         assert!(marker.exists(), "GUI session did not retain its descendant");
         let _ = fs::remove_file(marker);
+    }
+
+    #[test]
+    fn process_tree_shutdown_reaps_a_descendant_in_another_session() {
+        let process_file = std::env::temp_dir().join(format!(
+            "archphene-detached-descendant-{}-{}",
+            std::process::id(),
+            OUTPUT_ID.fetch_add(1, Ordering::Relaxed),
+        ));
+        let command = format!(
+            "/usr/bin/setsid /bin/sleep 30 & echo $! > '{}'; wait",
+            process_file.display(),
+        );
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(command)
+            .process_group(0)
+            .spawn()
+            .expect("process-tree leader");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !process_file.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let detached = fs::read_to_string(&process_file)
+            .expect("detached process pid")
+            .trim()
+            .parse::<u32>()
+            .expect("numeric detached process pid");
+        assert!(
+            system::process_exists(detached).expect("detached process status"),
+            "detached process did not start",
+        );
+        let descendants =
+            system::descendant_processes(child.id()).expect("bounded descendant scan");
+        assert!(
+            descendants
+                .iter()
+                .any(|process| process.process == detached),
+            "detached process was absent from {descendants:?}",
+        );
+
+        terminate_process_group(&mut child);
+        let _ = child.wait();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while system::process_exists(detached).unwrap_or(false) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let remained = system::process_exists(detached).unwrap_or(false);
+        if remained {
+            let _ = system::signal_process(detached, 9);
+        }
+        let _ = fs::remove_file(process_file);
+        assert!(!remained, "detached process survived tree shutdown");
+    }
+
+    #[test]
+    fn proc_stat_parent_parsing_handles_spaces_and_parentheses() {
+        assert_eq!(
+            system::process_parent(
+                "123 (name with ) paren) S 42 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18\n",
+            ),
+            Some(42),
+        );
+        assert_eq!(system::process_parent("malformed"), None);
     }
 
     #[test]

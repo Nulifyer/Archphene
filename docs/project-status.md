@@ -1108,9 +1108,10 @@ algorithm; Rust uses algorithm-qualified cache names and rehashes each source,
 while Kotlin derives a separate SHA-256 input digest for the Builder manifest.
 On the physical Samsung, current `dotnet-sdk-bin` `10.0.10.sdk302-1` reviewed
 from package base `dotnet-core-bin`, displayed both exact SHA-512 declarations,
-and verified the 225 MiB ARM64 SDK source. Build-environment resolution then
-exposed the next bounded gap: its four required sibling outputs must be built
-and installed together instead of queried from the official repositories.
+and verified the 225 MiB ARM64 SDK source. The completed split-package model
+now resolves package-base siblings and sibling providers recursively, excludes
+them from the official build closure, and carries the exact required-output set
+through the versioned review boundary.
 
 The next AUR boundary now resolves each architecture-selected declaration as a
 snapshot-local source, supported direct-HTTPS source, or unsupported transport.
@@ -1307,7 +1308,20 @@ entries, inspect full-device review/manage views, exercise skip,
 partial/re-enable paths through real generated wrappers, and restore the exact
 original package sets. Recursive AUR dependencies, the
 install-script/scriptlet policy, verified-output retention across manager
-process death, and actual Electron/Code launch remain open.
+process death, and cross-package-base AUR dependency builds remain open.
+
+Split-package build and installation now close the boundary exposed by .NET.
+The Builder returns every required archive instead of only the selected output;
+the manager independently reopens and verifies each archive, stages the set
+content-addressed, and gives pacman one atomic local-package transaction.
+Samsung built and installed all six current `dotnet-core-bin` outputs with
+`dotnet-sdk-bin` explicit and its five siblings recorded as dependencies.
+The selected SDK archive SHA-256 is
+`38b29e8c763c33bd649c3f05fbfb6b08275b1911efafea396455b045755abcb7`;
+the host archive SHA-256 is
+`4d7a6efe0637a261842fc2c792914ccad314ecc48ac0c505b3ac127c259dc79b`.
+Same-version installation is a real verification/reinstallation transaction,
+not a silent `--needed` no-op.
 
 Current AArch64 Code now reaches and retains its Ozone/Wayland workbench without
 a package patch. The generic bridge passes Chromium's kernel `/proc`
@@ -1447,8 +1461,19 @@ runs from the project directory so ASP.NET receives the normal content root.
 The same x86_64 project is available inside Code's integrated terminal:
 `dotnet --info`, `dotnet new mvc`, restore, build, and run complete through the
 generic runtime, and the browser reaches the running service. C# language
-service installation, debugging, breakpoints, and physical AArch64 .NET
-availability remain open.
+service installation, debugging, and breakpoints remain open.
+
+Physical AArch64 now passes the corresponding generic package and runtime
+boundary. On Samsung, the six-output AUR transaction installs SDK 10.0.302 and
+runtime 10.0.10 into the shared root. Manager commands complete `dotnet --info`,
+`dotnet new mvc`, restore, and build; the shared terminal starts Kestrel and the
+Android browser renders the generated site at `127.0.0.1:5000`. Full-device
+screenshots cover the build, terminal server, and browser rather than cropping
+the Linux surface. Stopping the shell also reaps Kestrel after a host regression
+proved descendants that create another process group are collected before the
+leader is terminated. Generic logical absolute package symlinks are preserved
+across both fake-chroot builds and root-identity installs; exact-root legacy
+physical links remain readable without accepting arbitrary Android paths.
 
 The same current-source arm64 manager preserves the Samsung shared root at 35
 installed packages and three current Foot launchers. Cached startup completes

@@ -94,7 +94,7 @@ mod android {
     use archphene_packages::{
         MAX_MANIFEST_BYTES, MAX_PACKAGE_RESOLUTION_BYTES, MAX_TOOL_OUTPUT_BYTES,
         MAX_VERIFIED_PACKAGE_CLOSURE_BYTES, PackageResolution, PackageRuntimeError, Repository,
-        RepositoryArchitecture, ToolOutput, VerifiedPackageClosure,
+        RepositoryArchitecture, ToolOutput, VerifiedAurArchive, VerifiedPackageClosure,
         aur::{
             MAX_AUR_REVIEW_BYTES, MAX_AUR_RPC_BYTES, MAX_AUR_SNAPSHOT_BYTES, MAX_AUR_SOURCE_BYTES,
             aur_snapshot_path, review_aur_snapshot,
@@ -107,7 +107,7 @@ mod android {
     };
     use archphene_storage::{OpenMode, StorageError};
     use jni::JNIEnv;
-    use jni::objects::{JByteBuffer, JClass, JString};
+    use jni::objects::{JByteBuffer, JClass, JIntArray, JString};
     use jni::sys::{JNI_FALSE, JNI_TRUE, jboolean, jint, jlong};
 
     use super::RuntimeRegistry;
@@ -128,6 +128,8 @@ mod android {
     const MAX_STORAGE_REQUEST_BYTES: usize = 4 * 1024;
     const BUILT_PACKAGE_REPORT_BYTES: usize = 64;
     const BUILT_PACKAGE_REPORT_MAGIC: &[u8; 8] = b"ABMV0001";
+    const AUR_INSTALL_FILENAME_MAGIC: &[u8; 8] = b"AIFN0001";
+    const MAX_AUR_INSTALL_FILENAME_BYTES: usize = 64 * 1024;
     const PTY_EVENT_READABLE: jint = 1;
     const PTY_EVENT_WRITABLE: jint = 1 << 1;
     const PTY_EVENT_HANGUP: jint = 1 << 2;
@@ -157,6 +159,51 @@ mod android {
             digest[index] = (high << 4) | low;
         }
         Ok(digest)
+    }
+
+    fn parse_aur_install_filenames(bytes: &[u8]) -> Result<Vec<String>, jint> {
+        if bytes.len() < 12
+            || bytes.len() > MAX_AUR_INSTALL_FILENAME_BYTES
+            || &bytes[..8] != AUR_INSTALL_FILENAME_MAGIC
+        {
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+        let count = u32::from_le_bytes(
+            bytes[8..12]
+                .try_into()
+                .map_err(|_| ERROR_INVALID_ARGUMENT)?,
+        ) as usize;
+        if count == 0 || count > 256 {
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+        let mut offset = 12_usize;
+        let mut filenames = Vec::with_capacity(count);
+        for _ in 0..count {
+            let end = offset.checked_add(4).ok_or(ERROR_INVALID_ARGUMENT)?;
+            let length = u32::from_le_bytes(
+                bytes
+                    .get(offset..end)
+                    .ok_or(ERROR_INVALID_ARGUMENT)?
+                    .try_into()
+                    .map_err(|_| ERROR_INVALID_ARGUMENT)?,
+            ) as usize;
+            offset = end;
+            if length == 0 || length > 240 {
+                return Err(ERROR_INVALID_ARGUMENT);
+            }
+            let end = offset.checked_add(length).ok_or(ERROR_INVALID_ARGUMENT)?;
+            let filename = str::from_utf8(bytes.get(offset..end).ok_or(ERROR_INVALID_ARGUMENT)?)
+                .map_err(|_| ERROR_INVALID_ARGUMENT)?;
+            if filename.bytes().any(|byte| !(0x21..=0x7e).contains(&byte)) {
+                return Err(ERROR_INVALID_ARGUMENT);
+            }
+            filenames.push(filename.to_owned());
+            offset = end;
+        }
+        if offset != bytes.len() {
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+        Ok(filenames)
     }
 
     const fn hex_value(value: u8) -> Option<u8> {
@@ -1563,6 +1610,168 @@ mod android {
                 report.archive_bytes,
                 report.sha256,
             ),
+            output,
+        )
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeInstallAurBuiltPackages(
+        mut environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        descriptors: JIntArray,
+        filename_manifest: JByteBuffer,
+        filename_manifest_length: jint,
+        package_base: JString,
+        package_name: JString,
+        version: JString,
+        architecture: JString,
+        closure_sha256: JString,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let (Ok(handle), Ok(filename_manifest_length)) = (
+            u64::try_from(handle),
+            usize::try_from(filename_manifest_length),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let (Ok(package_base), Ok(package_name), Ok(version), Ok(architecture), Ok(closure_sha256)) = (
+            java_string(&mut environment, &package_base),
+            java_string(&mut environment, &package_name),
+            java_string(&mut environment, &version),
+            java_string(&mut environment, &architecture),
+            java_string(&mut environment, &closure_sha256),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(closure_sha256) = parse_sha256(&closure_sha256) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let (Ok(manifest_capacity), Ok(manifest_address)) = (
+            environment.get_direct_buffer_capacity(&filename_manifest),
+            environment.get_direct_buffer_address(&filename_manifest),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if filename_manifest_length > manifest_capacity
+            || filename_manifest_length > MAX_AUR_INSTALL_FILENAME_BYTES
+            || manifest_address.is_null()
+        {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        // SAFETY: JNI verified the direct manifest buffer and bounded length.
+        let manifest = unsafe { slice::from_raw_parts(manifest_address, filename_manifest_length) };
+        let Ok(filenames) = parse_aur_install_filenames(manifest) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(descriptor_count) = environment.get_array_length(&descriptors) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(descriptor_count) = usize::try_from(descriptor_count) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if descriptor_count != filenames.len() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let mut descriptor_values = vec![0_i32; descriptor_count];
+        if environment
+            .get_int_array_region(&descriptors, 0, &mut descriptor_values)
+            .is_err()
+            || descriptor_values.iter().any(|descriptor| *descriptor < 0)
+        {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let (Ok(output_capacity), Ok(output_address)) = (
+            environment.get_direct_buffer_capacity(&output_buffer),
+            environment.get_direct_buffer_address(&output_buffer),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if output_capacity < MAX_TOOL_OUTPUT_BYTES || output_address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        // SAFETY: JNI verified the direct output-buffer capacity.
+        let output = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
+        output.fill(0);
+        let (closure, dependencies, required_packages, package_runtime) = {
+            let Ok(mut registry) = registry().lock() else {
+                return ERROR_INTERNAL;
+            };
+            let Some(runtime) = registry.runtime_mut(handle) else {
+                return ERROR_INVALID_HANDLE;
+            };
+            let closure = match runtime.verified_aur_build_closure() {
+                Ok(closure) => closure,
+                Err(error) => return copy_package_error(&error, output),
+            };
+            let dependencies =
+                match runtime.verified_aur_runtime_dependencies(&package_name, &version) {
+                    Ok(dependencies) => dependencies,
+                    Err(error) => return copy_package_error(&error, output),
+                };
+            let required_packages =
+                match runtime.verified_aur_required_packages(&package_name, &version) {
+                    Ok(packages) => packages,
+                    Err(error) => return copy_package_error(&error, output),
+                };
+            let Some(package_runtime) = runtime.package_runtime().cloned() else {
+                return ERROR_INVALID_STATE;
+            };
+            (closure, dependencies, required_packages, package_runtime)
+        };
+        if required_packages.len() != filenames.len() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let mut verified = Vec::with_capacity(required_packages.len());
+        for (((descriptor, filename), required_package), index) in descriptor_values
+            .iter()
+            .zip(&filenames)
+            .zip(&required_packages)
+            .zip(0_usize..)
+        {
+            if index >= 256 {
+                return ERROR_INVALID_ARGUMENT;
+            }
+            // SAFETY: Each descriptor is borrowed only for dup. Kotlin retains
+            // all original ParcelFileDescriptors for this complete call.
+            let borrowed = unsafe { BorrowedFd::borrow_raw(*descriptor) };
+            let Ok(owned) = rustix::io::dup(borrowed) else {
+                return ERROR_INVALID_ARGUMENT;
+            };
+            let mut archive = File::from(owned);
+            let report = match archphene_builder::verify_copied_built_package(
+                &mut archive,
+                filename,
+                &package_base,
+                required_package,
+                &version,
+                &architecture,
+                closure.as_bytes(),
+                closure_sha256,
+            ) {
+                Ok(report) => report,
+                Err(error) => return copy_package_error(&error, output),
+            };
+            verified.push((archive, report));
+        }
+        let dependency_names: Vec<&str> = dependencies.iter().map(String::as_str).collect();
+        if let Err(error) = package_runtime.install_dependencies(&dependency_names) {
+            return copy_package_error(&error, output);
+        }
+        let mut install_inputs: Vec<VerifiedAurArchive<'_>> = verified
+            .iter_mut()
+            .zip(&required_packages)
+            .map(|((archive, report), package)| VerifiedAurArchive {
+                source: archive,
+                filename: &report.filename,
+                package,
+                version: &version,
+                expected_bytes: report.archive_bytes,
+                expected_sha256: report.sha256,
+            })
+            .collect();
+        copy_tool_result(
+            package_runtime.install_verified_aur_archives(&mut install_inputs, &package_name),
             output,
         )
     }

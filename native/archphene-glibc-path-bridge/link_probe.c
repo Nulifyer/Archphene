@@ -33,6 +33,25 @@ int main(void) {
         close(directory);
         return 1;
     }
+    if (symlinkat("/usr/share/archphene/tool", directory, "absolute-link")
+            != 0) {
+        perror("absolute symlinkat");
+        close(directory);
+        return 1;
+    }
+    length = readlinkat(
+            directory, "absolute-link", target, sizeof(target) - 1);
+    if (length != (ssize_t)strlen("/usr/share/archphene/tool")) {
+        perror("read absolute symlinkat");
+        close(directory);
+        return 1;
+    }
+    target[length] = '\0';
+    if (strcmp(target, "/usr/share/archphene/tool") != 0) {
+        fputs("absolute symlink target escaped the Linux namespace\n", stderr);
+        close(directory);
+        return 1;
+    }
     int nested = openat(directory, "nested",
             O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (nested < 0

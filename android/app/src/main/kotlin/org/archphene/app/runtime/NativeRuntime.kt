@@ -221,6 +221,18 @@ internal object NativeRuntime {
         closureSha256: String,
         outputBuffer: ByteBuffer,
     ): Int
+    external fun nativeInstallAurBuiltPackages(
+        handle: Long,
+        descriptors: IntArray,
+        filenameManifest: ByteBuffer,
+        filenameManifestLength: Int,
+        packageBase: String,
+        packageName: String,
+        version: String,
+        architecture: String,
+        closureSha256: String,
+        outputBuffer: ByteBuffer,
+    ): Int
     external fun nativeReviewAur(
         handle: Long,
         architecture: Int,

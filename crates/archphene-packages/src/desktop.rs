@@ -3,7 +3,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::Read;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
 pub const MAX_DESKTOP_ENTRY_BYTES: usize = 512 * 1024;
@@ -644,7 +644,12 @@ fn resolve_root_regular_file(root: &Path, path: &Path, executable: bool) -> Opti
             }
             let target = fs::read_link(&candidate).ok()?;
             let mut replacement = if target.is_absolute() {
-                target.strip_prefix("/").ok()?.to_path_buf()
+                physical_target_under_root(root, &target)?.unwrap_or_else(|| {
+                    target
+                        .strip_prefix("/")
+                        .expect("absolute target")
+                        .to_path_buf()
+                })
             } else {
                 resolved.join(target)
             };
@@ -667,6 +672,27 @@ fn resolve_root_regular_file(root: &Path, path: &Path, executable: bool) -> Opti
         return None;
     }
     Some(format!("/{}", resolved.to_str()?))
+}
+
+fn physical_target_under_root(root: &Path, target: &Path) -> Option<Option<PathBuf>> {
+    let root_metadata = fs::metadata(root).ok()?;
+    let mut ancestor = Some(target);
+    while let Some(path) = ancestor {
+        match fs::metadata(path) {
+            Ok(metadata)
+                if metadata.dev() == root_metadata.dev()
+                    && metadata.ino() == root_metadata.ino() =>
+            {
+                let relative = target.strip_prefix(path).ok()?;
+                return Some(Some(relative.to_path_buf()));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return None,
+        }
+        ancestor = path.parent();
+    }
+    Some(None)
 }
 
 fn normalized_components(path: &Path) -> Option<VecDeque<OsString>> {
@@ -968,6 +994,26 @@ Icon=/usr/share/pixmaps/My\\sEditor.png\n",
         let catalog = discover_desktop_entries(&root.path).expect("desktop catalog");
         assert_eq!(catalog.entries.len(), 1);
         assert_eq!(catalog.entries[0].executable, "/usr/lib/editor/editor");
+
+        std::os::unix::fs::symlink(
+            root.path.join("usr/lib/editor/editor"),
+            root.path.join("usr/bin/physical-editor"),
+        )
+        .expect("physical-root executable link");
+        root.desktop(
+            "physical-editor.desktop",
+            "[Desktop Entry]\nType=Application\nName=Physical Editor\nExec=physical-editor\n",
+        );
+        let catalog = discover_desktop_entries(&root.path).expect("desktop catalog");
+        assert_eq!(
+            catalog
+                .entries
+                .iter()
+                .find(|entry| entry.name == "Physical Editor")
+                .expect("physical editor")
+                .executable,
+            "/usr/lib/editor/editor"
+        );
     }
 
     #[test]

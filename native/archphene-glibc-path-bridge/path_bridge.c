@@ -3928,9 +3928,24 @@ int symlinkat(const char *target, int directory, const char *link_path) {
         stored_target = target;
         target_translated = false;
     } else {
-        stored_target =
-                translate_path(target, target_buffer, &target_translated);
-        if (stored_target == NULL) return -1;
+        if (fake_chroot_active || root_identity_active) {
+            /*
+             * The symlink payload belongs to the emulated Linux namespace
+             * both while building a package and while a root-identity package
+             * tool installs it. Translating it leaks an Android-private root
+             * into either the package archive or the installed shared root.
+             */
+            if (!normalize_logical_path(target, target_buffer)) {
+                errno = EACCES;
+                return -1;
+            }
+            stored_target = target_buffer;
+            target_translated = false;
+        } else {
+            stored_target =
+                    translate_path(target, target_buffer, &target_translated);
+            if (stored_target == NULL) return -1;
+        }
     }
     REQUIRE_REAL(real);
     if (translated && !fake_chroot_active) {

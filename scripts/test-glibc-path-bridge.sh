@@ -125,6 +125,10 @@ test "$(
 )" = directory-link-ok
 test "$(<"$root/home/archphene/link-fd/hard-link")" = linked
 test "$(<"$root/home/archphene/link-fd/symbolic-link")" = linked
+ARCHPHENE_ROOT_IDENTITY=1 /bin/ln -s /usr/share/archphene/tool \
+  "$root/home/archphene/link-fd/root-identity-link"
+test "$(readlink "$root/home/archphene/link-fd/root-identity-link")" = \
+  /usr/share/archphene/tool
 directory_fd_listing="$(
   ARCHPHENE_FAKE_CHROOT=1 /usr/bin/find \
     /home/archphene/directory-fd -type f -print

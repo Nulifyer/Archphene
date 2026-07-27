@@ -1881,7 +1881,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             commandStatusView,
             if (
                 snapshot.sessionInterrupted &&
-                runtimeBinder?.sharedShellRunning != true
+                runtimeBinder?.sharedShellRunning != true &&
+                runtimeBinder?.linuxCommandStarted != true
             ) {
                 getString(R.string.session_interrupted)
             } else {

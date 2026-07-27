@@ -351,6 +351,15 @@ pub struct VerifiedPackageClosure {
     bytes: Vec<u8>,
 }
 
+pub struct VerifiedAurArchive<'a> {
+    pub source: &'a mut File,
+    pub filename: &'a str,
+    pub package: &'a str,
+    pub version: &'a str,
+    pub expected_bytes: u64,
+    pub expected_sha256: [u8; 32],
+}
+
 pub struct InstalledPackageCatalog {
     packages: Vec<(String, String, bool)>,
 }
@@ -1656,7 +1665,6 @@ impl PackageRuntime {
                 "--noconfirm",
                 "--noprogressbar",
                 "--noscriptlet",
-                "--needed",
                 "--asdeps",
                 "-U",
                 archive_path,
@@ -1675,6 +1683,180 @@ impl PackageRuntime {
             return Err(PackageRuntimeError::InvalidResolution);
         }
         Ok(installed)
+    }
+
+    pub fn install_verified_aur_archives(
+        &self,
+        inputs: &mut [VerifiedAurArchive<'_>],
+        selected_package: &str,
+    ) -> Result<ToolOutput, PackageRuntimeError> {
+        if inputs.is_empty()
+            || inputs.len() > aur::MAX_AUR_DEPENDENCIES
+            || !safe_logical_name(selected_package)
+        {
+            return Err(PackageRuntimeError::InvalidPayload);
+        }
+        let directory = self.arch_root.join(AUR_PACKAGE_CACHE_DIRECTORY);
+        prepare_private_directory(&directory)?;
+        let mut archives = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            if !safe_package_filename(input.filename)
+                || !safe_logical_name(input.package)
+                || input.version.is_empty()
+                || input.version.len() > 128
+                || input
+                    .version
+                    .bytes()
+                    .any(|byte| byte.is_ascii_whitespace() || byte == 0)
+                || input.expected_bytes == 0
+                || input.expected_bytes > PACKAGE_ARCHIVE_LIMIT
+                || input.expected_sha256 == [0; 32]
+                || archives
+                    .iter()
+                    .any(|archive: &InstallArchive| archive.name == input.package)
+            {
+                return Err(PackageRuntimeError::InvalidPayload);
+            }
+            let source_metadata = input.source.metadata()?;
+            if !source_metadata.is_file() || source_metadata.len() != input.expected_bytes {
+                return Err(PackageRuntimeError::InvalidPayload);
+            }
+            let digest = hex_sha256(&input.expected_sha256);
+            let destination = directory.join(format!("{digest}-{}", input.filename));
+            let temporary = directory.join(format!(".{digest}.part"));
+            prepare_output_path(&temporary)?;
+            match fs::symlink_metadata(&destination) {
+                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                    return Err(PackageRuntimeError::UnsafeEntry(destination));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(PackageRuntimeError::Io(error)),
+            }
+            let staged = (|| {
+                input.source.seek(SeekFrom::Start(0))?;
+                let mut output = OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .mode(0o600)
+                    .open(&temporary)?;
+                let mut hasher = Sha256::new();
+                let mut buffer = [0_u8; 64 * 1024];
+                let mut copied = 0_u64;
+                loop {
+                    let count = input.source.read(&mut buffer)?;
+                    if count == 0 {
+                        break;
+                    }
+                    copied = copied
+                        .checked_add(count as u64)
+                        .ok_or(PackageRuntimeError::OutputLimit)?;
+                    if copied > input.expected_bytes {
+                        return Err(PackageRuntimeError::InvalidPayload);
+                    }
+                    hasher.update(&buffer[..count]);
+                    output.write_all(&buffer[..count])?;
+                }
+                if copied != input.expected_bytes
+                    || <[u8; 32]>::from(hasher.finalize()) != input.expected_sha256
+                {
+                    return Err(PackageRuntimeError::InvalidPayload);
+                }
+                output.sync_all()?;
+                drop(output);
+                fs::rename(&temporary, &destination)?;
+                File::open(&directory)?.sync_all()?;
+                Ok(())
+            })();
+            if let Err(error) = staged {
+                let _ = fs::remove_file(&temporary);
+                return Err(error);
+            }
+            archives.push(InstallArchive {
+                path: destination
+                    .to_str()
+                    .ok_or(PackageRuntimeError::InvalidPath)?
+                    .to_owned(),
+                name: input.package.to_owned(),
+                version: input.version.to_owned(),
+                explicitly_installed: input.package == selected_package,
+            });
+        }
+        if !archives.iter().any(|archive| archive.explicitly_installed) {
+            return Err(PackageRuntimeError::InvalidPayload);
+        }
+
+        let config_path = self.arch_root.join(AUR_PACMAN_CONFIG_FILE);
+        let config = config_path
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let root = self
+            .arch_root
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let database_path = self.arch_root.join("var/lib/pacman");
+        let database = database_path
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let cache_path = self.arch_root.join(PACKAGE_CACHE_DIRECTORY);
+        let cache = cache_path
+            .to_str()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let mut plan_arguments = vec![
+            "--config",
+            config,
+            "--root",
+            root,
+            "--dbpath",
+            database,
+            "--cachedir",
+            cache,
+            "--noconfirm",
+            "--noprogressbar",
+            "-U",
+            "--print",
+            "--print-format",
+            "%n\t%v",
+        ];
+        plan_arguments.extend(archives.iter().map(|archive| archive.path.as_str()));
+        let plan =
+            self.run_with_timeout(PackageTool::Pacman, &plan_arguments, TRANSACTION_TIMEOUT)?;
+        validate_install_plan(plan.as_str()?, &archives)?;
+        self.publish_install_reason_intent(&archives)?;
+        let mut transaction_arguments = vec![
+            "--config",
+            config,
+            "--root",
+            root,
+            "--dbpath",
+            database,
+            "--cachedir",
+            cache,
+            "--noconfirm",
+            "--noprogressbar",
+            "--noscriptlet",
+            "--asdeps",
+            "-U",
+        ];
+        transaction_arguments.extend(archives.iter().map(|archive| archive.path.as_str()));
+        if let Err(error) = self.run_bytes_with_timeout(
+            PackageTool::Pacman,
+            &transaction_arguments,
+            TRANSACTION_TIMEOUT,
+            MAX_PACKAGE_TRANSACTION_OUTPUT_BYTES,
+            false,
+        ) {
+            let _ = self.recover_database_lock();
+            let _ = self.recover_pending_install_reasons();
+            return Err(error);
+        }
+        self.recover_pending_install_reasons()?;
+        for archive in &archives {
+            if self.installed_version(&archive.name)?.as_str()? != archive.version {
+                return Err(PackageRuntimeError::InvalidResolution);
+            }
+        }
+        self.installed_version(selected_package)
     }
 
     fn install_resolution(
