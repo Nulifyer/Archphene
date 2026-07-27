@@ -144,6 +144,12 @@ internal object NativeRuntime {
         expectedBytes: Long,
         outputBuffer: ByteBuffer,
     ): Int
+    external fun nativeFingerprintFile(
+        handle: Long,
+        sourceDescriptor: Int,
+        expectedBytes: Long,
+        outputBuffer: ByteBuffer,
+    ): Int
     external fun nativeAddProjectSyncAndroidDirectory(
         handle: Long,
         requestBuffer: ByteBuffer,

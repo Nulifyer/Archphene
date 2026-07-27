@@ -107,6 +107,7 @@ mod android {
     };
     use archphene_storage::{
         MirrorCancellation, OpenMode, StorageError, SyncAction, SyncEntryKind, SyncFingerprint,
+        fingerprint_file_from_fd,
     };
     use jni::JNIEnv;
     use jni::objects::{JByteBuffer, JClass, JIntArray, JString};
@@ -1064,6 +1065,46 @@ mod android {
             return ERROR_INVALID_HANDLE;
         };
         match runtime.fingerprint_project_sync_file(source_descriptor, expected_bytes) {
+            Ok(fingerprint) => copy_storage_value(&format_sync_fingerprint(fingerprint), output),
+            Err(error) => copy_storage_error(&error, output),
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeFingerprintFile(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        source_descriptor: jint,
+        expected_bytes: jlong,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let Ok(handle) = u64::try_from(handle) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let expected_bytes = if expected_bytes < 0 {
+            None
+        } else {
+            let Ok(bytes) = u64::try_from(expected_bytes) else {
+                return ERROR_INVALID_ARGUMENT;
+            };
+            Some(bytes)
+        };
+        if source_descriptor < 0 {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let Ok(output) = storage_output(&environment, &output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        {
+            let Ok(mut registry) = registry().lock() else {
+                return ERROR_INTERNAL;
+            };
+            if registry.runtime_mut(handle).is_none() {
+                return ERROR_INVALID_HANDLE;
+            }
+        }
+        match fingerprint_file_from_fd(source_descriptor, expected_bytes) {
             Ok(fingerprint) => copy_storage_value(&format_sync_fingerprint(fingerprint), output),
             Err(error) => copy_storage_error(&error, output),
         }

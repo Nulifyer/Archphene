@@ -7,6 +7,7 @@ import java.nio.charset.StandardCharsets
 internal data class ProjectSyncDeletedDocument(
     val uri: Uri,
     val expected: ProjectSyncFingerprint,
+    val backupPath: String,
 )
 
 internal data class ProjectSyncResult(
@@ -14,6 +15,7 @@ internal data class ProjectSyncResult(
     var pushed: Int = 0,
     var deferredDeletes: Int = 0,
     var androidDeletesApplied: Int = 0,
+    var rescanRequired: Boolean = false,
     val conflictPaths: MutableSet<String> = linkedSetOf(),
     val ignoredDocumentIds: MutableSet<String> = linkedSetOf(),
     val deletedDocuments: MutableList<ProjectSyncDeletedDocument> = ArrayList(),

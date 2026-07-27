@@ -172,9 +172,10 @@ sync_button() {
 
 set_sync_hold() {
   local phase="$1"
+  local hold_millis="${2:-20000}"
   archphene_adb_run logcat -c
   archphene_adb_run shell am broadcast -n "$receiver" -a "$action_hold_sync" \
-    --es token "$token" --es phase "$phase" --el holdMillis 20000 >/dev/null
+    --es token "$token" --es phase "$phase" --el holdMillis "$hold_millis" >/dev/null
   archphene_wait_log \
     "Folder grant $action_hold_sync passed token=$token" \
     15 'ArchpheneFolderGrantTest:V AndroidRuntime:E *:S' >/dev/null
@@ -282,6 +283,59 @@ archphene_adb_run shell run-as "$package" test ! -e \
   "$local_project/android-directory" ||
   archphene_die "Android directory deletion was not propagated to Linux"
 archphene_note "  Android directory additions and deletions propagated recursively"
+
+for window in live recovery; do
+  archphene_adb_run shell mkdir "$remote/delete-window-$window"
+  archphene_adb_run shell sh -c \
+    "'printf delete-window-$window-$token > $remote/delete-window-$window/source.txt'"
+  sync_button
+  archphene_wait_ui_unwrapped \
+    "Synced 2 change\\(s\\): 2 pulled, 0 pushed, 0 conflict\\(s\\), 0 deletion\\(s\\) deferred" \
+    "folder-sync-delete-window-baseline-$window-$serial" 30
+  archphene_adb_run shell run-as "$package" rm \
+    "$local_project/delete-window-$window/source.txt"
+  set_sync_hold committed 7000
+  archphene_adb_run logcat -c
+  sync_button
+  archphene_wait_log \
+    'Project sync test holding phase=committed' \
+    15 'ArchpheneRuntime:I AndroidRuntime:E *:S' >/dev/null
+  backup_path="$(
+    archphene_adb_run shell sh -c \
+      "'ls -1 $remote/delete-window-$window/Archphene-delete-*'" |
+      tr -d '\r'
+  )"
+  [[ -n "$backup_path" && "$backup_path" != *$'\n'* ]] ||
+    archphene_die "committed deletion backup was not unique"
+  backup_name="${backup_path##*/}"
+  archphene_adb_run shell sh -c \
+    "'printf changed-after-commit-$window-$token > $backup_path'"
+  if [[ "$window" == recovery ]]; then
+    archphene_adb_run shell am force-stop "$package"
+    restart_manager_files
+    sync_button
+    expected_changes=1
+  else
+    expected_changes=2
+  fi
+  archphene_wait_ui_unwrapped \
+    "Synced $expected_changes change\\(s\\): 1 pulled, $((expected_changes - 1)) pushed, 1 conflict\\(s\\), 0 deletion\\(s\\) deferred" \
+    "folder-sync-delete-window-retained-$window-$serial" 40
+  archphene_adb_run shell test ! -e "$remote/delete-window-$window/source.txt" ||
+    archphene_die "deleted source reappeared after its backup changed"
+  [[ "$(archphene_adb_run shell cat "$backup_path" | tr -d '\r')" == \
+    "changed-after-commit-$window-$token" ]] ||
+    archphene_die "changed committed deletion backup was removed"
+  [[ "$(
+    archphene_adb_run shell run-as "$package" cat \
+      "$local_project/delete-window-$window/$backup_name" |
+      tr -d '\r'
+  )" == "changed-after-commit-$window-$token" ]] ||
+    archphene_die "changed committed deletion backup was not preserved in Linux"
+  archphene_adb_run shell run-as "$package" test ! -e files/project-sync-journal-v1 ||
+    archphene_die "changed deletion synchronization journal remains"
+done
+archphene_note "  Provider edits after deletion commit are retained as explicit conflicts"
 
 archphene_adb_run shell run-as "$package" rm \
   "$local_project/linux-new.txt" "$local_project/linux-new-two.txt"

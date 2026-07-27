@@ -3,6 +3,8 @@ package org.archphene.app.runtime
 import android.net.Uri
 import java.nio.ByteBuffer
 
+internal data class ProjectSyncRecoveryResult(val retainedConflictPath: String?)
+
 internal class ProjectSyncRecoveryCoordinator(
     private val provider: ProjectSyncProvider,
     private val documents: ProjectSyncAndroidDocuments,
@@ -12,8 +14,8 @@ internal class ProjectSyncRecoveryCoordinator(
         activeHandle: Long,
         activeTreeUri: Uri,
         output: ByteBuffer,
-    ): Boolean {
-        val journal = journalStore.load() ?: return false
+    ): ProjectSyncRecoveryResult? {
+        val journal = journalStore.load() ?: return null
         check(journal.treeUri == activeTreeUri.toString()) {
             "An interrupted synchronization belongs to another Android folder"
         }
@@ -52,9 +54,16 @@ internal class ProjectSyncRecoveryCoordinator(
                 backupPresent = backup != null,
                 targetMatchesExpected = targetIsPublished,
             )
+        var retainedConflictPath: String? = null
         when (strategy) {
             ProjectSyncRecoveryStrategy.FINALIZE_COMMITTED_DELETE -> {
                 backup?.let {
+                    try {
+                        documents.verifyFingerprint(activeHandle, it.uri, expected, output)
+                    } catch (_: ProjectSyncFingerprintMismatch) {
+                        retainedConflictPath = backupPath(journal)
+                        return@let
+                    }
                     check(
                         provider.delete(
                             it.uri,
@@ -169,6 +178,15 @@ internal class ProjectSyncRecoveryCoordinator(
             }
         }
         journalStore.clear()
-        return true
+        return ProjectSyncRecoveryResult(retainedConflictPath)
+    }
+
+    private fun backupPath(journal: ProjectSyncJournal): String {
+        val slash = journal.path.lastIndexOf('/')
+        return if (slash < 0) {
+            journal.backupName
+        } else {
+            "${journal.path.substring(0, slash)}/${journal.backupName}"
+        }
     }
 }

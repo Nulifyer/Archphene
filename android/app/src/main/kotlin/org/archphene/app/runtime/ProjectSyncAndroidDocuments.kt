@@ -30,15 +30,43 @@ internal class ProjectSyncAndroidDocuments(private val provider: ProjectSyncProv
         expected: ProjectSyncFingerprint,
         output: ByteBuffer,
     ) {
+        verifyFingerprint(activeHandle, uri, expected, output, requireActiveSync = true)
+    }
+
+    fun verifyFingerprintAfterCommit(
+        activeHandle: Long,
+        uri: Uri,
+        expected: ProjectSyncFingerprint,
+        output: ByteBuffer,
+    ) {
+        verifyFingerprint(activeHandle, uri, expected, output, requireActiveSync = false)
+    }
+
+    private fun verifyFingerprint(
+        activeHandle: Long,
+        uri: Uri,
+        expected: ProjectSyncFingerprint,
+        output: ByteBuffer,
+        requireActiveSync: Boolean,
+    ) {
         provider.open(uri, "r", "open an Android project file for verification").use { source ->
             output.clear()
             val length =
-                NativeRuntime.nativeFingerprintProjectSyncFile(
-                    activeHandle,
-                    source.fd,
-                    expected.bytes,
-                    output,
-                )
+                if (requireActiveSync) {
+                    NativeRuntime.nativeFingerprintProjectSyncFile(
+                        activeHandle,
+                        source.fd,
+                        -1,
+                        output,
+                    )
+                } else {
+                    NativeRuntime.nativeFingerprintFile(
+                        activeHandle,
+                        source.fd,
+                        -1,
+                        output,
+                    )
+                }
             requireSuccess(length.toLong(), output, "verify Android project file")
             if (readCString(output) != expected.encode()) {
                 throw ProjectSyncFingerprintMismatch()

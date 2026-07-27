@@ -2521,14 +2521,17 @@ class ArchpheneRuntimeService : Service() {
                             )
                             nativeStarted = true
                             if (pass == 1) {
-                                if (
+                                val recovery =
                                     projectSyncRecoveryCoordinator.recover(
                                         activeHandle,
                                         activeUri,
                                         output,
                                     )
-                                ) {
+                                if (recovery != null) {
                                     Log.i(TAG, "Recovered interrupted Android project synchronization")
+                                    recovery.retainedConflictPath?.let {
+                                        aggregate.conflictPaths.add(it)
+                                    }
                                 }
                             }
                             checkFolderMirrorCancellation()
@@ -2654,15 +2657,25 @@ class ArchpheneRuntimeService : Service() {
                                 holdProjectSyncTestPhase(SYNC_TEST_PHASE_COMMITTED)
                             }
                             result.deletedDocuments.forEach { document ->
-                                if (
-                                    !projectSyncProvider.delete(
+                                try {
+                                    projectSyncAndroidDocuments.verifyFingerprintAfterCommit(
+                                        activeHandle,
+                                        document.uri,
+                                        document.expected,
+                                        output,
+                                    )
+                                } catch (_: ProjectSyncFingerprintMismatch) {
+                                    result.conflictPaths.add(document.backupPath)
+                                    result.rescanRequired = true
+                                    return@forEach
+                                }
+                                check(
+                                    projectSyncProvider.delete(
                                         document.uri,
                                         "finalize a committed Android project deletion",
-                                    )
+                                    ),
                                 ) {
-                                    throw IllegalStateException(
-                                        "Android provider retained a committed deletion backup",
-                                    )
+                                    "Android provider retained a committed deletion backup"
                                 }
                             }
                             if (result.deletedDocuments.isNotEmpty()) {
@@ -2673,8 +2686,13 @@ class ArchpheneRuntimeService : Service() {
                             aggregate.conflictPaths.addAll(result.conflictPaths)
                             aggregate.deferredDeletes = result.deferredDeletes
                             repeatForDeferredDeletes =
-                                result.deferredDeletes > 0 &&
-                                    result.androidDeletesApplied > 0 &&
+                                (
+                                    (
+                                        result.deferredDeletes > 0 &&
+                                            result.androidDeletesApplied > 0
+                                    ) ||
+                                        result.rescanRequired
+                                ) &&
                                     pass < MAX_MIRROR_ENTRIES
                         } while (repeatForDeferredDeletes)
                         folderStatus =
@@ -2844,7 +2862,13 @@ class ArchpheneRuntimeService : Service() {
         holdProjectSyncTestPhase(SYNC_TEST_PHASE_BACKED_UP)
         val backupId = DocumentsContract.getDocumentId(backup)
         result.ignoredDocumentIds.add(backupId)
-        result.deletedDocuments.add(ProjectSyncDeletedDocument(backup, expected))
+        result.deletedDocuments.add(
+            ProjectSyncDeletedDocument(
+                backup,
+                expected,
+                if (parentPath.isEmpty()) backupName else "$parentPath/$backupName",
+            ),
+        )
         remote.remove(entry.path)
     }
 
