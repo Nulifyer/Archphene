@@ -4,6 +4,8 @@ set -euo pipefail
 root="${TMPDIR:-/tmp}/archphene-path-bridge-test"
 output="${1:-$root/libarchphene_path_bridge.so}"
 loader_path="$(readlink -f /bin/echo)"
+host_loader="$(readlink -f "$(gcc -print-file-name=ld-linux-x86-64.so.2)")"
+host_libc="$(readlink -f "$(gcc -print-file-name=libc.so.6)")"
 rm -rf "$root"
 mkdir -p "$root/usr/share/archphene-test"
 mkdir -p "$root/usr/lib/locale/C.utf8"
@@ -27,6 +29,9 @@ gcc -O2 -Wall -Wextra -Werror \
   -o "$root/exec-probe" native/archphene-glibc-path-bridge/exec_probe.c
 gcc -O2 -Wall -Wextra -Werror \
   -o "$root/readlink-probe" native/archphene-glibc-path-bridge/readlink_probe.c
+gcc -O2 -Wall -Wextra -Werror \
+  -o "$root/process-identity-probe" \
+  native/archphene-glibc-path-bridge/process_identity_probe.c
 gcc -O2 -Wall -Wextra -Werror \
   -o "$root/identity-probe" native/archphene-glibc-path-bridge/identity_probe.c
 gcc -shared -fPIC -O2 -Wall -Wextra -Werror \
@@ -143,6 +148,13 @@ program_path="$(
     "$root/readlink-probe"
 )"
 test "$program_path" = /usr/bin/test-program
+process_identity_output="$(
+  ARCHPHENE_RUNTIME_LOADER="$host_loader" \
+  ARCHPHENE_RUNTIME_PROGRAM_PATH="$root/process-identity-probe" \
+    "$root/process-identity-probe" \
+      "$root/process-identity-probe" "$host_loader" "$(dirname "$host_libc")"
+)"
+test "$process_identity_output" = process-identity-ok
 mkdir -p "$root/commands"
 cp "$(readlink -f /bin/echo)" "$root/commands/cat"
 chmod 400 "$root/commands/cat"
@@ -220,8 +232,6 @@ nested_spawn_output="$(
   "$root/exec-probe" --spawn-path /usr/lib/archphene-example/example
 )"
 test "$nested_spawn_output" = "--library-path /lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu --argv0 example $root/usr/lib/archphene-example/example bridge-arg"
-host_loader="$(gcc -print-file-name=ld-linux-x86-64.so.2)"
-host_libc="$(gcc -print-file-name=libc.so.6)"
 test -f "$host_loader"
 test -f "$host_libc"
 cp "$root/exec-probe" "$root/usr/lib/archphene-example/self-exec-probe"

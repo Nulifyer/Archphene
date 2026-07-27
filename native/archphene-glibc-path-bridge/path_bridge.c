@@ -2789,6 +2789,249 @@ static char *linux_cwd(char *path) {
     return path;
 }
 
+#define PROCESS_ENVIRONMENT_LIMIT (256U * 1024U)
+
+static bool logical_runtime_program(
+        const char *candidate, char output[PATH_MAX]) {
+    if (candidate == NULL || candidate[0] != '/'
+            || has_parent_component(candidate)
+            || strchr(candidate, '\n') != NULL) {
+        return false;
+    }
+    typedef char *(*realpath_type)(const char *, char *);
+    typedef int (*stat_type)(const char *, struct stat *);
+    realpath_type real_realpath =
+            (realpath_type)dlsym(RTLD_NEXT, "realpath");
+    stat_type real_stat = (stat_type)dlsym(RTLD_NEXT, "stat");
+    char resolved[PATH_MAX];
+    struct stat metadata;
+    if (real_realpath == NULL || real_stat == NULL
+            || real_realpath(candidate, resolved) == NULL
+            || real_stat(resolved, &metadata) != 0
+            || !S_ISREG(metadata.st_mode)
+            || (metadata.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+        return false;
+    }
+    size_t root_length = strlen(trusted_root);
+    const char *logical = resolved;
+    if (root_length > 0
+            && strncmp(resolved, trusted_root, root_length) == 0
+            && (resolved[root_length] == '\0'
+                || resolved[root_length] == '/')) {
+        logical = resolved + root_length;
+        if (logical[0] == '\0') logical = "/";
+    }
+    size_t length = strlen(logical);
+    if (length == 0 || length >= PATH_MAX) return false;
+    memcpy(output, logical, length + 1);
+    return true;
+}
+
+static bool managed_process_executable(
+        const char *path, char output[PATH_MAX]) {
+    static const char proc_prefix[] = "/proc/";
+    static const char exe_suffix[] = "/exe";
+    if (trusted_root[0] == '\0'
+            || path == NULL
+            || strncmp(path, proc_prefix, sizeof(proc_prefix) - 1) != 0) {
+        return false;
+    }
+    const char *process = path + sizeof(proc_prefix) - 1;
+    const char *cursor = process;
+    while (*cursor >= '0' && *cursor <= '9') cursor++;
+    if (cursor == process || strcmp(cursor, exe_suffix) != 0) return false;
+    size_t process_length = (size_t)(cursor - process);
+    char environment_path[64];
+    int written = snprintf(environment_path, sizeof(environment_path),
+            "/proc/%.*s/environ", (int)process_length, process);
+    if (written <= 0 || (size_t)written >= sizeof(environment_path)) {
+        return false;
+    }
+
+    typedef int (*open_type)(const char *, int, ...);
+    open_type real_open = (open_type)dlsym(RTLD_NEXT, "open");
+    if (real_open == NULL) return false;
+    int descriptor =
+            real_open(environment_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (descriptor < 0) return false;
+
+    static const char variable[] = RUNTIME_PROGRAM_ENVIRONMENT;
+    char entry[PATH_MAX + sizeof(variable)];
+    size_t entry_length = 0;
+    size_t total = 0;
+    bool overflow = false;
+    bool found = false;
+    char chunk[4096];
+    while (total < PROCESS_ENVIRONMENT_LIMIT && !found) {
+        size_t remaining = PROCESS_ENVIRONMENT_LIMIT - total;
+        size_t capacity = remaining < sizeof(chunk) ? remaining : sizeof(chunk);
+        ssize_t count;
+        do {
+            count = read(descriptor, chunk, capacity);
+        } while (count < 0 && errno == EINTR);
+        if (count <= 0) break;
+        total += (size_t)count;
+        for (ssize_t index = 0; index < count; index++) {
+            unsigned char value = (unsigned char)chunk[index];
+            if (value == '\0') {
+                if (!overflow
+                        && entry_length >= sizeof(variable) - 1
+                        && memcmp(entry, variable, sizeof(variable) - 1) == 0) {
+                    entry[entry_length] = '\0';
+                    found = logical_runtime_program(
+                            entry + sizeof(variable) - 1, output);
+                }
+                entry_length = 0;
+                overflow = false;
+            } else if (!overflow) {
+                if (entry_length + 1 < sizeof(entry)) {
+                    entry[entry_length++] = (char)value;
+                } else {
+                    overflow = true;
+                }
+            }
+        }
+    }
+    int saved_errno = errno;
+    close(descriptor);
+    errno = saved_errno;
+    return found;
+}
+
+#define PROCESS_COMMANDLINE_LIMIT (64U * 1024U)
+
+static bool managed_process_commandline_path(const char *path) {
+    static const char prefix[] = "/proc/";
+    if (path == NULL || strncmp(path, prefix, sizeof(prefix) - 1) != 0) {
+        return false;
+    }
+    const char *cursor = path + sizeof(prefix) - 1;
+    const char *process = cursor;
+    while (*cursor >= '0' && *cursor <= '9') cursor++;
+    return cursor != process && strcmp(cursor, "/cmdline") == 0;
+}
+
+__attribute__((noinline))
+static int open_managed_process_commandline(const char *path, int flags) {
+    static const char prefix[] = "/proc/";
+    const char *process = path + sizeof(prefix) - 1;
+    const char *cursor = process;
+    while (*cursor >= '0' && *cursor <= '9') cursor++;
+    size_t process_length = (size_t)(cursor - process);
+    char executable_path[64];
+    int written = snprintf(executable_path, sizeof(executable_path),
+            "/proc/%.*s/exe", (int)process_length, process);
+    char logical_program[PATH_MAX];
+    if (written <= 0 || (size_t)written >= sizeof(executable_path)
+            || !managed_process_executable(
+                executable_path, logical_program)) {
+        return -1;
+    }
+
+    typedef int (*open_type)(const char *, int, ...);
+    open_type real_open = (open_type)dlsym(RTLD_NEXT, "open");
+    if (real_open == NULL) return -1;
+    int source = real_open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (source < 0) return -1;
+    char commandline[PROCESS_COMMANDLINE_LIMIT];
+    size_t length = 0;
+    while (length < sizeof(commandline)) {
+        ssize_t count;
+        do {
+            count = read(
+                    source, commandline + length,
+                    sizeof(commandline) - length);
+        } while (count < 0 && errno == EINTR);
+        if (count <= 0) break;
+        length += (size_t)count;
+    }
+    int saved_errno = errno;
+    close(source);
+    errno = saved_errno;
+    if (length == 0 || length == sizeof(commandline)
+            || commandline[length - 1] != '\0') {
+        return -1;
+    }
+
+    size_t token_offsets[7];
+    size_t token_count = 0;
+    size_t offset = 0;
+    while (offset < length && token_count < 7) {
+        token_offsets[token_count++] = offset;
+        while (offset < length && commandline[offset] != '\0') offset++;
+        if (offset == length) return -1;
+        offset++;
+    }
+    if (token_count < 6
+            || trusted_loader[0] == '\0'
+            || strcmp(commandline + token_offsets[0], trusted_loader) != 0
+            || strcmp(commandline + token_offsets[1], "--library-path") != 0
+            || commandline[token_offsets[2]] == '\0'
+            || strcmp(commandline + token_offsets[3], "--argv0") != 0
+            || commandline[token_offsets[4]] == '\0'
+            || commandline[token_offsets[5]] == '\0') {
+        return -1;
+    }
+    char command_program[PATH_MAX];
+    if (!logical_runtime_program(
+                commandline + token_offsets[5], command_program)
+            || strcmp(command_program, logical_program) != 0) {
+        return -1;
+    }
+    const char *name = strrchr(logical_program, '/');
+    name = name == NULL ? logical_program : name + 1;
+    const char *argv0 = commandline + token_offsets[4];
+    if (name[0] == '\0' || strcmp(argv0, name) != 0) return -1;
+
+    size_t argv0_length = strlen(argv0) + 1;
+    char argv0_value[NAME_MAX + 1];
+    if (argv0_length > sizeof(argv0_value)) return -1;
+    memcpy(argv0_value, argv0, argv0_length);
+    size_t tail_offset = token_count >= 7 ? token_offsets[6] : length;
+    size_t tail_length = length - tail_offset;
+    if (argv0_length > sizeof(commandline) - tail_length) return -1;
+    memmove(commandline + argv0_length,
+            commandline + tail_offset, tail_length);
+    memcpy(commandline, argv0_value, argv0_length);
+    size_t output_length = argv0_length + tail_length;
+
+    if (output_length > 32U * 1024U) return -1;
+    int descriptors[2];
+    if (pipe2(
+                descriptors,
+                flags & (O_CLOEXEC | O_NONBLOCK))
+            != 0) {
+        return -1;
+    }
+    int pipe_capacity = fcntl(descriptors[1], F_GETPIPE_SZ);
+    if (pipe_capacity < 0 || output_length > (size_t)pipe_capacity) {
+        saved_errno = pipe_capacity < 0 ? errno : E2BIG;
+        close(descriptors[0]);
+        close(descriptors[1]);
+        errno = saved_errno;
+        return -1;
+    }
+    size_t written_bytes = 0;
+    while (written_bytes < output_length) {
+        ssize_t count;
+        do {
+            count = write(
+                    descriptors[1], commandline + written_bytes,
+                    output_length - written_bytes);
+        } while (count < 0 && errno == EINTR);
+        if (count <= 0) {
+            saved_errno = errno;
+            close(descriptors[0]);
+            close(descriptors[1]);
+            errno = saved_errno;
+            return -1;
+        }
+        written_bytes += (size_t)count;
+    }
+    close(descriptors[1]);
+    return descriptors[0];
+}
+
 char *getcwd(char *buffer, size_t size) {
     typedef char *(*function_type)(char *, size_t);
     function_type real = (function_type)dlsym(RTLD_NEXT, "getcwd");
@@ -2812,6 +3055,17 @@ char *get_current_dir_name(void) {
 char *realpath(const char *path, char *resolved_path) {
     typedef char *(*function_type)(const char *, char *);
     const char *program = trusted_linux_program_path();
+    char managed_program[PATH_MAX];
+    if (path != NULL && managed_process_executable(path, managed_program)) {
+        size_t length = strlen(managed_program);
+        char *output = resolved_path;
+        if (output == NULL) {
+            output = malloc(length + 1);
+            if (output == NULL) return NULL;
+        }
+        memcpy(output, managed_program, length + 1);
+        return output;
+    }
     if (path != NULL && strcmp(path, "/proc/self/exe") == 0
             && program != NULL) {
         size_t length = strlen(program);
@@ -2839,6 +3093,22 @@ char *__realpath_chk(const char *path, char *resolved_path,
         size_t resolved_size) {
     typedef char *(*function_type)(const char *, char *, size_t);
     const char *program = trusted_linux_program_path();
+    char managed_program[PATH_MAX];
+    if (path != NULL && managed_process_executable(path, managed_program)) {
+        size_t length = strlen(managed_program);
+        if (resolved_path == NULL) {
+            char *output = malloc(length + 1);
+            if (output == NULL) return NULL;
+            memcpy(output, managed_program, length + 1);
+            return output;
+        }
+        if (length >= resolved_size) {
+            errno = ENAMETOOLONG;
+            return NULL;
+        }
+        memcpy(resolved_path, managed_program, length + 1);
+        return resolved_path;
+    }
     if (path != NULL && strcmp(path, "/proc/self/exe") == 0
             && program != NULL) {
         size_t length = strlen(program);
@@ -2991,6 +3261,13 @@ int shm_unlink(const char *name) {
 }
 static int open_impl(const char *symbol, const char *path, int flags, mode_t mode,
         bool has_mode) {
+    if (!has_mode
+            && (flags & O_ACCMODE) == O_RDONLY
+            && (flags & (O_DIRECTORY | O_PATH)) == 0
+            && managed_process_commandline_path(path)) {
+        int managed = open_managed_process_commandline(path, flags);
+        if (managed >= 0) return managed;
+    }
     typedef int (*function_type)(const char *, int, ...);
     function_type real = RESOLVE(function_type, symbol);
     bool translated;
@@ -3039,6 +3316,13 @@ int creat64(const char *path, mode_t mode) {
 
 static int openat_impl(const char *symbol, int directory, const char *path, int flags,
         mode_t mode, bool has_mode) {
+    if (!has_mode
+            && (flags & O_ACCMODE) == O_RDONLY
+            && (flags & (O_DIRECTORY | O_PATH)) == 0
+            && managed_process_commandline_path(path)) {
+        int managed = open_managed_process_commandline(path, flags);
+        if (managed >= 0) return managed;
+    }
     typedef int (*function_type)(int, const char *, int, ...);
     function_type real = RESOLVE(function_type, symbol);
     bool translated;
@@ -3239,6 +3523,25 @@ int mkostemps64(char *template, int suffix_length, int flags) {
 }
 
 static FILE *fopen_impl(const char *symbol, const char *path, const char *mode) {
+    if (mode != NULL
+            && mode[0] == 'r'
+            && strchr(mode, '+') == NULL
+            && managed_process_commandline_path(path)) {
+        int descriptor =
+                open_managed_process_commandline(path, O_RDONLY | O_CLOEXEC);
+        if (descriptor >= 0) {
+            typedef FILE *(*fdopen_type)(int, const char *);
+            fdopen_type real_fdopen =
+                    (fdopen_type)dlsym(RTLD_NEXT, "fdopen");
+            if (real_fdopen != NULL) {
+                FILE *stream = real_fdopen(descriptor, mode);
+                if (stream != NULL) return stream;
+            }
+            int saved_errno = errno;
+            close(descriptor);
+            errno = saved_errno;
+        }
+    }
     typedef FILE *(*function_type)(const char *, const char *);
     function_type real = RESOLVE(function_type, symbol);
     bool translated;
@@ -3641,6 +3944,13 @@ int statx(int directory, const char *path, int flags, unsigned int mask,
 ssize_t readlink(const char *path, char *buffer, size_t size) {
     typedef ssize_t (*function_type)(const char *, char *, size_t);
     const char *program = trusted_linux_program_path();
+    char managed_program[PATH_MAX];
+    if (managed_process_executable(path, managed_program)) {
+        size_t length = strlen(managed_program);
+        if (length > size) length = size;
+        if (length > 0) memcpy(buffer, managed_program, length);
+        return (ssize_t)length;
+    }
     if (strcmp(path, "/proc/self/exe") == 0 && program != NULL) {
         size_t length = strlen(program);
         if (length > size) length = size;
@@ -3678,6 +3988,14 @@ ssize_t __readlink_chk(
             const char *, char *, size_t, size_t);
     function_type real = RESOLVE(function_type, "__readlink_chk");
     const char *program = trusted_linux_program_path();
+    char managed_program[PATH_MAX];
+    if (size <= buffer_size
+            && managed_process_executable(path, managed_program)) {
+        size_t length = strlen(managed_program);
+        if (length > size) length = size;
+        if (length > 0) memcpy(buffer, managed_program, length);
+        return (ssize_t)length;
+    }
     if (size <= buffer_size
             && strcmp(path, "/proc/self/exe") == 0
             && program != NULL) {
@@ -3697,6 +4015,13 @@ ssize_t __readlink_chk(
 ssize_t readlinkat(int directory, const char *path, char *buffer, size_t size) {
     typedef ssize_t (*function_type)(int, const char *, char *, size_t);
     const char *program = trusted_linux_program_path();
+    char managed_program[PATH_MAX];
+    if (managed_process_executable(path, managed_program)) {
+        size_t length = strlen(managed_program);
+        if (length > size) length = size;
+        if (length > 0) memcpy(buffer, managed_program, length);
+        return (ssize_t)length;
+    }
     if (strcmp(path, "/proc/self/exe") == 0 && program != NULL) {
         size_t length = strlen(program);
         if (length > size) length = size;
@@ -3732,6 +4057,14 @@ ssize_t __readlinkat_chk(int directory, const char *path, char *buffer,
             int, const char *, char *, size_t, size_t);
     function_type real = RESOLVE(function_type, "__readlinkat_chk");
     const char *program = trusted_linux_program_path();
+    char managed_program[PATH_MAX];
+    if (size <= buffer_size
+            && managed_process_executable(path, managed_program)) {
+        size_t length = strlen(managed_program);
+        if (length > size) length = size;
+        if (length > 0) memcpy(buffer, managed_program, length);
+        return (ssize_t)length;
+    }
     if (size <= buffer_size
             && strcmp(path, "/proc/self/exe") == 0
             && program != NULL) {
