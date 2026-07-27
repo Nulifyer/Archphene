@@ -32,10 +32,14 @@ internal data class LauncherPortalSaveResult(
     val cancelled: Boolean,
 )
 
-internal data class LauncherPortalOpenResult(
-    val descriptor: ParcelFileDescriptor?,
+internal data class LauncherPortalOpenDocument(
+    val descriptor: ParcelFileDescriptor,
     val displayName: String,
     val writable: Boolean,
+)
+
+internal data class LauncherPortalOpenResult(
+    val documents: List<LauncherPortalOpenDocument>,
     val cancelled: Boolean,
 )
 
@@ -54,7 +58,7 @@ internal class LauncherPortalBridge(
     private val dark: Boolean,
     private val accent: Int,
     private val requestSave: (String, String, String) -> LauncherPortalSaveResult,
-    private val requestOpen: (String, String) -> LauncherPortalOpenResult,
+    private val requestOpen: (String, String, Boolean) -> LauncherPortalOpenResult,
 ) : Closeable {
     private class ActiveSave(
         val staging: File,
@@ -215,13 +219,17 @@ internal class LauncherPortalBridge(
                     return
                 }
                 val fields = request.split('\t')
-                if (fields.isEmpty() || fields[0] != "ARCHPHENE/2") {
+                if (
+                    fields.isEmpty() ||
+                    (fields[0] != "ARCHPHENE/2" && fields[0] != "ARCHPHENE/3")
+                ) {
                     writeResponse(client, "ERROR\tUNSUPPORTED")
                     return
                 }
                 when (fields.getOrNull(1)) {
                     "SAVE_FILE" -> handleSaveRequest(client, fields)
-                    "OPEN_FILE" -> handleOpenRequest(client, fields)
+                    "OPEN_FILE" -> handleOpenRequest(client, fields, multiple = false)
+                    "OPEN_FILES" -> handleOpenRequest(client, fields, multiple = true)
                     else -> writeResponse(client, "ERROR\tUNSUPPORTED")
                 }
             }.onFailure { error ->
@@ -273,8 +281,13 @@ internal class LauncherPortalBridge(
     private fun handleOpenRequest(
         client: LocalSocket,
         fields: List<String>,
+        multiple: Boolean,
     ) {
-        if (fields.size != 4) {
+        if (
+            fields.size != 4 ||
+            (multiple && fields[0] != "ARCHPHENE/3") ||
+            (!multiple && fields[0] != "ARCHPHENE/2")
+        ) {
             writeResponse(client, "ERROR\tINVALID_REQUEST")
             return
         }
@@ -284,21 +297,32 @@ internal class LauncherPortalBridge(
             writeResponse(client, "ERROR\tINVALID_REQUEST")
             return
         }
-        val result = requestOpen(title, mime)
-        val descriptor = result.descriptor
-        if (descriptor == null) {
+        val result = requestOpen(title, mime, multiple)
+        if (result.documents.isEmpty()) {
             writeResponse(client, if (result.cancelled) "CANCEL" else "ERROR\tFAILED")
             return
         }
-        val uri =
-            runCatching { beginOpen(result.displayName, descriptor, result.writable) }
+        val uris =
+            runCatching { beginOpen(result.documents, multiple) }
                 .getOrElse { error ->
-                    descriptor.close()
-                    Log.e(TAG, "Could not import portal document session=$sessionId", error)
+                    result.documents.forEach { document ->
+                        runCatching { document.descriptor.close() }
+                    }
+                    Log.e(TAG, "Could not import portal documents session=$sessionId", error)
                     writeResponse(client, "ERROR\tFAILED")
                     return
                 }
-        writeResponse(client, "OK\t${encodeField(uri)}")
+        writeResponse(
+            client,
+            buildString {
+                append("OK\t")
+                append(uris.size)
+                for (uri in uris) {
+                    append('\t')
+                    append(encodeField(uri))
+                }
+            },
+        )
     }
 
     @Synchronized
@@ -330,40 +354,49 @@ internal class LauncherPortalBridge(
 
     @Synchronized
     private fun beginOpen(
-        displayName: String,
-        descriptor: ParcelFileDescriptor,
-        writable: Boolean,
-    ): String {
+        documents: List<LauncherPortalOpenDocument>,
+        multiple: Boolean,
+    ): List<String> {
         check(running)
-        check(safeName(displayName))
-        val imported = createImport(displayName)
+        check(documents.size in 1..MAX_OPEN_DOCUMENTS)
+        check(multiple || documents.size == 1)
+        check(documents.all { document -> safeName(document.displayName) })
+        val imported = ArrayList<File>(documents.size)
+        var totalCopied = 0L
+        val buffer = ByteArray(COPY_BUFFER_BYTES)
         try {
-            ParcelFileDescriptor.AutoCloseInputStream(descriptor).use { input ->
-                FileOutputStream(imported, false).use { output ->
-                    val buffer = ByteArray(COPY_BUFFER_BYTES)
-                    var copied = 0L
-                    while (true) {
-                        val count = input.read(buffer)
-                        if (count < 0) break
-                        copied += count
-                        check(copied <= MAX_SAVE_BYTES) {
-                            "Portal document exceeds the size limit"
+            for (document in documents) {
+                val target = reserveImport(document.displayName)
+                imported += target
+                ParcelFileDescriptor.AutoCloseInputStream(document.descriptor).use { input ->
+                    FileOutputStream(target, false).use { output ->
+                        while (true) {
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            totalCopied += count
+                            check(totalCopied <= MAX_OPEN_BYTES) {
+                                "Portal document batch exceeds the size limit"
+                            }
+                            output.write(buffer, 0, count)
                         }
-                        output.write(buffer, 0, count)
+                        output.fd.sync()
                     }
-                    output.fd.sync()
+                }
+                if (document.writable) {
+                    Log.w(TAG, "Ignored untrusted writable OpenFile hint session=$sessionId")
                 }
             }
         } catch (error: Exception) {
-            runCatching { descriptor.close() }
-            runCatching { imported.delete() }
+            documents.forEach { document ->
+                runCatching { document.descriptor.close() }
+            }
+            imported.forEach { file -> runCatching { file.delete() } }
             throw error
         }
-        if (writable) {
-            Log.w(TAG, "Ignored untrusted writable OpenFile hint session=$sessionId")
+        return imported.map { file ->
+            val logicalPath = "/home/archphene/Documents/Android/${file.name}"
+            Uri.Builder().scheme("file").path(logicalPath).build().toString()
         }
-        val logicalPath = "/home/archphene/Documents/Android/${imported.name}"
-        return Uri.Builder().scheme("file").path(logicalPath).build().toString()
     }
 
     private fun createStaging(suggestedName: String): File {
@@ -376,7 +409,7 @@ internal class LauncherPortalBridge(
         return canonicalStaging
     }
 
-    private fun createImport(displayName: String): File {
+    private fun reserveImport(displayName: String): File {
         val canonicalDirectory = importsDirectory.canonicalFile
         val extensionIndex =
             displayName.lastIndexOf('.').takeIf { index -> index > 0 } ?: displayName.length
@@ -387,7 +420,10 @@ internal class LauncherPortalBridge(
                 if (attempt == 1) displayName else "$stem ($attempt)$extension"
             val candidate = File(canonicalDirectory, candidateName).canonicalFile
             check(candidate.parentFile == canonicalDirectory)
-            if (candidate.createNewFile()) return candidate
+            if (candidate.createNewFile()) {
+                return candidate
+            }
+            // Preserve the existing document and try the next visible suffix.
         }
         error("Too many imported documents with the same display name")
     }
@@ -699,8 +735,10 @@ internal class LauncherPortalBridge(
         private const val MAX_NAME_BYTES = 512
         private const val MAX_MIME_BYTES = 128
         private const val MAX_ACTIVE_SAVES = 8
+        private const val MAX_OPEN_DOCUMENTS = 32
         private const val MAX_IMPORT_COLLISIONS = 1_000
         private const val MAX_SAVE_BYTES = 512L * 1024 * 1024
+        private const val MAX_OPEN_BYTES = 512L * 1024 * 1024
         private const val COPY_BUFFER_BYTES = 64 * 1024
         private const val MIRROR_POLL_MILLIS = 250L
         private const val REQUIRED_STABLE_POLLS = 2

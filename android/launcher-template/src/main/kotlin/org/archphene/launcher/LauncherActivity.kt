@@ -58,6 +58,11 @@ class LauncherActivity :
         val purpose: Int,
     )
 
+    private data class OpenDocument(
+        val displayName: String,
+        val descriptor: ParcelFileDescriptor,
+    )
+
     private lateinit var status: TextView
     private lateinit var surfaceView: LauncherSurfaceView
     private lateinit var content: FrameLayout
@@ -197,7 +202,8 @@ class LauncherActivity :
                             val mimeType = data.readString()
                             if (
                                 requestId <= 0 ||
-                                operation !in DOCUMENT_OPERATION_SAVE..DOCUMENT_OPERATION_OPEN ||
+                                operation !in
+                                    DOCUMENT_OPERATION_SAVE..DOCUMENT_OPERATION_OPEN_MULTIPLE ||
                                 title.isNullOrBlank() ||
                                 title.length > MAX_DOCUMENT_TITLE_UTF16 ||
                                 suggestedName == null ||
@@ -207,7 +213,7 @@ class LauncherActivity :
                                         suggestedName.indexOf('/') >= 0 ||
                                         suggestedName.indexOf('\\') >= 0 ||
                                         suggestedName.indexOf('\u0000') >= 0)) ||
-                                (operation == DOCUMENT_OPERATION_OPEN &&
+                                (operation != DOCUMENT_OPERATION_SAVE &&
                                     suggestedName.isNotEmpty()) ||
                                 mimeType.isNullOrBlank() ||
                                 mimeType.length > MAX_DOCUMENT_MIME_UTF16 ||
@@ -226,7 +232,12 @@ class LauncherActivity :
                                         mimeType,
                                     )
                                 } else {
-                                    beginDocumentOpen(requestId, title, mimeType)
+                                    beginDocumentOpen(
+                                        requestId,
+                                        title,
+                                        mimeType,
+                                        operation == DOCUMENT_OPERATION_OPEN_MULTIPLE,
+                                    )
                                 }
                             }
                             true
@@ -537,11 +548,15 @@ class LauncherActivity :
         pendingDocumentOperation = 0
         if (
             requestId <= 0 ||
-            operation !in DOCUMENT_OPERATION_SAVE..DOCUMENT_OPERATION_OPEN
+            operation !in DOCUMENT_OPERATION_SAVE..DOCUMENT_OPERATION_OPEN_MULTIPLE
         ) {
             return
         }
-        if (resultCode != Activity.RESULT_OK || data?.data == null) {
+        if (
+            resultCode != Activity.RESULT_OK ||
+            data == null ||
+            (data.data == null && data.clipData == null)
+        ) {
             sendDocumentResult(
                 requestId,
                 operation,
@@ -553,9 +568,20 @@ class LauncherActivity :
             return
         }
         val resultIntent = checkNotNull(data)
-        val uri = checkNotNull(resultIntent.data)
         documentHandler.post {
             if (operation == DOCUMENT_OPERATION_SAVE) {
+                val uri = resultIntent.data
+                if (uri == null) {
+                    sendDocumentResult(
+                        requestId,
+                        operation,
+                        DOCUMENT_RESULT_FAILED,
+                        null,
+                        "",
+                        false,
+                    )
+                    return@post
+                }
                 val descriptor =
                     runCatching {
                         contentResolver.openFileDescriptor(uri, "w")
@@ -585,7 +611,7 @@ class LauncherActivity :
                     }
                 }
             } else {
-                sendOpenDocumentResult(requestId, uri)
+                sendOpenDocumentResults(requestId, operation, resultIntent)
             }
         }
     }
@@ -1625,7 +1651,10 @@ class LauncherActivity :
         requestId: Int,
         title: String,
         mimeType: String,
+        multiple: Boolean,
     ) {
+        val operation =
+            if (multiple) DOCUMENT_OPERATION_OPEN_MULTIPLE else DOCUMENT_OPERATION_OPEN
         if (
             requestId <= 0 ||
             sessionId <= 0 ||
@@ -1636,7 +1665,7 @@ class LauncherActivity :
         ) {
             sendDocumentResult(
                 requestId,
-                DOCUMENT_OPERATION_OPEN,
+                operation,
                 DOCUMENT_RESULT_FAILED,
                 null,
                 "",
@@ -1645,7 +1674,7 @@ class LauncherActivity :
             return
         }
         pendingDocumentRequestId = requestId
-        pendingDocumentOperation = DOCUMENT_OPERATION_OPEN
+        pendingDocumentOperation = operation
         val intent =
             Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                 addCategory(Intent.CATEGORY_OPENABLE)
@@ -1654,6 +1683,9 @@ class LauncherActivity :
                     Intent.FLAG_GRANT_READ_URI_PERMISSION,
                 )
                 putExtra(Intent.EXTRA_TITLE, title)
+                if (multiple) {
+                    putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                }
             }
         try {
             startActivityForResult(intent, DOCUMENT_OPEN_REQUEST_CODE)
@@ -1663,7 +1695,7 @@ class LauncherActivity :
             Log.w(TAG, "No Android document provider is available", error)
             sendDocumentResult(
                 requestId,
-                DOCUMENT_OPERATION_OPEN,
+                operation,
                 DOCUMENT_RESULT_FAILED,
                 null,
                 "",
@@ -1675,7 +1707,7 @@ class LauncherActivity :
             Log.w(TAG, "Could not open Android document chooser", error)
             sendDocumentResult(
                 requestId,
-                DOCUMENT_OPERATION_OPEN,
+                operation,
                 DOCUMENT_RESULT_FAILED,
                 null,
                 "",
@@ -1691,7 +1723,7 @@ class LauncherActivity :
         pendingDocumentOperation = 0
         if (
             requestId > 0 &&
-            operation in DOCUMENT_OPERATION_SAVE..DOCUMENT_OPERATION_OPEN
+            operation in DOCUMENT_OPERATION_SAVE..DOCUMENT_OPERATION_OPEN_MULTIPLE
         ) {
             sendDocumentResult(
                 requestId,
@@ -1704,32 +1736,56 @@ class LauncherActivity :
         }
     }
 
-    private fun sendOpenDocumentResult(
+    private fun sendOpenDocumentResults(
         requestId: Int,
-        uri: Uri,
+        operation: Int,
+        resultIntent: Intent,
     ) {
-        val displayName = queryDocumentName(uri)
-        if (displayName == null) {
-            sendDocumentResult(
-                requestId,
-                DOCUMENT_OPERATION_OPEN,
-                DOCUMENT_RESULT_FAILED,
-                null,
-                "",
-                false,
-            )
+        if (
+            operation != DOCUMENT_OPERATION_OPEN &&
+            operation != DOCUMENT_OPERATION_OPEN_MULTIPLE
+        ) {
             return
         }
-        val descriptor =
-            runCatching { contentResolver.openFileDescriptor(uri, "r") }
-                .getOrElse { error ->
-                    Log.w(TAG, "Could not open Android document source", error)
-                    null
+        val uris = ArrayList<Uri>(MAX_OPEN_DOCUMENTS)
+        val clip = resultIntent.clipData
+        if (clip != null) {
+            if (clip.itemCount !in 1..MAX_OPEN_DOCUMENTS) {
+                sendDocumentResult(
+                    requestId,
+                    operation,
+                    DOCUMENT_RESULT_FAILED,
+                    null,
+                    "",
+                    false,
+                )
+                return
+            }
+            repeat(clip.itemCount) { index ->
+                val uri = clip.getItemAt(index).uri
+                if (uri == null || uri in uris) {
+                    sendDocumentResult(
+                        requestId,
+                        operation,
+                        DOCUMENT_RESULT_FAILED,
+                        null,
+                        "",
+                        false,
+                    )
+                    return
                 }
-        if (descriptor == null) {
+                uris += uri
+            }
+        } else {
+            resultIntent.data?.let(uris::add)
+        }
+        if (
+            uris.isEmpty() ||
+            (operation == DOCUMENT_OPERATION_OPEN && uris.size != 1)
+        ) {
             sendDocumentResult(
                 requestId,
-                DOCUMENT_OPERATION_OPEN,
+                operation,
                 DOCUMENT_RESULT_FAILED,
                 null,
                 "",
@@ -1737,15 +1793,92 @@ class LauncherActivity :
             )
             return
         }
-        descriptor.use {
+        val documents = ArrayList<OpenDocument>(uris.size)
+        try {
+            for (uri in uris) {
+                val displayName =
+                    queryDocumentName(uri)
+                        ?: error("Android document has no safe display name")
+                val descriptor =
+                    contentResolver.openFileDescriptor(uri, "r")
+                        ?: error("Android provider returned no document descriptor")
+                documents += OpenDocument(displayName, descriptor)
+            }
+        } catch (error: Exception) {
+            documents.forEach { document ->
+                runCatching { document.descriptor.close() }
+            }
+            Log.w(TAG, "Could not open Android document sources", error)
             sendDocumentResult(
                 requestId,
-                DOCUMENT_OPERATION_OPEN,
-                DOCUMENT_RESULT_SUCCESS,
-                it,
-                displayName,
+                operation,
+                DOCUMENT_RESULT_FAILED,
+                null,
+                "",
                 false,
             )
+            return
+        }
+        try {
+            sendOpenDocumentBatch(
+                requestId,
+                operation,
+                documents,
+            )
+        } finally {
+            documents.forEach { document ->
+                runCatching { document.descriptor.close() }
+            }
+        }
+    }
+
+    private fun sendOpenDocumentBatch(
+        requestId: Int,
+        operation: Int,
+        documents: List<OpenDocument>,
+    ): Boolean {
+        val service = remote ?: return false
+        val activeSession = sessionId
+        if (
+            activeSession <= 0 ||
+            requestId <= 0 ||
+            operation !in DOCUMENT_OPERATION_OPEN..DOCUMENT_OPERATION_OPEN_MULTIPLE ||
+            documents.size !in 1..MAX_OPEN_DOCUMENTS ||
+            (operation == DOCUMENT_OPERATION_OPEN && documents.size != 1) ||
+            documents.any { document -> !safeDocumentName(document.displayName) }
+        ) {
+            return false
+        }
+        val parcel = Parcel.obtain()
+        val reply = Parcel.obtain()
+        return try {
+            parcel.writeInterfaceToken(INTERFACE)
+            parcel.writeInt(PROTOCOL_VERSION)
+            parcel.writeInt(activeSession)
+            parcel.writeInt(requestId)
+            parcel.writeInt(DOCUMENT_RESULT_SUCCESS)
+            if (operation == DOCUMENT_OPERATION_OPEN_MULTIPLE) {
+                parcel.writeInt(documents.size)
+            }
+            for (document in documents) {
+                parcel.writeString(document.displayName)
+                parcel.writeInt(0)
+                document.descriptor.writeToParcel(parcel, 0)
+            }
+            service.transact(TRANSACTION_DOCUMENT_RESULT, parcel, reply, 0) &&
+                run {
+                    reply.readException()
+                    reply.readInt() == RESULT_OK
+                }
+        } catch (error: RemoteException) {
+            Log.w(TAG, "Could not submit Android document batch", error)
+            false
+        } catch (error: RuntimeException) {
+            Log.w(TAG, "Android document batch was rejected", error)
+            false
+        } finally {
+            reply.recycle()
+            parcel.recycle()
         }
     }
 
@@ -1790,9 +1923,11 @@ class LauncherActivity :
         if (
             activeSession <= 0 ||
             requestId <= 0 ||
-            operation !in DOCUMENT_OPERATION_SAVE..DOCUMENT_OPERATION_OPEN ||
+            operation !in DOCUMENT_OPERATION_SAVE..DOCUMENT_OPERATION_OPEN_MULTIPLE ||
             result !in DOCUMENT_RESULT_SUCCESS..DOCUMENT_RESULT_FAILED ||
             (result == DOCUMENT_RESULT_SUCCESS) != (descriptor != null) ||
+            (operation == DOCUMENT_OPERATION_OPEN_MULTIPLE &&
+                result == DOCUMENT_RESULT_SUCCESS) ||
             (operation == DOCUMENT_OPERATION_OPEN &&
                 result == DOCUMENT_RESULT_SUCCESS &&
                 !safeDocumentName(displayName))
@@ -1868,7 +2003,7 @@ class LauncherActivity :
         private const val CAPABILITIES_V2 = "c:wayland,input,ime,clipboard,documents"
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
         private const val INTERFACE = "org.archphene.launcher.ISessionV2"
-        private const val PROTOCOL_VERSION = 2
+        private const val PROTOCOL_VERSION = 3
         private const val TRANSACTION_OPEN = IBinder.FIRST_CALL_TRANSACTION
         private const val TRANSACTION_CLOSE = IBinder.FIRST_CALL_TRANSACTION + 1
         private const val TRANSACTION_ATTACH_SURFACE = IBinder.FIRST_CALL_TRANSACTION + 2
@@ -1915,9 +2050,11 @@ class LauncherActivity :
         private const val DOCUMENT_OPEN_REQUEST_CODE = 7_144
         private const val DOCUMENT_OPERATION_SAVE = 1
         private const val DOCUMENT_OPERATION_OPEN = 2
+        private const val DOCUMENT_OPERATION_OPEN_MULTIPLE = 3
         private const val DOCUMENT_RESULT_SUCCESS = 1
         private const val DOCUMENT_RESULT_CANCELLED = 2
         private const val DOCUMENT_RESULT_FAILED = 3
+        private const val MAX_OPEN_DOCUMENTS = 32
         private const val MAX_DOCUMENT_TITLE_UTF16 = 128
         private const val MAX_DOCUMENT_NAME_UTF16 = 255
         private const val MAX_DOCUMENT_MIME_UTF16 = 128

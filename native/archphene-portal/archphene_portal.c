@@ -30,6 +30,7 @@
 #define INTROSPECTABLE "org.freedesktop.DBus.Introspectable"
 #define MAX_TEXT 8192
 #define MAX_ID 96
+#define MAX_OPEN_RESPONSE (192 * 1024)
 
 static volatile sig_atomic_t running = 1;
 static uint32_t next_id = 1;
@@ -344,17 +345,23 @@ static void emit_portal_response(DBusConnection *connection, const char *path,
     send_message(connection, signal);
 }
 
-static dbus_bool_t append_uri_result(DBusMessageIter *dict, const char *uri) {
+static dbus_bool_t append_uri_result(
+        DBusMessageIter *dict, const char *uris, size_t uri_stride,
+        size_t uri_count) {
     const char *key = "uris";
     DBusMessageIter entry;
     DBusMessageIter variant;
     DBusMessageIter values;
-    return dbus_message_iter_open_container(dict, DBUS_TYPE_DICT_ENTRY, NULL, &entry)
+    dbus_bool_t ok =
+            dbus_message_iter_open_container(dict, DBUS_TYPE_DICT_ENTRY, NULL, &entry)
             && dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &key)
             && dbus_message_iter_open_container(&entry, DBUS_TYPE_VARIANT, "as", &variant)
-            && dbus_message_iter_open_container(&variant, DBUS_TYPE_ARRAY, "s", &values)
-            && (uri == NULL
-                || dbus_message_iter_append_basic(&values, DBUS_TYPE_STRING, &uri))
+            && dbus_message_iter_open_container(&variant, DBUS_TYPE_ARRAY, "s", &values);
+    for (size_t index = 0; ok && index < uri_count; index++) {
+        const char *uri = uris + index * uri_stride;
+        ok = dbus_message_iter_append_basic(&values, DBUS_TYPE_STRING, &uri);
+    }
+    return ok
             && dbus_message_iter_close_container(&variant, &values)
             && dbus_message_iter_close_container(&entry, &variant)
             && dbus_message_iter_close_container(dict, &entry);
@@ -362,7 +369,8 @@ static dbus_bool_t append_uri_result(DBusMessageIter *dict, const char *uri) {
 
 static dbus_bool_t emit_file_chooser_response(
         DBusConnection *connection, const char *path, const char *destination,
-        uint32_t response, const char *uri) {
+        uint32_t response, const char *uris, size_t uri_stride,
+        size_t uri_count) {
     DBusMessage *signal = dbus_message_new_signal(
             path, "org.freedesktop.portal.Request", "Response");
     if (signal == NULL) return FALSE;
@@ -381,7 +389,9 @@ static dbus_bool_t emit_file_chooser_response(
              * responses. Include a well-typed empty array instead of omitting
              * it so legacy clients do not dereference an unset result.
              */
-            && append_uri_result(&dict, response == 0 ? uri : NULL)
+            && append_uri_result(
+                    &dict, response == 0 ? uris : NULL,
+                    uri_stride, response == 0 ? uri_count : 0)
             && dbus_message_iter_close_container(&args, &dict);
     if (!ok) {
         dbus_message_unref(signal);
@@ -866,23 +876,35 @@ static void handle_open_file(DBusConnection *connection, DBusMessage *request) {
     make_request_path(request, &args, path, sizeof(path));
     if (!send_request_reply(connection, request, path)) return;
 
-    char uri[4097] = {0};
-    char response[256] = {0};
+    char uris[32][4097] = {{0}};
+    size_t uri_count = 0;
+    char fallback_response[64] = "ERROR\tOUT_OF_MEMORY";
+    char *response = calloc(MAX_OPEN_RESPONSE, 1);
     int result = -1;
-    if (!multiple && !directory) {
-        result = archphene_android_open_file(
-                title, "*/*", uri, sizeof(uri), response, sizeof(response));
+    if (!directory && response != NULL) {
+        result = archphene_android_open_files(
+                title, "*/*", multiple ? 1 : 0,
+                &uris[0][0], sizeof(uris[0]), 32, &uri_count,
+                response, MAX_OPEN_RESPONSE);
     } else {
-        snprintf(response, sizeof(response), "ERROR\tUNSUPPORTED_SELECTION");
+        if (response == NULL) response = fallback_response;
+        if (directory) {
+            snprintf(
+                    response,
+                    response == fallback_response
+                        ? sizeof(fallback_response) : MAX_OPEN_RESPONSE,
+                    "ERROR\tUNSUPPORTED_SELECTION");
+        }
     }
     uint32_t portal_response =
             result == 0 ? 0u : (strcmp(response, "CANCEL") == 0 ? 1u : 2u);
     dbus_bool_t emitted = emit_file_chooser_response(
             connection, path, dbus_message_get_sender(request),
-            portal_response, result == 0 ? uri : NULL);
+            portal_response, &uris[0][0], sizeof(uris[0]), uri_count);
     fprintf(stderr,
             "OpenFile completed path=%s broker=%d response=%u emitted=%d\n",
             path, result, portal_response, emitted ? 1 : 0);
+    if (response != fallback_response) free(response);
 }
 
 static void handle_save_file(DBusConnection *connection, DBusMessage *request) {
@@ -915,7 +937,7 @@ static void handle_save_file(DBusConnection *connection, DBusMessage *request) {
     dbus_bool_t emitted = emit_file_chooser_response(
             connection, path, dbus_message_get_sender(request),
             portal_response,
-            result == 0 ? uri : NULL);
+            result == 0 ? uri : NULL, sizeof(uri), result == 0 ? 1 : 0);
     fprintf(stderr,
             "SaveFile completed path=%s broker=%d response=%u emitted=%d\n",
             path, result, portal_response, emitted);

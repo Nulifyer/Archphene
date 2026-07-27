@@ -54,20 +54,17 @@ class LauncherSessionService : Service() {
         private val completed = AtomicBoolean(false)
         @Volatile var result = DOCUMENT_RESULT_FAILED
         @Volatile var descriptor: ParcelFileDescriptor? = null
-        @Volatile var displayName = ""
-        @Volatile var writable = false
+        @Volatile var documents = emptyList<LauncherPortalOpenDocument>()
 
         fun complete(
             result: Int,
             descriptor: ParcelFileDescriptor?,
-            displayName: String,
-            writable: Boolean,
+            documents: List<LauncherPortalOpenDocument>,
         ): Boolean {
             if (!completed.compareAndSet(false, true)) return false
             this.result = result
             this.descriptor = descriptor
-            this.displayName = displayName
-            this.writable = writable
+            this.documents = documents
             latch.countDown()
             return true
         }
@@ -260,8 +257,7 @@ class LauncherSessionService : Service() {
                 session.pendingDocumentRequest?.portalCompletion?.complete(
                     DOCUMENT_RESULT_FAILED,
                     null,
-                    "",
-                    false,
+                    emptyList(),
                 )
                 session.pendingDocumentRequest = null
             }
@@ -641,9 +637,7 @@ class LauncherSessionService : Service() {
             reply: Parcel,
         ) {
             var descriptor: ParcelFileDescriptor? = null
-            var displayName = ""
-            var writable = false
-            var writableValue = 0
+            val openDocuments = ArrayList<LauncherPortalOpenDocument>(MAX_OPEN_DOCUMENTS)
             val result =
                 runCatching {
                     data.enforceInterface(INTERFACE)
@@ -658,24 +652,53 @@ class LauncherSessionService : Service() {
                             requestId,
                         )
                     if (documentResult == DOCUMENT_RESULT_SUCCESS) {
-                        if (operation == DOCUMENT_OPERATION_OPEN) {
-                            displayName = data.readString().orEmpty()
-                            writableValue = data.readInt()
-                            writable = writableValue == 1
+                        if (
+                            operation == DOCUMENT_OPERATION_OPEN ||
+                            operation == DOCUMENT_OPERATION_OPEN_MULTIPLE
+                        ) {
+                            val count =
+                                if (operation == DOCUMENT_OPERATION_OPEN) 1 else data.readInt()
+                            check(count in 1..MAX_OPEN_DOCUMENTS)
+                            repeat(count) {
+                                val displayName = data.readString().orEmpty()
+                                val writableValue = data.readInt()
+                                check(
+                                    safeDocumentName(displayName) &&
+                                        writableValue in 0..1,
+                                )
+                                openDocuments +=
+                                    LauncherPortalOpenDocument(
+                                        ParcelFileDescriptor.CREATOR.createFromParcel(data),
+                                        displayName,
+                                        writableValue == 1,
+                                    )
+                            }
+                        } else {
+                            descriptor = ParcelFileDescriptor.CREATOR.createFromParcel(data)
                         }
-                        descriptor = ParcelFileDescriptor.CREATOR.createFromParcel(data)
                     }
+                    val openOperation =
+                        operation == DOCUMENT_OPERATION_OPEN ||
+                            operation == DOCUMENT_OPERATION_OPEN_MULTIPLE
+                    val successShape =
+                        if (openOperation) {
+                            descriptor == null &&
+                                openDocuments.isNotEmpty() &&
+                                (operation == DOCUMENT_OPERATION_OPEN_MULTIPLE ||
+                                    openDocuments.size == 1)
+                        } else {
+                            descriptor != null && openDocuments.isEmpty()
+                        }
                     if (
                         version != PROTOCOL_VERSION ||
                         sessionId <= 0 ||
                         requestId <= 0 ||
-                        operation !in DOCUMENT_OPERATION_SAVE..DOCUMENT_OPERATION_OPEN ||
+                        operation !in
+                            DOCUMENT_OPERATION_SAVE..DOCUMENT_OPERATION_OPEN_MULTIPLE ||
                         documentResult !in DOCUMENT_RESULT_SUCCESS..DOCUMENT_RESULT_FAILED ||
-                        (documentResult == DOCUMENT_RESULT_SUCCESS) != (descriptor != null) ||
-                        (operation == DOCUMENT_OPERATION_OPEN &&
-                            documentResult == DOCUMENT_RESULT_SUCCESS &&
-                            (!safeDocumentName(displayName) ||
-                                writableValue !in 0..1)) ||
+                        (documentResult == DOCUMENT_RESULT_SUCCESS) != successShape ||
+                        (documentResult != DOCUMENT_RESULT_SUCCESS &&
+                            (descriptor != null || openDocuments.isNotEmpty())) ||
                         data.dataAvail() != 0
                     ) {
                         return@runCatching RESULT_INVALID
@@ -686,14 +709,14 @@ class LauncherSessionService : Service() {
                         requestId,
                         documentResult,
                         descriptor,
-                        displayName,
-                        writable,
+                        openDocuments.toList(),
                     ).also { completionResult ->
                         if (
                             completionResult == RESULT_OK &&
                             documentResult == DOCUMENT_RESULT_SUCCESS
                         ) {
                             descriptor = null
+                            openDocuments.clear()
                         }
                     }
                 }.getOrElse { error ->
@@ -701,6 +724,7 @@ class LauncherSessionService : Service() {
                     RESULT_INVALID
                 }
             descriptor?.close()
+            openDocuments.forEach { document -> document.descriptor.close() }
             reply.writeNoException()
             reply.writeInt(result)
         }
@@ -1507,8 +1531,8 @@ class LauncherSessionService : Service() {
                                 mimeType,
                             )
                         },
-                        requestOpen = { title, mimeType ->
-                            requestPortalDocumentOpen(session, title, mimeType)
+                        requestOpen = { title, mimeType, multiple ->
+                            requestPortalDocumentOpen(session, title, mimeType, multiple)
                         },
                     ).also { bridge ->
                         bridge.start()
@@ -1633,6 +1657,7 @@ class LauncherSessionService : Service() {
         session: Session,
         title: String,
         mimeType: String,
+        multiple: Boolean,
     ): LauncherPortalOpenResult {
         if (
             title.isBlank() ||
@@ -1642,8 +1667,10 @@ class LauncherSessionService : Service() {
             mimeType.indexOf('/') <= 0 ||
             mimeType.indexOf('\u0000') >= 0
         ) {
-            return LauncherPortalOpenResult(null, "", false, false)
+            return LauncherPortalOpenResult(emptyList(), false)
         }
+        val operation =
+            if (multiple) DOCUMENT_OPERATION_OPEN_MULTIPLE else DOCUMENT_OPERATION_OPEN
         val completion = PortalDocumentCompletion()
         val pending =
             synchronized(this) {
@@ -1653,18 +1680,18 @@ class LauncherSessionService : Service() {
                     sessions[session.id] !== session ||
                     session.pendingDocumentRequest != null
                 ) {
-                    return LauncherPortalOpenResult(null, "", false, false)
+                    return LauncherPortalOpenResult(emptyList(), false)
                 }
                 val requestId =
                     nextDocumentRequestId.getAndUpdate { value ->
                         if (value == Int.MAX_VALUE) 1 else value + 1
                     }
                 if (requestId <= 0) {
-                    return LauncherPortalOpenResult(null, "", false, false)
+                    return LauncherPortalOpenResult(emptyList(), false)
                 }
                 PendingDocumentRequest(
                     requestId,
-                    DOCUMENT_OPERATION_OPEN,
+                    operation,
                     title,
                     "",
                     mimeType,
@@ -1674,14 +1701,14 @@ class LauncherSessionService : Service() {
                     session.pendingDocumentRequest = request
                     if (!notifyDocumentRequest(session, request)) {
                         session.pendingDocumentRequest = null
-                        return LauncherPortalOpenResult(null, "", false, false)
+                        return LauncherPortalOpenResult(emptyList(), false)
                     }
                 }
             }
         Log.i(
             TAG,
             "Portal requested Android document source session=${session.id} " +
-                "request=${pending.id}",
+                "request=${pending.id} multiple=$multiple",
         )
         if (!completion.latch.await(DOCUMENT_REQUEST_TIMEOUT_MINUTES, TimeUnit.MINUTES)) {
             synchronized(this) {
@@ -1689,12 +1716,10 @@ class LauncherSessionService : Service() {
                     session.pendingDocumentRequest = null
                 }
             }
-            return LauncherPortalOpenResult(null, "", false, false)
+            return LauncherPortalOpenResult(emptyList(), false)
         }
         return LauncherPortalOpenResult(
-            completion.descriptor,
-            completion.displayName,
-            completion.writable,
+            completion.documents,
             completion.result == DOCUMENT_RESULT_CANCELLED,
         )
     }
@@ -2303,7 +2328,8 @@ class LauncherSessionService : Service() {
             !session.active ||
             request.id <= 0 ||
             request.title.isBlank() ||
-            request.operation !in DOCUMENT_OPERATION_SAVE..DOCUMENT_OPERATION_OPEN ||
+            request.operation !in
+                DOCUMENT_OPERATION_SAVE..DOCUMENT_OPERATION_OPEN_MULTIPLE ||
             (request.operation == DOCUMENT_OPERATION_SAVE && request.suggestedName.isBlank()) ||
             request.mimeType.isBlank()
         ) {
@@ -2351,18 +2377,29 @@ class LauncherSessionService : Service() {
         requestId: Int,
         result: Int,
         descriptor: ParcelFileDescriptor?,
-        displayName: String,
-        writable: Boolean,
+        documents: List<LauncherPortalOpenDocument>,
     ): Int {
         val session = authorizedSession(callingUid, sessionId) ?: return RESULT_UNAUTHORIZED
         val request = session.pendingDocumentRequest ?: return RESULT_INVALID
+        val openOperation =
+            request.operation == DOCUMENT_OPERATION_OPEN ||
+                request.operation == DOCUMENT_OPERATION_OPEN_MULTIPLE
+        val successShape =
+            if (openOperation) {
+                descriptor == null &&
+                    documents.size in 1..MAX_OPEN_DOCUMENTS &&
+                    documents.all { document -> safeDocumentName(document.displayName) } &&
+                    (request.operation == DOCUMENT_OPERATION_OPEN_MULTIPLE ||
+                        documents.size == 1)
+            } else {
+                descriptor != null && documents.isEmpty()
+            }
         if (
             request.id != requestId ||
             result !in DOCUMENT_RESULT_SUCCESS..DOCUMENT_RESULT_FAILED ||
-            (result == DOCUMENT_RESULT_SUCCESS) != (descriptor != null) ||
-            (request.operation == DOCUMENT_OPERATION_OPEN &&
-                result == DOCUMENT_RESULT_SUCCESS &&
-                !safeDocumentName(displayName))
+            (result == DOCUMENT_RESULT_SUCCESS) != successShape ||
+            (result != DOCUMENT_RESULT_SUCCESS &&
+                (descriptor != null || documents.isNotEmpty()))
         ) {
             return RESULT_INVALID
         }
@@ -2373,8 +2410,7 @@ class LauncherSessionService : Service() {
                 !portalCompletion.complete(
                     result,
                     if (result == DOCUMENT_RESULT_SUCCESS) descriptor else null,
-                    if (result == DOCUMENT_RESULT_SUCCESS) displayName else "",
-                    result == DOCUMENT_RESULT_SUCCESS && writable,
+                    if (result == DOCUMENT_RESULT_SUCCESS) documents else emptyList(),
                 )
             ) {
                 return RESULT_INVALID
@@ -2498,7 +2534,7 @@ class LauncherSessionService : Service() {
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
         private const val LAUNCHER_PACKAGE_PREFIX = "org.archphene.linux.p"
         private const val INTERFACE = "org.archphene.launcher.ISessionV2"
-        private const val PROTOCOL_VERSION = 2
+        private const val PROTOCOL_VERSION = 3
         private const val TRANSACTION_OPEN = IBinder.FIRST_CALL_TRANSACTION
         private const val TRANSACTION_CLOSE = IBinder.FIRST_CALL_TRANSACTION + 1
         private const val TRANSACTION_ATTACH_SURFACE = IBinder.FIRST_CALL_TRANSACTION + 2
@@ -2573,6 +2609,7 @@ class LauncherSessionService : Service() {
         private const val IME_COMPONENT_PURPOSE = 3
         private const val DOCUMENT_OPERATION_SAVE = 1
         private const val DOCUMENT_OPERATION_OPEN = 2
+        private const val DOCUMENT_OPERATION_OPEN_MULTIPLE = 3
         private const val DOCUMENT_RESULT_SUCCESS = 1
         private const val DOCUMENT_RESULT_CANCELLED = 2
         private const val DOCUMENT_RESULT_FAILED = 3
@@ -2580,6 +2617,7 @@ class LauncherSessionService : Service() {
         private const val MAX_DOCUMENT_TITLE_UTF16 = 128
         private const val MAX_DOCUMENT_NAME_UTF16 = 255
         private const val MAX_DOCUMENT_MIME_UTF16 = 128
+        private const val MAX_OPEN_DOCUMENTS = 32
         private const val MAX_DEBUG_DOCUMENT_BYTES = 65_536
         private val stalePortalSavesRecovered = AtomicBoolean(false)
         private const val RESULT_OK = 0

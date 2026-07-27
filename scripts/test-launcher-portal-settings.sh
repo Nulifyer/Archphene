@@ -46,10 +46,16 @@ archphene_wait_log \
   'Private desktop portal ready session=' 30 \
   'ArchphenePortal:I ArchpheneLauncherSession:I AndroidRuntime:E *:S' >/dev/null
 
-bus="$(
-  archphene_adb_run shell run-as "$manager" find cache -name bus -print |
-    tr -d '\r'
-)"
+bus=
+deadline=$((SECONDS + 10))
+while ((SECONDS < deadline)); do
+  bus="$(
+    archphene_adb_run shell run-as "$manager" find cache -name bus -print |
+      tr -d '\r'
+  )"
+  [[ "$bus" =~ ^cache/p[1-9][0-9]*-[0-9a-f]{16}/bus$ ]] && break
+  sleep 0.3
+done
 [[ "$bus" =~ ^cache/p[1-9][0-9]*-[0-9a-f]{16}/bus$ ]] ||
   archphene_die "expected exactly one private launcher bus, received: $bus"
 

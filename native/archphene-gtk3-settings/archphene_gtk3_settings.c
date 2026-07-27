@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 
 #include <dlfcn.h>
+#include <gio/gio.h>
 #include <glib-object.h>
 #include <glib.h>
 #include <gmodule.h>
@@ -39,6 +40,13 @@ typedef gint (*GtkNativeDialogRun)(gpointer dialog);
 typedef gpointer (*GtkFileChooserGetFile)(gpointer chooser);
 typedef gboolean (*GtkFileChooserSetFile)(
         gpointer chooser, gpointer file, GError **error);
+typedef gboolean (*GtkFileChooserGetSelectMultiple)(gpointer chooser);
+typedef void (*GtkFileChooserSetSelectMultiple)(
+        gpointer chooser, gboolean multiple);
+typedef GSList *(*GtkFileChooserGetFiles)(gpointer chooser);
+typedef gboolean (*GtkFileChooserSelectFile)(
+        gpointer chooser, gpointer file, GError **error);
+typedef void (*GtkFileChooserUnselectAll)(gpointer chooser);
 
 static gchar *settings_path;
 static gchar *active_theme;
@@ -48,6 +56,8 @@ static gboolean active_dark;
 static gboolean have_active_settings;
 static gpointer active_css_provider;
 static gboolean refresh_started;
+static gpointer portal_file_chooser;
+static GSList *portal_files;
 
 enum {
     ARCHPHENE_GTK_FILE_CHOOSER_ACTION_OPEN = 0,
@@ -64,6 +74,108 @@ static void write_diagnostic(const gchar *status)
     gchar *path = g_build_filename(cache, "archphene-gtk-settings.log", NULL);
     g_file_set_contents(path, status, -1, NULL);
     g_free(path);
+}
+
+static void portal_file_chooser_destroyed(
+        gpointer data, GObject *chooser)
+{
+    (void)data;
+    if (portal_file_chooser != chooser) return;
+    portal_file_chooser = NULL;
+    g_slist_free_full(portal_files, g_object_unref);
+    portal_files = NULL;
+}
+
+static void clear_portal_files(void)
+{
+    if (portal_file_chooser != NULL) {
+        g_object_weak_unref(
+                G_OBJECT(portal_file_chooser),
+                portal_file_chooser_destroyed, NULL);
+    }
+    portal_file_chooser = NULL;
+    g_slist_free_full(portal_files, g_object_unref);
+    portal_files = NULL;
+}
+
+static void retain_portal_files(gpointer chooser, GSList *files)
+{
+    clear_portal_files();
+    portal_file_chooser = chooser;
+    g_object_weak_ref(
+            G_OBJECT(chooser), portal_file_chooser_destroyed, NULL);
+    for (GSList *item = files; item != NULL; item = item->next) {
+        portal_files = g_slist_append(portal_files, g_object_ref(item->data));
+    }
+}
+
+static GSList *copy_portal_files(gpointer chooser)
+{
+    if (chooser != portal_file_chooser || portal_files == NULL) return NULL;
+    GSList *copy = NULL;
+    for (GSList *item = portal_files; item != NULL; item = item->next) {
+        copy = g_slist_append(copy, g_object_ref(item->data));
+    }
+    return copy;
+}
+
+G_MODULE_EXPORT GSList *gtk_file_chooser_get_files(gpointer chooser)
+{
+    GSList *files = copy_portal_files(chooser);
+    if (files != NULL) {
+        write_diagnostic("Application consumed portal files through GTK\n");
+        return files;
+    }
+    union {
+        gpointer object;
+        GtkFileChooserGetFiles function;
+    } original = {dlsym(RTLD_NEXT, "gtk_file_chooser_get_files")};
+    return original.function == NULL ? NULL : original.function(chooser);
+}
+
+static GSList *portal_file_strings(gpointer chooser, gboolean uri)
+{
+    if (chooser != portal_file_chooser || portal_files == NULL) return NULL;
+    GSList *values = NULL;
+    for (GSList *item = portal_files; item != NULL; item = item->next) {
+        gchar *value = uri
+                ? g_file_get_uri(G_FILE(item->data))
+                : g_file_get_path(G_FILE(item->data));
+        if (value == NULL) {
+            g_slist_free_full(values, g_free);
+            return NULL;
+        }
+        values = g_slist_append(values, value);
+    }
+    return values;
+}
+
+G_MODULE_EXPORT GSList *gtk_file_chooser_get_filenames(gpointer chooser)
+{
+    GSList *values = portal_file_strings(chooser, FALSE);
+    if (values != NULL) {
+        write_diagnostic("Application consumed portal filenames through GTK\n");
+        return values;
+    }
+    union {
+        gpointer object;
+        GSList *(*function)(gpointer);
+    } original = {dlsym(RTLD_NEXT, "gtk_file_chooser_get_filenames")};
+    return original.function == NULL ? NULL : original.function(chooser);
+}
+
+G_MODULE_EXPORT GSList *gtk_file_chooser_get_uris(gpointer chooser)
+{
+    GSList *values = portal_file_strings(chooser, TRUE);
+    if (values != NULL) {
+        write_diagnostic("Application consumed portal URIs through GTK\n");
+        return values;
+    }
+    union {
+        gpointer object;
+        GSList *(*function)(gpointer);
+    } original = {dlsym(RTLD_NEXT, "gtk_file_chooser_get_uris")};
+    return original.function == NULL ? NULL : original.function(chooser);
 }
 
 static GtkSettingsGetDefault resolve_settings_get_default(void)
@@ -341,12 +453,37 @@ G_MODULE_EXPORT gint gtk_dialog_run(gpointer dialog)
         gpointer object;
         GtkFileChooserSetFile function;
     } set_file = {dlsym(RTLD_DEFAULT, "gtk_file_chooser_set_file")};
+    union {
+        gpointer object;
+        GtkFileChooserGetSelectMultiple function;
+    } get_multiple = {
+            dlsym(RTLD_DEFAULT, "gtk_file_chooser_get_select_multiple")};
+    union {
+        gpointer object;
+        GtkFileChooserSetSelectMultiple function;
+    } set_multiple = {
+            dlsym(RTLD_DEFAULT, "gtk_file_chooser_set_select_multiple")};
+    union {
+        gpointer object;
+        GtkFileChooserGetFiles function;
+    } get_files = {dlsym(RTLD_NEXT, "gtk_file_chooser_get_files")};
+    union {
+        gpointer object;
+        GtkFileChooserSelectFile function;
+    } select_file = {dlsym(RTLD_DEFAULT, "gtk_file_chooser_select_file")};
+    union {
+        gpointer object;
+        GtkFileChooserUnselectAll function;
+    } unselect_all = {dlsym(RTLD_DEFAULT, "gtk_file_chooser_unselect_all")};
     if (get_type.function == NULL || get_action.function == NULL
             || get_name.function == NULL || native_new.function == NULL
             || get_parent.function == NULL || get_title.function == NULL
             || set_name.function == NULL || get_overwrite.function == NULL
             || set_overwrite.function == NULL || native_run.function == NULL
             || get_file.function == NULL || set_file.function == NULL
+            || get_multiple.function == NULL || set_multiple.function == NULL
+            || get_files.function == NULL || select_file.function == NULL
+            || unselect_all.function == NULL
             || !g_type_check_instance_is_a(
                     (GTypeInstance *)dialog, get_type.function())) {
         return original.function(dialog);
@@ -357,6 +494,7 @@ G_MODULE_EXPORT gint gtk_dialog_run(gpointer dialog)
             && action != ARCHPHENE_GTK_FILE_CHOOSER_ACTION_SAVE) {
         return original.function(dialog);
     }
+    clear_portal_files();
     gchar *name = action == ARCHPHENE_GTK_FILE_CHOOSER_ACTION_SAVE
             ? get_name.function(dialog) : NULL;
     const gchar *title = get_title.function(dialog);
@@ -376,6 +514,8 @@ G_MODULE_EXPORT gint gtk_dialog_run(gpointer dialog)
     if (action == ARCHPHENE_GTK_FILE_CHOOSER_ACTION_SAVE) {
         if (name != NULL && name[0] != '\0') set_name.function(native, name);
         set_overwrite.function(native, get_overwrite.function(dialog));
+    } else {
+        set_multiple.function(native, get_multiple.function(dialog));
     }
     g_free(name);
 
@@ -392,16 +532,56 @@ G_MODULE_EXPORT gint gtk_dialog_run(gpointer dialog)
         g_object_unref(native);
         return response;
     }
-    gpointer file = get_file.function(native);
-    if (file == NULL) {
-        g_object_unref(native);
-        return ARCHPHENE_GTK_RESPONSE_CANCEL;
-    }
+    gboolean multiple = action == ARCHPHENE_GTK_FILE_CHOOSER_ACTION_OPEN
+            && get_multiple.function(dialog);
     GError *error = NULL;
-    gboolean selected = set_file.function(dialog, file, &error);
-    g_object_unref(file);
+    gboolean selected = TRUE;
+    guint expected = 1;
+    if (multiple) {
+        GSList *files = get_files.function(native);
+        expected = g_slist_length(files);
+        if (expected == 0 || expected > 32) {
+            selected = FALSE;
+        } else {
+            retain_portal_files(dialog, files);
+            unselect_all.function(dialog);
+            selected = set_file.function(dialog, files->data, &error);
+            gboolean first_visible = FALSE;
+            for (guint attempt = 0; selected && attempt < 2000; attempt++) {
+                gpointer applied = get_file.function(dialog);
+                if (applied != NULL) {
+                    g_object_unref(applied);
+                    first_visible = TRUE;
+                    break;
+                }
+                while (g_main_context_iteration(NULL, FALSE)) {}
+                g_usleep(1000);
+            }
+            selected = selected && first_visible;
+            if (selected) set_multiple.function(dialog, TRUE);
+            for (GSList *item = files->next;
+                    selected && item != NULL; item = item->next) {
+                selected = select_file.function(dialog, item->data, &error);
+            }
+        }
+        g_slist_free_full(files, g_object_unref);
+    } else {
+        gpointer file = get_file.function(native);
+        if (file == NULL) {
+            selected = FALSE;
+        } else {
+            selected = set_file.function(dialog, file, &error);
+            g_object_unref(file);
+        }
+    }
     g_object_unref(native);
     if (!selected) {
+        if (multiple && portal_file_chooser == dialog && portal_files != NULL) {
+            if (error != NULL) g_error_free(error);
+            write_diagnostic(
+                    "File portal selection retained through GTK plural getters\n");
+            return ARCHPHENE_GTK_RESPONSE_ACCEPT;
+        }
         if (error != NULL) {
             gchar *status = g_strdup_printf(
                     "File portal could not apply selection: %s\n", error->message);
@@ -419,18 +599,38 @@ G_MODULE_EXPORT gint gtk_dialog_run(gpointer dialog)
      * such as editors see a null destination and silently skip their write.
      */
     gboolean visible = FALSE;
+    guint last_count = 0;
     for (guint attempt = 0; attempt < 2000; attempt++) {
-        gpointer applied = get_file.function(dialog);
-        if (applied != NULL) {
-            g_object_unref(applied);
-            visible = TRUE;
-            break;
+        if (multiple) {
+            GSList *applied = get_files.function(dialog);
+            last_count = g_slist_length(applied);
+            g_slist_free_full(applied, g_object_unref);
+            if (last_count == expected) {
+                visible = TRUE;
+                break;
+            }
+        } else {
+            gpointer applied = get_file.function(dialog);
+            if (applied != NULL) {
+                g_object_unref(applied);
+                visible = TRUE;
+                break;
+            }
         }
         while (g_main_context_iteration(NULL, FALSE)) {}
         g_usleep(1000);
     }
     if (!visible) {
-        write_diagnostic("File portal selection did not settle\n");
+        if (multiple && portal_file_chooser == dialog && portal_files != NULL) {
+            write_diagnostic(
+                    "File portal selection served through GTK plural getters\n");
+            return ARCHPHENE_GTK_RESPONSE_ACCEPT;
+        }
+        gchar *status = g_strdup_printf(
+                "File portal selection did not settle expected=%u visible=%u\n",
+                expected, last_count);
+        write_diagnostic(status);
+        g_free(status);
         return ARCHPHENE_GTK_RESPONSE_CANCEL;
     }
     write_diagnostic(action == ARCHPHENE_GTK_FILE_CHOOSER_ACTION_SAVE

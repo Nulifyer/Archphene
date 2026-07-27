@@ -1619,16 +1619,20 @@ Every mapped surface now receives output membership and preferred buffer scale;
 the stock chooser commits scale 3, its visible Open action works, and Code opens
 the shared `ArchpheneMvp` tree.
 
-The private portal now replaces stock GTK 3 single-file Open and Save As
-dialogs with Android DocumentsUI. Save As mirrors stable writes through a
-bounded private staging file into the chosen Android descriptor. Open imports
-at most 512 MiB into a durable, collision-safe
-`~/Documents/Android/<display name>` copy; Android URIs and grants never cross
-into Linux, and editing the imported copy does not claim to update the original
-provider document. Cancellation, exact bytes, full-device captures, scoped
-fatal logs, and the current x86_64/AArch64 wrapper ABIs pass on the emulator and
-Samsung. Folder/multiple selection and Qt 6, GTK 4, and Electron caller
-validation remain.
+The private portal now replaces stock GTK 3 single- and multiple-file Open plus
+Save As dialogs with Android DocumentsUI. Save As mirrors stable writes through
+a bounded private staging file into the chosen Android descriptor. Open imports
+at most 32 documents and 512 MiB per batch into durable, collision-safe
+`~/Documents/Android/<display name>` copies. The versioned Binder path rejects
+duplicate Android URIs and malformed result shapes, owns every descriptor
+exactly, reserves non-replacing destinations, and removes the complete batch on
+copy failure. The GTK bridge preserves every selected file through the
+toolkit's plural getters; Android URIs and grants never cross into Linux, and
+editing an imported copy does not claim to update the original provider
+document. Cancellation, repeated single-file collision behavior, exact bytes,
+application-visible dual-file results, full-device captures, scoped fatal logs,
+and the current x86_64/AArch64 wrapper ABIs pass on the emulator and Samsung.
+Folder selection and Qt 6, GTK 4, and Electron caller validation remain.
 
 The same private frontend implements XDG Settings portal v2 for the standard
 appearance color scheme, accent, contrast, and reduced-motion keys, including

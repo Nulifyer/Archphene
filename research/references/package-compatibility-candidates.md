@@ -70,7 +70,7 @@ sudo pacman -S \
 | Package             | Stack            | Primary coverage                                        |
 | ------------------- | ---------------- | ------------------------------------------------------- |
 | `kcalc`             | Qt 6/KDE         | Basic Qt control case                                   |
-| `mousepad`          | GTK 3            | Basic GTK 3 control case                                |
+| `mousepad`          | GTK 3            | Controls plus single/multiple Open and Save portals     |
 | `gnome-text-editor` | GTK 4/libadwaita | IME, selection, adaptive UI, open/save                  |
 | `kate`              | Qt 6/KDE         | Tabs, split views, menus, sessions, large text          |
 | `foot`              | Native Wayland   | PTY, keyboard, Unicode, scrolling and clipboard         |
