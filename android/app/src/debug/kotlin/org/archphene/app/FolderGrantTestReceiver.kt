@@ -4,10 +4,14 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.util.AtomicFile
 import android.util.Log
 import java.io.File
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
+import java.security.MessageDigest
 
 internal class FolderGrantTestReceiver : BroadcastReceiver() {
     override fun onReceive(
@@ -24,7 +28,8 @@ internal class FolderGrantTestReceiver : BroadcastReceiver() {
             intent.action != ACTION_PREPARE_MIRROR &&
             intent.action != ACTION_VERIFY_MIRROR &&
             intent.action != ACTION_VERIFY_MIRROR_ABSENT &&
-            intent.action != ACTION_CLEAN_MIRROR
+            intent.action != ACTION_CLEAN_MIRROR &&
+            intent.action != ACTION_HOLD_SYNC
         ) {
             return
         }
@@ -48,6 +53,7 @@ internal class FolderGrantTestReceiver : BroadcastReceiver() {
                         ACTION_VERIFY_MIRROR -> verifyMirror(context, token)
                         ACTION_VERIFY_MIRROR_ABSENT -> verifyMirrorAbsent(context, token)
                         ACTION_CLEAN_MIRROR -> cleanMirror(context, token)
+                        ACTION_HOLD_SYNC -> holdSync(context, intent)
                     }
                     Log.i(TAG, "Folder grant ${intent.action} passed token=$token")
                 } catch (error: Exception) {
@@ -215,6 +221,86 @@ internal class FolderGrantTestReceiver : BroadcastReceiver() {
         check(!File(projectsRoot(context), STAGING_NAME).exists()) {
             "mirror staging remains after publication"
         }
+        verifyMirrorBaseline(context, token, project)
+    }
+
+    private fun verifyMirrorBaseline(
+        context: Context,
+        token: String,
+        project: File,
+    ) {
+        val preferences =
+            context.getSharedPreferences(STORAGE_PREFERENCES, Context.MODE_PRIVATE)
+        val mappingId =
+            preferences
+                .getString(FOLDER_MAPPING_ID, null)
+                ?.takeIf(MAPPING_ID::matches)
+                ?: error("project mirror mapping identity is unavailable")
+        val manifest = File(syncStateRoot(context), "$mappingId.v1")
+        check(manifest.isFile && !Files.isSymbolicLink(manifest.toPath())) {
+            "project mirror baseline is unavailable or symbolic"
+        }
+        val encoded = manifest.readBytes()
+        check(encoded.size in 36..MAX_MANIFEST_BYTES) { "project mirror baseline is not bounded" }
+        val input = ByteBuffer.wrap(encoded).order(ByteOrder.LITTLE_ENDIAN)
+        val magic = ByteArray(8)
+        input.get(magic)
+        check(magic.contentEquals("ARCSYNC1".toByteArray(StandardCharsets.US_ASCII))) {
+            "project mirror baseline magic differs"
+        }
+        check(input.int == 1) { "project mirror baseline version differs" }
+        val entryCount = input.int
+        check(entryCount == 6) { "project mirror baseline entry count differs" }
+        val encodedMapping = ByteArray(16)
+        input.get(encodedMapping)
+        check(encodedMapping.toHex() == mappingId) {
+            "project mirror baseline mapping identity differs"
+        }
+        val projectLength = input.short.toInt() and 0xffff
+        check(input.short.toInt() == 0) { "project mirror baseline header is not canonical" }
+        val projectName = input.takeUtf8(projectLength)
+        check(projectName == mirrorName(token)) { "project mirror baseline name differs" }
+
+        val expectedPaths =
+            setOf(".git", ".git/config", "empty.bin", "main.txt", "src", "src/nested.txt")
+        val observedPaths = linkedSetOf<String>()
+        var previousPath = ""
+        repeat(entryCount) {
+            check(input.remaining() >= 44) { "project mirror baseline entry is truncated" }
+            val pathLength = input.short.toInt() and 0xffff
+            val kind = input.get().toInt() and 0xff
+            check(input.get().toInt() == 0) { "project mirror baseline entry is not canonical" }
+            val bytes = input.long
+            val sha256 = ByteArray(32)
+            input.get(sha256)
+            val relativePath = input.takeUtf8(pathLength)
+            check(relativePath > previousPath) { "project mirror baseline is not sorted" }
+            check(relativePath in expectedPaths && observedPaths.add(relativePath)) {
+                "project mirror baseline path differs"
+            }
+            previousPath = relativePath
+            val local = File(project, relativePath)
+            check(!Files.isSymbolicLink(local.toPath())) { "baseline path is symbolic" }
+            if (local.isDirectory) {
+                check(kind == 1 && bytes == 0L && sha256.all { it == 0.toByte() }) {
+                    "directory baseline differs"
+                }
+            } else {
+                check(local.isFile && kind == 2 && bytes == local.length()) {
+                    "file baseline metadata differs"
+                }
+                check(
+                    sha256.contentEquals(
+                        MessageDigest.getInstance("SHA-256").digest(local.readBytes()),
+                    ),
+                ) {
+                    "file baseline digest differs"
+                }
+            }
+        }
+        check(observedPaths == expectedPaths && !input.hasRemaining()) {
+            "project mirror baseline content differs"
+        }
     }
 
     private fun cleanMirror(
@@ -228,15 +314,51 @@ internal class FolderGrantTestReceiver : BroadcastReceiver() {
         if (
             preferences.getString(FOLDER_MIRROR_NAME, null) == mirrorName(token)
         ) {
+            preferences
+                .getString(FOLDER_MAPPING_ID, null)
+                ?.takeIf(MAPPING_ID::matches)
+                ?.let { mappingId ->
+                    deleteFixture(File(syncStateRoot(context), "$mappingId.v1"))
+                    deleteFixture(File(syncStateRoot(context), ".$mappingId.v1.tmp"))
+                }
             check(
                 preferences
                     .edit()
                     .remove(FOLDER_MIRROR_URI)
                     .remove(FOLDER_MIRROR_NAME)
+                    .remove(FOLDER_MAPPING_ID)
                     .commit(),
             ) {
                 "could not clear mirror test state"
             }
+        }
+        context
+            .getSharedPreferences(SYNC_TEST_PREFERENCES, Context.MODE_PRIVATE)
+            .edit()
+            .clear()
+            .commit()
+        AtomicFile(File(context.filesDir, SYNC_JOURNAL_FILE)).delete()
+    }
+
+    private fun holdSync(
+        context: Context,
+        intent: Intent,
+    ) {
+        val phase =
+            intent.getStringExtra(EXTRA_PHASE)
+                ?.takeIf { it == SYNC_PHASE_BACKED_UP || it == SYNC_PHASE_COMMITTED }
+                ?: error("project sync hold phase is invalid")
+        val holdMillis = intent.getLongExtra(EXTRA_HOLD_MILLIS, 0)
+        check(holdMillis in 5_000L..30_000L) { "project sync hold duration is invalid" }
+        check(
+            context
+                .getSharedPreferences(SYNC_TEST_PREFERENCES, Context.MODE_PRIVATE)
+                .edit()
+                .putString(SYNC_TEST_PHASE, phase)
+                .putLong(SYNC_TEST_HOLD_MILLIS, holdMillis)
+                .commit(),
+        ) {
+            "could not save project sync hold"
         }
     }
 
@@ -254,6 +376,27 @@ internal class FolderGrantTestReceiver : BroadcastReceiver() {
 
     private fun projectsRoot(context: Context): File =
         File(context.filesDir, "arch-root/home/archphene/Projects")
+
+    private fun syncStateRoot(context: Context): File =
+        File(context.filesDir, "arch-root/var/lib/archphene/storage")
+
+    private fun ByteBuffer.takeUtf8(length: Int): String {
+        check(length in 1..remaining()) { "project mirror baseline string is invalid" }
+        val bytes = ByteArray(length)
+        get(bytes)
+        return String(bytes, StandardCharsets.UTF_8)
+    }
+
+    private fun ByteArray.toHex(): String {
+        val alphabet = "0123456789abcdef"
+        val encoded = CharArray(size * 2)
+        forEachIndexed { index, value ->
+            val unsigned = value.toInt() and 0xff
+            encoded[index * 2] = alphabet[unsigned ushr 4]
+            encoded[index * 2 + 1] = alphabet[unsigned and 0x0f]
+        }
+        return encoded.concatToString()
+    }
 
     private fun deleteFixture(file: File) {
         if (!file.exists() && !Files.isSymbolicLink(file.toPath())) {
@@ -306,15 +449,28 @@ internal class FolderGrantTestReceiver : BroadcastReceiver() {
             "org.archphene.app.debug.action.VERIFY_FOLDER_MIRROR_ABSENT"
         private const val ACTION_CLEAN_MIRROR =
             "org.archphene.app.debug.action.CLEAN_FOLDER_MIRROR"
+        private const val ACTION_HOLD_SYNC =
+            "org.archphene.app.debug.action.HOLD_PROJECT_SYNC"
         private const val EXTRA_TOKEN = "token"
+        private const val EXTRA_PHASE = "phase"
+        private const val EXTRA_HOLD_MILLIS = "holdMillis"
         private const val STORAGE_PREFERENCES = "storage"
         private const val FOLDER_URI = "folder_tree_uri"
         private const val FOLDER_LABEL = "folder_label"
         private const val FOLDER_STATE = "folder_state"
         private const val FOLDER_MIRROR_URI = "folder_mirror_uri"
         private const val FOLDER_MIRROR_NAME = "folder_mirror_name"
+        private const val FOLDER_MAPPING_ID = "folder_mapping_id"
         private const val STAGING_NAME = ".archphene-mirror-pending"
+        private const val SYNC_TEST_PREFERENCES = "project_sync_test"
+        private const val SYNC_TEST_PHASE = "hold_phase"
+        private const val SYNC_TEST_HOLD_MILLIS = "hold_ms"
+        private const val SYNC_PHASE_BACKED_UP = "backed-up"
+        private const val SYNC_PHASE_COMMITTED = "committed"
+        private const val SYNC_JOURNAL_FILE = "project-sync-journal-v1"
+        private const val MAX_MANIFEST_BYTES = 4 * 1024 * 1024
         private val TOKEN = Regex("[a-f0-9]{8}")
+        private val MAPPING_ID = Regex("[a-f0-9]{32}")
 
         private fun mirrorName(token: String): String = "Archphene-Mirror-$token"
     }

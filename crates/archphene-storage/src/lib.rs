@@ -3,12 +3,15 @@
 use std::ffi::{CString, OsStr};
 use std::fmt;
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+use sha2::{Digest, Sha256};
 
 mod sys {
     #![allow(unsafe_code)]
@@ -211,6 +214,8 @@ pub enum StorageError {
     MirrorCancelled,
     InvalidManifest,
     ManifestTooLarge,
+    SyncChanged,
+    SyncConflictLimit,
     Io(io::Error),
 }
 
@@ -233,6 +238,12 @@ impl fmt::Display for StorageError {
             Self::ManifestTooLarge => {
                 formatter.write_str("project sync manifest exceeds its limit")
             }
+            Self::SyncChanged => {
+                formatter.write_str("project changed while synchronization was running")
+            }
+            Self::SyncConflictLimit => {
+                formatter.write_str("could not allocate a project conflict copy")
+            }
             Self::Io(error) => write!(formatter, "Archphene document I/O error: {error}"),
         }
     }
@@ -243,10 +254,18 @@ pub struct MirrorImport {
     projects: File,
     staging: File,
     target_name: CString,
+    sync_baseline: Option<MirrorSyncBaseline>,
+    sync_entries: Vec<SyncManifestEntry>,
     entries: u32,
     bytes: u64,
     published: bool,
     cancellation: MirrorCancellation,
+}
+
+struct MirrorSyncBaseline {
+    arch_root: PathBuf,
+    mapping_id: [u8; 16],
+    project_name: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -307,6 +326,51 @@ pub enum SyncAction {
     DeleteFromAndroid,
     DeleteFromLinux,
     PreserveConflict,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SyncPlanEntry {
+    pub path: String,
+    pub baseline: Option<SyncFingerprint>,
+    pub linux: Option<SyncFingerprint>,
+    pub android: Option<SyncFingerprint>,
+    pub action: SyncAction,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SyncPlanSummary {
+    pub converged: u32,
+    pub push_to_android: u32,
+    pub pull_to_linux: u32,
+    pub delete_from_android: u32,
+    pub delete_from_linux: u32,
+    pub conflicts: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SyncPlan {
+    mapping_id: [u8; 16],
+    project_name: String,
+    entries: Vec<SyncPlanEntry>,
+    summary: SyncPlanSummary,
+}
+
+impl SyncPlan {
+    pub fn mapping_id(&self) -> [u8; 16] {
+        self.mapping_id
+    }
+
+    pub fn project_name(&self) -> &str {
+        &self.project_name
+    }
+
+    pub fn entries(&self) -> &[SyncPlanEntry] {
+        &self.entries
+    }
+
+    pub fn summary(&self) -> SyncPlanSummary {
+        self.summary
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -585,17 +649,22 @@ fn manifest_file_names(mapping_id: [u8; 16]) -> Result<(CString, CString), Stora
     if mapping_id == [0; 16] {
         return Err(StorageError::InvalidManifest);
     }
+    let identifier = hex_mapping_id(mapping_id);
+    let final_name =
+        CString::new(format!("{identifier}.v1")).map_err(|_| StorageError::InvalidManifest)?;
+    let temporary_name =
+        CString::new(format!(".{identifier}.tmp")).map_err(|_| StorageError::InvalidManifest)?;
+    Ok((final_name, temporary_name))
+}
+
+fn hex_mapping_id(mapping_id: [u8; 16]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut identifier = String::with_capacity(32);
     for byte in mapping_id {
         identifier.push(HEX[(byte >> 4) as usize] as char);
         identifier.push(HEX[(byte & 0x0f) as usize] as char);
     }
-    let final_name =
-        CString::new(format!("{identifier}.v1")).map_err(|_| StorageError::InvalidManifest)?;
-    let temporary_name =
-        CString::new(format!(".{identifier}.tmp")).map_err(|_| StorageError::InvalidManifest)?;
-    Ok((final_name, temporary_name))
+    identifier
 }
 
 fn validate_manifest_state_entry(directory: &File, name: &CString) -> Result<bool, StorageError> {
@@ -615,6 +684,605 @@ fn validate_manifest_state_entry(directory: &File, name: &CString) -> Result<boo
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(_) => Err(StorageError::InvalidManifest),
     }
+}
+
+pub fn create_sync_plan(
+    baseline: &SyncManifest,
+    linux: &SyncManifest,
+    android: &SyncManifest,
+) -> Result<SyncPlan, StorageError> {
+    if baseline.mapping_id != linux.mapping_id
+        || baseline.mapping_id != android.mapping_id
+        || baseline.project_name != linux.project_name
+        || baseline.project_name != android.project_name
+    {
+        return Err(StorageError::InvalidManifest);
+    }
+
+    let mut baseline_index = 0;
+    let mut linux_index = 0;
+    let mut android_index = 0;
+    let mut entries = Vec::with_capacity(
+        baseline
+            .entries
+            .len()
+            .max(linux.entries.len())
+            .max(android.entries.len()),
+    );
+    let mut summary = SyncPlanSummary::default();
+    while baseline_index < baseline.entries.len()
+        || linux_index < linux.entries.len()
+        || android_index < android.entries.len()
+    {
+        let path = [
+            baseline.entries.get(baseline_index),
+            linux.entries.get(linux_index),
+            android.entries.get(android_index),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|entry| entry.path.as_str())
+        .min_by(|left, right| left.as_bytes().cmp(right.as_bytes()))
+        .ok_or(StorageError::InvalidManifest)?;
+        let baseline_fingerprint =
+            manifest_fingerprint_at(&baseline.entries, &mut baseline_index, path);
+        let linux_fingerprint = manifest_fingerprint_at(&linux.entries, &mut linux_index, path);
+        let android_fingerprint =
+            manifest_fingerprint_at(&android.entries, &mut android_index, path);
+        let action =
+            decide_sync_action(baseline_fingerprint, linux_fingerprint, android_fingerprint);
+        match action {
+            SyncAction::Converged => summary.converged += 1,
+            SyncAction::PushToAndroid => summary.push_to_android += 1,
+            SyncAction::PullToLinux => summary.pull_to_linux += 1,
+            SyncAction::DeleteFromAndroid => summary.delete_from_android += 1,
+            SyncAction::DeleteFromLinux => summary.delete_from_linux += 1,
+            SyncAction::PreserveConflict => summary.conflicts += 1,
+        }
+        entries.push(SyncPlanEntry {
+            path: path.to_owned(),
+            baseline: baseline_fingerprint,
+            linux: linux_fingerprint,
+            android: android_fingerprint,
+            action,
+        });
+        if entries.len() > MAX_MIRROR_ENTRIES as usize {
+            return Err(StorageError::ManifestTooLarge);
+        }
+    }
+    Ok(SyncPlan {
+        mapping_id: baseline.mapping_id,
+        project_name: baseline.project_name.clone(),
+        entries,
+        summary,
+    })
+}
+
+pub fn reconcile_sync_baseline(
+    previous: &SyncManifest,
+    linux: &SyncManifest,
+    android: &SyncManifest,
+) -> Result<SyncManifest, StorageError> {
+    let plan = create_sync_plan(previous, linux, android)?;
+    let mut entries = Vec::with_capacity(plan.entries.len());
+    for entry in plan.entries {
+        if entry.linux == entry.android {
+            if let Some(fingerprint) = entry.linux {
+                entries.push(SyncManifestEntry {
+                    path: entry.path,
+                    fingerprint,
+                });
+            }
+        } else if let Some(fingerprint) = entry.baseline {
+            entries.push(SyncManifestEntry {
+                path: entry.path,
+                fingerprint,
+            });
+        }
+    }
+    SyncManifest::new(previous.mapping_id, previous.project_name.clone(), entries)
+}
+
+pub fn snapshot_linux_project(
+    arch_root: &Path,
+    mapping_id: [u8; 16],
+) -> Result<SyncManifest, StorageError> {
+    let baseline =
+        load_sync_manifest(arch_root, mapping_id)?.ok_or(StorageError::InvalidManifest)?;
+    let project = open_directory(
+        arch_root,
+        &["home", "archphene", "Projects", baseline.project_name()],
+    )?;
+    let mut entries = Vec::with_capacity(baseline.entries().len().max(256));
+    let mut total_bytes = 0_u64;
+    snapshot_linux_directory(&project, "", 0, &mut entries, &mut total_bytes)?;
+    SyncManifest::new(mapping_id, baseline.project_name().to_owned(), entries)
+}
+
+pub fn fingerprint_file_from_fd(
+    source_descriptor: RawFd,
+    expected_bytes: Option<u64>,
+) -> Result<SyncFingerprint, StorageError> {
+    if source_descriptor < 0 || expected_bytes.is_some_and(|size| size > MAX_MIRROR_FILE_BYTES) {
+        return Err(StorageError::InvalidDocument);
+    }
+    let mut source = sys::duplicate(source_descriptor)?;
+    let mut bytes = 0_u64;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 32 * 1024];
+    loop {
+        let count = source.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        bytes = bytes
+            .checked_add(count as u64)
+            .ok_or(StorageError::MirrorTooLarge)?;
+        if bytes > MAX_MIRROR_FILE_BYTES {
+            return Err(StorageError::MirrorTooLarge);
+        }
+        digest.update(&buffer[..count]);
+    }
+    if expected_bytes.is_some_and(|expected| expected != bytes) {
+        return Err(StorageError::InvalidDocument);
+    }
+    Ok(SyncFingerprint::file(bytes, digest.finalize().into()))
+}
+
+pub fn open_linux_project_file(
+    arch_root: &Path,
+    mapping_id: [u8; 16],
+    relative_path: &str,
+    expected: SyncFingerprint,
+) -> Result<File, StorageError> {
+    if expected.kind != SyncEntryKind::File {
+        return Err(StorageError::InvalidDocument);
+    }
+    let project = open_sync_project(arch_root, mapping_id)?;
+    let segments = parse_mirror_path(relative_path)?;
+    let (parent, leaf) = open_mirror_parent(&project, &segments)?;
+    let mut file = sys::open_at(
+        parent.as_raw_fd(),
+        &leaf,
+        sys::O_RDONLY | sys::O_CLOEXEC | sys::O_NOFOLLOW | sys::O_NONBLOCK,
+        0,
+    )
+    .map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            StorageError::SyncChanged
+        } else {
+            StorageError::Io(error)
+        }
+    })?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || fingerprint_open_linux_file(file.try_clone()?, &metadata)? != expected
+    {
+        return Err(StorageError::SyncChanged);
+    }
+    file.seek(SeekFrom::Start(0))?;
+    Ok(file)
+}
+
+pub fn pull_linux_project_file_from_fd(
+    arch_root: &Path,
+    mapping_id: [u8; 16],
+    relative_path: &str,
+    source_descriptor: RawFd,
+    expected_android: SyncFingerprint,
+    expected_linux: Option<SyncFingerprint>,
+) -> Result<(), StorageError> {
+    if expected_android.kind != SyncEntryKind::File || source_descriptor < 0 {
+        return Err(StorageError::InvalidDocument);
+    }
+    if expected_linux.is_some_and(|fingerprint| fingerprint.kind != SyncEntryKind::File) {
+        return Err(StorageError::SyncChanged);
+    }
+    let project = open_sync_project(arch_root, mapping_id)?;
+    let segments = parse_mirror_path(relative_path)?;
+    let (parent, leaf) = open_mirror_parent(&project, &segments)?;
+    validate_project_target(&parent, &leaf, expected_linux)?;
+
+    let state = open_directory(arch_root, SYNC_STATE_DIRECTORY)?;
+    let temporary_name = sync_transfer_name(mapping_id)?;
+    remove_sync_transfer_if_present(&state, &temporary_name)?;
+    let mut temporary = sys::open_at(
+        state.as_raw_fd(),
+        &temporary_name,
+        sys::O_WRONLY | sys::O_CREAT | sys::O_EXCL | sys::O_CLOEXEC | sys::O_NOFOLLOW,
+        0o600,
+    )?;
+    state.sync_all()?;
+    let mut source = sys::duplicate(source_descriptor)?;
+    let result = (|| {
+        let mut bytes = 0_u64;
+        let mut digest = Sha256::new();
+        let mut buffer = [0_u8; 32 * 1024];
+        loop {
+            let count = source.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            bytes = bytes
+                .checked_add(count as u64)
+                .ok_or(StorageError::MirrorTooLarge)?;
+            if bytes > MAX_MIRROR_FILE_BYTES {
+                return Err(StorageError::MirrorTooLarge);
+            }
+            digest.update(&buffer[..count]);
+            temporary.write_all(&buffer[..count])?;
+        }
+        let observed = SyncFingerprint::file(bytes, digest.finalize().into());
+        if observed != expected_android {
+            return Err(StorageError::SyncChanged);
+        }
+        temporary.sync_all()?;
+        validate_project_target(&parent, &leaf, expected_linux)?;
+        if expected_linux.is_some() {
+            sys::rename_replace_between(
+                state.as_raw_fd(),
+                &temporary_name,
+                parent.as_raw_fd(),
+                &leaf,
+            )?;
+        } else {
+            sys::rename_noreplace_between(
+                state.as_raw_fd(),
+                &temporary_name,
+                parent.as_raw_fd(),
+                &leaf,
+            )
+            .map_err(|error| {
+                if error.kind() == io::ErrorKind::AlreadyExists {
+                    StorageError::SyncChanged
+                } else {
+                    StorageError::Io(error)
+                }
+            })?;
+        }
+        parent.sync_all()?;
+        let _ = state.sync_all();
+        Ok(())
+    })();
+    drop(temporary);
+    if result.is_err() {
+        let _ = sys::unlink_at(state.as_raw_fd(), &temporary_name, false);
+        let _ = state.sync_all();
+    }
+    result
+}
+
+pub fn create_linux_project_directory(
+    arch_root: &Path,
+    mapping_id: [u8; 16],
+    relative_path: &str,
+) -> Result<(), StorageError> {
+    let project = open_sync_project(arch_root, mapping_id)?;
+    let segments = parse_mirror_path(relative_path)?;
+    let (parent, leaf) = open_mirror_parent(&project, &segments)?;
+    validate_project_target(&parent, &leaf, None)?;
+    sys::mkdir_at(parent.as_raw_fd(), &leaf, 0o700).map_err(|error| {
+        if error.kind() == io::ErrorKind::AlreadyExists {
+            StorageError::SyncChanged
+        } else {
+            StorageError::Io(error)
+        }
+    })?;
+    parent.sync_all()?;
+    Ok(())
+}
+
+pub fn delete_linux_project_entry(
+    arch_root: &Path,
+    mapping_id: [u8; 16],
+    relative_path: &str,
+    expected: SyncFingerprint,
+) -> Result<(), StorageError> {
+    let project = open_sync_project(arch_root, mapping_id)?;
+    let segments = parse_mirror_path(relative_path)?;
+    let (parent, leaf) = open_mirror_parent(&project, &segments)?;
+    validate_project_target(&parent, &leaf, Some(expected))?;
+    sys::unlink_at(
+        parent.as_raw_fd(),
+        &leaf,
+        expected.kind == SyncEntryKind::Directory,
+    )
+    .map_err(|error| {
+        if matches!(
+            error.kind(),
+            io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty
+        ) {
+            StorageError::SyncChanged
+        } else {
+            StorageError::Io(error)
+        }
+    })?;
+    parent.sync_all()?;
+    Ok(())
+}
+
+pub fn preserve_android_conflict_from_fd(
+    arch_root: &Path,
+    mapping_id: [u8; 16],
+    relative_path: &str,
+    source_descriptor: RawFd,
+    expected_android: SyncFingerprint,
+) -> Result<String, StorageError> {
+    if expected_android.kind != SyncEntryKind::File {
+        return Err(StorageError::InvalidDocument);
+    }
+    let (parent_path, name) = relative_path
+        .rsplit_once('/')
+        .map_or(("", relative_path), |(parent, name)| (parent, name));
+    validate_project_name(name)?;
+    let digest = hex_digest_prefix(expected_android.sha256, 12);
+    for collision in 0..=999 {
+        let suffix = if collision == 0 {
+            format!(".android-conflict-{digest}")
+        } else {
+            format!(".android-conflict-{digest}-{collision}")
+        };
+        let parent_bytes = if parent_path.is_empty() {
+            0
+        } else {
+            parent_path.len() + 1
+        };
+        let available =
+            MAX_DOCUMENT_NAME_BYTES.min(MAX_MIRROR_PATH_BYTES.saturating_sub(parent_bytes));
+        if suffix.len() >= available {
+            return Err(StorageError::SyncConflictLimit);
+        }
+        let mut prefix_bytes = (available - suffix.len()).min(name.len());
+        while !name.is_char_boundary(prefix_bytes) {
+            prefix_bytes -= 1;
+        }
+        let mut conflict_name = String::with_capacity(available);
+        conflict_name.push_str(&name[..prefix_bytes]);
+        conflict_name.push_str(&suffix);
+        let candidate = if parent_path.is_empty() {
+            conflict_name
+        } else {
+            format!("{parent_path}/{conflict_name}")
+        };
+        match linux_project_fingerprint(arch_root, mapping_id, &candidate)? {
+            Some(fingerprint) if fingerprint == expected_android => return Ok(candidate),
+            Some(_) => continue,
+            None => {
+                pull_linux_project_file_from_fd(
+                    arch_root,
+                    mapping_id,
+                    &candidate,
+                    source_descriptor,
+                    expected_android,
+                    None,
+                )?;
+                return Ok(candidate);
+            }
+        }
+    }
+    Err(StorageError::SyncConflictLimit)
+}
+
+fn open_sync_project(arch_root: &Path, mapping_id: [u8; 16]) -> Result<File, StorageError> {
+    let baseline =
+        load_sync_manifest(arch_root, mapping_id)?.ok_or(StorageError::InvalidManifest)?;
+    open_directory(
+        arch_root,
+        &["home", "archphene", "Projects", baseline.project_name()],
+    )
+}
+
+fn linux_project_fingerprint(
+    arch_root: &Path,
+    mapping_id: [u8; 16],
+    relative_path: &str,
+) -> Result<Option<SyncFingerprint>, StorageError> {
+    let project = open_sync_project(arch_root, mapping_id)?;
+    let segments = parse_mirror_path(relative_path)?;
+    let (parent, leaf) = open_mirror_parent(&project, &segments)?;
+    project_target_fingerprint(&parent, &leaf)
+}
+
+fn validate_project_target(
+    parent: &File,
+    leaf: &CString,
+    expected: Option<SyncFingerprint>,
+) -> Result<(), StorageError> {
+    if project_target_fingerprint(parent, leaf)? == expected {
+        Ok(())
+    } else {
+        Err(StorageError::SyncChanged)
+    }
+}
+
+fn project_target_fingerprint(
+    parent: &File,
+    leaf: &CString,
+) -> Result<Option<SyncFingerprint>, StorageError> {
+    let child = match sys::open_at(
+        parent.as_raw_fd(),
+        leaf,
+        sys::O_RDONLY | sys::O_CLOEXEC | sys::O_NOFOLLOW | sys::O_NONBLOCK,
+        0,
+    ) {
+        Ok(child) => child,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let metadata = child.metadata()?;
+    if metadata.is_dir() {
+        Ok(Some(SyncFingerprint::directory()))
+    } else if metadata.is_file() {
+        Ok(Some(fingerprint_open_linux_file(child, &metadata)?))
+    } else {
+        Err(StorageError::InvalidDocument)
+    }
+}
+
+fn sync_transfer_name(mapping_id: [u8; 16]) -> Result<CString, StorageError> {
+    c_string(OsStr::new(&format!(
+        ".{}.transfer.tmp",
+        hex_mapping_id(mapping_id)
+    )))
+}
+
+fn remove_sync_transfer_if_present(
+    state: &File,
+    temporary_name: &CString,
+) -> Result<(), StorageError> {
+    match sys::open_at(
+        state.as_raw_fd(),
+        temporary_name,
+        sys::O_RDONLY | sys::O_CLOEXEC | sys::O_NOFOLLOW | sys::O_NONBLOCK,
+        0,
+    ) {
+        Ok(file) => {
+            let metadata = file.metadata()?;
+            if !metadata.is_file() || metadata.len() > MAX_MIRROR_FILE_BYTES {
+                return Err(StorageError::InvalidDocument);
+            }
+            drop(file);
+            sys::unlink_at(state.as_raw_fd(), temporary_name, false)?;
+            state.sync_all()?;
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(_) => return Err(StorageError::InvalidDocument),
+    }
+    Ok(())
+}
+
+fn hex_digest_prefix(digest: [u8; 32], digits: usize) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digits = digits.min(64);
+    let mut output = String::with_capacity(digits);
+    for index in 0..digits {
+        let byte = digest[index / 2];
+        output.push(HEX[((byte >> (4 * (1 - index % 2))) & 0x0f) as usize] as char);
+    }
+    output
+}
+
+fn snapshot_linux_directory(
+    directory: &File,
+    prefix: &str,
+    depth: usize,
+    entries: &mut Vec<SyncManifestEntry>,
+    total_bytes: &mut u64,
+) -> Result<(), StorageError> {
+    if depth > MAX_MIRROR_DEPTH {
+        return Err(StorageError::MirrorTooLarge);
+    }
+    let before = directory.metadata()?;
+    let descriptor_path = format!("/proc/self/fd/{}", directory.as_raw_fd());
+    for child in fs::read_dir(descriptor_path)? {
+        if depth >= MAX_MIRROR_DEPTH {
+            return Err(StorageError::MirrorTooLarge);
+        }
+        let child = child?;
+        let name = child.file_name();
+        let name = name.to_str().ok_or(StorageError::InvalidDocument)?;
+        validate_project_name(name)?;
+        if entries.len() >= MAX_MIRROR_ENTRIES as usize {
+            return Err(StorageError::MirrorTooLarge);
+        }
+        let relative_path = if prefix.is_empty() {
+            name.to_owned()
+        } else {
+            let mut path = String::with_capacity(prefix.len() + name.len() + 1);
+            path.push_str(prefix);
+            path.push('/');
+            path.push_str(name);
+            path
+        };
+        if relative_path.len() > MAX_MIRROR_PATH_BYTES {
+            return Err(StorageError::MirrorTooLarge);
+        }
+        let child = sys::open_at(
+            directory.as_raw_fd(),
+            &c_string(OsStr::new(name))?,
+            sys::O_RDONLY | sys::O_CLOEXEC | sys::O_NOFOLLOW | sys::O_NONBLOCK,
+            0,
+        )?;
+        let metadata = child.metadata()?;
+        if metadata.is_dir() {
+            entries.push(SyncManifestEntry {
+                path: relative_path.clone(),
+                fingerprint: SyncFingerprint::directory(),
+            });
+            snapshot_linux_directory(&child, &relative_path, depth + 1, entries, total_bytes)?;
+        } else if metadata.is_file() {
+            if metadata.len() > MAX_MIRROR_FILE_BYTES {
+                return Err(StorageError::MirrorTooLarge);
+            }
+            let fingerprint = fingerprint_open_linux_file(child, &metadata)?;
+            *total_bytes = total_bytes
+                .checked_add(fingerprint.bytes)
+                .ok_or(StorageError::MirrorTooLarge)?;
+            if *total_bytes > MAX_MIRROR_TOTAL_BYTES {
+                return Err(StorageError::MirrorTooLarge);
+            }
+            entries.push(SyncManifestEntry {
+                path: relative_path,
+                fingerprint,
+            });
+        } else {
+            return Err(StorageError::InvalidDocument);
+        }
+    }
+    let after = directory.metadata()?;
+    if metadata_changed(&before, &after) {
+        return Err(StorageError::InvalidDocument);
+    }
+    Ok(())
+}
+
+fn fingerprint_open_linux_file(
+    mut file: File,
+    before: &fs::Metadata,
+) -> Result<SyncFingerprint, StorageError> {
+    let mut bytes = 0_u64;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 32 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        bytes = bytes
+            .checked_add(count as u64)
+            .ok_or(StorageError::MirrorTooLarge)?;
+        if bytes > MAX_MIRROR_FILE_BYTES {
+            return Err(StorageError::MirrorTooLarge);
+        }
+        digest.update(&buffer[..count]);
+    }
+    let after = file.metadata()?;
+    if bytes != before.len() || metadata_changed(before, &after) {
+        return Err(StorageError::InvalidDocument);
+    }
+    Ok(SyncFingerprint::file(bytes, digest.finalize().into()))
+}
+
+fn metadata_changed(before: &fs::Metadata, after: &fs::Metadata) -> bool {
+    before.dev() != after.dev()
+        || before.ino() != after.ino()
+        || before.len() != after.len()
+        || before.mtime() != after.mtime()
+        || before.mtime_nsec() != after.mtime_nsec()
+        || before.ctime() != after.ctime()
+        || before.ctime_nsec() != after.ctime_nsec()
+}
+
+fn manifest_fingerprint_at(
+    entries: &[SyncManifestEntry],
+    index: &mut usize,
+    path: &str,
+) -> Option<SyncFingerprint> {
+    let entry = entries.get(*index)?;
+    if entry.path != path {
+        return None;
+    }
+    *index += 1;
+    Some(entry.fingerprint)
 }
 
 fn validate_manifest_entries(entries: &[SyncManifestEntry]) -> Result<(), StorageError> {
@@ -693,6 +1361,34 @@ fn take_manifest_u64(input: &[u8], cursor: &mut usize) -> Result<u64, StorageErr
 
 impl MirrorImport {
     pub fn begin(home: &Path, project_name: &str) -> Result<Self, StorageError> {
+        Self::begin_inner(home, project_name, None)
+    }
+
+    pub fn begin_with_sync_baseline(
+        arch_root: &Path,
+        project_name: &str,
+        mapping_id: [u8; 16],
+    ) -> Result<Self, StorageError> {
+        if mapping_id == [0; 16] {
+            return Err(StorageError::InvalidManifest);
+        }
+        let home = arch_root.join("home/archphene");
+        Self::begin_inner(
+            &home,
+            project_name,
+            Some(MirrorSyncBaseline {
+                arch_root: arch_root.to_owned(),
+                mapping_id,
+                project_name: project_name.to_owned(),
+            }),
+        )
+    }
+
+    fn begin_inner(
+        home: &Path,
+        project_name: &str,
+        sync_baseline: Option<MirrorSyncBaseline>,
+    ) -> Result<Self, StorageError> {
         validate_visible_name(project_name)?;
         let projects = open_directory(home, &["Projects"])?;
         let target_name = c_string(OsStr::new(project_name))?;
@@ -730,6 +1426,8 @@ impl MirrorImport {
             projects,
             staging,
             target_name,
+            sync_baseline,
+            sync_entries: Vec::with_capacity(256),
             entries: 0,
             bytes: 0,
             published: false,
@@ -749,6 +1447,12 @@ impl MirrorImport {
         match sys::mkdir_at(parent.as_raw_fd(), &leaf, 0o700) {
             Ok(()) => {
                 parent.sync_all()?;
+                if self.sync_baseline.is_some() {
+                    self.sync_entries.push(SyncManifestEntry {
+                        path: relative_path.to_owned(),
+                        fingerprint: SyncFingerprint::directory(),
+                    });
+                }
                 Ok(())
             }
             Err(error) => Err(error.into()),
@@ -778,6 +1482,7 @@ impl MirrorImport {
         let mut source = sys::duplicate(source_descriptor)?;
         let result = (|| {
             let mut copied = 0_u64;
+            let mut digest = Sha256::new();
             let mut buffer = [0_u8; 32 * 1024];
             loop {
                 self.check_cancelled()?;
@@ -792,6 +1497,7 @@ impl MirrorImport {
                 if copied > MAX_MIRROR_FILE_BYTES {
                     return Err(StorageError::MirrorTooLarge);
                 }
+                digest.update(&buffer[..count]);
                 destination.write_all(&buffer[..count])?;
             }
             if expected_bytes.is_some_and(|expected| expected != copied) {
@@ -806,7 +1512,8 @@ impl MirrorImport {
             }
             destination.sync_all()?;
             self.bytes = new_total;
-            Ok(copied)
+            let sha256: [u8; 32] = digest.finalize().into();
+            Ok((copied, sha256))
         })();
         drop(destination);
         if result.is_err() {
@@ -815,12 +1522,29 @@ impl MirrorImport {
         } else {
             parent.sync_all()?;
         }
-        result
+        result.map(|(copied, sha256)| {
+            if self.sync_baseline.is_some() {
+                self.sync_entries.push(SyncManifestEntry {
+                    path: relative_path.to_owned(),
+                    fingerprint: SyncFingerprint::file(copied, sha256),
+                });
+            }
+            copied
+        })
     }
 
     pub fn finish(mut self) -> Result<MirrorImportReport, StorageError> {
         self.check_cancelled()?;
         self.staging.sync_all()?;
+        self.check_cancelled()?;
+        if let Some(baseline) = self.sync_baseline.take() {
+            let manifest = SyncManifest::new(
+                baseline.mapping_id,
+                baseline.project_name,
+                std::mem::take(&mut self.sync_entries),
+            )?;
+            persist_sync_manifest(&baseline.arch_root, &manifest)?;
+        }
         self.check_cancelled()?;
         let staging_name = c_string(OsStr::new(MIRROR_STAGING_DIRECTORY))?;
         sys::rename_noreplace_between(
@@ -1534,6 +2258,206 @@ mod tests {
     }
 
     #[test]
+    fn mirror_import_persists_an_exact_sync_baseline_before_publication() {
+        let root = TestDirectory::new();
+        let source = TestDirectory::new();
+        fs::create_dir_all(root.0.join("home/archphene/Projects")).expect("projects");
+        fs::create_dir_all(root.0.join("var/lib/archphene/storage")).expect("storage");
+        fs::write(source.0.join("main.rs"), b"fn main() {}\n").expect("source");
+        fs::write(source.0.join("empty"), []).expect("empty source");
+        let main = File::open(source.0.join("main.rs")).expect("main");
+        let empty = File::open(source.0.join("empty")).expect("empty");
+
+        let mut import = MirrorImport::begin_with_sync_baseline(&root.0, "AndroidProject", [9; 16])
+            .expect("begin");
+        import.add_directory(".git").expect("directory");
+        import
+            .add_file_from_fd("main.rs", main.as_raw_fd(), Some(13))
+            .expect("main");
+        import
+            .add_file_from_fd("empty", empty.as_raw_fd(), Some(0))
+            .expect("empty");
+        import.finish().expect("finish");
+
+        let manifest = load_sync_manifest(&root.0, [9; 16])
+            .expect("load")
+            .expect("manifest");
+        assert_eq!(manifest.project_name(), "AndroidProject");
+        assert_eq!(manifest.entries().len(), 3);
+        assert_eq!(
+            manifest.entries()[0],
+            SyncManifestEntry {
+                path: ".git".to_owned(),
+                fingerprint: SyncFingerprint::directory(),
+            },
+        );
+        assert_eq!(
+            manifest.entries()[1],
+            SyncManifestEntry {
+                path: "empty".to_owned(),
+                fingerprint: SyncFingerprint::file(0, Sha256::digest([]).into(),),
+            },
+        );
+        assert_eq!(
+            manifest.entries()[2],
+            SyncManifestEntry {
+                path: "main.rs".to_owned(),
+                fingerprint: SyncFingerprint::file(13, Sha256::digest(b"fn main() {}\n").into(),),
+            },
+        );
+        assert!(
+            root.0
+                .join("home/archphene/Projects/AndroidProject")
+                .is_dir()
+        );
+    }
+
+    #[test]
+    fn linux_project_snapshot_hashes_regular_files_and_rejects_symlinks() {
+        let root = TestDirectory::new();
+        let outside = TestDirectory::new();
+        let project = root.0.join("home/archphene/Projects/Project");
+        fs::create_dir_all(project.join(".git")).expect("project");
+        fs::create_dir_all(root.0.join("var/lib/archphene/storage")).expect("storage");
+        fs::write(project.join(".git/config"), b"config\n").expect("config");
+        fs::write(project.join("empty"), []).expect("empty");
+        fs::write(outside.0.join("outside"), b"outside").expect("outside");
+        let baseline =
+            SyncManifest::new([8; 16], "Project".to_owned(), Vec::new()).expect("manifest");
+        persist_sync_manifest(&root.0, &baseline).expect("persist");
+
+        let snapshot = snapshot_linux_project(&root.0, [8; 16]).expect("snapshot");
+        assert_eq!(
+            snapshot.entries(),
+            [
+                SyncManifestEntry {
+                    path: ".git".to_owned(),
+                    fingerprint: SyncFingerprint::directory(),
+                },
+                SyncManifestEntry {
+                    path: ".git/config".to_owned(),
+                    fingerprint: SyncFingerprint::file(7, Sha256::digest(b"config\n").into(),),
+                },
+                SyncManifestEntry {
+                    path: "empty".to_owned(),
+                    fingerprint: SyncFingerprint::file(0, Sha256::digest([]).into()),
+                },
+            ],
+        );
+
+        symlink(outside.0.join("outside"), project.join("link")).expect("symlink");
+        assert!(matches!(
+            snapshot_linux_project(&root.0, [8; 16]),
+            Err(StorageError::Io(error)) if error.raw_os_error() == Some(40)
+        ));
+    }
+
+    #[test]
+    fn descriptor_fingerprinting_is_exact_and_rejects_size_races() {
+        let source = TestDirectory::new();
+        fs::write(source.0.join("file"), b"fingerprint").expect("source");
+        let file = File::open(source.0.join("file")).expect("open");
+        assert_eq!(
+            fingerprint_file_from_fd(file.as_raw_fd(), Some(11)).expect("fingerprint"),
+            SyncFingerprint::file(11, Sha256::digest(b"fingerprint").into()),
+        );
+        assert!(matches!(
+            fingerprint_file_from_fd(file.as_raw_fd(), Some(12)),
+            Err(StorageError::InvalidDocument),
+        ));
+    }
+
+    #[test]
+    fn local_sync_transactions_revalidate_publish_and_preserve_conflicts() {
+        let root = TestDirectory::new();
+        let source = TestDirectory::new();
+        let project = root.0.join("home/archphene/Projects/Project");
+        fs::create_dir_all(&project).expect("project");
+        fs::create_dir_all(root.0.join("var/lib/archphene/storage")).expect("storage");
+        fs::write(project.join("main"), b"old").expect("old");
+        fs::write(source.0.join("android"), b"android").expect("android");
+        let baseline =
+            SyncManifest::new([6; 16], "Project".to_owned(), Vec::new()).expect("manifest");
+        persist_sync_manifest(&root.0, &baseline).expect("persist");
+        let old = SyncFingerprint::file(3, Sha256::digest(b"old").into());
+        let android = SyncFingerprint::file(7, Sha256::digest(b"android").into());
+
+        let source_file = File::open(source.0.join("android")).expect("source");
+        pull_linux_project_file_from_fd(
+            &root.0,
+            [6; 16],
+            "main",
+            source_file.as_raw_fd(),
+            android,
+            Some(old),
+        )
+        .expect("pull");
+        assert_eq!(fs::read(project.join("main")).expect("main"), b"android");
+        let mut opened =
+            open_linux_project_file(&root.0, [6; 16], "main", android).expect("verified open");
+        let mut content = Vec::new();
+        opened.read_to_end(&mut content).expect("read");
+        assert_eq!(content, b"android");
+
+        fs::write(project.join("main"), b"concurrent").expect("concurrent");
+        let fresh_source = File::open(source.0.join("android")).expect("source");
+        assert!(matches!(
+            pull_linux_project_file_from_fd(
+                &root.0,
+                [6; 16],
+                "main",
+                fresh_source.as_raw_fd(),
+                android,
+                Some(old),
+            ),
+            Err(StorageError::SyncChanged),
+        ));
+        assert_eq!(fs::read(project.join("main")).expect("main"), b"concurrent",);
+
+        create_linux_project_directory(&root.0, [6; 16], "created").expect("create directory");
+        delete_linux_project_entry(&root.0, [6; 16], "created", SyncFingerprint::directory())
+            .expect("delete directory");
+
+        let conflict_source = File::open(source.0.join("android")).expect("source");
+        let conflict = preserve_android_conflict_from_fd(
+            &root.0,
+            [6; 16],
+            "main",
+            conflict_source.as_raw_fd(),
+            android,
+        )
+        .expect("conflict");
+        assert_eq!(
+            conflict,
+            format!(
+                "main.android-conflict-{}",
+                hex_digest_prefix(android.sha256, 12),
+            ),
+        );
+        assert_eq!(
+            fs::read(project.join(&conflict)).expect("conflict content"),
+            b"android",
+        );
+        assert_eq!(
+            preserve_android_conflict_from_fd(
+                &root.0,
+                [6; 16],
+                "main",
+                conflict_source.as_raw_fd(),
+                android,
+            )
+            .expect("idempotent conflict"),
+            conflict,
+        );
+        assert!(
+            !root
+                .0
+                .join("var/lib/archphene/storage/.06060606060606060606060606060606.transfer.tmp")
+                .exists(),
+        );
+    }
+
+    #[test]
     fn mirror_paths_reject_traversal_controls_and_backslashes() {
         for path in [
             "",
@@ -1652,6 +2576,164 @@ mod tests {
         assert_eq!(
             decide_sync_action(Some(DIRECTORY), Some(FILE), None),
             SyncAction::PreserveConflict,
+        );
+    }
+
+    #[test]
+    fn sync_plan_merges_three_canonical_snapshots_and_counts_every_action() {
+        const ORIGINAL: SyncFingerprint = SyncFingerprint::file(1, [1; 32]);
+        const LINUX_EDIT: SyncFingerprint = SyncFingerprint::file(2, [2; 32]);
+        const ANDROID_EDIT: SyncFingerprint = SyncFingerprint::file(3, [3; 32]);
+        let manifest = |entries: &[(&str, SyncFingerprint)]| {
+            SyncManifest::new(
+                [4; 16],
+                "Project".to_owned(),
+                entries
+                    .iter()
+                    .map(|(path, fingerprint)| SyncManifestEntry {
+                        path: (*path).to_owned(),
+                        fingerprint: *fingerprint,
+                    })
+                    .collect(),
+            )
+            .expect("manifest")
+        };
+        let baseline = manifest(&[
+            ("a", ORIGINAL),
+            ("both-gone", ORIGINAL),
+            ("conflict", ORIGINAL),
+            ("delete-android", ORIGINAL),
+            ("delete-linux", ORIGINAL),
+            ("linux-edit", ORIGINAL),
+            ("remote-edit", ORIGINAL),
+        ]);
+        let linux = manifest(&[
+            ("a", ORIGINAL),
+            ("conflict", LINUX_EDIT),
+            ("delete-linux", ORIGINAL),
+            ("linux-edit", LINUX_EDIT),
+            ("new-linux", LINUX_EDIT),
+            ("remote-edit", ORIGINAL),
+        ]);
+        let android = manifest(&[
+            ("a", ORIGINAL),
+            ("conflict", ANDROID_EDIT),
+            ("delete-android", ORIGINAL),
+            ("linux-edit", ORIGINAL),
+            ("new-android", ANDROID_EDIT),
+            ("remote-edit", ANDROID_EDIT),
+        ]);
+
+        let plan = create_sync_plan(&baseline, &linux, &android).expect("plan");
+        assert_eq!(plan.mapping_id(), [4; 16]);
+        assert_eq!(plan.project_name(), "Project");
+        assert_eq!(
+            plan.summary(),
+            SyncPlanSummary {
+                converged: 2,
+                push_to_android: 2,
+                pull_to_linux: 2,
+                delete_from_android: 1,
+                delete_from_linux: 1,
+                conflicts: 1,
+            },
+        );
+        assert_eq!(
+            plan.entries()
+                .iter()
+                .map(|entry| (entry.path.as_str(), entry.action))
+                .collect::<Vec<_>>(),
+            [
+                ("a", SyncAction::Converged),
+                ("both-gone", SyncAction::Converged),
+                ("conflict", SyncAction::PreserveConflict),
+                ("delete-android", SyncAction::DeleteFromAndroid),
+                ("delete-linux", SyncAction::DeleteFromLinux),
+                ("linux-edit", SyncAction::PushToAndroid),
+                ("new-android", SyncAction::PullToLinux),
+                ("new-linux", SyncAction::PushToAndroid),
+                ("remote-edit", SyncAction::PullToLinux),
+            ],
+        );
+    }
+
+    #[test]
+    fn sync_plan_rejects_identity_substitution_and_an_oversized_union() {
+        let baseline =
+            SyncManifest::new([1; 16], "Project".to_owned(), Vec::new()).expect("baseline");
+        let substituted =
+            SyncManifest::new([2; 16], "Project".to_owned(), Vec::new()).expect("substituted");
+        assert!(matches!(
+            create_sync_plan(&baseline, &baseline, &substituted),
+            Err(StorageError::InvalidManifest),
+        ));
+
+        let entries = |prefix: &str| {
+            (0..6_000)
+                .map(|index| SyncManifestEntry {
+                    path: format!("{prefix}{index:04}"),
+                    fingerprint: SyncFingerprint::file(1, [1; 32]),
+                })
+                .collect()
+        };
+        let linux = SyncManifest::new([1; 16], "Project".to_owned(), entries("l")).expect("linux");
+        let android =
+            SyncManifest::new([1; 16], "Project".to_owned(), entries("r")).expect("android");
+        assert!(matches!(
+            create_sync_plan(&baseline, &linux, &android),
+            Err(StorageError::ManifestTooLarge),
+        ));
+    }
+
+    #[test]
+    fn reconciled_baseline_advances_only_converged_paths() {
+        const OLD: SyncFingerprint = SyncFingerprint::file(1, [1; 32]);
+        const NEW: SyncFingerprint = SyncFingerprint::file(2, [2; 32]);
+        const REMOTE: SyncFingerprint = SyncFingerprint::file(3, [3; 32]);
+        let manifest = |entries: &[(&str, SyncFingerprint)]| {
+            SyncManifest::new(
+                [3; 16],
+                "Project".to_owned(),
+                entries
+                    .iter()
+                    .map(|(path, fingerprint)| SyncManifestEntry {
+                        path: (*path).to_owned(),
+                        fingerprint: *fingerprint,
+                    })
+                    .collect(),
+            )
+            .expect("manifest")
+        };
+        let previous = manifest(&[("deleted", OLD), ("resolved", OLD), ("unresolved", OLD)]);
+        let linux = manifest(&[
+            ("conflict-copy", REMOTE),
+            ("new-equal", NEW),
+            ("resolved", NEW),
+            ("unresolved", NEW),
+        ]);
+        let android = manifest(&[
+            ("resolved", NEW),
+            ("unresolved", REMOTE),
+            ("new-equal", NEW),
+        ]);
+
+        let reconciled = reconcile_sync_baseline(&previous, &linux, &android).expect("reconcile");
+        assert_eq!(
+            reconciled.entries(),
+            [
+                SyncManifestEntry {
+                    path: "new-equal".to_owned(),
+                    fingerprint: NEW,
+                },
+                SyncManifestEntry {
+                    path: "resolved".to_owned(),
+                    fingerprint: NEW,
+                },
+                SyncManifestEntry {
+                    path: "unresolved".to_owned(),
+                    fingerprint: OLD,
+                },
+            ],
         );
     }
 

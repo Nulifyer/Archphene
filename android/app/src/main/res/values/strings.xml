@@ -19,7 +19,7 @@
     <string name="terminal">Terminal</string>
     <string name="settings">Settings</string>
     <string name="files_heading">Android and Linux files</string>
-    <string name="files_description">Documents, Downloads, Media, Pictures, and Shared in Archphene Home appear in Linux under /mnt/android. Import files into Downloads, or connect an Android folder and copy a snapshot into ~/Projects; connected folders are not live mounts.</string>
+    <string name="files_description">Documents, Downloads, Media, Pictures, and Shared in Archphene Home appear in Linux under /mnt/android. Connect an Android folder to create a private ~/Projects mirror, then use Sync to exchange changes; it is not a live mount.</string>
     <string name="terminal_heading">Shared Linux terminal</string>
     <string name="terminal_description">Use a shared shell or run an installed Linux command directly.</string>
     <string name="appearance_heading">Linux app appearance</string>

@@ -105,7 +105,10 @@ mod android {
         MAX_PTY_TRANSFER_BYTES, MAX_TERMINAL_DAMAGE_BYTES, MAX_TERMINAL_SELECTION_BYTES,
         ProcessError,
     };
-    use archphene_storage::{OpenMode, StorageError};
+    use archphene_storage::{
+        OpenMode, StorageError, SyncAction, SyncEntryKind, SyncFingerprint,
+        fingerprint_file_from_fd,
+    };
     use jni::JNIEnv;
     use jni::objects::{JByteBuffer, JClass, JIntArray, JString};
     use jni::sys::{JNI_FALSE, JNI_TRUE, jboolean, jint, jlong};
@@ -125,7 +128,7 @@ mod android {
     const MAX_ANDROID_DNS_REQUEST_BYTES: usize = 512;
     const MAX_LAUNCHER_REVIEW_REQUEST_BYTES: usize = 32 * 1024;
     const MAX_PACKAGE_CACHE_SELECTION_BYTES: usize = 32 * 1024;
-    const MAX_STORAGE_REQUEST_BYTES: usize = 4 * 1024;
+    const MAX_STORAGE_REQUEST_BYTES: usize = 8 * 1024;
     const BUILT_PACKAGE_REPORT_BYTES: usize = 64;
     const BUILT_PACKAGE_REPORT_MAGIC: &[u8; 8] = b"ABMV0001";
     const AUR_INSTALL_FILENAME_MAGIC: &[u8; 8] = b"AIFN0001";
@@ -377,6 +380,122 @@ mod android {
             return Err(ERROR_INVALID_ARGUMENT);
         }
         Ok(fields)
+    }
+
+    fn parse_mapping_id(value: &str) -> Result<[u8; 16], jint> {
+        if value.len() != 32 {
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+        let mut mapping_id = [0_u8; 16];
+        for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+            let high = match pair[0] {
+                b'0'..=b'9' => pair[0] - b'0',
+                b'a'..=b'f' => pair[0] - b'a' + 10,
+                _ => return Err(ERROR_INVALID_ARGUMENT),
+            };
+            let low = match pair[1] {
+                b'0'..=b'9' => pair[1] - b'0',
+                b'a'..=b'f' => pair[1] - b'a' + 10,
+                _ => return Err(ERROR_INVALID_ARGUMENT),
+            };
+            mapping_id[index] = (high << 4) | low;
+        }
+        if mapping_id == [0; 16] {
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+        Ok(mapping_id)
+    }
+
+    fn parse_sync_fingerprint(value: &str) -> Result<Option<SyncFingerprint>, jint> {
+        if value == "n" {
+            return Ok(None);
+        }
+        if value == "d" {
+            return Ok(Some(SyncFingerprint::directory()));
+        }
+        let mut fields = value.split(':');
+        if fields.next() != Some("f") {
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+        let bytes = fields
+            .next()
+            .and_then(|field| field.parse::<u64>().ok())
+            .ok_or(ERROR_INVALID_ARGUMENT)?;
+        let digest = fields.next().ok_or(ERROR_INVALID_ARGUMENT)?;
+        if fields.next().is_some() || digest.len() != 64 {
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+        let mut sha256 = [0_u8; 32];
+        for (index, pair) in digest.as_bytes().chunks_exact(2).enumerate() {
+            sha256[index] = (hex_value(pair[0]).ok_or(ERROR_INVALID_ARGUMENT)? << 4)
+                | hex_value(pair[1]).ok_or(ERROR_INVALID_ARGUMENT)?;
+        }
+        Ok(Some(SyncFingerprint::file(bytes, sha256)))
+    }
+
+    fn format_sync_fingerprint(fingerprint: SyncFingerprint) -> String {
+        match fingerprint.kind {
+            SyncEntryKind::Directory => "d".to_owned(),
+            SyncEntryKind::File => {
+                const HEX: &[u8; 16] = b"0123456789abcdef";
+                let mut value = format!("f:{}:", fingerprint.bytes);
+                value.reserve(64);
+                for byte in fingerprint.sha256 {
+                    value.push(HEX[(byte >> 4) as usize] as char);
+                    value.push(HEX[(byte & 0x0f) as usize] as char);
+                }
+                value
+            }
+        }
+    }
+
+    fn encode_sync_plan_entry(
+        entry: &archphene_storage::SyncPlanEntry,
+        output: &mut [u8],
+    ) -> Result<usize, jint> {
+        const HEADER_BYTES: usize = 136;
+        let path = entry.path.as_bytes();
+        let length = HEADER_BYTES
+            .checked_add(path.len())
+            .ok_or(ERROR_INVALID_ARGUMENT)?;
+        if output.len() < length {
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+        output[..length].fill(0);
+        output[..8].copy_from_slice(b"ASPE0001");
+        output[8] = match entry.action {
+            SyncAction::Converged => 0,
+            SyncAction::PushToAndroid => 1,
+            SyncAction::PullToLinux => 2,
+            SyncAction::DeleteFromAndroid => 3,
+            SyncAction::DeleteFromLinux => 4,
+            SyncAction::PreserveConflict => 5,
+        };
+        output[9] = sync_fingerprint_kind(entry.baseline);
+        output[10] = sync_fingerprint_kind(entry.linux);
+        output[11] = sync_fingerprint_kind(entry.android);
+        let path_length = u32::try_from(path.len()).map_err(|_| ERROR_INVALID_ARGUMENT)?;
+        output[12..16].copy_from_slice(&path_length.to_le_bytes());
+        write_sync_fingerprint_payload(entry.baseline, &mut output[16..56]);
+        write_sync_fingerprint_payload(entry.linux, &mut output[56..96]);
+        write_sync_fingerprint_payload(entry.android, &mut output[96..136]);
+        output[136..length].copy_from_slice(path);
+        Ok(length)
+    }
+
+    fn sync_fingerprint_kind(fingerprint: Option<SyncFingerprint>) -> u8 {
+        match fingerprint.map(|value| value.kind) {
+            None => 0,
+            Some(SyncEntryKind::Directory) => 1,
+            Some(SyncEntryKind::File) => 2,
+        }
+    }
+
+    fn write_sync_fingerprint_payload(fingerprint: Option<SyncFingerprint>, output: &mut [u8]) {
+        if let Some(fingerprint) = fingerprint {
+            output[..8].copy_from_slice(&fingerprint.bytes.to_le_bytes());
+            output[8..40].copy_from_slice(&fingerprint.sha256);
+        }
     }
 
     fn storage_output<'local>(
@@ -639,7 +758,10 @@ mod android {
         let Ok(output) = storage_output(&environment, &output_buffer) else {
             return ERROR_INVALID_ARGUMENT;
         };
-        let Ok(request) = storage_request(&environment, &request_buffer, request_length, 1) else {
+        let Ok(request) = storage_request(&environment, &request_buffer, request_length, 2) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(mapping_id) = parse_mapping_id(&request[1]) else {
             return ERROR_INVALID_ARGUMENT;
         };
         let Ok(mut registry) = registry().lock() else {
@@ -649,7 +771,7 @@ mod android {
             return ERROR_INVALID_HANDLE;
         };
         runtime
-            .begin_mirror_import(&request[0])
+            .begin_mirror_import(&request[0], mapping_id)
             .map_or_else(|error| copy_storage_error(&error, output), |_| 0)
     }
 
@@ -806,6 +928,379 @@ mod android {
         if registry
             .runtime_mut(handle)
             .is_some_and(|runtime| runtime.cancel_mirror_import())
+        {
+            JNI_TRUE
+        } else {
+            JNI_FALSE
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeBeginProjectSync(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        request_buffer: JByteBuffer,
+        request_length: jint,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let Ok(handle) = u64::try_from(handle) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(output) = storage_output(&environment, &output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(request) = storage_request(&environment, &request_buffer, request_length, 1) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(mapping_id) = parse_mapping_id(&request[0]) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(mut registry) = registry().lock() else {
+            return ERROR_INTERNAL;
+        };
+        registry
+            .runtime_mut(handle)
+            .map_or(ERROR_INVALID_HANDLE, |runtime| {
+                runtime
+                    .begin_project_sync(mapping_id)
+                    .map_or_else(|error| copy_storage_error(&error, output), |_| 0)
+            })
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeFingerprintProjectSyncFile(
+        environment: JNIEnv,
+        _class: JClass,
+        source_descriptor: jint,
+        expected_bytes: jlong,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let expected_bytes = if expected_bytes < 0 {
+            None
+        } else {
+            let Ok(bytes) = u64::try_from(expected_bytes) else {
+                return ERROR_INVALID_ARGUMENT;
+            };
+            Some(bytes)
+        };
+        if source_descriptor < 0 {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let Ok(output) = storage_output(&environment, &output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        match fingerprint_file_from_fd(source_descriptor, expected_bytes) {
+            Ok(fingerprint) => copy_storage_value(&format_sync_fingerprint(fingerprint), output),
+            Err(error) => copy_storage_error(&error, output),
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeAddProjectSyncAndroidDirectory(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        request_buffer: JByteBuffer,
+        request_length: jint,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let Ok(handle) = u64::try_from(handle) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(output) = storage_output(&environment, &output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(request) = storage_request(&environment, &request_buffer, request_length, 1) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(mut registry) = registry().lock() else {
+            return ERROR_INTERNAL;
+        };
+        registry
+            .runtime_mut(handle)
+            .map_or(ERROR_INVALID_HANDLE, |runtime| {
+                runtime
+                    .add_project_sync_android_directory(&request[0])
+                    .map_or_else(|error| copy_storage_error(&error, output), |_| 0)
+            })
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeAddProjectSyncAndroidFile(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        request_buffer: JByteBuffer,
+        request_length: jint,
+        source_descriptor: jint,
+        expected_bytes: jlong,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let (Ok(handle), expected_bytes) = (
+            u64::try_from(handle),
+            if expected_bytes < 0 {
+                None
+            } else {
+                u64::try_from(expected_bytes).ok()
+            },
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if source_descriptor < 0 {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let Ok(output) = storage_output(&environment, &output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(request) = storage_request(&environment, &request_buffer, request_length, 1) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let fingerprint = match fingerprint_file_from_fd(source_descriptor, expected_bytes) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => return copy_storage_error(&error, output),
+        };
+        let Ok(mut registry) = registry().lock() else {
+            return ERROR_INTERNAL;
+        };
+        registry
+            .runtime_mut(handle)
+            .map_or(ERROR_INVALID_HANDLE, |runtime| {
+                runtime
+                    .add_project_sync_android_fingerprint(&request[0], fingerprint)
+                    .map_or_else(|error| copy_storage_error(&error, output), |_| 0)
+            })
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeFinishProjectSyncScan(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let Ok(handle) = u64::try_from(handle) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(output) = storage_output(&environment, &output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(mut registry) = registry().lock() else {
+            return ERROR_INTERNAL;
+        };
+        let Some(runtime) = registry.runtime_mut(handle) else {
+            return ERROR_INVALID_HANDLE;
+        };
+        match runtime.finish_project_sync_scan() {
+            Ok(summary) => {
+                let Ok(entries) = runtime.project_sync_plan_entries() else {
+                    return ERROR_INTERNAL;
+                };
+                copy_storage_value(
+                    &format!(
+                        "{entries}\t{}\t{}\t{}\t{}\t{}\t{}",
+                        summary.converged,
+                        summary.push_to_android,
+                        summary.pull_to_linux,
+                        summary.delete_from_android,
+                        summary.delete_from_linux,
+                        summary.conflicts,
+                    ),
+                    output,
+                )
+            }
+            Err(error) => copy_storage_error(&error, output),
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeProjectSyncPlanEntry(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        index: jint,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let (Ok(handle), Ok(index)) = (u64::try_from(handle), usize::try_from(index)) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(output) = storage_output(&environment, &output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(mut registry) = registry().lock() else {
+            return ERROR_INTERNAL;
+        };
+        let Some(runtime) = registry.runtime_mut(handle) else {
+            return ERROR_INVALID_HANDLE;
+        };
+        match runtime.project_sync_plan_entry(index) {
+            Ok(entry) => encode_sync_plan_entry(entry, output)
+                .ok()
+                .and_then(|length| jint::try_from(length).ok())
+                .unwrap_or(ERROR_INVALID_ARGUMENT),
+            Err(error) => copy_storage_error(&error, output),
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeExecuteProjectSyncLocal(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        operation: jint,
+        request_buffer: JByteBuffer,
+        request_length: jint,
+        source_descriptor: jint,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let Ok(handle) = u64::try_from(handle) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(output) = storage_output(&environment, &output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let field_count = match operation {
+            1 | 3 => 2,
+            2 => 3,
+            4 => 1,
+            5 => 2,
+            6 => 2,
+            _ => return ERROR_INVALID_ARGUMENT,
+        };
+        let Ok(request) =
+            storage_request(&environment, &request_buffer, request_length, field_count)
+        else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(mut registry) = registry().lock() else {
+            return ERROR_INTERNAL;
+        };
+        let Some(runtime) = registry.runtime_mut(handle) else {
+            return ERROR_INVALID_HANDLE;
+        };
+        match operation {
+            1 => {
+                let Ok(Some(expected)) = parse_sync_fingerprint(&request[1]) else {
+                    return ERROR_INVALID_ARGUMENT;
+                };
+                runtime
+                    .open_project_sync_linux_file(&request[0], expected)
+                    .map_or_else(
+                        |error| copy_storage_error(&error, output),
+                        |file| file.into_raw_fd(),
+                    )
+            }
+            2 => {
+                if source_descriptor < 0 {
+                    return ERROR_INVALID_ARGUMENT;
+                }
+                let (Ok(Some(android)), Ok(linux)) = (
+                    parse_sync_fingerprint(&request[1]),
+                    parse_sync_fingerprint(&request[2]),
+                ) else {
+                    return ERROR_INVALID_ARGUMENT;
+                };
+                runtime
+                    .pull_project_sync_linux_file(&request[0], source_descriptor, android, linux)
+                    .map_or_else(|error| copy_storage_error(&error, output), |_| 0)
+            }
+            3 => {
+                let Ok(Some(expected)) = parse_sync_fingerprint(&request[1]) else {
+                    return ERROR_INVALID_ARGUMENT;
+                };
+                runtime
+                    .delete_project_sync_linux_entry(&request[0], expected)
+                    .map_or_else(|error| copy_storage_error(&error, output), |_| 0)
+            }
+            4 => runtime
+                .create_project_sync_linux_directory(&request[0])
+                .map_or_else(|error| copy_storage_error(&error, output), |_| 0),
+            5 => {
+                if source_descriptor < 0 {
+                    return ERROR_INVALID_ARGUMENT;
+                }
+                let Ok(Some(android)) = parse_sync_fingerprint(&request[1]) else {
+                    return ERROR_INVALID_ARGUMENT;
+                };
+                match runtime.preserve_project_sync_android_conflict(
+                    &request[0],
+                    source_descriptor,
+                    android,
+                ) {
+                    Ok(path) => copy_storage_value(&path, output),
+                    Err(error) => copy_storage_error(&error, output),
+                }
+            }
+            6 => ERROR_INVALID_STATE,
+            _ => ERROR_INVALID_ARGUMENT,
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeBeginProjectSyncCommitScan(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let Ok(handle) = u64::try_from(handle) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(output) = storage_output(&environment, &output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(mut registry) = registry().lock() else {
+            return ERROR_INTERNAL;
+        };
+        registry
+            .runtime_mut(handle)
+            .map_or(ERROR_INVALID_HANDLE, |runtime| {
+                runtime
+                    .begin_project_sync_commit_scan()
+                    .map_or_else(|error| copy_storage_error(&error, output), |_| 0)
+            })
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeCommitProjectSync(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let Ok(handle) = u64::try_from(handle) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(output) = storage_output(&environment, &output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(mut registry) = registry().lock() else {
+            return ERROR_INTERNAL;
+        };
+        registry
+            .runtime_mut(handle)
+            .map_or(ERROR_INVALID_HANDLE, |runtime| {
+                runtime
+                    .commit_project_sync()
+                    .map_or_else(|error| copy_storage_error(&error, output), |_| 0)
+            })
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeAbortProjectSync(
+        _environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+    ) -> jboolean {
+        let Ok(handle) = u64::try_from(handle) else {
+            return JNI_FALSE;
+        };
+        let Ok(mut registry) = registry().lock() else {
+            return JNI_FALSE;
+        };
+        if registry
+            .runtime_mut(handle)
+            .is_some_and(|runtime| runtime.abort_project_sync())
         {
             JNI_TRUE
         } else {

@@ -61,6 +61,7 @@ internal object NativeRuntime {
     const val PTY_EVENT_HANGUP = 1 shl 2
     const val PTY_EVENT_WOKEN = 1 shl 3
     const val STORAGE_OUTPUT_SIZE = 1024
+    const val PROJECT_SYNC_BUFFER_SIZE = 8 * 1024
     const val STORAGE_MODE_READ = 1
     const val STORAGE_MODE_WRITE = 1 shl 1
     const val STORAGE_MODE_TRUNCATE = 1 shl 2
@@ -131,6 +132,57 @@ internal object NativeRuntime {
     ): Int
     external fun nativeAbortProjectMirror(handle: Long): Boolean
     external fun nativeCancelProjectMirror(handle: Long): Boolean
+    external fun nativeBeginProjectSync(
+        handle: Long,
+        requestBuffer: ByteBuffer,
+        requestLength: Int,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeFingerprintProjectSyncFile(
+        sourceDescriptor: Int,
+        expectedBytes: Long,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeAddProjectSyncAndroidDirectory(
+        handle: Long,
+        requestBuffer: ByteBuffer,
+        requestLength: Int,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeAddProjectSyncAndroidFile(
+        handle: Long,
+        requestBuffer: ByteBuffer,
+        requestLength: Int,
+        sourceDescriptor: Int,
+        expectedBytes: Long,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeFinishProjectSyncScan(
+        handle: Long,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeProjectSyncPlanEntry(
+        handle: Long,
+        index: Int,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeExecuteProjectSyncLocal(
+        handle: Long,
+        operation: Int,
+        requestBuffer: ByteBuffer,
+        requestLength: Int,
+        sourceDescriptor: Int,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeBeginProjectSyncCommitScan(
+        handle: Long,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeCommitProjectSync(
+        handle: Long,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeAbortProjectSync(handle: Long): Boolean
     external fun nativeCreate(): Long
     external fun nativeDestroy(handle: Long): Boolean
     external fun nativeTransition(handle: Long, lifecycle: Int): Int

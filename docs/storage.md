@@ -118,14 +118,15 @@ restart. The normal Connect/Change action remains available afterward.
 Semantic UI, picker-cancellation, no-repeat restart, scoped-log, and visually
 inspected full-device gates pass on the exact-ABI emulator and Samsung.
 
-This is deliberately an initial snapshot, not a live mount or completed
-synchronizer. Android-side edits made after publication and Linux-side edits
-are not yet reconciled or written back. The next storage slice must add an
-explicit manifest, change detection, conflict copies, deletion policy,
-resumable pull/push, and sync-plan cancellation before the UI calls this
-“Synced.” Exact recursive content, empty files, nested dotfiles, stale-stage
-recovery, restart persistence, grant removal, scoped logs, and visually
-inspected full-device gates pass on both exact-ABI targets.
+The first import remains a snapshot rather than a live mount. Afterward the
+user invokes explicit Sync to reconcile regular-file changes in either
+direction; Linux applications continue to use the stable private POSIX path
+between syncs. Directory deletion, multi-delete batching, long-hash native
+cancellation, and provider deadlines remain before this becomes the completed
+folder bridge. Exact recursive content, empty files, nested dotfiles,
+stale-stage recovery, restart persistence, and grant removal pass on both
+exact-ABI targets; the new mutation and crash-recovery matrix currently passes
+on physical AArch64.
 
 The initial snapshot itself is cancellable. The Service exposes the same folder
 action as Cancel while work is active, interrupts provider traversal, and
@@ -151,14 +152,37 @@ unknown versions, noncanonical order, and trailing data, and is capped at
 4 MiB. Rust persists each mapping under private `var/lib/archphene/storage`
 through a mode-0600 temporary file, file sync, atomic replacement, and
 directory sync; stale regular temporaries recover while symlinked, nonregular,
-oversized, or mapping-substituted state fails closed. SHA-256 calculation,
-initial-manifest population, and transactional synchronization execution
-remain.
+oversized, or mapping-substituted state fails closed. The initial mirror now
+creates one cryptographically random nonzero mapping identity and calculates
+each file's SHA-256 in the same fixed 32 KiB copy loop, so publication does not
+require a second read. It records directories, empty files, byte counts, and
+digests in the baseline before exposing the project. The identity and baseline
+survive manager restart and scoped-grant removal so reconnecting the same tree
+does not lose its common ancestor. A debug-only physical-device gate
+independently decodes the binary baseline and hashes all six recursive fixture
+entries.
 
-The SAF capability itself is never presented as a POSIX mount; Linux sees only
-the private initial snapshot today. Exports, conflict-aware synchronization,
-drag-and-drop, progress/cancel, provider timeouts, and `/mnt/android` status
-and convenience paths are still planned.
+Explicit Sync now rescans both sides into bounded Rust manifests and pages a
+fixed binary three-way plan to the Android service. Android pulls publish
+through private descriptor-relative Rust staging only after revalidating both
+source and destination fingerprints. Linux pushes use a verified provider
+staging document, rename the previous file to a backup, publish and rehash the
+replacement, then remove the backup. Exact file deletions propagate in both
+directions; Android removal stages one verified backup per baseline commit.
+A checksum-protected atomic journal restores that backup after pre-commit
+process death or completes its removal after post-commit death. Simultaneous
+file edits retain the Android bytes in a deterministic hash-suffixed Linux
+conflict copy without overwriting either original. No-change, additions,
+edits, deletions, conflicts, and forced process death at both journal phases
+pass on physical AArch64 and the exact x86_64 emulator build with full-device
+captures. Directory deletion, batching multiple Android deletions in one pass,
+long-hash native cancellation, and provider deadlines remain.
+
+The SAF capability itself is never presented as a POSIX mount; Linux sees the
+private POSIX mirror and changes cross the boundary only during explicit Sync.
+Exports, drag-and-drop, durable per-operation history, native cancellation
+during long hashes, provider timeouts, and richer `/mnt/android` mapping status
+are still planned.
 
 ## Virtual Linux Layout
 

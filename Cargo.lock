@@ -106,6 +106,9 @@ dependencies = [
 [[package]]
 name = "archphene-storage"
 version = "0.1.0"
+dependencies = [
+ "sha2",
+]
 
 [[package]]
 name = "archphene-terminal"

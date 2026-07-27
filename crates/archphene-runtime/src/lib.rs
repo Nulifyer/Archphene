@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
+use std::os::fd::RawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
@@ -23,7 +24,14 @@ use archphene_process::{
     GuiAppearance, GuiRegistry, MAX_COMMAND_ARGUMENTS, ProcessError, PtyRegistry, PtyWaiter,
 };
 use archphene_root::{ArchRoot, BootstrapReport, RootError};
-use archphene_storage::{MirrorCancellation, MirrorImport, MirrorImportReport, StorageError};
+use archphene_storage::{
+    MAX_MIRROR_ENTRIES, MirrorCancellation, MirrorImport, MirrorImportReport, StorageError,
+    SyncFingerprint, SyncManifest, SyncManifestEntry, SyncPlan, SyncPlanEntry, SyncPlanSummary,
+    create_linux_project_directory, create_sync_plan, delete_linux_project_entry,
+    fingerprint_file_from_fd, load_sync_manifest, open_linux_project_file, persist_sync_manifest,
+    preserve_android_conflict_from_fd, pull_linux_project_file_from_fd, reconcile_sync_baseline,
+    snapshot_linux_project,
+};
 
 pub const STATUS_ARCH_ROOT_READY: u32 = 1 << 0;
 pub const STATUS_JOB_STORE_READY: u32 = 1 << 1;
@@ -54,6 +62,15 @@ pub struct RuntimeHost {
     session_marker: Option<PathBuf>,
     mirror_import: Option<MirrorImport>,
     mirror_cancellation: Option<MirrorCancellation>,
+    project_sync: Option<ProjectSyncSession>,
+}
+
+struct ProjectSyncSession {
+    baseline: SyncManifest,
+    linux: SyncManifest,
+    android_entries: Vec<SyncManifestEntry>,
+    android: Option<SyncManifest>,
+    plan: Option<SyncPlan>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -219,6 +236,7 @@ impl RuntimeHost {
             session_marker: None,
             mirror_import: None,
             mirror_cancellation: None,
+            project_sync: None,
         }
     }
 
@@ -272,17 +290,20 @@ impl RuntimeHost {
             .configure_android_dns(request)
     }
 
-    pub fn begin_mirror_import(&mut self, project_name: &str) -> Result<(), StorageError> {
+    pub fn begin_mirror_import(
+        &mut self,
+        project_name: &str,
+        mapping_id: [u8; 16],
+    ) -> Result<(), StorageError> {
         if self.mirror_import.is_some() || self.mirror_cancellation.is_some() {
             return Err(StorageError::MirrorBusy);
         }
-        let home = self
+        let arch_root = self
             .arch_root
             .as_ref()
             .ok_or(StorageError::InvalidRoot)?
-            .path()
-            .join("home/archphene");
-        let mirror = MirrorImport::begin(&home, project_name)?;
+            .path();
+        let mirror = MirrorImport::begin_with_sync_baseline(arch_root, project_name, mapping_id)?;
         self.mirror_cancellation = Some(mirror.cancellation());
         self.mirror_import = Some(mirror);
         Ok(())
@@ -343,6 +364,239 @@ impl RuntimeHost {
                 cancellation.cancel();
                 true
             })
+    }
+
+    pub fn begin_project_sync(&mut self, mapping_id: [u8; 16]) -> Result<(), StorageError> {
+        if self.project_sync.is_some() {
+            return Err(StorageError::MirrorBusy);
+        }
+        let arch_root = self
+            .arch_root
+            .as_ref()
+            .ok_or(StorageError::InvalidRoot)?
+            .path();
+        let baseline =
+            load_sync_manifest(arch_root, mapping_id)?.ok_or(StorageError::InvalidManifest)?;
+        let linux = snapshot_linux_project(arch_root, mapping_id)?;
+        let capacity = baseline.entries().len().max(linux.entries().len()).max(256);
+        self.project_sync = Some(ProjectSyncSession {
+            baseline,
+            linux,
+            android_entries: Vec::with_capacity(capacity),
+            android: None,
+            plan: None,
+        });
+        Ok(())
+    }
+
+    pub fn add_project_sync_android_directory(
+        &mut self,
+        relative_path: &str,
+    ) -> Result<(), StorageError> {
+        let session = self.project_sync.as_mut().ok_or(StorageError::MirrorBusy)?;
+        if session.android.is_some() || session.android_entries.len() >= MAX_MIRROR_ENTRIES as usize
+        {
+            return Err(StorageError::MirrorTooLarge);
+        }
+        session.android_entries.push(SyncManifestEntry {
+            path: relative_path.to_owned(),
+            fingerprint: SyncFingerprint::directory(),
+        });
+        Ok(())
+    }
+
+    pub fn add_project_sync_android_file(
+        &mut self,
+        relative_path: &str,
+        source_descriptor: RawFd,
+        expected_bytes: Option<u64>,
+    ) -> Result<SyncFingerprint, StorageError> {
+        let fingerprint = fingerprint_file_from_fd(source_descriptor, expected_bytes)?;
+        self.add_project_sync_android_fingerprint(relative_path, fingerprint)?;
+        Ok(fingerprint)
+    }
+
+    pub fn add_project_sync_android_fingerprint(
+        &mut self,
+        relative_path: &str,
+        fingerprint: SyncFingerprint,
+    ) -> Result<(), StorageError> {
+        let session = self.project_sync.as_mut().ok_or(StorageError::MirrorBusy)?;
+        if session.android.is_some() || session.android_entries.len() >= MAX_MIRROR_ENTRIES as usize
+        {
+            return Err(StorageError::MirrorTooLarge);
+        }
+        session.android_entries.push(SyncManifestEntry {
+            path: relative_path.to_owned(),
+            fingerprint,
+        });
+        Ok(())
+    }
+
+    pub fn finish_project_sync_scan(&mut self) -> Result<SyncPlanSummary, StorageError> {
+        let session = self.project_sync.as_mut().ok_or(StorageError::MirrorBusy)?;
+        if session.android.is_some() {
+            return Err(StorageError::MirrorBusy);
+        }
+        let android = SyncManifest::new(
+            session.baseline.mapping_id(),
+            session.baseline.project_name().to_owned(),
+            std::mem::take(&mut session.android_entries),
+        )?;
+        let plan = create_sync_plan(&session.baseline, &session.linux, &android)?;
+        let summary = plan.summary();
+        session.android = Some(android);
+        session.plan = Some(plan);
+        Ok(summary)
+    }
+
+    pub fn project_sync_plan_entries(&self) -> Result<usize, StorageError> {
+        Ok(self
+            .project_sync
+            .as_ref()
+            .and_then(|session| session.plan.as_ref())
+            .ok_or(StorageError::MirrorBusy)?
+            .entries()
+            .len())
+    }
+
+    pub fn project_sync_plan_entry(&self, index: usize) -> Result<&SyncPlanEntry, StorageError> {
+        self.project_sync
+            .as_ref()
+            .and_then(|session| session.plan.as_ref())
+            .and_then(|plan| plan.entries().get(index))
+            .ok_or(StorageError::InvalidDocument)
+    }
+
+    pub fn open_project_sync_linux_file(
+        &self,
+        relative_path: &str,
+        expected: SyncFingerprint,
+    ) -> Result<File, StorageError> {
+        let session = self.project_sync.as_ref().ok_or(StorageError::MirrorBusy)?;
+        let arch_root = self
+            .arch_root
+            .as_ref()
+            .ok_or(StorageError::InvalidRoot)?
+            .path();
+        open_linux_project_file(
+            arch_root,
+            session.baseline.mapping_id(),
+            relative_path,
+            expected,
+        )
+    }
+
+    pub fn pull_project_sync_linux_file(
+        &self,
+        relative_path: &str,
+        source_descriptor: RawFd,
+        expected_android: SyncFingerprint,
+        expected_linux: Option<SyncFingerprint>,
+    ) -> Result<(), StorageError> {
+        let session = self.project_sync.as_ref().ok_or(StorageError::MirrorBusy)?;
+        let arch_root = self
+            .arch_root
+            .as_ref()
+            .ok_or(StorageError::InvalidRoot)?
+            .path();
+        pull_linux_project_file_from_fd(
+            arch_root,
+            session.baseline.mapping_id(),
+            relative_path,
+            source_descriptor,
+            expected_android,
+            expected_linux,
+        )
+    }
+
+    pub fn create_project_sync_linux_directory(
+        &self,
+        relative_path: &str,
+    ) -> Result<(), StorageError> {
+        let session = self.project_sync.as_ref().ok_or(StorageError::MirrorBusy)?;
+        let arch_root = self
+            .arch_root
+            .as_ref()
+            .ok_or(StorageError::InvalidRoot)?
+            .path();
+        create_linux_project_directory(arch_root, session.baseline.mapping_id(), relative_path)
+    }
+
+    pub fn delete_project_sync_linux_entry(
+        &self,
+        relative_path: &str,
+        expected: SyncFingerprint,
+    ) -> Result<(), StorageError> {
+        let session = self.project_sync.as_ref().ok_or(StorageError::MirrorBusy)?;
+        let arch_root = self
+            .arch_root
+            .as_ref()
+            .ok_or(StorageError::InvalidRoot)?
+            .path();
+        delete_linux_project_entry(
+            arch_root,
+            session.baseline.mapping_id(),
+            relative_path,
+            expected,
+        )
+    }
+
+    pub fn preserve_project_sync_android_conflict(
+        &self,
+        relative_path: &str,
+        source_descriptor: RawFd,
+        expected_android: SyncFingerprint,
+    ) -> Result<String, StorageError> {
+        let session = self.project_sync.as_ref().ok_or(StorageError::MirrorBusy)?;
+        let arch_root = self
+            .arch_root
+            .as_ref()
+            .ok_or(StorageError::InvalidRoot)?
+            .path();
+        preserve_android_conflict_from_fd(
+            arch_root,
+            session.baseline.mapping_id(),
+            relative_path,
+            source_descriptor,
+            expected_android,
+        )
+    }
+
+    pub fn begin_project_sync_commit_scan(&mut self) -> Result<(), StorageError> {
+        let session = self.project_sync.as_mut().ok_or(StorageError::MirrorBusy)?;
+        let arch_root = self
+            .arch_root
+            .as_ref()
+            .ok_or(StorageError::InvalidRoot)?
+            .path();
+        session.linux = snapshot_linux_project(arch_root, session.baseline.mapping_id())?;
+        session.android_entries.clear();
+        session.android = None;
+        session.plan = None;
+        Ok(())
+    }
+
+    pub fn commit_project_sync(&mut self) -> Result<(), StorageError> {
+        let session = self.project_sync.as_mut().ok_or(StorageError::MirrorBusy)?;
+        let android = SyncManifest::new(
+            session.baseline.mapping_id(),
+            session.baseline.project_name().to_owned(),
+            session.android_entries.clone(),
+        )?;
+        let reconciled = reconcile_sync_baseline(&session.baseline, &session.linux, &android)?;
+        let arch_root = self
+            .arch_root
+            .as_ref()
+            .ok_or(StorageError::InvalidRoot)?
+            .path();
+        persist_sync_manifest(arch_root, &reconciled)?;
+        self.project_sync = None;
+        Ok(())
+    }
+
+    pub fn abort_project_sync(&mut self) -> bool {
+        self.project_sync.take().is_some()
     }
 
     pub fn prepare_package_runtime(
@@ -1498,7 +1752,7 @@ mod tests {
             .bootstrap_arch_root(&path, 1)
             .expect("root bootstrap");
         runtime
-            .begin_mirror_import("Cancelled")
+            .begin_mirror_import("Cancelled", [1; 16])
             .expect("begin mirror");
         let mut mirror = runtime.take_mirror_import().expect("take mirror");
         assert!(runtime.cancel_mirror_import());
