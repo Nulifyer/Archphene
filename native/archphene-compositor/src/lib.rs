@@ -11054,7 +11054,7 @@ fn cleanup_runtime_fd_view(inherited: &mut Vec<i32>, links: &[PathBuf]) {
     }
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RuntimeExecutionState {
     Starting,
@@ -11066,12 +11066,131 @@ enum RuntimeExecutionState {
     Cancelled,
 }
 
+#[cfg(any(target_os = "android", test))]
+const MAX_RUNTIME_EXECUTIONS: usize = 32;
+
+#[cfg(any(target_os = "android", test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RuntimeExecutionEntry {
+    id: i64,
+    state: RuntimeExecutionState,
+}
+
+#[cfg(any(target_os = "android", test))]
+struct RuntimeExecutionRegistry {
+    entries: [Option<RuntimeExecutionEntry>; MAX_RUNTIME_EXECUTIONS],
+}
+
+#[cfg(any(target_os = "android", test))]
+impl RuntimeExecutionRegistry {
+    const fn new() -> Self {
+        Self {
+            entries: [None; MAX_RUNTIME_EXECUTIONS],
+        }
+    }
+
+    fn begin(&mut self, id: i64) -> Result<(), i32> {
+        if let Some(index) = self.index(id) {
+            if self.entries[index]
+                .is_some_and(|entry| entry.state == RuntimeExecutionState::Cancelled)
+            {
+                self.entries[index] = None;
+                return Err(libc::ECANCELED);
+            }
+            return Err(libc::EBUSY);
+        }
+        let Some(slot) = self.entries.iter_mut().find(|entry| entry.is_none()) else {
+            return Err(libc::ENOSPC);
+        };
+        *slot = Some(RuntimeExecutionEntry {
+            id,
+            state: RuntimeExecutionState::Starting,
+        });
+        Ok(())
+    }
+
+    fn register_process_group(&mut self, id: i64, pgid: libc::pid_t, target: libc::pid_t) -> bool {
+        let Some(entry) = self.entry_mut(id) else {
+            return false;
+        };
+        match entry.state {
+            RuntimeExecutionState::Starting => {
+                entry.state = RuntimeExecutionState::Running { pgid, target };
+                true
+            }
+            RuntimeExecutionState::Cancelled => {
+                entry.state = RuntimeExecutionState::Cancelling(pgid);
+                false
+            }
+            RuntimeExecutionState::Running { .. } | RuntimeExecutionState::Cancelling(_) => false,
+        }
+    }
+
+    fn cancel(&mut self, id: i64) -> Option<libc::pid_t> {
+        if let Some(entry) = self.entry_mut(id) {
+            return match entry.state {
+                RuntimeExecutionState::Starting => {
+                    entry.state = RuntimeExecutionState::Cancelled;
+                    None
+                }
+                RuntimeExecutionState::Running { pgid, .. } => {
+                    entry.state = RuntimeExecutionState::Cancelling(pgid);
+                    Some(pgid)
+                }
+                RuntimeExecutionState::Cancelling(_) | RuntimeExecutionState::Cancelled => None,
+            };
+        }
+        if let Some(slot) = self.entries.iter_mut().find(|entry| entry.is_none()) {
+            *slot = Some(RuntimeExecutionEntry {
+                id,
+                state: RuntimeExecutionState::Cancelled,
+            });
+        }
+        None
+    }
+
+    fn running_target(&self, id: i64) -> Option<(libc::pid_t, libc::pid_t)> {
+        match self.entry(id)?.state {
+            RuntimeExecutionState::Running { pgid, target } => Some((pgid, target)),
+            RuntimeExecutionState::Starting
+            | RuntimeExecutionState::Cancelling(_)
+            | RuntimeExecutionState::Cancelled => None,
+        }
+    }
+
+    fn state(&self, id: i64) -> Option<RuntimeExecutionState> {
+        self.entry(id).map(|entry| entry.state)
+    }
+
+    fn remove(&mut self, id: i64) {
+        if let Some(index) = self.index(id) {
+            self.entries[index] = None;
+        }
+    }
+
+    fn entry(&self, id: i64) -> Option<&RuntimeExecutionEntry> {
+        self.entries.iter().flatten().find(|entry| entry.id == id)
+    }
+
+    fn entry_mut(&mut self, id: i64) -> Option<&mut RuntimeExecutionEntry> {
+        self.entries
+            .iter_mut()
+            .flatten()
+            .find(|entry| entry.id == id)
+    }
+
+    fn index(&self, id: i64) -> Option<usize> {
+        self.entries
+            .iter()
+            .position(|entry| entry.is_some_and(|entry| entry.id == id))
+    }
+}
+
 #[cfg(target_os = "android")]
-fn runtime_executions() -> &'static Mutex<std::collections::HashMap<i64, RuntimeExecutionState>> {
-    static EXECUTIONS: std::sync::OnceLock<
-        Mutex<std::collections::HashMap<i64, RuntimeExecutionState>>,
-    > = std::sync::OnceLock::new();
-    EXECUTIONS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+fn runtime_executions() -> &'static Mutex<RuntimeExecutionRegistry> {
+    static EXECUTIONS: std::sync::OnceLock<Mutex<RuntimeExecutionRegistry>> =
+        std::sync::OnceLock::new();
+    EXECUTIONS.get_or_init(|| Mutex::new(RuntimeExecutionRegistry::new()))
 }
 
 #[cfg(target_os = "android")]
@@ -11086,19 +11205,8 @@ impl RuntimeExecutionGuard {
             return Ok(Self { id: 0 });
         }
         let mut executions = runtime_executions().lock().map_err(|_| libc::EIO)?;
-        match executions.entry(id) {
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(RuntimeExecutionState::Starting);
-                Ok(Self { id })
-            }
-            std::collections::hash_map::Entry::Occupied(entry)
-                if *entry.get() == RuntimeExecutionState::Cancelled =>
-            {
-                entry.remove();
-                Err(libc::ECANCELED)
-            }
-            std::collections::hash_map::Entry::Occupied(_) => Err(libc::EBUSY),
-        }
+        executions.begin(id)?;
+        Ok(Self { id })
     }
 
     fn register_process_group(&self, pgid: libc::pid_t, target: libc::pid_t) -> bool {
@@ -11108,17 +11216,7 @@ impl RuntimeExecutionGuard {
         let Ok(mut executions) = runtime_executions().lock() else {
             return false;
         };
-        match executions.get_mut(&self.id) {
-            Some(state @ RuntimeExecutionState::Starting) => {
-                *state = RuntimeExecutionState::Running { pgid, target };
-                true
-            }
-            Some(state @ RuntimeExecutionState::Cancelled) => {
-                *state = RuntimeExecutionState::Cancelling(pgid);
-                false
-            }
-            _ => false,
-        }
+        executions.register_process_group(self.id, pgid, target)
     }
 }
 
@@ -11129,7 +11227,7 @@ impl Drop for RuntimeExecutionGuard {
             return;
         }
         if let Ok(mut executions) = runtime_executions().lock() {
-            executions.remove(&self.id);
+            executions.remove(self.id);
         }
     }
 }
@@ -11143,21 +11241,7 @@ fn cancel_runtime_execution(id: i64) {
         let Ok(mut executions) = runtime_executions().lock() else {
             return;
         };
-        let Some(state) = executions.get_mut(&id) else {
-            executions.insert(id, RuntimeExecutionState::Cancelled);
-            return;
-        };
-        match *state {
-            RuntimeExecutionState::Starting => {
-                *state = RuntimeExecutionState::Cancelled;
-                0
-            }
-            RuntimeExecutionState::Running { pgid, .. } => {
-                *state = RuntimeExecutionState::Cancelling(pgid);
-                pgid
-            }
-            RuntimeExecutionState::Cancelling(_) | RuntimeExecutionState::Cancelled => 0,
-        }
+        executions.cancel(id).unwrap_or(0)
     };
     if pgid <= 0 {
         return;
@@ -11169,7 +11253,7 @@ fn cancel_runtime_execution(id: i64) {
         std::thread::sleep(std::time::Duration::from_millis(750));
         let should_kill = runtime_executions()
             .lock()
-            .map(|executions| executions.get(&id) == Some(&RuntimeExecutionState::Cancelling(pgid)))
+            .map(|executions| executions.state(id) == Some(RuntimeExecutionState::Cancelling(pgid)))
             .unwrap_or(false);
         if should_kill {
             unsafe {
@@ -11188,12 +11272,12 @@ fn signal_runtime_execution(id: i64, signal: i32) -> i32 {
         let Ok(executions) = runtime_executions().lock() else {
             return -libc::EIO;
         };
-        match executions.get(&id) {
-            Some(RuntimeExecutionState::Running { pgid, target }) => (*pgid, *target),
-            _ => return -libc::ESRCH,
-        }
+        executions.running_target(id).ok_or(libc::ESRCH)
     };
-    let (pgid, target) = pgid;
+    let (pgid, target) = match pgid {
+        Ok(value) => value,
+        Err(error) => return -error,
+    };
     // Signal the exact target recorded by the subreaper at fork time, not the
     // whole process group: terminals and complex applications may have child
     // shells and helpers for which SIGUSR1/2 have unrelated meanings.
@@ -11215,7 +11299,7 @@ fn forget_runtime_execution(id: i64) {
         return;
     }
     if let Ok(mut executions) = runtime_executions().lock() {
-        executions.remove(&id);
+        executions.remove(id);
     }
 }
 
@@ -13215,6 +13299,48 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_execution_registry_is_bounded_and_reuses_slots() {
+        let mut registry = RuntimeExecutionRegistry::new();
+        for id in 1..=MAX_RUNTIME_EXECUTIONS as i64 {
+            registry.begin(id).expect("bounded execution slot");
+        }
+        assert_eq!(
+            registry.begin(MAX_RUNTIME_EXECUTIONS as i64 + 1),
+            Err(libc::ENOSPC)
+        );
+        assert_eq!(registry.begin(1), Err(libc::EBUSY));
+        assert!(registry.register_process_group(1, 101, 102));
+        assert_eq!(registry.running_target(1), Some((101, 102)));
+        assert_eq!(registry.cancel(1), Some(101));
+        assert_eq!(
+            registry.state(1),
+            Some(RuntimeExecutionState::Cancelling(101))
+        );
+        registry.remove(1);
+        registry
+            .begin(MAX_RUNTIME_EXECUTIONS as i64 + 1)
+            .expect("recycled execution slot");
+    }
+
+    #[test]
+    fn runtime_execution_registry_consumes_early_cancellation_once() {
+        let mut registry = RuntimeExecutionRegistry::new();
+        assert_eq!(registry.cancel(77), None);
+        assert_eq!(registry.state(77), Some(RuntimeExecutionState::Cancelled));
+        assert_eq!(registry.begin(77), Err(libc::ECANCELED));
+        assert_eq!(registry.state(77), None);
+        registry
+            .begin(77)
+            .expect("retry after consumed cancellation");
+        assert_eq!(registry.cancel(77), None);
+        assert!(!registry.register_process_group(77, 201, 202));
+        assert_eq!(
+            registry.state(77),
+            Some(RuntimeExecutionState::Cancelling(201))
+        );
+    }
 
     #[test]
     fn encodes_xdg_toplevel_states_for_the_wire() {

@@ -221,6 +221,7 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
 - [ ] Confine Rust `unsafe` to reviewed FFI/syscall modules with safe wrappers, ownership documentation, null/alignment/length validation, and targeted tests.
   - [x] Enforce `unsafe_op_in_unsafe_fn` in every production crate that contains unsafe code, deny unsafe outside the existing Android JNI, Builder JNI, process-syscall, and storage-syscall modules, and keep the remaining compositor-wide confinement work explicit.
 - [ ] Keep the only global JNI state to a bounded synchronized handle registry; capability state stays in its owned runtime. Handles have generation checks, deterministic destruction, and use-after-close rejection.
+  - [x] Replace the compositor runtime execution/cancellation `HashMap` with a fixed 32-entry state registry. Unknown early-cancel IDs can no longer grow process-global memory; duplicate, full, cancellation, process registration, removal, and slot-reuse transitions have direct tests.
 - [ ] Keep blocking I/O, package work, and filesystem synchronization off Android's main thread and compositor/render threads.
 - [ ] Measure cold/warm startup, RSS/PSS, Java/Kotlin allocations and GC, native allocations, JNI calls, copied bytes, frame time, input latency, descriptors, threads, and child processes.
 - [ ] Add allocation-count and steady-state soak gates; performance regressions fail CI rather than becoming documentation notes.

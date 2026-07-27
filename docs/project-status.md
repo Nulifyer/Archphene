@@ -1558,8 +1558,20 @@ Foot Server, Foot, and Foot Client through five confirmations. Direct APK
 inspection and complete post-update Foot lifecycle/crash runs pass on both
 ABIs with full-device evidence.
 
+The native runtime execution boundary is now allocation-bounded as well. Its
+process-global cancellation registry previously retained unknown future IDs
+in an unbounded `HashMap`; a caller could grow native heap state without ever
+starting a process. It is now a fixed 32-entry registry with explicit
+`ENOSPC`, one-shot early-cancellation, duplicate-ID, running/cancelling,
+removal, and slot-reuse semantics. Direct tests cover those state transitions,
+and `unsafe_op_in_unsafe_fn` is enforced across every production Rust crate
+that contains unsafe operations. Builder, manager JNI, process, and storage
+crates additionally deny unsafe outside their existing explicit boundary
+modules; decomposing the compositor's remaining broad FFI/syscall region stays
+open.
+
 The visually inspected evidence is a full-device screenshot rather than an
-app-only frame. The complete Rust workspace passes 255 tests, including the
+app-only frame. The complete Rust workspace passes 257 tests, including the
 large-resolution, raw-signature-status, empty-files-record, loader-path, JNI,
 compositor, terminal, storage, AUR snapshot, and warmed-allocation regressions.
 
@@ -1597,7 +1609,7 @@ aliases to the corresponding private home directories. The Files page explains
 the Archphene Home and snapshot boundary, DocumentsProvider CRUD/security gates
 pass on x86_64 and AArch64, and a full-device Samsung Foot/Bash run reads an
 Android-side Shared fixture through the Linux alias. The complete Rust workspace
-passes 255 tests; Android debug lint and the minified release build pass.
+passes 257 tests; Android debug lint and the minified release build pass.
 
 The manager's new Share action opens at Archphene Home, selects only its own
 bounded regular provider documents, excludes Archphene as a circular target,
