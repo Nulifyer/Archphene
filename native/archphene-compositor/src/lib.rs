@@ -1,10 +1,9 @@
+#![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{self, Write};
-#[cfg(target_os = "android")]
-use std::mem::zeroed;
 use std::ops::Range;
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::FileExt;
@@ -1285,83 +1284,296 @@ fn copy_wayland_pixels_to_android(
     Ok(())
 }
 
+/// Reviewed Android bitmap and native-window boundary.
+///
+/// JNI references are accepted only by the two explicitly unsafe entry
+/// functions. A successful surface conversion becomes an owned RAII window;
+/// locked pixel pointers become bounded slices only after dimensions, stride,
+/// format, nullness, and byte-count validation.
 #[cfg(target_os = "android")]
-#[repr(C)]
-struct AndroidBitmapInfo {
-    width: u32,
-    height: u32,
-    stride: u32,
-    format: i32,
-    flags: u32,
-}
+#[allow(unsafe_code)]
+mod android_graphics_ffi {
+    use std::ffi::c_void;
+    use std::marker::PhantomData;
+    use std::mem::zeroed;
+    use std::ptr::{self, NonNull};
 
-#[cfg(target_os = "android")]
-#[repr(C)]
-struct AndroidNativeWindowBuffer {
-    width: i32,
-    height: i32,
-    stride: i32,
-    format: i32,
-    bits: *mut std::ffi::c_void,
-    reserved: [u32; 6],
-}
+    const ANDROID_RGBA_8888: i32 = 1;
+    const MAX_DIMENSION: usize = 8192;
+    const MAX_PIXEL_BYTES: usize = 33_554_432 * 4;
 
-#[cfg(target_os = "android")]
-enum AndroidNativeWindow {}
+    #[repr(C)]
+    struct AndroidBitmapInfo {
+        width: u32,
+        height: u32,
+        stride: u32,
+        format: i32,
+        flags: u32,
+    }
 
-#[cfg(target_os = "android")]
-#[link(name = "jnigraphics")]
-unsafe extern "C" {
-    #[link_name = "AndroidBitmap_getInfo"]
-    fn android_bitmap_get_info(
-        environment: *mut std::ffi::c_void,
-        bitmap: *mut std::ffi::c_void,
-        info: *mut AndroidBitmapInfo,
-    ) -> i32;
-    #[link_name = "AndroidBitmap_lockPixels"]
-    fn android_bitmap_lock_pixels(
-        environment: *mut std::ffi::c_void,
-        bitmap: *mut std::ffi::c_void,
-        address: *mut *mut std::ffi::c_void,
-    ) -> i32;
-    #[link_name = "AndroidBitmap_unlockPixels"]
-    fn android_bitmap_unlock_pixels(
-        environment: *mut std::ffi::c_void,
-        bitmap: *mut std::ffi::c_void,
-    ) -> i32;
-}
-
-#[cfg(target_os = "android")]
-#[link(name = "android")]
-unsafe extern "C" {
-    #[link_name = "ANativeWindow_fromSurface"]
-    fn android_native_window_from_surface(
-        environment: *mut std::ffi::c_void,
-        surface: *mut std::ffi::c_void,
-    ) -> *mut AndroidNativeWindow;
-    #[link_name = "ANativeWindow_release"]
-    fn android_native_window_release(window: *mut AndroidNativeWindow);
-    #[link_name = "ANativeWindow_setBuffersGeometry"]
-    fn android_native_window_set_buffers_geometry(
-        window: *mut AndroidNativeWindow,
+    #[repr(C)]
+    struct AndroidNativeWindowBuffer {
         width: i32,
         height: i32,
+        stride: i32,
         format: i32,
-    ) -> i32;
-    #[link_name = "ANativeWindow_lock"]
-    fn android_native_window_lock(
-        window: *mut AndroidNativeWindow,
-        buffer: *mut AndroidNativeWindowBuffer,
-        dirty_bounds: *mut std::ffi::c_void,
-    ) -> i32;
-    #[link_name = "ANativeWindow_unlockAndPost"]
-    fn android_native_window_unlock_and_post(window: *mut AndroidNativeWindow) -> i32;
+        bits: *mut c_void,
+        reserved: [u32; 6],
+    }
+
+    enum AndroidNativeWindow {}
+
+    #[link(name = "jnigraphics")]
+    unsafe extern "C" {
+        #[link_name = "AndroidBitmap_getInfo"]
+        fn android_bitmap_get_info(
+            environment: *mut c_void,
+            bitmap: *mut c_void,
+            info: *mut AndroidBitmapInfo,
+        ) -> i32;
+        #[link_name = "AndroidBitmap_lockPixels"]
+        fn android_bitmap_lock_pixels(
+            environment: *mut c_void,
+            bitmap: *mut c_void,
+            address: *mut *mut c_void,
+        ) -> i32;
+        #[link_name = "AndroidBitmap_unlockPixels"]
+        fn android_bitmap_unlock_pixels(environment: *mut c_void, bitmap: *mut c_void) -> i32;
+    }
+
+    #[link(name = "android")]
+    unsafe extern "C" {
+        #[link_name = "ANativeWindow_fromSurface"]
+        fn android_native_window_from_surface(
+            environment: *mut c_void,
+            surface: *mut c_void,
+        ) -> *mut AndroidNativeWindow;
+        #[link_name = "ANativeWindow_release"]
+        fn android_native_window_release(window: *mut AndroidNativeWindow);
+        #[link_name = "ANativeWindow_setBuffersGeometry"]
+        fn android_native_window_set_buffers_geometry(
+            window: *mut AndroidNativeWindow,
+            width: i32,
+            height: i32,
+            format: i32,
+        ) -> i32;
+        #[link_name = "ANativeWindow_lock"]
+        fn android_native_window_lock(
+            window: *mut AndroidNativeWindow,
+            buffer: *mut AndroidNativeWindowBuffer,
+            dirty_bounds: *mut c_void,
+        ) -> i32;
+        #[link_name = "ANativeWindow_unlockAndPost"]
+        fn android_native_window_unlock_and_post(window: *mut AndroidNativeWindow) -> i32;
+    }
+
+    pub(super) struct NativeWindow {
+        raw: NonNull<AndroidNativeWindow>,
+    }
+
+    // SAFETY: Android specifies that an acquired ANativeWindow may be used
+    // across threads. Archphene additionally serializes all access through the
+    // launcher registry's mutex.
+    unsafe impl Send for NativeWindow {}
+
+    impl NativeWindow {
+        /// Acquires a native-window reference from valid JNI references.
+        ///
+        /// # Safety
+        ///
+        /// `environment` must be the current JNI environment and `surface`
+        /// must be a live `android.view.Surface` reference for this call.
+        pub(super) unsafe fn from_surface(
+            environment: *mut c_void,
+            surface: *mut c_void,
+        ) -> Option<Self> {
+            if environment.is_null() || surface.is_null() {
+                return None;
+            }
+            // SAFETY: the caller guarantees both JNI references are valid for
+            // this invocation; Android returns an acquired window reference.
+            let raw = unsafe { android_native_window_from_surface(environment, surface) };
+            NonNull::new(raw).map(|raw| Self { raw })
+        }
+
+        pub(super) fn set_rgba_geometry(&mut self, width: i32, height: i32) -> Result<(), ()> {
+            if width <= 0
+                || height <= 0
+                || width as usize > MAX_DIMENSION
+                || height as usize > MAX_DIMENSION
+                || (width as usize)
+                    .checked_mul(height as usize)
+                    .is_none_or(|pixels| pixels > MAX_PIXEL_BYTES / 4)
+            {
+                return Err(());
+            }
+            // SAFETY: `self.raw` owns a live acquired window and the validated
+            // dimensions/format match the buffer contract used below.
+            if unsafe {
+                android_native_window_set_buffers_geometry(
+                    self.raw.as_ptr(),
+                    width,
+                    height,
+                    ANDROID_RGBA_8888,
+                )
+            } == 0
+            {
+                Ok(())
+            } else {
+                Err(())
+            }
+        }
+
+        pub(super) fn with_locked_rgba<R>(
+            &mut self,
+            operation: impl FnOnce(WindowBuffer<'_>) -> R,
+        ) -> Result<(R, i32), i32> {
+            // SAFETY: all-zero is the documented input state; Android fills
+            // the complete buffer record after a successful lock.
+            let mut buffer: AndroidNativeWindowBuffer = unsafe { zeroed() };
+            // SAFETY: `self.raw` remains live and exclusively serialized;
+            // `buffer` is writable and no dirty rectangle is requested.
+            if unsafe {
+                android_native_window_lock(self.raw.as_ptr(), &mut buffer, ptr::null_mut())
+            } != 0
+            {
+                return Err(-2);
+            }
+
+            let prepared = prepare_window_buffer(&mut buffer);
+            let result = prepared.map(operation);
+            // SAFETY: every successful lock is paired exactly once with this
+            // unlock/post, including validation and operation error paths.
+            let posted = unsafe { android_native_window_unlock_and_post(self.raw.as_ptr()) };
+            result.map(|value| (value, posted))
+        }
+    }
+
+    impl Drop for NativeWindow {
+        fn drop(&mut self) {
+            // SAFETY: this object owns exactly one acquired reference.
+            unsafe { android_native_window_release(self.raw.as_ptr()) };
+        }
+    }
+
+    pub(super) struct WindowBuffer<'a> {
+        pub(super) width: usize,
+        pub(super) height: usize,
+        pub(super) stride_bytes: usize,
+        pub(super) pixels: &'a mut [u8],
+    }
+
+    fn prepare_window_buffer(
+        buffer: &mut AndroidNativeWindowBuffer,
+    ) -> Result<WindowBuffer<'_>, i32> {
+        if buffer.bits.is_null()
+            || buffer.format != ANDROID_RGBA_8888
+            || buffer.width <= 0
+            || buffer.height <= 0
+            || buffer.stride < buffer.width
+        {
+            return Err(-3);
+        }
+        let (width, height, stride) = (
+            usize::try_from(buffer.width).map_err(|_| -3)?,
+            usize::try_from(buffer.height).map_err(|_| -3)?,
+            usize::try_from(buffer.stride).map_err(|_| -3)?,
+        );
+        if width > MAX_DIMENSION || height > MAX_DIMENSION {
+            return Err(-4);
+        }
+        let stride_bytes = stride.checked_mul(4).ok_or(-4)?;
+        let byte_count = stride_bytes.checked_mul(height).ok_or(-4)?;
+        if byte_count > MAX_PIXEL_BYTES {
+            return Err(-4);
+        }
+        // SAFETY: the successful lock supplies `bits` for at least
+        // stride*height pixels. The checks above bound and validate that exact
+        // byte count, and the borrow cannot outlive the locked operation.
+        let pixels =
+            unsafe { std::slice::from_raw_parts_mut(buffer.bits.cast::<u8>(), byte_count) };
+        Ok(WindowBuffer {
+            width,
+            height,
+            stride_bytes,
+            pixels,
+        })
+    }
+
+    pub(super) struct BitmapPixels<'a> {
+        pub(super) stride_bytes: usize,
+        pub(super) pixels: &'a mut [u8],
+        _locked: PhantomData<&'a mut [u8]>,
+    }
+
+    /// Locks one valid JNI Bitmap and exposes only its validated RGBA bytes.
+    ///
+    /// # Safety
+    ///
+    /// `environment` must be the current JNI environment and `bitmap` a live
+    /// mutable RGBA_8888 Bitmap reference for the duration of this call.
+    pub(super) unsafe fn with_rgba_bitmap<R>(
+        environment: *mut c_void,
+        bitmap: *mut c_void,
+        expected_width: u32,
+        expected_height: u32,
+        operation: impl FnOnce(BitmapPixels<'_>) -> R,
+    ) -> Result<(R, i32), i32> {
+        if environment.is_null() || bitmap.is_null() {
+            return Err(-2);
+        }
+        // SAFETY: the caller guarantees valid JNI references and `info` is a
+        // writable ABI-compatible record.
+        let mut info: AndroidBitmapInfo = unsafe { zeroed() };
+        if unsafe { android_bitmap_get_info(environment, bitmap, &mut info) } != 0 {
+            return Err(-2);
+        }
+        let width = usize::try_from(info.width).map_err(|_| -3)?;
+        let height = usize::try_from(info.height).map_err(|_| -3)?;
+        let stride_bytes = usize::try_from(info.stride).map_err(|_| -3)?;
+        let row_bytes = width.checked_mul(4).ok_or(-3)?;
+        let byte_count = stride_bytes.checked_mul(height).ok_or(-3)?;
+        if info.format != ANDROID_RGBA_8888
+            || info.width != expected_width
+            || info.height != expected_height
+            || width > MAX_DIMENSION
+            || height > MAX_DIMENSION
+            || stride_bytes < row_bytes
+            || byte_count > MAX_PIXEL_BYTES
+        {
+            return Err(-3);
+        }
+
+        let mut address = ptr::null_mut();
+        // SAFETY: the caller guarantees valid JNI references and `address` is
+        // a writable output pointer.
+        if unsafe { android_bitmap_lock_pixels(environment, bitmap, &mut address) } != 0 {
+            return Err(-4);
+        }
+        let Some(address) = NonNull::new(address.cast::<u8>()) else {
+            // SAFETY: a successful lock must be balanced even if Android
+            // unexpectedly returned a null pixel address.
+            let _ = unsafe { android_bitmap_unlock_pixels(environment, bitmap) };
+            return Err(-4);
+        };
+        // SAFETY: AndroidBitmap info supplies a locked allocation of at least
+        // stride*height bytes; it remains locked through the callback.
+        let pixels = unsafe { std::slice::from_raw_parts_mut(address.as_ptr(), byte_count) };
+        let result = operation(BitmapPixels {
+            stride_bytes,
+            pixels,
+            _locked: PhantomData,
+        });
+        // SAFETY: this exactly balances the successful lock above.
+        let unlocked = unsafe { android_bitmap_unlock_pixels(environment, bitmap) };
+        Ok((result, unlocked))
+    }
 }
 
 #[cfg(target_os = "android")]
 struct LauncherSurfaceCompositor {
     core: CompositorCore,
-    window: *mut AndroidNativeWindow,
+    window: Option<android_graphics_ffi::NativeWindow>,
     surface_width: i32,
     surface_height: i32,
     buffer_width: i32,
@@ -1372,16 +1584,12 @@ struct LauncherSurfaceCompositor {
 #[cfg(target_os = "android")]
 impl LauncherSurfaceCompositor {
     fn detach_surface(&mut self) {
-        if !self.window.is_null() {
-            unsafe { android_native_window_release(self.window) };
-            self.window = ptr::null_mut();
-        }
+        self.window = None;
     }
 
     fn attach_surface(
         &mut self,
-        environment: *mut std::ffi::c_void,
-        surface: *mut std::ffi::c_void,
+        mut window: android_graphics_ffi::NativeWindow,
         width: i32,
         height: i32,
         density_dpi: i32,
@@ -1390,32 +1598,20 @@ impl LauncherSurfaceCompositor {
         if !valid_launcher_surface_size(width, height)
             || !valid_launcher_density(density_dpi)
             || !valid_launcher_geometry_percent(geometry_percent)
-            || surface.is_null()
         {
             return -2;
-        }
-        let window = unsafe { android_native_window_from_surface(environment, surface) };
-        if window.is_null() {
-            return -3;
         }
         let density_dpi = launcher_density_dpi(width, height, density_dpi, geometry_percent);
         let logical_width = launcher_logical_extent(width, density_dpi);
         let logical_height = launcher_logical_extent(height, density_dpi);
-        const AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM: i32 = 1;
-        if unsafe {
-            android_native_window_set_buffers_geometry(
-                window,
-                logical_width,
-                logical_height,
-                AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM,
-            )
-        } != 0
+        if window
+            .set_rgba_geometry(logical_width, logical_height)
+            .is_err()
         {
-            unsafe { android_native_window_release(window) };
             return -4;
         }
         self.detach_surface();
-        self.window = window;
+        self.window = Some(window);
         self.surface_width = width;
         self.surface_height = height;
         self.buffer_width = logical_width;
@@ -1431,11 +1627,11 @@ impl LauncherSurfaceCompositor {
         }
         let mut flags = i32::from(self.core.accepted_client_count() != 0);
         let commit = self.core.surface_commit_count();
-        if !self.window.is_null()
-            && commit != self.last_presented_commit
+        if commit != self.last_presented_commit
+            && let Some(window) = self.window.as_mut()
             && copy_last_frame_to_native_window(
                 &self.core,
-                self.window,
+                window,
                 &mut self.buffer_width,
                 &mut self.buffer_height,
             ) == 0
@@ -1852,7 +2048,7 @@ fn scale_launcher_input_record(
 #[cfg(target_os = "android")]
 fn copy_last_frame_to_native_window(
     core: &CompositorCore,
-    window: *mut AndroidNativeWindow,
+    window: &mut android_graphics_ffi::NativeWindow,
     buffer_width: &mut i32,
     buffer_height: &mut i32,
 ) -> i32 {
@@ -1863,27 +2059,18 @@ fn copy_last_frame_to_native_window(
         return -2;
     };
     if width != *buffer_width || height != *buffer_height {
-        const AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM: i32 = 1;
-        if unsafe {
-            android_native_window_set_buffers_geometry(
-                window,
-                width,
-                height,
-                AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM,
-            )
-        } != 0
-        {
+        if window.set_rgba_geometry(width, height).is_err() {
             return -2;
         }
         *buffer_width = width;
         *buffer_height = height;
     }
-    let mut buffer: AndroidNativeWindowBuffer = unsafe { zeroed() };
-    if unsafe { android_native_window_lock(window, &mut buffer, ptr::null_mut()) } != 0 {
-        return -2;
-    }
-    let result = copy_frame_to_native_window_buffer(&frame, &mut buffer);
-    let posted = unsafe { android_native_window_unlock_and_post(window) };
+    let (result, posted) = match window
+        .with_locked_rgba(|buffer| copy_frame_to_native_window_buffer(&frame, buffer))
+    {
+        Ok(result) => result,
+        Err(error) => return error,
+    };
     if result != 0 {
         result
     } else if posted != 0 {
@@ -2079,32 +2266,14 @@ fn launcher_presentation_component(state: &CompositorState, component: i32) -> i
 #[cfg(target_os = "android")]
 fn copy_frame_to_native_window_buffer(
     frame: &CommittedFrame,
-    buffer: &mut AndroidNativeWindowBuffer,
+    buffer: android_graphics_ffi::WindowBuffer<'_>,
 ) -> i32 {
-    const AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM: i32 = 1;
-    if buffer.bits.is_null()
-        || buffer.format != AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM
-        || buffer.width <= 0
-        || buffer.height <= 0
-        || buffer.stride < buffer.width
-    {
-        return -3;
-    }
-    let (Ok(width), Ok(height), Ok(stride)) = (
-        usize::try_from(buffer.width),
-        usize::try_from(buffer.height),
-        usize::try_from(buffer.stride),
-    ) else {
-        return -3;
-    };
-    let Some(destination_stride) = stride.checked_mul(4) else {
-        return -4;
-    };
-    let Some(destination_bytes) = destination_stride.checked_mul(height) else {
-        return -4;
-    };
-    let destination =
-        unsafe { std::slice::from_raw_parts_mut(buffer.bits.cast::<u8>(), destination_bytes) };
+    let android_graphics_ffi::WindowBuffer {
+        width,
+        height,
+        stride_bytes: destination_stride,
+        pixels: destination,
+    } = buffer;
     destination.fill(0);
 
     let frame_width = frame.width as usize;
@@ -2156,77 +2325,6 @@ fn copy_frame_to_native_window_buffer(
                 u8::MAX
             };
         }
-    }
-    0
-}
-
-#[cfg(target_os = "android")]
-fn copy_last_frame_to_bitmap(
-    core: &CompositorCore,
-    environment: *mut std::ffi::c_void,
-    bitmap: *mut std::ffi::c_void,
-) -> i32 {
-    let Some(frame) = core.state.last_frame.as_ref() else {
-        return -1;
-    };
-    copy_frame_to_bitmap(frame, environment, bitmap)
-}
-
-#[cfg(target_os = "android")]
-fn copy_frame_to_bitmap(
-    frame: &CommittedFrame,
-    environment: *mut std::ffi::c_void,
-    bitmap: *mut std::ffi::c_void,
-) -> i32 {
-    const ANDROID_BITMAP_FORMAT_RGBA_8888: i32 = 1;
-    let mut info: AndroidBitmapInfo = unsafe { zeroed() };
-    if unsafe { android_bitmap_get_info(environment, bitmap, &mut info) } != 0 {
-        return -2;
-    }
-    let row_bytes = match usize::try_from(frame.width)
-        .ok()
-        .and_then(|width| width.checked_mul(4))
-    {
-        Some(value) => value,
-        None => return -3,
-    };
-    let Ok(bitmap_stride) = usize::try_from(info.stride) else {
-        return -3;
-    };
-    if info.format != ANDROID_BITMAP_FORMAT_RGBA_8888
-        || info.width != frame.width
-        || info.height != frame.height
-        || bitmap_stride < row_bytes
-    {
-        return -3;
-    }
-    let Some(bitmap_bytes) = bitmap_stride.checked_mul(info.height as usize) else {
-        return -3;
-    };
-    let mut address = ptr::null_mut();
-    if unsafe { android_bitmap_lock_pixels(environment, bitmap, &mut address) } != 0 {
-        return -4;
-    }
-    if address.is_null() {
-        let _ = unsafe { android_bitmap_unlock_pixels(environment, bitmap) };
-        return -4;
-    }
-
-    let destination = unsafe { std::slice::from_raw_parts_mut(address.cast::<u8>(), bitmap_bytes) };
-    for (source, destination) in frame
-        .pixels
-        .chunks_exact(row_bytes)
-        .zip(destination.chunks_exact_mut(bitmap_stride))
-    {
-        if copy_wayland_pixels_to_android(source, frame.format, &mut destination[..row_bytes])
-            .is_err()
-        {
-            let _ = unsafe { android_bitmap_unlock_pixels(environment, bitmap) };
-            return -5;
-        }
-    }
-    if unsafe { android_bitmap_unlock_pixels(environment, bitmap) } != 0 {
-        return -6;
     }
     0
 }
@@ -9989,13 +10087,76 @@ impl Drop for CompositorCore {
 /// All exported Java symbols are enclosed here, including their conversion of
 /// Java-owned handles, arrays, direct buffers, surfaces, and bitmaps. Existing
 /// null/length/range checks stay next to that conversion before control reaches
-/// the compositor core. The remaining raw-pointer handle replacement and
-/// syscall/window-FFI split stay explicit in `todo.md`; this module boundary
-/// does not claim those later safety steps are complete.
+/// the compositor core. Descriptor and Android graphics operations use their
+/// reviewed wrappers; the remaining legacy runtime-process syscall extraction
+/// stays explicit in `todo.md`.
 #[allow(clippy::missing_safety_doc)]
+#[allow(unsafe_code)]
 #[rustfmt::skip]
 mod jni_exports {
     use super::*;
+
+#[cfg(target_os = "android")]
+fn copy_last_frame_to_bitmap(
+    core: &CompositorCore,
+    environment: *mut std::ffi::c_void,
+    bitmap: *mut std::ffi::c_void,
+) -> i32 {
+    let Some(frame) = core.state.last_frame.as_ref() else {
+        return -1;
+    };
+    copy_frame_to_bitmap(frame, environment, bitmap)
+}
+
+#[cfg(target_os = "android")]
+fn copy_frame_to_bitmap(
+    frame: &CommittedFrame,
+    environment: *mut std::ffi::c_void,
+    bitmap: *mut std::ffi::c_void,
+) -> i32 {
+    let row_bytes = match usize::try_from(frame.width)
+        .ok()
+        .and_then(|width| width.checked_mul(4))
+    {
+        Some(value) => value,
+        None => return -3,
+    };
+    // SAFETY: these arguments come directly from the active JNI invocation;
+    // the boundary wrapper validates nullness, format, dimensions, stride, and
+    // byte count before exposing the locked pixels.
+    let result = unsafe {
+        android_graphics_ffi::with_rgba_bitmap(
+            environment,
+            bitmap,
+            frame.width,
+            frame.height,
+            |bitmap| {
+                for (source, destination) in frame
+                    .pixels
+                    .chunks_exact(row_bytes)
+                    .zip(bitmap.pixels.chunks_exact_mut(bitmap.stride_bytes))
+                {
+                    if copy_wayland_pixels_to_android(
+                        source,
+                        frame.format,
+                        &mut destination[..row_bytes],
+                    )
+                    .is_err()
+                    {
+                        return -5;
+                    }
+                }
+                0
+            },
+        )
+    };
+    match result {
+        Ok((copy_result, _)) if copy_result != 0 => copy_result,
+        Ok((_, 0)) => 0,
+        Ok(_) => -6,
+        Err(error) => error,
+    }
+}
 
 const JNI_HANDLE_INDEX_BITS: u32 = 16;
 const JNI_HANDLE_INDEX_MASK: u64 = u16::MAX as u64;
@@ -10107,12 +10268,6 @@ fn remove_core_compositor(handle: i64) -> Option<CompositorCore> {
 
 #[cfg(target_os = "android")]
 const MAX_LAUNCHER_COMPOSITORS: usize = 4;
-
-// LauncherSurfaceCompositor owns one retained ANativeWindow reference. Android
-// permits ANativeWindow use across threads, and every access is serialized by
-// the registry mutex before the reference is released on removal.
-#[cfg(target_os = "android")]
-unsafe impl Send for LauncherSurfaceCompositor {}
 
 #[cfg(target_os = "android")]
 fn launcher_compositors(
@@ -12177,7 +12332,7 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
     configure_launcher_output(&mut core, width, height, density_dpi, geometry_percent);
     register_launcher_compositor(LauncherSurfaceCompositor {
         core,
-        window: ptr::null_mut(),
+        window: None,
         surface_width: width,
         surface_height: height,
         buffer_width: 0,
@@ -12201,14 +12356,15 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
     let Some(mut compositor) = launcher_compositor(handle) else {
         return -1;
     };
-    compositor.attach_surface(
-        environment,
-        surface,
-        width,
-        height,
-        density_dpi,
-        geometry_percent,
-    )
+    // SAFETY: Android invokes this JNI method with the current JNIEnv and a
+    // live `android.view.Surface`; the boundary acquires its own native-window
+    // reference before the Java reference may expire.
+    let Some(window) = (unsafe {
+        android_graphics_ffi::NativeWindow::from_surface(environment, surface)
+    }) else {
+        return -3;
+    };
+    compositor.attach_surface(window, width, height, density_dpi, geometry_percent)
 }
 
 #[cfg(target_os = "android")]

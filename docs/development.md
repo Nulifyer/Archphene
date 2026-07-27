@@ -120,6 +120,11 @@ Unix syscall boundary, where new descriptors are wrapped in Rust ownership
 immediately; client adoption takes an `OwnedFd` after JNI receives the sole
 descriptor returned by `ParcelFileDescriptor.detachFd()`.
 
+Android presentation also crosses one reviewed graphics boundary:
+`ANativeWindow` references are retained and released through RAII, and native
+window/Bitmap storage is exposed to the compositor only as a bounded RGBA byte
+slice after format, dimensions, stride, nullness, and total size are checked.
+
 ### Secrets desktop-client fixture
 
 Rebuild the KWallet compatibility daemon and official Arch desktop-client
