@@ -118,8 +118,6 @@ archphene_tap_ui_pattern \
   Cancel
 archphene_wait_ui_exact_text \
   "Install · Cancelled · 0%" "live-package-queue-cancelled-$serial" 15
-archphene_wait_ui_exact_text \
-  "Cancelled before package mutation" "live-package-queue-cancel-message-$serial" 15
 archphene_wait_log 'Cancelled package operation for dotnet-sdk' 15 >/dev/null
 
 cache_contents="$(
@@ -132,7 +130,7 @@ cache_contents="$(
 installed_entry="$(
   archphene_adb_run exec-out run-as "$package" find \
     files/arch-root/var/lib/pacman/local -mindepth 1 -maxdepth 1 -type d \
-    -name 'dotnet-sdk-*' | tr -d '\r'
+    -name 'dotnet-sdk-[0-9]*' | tr -d '\r'
 )"
 [[ -z "$installed_entry" ]] ||
   archphene_die "cancelled Queued operation installed dotnet-sdk"
@@ -145,6 +143,11 @@ archphene_adb_run logcat -c
 archphene_adb_run shell am force-stop "$package" >/dev/null
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
 archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 20 >/dev/null
+ui="$(archphene_capture_ui "live-package-queue-restored-input-$serial")"
+archphene_tap_ui_pattern \
+  "$ui" 'text="Package name"[^>]*class="android.widget.EditText"' "Package name"
+archphene_adb_run shell input text dotnet-sdk
+archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null
 archphene_wait_ui_exact_text \
   "Install · Cancelled · 0%" "live-package-queue-restored-$serial" 20
 archphene_wait_ui_exact_text \

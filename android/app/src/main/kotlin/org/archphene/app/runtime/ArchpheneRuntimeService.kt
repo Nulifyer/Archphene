@@ -87,6 +87,8 @@ internal class AvailablePackageSnapshot(
     val names: Array<String>,
     val versions: Array<String>,
     val descriptions: Array<String>,
+    val installStates: Array<String>,
+    val installedVersions: Array<String>,
     val status: String,
     val revision: Int,
 )
@@ -799,6 +801,8 @@ class ArchpheneRuntimeService : Service() {
     @Volatile
     private var availablePackageSnapshot =
         AvailablePackageSnapshot(
+            emptyArray(),
+            emptyArray(),
             emptyArray(),
             emptyArray(),
             emptyArray(),
@@ -4575,6 +4579,8 @@ class ArchpheneRuntimeService : Service() {
                 emptyArray(),
                 emptyArray(),
                 emptyArray(),
+                emptyArray(),
+                emptyArray(),
                 status,
                 previousRevision + 1,
             )
@@ -4588,13 +4594,27 @@ class ArchpheneRuntimeService : Service() {
         val names = ArrayList<String>()
         val versions = ArrayList<String>()
         val descriptions = ArrayList<String>()
+        val installStates = ArrayList<String>()
+        val installedVersions = ArrayList<String>()
         String(bytes, StandardCharsets.UTF_8)
             .trimEnd('\n')
             .lineSequence()
             .forEach { line ->
-                val fields = line.split('\t', limit = 4)
+                val fields = line.split('\t', limit = 6)
+                val validInstalledVersion =
+                    fields.size == 6 &&
+                        fields[5].length <= 128 &&
+                        fields[5].none(Char::isWhitespace)
+                val validInstallState =
+                    validInstalledVersion &&
+                        when (fields[4]) {
+                            "available" -> fields[5].isEmpty()
+                            "installed" -> fields[5] == fields[2]
+                            "different" -> fields[5].isNotEmpty()
+                            else -> false
+                        }
                 if (
-                    fields.size != 4 ||
+                    fields.size != 6 ||
                     (fields[0] != "core" && fields[0] != "extra") ||
                     fields[1].isEmpty() ||
                     fields[1].length > 128 ||
@@ -4609,6 +4629,7 @@ class ArchpheneRuntimeService : Service() {
                     fields[3].any { character ->
                         character == '\u0000' || character == '\r'
                     } ||
+                    !validInstallState ||
                     names.contains(fields[1]) ||
                     names.size >= AVAILABLE_PACKAGE_LIMIT
                 ) {
@@ -4618,6 +4639,8 @@ class ArchpheneRuntimeService : Service() {
                 names.add(fields[1])
                 versions.add(fields[2])
                 descriptions.add(fields[3])
+                installStates.add(fields[4])
+                installedVersions.add(fields[5])
             }
         val previousRevision = availablePackageSnapshot.revision
         val status =
@@ -4632,6 +4655,8 @@ class ArchpheneRuntimeService : Service() {
                 names.toTypedArray(),
                 versions.toTypedArray(),
                 descriptions.toTypedArray(),
+                installStates.toTypedArray(),
+                installedVersions.toTypedArray(),
                 status,
                 previousRevision + 1,
             )

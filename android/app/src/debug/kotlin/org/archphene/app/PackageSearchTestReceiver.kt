@@ -41,6 +41,11 @@ internal class PackageSearchTestReceiver : BroadcastReceiver() {
                         File(sync, "core.db"),
                         listOf(
                             PackageRecord(
+                                "base",
+                                "3-2",
+                                "Minimal package set to define a basic Arch Linux installation",
+                            ),
+                            PackageRecord(
                                 "glibc",
                                 "2.42+r33+gde5fe48316ed-1",
                                 "GNU C Library",
@@ -67,6 +72,24 @@ internal class PackageSearchTestReceiver : BroadcastReceiver() {
                             ),
                         ),
                     )
+                    val local =
+                        File(context.filesDir, "arch-root/var/lib/pacman/local")
+                    check(local.mkdirs() || local.isDirectory) {
+                        "could not create local package database"
+                    }
+                    File(local, "ALPM_DB_VERSION").writeText("9\n")
+                    writeInstalledPackage(
+                        local,
+                        "dotnet-runtime",
+                        "10.0.4.sdk104-1",
+                        "The .NET runtime",
+                    )
+                    writeInstalledPackage(
+                        local,
+                        "dotnet-sdk-preview",
+                        "10.0.0.preview.1-1",
+                        "Previously installed preview .NET SDK",
+                    )
                     if (workerHoldMillis != 0) {
                         check(
                             context
@@ -87,6 +110,24 @@ internal class PackageSearchTestReceiver : BroadcastReceiver() {
             },
             "ArchphenePackageSearchProbe",
         ).start()
+    }
+
+    private fun writeInstalledPackage(
+        local: File,
+        name: String,
+        version: String,
+        description: String,
+    ) {
+        val directory = File(local, "$name-$version")
+        check(directory.mkdirs() || directory.isDirectory) {
+            "could not create installed package record"
+        }
+        File(directory, "desc").writeText(
+            "%NAME%\n$name\n\n%VERSION%\n$version\n\n%DESC%\n$description\n\n" +
+                "%ARCH%\nany\n\n%REASON%\n0\n\n%VALIDATION%\npgp\n",
+            StandardCharsets.UTF_8,
+        )
+        File(directory, "files").writeText("%FILES%\n", StandardCharsets.UTF_8)
     }
 
     private fun writeCatalog(

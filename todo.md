@@ -354,6 +354,8 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
     - [x] Hold two or more newly discovered desktop entries in one durable review batch, default them selected, support Skip all/Not now/Add selected, and expose dismissed launchers through the package-screen status for later re-enablement. Prove the atomic Rust transition and real generated-wrapper flows on the emulator and Samsung, then remove every temporary package record, desktop entry, and wrapper.
 - [ ] Review Obtainium's source, license, screenshots, app-list structure, and update progress UI. Adapt suitable open-source patterns to Archphene's compact list, spinner, and richer phase strings without copying blindly.
 - [ ] Ensure search results distinguish graphical apps, CLI tools, libraries, installed packages, available updates, AUR results, unsupported packages, and compatibility status.
+  - [x] Preserve pacman's authoritative installed marker across the bounded Rust/JNI snapshot and show Official, Installed, or the exact differing installed version without name/description heuristics. Current, differing, and available fixtures pass light/dark full-device emulator inspection; the physical Samsung shows its real installed Foot package while preserving all 255 installed packages.
+  - [ ] Derive GUI, CLI, library, and compatibility classes from verified package file/capability metadata; integrate AUR results and a version-order-safe update state without guessing from names or descriptions.
 - [ ] Add clear disk-use estimates and controls for package archives, shared runtime data, build caches, and user files.
 
 ## P0 - VS Code and .NET daily-use milestone

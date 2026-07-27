@@ -126,6 +126,9 @@
     <string name="package_activity_heading">Recent package activity</string>
     <string name="package_job_unavailable">Package operation unavailable</string>
     <string name="package_search_prompt">Search the official Arch repositories</string>
+    <string name="package_search_official">Official</string>
+    <string name="package_search_installed">Installed</string>
+    <string name="package_search_version_differs">Differs from %1$s</string>
     <string name="session_channel_name">Linux activity</string>
     <string name="session_channel_description">Keeps user-started Archphene work running</string>
     <string name="session_notification_title">Archphene Linux session</string>

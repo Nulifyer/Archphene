@@ -66,6 +66,7 @@ archphene_adb_run shell am broadcast \
 archphene_wait_log \
   "Seeded package job state=failed token=search-job-$serial_slug" 20 \
   "ArchphenePackageJobProbe:V *:S" >/dev/null
+archphene_adb_run shell am force-stop "$package" >/dev/null
 
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
 archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 20 >/dev/null
@@ -90,6 +91,13 @@ archphene_wait_ui_exact_text \
   "The .NET SDK" "available-packages-description-$serial" 15
 archphene_wait_ui_exact_text \
   "extra" "available-packages-repository-$serial" 15
+archphene_wait_ui_exact_text \
+  "Official" "available-packages-official-$serial" 15
+archphene_wait_ui_exact_text \
+  "Installed" "available-packages-installed-$serial" 15
+archphene_wait_ui_exact_text \
+  "Differs from 10.0.0.preview.1-1" \
+  "available-packages-different-$serial" 15
 archphene_wait_ui_exact_text \
   "Install · Failed · 0%" "available-packages-job-state-$serial" 15
 archphene_adb_run exec-out screencap -p >"$output_dir/$serial-light.png"

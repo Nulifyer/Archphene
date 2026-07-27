@@ -1508,7 +1508,7 @@ retains an explicit terminal message across every later Surface attachment;
 two consecutive physical-device runs prove no process exists before the
 wrapper is explicitly closed and reopened.
 The visually inspected evidence is a full-device screenshot rather than an
-app-only frame. The complete Rust workspace passes 212 tests, including the
+app-only frame. The complete Rust workspace passes 247 tests, including the
 large-resolution, raw-signature-status, empty-files-record, loader-path, JNI,
 compositor, terminal, storage, AUR snapshot, and warmed-allocation regressions.
 
@@ -1528,6 +1528,17 @@ while continuing to suppress unrelated daemon escape from the supervised GUI
 process tree. Host regressions reproduce Foot's exact ordering plus `openpty`
 and `forkpty`; the sealed AArch64 bridge starts stock Foot and Bash without
 permission errors, accepts a command, and remains manager-owned.
+
+Official package search now preserves pacman's installed annotation through a
+strict six-field Rust/JNI snapshot. Rows distinguish an available official
+package, the same installed version, and a differing installed version without
+guessing application type from its name or description. The no-network
+emulator fixture covers all three states, durable failed/queued/cancelled row
+overlays, cold restoration, Retry, light/dark visuals, and exact non-mutation.
+The physical Samsung manager was updated in place and shows the real current
+Foot package as Installed while preserving its 255-package shared root.
+Verified package-file classification and version-order-safe update labels
+remain pending.
 
 ## Validated
 

@@ -3815,12 +3815,20 @@ fn append_search_output_pass(
     output: &mut ToolOutput,
     count: &mut usize,
 ) -> Result<(), PackageRuntimeError> {
-    let mut pending: Option<(&str, &str, &str)> = None;
+    let mut pending: Option<(&str, &str, &str, &'static str, &str)> = None;
     for line in input.lines() {
         if line.starts_with(char::is_whitespace) {
-            if let Some((repository, name, version)) = pending.take() {
+            if let Some((repository, name, version, state, installed_version)) = pending.take() {
                 if (name == preferred_name) == exact_match {
-                    append_search_result(output, repository, name, version, line.trim())?;
+                    append_search_result(
+                        output,
+                        repository,
+                        name,
+                        version,
+                        line.trim(),
+                        state,
+                        installed_version,
+                    )?;
                     *count += 1;
                 }
                 if *count >= 100 {
@@ -3829,9 +3837,17 @@ fn append_search_output_pass(
             }
             continue;
         }
-        if let Some((repository, name, version)) = pending.take() {
+        if let Some((repository, name, version, state, installed_version)) = pending.take() {
             if (name == preferred_name) == exact_match {
-                append_search_result(output, repository, name, version, "")?;
+                append_search_result(
+                    output,
+                    repository,
+                    name,
+                    version,
+                    "",
+                    state,
+                    installed_version,
+                )?;
                 *count += 1;
             }
             if *count >= 100 {
@@ -3854,18 +3870,51 @@ fn append_search_output_pass(
             && version.len() <= 128
             && version.bytes().all(|byte| !byte.is_ascii_whitespace())
         {
-            pending = Some((repository, name, version));
+            let (state, installed_version) = search_install_state(line, version)?;
+            pending = Some((repository, name, version, state, installed_version));
         }
     }
     if *count < 100 {
-        if let Some((repository, name, version)) = pending {
+        if let Some((repository, name, version, state, installed_version)) = pending {
             if (name == preferred_name) == exact_match {
-                append_search_result(output, repository, name, version, "")?;
+                append_search_result(
+                    output,
+                    repository,
+                    name,
+                    version,
+                    "",
+                    state,
+                    installed_version,
+                )?;
                 *count += 1;
             }
         }
     }
     Ok(())
+}
+
+fn search_install_state<'a>(
+    line: &'a str,
+    available_version: &'a str,
+) -> Result<(&'static str, &'a str), PackageRuntimeError> {
+    if line.ends_with(" [installed]") {
+        return Ok(("installed", available_version));
+    }
+    let Some((_, suffix)) = line.rsplit_once(" [installed: ") else {
+        return Ok(("available", ""));
+    };
+    let installed_version = suffix
+        .strip_suffix(']')
+        .ok_or(PackageRuntimeError::InvalidResolution)?;
+    if installed_version.is_empty()
+        || installed_version.len() > 128
+        || installed_version
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || matches!(byte, b'\t' | b'\r' | b'\n' | 0))
+    {
+        return Err(PackageRuntimeError::InvalidResolution);
+    }
+    Ok(("different", installed_version))
 }
 
 fn empty_tool_output() -> ToolOutput {
@@ -4061,6 +4110,8 @@ fn append_search_result(
     name: &str,
     version: &str,
     description: &str,
+    state: &str,
+    installed_version: &str,
 ) -> Result<(), PackageRuntimeError> {
     if description.len() > 512
         || description
@@ -4069,12 +4120,19 @@ fn append_search_result(
     {
         return Err(PackageRuntimeError::InvalidManifest);
     }
-    for (index, field) in [repository, name, version, description]
-        .into_iter()
-        .enumerate()
+    for (index, field) in [
+        repository,
+        name,
+        version,
+        description,
+        state,
+        installed_version,
+    ]
+    .into_iter()
+    .enumerate()
     {
         output.push(field.as_bytes())?;
-        output.push(if index == 3 { b"\n" } else { b"\t" })?;
+        output.push(if index == 5 { b"\n" } else { b"\t" })?;
     }
     Ok(())
 }
@@ -5228,8 +5286,8 @@ extra/dotnet-sdk-8.0 8.0.29.sdk129-1 [installed]\n    The .NET Core SDK\n",
         .expect("search output");
         assert_eq!(
             parsed.as_str().expect("utf-8"),
-            "extra\tdotnet-sdk\t10.0.10.sdk110-1\tThe .NET Core SDK\n\
-extra\tdotnet-sdk-8.0\t8.0.29.sdk129-1\tThe .NET Core SDK\n"
+            "extra\tdotnet-sdk\t10.0.10.sdk110-1\tThe .NET Core SDK\tavailable\t\n\
+extra\tdotnet-sdk-8.0\t8.0.29.sdk129-1\tThe .NET Core SDK\tinstalled\t8.0.29.sdk129-1\n"
         );
         assert!(valid_search_query("dotnet-sdk"));
         assert!(!valid_search_query("a"));
@@ -5250,10 +5308,34 @@ extra/strace-analyzer 1.0-1\n    Analyze strace output\n",
         .expect("search output");
         assert_eq!(
             parsed.as_str().expect("utf-8"),
-            "extra\tstrace\t6.16-1\tA diagnostic tracing utility\n\
-extra\tgst-plugin-rstracers\t1.26.4-1\tGStreamer tracing plugins\n\
-extra\tstrace-analyzer\t1.0-1\tAnalyze strace output\n",
+            "extra\tstrace\t6.16-1\tA diagnostic tracing utility\tavailable\t\n\
+extra\tgst-plugin-rstracers\t1.26.4-1\tGStreamer tracing plugins\tavailable\t\n\
+extra\tstrace-analyzer\t1.0-1\tAnalyze strace output\tavailable\t\n",
         );
+    }
+
+    #[test]
+    fn package_search_preserves_pacman_install_state() {
+        let parsed = parse_search_output(
+            "extra/current 2.0-1 (tools) [installed]\n    Current package\n\
+extra/changed 3.0-1 [installed: 2.5-1]\n    Different package\n\
+extra/available 1.0-1\n    Available package\n",
+            "package",
+        )
+        .expect("search output");
+        assert_eq!(
+            parsed.as_str().expect("utf-8"),
+            "extra\tcurrent\t2.0-1\tCurrent package\tinstalled\t2.0-1\n\
+extra\tchanged\t3.0-1\tDifferent package\tdifferent\t2.5-1\n\
+extra\tavailable\t1.0-1\tAvailable package\tavailable\t\n",
+        );
+        assert!(matches!(
+            parse_search_output(
+                "extra/broken 1.0-1 [installed: invalid version]\n    Broken\n",
+                "broken",
+            ),
+            Err(PackageRuntimeError::InvalidResolution)
+        ));
     }
 
     #[test]

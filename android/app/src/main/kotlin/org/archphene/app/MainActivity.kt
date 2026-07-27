@@ -2514,6 +2514,13 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                         maxLines = 1
                         ellipsize = TextUtils.TruncateAt.END
                     }
+                val kind =
+                    TextView(this@MainActivity).apply {
+                        setTextColor(getColor(R.color.archphene_primary))
+                        textSize = 13f
+                        maxLines = 1
+                        ellipsize = TextUtils.TruncateAt.END
+                    }
                 val description =
                     TextView(this@MainActivity).apply {
                         setTextColor(getColor(R.color.archphene_on_surface_muted))
@@ -2540,7 +2547,29 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                                 orientation = LinearLayout.VERTICAL
                                 gravity = Gravity.CENTER_VERTICAL
                                 addView(name)
-                                addView(version)
+                                addView(
+                                    LinearLayout(this@MainActivity).apply {
+                                        orientation = LinearLayout.HORIZONTAL
+                                        gravity = Gravity.CENTER_VERTICAL
+                                        addView(
+                                            version,
+                                            LinearLayout.LayoutParams(
+                                                0,
+                                                ViewGroup.LayoutParams.WRAP_CONTENT,
+                                                1f,
+                                            ),
+                                        )
+                                        addView(
+                                            kind,
+                                            LinearLayout.LayoutParams(
+                                                ViewGroup.LayoutParams.WRAP_CONTENT,
+                                                ViewGroup.LayoutParams.WRAP_CONTENT,
+                                            ).apply {
+                                                marginStart = dp(8)
+                                            },
+                                        )
+                                    },
+                                )
                                 addView(description)
                             },
                             LinearLayout.LayoutParams(
@@ -2559,13 +2588,25 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                             },
                         )
                     }
-                views = AvailablePackageRowViews(name, version, description, state)
+                views = AvailablePackageRowViews(name, version, kind, description, state)
                 row.tag = views
             }
             val snapshot = packages
             if (snapshot != null && position in snapshot.names.indices) {
                 setTextIfChanged(views.name, snapshot.names[position])
                 setTextIfChanged(views.version, snapshot.versions[position])
+                setTextIfChanged(
+                    views.kind,
+                    when (snapshot.installStates[position]) {
+                        "available" -> getString(R.string.package_search_official)
+                        "installed" -> getString(R.string.package_search_installed)
+                        else ->
+                            getString(
+                                R.string.package_search_version_differs,
+                                snapshot.installedVersions[position],
+                            )
+                    },
+                )
                 setTextIfChanged(views.description, snapshot.descriptions[position])
                 setTextIfChanged(
                     views.state,
@@ -2578,6 +2619,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             } else {
                 setTextIfChanged(views.name, jobPackage)
                 setTextIfChanged(views.version, "")
+                setTextIfChanged(views.kind, "")
                 setTextIfChanged(views.description, jobMessage)
                 setTextIfChanged(views.state, jobLabel)
             }
@@ -2721,6 +2763,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private class AvailablePackageRowViews(
         val name: TextView,
         val version: TextView,
+        val kind: TextView,
         val description: TextView,
         val state: TextView,
     )
