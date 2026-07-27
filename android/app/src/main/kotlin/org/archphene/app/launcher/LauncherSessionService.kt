@@ -1242,7 +1242,19 @@ class LauncherSessionService : Service() {
                             "serial=${compositor.presentationComponent(16)} " +
                             "pending=${compositor.presentationComponent(17)} " +
                             "outputEvents=${compositor.presentationComponent(18)} " +
-                            "outputBinds=${compositor.presentationComponent(19)}",
+                            "outputBinds=${compositor.presentationComponent(19)} " +
+                            "geometry=${compositor.presentationComponent(20)}," +
+                            "${compositor.presentationComponent(21)} " +
+                            "${compositor.presentationComponent(22)}x" +
+                            "${compositor.presentationComponent(23)} " +
+                            "root=${compositor.presentationComponent(24)}," +
+                            "${compositor.presentationComponent(25)} " +
+                            "${compositor.presentationComponent(26)}x" +
+                            "${compositor.presentationComponent(27)} " +
+                            "content=${compositor.presentationComponent(28)}," +
+                            "${compositor.presentationComponent(29)} " +
+                            "${compositor.presentationComponent(30)}x" +
+                            "${compositor.presentationComponent(31)}",
                     )
                 }
             }

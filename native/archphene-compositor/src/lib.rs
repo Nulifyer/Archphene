@@ -1656,6 +1656,20 @@ fn launcher_presentation_component(state: &CompositorState, component: i32) -> i
     let selected = launcher_presentation_frame(state);
     let root = state.root_surface.as_ref().and_then(surface_frame);
     let original = root.as_ref().map(original_buffer_frame);
+    let root_geometry = root.as_ref().map(|frame| {
+        state
+            .root_surface
+            .as_ref()
+            .and_then(window_geometry_for_surface)
+            .unwrap_or(WindowGeometry {
+                x: 0,
+                y: 0,
+                width: frame.width as i32,
+                height: frame.height as i32,
+            })
+    });
+    let root_layout = toplevel_layout(state);
+    let content_layout = root_content_layout(state);
     let primary_pending_configures = state
         .primary_toplevel
         .as_ref()
@@ -1744,6 +1758,27 @@ fn launcher_presentation_component(state: &CompositorState, component: i32) -> i
         17 => primary_pending_configures,
         18 => i32::try_from(state.output_event_count).unwrap_or(i32::MAX),
         19 => i32::try_from(state.output_binds).unwrap_or(i32::MAX),
+        20..=23 => root_geometry.map_or(0, |geometry| match component {
+            20 => geometry.x,
+            21 => geometry.y,
+            22 => geometry.width,
+            23 => geometry.height,
+            _ => 0,
+        }),
+        24..=27 => root_layout.map_or(0, |layout| match component {
+            24 => layout.root_x,
+            25 => layout.root_y,
+            26 => layout.root_width,
+            27 => layout.root_height,
+            _ => 0,
+        }),
+        28..=31 => content_layout.map_or(0, |layout| match component {
+            28 => layout.0,
+            29 => layout.1,
+            30 => layout.2,
+            31 => layout.3,
+            _ => 0,
+        }),
         _ => -1,
     }
 }
@@ -6079,7 +6114,7 @@ fn calculate_toplevel_layout(
     root_geometry: WindowGeometry,
     primary_size: Option<(u32, u32)>,
 ) -> ToplevelLayout {
-    let Some((primary_width, primary_height)) = primary_size else {
+    let Some((_primary_width, _primary_height)) = primary_size else {
         let output_width = u32::try_from(output_width.max(1)).unwrap_or(1);
         let output_height = u32::try_from(output_height.max(1)).unwrap_or(1);
         let fallback_width = root_width.max(output_width / 2);
@@ -6108,6 +6143,13 @@ fn calculate_toplevel_layout(
             overlay_primary: false,
         };
     };
+    // The Android Surface is the presentation and input coordinate space.
+    // A primary client can temporarily retain its old dimensions while the
+    // IME is hiding or showing and a modal child is already mapped. Using
+    // that stale client size as the output canvas stretches the child and
+    // makes visible touch targets disagree with input coordinates.
+    let primary_width = u32::try_from(output_width.max(1)).unwrap_or(1);
+    let primary_height = u32::try_from(output_height.max(1)).unwrap_or(1);
     let frame_overflows_geometry = root_frame_width > root_width.saturating_add(64)
         || root_frame_height > root_height.saturating_add(64);
     if frame_overflows_geometry {
@@ -13940,8 +13982,8 @@ mod tests {
         assert!(!main.overlay_primary);
 
         let chooser = calculate_toplevel_layout(
-            1080,
-            2205,
+            540,
+            1102,
             540,
             900,
             560,
@@ -13963,8 +14005,8 @@ mod tests {
     #[test]
     fn centers_compact_secondary_window_over_primary() {
         let layout = calculate_toplevel_layout(
-            1080,
-            2205,
+            540,
+            1102,
             374,
             546,
             394,
@@ -13979,6 +14021,29 @@ mod tests {
         );
         assert_eq!((layout.output_width, layout.output_height), (540, 1102));
         assert_eq!((layout.root_x, layout.root_y), (73, 268));
+        assert!(layout.overlay_primary);
+    }
+
+    #[test]
+    fn centers_compact_secondary_against_output_when_primary_resize_is_stale() {
+        let layout = calculate_toplevel_layout(
+            432,
+            881,
+            384,
+            220,
+            404,
+            240,
+            WindowGeometry {
+                x: 10,
+                y: 10,
+                width: 384,
+                height: 220,
+            },
+            Some((432, 537)),
+        );
+        assert_eq!((layout.output_width, layout.output_height), (432, 881));
+        assert_eq!((layout.root_x, layout.root_y), (14, 320));
+        assert_eq!((layout.root_width, layout.root_height), (404, 240));
         assert!(layout.overlay_primary);
     }
     #[test]

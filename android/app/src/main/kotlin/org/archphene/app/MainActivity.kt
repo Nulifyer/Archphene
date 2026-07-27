@@ -1817,6 +1817,10 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private fun updateStatus() {
         dispatchPendingImport()
         dispatchPendingFolderGrant()
+        // Launcher APK publication can require Android-owned confirmation.
+        // Drive it only from the visible Activity so modern Android versions
+        // do not reject the confirmation as a background activity launch.
+        runtimeBinder?.resumeLauncherPublisher()
         updateInstalledPackages(runtimeBinder)
         updateAvailablePackages(runtimeBinder)
         updateAurReview(runtimeBinder)

@@ -68,6 +68,7 @@ class LauncherActivity :
     private var attachedHeight = 0
     private var attachedDensityDpi = 0
     private var attachedFontScaleMillis = 0
+    private var managerDeathSurfaceReset = false
     private var pointerButtonState = 0
     private var imeState = ImeState(false, 0, "", 0, 0, 0, 0)
     private var softImeRequested = false
@@ -183,6 +184,7 @@ class LauncherActivity :
                 service: IBinder,
             ) {
                 remote = service
+                managerDeathSurfaceReset = false
                 attempts = 0
                 openSession()
             }
@@ -191,11 +193,8 @@ class LauncherActivity :
                 remote = null
                 sessionId = 0
                 remoteStatus = STATUS_STARTING
-                attachedSurface = null
-                attachedWidth = 0
-                attachedHeight = 0
-                attachedDensityDpi = 0
-                attachedFontScaleMillis = 0
+                resetSurfaceAttachment()
+                recreateSurfaceView()
                 pointerButtonState = 0
                 softImeRequested = false
                 hasPendingLinuxClipboard = false
@@ -222,13 +221,7 @@ class LauncherActivity :
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        surfaceView =
-            LauncherSurfaceView(this).apply {
-                holder.addCallback(this@LauncherActivity)
-                isFocusable = true
-                isFocusableInTouchMode = true
-                requestFocus()
-            }
+        surfaceView = createSurfaceView()
         status =
             TextView(this).apply {
                 gravity = Gravity.CENTER
@@ -371,11 +364,8 @@ class LauncherActivity :
         remote = null
         sessionId = 0
         remoteStatus = STATUS_STARTING
-        attachedSurface = null
-        attachedWidth = 0
-        attachedHeight = 0
-        attachedDensityDpi = 0
-        attachedFontScaleMillis = 0
+        resetSurfaceAttachment()
+        recreateSurfaceView()
         pointerButtonState = 0
         softImeRequested = false
         hasPendingLinuxClipboard = false
@@ -387,6 +377,47 @@ class LauncherActivity :
         }
         status.setText(R.string.launcher_disconnected)
         status.visibility = View.VISIBLE
+    }
+
+    private fun createSurfaceView(): LauncherSurfaceView =
+        LauncherSurfaceView(this).apply {
+            holder.addCallback(this@LauncherActivity)
+            isFocusable = true
+            isFocusableInTouchMode = true
+        }
+
+    private fun recreateSurfaceView() {
+        if (
+            managerDeathSurfaceReset ||
+            !::content.isInitialized ||
+            isFinishing ||
+            isDestroyed
+        ) {
+            return
+        }
+        managerDeathSurfaceReset = true
+        val previous = surfaceView
+        previous.holder.removeCallback(this)
+        content.removeView(previous)
+        surfaceView = createSurfaceView()
+        content.addView(
+            surfaceView,
+            0,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+            ),
+        )
+        surfaceView.requestFocus()
+        Log.i(TAG, "Recreated launcher Surface after manager disconnect")
+    }
+
+    private fun resetSurfaceAttachment() {
+        attachedSurface = null
+        attachedWidth = 0
+        attachedHeight = 0
+        attachedDensityDpi = 0
+        attachedFontScaleMillis = 0
     }
 
     override fun onStop() {
@@ -842,11 +873,7 @@ class LauncherActivity :
         val service = remote
         val activeSession = sessionId
         val wasAttached = attachedSurface != null
-        attachedSurface = null
-        attachedWidth = 0
-        attachedHeight = 0
-        attachedDensityDpi = 0
-        attachedFontScaleMillis = 0
+        resetSurfaceAttachment()
         pointerButtonState = 0
         if (service == null || activeSession <= 0 || !wasAttached) {
             return

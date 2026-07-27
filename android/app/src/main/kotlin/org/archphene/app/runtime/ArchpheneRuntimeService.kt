@@ -258,7 +258,7 @@ class ArchpheneRuntimeService : Service() {
 
         fun resumeLauncherPublisher(): Boolean {
             val activeHandle = readyHandle
-            if (activeHandle == 0L) {
+            if (activeHandle == 0L || !launcherPublicationPending) {
                 return false
             }
             if (!packageManager.canRequestPackageInstalls()) {
@@ -722,6 +722,7 @@ class ArchpheneRuntimeService : Service() {
     private val launcherDecisionActive = AtomicBoolean(false)
     private val launcherReviewActive = AtomicBoolean(false)
     @Volatile private var launcherPermissionRequired = false
+    @Volatile private var launcherPublicationPending = false
     @Volatile private var launcherCancelledCount = 0
     @Volatile private var pendingLauncherResultPackage = ""
     @Volatile private var pendingLauncherResultGeneration = 0L
@@ -2984,7 +2985,6 @@ class ArchpheneRuntimeService : Service() {
                             }
                             readyHandle = activeHandle
                             processPendingLauncherResult()
-                            startLauncherPublisher(activeHandle)
                             Log.i(TAG, "Package runtime ready: $packageVersion")
                             Log.i(
                                 TAG,
@@ -3382,6 +3382,10 @@ class ArchpheneRuntimeService : Service() {
                 }
             }
             val launcherSummary = readLauncherSummary(activeHandle)
+            launcherPublicationPending =
+                launcherSummary?.let { summary ->
+                    summary.needsPublish > 0 || summary.needsRemoval > 0
+                } == true
             launcherCancelledCount = launcherSummary?.cancelled ?: 0
             val launcherRows =
                 if (
@@ -3503,6 +3507,7 @@ class ArchpheneRuntimeService : Service() {
             )
             return true
         } catch (error: Exception) {
+            launcherPublicationPending = false
             val previous = desktopEntrySnapshot
             desktopEntrySnapshot =
                 DesktopEntrySnapshot(
@@ -3813,7 +3818,6 @@ class ArchpheneRuntimeService : Service() {
                         "Launcher package=$androidPackage generation=$generation " +
                             transition,
                     )
-                    startLauncherPublisher(activeHandle)
                 } else {
                     Log.e(TAG, "Could not persist launcher install result")
                 }
@@ -3902,13 +3906,31 @@ class ArchpheneRuntimeService : Service() {
                 }
             val transitioned =
                 when {
-                    generation == -2L ->
+                    generation == -2L -> {
+                        for (
+                            session in
+                                activeInstallerSessions.filter { session ->
+                                    session.appPackageName == row.androidPackage
+                                }
+                        ) {
+                            runCatching {
+                                packageManager.packageInstaller.abandonSession(session.sessionId)
+                            }.onFailure { error ->
+                                Log.w(
+                                    TAG,
+                                    "Could not abandon stale launcher session=" +
+                                        session.sessionId,
+                                    error,
+                                )
+                            }
+                        }
                         launcherTransition(
                             activeHandle,
                             "template-stale",
                             row.androidPackage,
                             row.desiredGeneration,
                         )
+                    }
                     generation > 0 ->
                         launcherTransition(
                             activeHandle,
@@ -4101,9 +4123,6 @@ class ArchpheneRuntimeService : Service() {
                         "Could not persist cancelled launcher decision"
                     }
                     refreshDesktopEntries(activeHandle)
-                    if (action == "retry") {
-                        startLauncherPublisher(activeHandle)
-                    }
                 } catch (error: Exception) {
                     Log.e(TAG, "Cancelled launcher decision failed", error)
                 } finally {
@@ -4166,7 +4185,6 @@ class ArchpheneRuntimeService : Service() {
                         "Could not persist launcher review"
                     }
                     refreshDesktopEntries(activeHandle)
-                    startLauncherPublisher(activeHandle)
                 } catch (error: Exception) {
                     Log.e(TAG, "Launcher review failed", error)
                 } finally {
@@ -7576,7 +7594,6 @@ class ArchpheneRuntimeService : Service() {
                         packageCancellationRequested = false
                         packageOperationActive = false
                         packageThread = null
-                        startLauncherPublisher(activeHandle)
                         stopWhenUnobservedAndIdle()
                     }
                 },
@@ -7878,7 +7895,6 @@ class ArchpheneRuntimeService : Service() {
                         packageCancellationRequested = false
                         packageOperationActive = false
                         packageThread = null
-                        startLauncherPublisher(activeHandle)
                         stopWhenUnobservedAndIdle()
                     }
                 },
@@ -8084,7 +8100,6 @@ class ArchpheneRuntimeService : Service() {
                     } finally {
                         packageOperationActive = false
                         packageThread = null
-                        startLauncherPublisher(activeHandle)
                         stopWhenUnobservedAndIdle()
                     }
                 },
@@ -8287,7 +8302,6 @@ class ArchpheneRuntimeService : Service() {
                         packageCancellationRequested = false
                         packageOperationActive = false
                         packageThread = null
-                        startLauncherPublisher(activeHandle)
                         stopWhenUnobservedAndIdle()
                     }
                 },
