@@ -15,19 +15,24 @@ if [[ "$rebuild_image" == true ]] || ! archphene_podman_image_exists "$image"; t
   podman build -f "$ARCHPHENE_ROOT/containers/qt-platform-theme.Containerfile" \
     -t "$image" "$ARCHPHENE_ROOT/containers"
 fi
+mkdir -p "$ARCHPHENE_ROOT/prebuilt/gtk3-compat/x86_64"
+gcc -shared -fPIC -O2 -Wall -Wextra -Werror \
+  $(pkg-config --cflags glib-2.0 gobject-2.0 gmodule-2.0) \
+  -Wl,--allow-shlib-undefined \
+  -o "$ARCHPHENE_ROOT/prebuilt/gtk3-compat/x86_64/libarchphene_gtk3_settings.so" \
+  "$ARCHPHENE_ROOT/native/archphene-gtk3-settings/archphene_gtk3_settings.c"
+strip --strip-unneeded \
+  "$ARCHPHENE_ROOT/prebuilt/gtk3-compat/x86_64/libarchphene_gtk3_settings.so"
+readelf -h "$ARCHPHENE_ROOT/prebuilt/gtk3-compat/x86_64/libarchphene_gtk3_settings.so" |
+  grep -F "Advanced Micro Devices X86-64"
 podman run --rm -v "$ARCHPHENE_ROOT:/workspace" -w /workspace "$image" bash -lc '
 set -euo pipefail
 source_file=/workspace/native/archphene-gtk3-settings/archphene_gtk3_settings.c
-arm_root=/workspace/tooling/downloads/arch-curated-kcalc-aarch64/runtime-root
-mkdir -p /workspace/prebuilt/gtk3-compat/{x86_64,aarch64}
-gcc -shared -fPIC -O2 -Wall -Wextra -Werror $(pkg-config --cflags glib-2.0 gobject-2.0 gmodule-2.0) \
-  -Wl,--allow-shlib-undefined -o /workspace/prebuilt/gtk3-compat/x86_64/libarchphene_gtk3_settings.so "$source_file"
+mkdir -p /workspace/prebuilt/gtk3-compat/aarch64
 aarch64-linux-gnu-gcc -shared -fPIC -O2 -Wall -Wextra -Werror \
-  -I"$arm_root/usr/include/glib-2.0" -I"$arm_root/usr/lib/glib-2.0/include" \
+  $(pkg-config --cflags glib-2.0 gobject-2.0 gmodule-2.0) \
   -Wl,--allow-shlib-undefined -o /workspace/prebuilt/gtk3-compat/aarch64/libarchphene_gtk3_settings.so "$source_file"
-strip --strip-unneeded /workspace/prebuilt/gtk3-compat/x86_64/libarchphene_gtk3_settings.so
 aarch64-linux-gnu-strip --strip-unneeded /workspace/prebuilt/gtk3-compat/aarch64/libarchphene_gtk3_settings.so
-readelf -h /workspace/prebuilt/gtk3-compat/x86_64/libarchphene_gtk3_settings.so | grep -F "Advanced Micro Devices X86-64"
 aarch64-linux-gnu-readelf -h /workspace/prebuilt/gtk3-compat/aarch64/libarchphene_gtk3_settings.so | grep -F AArch64
 '
 python3 - "$ARCHPHENE_ROOT/prebuilt/gtk3-compat" <<'PY'
@@ -50,4 +55,3 @@ lines += [f'{entry["sha256"]}  aarch64/{entry["name"]}' for entry in arm]
 (root / "SHA256SUMS").write_text("\n".join(lines) + "\n")
 PY
 archphene_note "GTK 3 live-settings module built for x86_64 and AArch64."
-

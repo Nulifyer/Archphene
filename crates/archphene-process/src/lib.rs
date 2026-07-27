@@ -188,6 +188,7 @@ pub struct CommandEnvironment {
     gtk_settings_module: Option<PathBuf>,
     qt_plugin_root: Option<PathBuf>,
     appearance: GuiAppearance,
+    portal_bus_address: Option<OsString>,
 }
 
 impl CommandEnvironment {
@@ -256,6 +257,7 @@ impl CommandEnvironment {
             gtk_settings_module: None,
             qt_plugin_root: None,
             appearance: GuiAppearance::default(),
+            portal_bus_address: None,
         })
     }
 
@@ -270,6 +272,19 @@ impl CommandEnvironment {
         self.qt_plugin_root = validate_optional_gui_directory(&self.arch_root, qt_plugin_root)?;
         write_gui_appearance(&self.arch_root, appearance)?;
         self.appearance = appearance;
+        Ok(self)
+    }
+
+    pub fn with_portal_bus_address(mut self, address: &str) -> Result<Self, ProcessError> {
+        if address.len() > 256
+            || !address.starts_with("unix:path=/data/")
+            || address
+                .bytes()
+                .any(|byte| matches!(byte, 0 | b'\t' | b'\n' | b'\r'))
+        {
+            return Err(ProcessError::InvalidEnvironment);
+        }
+        self.portal_bus_address = Some(OsString::from(address));
         Ok(self)
     }
 
@@ -500,13 +515,16 @@ impl CommandEnvironment {
             .env("XDG_DATA_HOME", "/home/archphene/.local/share")
             .env("XDG_RUNTIME_DIR", "/run")
             .env("GLIBC_TUNABLES", "glibc.pthread.rseq=0")
-            .env("LD_PRELOAD", &self.path_bridge)
             .env("ARCHPHENE_RUNTIME_LOADER", &self.loader)
             .env("ARCHPHENE_RUNTIME_LIB", &self.library_path)
             .env("ARCHPHENE_RUNTIME_COMMAND_DIR", &self.command_directory)
             .env("ARCHPHENE_RUNTIME_ROOT", &self.arch_root)
             .env("ARCHPHENE_RUNTIME_PROGRAM_PATH", &launch.program)
-            .env("ARCHPHENE_FAKE_CHROOT", "1");
+            .env("ARCHPHENE_FAKE_CHROOT", "1")
+            // Every Arch command needs logical-root path and child-process
+            // translation, not only graphical clients. GUI setup may extend
+            // this preload with the GTK compatibility module below.
+            .env("LD_PRELOAD", &self.path_bridge);
         if let Some(module_file) = self.gdk_pixbuf_module_file.as_ref() {
             command.env("GDK_PIXBUF_MODULE_FILE", module_file);
         }
@@ -534,7 +552,6 @@ impl CommandEnvironment {
                 },
             )
             .env("ARCHPHENE_GTK_SETTINGS_FILE", GTK_SETTINGS_LOGICAL_PATH)
-            .env("GTK_USE_PORTAL", "0")
             .env("GIO_USE_VFS", "local")
             .env("XDG_DATA_DIRS", "/usr/local/share:/usr/share")
             .env("GSETTINGS_SCHEMA_DIR", "/usr/share/glib-2.0/schemas")
@@ -565,8 +582,25 @@ impl CommandEnvironment {
             )
             .env("SDL_VIDEODRIVER", "wayland")
             .env("ARCHPHENE_SUPERVISED_PROCESS_GROUP", "1");
+        if let Some(address) = self.portal_bus_address.as_ref() {
+            command
+                .env("DBUS_SESSION_BUS_ADDRESS", address)
+                .env("GTK_USE_PORTAL", "1")
+                .env("GIO_USE_PORTALS", "1")
+                .env("NOTIFY_FORCE_PORTAL", "1")
+                .env("ARCHPHENE_GTK_FILE_PORTAL", "1");
+        } else {
+            command.env("GTK_USE_PORTAL", "0");
+        }
         if let Some(module) = self.gtk_settings_module.as_ref() {
-            command.env("GTK_MODULES", module);
+            let mut preloads = self.path_bridge.as_os_str().to_os_string();
+            preloads.push(":");
+            preloads.push(module);
+            command
+                .env("LD_PRELOAD", preloads)
+                .env("GTK_MODULES", module);
+        } else {
+            command.env("LD_PRELOAD", &self.path_bridge);
         }
         if let Some(root) = self.qt_plugin_root.as_ref() {
             command.env("QT_PLUGIN_PATH", root);
@@ -2348,6 +2382,10 @@ mod tests {
             Some(launch.program.as_os_str()),
         );
         assert_eq!(
+            value("LD_PRELOAD"),
+            Some(environment.path_bridge.as_os_str())
+        );
+        assert_eq!(
             value("GDK_PIXBUF_MODULE_FILE"),
             Some(pixbuf_modules.as_os_str()),
         );
@@ -2431,7 +2469,9 @@ mod tests {
         )
         .expect("base environment")
         .with_gui_support(Some(&gtk_alias), Some(&plugins), appearance)
-        .expect("GUI environment");
+        .expect("GUI environment")
+        .with_portal_bus_address("unix:path=/data/user/0/org.archphene.app/cache/p1/bus")
+        .expect("portal environment");
         let launch = LaunchPlan {
             program: root.0.join("usr/bin/loader"),
             argv0: "loader".to_owned(),
@@ -2445,6 +2485,10 @@ mod tests {
                 .find_map(|(key, value)| (key == name).then_some(value).flatten())
         };
         assert_eq!(value("GTK_MODULES"), Some(gtk_alias.as_os_str()));
+        let mut expected_preload = bridge.as_os_str().to_os_string();
+        expected_preload.push(":");
+        expected_preload.push(&gtk_alias);
+        assert_eq!(value("LD_PRELOAD"), Some(expected_preload.as_os_str()));
         assert_eq!(value("GTK_THEME"), Some(OsStr::new("Adwaita:dark")));
         assert_eq!(value("GDK_SCALE"), None);
         assert_eq!(value("GDK_DPI_SCALE"), None);
@@ -2459,6 +2503,15 @@ mod tests {
             Some(OsStr::new("20"))
         );
         assert_eq!(value("QT_SCALE_FACTOR"), None);
+        assert_eq!(
+            value("DBUS_SESSION_BUS_ADDRESS"),
+            Some(OsStr::new(
+                "unix:path=/data/user/0/org.archphene.app/cache/p1/bus"
+            ))
+        );
+        assert_eq!(value("GTK_USE_PORTAL"), Some(OsStr::new("1")));
+        assert_eq!(value("GIO_USE_PORTALS"), Some(OsStr::new("1")));
+        assert_eq!(value("ARCHPHENE_GTK_FILE_PORTAL"), Some(OsStr::new("1")));
         let settings =
             fs::read_to_string(root.0.join("home/archphene/.config/gtk-3.0/settings.ini"))
                 .expect("GTK settings");

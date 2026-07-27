@@ -898,7 +898,14 @@ impl PackageRuntime {
             return Err(PackageRuntimeError::UnsafeEntry(source));
         }
         let environment = self.command_environment()?;
-        for command in ["update-ca-trust", "trust"] {
+        // `update-ca-trust` is a Bash script rather than a self-contained
+        // executable.  Treat the adapter as unavailable unless every external
+        // command used by its normal extraction path is installed.  A minimal
+        // Archphene root can legitimately have ca-certificates and p11-kit
+        // before coreutils/findutils; starting the script in that state would
+        // fail after the package transaction had already committed and falsely
+        // report the package install itself as failed.
+        for command in ["update-ca-trust", "trust", "mkdir", "ln", "find"] {
             if !environment.command_available(command)? {
                 return Ok(false);
             }
@@ -3490,6 +3497,16 @@ impl PackageRuntime {
                 self.qt_plugin_root.as_deref(),
                 appearance,
             )
+            .map_err(PackageRuntimeError::from)
+    }
+
+    pub fn command_environment_with_gui_and_portal(
+        &self,
+        appearance: GuiAppearance,
+        portal_bus_address: &str,
+    ) -> Result<CommandEnvironment, PackageRuntimeError> {
+        self.command_environment_with_gui(appearance)?
+            .with_portal_bus_address(portal_bus_address)
             .map_err(PackageRuntimeError::from)
     }
 }

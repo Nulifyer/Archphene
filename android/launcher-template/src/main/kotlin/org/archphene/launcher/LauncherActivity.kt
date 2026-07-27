@@ -1,6 +1,7 @@
 package org.archphene.launcher
 
 import android.app.Activity
+import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.ComponentName
@@ -16,6 +17,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.Parcel
+import android.os.ParcelFileDescriptor
 import android.os.RemoteException
 import android.os.SystemClock
 import android.text.Editable
@@ -72,8 +74,15 @@ class LauncherActivity :
     private var pointerButtonState = 0
     private var imeState = ImeState(false, 0, "", 0, 0, 0, 0)
     private var softImeRequested = false
+    private val showImeAfterTouch =
+        Runnable {
+            if (softImeRequested && imeState.active) {
+                showIme(restart = true)
+            }
+        }
     private var hasPendingLinuxClipboard = false
     private var pendingLinuxClipboardText: String? = null
+    private var pendingDocumentRequestId = 0
     private val clipboardManager by lazy {
         getSystemService(ClipboardManager::class.java)
     }
@@ -93,7 +102,7 @@ class LauncherActivity :
                 flags: Int,
             ): Boolean {
                 if (
-                    code !in CALLBACK_STATUS..CALLBACK_IME_STATE ||
+                    code !in CALLBACK_STATUS..CALLBACK_DOCUMENT_REQUEST ||
                     Binder.getCallingUid() != managerUid
                 ) {
                     return super.onTransact(code, data, reply, flags)
@@ -174,6 +183,40 @@ class LauncherActivity :
                             handler.post { applyImeState(next) }
                             true
                         }
+                        CALLBACK_DOCUMENT_REQUEST -> {
+                            val requestId = data.readInt()
+                            val operation = data.readInt()
+                            val title = data.readString()
+                            val suggestedName = data.readString()
+                            val mimeType = data.readString()
+                            if (
+                                requestId <= 0 ||
+                                operation != DOCUMENT_OPERATION_SAVE ||
+                                title.isNullOrBlank() ||
+                                title.length > MAX_DOCUMENT_TITLE_UTF16 ||
+                                suggestedName.isNullOrBlank() ||
+                                suggestedName.length > MAX_DOCUMENT_NAME_UTF16 ||
+                                suggestedName.indexOf('/') >= 0 ||
+                                suggestedName.indexOf('\\') >= 0 ||
+                                suggestedName.indexOf('\u0000') >= 0 ||
+                                mimeType.isNullOrBlank() ||
+                                mimeType.length > MAX_DOCUMENT_MIME_UTF16 ||
+                                mimeType.indexOf('/') <= 0 ||
+                                mimeType.indexOf('\u0000') >= 0 ||
+                                data.dataAvail() != 0
+                            ) {
+                                return@runCatching false
+                            }
+                            handler.post {
+                                beginDocumentSave(
+                                    requestId,
+                                    title,
+                                    suggestedName,
+                                    mimeType,
+                                )
+                            }
+                            true
+                        }
                         else -> false
                     }
                 }.getOrDefault(false)
@@ -202,6 +245,7 @@ class LauncherActivity :
                 softImeRequested = false
                 hasPendingLinuxClipboard = false
                 pendingLinuxClipboardText = null
+                pendingDocumentRequestId = 0
                 applyImeState(ImeState(false, 0, "", 0, 0, 0, 0))
                 status.setText(R.string.launcher_disconnected)
                 status.visibility = View.VISIBLE
@@ -341,7 +385,7 @@ class LauncherActivity :
             return
         }
         val metadata = applicationMetadata()
-        if (metadata.getString(CAPABILITIES) != CAPABILITIES_V1) {
+        if (metadata.getString(CAPABILITIES) != CAPABILITIES_V2) {
             status.setText(R.string.launcher_capabilities_invalid)
             status.visibility = View.VISIBLE
             return
@@ -442,6 +486,7 @@ class LauncherActivity :
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
         stopClipboardListening()
+        cancelPendingDocumentRequest()
         detachSurface()
         closeSession()
         remote = null
@@ -450,6 +495,46 @@ class LauncherActivity :
             binding = false
         }
         super.onDestroy()
+    }
+
+    @Deprecated("Deprecated in Android")
+    override fun onActivityResult(
+        requestCode: Int,
+        resultCode: Int,
+        data: Intent?,
+    ) {
+        super.onActivityResult(requestCode, resultCode, data)
+        Log.i(
+            TAG,
+            "Android activity result request=$requestCode result=$resultCode " +
+                "documentPending=${pendingDocumentRequestId > 0}",
+        )
+        if (requestCode != DOCUMENT_SAVE_REQUEST_CODE) {
+            return
+        }
+        val requestId = pendingDocumentRequestId
+        pendingDocumentRequestId = 0
+        if (requestId <= 0) {
+            return
+        }
+        if (resultCode != Activity.RESULT_OK || data?.data == null) {
+            sendDocumentResult(requestId, DOCUMENT_RESULT_CANCELLED, null)
+            return
+        }
+        val descriptor =
+            runCatching {
+                contentResolver.openFileDescriptor(checkNotNull(data.data), "w")
+            }.getOrElse { error ->
+                Log.w(TAG, "Could not open Android document destination", error)
+                null
+            }
+        if (descriptor == null) {
+            sendDocumentResult(requestId, DOCUMENT_RESULT_FAILED, null)
+            return
+        }
+        descriptor.use {
+            sendDocumentResult(requestId, DOCUMENT_RESULT_SUCCESS, it)
+        }
     }
 
     override fun onConfigurationChanged(configuration: Configuration) {
@@ -501,11 +586,13 @@ class LauncherActivity :
         if (event.actionMasked == MotionEvent.ACTION_DOWN) {
             // Desktop clients commonly retain a logical text focus across
             // launches. Do not let that alone pop Android's soft keyboard and
-            // resize a newly starting application; a fresh touch opts into
-            // the phone keyboard while hardware keys remain available.
+            // resize a newly starting application. Give the Wayland client a
+            // short chance to deactivate text input when the touch targets a
+            // menu or another non-editor control before showing Android's IME.
             softImeRequested = true
+            handler.removeCallbacks(showImeAfterTouch)
             if (imeState.active) {
-                handler.post { showIme(restart = true) }
+                handler.postDelayed(showImeAfterTouch, SOFT_IME_TOUCH_DELAY_MILLIS)
             }
         }
         val count =
@@ -1243,6 +1330,7 @@ class LauncherActivity :
         }
         if (!next.active) {
             softImeRequested = false
+            handler.removeCallbacks(showImeAfterTouch)
             if (previous.active) {
                 hideIme()
             }
@@ -1415,6 +1503,95 @@ class LauncherActivity :
         }
     }
 
+    private fun beginDocumentSave(
+        requestId: Int,
+        title: String,
+        suggestedName: String,
+        mimeType: String,
+    ) {
+        if (
+            requestId <= 0 ||
+            sessionId <= 0 ||
+            remote == null ||
+            pendingDocumentRequestId != 0 ||
+            isFinishing ||
+            isDestroyed
+        ) {
+            sendDocumentResult(requestId, DOCUMENT_RESULT_FAILED, null)
+            return
+        }
+        pendingDocumentRequestId = requestId
+        val intent =
+            Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = mimeType
+                putExtra(Intent.EXTRA_TITLE, suggestedName)
+        }
+        try {
+            // ACTION_CREATE_DOCUMENT already resolves to Android's
+            // authoritative DocumentsUI. Wrapping it in ACTION_CHOOSER adds a
+            // second task layer on some Android releases and can lose the
+            // cancellation result when that resolver task finishes.
+            startActivityForResult(intent, DOCUMENT_SAVE_REQUEST_CODE)
+        } catch (error: ActivityNotFoundException) {
+            pendingDocumentRequestId = 0
+            Log.w(TAG, "No Android document provider is available", error)
+            sendDocumentResult(requestId, DOCUMENT_RESULT_FAILED, null)
+        } catch (error: RuntimeException) {
+            pendingDocumentRequestId = 0
+            Log.w(TAG, "Could not open Android document chooser", error)
+            sendDocumentResult(requestId, DOCUMENT_RESULT_FAILED, null)
+        }
+    }
+
+    private fun cancelPendingDocumentRequest() {
+        val requestId = pendingDocumentRequestId
+        pendingDocumentRequestId = 0
+        if (requestId > 0) {
+            sendDocumentResult(requestId, DOCUMENT_RESULT_CANCELLED, null)
+        }
+    }
+
+    private fun sendDocumentResult(
+        requestId: Int,
+        result: Int,
+        descriptor: ParcelFileDescriptor?,
+    ): Boolean {
+        val service = remote ?: return false
+        val activeSession = sessionId
+        if (
+            activeSession <= 0 ||
+            requestId <= 0 ||
+            result !in DOCUMENT_RESULT_SUCCESS..DOCUMENT_RESULT_FAILED ||
+            (result == DOCUMENT_RESULT_SUCCESS) != (descriptor != null)
+        ) {
+            return false
+        }
+        val parcel = Parcel.obtain()
+        val reply = Parcel.obtain()
+        return try {
+            parcel.writeInterfaceToken(INTERFACE)
+            parcel.writeInt(PROTOCOL_VERSION)
+            parcel.writeInt(activeSession)
+            parcel.writeInt(requestId)
+            parcel.writeInt(result)
+            if (descriptor != null) {
+                descriptor.writeToParcel(parcel, 0)
+            }
+            service.transact(TRANSACTION_DOCUMENT_RESULT, parcel, reply, 0) &&
+                run {
+                    reply.readException()
+                    reply.readInt() == RESULT_OK
+                }
+        } catch (error: RemoteException) {
+            Log.w(TAG, "Could not submit Android document result", error)
+            false
+        } finally {
+            reply.recycle()
+            parcel.recycle()
+        }
+    }
+
     private fun showUnavailable() {
         status.setText(R.string.launcher_unavailable)
         status.visibility = View.VISIBLE
@@ -1452,10 +1629,10 @@ class LauncherActivity :
         private const val TAG = "ArchpheneLauncher"
         private const val MANAGER_PACKAGE = "org.archphene.launcher.MANAGER_PACKAGE"
         private const val CAPABILITIES = "org.archphene.launcher.CAPABILITIES"
-        private const val CAPABILITIES_V1 = "c:wayland,input,ime,clipboard"
+        private const val CAPABILITIES_V2 = "c:wayland,input,ime,clipboard,documents"
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
-        private const val INTERFACE = "org.archphene.launcher.ISessionV1"
-        private const val PROTOCOL_VERSION = 1
+        private const val INTERFACE = "org.archphene.launcher.ISessionV2"
+        private const val PROTOCOL_VERSION = 2
         private const val TRANSACTION_OPEN = IBinder.FIRST_CALL_TRANSACTION
         private const val TRANSACTION_CLOSE = IBinder.FIRST_CALL_TRANSACTION + 1
         private const val TRANSACTION_ATTACH_SURFACE = IBinder.FIRST_CALL_TRANSACTION + 2
@@ -1463,10 +1640,12 @@ class LauncherActivity :
         private const val TRANSACTION_INPUT = IBinder.FIRST_CALL_TRANSACTION + 4
         private const val TRANSACTION_CLIPBOARD = IBinder.FIRST_CALL_TRANSACTION + 5
         private const val TRANSACTION_IME = IBinder.FIRST_CALL_TRANSACTION + 6
-        private const val CALLBACK_INTERFACE = "org.archphene.launcher.IClientV1"
+        private const val TRANSACTION_DOCUMENT_RESULT = IBinder.FIRST_CALL_TRANSACTION + 7
+        private const val CALLBACK_INTERFACE = "org.archphene.launcher.IClientV2"
         private const val CALLBACK_STATUS = IBinder.FIRST_CALL_TRANSACTION
         private const val CALLBACK_CLIPBOARD = IBinder.FIRST_CALL_TRANSACTION + 1
         private const val CALLBACK_IME_STATE = IBinder.FIRST_CALL_TRANSACTION + 2
+        private const val CALLBACK_DOCUMENT_REQUEST = IBinder.FIRST_CALL_TRANSACTION + 3
         private const val RESULT_OK = 0
         private const val RESULT_NOT_READY = 1
         private const val MAX_OPEN_ATTEMPTS = 120
@@ -1476,6 +1655,7 @@ class LauncherActivity :
         private const val MIN_FONT_SCALE_MILLIS = 500
         private const val MAX_FONT_SCALE_MILLIS = 3_000
         private const val MAX_INPUT_RECORDS = 32
+        private const val SOFT_IME_TOUCH_DELAY_MILLIS = 300L
         private const val INPUT_TOUCH_DOWN = 1
         private const val INPUT_TOUCH_MOTION = 2
         private const val INPUT_TOUCH_UP = 3
@@ -1493,6 +1673,16 @@ class LauncherActivity :
         private const val MAX_CLIPBOARD_UTF16 = 16_384
         private const val MAX_IME_UTF16 = 4_096
         private const val MAX_IME_BYTES = 16_384
+        // Activity results retain only the low 16 request-code bits on some
+        // Android releases. Keep this explicit launcher code in that range.
+        private const val DOCUMENT_SAVE_REQUEST_CODE = 7_143
+        private const val DOCUMENT_OPERATION_SAVE = 1
+        private const val DOCUMENT_RESULT_SUCCESS = 1
+        private const val DOCUMENT_RESULT_CANCELLED = 2
+        private const val DOCUMENT_RESULT_FAILED = 3
+        private const val MAX_DOCUMENT_TITLE_UTF16 = 128
+        private const val MAX_DOCUMENT_NAME_UTF16 = 255
+        private const val MAX_DOCUMENT_MIME_UTF16 = 128
         private const val MAX_IME_ACTION = 64
         private const val MAX_IME_PURPOSE = 13
         private const val IME_COMMIT = 1

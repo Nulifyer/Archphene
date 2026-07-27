@@ -313,6 +313,7 @@ class ArchpheneRuntimeService : Service() {
             accent: Int,
             background: Int,
             foreground: Int,
+            portalBusAddress: String,
         ): Long =
             this@ArchpheneRuntimeService.openLauncherProcess(
                 androidPackage,
@@ -326,6 +327,7 @@ class ArchpheneRuntimeService : Service() {
                 accent,
                 background,
                 foreground,
+                portalBusAddress,
             )
 
         internal fun closeLauncherProcess(launcherHandle: Long): Boolean =
@@ -1620,6 +1622,7 @@ class ArchpheneRuntimeService : Service() {
         accent: Int,
         background: Int,
         foreground: Int,
+        portalBusAddress: String,
     ): Long {
         val activeHandle = readyHandle
         if (
@@ -1631,6 +1634,14 @@ class ArchpheneRuntimeService : Service() {
             controlVisualDp !in 12..48 ||
             controlTargetDp !in 24..64 ||
             controlTargetDp < controlVisualDp ||
+            portalBusAddress.length !in 1..256 ||
+            !portalBusAddress.startsWith("unix:path=/data/") ||
+            portalBusAddress.any { character ->
+                character == '\t' ||
+                    character == '\n' ||
+                    character == '\r' ||
+                    character == '\u0000'
+            } ||
             waylandDisplay.isEmpty() ||
             waylandDisplay.length > 64 ||
             !waylandDisplay.all { character ->
@@ -1645,9 +1656,10 @@ class ArchpheneRuntimeService : Service() {
             return 0L
         }
         val request =
-            "G2\t$androidPackage\t$descriptorIdHex\t$generation\t$waylandDisplay\t" +
+            "G3\t$androidPackage\t$descriptorIdHex\t$generation\t$waylandDisplay\t" +
                 "${if (dark) 1 else 0}\t$fontPercent\t$controlVisualDp\t$controlTargetDp\t" +
-                "${rgbHex(accent)}\t${rgbHex(background)}\t${rgbHex(foreground)}\n"
+                "${rgbHex(accent)}\t${rgbHex(background)}\t${rgbHex(foreground)}\t" +
+                "$portalBusAddress\n"
         val requestBytes = request.toByteArray(StandardCharsets.US_ASCII)
         if (requestBytes.size > launcherAuthorizationRequestBuffer.capacity()) {
             return 0L
@@ -5346,7 +5358,7 @@ class ArchpheneRuntimeService : Service() {
                             fields[0] == "W3" &&
                             LAUNCHER_PACKAGE.matches(fields[1]) &&
                             LAUNCHER_DESCRIPTOR.matches(fields[2]) &&
-                            fields[5] == LauncherApkAssembler.CAPABILITIES_V1,
+                            fields[5] == LauncherApkAssembler.CAPABILITIES_V2,
                     ) {
                         "Invalid native launcher publication"
                     }
@@ -5649,7 +5661,7 @@ class ArchpheneRuntimeService : Service() {
                                             metadata.getString(
                                                 "org.archphene.launcher.CAPABILITIES",
                                             ) !=
-                                            "c:${LauncherApkAssembler.CAPABILITIES_V1}"
+                                            "c:${LauncherApkAssembler.CAPABILITIES_V2}"
                                     )
                             )
                     if (installedContentIsStale) {

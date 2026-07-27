@@ -27,6 +27,10 @@ internal class LauncherSessionTestReceiver : BroadcastReceiver() {
             injectIme(intent)
             return
         }
+        if (intent.action == ACTION_REQUEST_DOCUMENT_SAVE) {
+            requestDocumentSave(intent)
+            return
+        }
         if (intent.action != ACTION_PROBE) {
             Log.e(TAG, "Rejected unknown launcher-session operation")
             return
@@ -39,20 +43,48 @@ internal class LauncherSessionTestReceiver : BroadcastReceiver() {
                     name: ComponentName,
                     service: IBinder,
                 ) {
-                    try {
-                        check(open(service, PROTOCOL_VERSION) == RESULT_UNAUTHORIZED) {
-                            "manager UID was not rejected"
-                        }
-                        check(open(service, PROTOCOL_VERSION + 1) == RESULT_INVALID) {
-                            "invalid protocol version was not rejected"
-                        }
-                        Log.i(TAG, "Untrusted Binder caller and malformed version rejected")
-                    } catch (error: Exception) {
-                        Log.e(TAG, "Launcher-session rejection probe failed", error)
-                    } finally {
-                        application.unbindService(this)
-                        pending.finish()
-                    }
+                    Thread(
+                        {
+                            try {
+                                check(open(service, PROTOCOL_VERSION) == RESULT_UNAUTHORIZED) {
+                                    "manager UID was not rejected"
+                                }
+                                check(open(service, PROTOCOL_VERSION + 1) == RESULT_INVALID) {
+                                    "invalid protocol version was not rejected"
+                                }
+                                check(
+                                    documentResult(
+                                        service,
+                                        sessionId = 1,
+                                        requestId = 1,
+                                        result = DOCUMENT_RESULT_CANCELLED,
+                                    ) == RESULT_UNAUTHORIZED,
+                                ) {
+                                    "manager UID document result was not rejected"
+                                }
+                                check(
+                                    documentResult(
+                                        service,
+                                        sessionId = 1,
+                                        requestId = 1,
+                                        result = DOCUMENT_RESULT_SUCCESS,
+                                    ) == RESULT_INVALID,
+                                ) {
+                                    "document success without a descriptor was not rejected"
+                                }
+                                Log.i(
+                                    TAG,
+                                    "Untrusted Binder caller and malformed version rejected",
+                                )
+                            } catch (error: Exception) {
+                                Log.e(TAG, "Launcher-session rejection probe failed", error)
+                            } finally {
+                                application.unbindService(this)
+                                pending.finish()
+                            }
+                        },
+                        "ArchpheneLauncherSessionProbe",
+                    ).start()
                 }
 
                 override fun onServiceDisconnected(name: ComponentName) {
@@ -112,6 +144,44 @@ internal class LauncherSessionTestReceiver : BroadcastReceiver() {
         }
     }
 
+    private fun requestDocumentSave(intent: Intent) {
+        val androidPackage = intent.getStringExtra(EXTRA_PACKAGE).orEmpty()
+        val title = intent.getStringExtra(EXTRA_DOCUMENT_TITLE).orEmpty()
+        val suggestedName = intent.getStringExtra(EXTRA_DOCUMENT_NAME).orEmpty()
+        val mimeType = intent.getStringExtra(EXTRA_DOCUMENT_MIME).orEmpty()
+        val encodedPayload = intent.getStringExtra(EXTRA_DOCUMENT_PAYLOAD_BASE64).orEmpty()
+        if (encodedPayload.length > MAX_BASE64_CHARACTERS) {
+            Log.e(TAG, "Rejected oversized launcher-session document payload")
+            return
+        }
+        val payload =
+            runCatching { Base64.decode(encodedPayload, Base64.DEFAULT) }
+                .getOrElse {
+                    Log.e(TAG, "Rejected invalid launcher-session document base64", it)
+                    return
+                }
+        if (payload.size > MAX_DEBUG_DOCUMENT_BYTES) {
+            Log.e(TAG, "Rejected oversized launcher-session document payload")
+            return
+        }
+        val result =
+            LauncherSessionDebugBridge.requestDocumentSave(
+                androidPackage,
+                title,
+                suggestedName,
+                mimeType,
+                payload,
+            )
+        val message =
+            "Manager document request package=$androidPackage session=${result.sessionId} " +
+                "name=$suggestedName bytes=${payload.size} result=${result.reason}"
+        if (result.accepted) {
+            Log.i(TAG, message)
+        } else {
+            Log.e(TAG, message)
+        }
+    }
+
     private fun decodeUtf8(encoded: String): String? {
         if (encoded.length > MAX_BASE64_CHARACTERS) {
             Log.e(TAG, "Rejected invalid launcher-session IME payload")
@@ -162,24 +232,63 @@ internal class LauncherSessionTestReceiver : BroadcastReceiver() {
         }
     }
 
+    private fun documentResult(
+        service: IBinder,
+        sessionId: Int,
+        requestId: Int,
+        result: Int,
+    ): Int {
+        val data = Parcel.obtain()
+        val reply = Parcel.obtain()
+        return try {
+            data.writeInterfaceToken(INTERFACE)
+            data.writeInt(PROTOCOL_VERSION)
+            data.writeInt(sessionId)
+            data.writeInt(requestId)
+            data.writeInt(result)
+            check(
+                service.transact(
+                    IBinder.FIRST_CALL_TRANSACTION + 7,
+                    data,
+                    reply,
+                    0,
+                ),
+            )
+            reply.readException()
+            reply.readInt()
+        } finally {
+            reply.recycle()
+            data.recycle()
+        }
+    }
+
     private companion object {
         private const val TAG = "ArchpheneLauncherSessionProbe"
         private const val ACTION_PROBE =
             "org.archphene.app.debug.action.PROBE_LAUNCHER_SESSION"
         private const val ACTION_INJECT_IME =
             "org.archphene.app.debug.action.INJECT_LAUNCHER_IME"
+        private const val ACTION_REQUEST_DOCUMENT_SAVE =
+            "org.archphene.app.debug.action.REQUEST_LAUNCHER_DOCUMENT_SAVE"
         private const val EXTRA_TOKEN = "token"
         private const val EXTRA_PACKAGE = "package"
         private const val EXTRA_COMPOSING_BASE64 = "composing_base64"
         private const val EXTRA_COMMITTED_BASE64 = "committed_base64"
         private const val EXTRA_SUBMIT = "submit"
+        private const val EXTRA_DOCUMENT_TITLE = "document_title"
+        private const val EXTRA_DOCUMENT_NAME = "document_name"
+        private const val EXTRA_DOCUMENT_MIME = "document_mime"
+        private const val EXTRA_DOCUMENT_PAYLOAD_BASE64 = "document_payload_base64"
         private const val TOKEN = "launcher-session-gate"
         private const val MAX_IME_BYTES = 16_384
+        private const val MAX_DEBUG_DOCUMENT_BYTES = 65_536
         private const val MAX_BASE64_CHARACTERS = 24_000
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
-        private const val INTERFACE = "org.archphene.launcher.ISessionV1"
-        private const val PROTOCOL_VERSION = 1
+        private const val INTERFACE = "org.archphene.launcher.ISessionV2"
+        private const val PROTOCOL_VERSION = 2
         private const val RESULT_UNAUTHORIZED = 2
         private const val RESULT_INVALID = 4
+        private const val DOCUMENT_RESULT_SUCCESS = 1
+        private const val DOCUMENT_RESULT_CANCELLED = 2
     }
 }

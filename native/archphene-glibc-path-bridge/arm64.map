@@ -94,6 +94,7 @@ GLIBC_2.17 {
         semget;
         semop;
         semtimedop;
+        sendmsg;
         setpgid;
         setsid;
         setfsgid;

@@ -15,6 +15,7 @@ import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Looper
 import android.os.Parcel
+import android.os.ParcelFileDescriptor
 import android.os.RemoteException
 import android.os.SystemClock
 import android.util.Log
@@ -29,12 +30,42 @@ import java.nio.ByteOrder
 import java.nio.CharBuffer
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import org.archphene.app.ArchphenePreferences
 import org.archphene.app.runtime.ArchpheneRuntimeService
 import org.archphene.app.runtime.LauncherAuthorization
 
 class LauncherSessionService : Service() {
+    private data class PendingDocumentRequest(
+        val id: Int,
+        val title: String,
+        val suggestedName: String,
+        val mimeType: String,
+        val debugPayload: ByteArray?,
+        val portalCompletion: PortalDocumentCompletion?,
+    )
+
+    private class PortalDocumentCompletion {
+        val latch = CountDownLatch(1)
+        private val completed = AtomicBoolean(false)
+        @Volatile var result = DOCUMENT_RESULT_FAILED
+        @Volatile var descriptor: ParcelFileDescriptor? = null
+
+        fun complete(
+            result: Int,
+            descriptor: ParcelFileDescriptor?,
+        ): Boolean {
+            if (!completed.compareAndSet(false, true)) return false
+            this.result = result
+            this.descriptor = descriptor
+            latch.countDown()
+            return true
+        }
+    }
+
     private class Session(
         val id: Int,
         val uid: Int,
@@ -49,6 +80,7 @@ class LauncherSessionService : Service() {
         var compositorSocket: File? = null
         var linuxHandle = 0L
         var terminalMessage: String? = null
+        var portalBridge: LauncherPortalBridge? = null
         var nextProcessStatusMillis = 0L
         var pumpStarted = false
         var clientLogged = false
@@ -102,10 +134,12 @@ class LauncherSessionService : Service() {
         var imeDrain: Runnable? = null
         var lastImeChangeSerial = Int.MIN_VALUE
         var imeLogged = false
+        var pendingDocumentRequest: PendingDocumentRequest? = null
     }
 
     private val sessions = HashMap<Int, Session>(MAX_SESSIONS)
     private val nextSessionId = AtomicInteger(1)
+    private val nextDocumentRequestId = AtomicInteger(1)
     private val sessionBinder = SessionBinder()
     private lateinit var surfaceThread: HandlerThread
     private lateinit var surfaceHandler: Handler
@@ -133,6 +167,13 @@ class LauncherSessionService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        if (stalePortalSavesRecovered.compareAndSet(false, true)) {
+            runCatching {
+                LauncherPortalBridge.recoverStaleSaves(File(filesDir, "arch-root"))
+            }.onFailure { error ->
+                Log.e(TAG, "Could not recover stale portal saves", error)
+            }
+        }
         surfaceThread = HandlerThread("ArchpheneLauncherSurface").apply { start() }
         surfaceHandler = Handler(surfaceThread.looper)
         clipboardThread = HandlerThread("ArchpheneLauncherClipboard").apply { start() }
@@ -207,6 +248,13 @@ class LauncherSessionService : Service() {
             session.imeHead = 0
             session.imeSize = 0
             session.imePosted = false
+            if (closeCompositor) {
+                session.pendingDocumentRequest?.portalCompletion?.complete(
+                    DOCUMENT_RESULT_FAILED,
+                    null,
+                )
+                session.pendingDocumentRequest = null
+            }
         }
         val runtime = runtimeBinder
         surfaceHandler.post {
@@ -228,6 +276,8 @@ class LauncherSessionService : Service() {
                 if (linuxHandle != 0L && runtime?.closeLauncherProcess(linuxHandle) != true) {
                     Log.w(TAG, "Could not close Linux process session=${session.id}")
                 }
+                session.portalBridge?.close()
+                session.portalBridge = null
                 compositor?.close()
                 session.compositor = null
                 val socket = session.compositorSocket
@@ -291,6 +341,10 @@ class LauncherSessionService : Service() {
                 }
                 TRANSACTION_IME -> {
                     transactIme(data, reply)
+                    true
+                }
+                TRANSACTION_DOCUMENT_RESULT -> {
+                    transactDocumentResult(data, reply)
                     true
                 }
                 else -> super.onTransact(code, data, reply, flags)
@@ -568,6 +622,54 @@ class LauncherSessionService : Service() {
                     Log.w(TAG, "Rejected malformed launcher IME command", error)
                     RESULT_INVALID
                 }
+            reply.writeNoException()
+            reply.writeInt(result)
+        }
+
+        private fun transactDocumentResult(
+            data: Parcel,
+            reply: Parcel,
+        ) {
+            var descriptor: ParcelFileDescriptor? = null
+            val result =
+                runCatching {
+                    data.enforceInterface(INTERFACE)
+                    val version = data.readInt()
+                    val sessionId = data.readInt()
+                    val requestId = data.readInt()
+                    val documentResult = data.readInt()
+                    if (documentResult == DOCUMENT_RESULT_SUCCESS) {
+                        descriptor = ParcelFileDescriptor.CREATOR.createFromParcel(data)
+                    }
+                    if (
+                        version != PROTOCOL_VERSION ||
+                        sessionId <= 0 ||
+                        requestId <= 0 ||
+                        documentResult !in DOCUMENT_RESULT_SUCCESS..DOCUMENT_RESULT_FAILED ||
+                        (documentResult == DOCUMENT_RESULT_SUCCESS) != (descriptor != null) ||
+                        data.dataAvail() != 0
+                    ) {
+                        return@runCatching RESULT_INVALID
+                    }
+                    completeDocumentRequest(
+                        Binder.getCallingUid(),
+                        sessionId,
+                        requestId,
+                        documentResult,
+                        descriptor,
+                    ).also { completionResult ->
+                        if (
+                            completionResult == RESULT_OK &&
+                            documentResult == DOCUMENT_RESULT_SUCCESS
+                        ) {
+                            descriptor = null
+                        }
+                    }
+                }.getOrElse { error ->
+                    Log.w(TAG, "Rejected malformed Android document result", error)
+                    RESULT_INVALID
+                }
+            descriptor?.close()
             reply.writeNoException()
             reply.writeInt(result)
         }
@@ -1021,6 +1123,97 @@ class LauncherSessionService : Service() {
         return LauncherSessionDebugResult(true, activeSession.id, "accepted")
     }
 
+    @Synchronized
+    internal fun debugRequestDocumentSave(
+        androidPackage: String,
+        title: String,
+        suggestedName: String,
+        mimeType: String,
+        payload: ByteArray,
+    ): LauncherSessionDebugResult {
+        if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0) {
+            return LauncherSessionDebugResult(false, 0, "release-build")
+        }
+        if (!isValidLauncherPackage(androidPackage)) {
+            return LauncherSessionDebugResult(false, 0, "invalid-package")
+        }
+        if (
+            title.isBlank() ||
+            title.length > MAX_DOCUMENT_TITLE_UTF16 ||
+            suggestedName.isBlank() ||
+            suggestedName.length > MAX_DOCUMENT_NAME_UTF16 ||
+            suggestedName.indexOf('/') >= 0 ||
+            suggestedName.indexOf('\u0000') >= 0 ||
+            mimeType.isBlank() ||
+            mimeType.length > MAX_DOCUMENT_MIME_UTF16 ||
+            mimeType.indexOf('/') <= 0 ||
+            mimeType.indexOf('\u0000') >= 0 ||
+            payload.size > MAX_DEBUG_DOCUMENT_BYTES
+        ) {
+            return LauncherSessionDebugResult(false, 0, "invalid-document")
+        }
+        var session: Session? = null
+        var matching = 0
+        for (candidate in sessions.values) {
+            if (candidate.active && candidate.identity.androidPackage == androidPackage) {
+                session = candidate
+                matching++
+            }
+        }
+        if (matching != 1) {
+            return LauncherSessionDebugResult(false, 0, "active-session-count-$matching")
+        }
+        val activeSession = checkNotNull(session)
+        if (activeSession.surface == null) {
+            return LauncherSessionDebugResult(false, activeSession.id, "surface-not-ready")
+        }
+        if (activeSession.pendingDocumentRequest != null) {
+            return LauncherSessionDebugResult(false, activeSession.id, "document-request-busy")
+        }
+        val requestId =
+            nextDocumentRequestId.getAndUpdate { value ->
+                if (value == Int.MAX_VALUE) 1 else value + 1
+            }
+        if (requestId <= 0) {
+            return LauncherSessionDebugResult(false, activeSession.id, "request-id-busy")
+        }
+        activeSession.pendingDocumentRequest =
+            PendingDocumentRequest(
+                requestId,
+                title,
+                suggestedName,
+                mimeType,
+                payload.copyOf(),
+                null,
+            )
+        if (!notifyDocumentRequest(activeSession, checkNotNull(activeSession.pendingDocumentRequest))) {
+            activeSession.pendingDocumentRequest = null
+            return LauncherSessionDebugResult(false, activeSession.id, "callback-failed")
+        }
+        Log.i(
+            TAG,
+            "Requested Android document destination session=${activeSession.id} " +
+                "request=$requestId name=$suggestedName",
+        )
+        return LauncherSessionDebugResult(true, activeSession.id, "accepted")
+    }
+
+    private fun isValidLauncherPackage(androidPackage: String): Boolean {
+        if (
+            androidPackage.length != 53 ||
+            !androidPackage.startsWith(LAUNCHER_PACKAGE_PREFIX)
+        ) {
+            return false
+        }
+        for (index in LAUNCHER_PACKAGE_PREFIX.length until androidPackage.length) {
+            val character = androidPackage[index]
+            if (character !in '0'..'9' && character !in 'a'..'f') {
+                return false
+            }
+        }
+        return true
+    }
+
     private fun appendImeCommand(
         session: Session,
         operation: Int,
@@ -1263,6 +1456,34 @@ class LauncherSessionService : Service() {
             Log.e(TAG, "Shared runtime unavailable for Linux session=${session.id}")
             return
         }
+        val portalBridge =
+            session.portalBridge
+                ?: runCatching {
+                    LauncherPortalBridge(
+                        this,
+                        session.id,
+                        session.authorization.label,
+                        File(filesDir, "arch-root"),
+                    ) { title, suggestedName, mimeType ->
+                        requestPortalDocumentSave(
+                            session,
+                            title,
+                            suggestedName,
+                            mimeType,
+                        )
+                    }.also { bridge ->
+                        bridge.start()
+                        session.portalBridge = bridge
+                    }
+                }.getOrElse { error ->
+                    Log.e(TAG, "Could not start private portal session=${session.id}", error)
+                    stopCompositorForStatus(
+                        session,
+                        attachedSurface,
+                        "Could not start ${session.authorization.label}.",
+                    )
+                    return
+                }
         val linuxHandle =
             resolvedAppearance(session).let { appearance ->
             runtime.openLauncherProcess(
@@ -1277,9 +1498,12 @@ class LauncherSessionService : Service() {
                 appearance.accent,
                 appearance.background,
                 appearance.foreground,
+                portalBridge.busAddress,
             )
             }
         if (linuxHandle == 0L) {
+            session.portalBridge?.close()
+            session.portalBridge = null
             Log.e(TAG, "Could not start descriptor process session=${session.id}")
             stopCompositorForStatus(
                 session,
@@ -1292,6 +1516,79 @@ class LauncherSessionService : Service() {
         session.nextProcessStatusMillis =
             SystemClock.uptimeMillis() + PROCESS_STATUS_DELAY_MILLIS
         Log.i(TAG, "Started manager-owned Linux process session=${session.id}")
+    }
+
+    private fun requestPortalDocumentSave(
+        session: Session,
+        title: String,
+        suggestedName: String,
+        mimeType: String,
+    ): LauncherPortalSaveResult {
+        if (
+            title.isBlank() ||
+            title.length > MAX_DOCUMENT_TITLE_UTF16 ||
+            suggestedName.isBlank() ||
+            suggestedName.length > MAX_DOCUMENT_NAME_UTF16 ||
+            suggestedName.indexOf('/') >= 0 ||
+            suggestedName.indexOf('\\') >= 0 ||
+            suggestedName.indexOf('\u0000') >= 0 ||
+            mimeType.isBlank() ||
+            mimeType.length > MAX_DOCUMENT_MIME_UTF16 ||
+            mimeType.indexOf('/') <= 0 ||
+            mimeType.indexOf('\u0000') >= 0
+        ) {
+            return LauncherPortalSaveResult(null, false)
+        }
+        val completion = PortalDocumentCompletion()
+        val pending =
+            synchronized(this) {
+                if (
+                    !session.active ||
+                    session.surface == null ||
+                    sessions[session.id] !== session ||
+                    session.pendingDocumentRequest != null
+                ) {
+                    return LauncherPortalSaveResult(null, false)
+                }
+                val requestId =
+                    nextDocumentRequestId.getAndUpdate { value ->
+                        if (value == Int.MAX_VALUE) 1 else value + 1
+                    }
+                if (requestId <= 0) {
+                    return LauncherPortalSaveResult(null, false)
+                }
+                PendingDocumentRequest(
+                    requestId,
+                    title,
+                    suggestedName,
+                    mimeType,
+                    null,
+                    completion,
+                ).also { request ->
+                    session.pendingDocumentRequest = request
+                    if (!notifyDocumentRequest(session, request)) {
+                        session.pendingDocumentRequest = null
+                        return LauncherPortalSaveResult(null, false)
+                    }
+                }
+            }
+        Log.i(
+            TAG,
+            "Portal requested Android document destination session=${session.id} " +
+                "request=${pending.id} name=$suggestedName",
+        )
+        if (!completion.latch.await(DOCUMENT_REQUEST_TIMEOUT_MINUTES, TimeUnit.MINUTES)) {
+            synchronized(this) {
+                if (session.pendingDocumentRequest === pending) {
+                    session.pendingDocumentRequest = null
+                }
+            }
+            return LauncherPortalSaveResult(null, false)
+        }
+        return LauncherPortalSaveResult(
+            completion.descriptor,
+            completion.result == DOCUMENT_RESULT_CANCELLED,
+        )
     }
 
     private data class ResolvedAppearance(
@@ -1890,6 +2187,111 @@ class LauncherSessionService : Service() {
         }
     }
 
+    private fun notifyDocumentRequest(
+        session: Session,
+        request: PendingDocumentRequest,
+    ): Boolean {
+        if (
+            !session.active ||
+            request.id <= 0 ||
+            request.title.isBlank() ||
+            request.suggestedName.isBlank() ||
+            request.mimeType.isBlank()
+        ) {
+            return false
+        }
+        val data = Parcel.obtain()
+        return try {
+            data.writeInterfaceToken(CALLBACK_INTERFACE)
+            data.writeInt(PROTOCOL_VERSION)
+            data.writeInt(session.id)
+            data.writeInt(request.id)
+            data.writeInt(DOCUMENT_OPERATION_SAVE)
+            data.writeString(request.title)
+            data.writeString(request.suggestedName)
+            data.writeString(request.mimeType)
+            session.clientToken.transact(
+                CALLBACK_DOCUMENT_REQUEST,
+                data,
+                null,
+                IBinder.FLAG_ONEWAY,
+            )
+        } catch (error: RemoteException) {
+            Log.w(TAG, "Could not deliver Android document request session=${session.id}", error)
+            false
+        } finally {
+            data.recycle()
+        }
+    }
+
+    @Synchronized
+    private fun completeDocumentRequest(
+        callingUid: Int,
+        sessionId: Int,
+        requestId: Int,
+        result: Int,
+        descriptor: ParcelFileDescriptor?,
+    ): Int {
+        val session = authorizedSession(callingUid, sessionId) ?: return RESULT_UNAUTHORIZED
+        val request = session.pendingDocumentRequest ?: return RESULT_INVALID
+        if (
+            request.id != requestId ||
+            result !in DOCUMENT_RESULT_SUCCESS..DOCUMENT_RESULT_FAILED ||
+            (result == DOCUMENT_RESULT_SUCCESS) != (descriptor != null)
+        ) {
+            return RESULT_INVALID
+        }
+        session.pendingDocumentRequest = null
+        val portalCompletion = request.portalCompletion
+        if (portalCompletion != null) {
+            if (
+                !portalCompletion.complete(
+                    result,
+                    if (result == DOCUMENT_RESULT_SUCCESS) descriptor else null,
+                )
+            ) {
+                return RESULT_INVALID
+            }
+            Log.i(
+                TAG,
+                "Portal document request ended session=$sessionId request=$requestId result=$result",
+            )
+            return RESULT_OK
+        }
+        if (result != DOCUMENT_RESULT_SUCCESS) {
+            Log.i(
+                TAG,
+                "Android document request ended session=$sessionId request=$requestId result=$result",
+            )
+            return RESULT_OK
+        }
+        val destination = checkNotNull(descriptor)
+        val payload = request.debugPayload ?: return RESULT_INVALID
+        clipboardHandler.post {
+            runCatching {
+                ParcelFileDescriptor.AutoCloseOutputStream(destination).use { output ->
+                    output.write(payload)
+                    output.flush()
+                    destination.fileDescriptor.sync()
+                }
+            }.onSuccess {
+                Log.i(
+                    TAG,
+                    "Android document save completed session=$sessionId request=$requestId " +
+                        "bytes=${payload.size}",
+                )
+            }.onFailure { error ->
+                runCatching { destination.close() }
+                Log.e(
+                    TAG,
+                    "Android document save failed session=$sessionId request=$requestId",
+                    error,
+                )
+            }
+        }
+        return RESULT_OK
+    }
+
     private fun utf8OffsetToUtf16(
         text: String,
         byteOffset: Int,
@@ -1955,8 +2357,8 @@ class LauncherSessionService : Service() {
         private const val TAG = "ArchpheneLauncherSession"
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
         private const val LAUNCHER_PACKAGE_PREFIX = "org.archphene.linux.p"
-        private const val INTERFACE = "org.archphene.launcher.ISessionV1"
-        private const val PROTOCOL_VERSION = 1
+        private const val INTERFACE = "org.archphene.launcher.ISessionV2"
+        private const val PROTOCOL_VERSION = 2
         private const val TRANSACTION_OPEN = IBinder.FIRST_CALL_TRANSACTION
         private const val TRANSACTION_CLOSE = IBinder.FIRST_CALL_TRANSACTION + 1
         private const val TRANSACTION_ATTACH_SURFACE = IBinder.FIRST_CALL_TRANSACTION + 2
@@ -1964,10 +2366,12 @@ class LauncherSessionService : Service() {
         private const val TRANSACTION_INPUT = IBinder.FIRST_CALL_TRANSACTION + 4
         private const val TRANSACTION_CLIPBOARD = IBinder.FIRST_CALL_TRANSACTION + 5
         private const val TRANSACTION_IME = IBinder.FIRST_CALL_TRANSACTION + 6
-        private const val CALLBACK_INTERFACE = "org.archphene.launcher.IClientV1"
+        private const val TRANSACTION_DOCUMENT_RESULT = IBinder.FIRST_CALL_TRANSACTION + 7
+        private const val CALLBACK_INTERFACE = "org.archphene.launcher.IClientV2"
         private const val CALLBACK_STATUS = IBinder.FIRST_CALL_TRANSACTION
         private const val CALLBACK_CLIPBOARD = IBinder.FIRST_CALL_TRANSACTION + 1
         private const val CALLBACK_IME_STATE = IBinder.FIRST_CALL_TRANSACTION + 2
+        private const val CALLBACK_DOCUMENT_REQUEST = IBinder.FIRST_CALL_TRANSACTION + 3
         private const val MAX_SESSIONS = 16
         private const val MAX_SURFACE_DIMENSION = 8192
         private const val MAX_SURFACE_PIXELS = 33_554_432L
@@ -2027,6 +2431,16 @@ class LauncherSessionService : Service() {
         private const val IME_COMPONENT_ANCHOR = 1
         private const val IME_COMPONENT_HINT = 2
         private const val IME_COMPONENT_PURPOSE = 3
+        private const val DOCUMENT_OPERATION_SAVE = 1
+        private const val DOCUMENT_RESULT_SUCCESS = 1
+        private const val DOCUMENT_RESULT_CANCELLED = 2
+        private const val DOCUMENT_RESULT_FAILED = 3
+        private const val DOCUMENT_REQUEST_TIMEOUT_MINUTES = 10L
+        private const val MAX_DOCUMENT_TITLE_UTF16 = 128
+        private const val MAX_DOCUMENT_NAME_UTF16 = 255
+        private const val MAX_DOCUMENT_MIME_UTF16 = 128
+        private const val MAX_DEBUG_DOCUMENT_BYTES = 65_536
+        private val stalePortalSavesRecovered = AtomicBoolean(false)
         private const val RESULT_OK = 0
         private const val RESULT_NOT_READY = 1
         private const val RESULT_UNAUTHORIZED = 2

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use archphene_core::{Lifecycle, Runtime, RuntimeError};
 use archphene_jobs::{JobError, JobOperation, JobState, PackageJob, PackageJobStore};
 use archphene_launcher::{
-    LAUNCHER_CAPABILITIES_V1, LauncherRegistry, LauncherRegistryError, LauncherReviewDecision,
+    LAUNCHER_CAPABILITIES_V2, LauncherRegistry, LauncherRegistryError, LauncherReviewDecision,
     ReconcileReport, WrapperStatus,
 };
 use archphene_packages::{
@@ -881,6 +881,7 @@ impl RuntimeHost {
         generation: u64,
         wayland_display: &str,
         appearance: GuiAppearance,
+        portal_bus_address: Option<&str>,
     ) -> Result<u64, LauncherProcessError> {
         let (command, arguments) = {
             let descriptor = self
@@ -920,11 +921,16 @@ impl RuntimeHost {
             }
             (command, arguments)
         };
-        let environment = self
+        let package_runtime = self
             .package_runtime
             .as_ref()
-            .ok_or(PackageRuntimeError::InvalidPath)?
-            .command_environment_with_gui(appearance)?;
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        let environment = match portal_bus_address {
+            Some(address) => {
+                package_runtime.command_environment_with_gui_and_portal(appearance, address)?
+            }
+            None => package_runtime.command_environment_with_gui(appearance)?,
+        };
         if arguments.len() > MAX_COMMAND_ARGUMENTS {
             return Err(LauncherProcessError::Process(ProcessError::InvalidArgument));
         }
@@ -994,7 +1000,7 @@ impl RuntimeHost {
             descriptor_id_hex: descriptor.descriptor_id_hex(),
             generation: descriptor.desired_generation,
             label: descriptor.name.clone(),
-            capabilities: LAUNCHER_CAPABILITIES_V1,
+            capabilities: LAUNCHER_CAPABILITIES_V2,
             icon_path,
             icon_sha256,
         };

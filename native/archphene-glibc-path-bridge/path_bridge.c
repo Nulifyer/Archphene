@@ -42,6 +42,51 @@
 static bool supervised_process_group;
 static _Thread_local bool pending_pty_session;
 
+/*
+ * GDBus authenticates to a Unix D-Bus socket with an explicit
+ * SCM_CREDENTIALS message. Android's untrusted_app SELinux domain rejects
+ * that redundant ancillary credential even though SO_PEERCRED on the
+ * connected socket reports the same UID. Retry only that exact EPERM case
+ * without ancillary data. Keep this in the generic process bridge so GTK,
+ * Qt, and direct D-Bus clients all receive the same compatibility behavior.
+ */
+ssize_t sendmsg(int socket_fd, const struct msghdr *message, int flags) {
+    typedef ssize_t (*function_type)(int, const struct msghdr *, int);
+    function_type real = (function_type)dlsym(RTLD_NEXT, "sendmsg");
+    if (real == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    ssize_t result = real(socket_fd, message, flags);
+    if (result >= 0 || errno != EPERM || message == NULL
+            || message->msg_control == NULL || message->msg_controllen == 0) {
+        return result;
+    }
+    struct msghdr retry = *message;
+    bool found_credentials = false;
+    for (struct cmsghdr *header = CMSG_FIRSTHDR(&retry);
+            header != NULL; header = CMSG_NXTHDR(&retry, header)) {
+        if (header->cmsg_level != SOL_SOCKET
+                || header->cmsg_type != SCM_CREDENTIALS
+                || found_credentials
+                || header->cmsg_len != CMSG_LEN(sizeof(struct ucred))) {
+            return result;
+        }
+        const struct ucred *credentials =
+                (const struct ucred *)CMSG_DATA(header);
+        if (credentials->pid != getpid()
+                || credentials->uid != getuid()
+                || credentials->gid != getgid()) {
+            return result;
+        }
+        found_credentials = true;
+    }
+    if (!found_credentials) return result;
+    retry.msg_control = NULL;
+    retry.msg_controllen = 0;
+    return real(socket_fd, &retry, flags);
+}
+
 static bool process_has_terminal(void) {
     typedef int (*isatty_type)(int);
     isatty_type real_isatty = (isatty_type)dlsym(RTLD_NEXT, "isatty");

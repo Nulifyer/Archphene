@@ -63,6 +63,16 @@ static uint32_t wait_request_response(DBusConnection *connection,
                     && dbus_message_is_signal(message,
                             "org.freedesktop.portal.Request", "Response")
                     && strcmp(message_path, path) == 0) {
+                const char *destination = dbus_message_get_destination(message);
+                const char *unique_name = dbus_bus_get_unique_name(connection);
+                if (destination == NULL || unique_name == NULL
+                        || strcmp(destination, unique_name) != 0) {
+                    dbus_message_unref(message);
+                    fprintf(stderr,
+                            "FAIL %s: response was not unicast to the caller\n",
+                            label);
+                    exit(1);
+                }
                 uint32_t response = 2;
                 DBusMessageIter arguments;
                 if (!dbus_message_iter_init(message, &arguments)

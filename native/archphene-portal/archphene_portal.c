@@ -20,6 +20,7 @@
 #define NOTIFICATIONS_PATH "/org/freedesktop/Notifications"
 #define PORTAL_NAME "org.freedesktop.portal.Desktop"
 #define PORTAL_OPEN_URI "org.freedesktop.portal.OpenURI"
+#define PORTAL_FILE_CHOOSER "org.freedesktop.portal.FileChooser"
 #define PORTAL_NOTIFICATION "org.freedesktop.portal.Notification"
 #define PORTAL_PRINT "org.freedesktop.portal.Print"
 #define PORTAL_CAMERA "org.freedesktop.portal.Camera"
@@ -39,6 +40,11 @@ static const char portal_xml[] =
         "<arg type='a{sv}' direction='in'/><arg type='o' direction='out'/></method>"
         "<method name='SchemeSupported'><arg type='s' direction='in'/>"
         "<arg type='a{sv}' direction='in'/><arg type='b' direction='out'/></method>"
+        "<property name='version' type='u' access='read'/></interface>"
+        "<interface name='org.freedesktop.portal.FileChooser'>"
+        "<method name='SaveFile'><arg type='s' direction='in'/>"
+        "<arg type='s' direction='in'/><arg type='a{sv}' direction='in'/>"
+        "<arg type='o' direction='out'/></method>"
         "<property name='version' type='u' access='read'/></interface>"
         "<interface name='org.freedesktop.portal.Notification'>"
         "<method name='AddNotification'><arg type='s' direction='in'/>"
@@ -178,6 +184,29 @@ static void read_vardict_strings(DBusMessageIter *array, char *title, size_t tit
     }
 }
 
+static void read_save_options(
+        DBusMessageIter *array, char *name, size_t name_size) {
+    if (dbus_message_iter_get_arg_type(array) != DBUS_TYPE_ARRAY) return;
+    DBusMessageIter entries;
+    dbus_message_iter_recurse(array, &entries);
+    while (dbus_message_iter_get_arg_type(&entries) == DBUS_TYPE_DICT_ENTRY) {
+        DBusMessageIter entry;
+        dbus_message_iter_recurse(&entries, &entry);
+        if (dbus_message_iter_get_arg_type(&entry) == DBUS_TYPE_STRING) {
+            const char *key = NULL;
+            dbus_message_iter_get_basic(&entry, &key);
+            if (strcmp(key, "current_name") == 0
+                    && dbus_message_iter_next(&entry)
+                    && dbus_message_iter_get_arg_type(&entry) == DBUS_TYPE_VARIANT) {
+                DBusMessageIter value;
+                dbus_message_iter_recurse(&entry, &value);
+                (void)copy_basic_string(&value, name, name_size);
+            }
+        }
+        dbus_message_iter_next(&entries);
+    }
+}
+
 static dbus_bool_t valid_path_element(const char *value) {
     if (value == NULL || value[0] == '\0') return FALSE;
     for (const unsigned char *p = (const unsigned char *)value; *p != '\0'; p++) {
@@ -248,10 +277,14 @@ static int connect_pipewire_remote(void) {
 }
 
 static void emit_portal_response(DBusConnection *connection, const char *path,
-        uint32_t response) {
+        const char *destination, uint32_t response) {
     DBusMessage *signal = dbus_message_new_signal(
             path, "org.freedesktop.portal.Request", "Response");
     if (signal == NULL) return;
+    if (!dbus_message_set_destination(signal, destination)) {
+        dbus_message_unref(signal);
+        return;
+    }
     DBusMessageIter args;
     dbus_message_iter_init_append(signal, &args);
     if (!dbus_message_iter_append_basic(&args, DBUS_TYPE_UINT32, &response)
@@ -260,6 +293,52 @@ static void emit_portal_response(DBusConnection *connection, const char *path,
         return;
     }
     send_message(connection, signal);
+}
+
+static dbus_bool_t append_uri_result(DBusMessageIter *dict, const char *uri) {
+    const char *key = "uris";
+    DBusMessageIter entry;
+    DBusMessageIter variant;
+    DBusMessageIter values;
+    return dbus_message_iter_open_container(dict, DBUS_TYPE_DICT_ENTRY, NULL, &entry)
+            && dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &key)
+            && dbus_message_iter_open_container(&entry, DBUS_TYPE_VARIANT, "as", &variant)
+            && dbus_message_iter_open_container(&variant, DBUS_TYPE_ARRAY, "s", &values)
+            && (uri == NULL
+                || dbus_message_iter_append_basic(&values, DBUS_TYPE_STRING, &uri))
+            && dbus_message_iter_close_container(&variant, &values)
+            && dbus_message_iter_close_container(&entry, &variant)
+            && dbus_message_iter_close_container(dict, &entry);
+}
+
+static dbus_bool_t emit_file_chooser_response(
+        DBusConnection *connection, const char *path, const char *destination,
+        uint32_t response, const char *uri) {
+    DBusMessage *signal = dbus_message_new_signal(
+            path, "org.freedesktop.portal.Request", "Response");
+    if (signal == NULL) return FALSE;
+    if (!dbus_message_set_destination(signal, destination)) {
+        dbus_message_unref(signal);
+        return FALSE;
+    }
+    DBusMessageIter args;
+    DBusMessageIter dict;
+    dbus_message_iter_init_append(signal, &args);
+    dbus_bool_t ok = dbus_message_iter_append_basic(
+            &args, DBUS_TYPE_UINT32, &response)
+            && dbus_message_iter_open_container(&args, DBUS_TYPE_ARRAY, "{sv}", &dict)
+            /*
+             * GTK 3.24 reads the "uris" member even for cancelled portal
+             * responses. Include a well-typed empty array instead of omitting
+             * it so legacy clients do not dereference an unset result.
+             */
+            && append_uri_result(&dict, response == 0 ? uri : NULL)
+            && dbus_message_iter_close_container(&args, &dict);
+    if (!ok) {
+        dbus_message_unref(signal);
+        return FALSE;
+    }
+    return send_message(connection, signal);
 }
 
 static dbus_bool_t append_named_empty_dict(DBusMessageIter *dict, const char *key) {
@@ -300,10 +379,15 @@ static dbus_bool_t append_named_uint(
 }
 
 static void emit_print_prepare_response(
-        DBusConnection *connection, const char *path, uint32_t token) {
+        DBusConnection *connection, const char *path, const char *destination,
+        uint32_t token) {
     DBusMessage *signal = dbus_message_new_signal(
             path, "org.freedesktop.portal.Request", "Response");
     if (signal == NULL) return;
+    if (!dbus_message_set_destination(signal, destination)) {
+        dbus_message_unref(signal);
+        return;
+    }
     DBusMessageIter args;
     DBusMessageIter dict;
     uint32_t response = 0;
@@ -370,7 +454,8 @@ static void handle_prepare_print(DBusConnection *connection, DBusMessage *reques
     uint32_t token = next_id++;
     if (token == 0) token = next_id++;
     if (send_request_reply(connection, request, path)) {
-        emit_print_prepare_response(connection, path, token);
+        emit_print_prepare_response(
+                connection, path, dbus_message_get_sender(request), token);
     }
 }
 
@@ -401,7 +486,8 @@ static void handle_print(DBusConnection *connection, DBusMessage *request) {
     char response[256] = {0};
     int result = archphene_android_print_pdf(pdf_fd, title, response, sizeof(response));
     if (send_request_reply(connection, request, path)) {
-        emit_portal_response(connection, path, result == 0 ? 0u : 2u);
+        emit_portal_response(connection, path,
+                dbus_message_get_sender(request), result == 0 ? 0u : 2u);
     }
 }
 
@@ -426,7 +512,8 @@ static void handle_camera_access(DBusConnection *connection, DBusMessage *reques
             if (result == 0 || strcmp(response, "ERROR\tPERMISSION_REQUESTED") != 0) break;
         }
     }
-    emit_portal_response(connection, path, result == 0 ? 0u : 2u);
+    emit_portal_response(connection, path,
+            dbus_message_get_sender(request), result == 0 ? 0u : 2u);
 }
 
 static void handle_camera_open_remote(
@@ -494,7 +581,54 @@ static void handle_open_uri(DBusConnection *connection, DBusMessage *request) {
         return;
     }
     send_message(connection, reply);
-    emit_portal_response(connection, path, result == 0 ? 0u : 2u);
+    emit_portal_response(connection, path,
+            dbus_message_get_sender(request), result == 0 ? 0u : 2u);
+}
+
+static dbus_bool_t safe_suggested_name(const char *name) {
+    if (name == NULL || name[0] == '\0' || strlen(name) > 255
+            || strcmp(name, ".") == 0 || strcmp(name, "..") == 0) return FALSE;
+    for (const unsigned char *value = (const unsigned char *)name;
+            *value != '\0'; value++) {
+        if (*value == '/' || *value == '\\' || *value < 32 || *value == 127) return FALSE;
+    }
+    return TRUE;
+}
+
+static void handle_save_file(DBusConnection *connection, DBusMessage *request) {
+    DBusMessageIter args;
+    char title[257] = {0};
+    char name[256] = {0};
+    if (!dbus_message_iter_init(request, &args)
+            || dbus_message_iter_get_arg_type(&args) != DBUS_TYPE_STRING
+            || !dbus_message_iter_next(&args)
+            || copy_basic_string(&args, title, sizeof(title)) != 0
+            || !dbus_message_iter_next(&args)
+            || dbus_message_iter_get_arg_type(&args) != DBUS_TYPE_ARRAY) {
+        send_error(connection, request, DBUS_ERROR_INVALID_ARGS, "Expected (ssa{sv})");
+        return;
+    }
+    read_save_options(&args, name, sizeof(name));
+    if (!safe_suggested_name(name)) snprintf(name, sizeof(name), "document");
+    if (title[0] == '\0') snprintf(title, sizeof(title), "Save Linux document");
+    char path[256];
+    make_request_path(request, &args, path, sizeof(path));
+    if (!send_request_reply(connection, request, path)) return;
+
+    char uri[4097] = {0};
+    char response[256] = {0};
+    int result = archphene_android_save_file(
+            title, name, "application/octet-stream",
+            uri, sizeof(uri), response, sizeof(response));
+    uint32_t portal_response =
+            result == 0 ? 0u : (strcmp(response, "CANCEL") == 0 ? 1u : 2u);
+    dbus_bool_t emitted = emit_file_chooser_response(
+            connection, path, dbus_message_get_sender(request),
+            portal_response,
+            result == 0 ? uri : NULL);
+    fprintf(stderr,
+            "SaveFile completed path=%s broker=%d response=%u emitted=%d\n",
+            path, result, portal_response, emitted);
 }
 
 static dbus_bool_t http_scheme(const char *scheme) {
@@ -646,7 +780,9 @@ static void handle_properties(DBusConnection *connection, DBusMessage *request) 
     dbus_bool_t notification = strcmp(interface, PORTAL_NOTIFICATION) == 0;
     dbus_bool_t printing = strcmp(interface, PORTAL_PRINT) == 0;
     dbus_bool_t camera = strcmp(interface, PORTAL_CAMERA) == 0;
-    uint32_t version = camera ? 1u : (notification ? 2u : (printing ? 4u : 5u));
+    dbus_bool_t chooser = strcmp(interface, PORTAL_FILE_CHOOSER) == 0;
+    uint32_t version = chooser ? 4u
+            : (camera ? 1u : (notification ? 2u : (printing ? 4u : 5u)));
     if (dbus_message_is_method_call(request, PROPERTIES, "Get")) {
         char property[64] = {0};
         if (!dbus_message_iter_next(&args)
@@ -661,7 +797,7 @@ static void handle_properties(DBusConnection *connection, DBusMessage *request) 
         dbus_message_iter_init_append(reply, &output);
         dbus_bool_t ok = FALSE;
         if (strcmp(property, "version") == 0
-                && (camera || notification || printing
+                && (camera || notification || printing || chooser
                     || strcmp(interface, PORTAL_OPEN_URI) == 0)) {
             ok = dbus_message_iter_open_container(&output, DBUS_TYPE_VARIANT, "u", &variant)
                     && dbus_message_iter_append_basic(&variant, DBUS_TYPE_UINT32, &version)
@@ -685,7 +821,7 @@ static void handle_properties(DBusConnection *connection, DBusMessage *request) 
         send_message(connection, reply);
         return;
     }
-    if (!camera && !notification && !printing
+    if (!camera && !notification && !printing && !chooser
             && strcmp(interface, PORTAL_OPEN_URI) != 0) {
         send_error(connection, request, DBUS_ERROR_UNKNOWN_INTERFACE, "Unknown interface");
         return;
@@ -738,6 +874,8 @@ static void handle_message(DBusConnection *connection, DBusMessage *request) {
         handle_open_uri(connection, request);
     } else if (dbus_message_is_method_call(request, PORTAL_OPEN_URI, "SchemeSupported")) {
         handle_scheme_supported(connection, request);
+    } else if (dbus_message_is_method_call(request, PORTAL_FILE_CHOOSER, "SaveFile")) {
+        handle_save_file(connection, request);
     } else if (dbus_message_is_method_call(request, PORTAL_CAMERA, "AccessCamera")) {
         handle_camera_access(connection, request);
     } else if (dbus_message_is_method_call(

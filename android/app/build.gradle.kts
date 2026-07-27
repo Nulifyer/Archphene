@@ -44,6 +44,7 @@ android {
             jniLibs.directories.add("build/generated/jniLibs")
             jniLibs.directories.add("build/generated/compositorJniLibs")
             jniLibs.directories.add("build/generated/packageRuntime/jniLibs")
+            jniLibs.directories.add("build/generated/portalJniLibs")
             assets.directories.add("build/generated/packageRuntime/assets")
             assets.directories.add("build/generated/launcherTemplate/assets")
             assets.directories.add("build/generated/terminalFont/assets")
@@ -80,6 +81,7 @@ tasks.named("preBuild").configure {
     dependsOn(rootProject.tasks.named("buildArchpheneRust"))
     dependsOn(rootProject.tasks.named("buildArchpheneCompositor"))
     dependsOn(rootProject.tasks.named("stageArchphenePackageRuntime"))
+    dependsOn(rootProject.tasks.named("stageArchpheneAndroidDbus"))
     dependsOn(rootProject.tasks.named("stageArchpheneLauncherTemplate"))
     dependsOn(rootProject.tasks.named("stageArchpheneTerminalFont"))
 }

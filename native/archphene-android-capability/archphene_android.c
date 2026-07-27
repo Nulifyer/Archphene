@@ -52,6 +52,47 @@ static int base64url(const char *input, char *output, size_t output_size) {
     return base64url_value(input, output, output_size, false);
 }
 
+static int base64url_decode(const char *input, char *output, size_t output_size) {
+    size_t length = input == NULL ? 0 : strlen(input);
+    if (length == 0 || length > MAX_FIELD * 2 || output == NULL || output_size < 2) {
+        errno = EINVAL;
+        return -1;
+    }
+    uint32_t value = 0;
+    unsigned int bits = 0;
+    size_t target = 0;
+    for (size_t index = 0; index < length; index++) {
+        unsigned char character = (unsigned char)input[index];
+        unsigned int decoded;
+        if (character >= 'A' && character <= 'Z') decoded = character - 'A';
+        else if (character >= 'a' && character <= 'z') decoded = character - 'a' + 26;
+        else if (character >= '0' && character <= '9') decoded = character - '0' + 52;
+        else if (character == '-') decoded = 62;
+        else if (character == '_') decoded = 63;
+        else {
+            errno = EPROTO;
+            return -1;
+        }
+        value = (value << 6) | decoded;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            if (target + 1 >= output_size) {
+                errno = ENOSPC;
+                return -1;
+            }
+            output[target++] = (char)(value >> bits);
+            value &= bits == 0 ? 0u : ((1u << bits) - 1u);
+        }
+    }
+    if (bits >= 6 || (bits != 0 && value != 0)) {
+        errno = EPROTO;
+        return -1;
+    }
+    output[target] = '\0';
+    return 0;
+}
+
 static int broker_request_with_fd(
         const char *request, int send_fd, char *response, size_t response_size) {
     const char *name = getenv("ARCHPHENE_ANDROID_BROKER");
@@ -211,6 +252,38 @@ int archphene_android_print_pdf(
         return -1;
     }
     return broker_request_with_fd(request, pdf_fd, response, response_size);
+}
+
+int archphene_android_save_file(
+        const char *title, const char *suggested_name, const char *mime_type,
+        char *uri, size_t uri_size, char *response, size_t response_size) {
+    char encoded_title[MAX_FIELD * 2];
+    char encoded_name[MAX_FIELD * 2];
+    char encoded_mime[MAX_FIELD * 2];
+    char request[MAX_REQUEST];
+    if (base64url(title, encoded_title, sizeof(encoded_title)) != 0
+            || base64url(suggested_name, encoded_name, sizeof(encoded_name)) != 0
+            || base64url(mime_type, encoded_mime, sizeof(encoded_mime)) != 0
+            || uri == NULL || uri_size < 2) {
+        errno = EINVAL;
+        return -1;
+    }
+    int length = snprintf(request, sizeof(request),
+            "ARCHPHENE/2\tSAVE_FILE\t%s\t%s\t%s",
+            encoded_title, encoded_name, encoded_mime);
+    if (length <= 0 || (size_t)length >= sizeof(request)) {
+        errno = ENOSPC;
+        return -1;
+    }
+    int result = broker_request(request, response, response_size);
+    if (result != 0) return result;
+    const char *encoded_uri = response;
+    if (strncmp(response, "OK\t", 3) == 0) encoded_uri = response + 3;
+    else {
+        errno = EPROTO;
+        return -1;
+    }
+    return base64url_decode(encoded_uri, uri, uri_size);
 }
 
 int archphene_android_request_audio_input(char *response, size_t response_size) {

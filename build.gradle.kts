@@ -37,6 +37,54 @@ tasks.register<Exec>("buildArchpheneCompositor") {
     outputs.dir("android/app/build/generated/compositorJniLibs")
 }
 
+val buildArchpheneAndroidDbus =
+    tasks.register<Exec>("buildArchpheneAndroidDbus") {
+        workingDir(rootDir)
+        commandLine("bash", "scripts/build-android-dbus-all-podman.sh")
+        inputs.files(
+            fileTree("native/archphene-android-capability") {
+                include("**/*.c", "**/*.h")
+            },
+            fileTree("native/archphene-portal") {
+                include("**/*.c", "**/*.h")
+            },
+            fileTree("native/archphene-dbus") {
+                include("patches/*.patch")
+            },
+            file("scripts/build-android-dbus.sh"),
+            file("scripts/build-android-dbus-podman.sh"),
+            file("scripts/build-android-dbus-all-podman.sh"),
+            file("containers/android-native.Containerfile"),
+        )
+        outputs.files(
+            "tooling/build/android-dbus/x86_64/dbus-daemon",
+            "tooling/build/android-dbus/x86_64/portal-service",
+            "tooling/build/android-dbus/x86_64/portal-probe",
+            "tooling/build/android-dbus/aarch64/dbus-daemon",
+            "tooling/build/android-dbus/aarch64/portal-service",
+            "tooling/build/android-dbus/aarch64/portal-probe",
+        )
+    }
+
+tasks.register<Sync>("stageArchpheneAndroidDbus") {
+    dependsOn(buildArchpheneAndroidDbus)
+    from("tooling/build/android-dbus/x86_64") {
+        include("dbus-daemon", "portal-service", "portal-probe")
+        into("x86_64")
+        rename("dbus-daemon", "libarchphene_dbus_daemon.so")
+        rename("portal-service", "libarchphene_portal_service.so")
+        rename("portal-probe", "libarchphene_portal_probe.so")
+    }
+    from("tooling/build/android-dbus/aarch64") {
+        include("dbus-daemon", "portal-service", "portal-probe")
+        into("arm64-v8a")
+        rename("dbus-daemon", "libarchphene_dbus_daemon.so")
+        rename("portal-service", "libarchphene_portal_service.so")
+        rename("portal-probe", "libarchphene_portal_probe.so")
+    }
+    into("android/app/build/generated/portalJniLibs")
+}
+
 val verifyArchpheneTerminalFont =
     tasks.register<Exec>("verifyArchpheneTerminalFont") {
         workingDir("third_party/jetbrains-mono-nerd-font")

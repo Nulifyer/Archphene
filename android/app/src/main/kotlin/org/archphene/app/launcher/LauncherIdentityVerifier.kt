@@ -79,7 +79,7 @@ internal object LauncherIdentityVerifier {
             metadata.getString(TEMPLATE_SHA256) !=
             "h:${LauncherApkAssembler.templateDigestHex(context)}" ||
             metadata.getString(CAPABILITIES) !=
-            "c:${LauncherApkAssembler.CAPABILITIES_V1}" ||
+            "c:${LauncherApkAssembler.CAPABILITIES_V2}" ||
             signers.size != 1
         ) {
             return null

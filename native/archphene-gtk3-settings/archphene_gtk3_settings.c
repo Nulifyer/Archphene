@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+
 #include <dlfcn.h>
 #include <glib-object.h>
 #include <glib.h>
@@ -21,6 +23,22 @@ typedef void (*GtkStyleContextRemoveProviderForDisplay)(gpointer display,
         gpointer provider);
 typedef gpointer (*AdwStyleManagerGetDefault)(void);
 typedef void (*AdwStyleManagerSetColorScheme)(gpointer manager, gint scheme);
+typedef gint (*GtkDialogRun)(gpointer dialog);
+typedef GType (*GtkFileChooserGetType)(void);
+typedef gint (*GtkFileChooserGetAction)(gpointer chooser);
+typedef gchar *(*GtkFileChooserGetCurrentName)(gpointer chooser);
+typedef gpointer (*GtkFileChooserNativeNew)(const gchar *title, gpointer parent,
+        gint action, const gchar *accept_label, const gchar *cancel_label);
+typedef gpointer (*GtkWindowGetTransientFor)(gpointer window);
+typedef const gchar *(*GtkWindowGetTitle)(gpointer window);
+typedef void (*GtkFileChooserSetCurrentName)(gpointer chooser, const gchar *name);
+typedef void (*GtkFileChooserSetOverwriteConfirmation)(
+        gpointer chooser, gboolean enabled);
+typedef gboolean (*GtkFileChooserGetOverwriteConfirmation)(gpointer chooser);
+typedef gint (*GtkNativeDialogRun)(gpointer dialog);
+typedef gpointer (*GtkFileChooserGetFile)(gpointer chooser);
+typedef gboolean (*GtkFileChooserSetFile)(
+        gpointer chooser, gpointer file, GError **error);
 
 static gchar *settings_path;
 static gchar *active_theme;
@@ -30,6 +48,13 @@ static gboolean active_dark;
 static gboolean have_active_settings;
 static gpointer active_css_provider;
 static gboolean refresh_started;
+
+enum {
+    ARCHPHENE_GTK_FILE_CHOOSER_ACTION_SAVE = 1,
+    ARCHPHENE_GTK_RESPONSE_ACCEPT = -3,
+    ARCHPHENE_GTK_RESPONSE_OK = -5,
+    ARCHPHENE_GTK_RESPONSE_CANCEL = -6,
+};
 
 static void write_diagnostic(const gchar *status)
 {
@@ -246,6 +271,156 @@ static void start_refresh(void)
     write_diagnostic("initialized\n");
     refresh_settings(NULL);
     g_timeout_add(250, refresh_settings, NULL);
+}
+
+/*
+ * GtkFileChooserDialog predates the portal-aware GtkFileChooserNative API and
+ * remains common in otherwise unmodified GTK3 applications. Intercept only its
+ * synchronous SaveFile path and delegate to GtkFileChooserNative. The native
+ * object preserves GTK's portal protocol implementation while the original
+ * dialog retains application-owned state such as encoding controls.
+ */
+G_MODULE_EXPORT gint gtk_dialog_run(gpointer dialog)
+{
+    union {
+        gpointer object;
+        GtkDialogRun function;
+    } original = {dlsym(RTLD_NEXT, "gtk_dialog_run")};
+    if (original.function == NULL) return ARCHPHENE_GTK_RESPONSE_CANCEL;
+    if (g_strcmp0(g_getenv("ARCHPHENE_GTK_FILE_PORTAL"), "1") != 0
+            || dialog == NULL) return original.function(dialog);
+
+    union {
+        gpointer object;
+        GtkFileChooserGetType function;
+    } get_type = {dlsym(RTLD_DEFAULT, "gtk_file_chooser_get_type")};
+    union {
+        gpointer object;
+        GtkFileChooserGetAction function;
+    } get_action = {dlsym(RTLD_DEFAULT, "gtk_file_chooser_get_action")};
+    union {
+        gpointer object;
+        GtkFileChooserGetCurrentName function;
+    } get_name = {dlsym(RTLD_DEFAULT, "gtk_file_chooser_get_current_name")};
+    union {
+        gpointer object;
+        GtkFileChooserNativeNew function;
+    } native_new = {dlsym(RTLD_DEFAULT, "gtk_file_chooser_native_new")};
+    union {
+        gpointer object;
+        GtkWindowGetTransientFor function;
+    } get_parent = {dlsym(RTLD_DEFAULT, "gtk_window_get_transient_for")};
+    union {
+        gpointer object;
+        GtkWindowGetTitle function;
+    } get_title = {dlsym(RTLD_DEFAULT, "gtk_window_get_title")};
+    union {
+        gpointer object;
+        GtkFileChooserSetCurrentName function;
+    } set_name = {dlsym(RTLD_DEFAULT, "gtk_file_chooser_set_current_name")};
+    union {
+        gpointer object;
+        GtkFileChooserGetOverwriteConfirmation function;
+    } get_overwrite = {
+            dlsym(RTLD_DEFAULT, "gtk_file_chooser_get_do_overwrite_confirmation")};
+    union {
+        gpointer object;
+        GtkFileChooserSetOverwriteConfirmation function;
+    } set_overwrite = {
+            dlsym(RTLD_DEFAULT, "gtk_file_chooser_set_do_overwrite_confirmation")};
+    union {
+        gpointer object;
+        GtkNativeDialogRun function;
+    } native_run = {dlsym(RTLD_DEFAULT, "gtk_native_dialog_run")};
+    union {
+        gpointer object;
+        GtkFileChooserGetFile function;
+    } get_file = {dlsym(RTLD_DEFAULT, "gtk_file_chooser_get_file")};
+    union {
+        gpointer object;
+        GtkFileChooserSetFile function;
+    } set_file = {dlsym(RTLD_DEFAULT, "gtk_file_chooser_set_file")};
+    if (get_type.function == NULL || get_action.function == NULL
+            || get_name.function == NULL || native_new.function == NULL
+            || get_parent.function == NULL || get_title.function == NULL
+            || set_name.function == NULL || get_overwrite.function == NULL
+            || set_overwrite.function == NULL || native_run.function == NULL
+            || get_file.function == NULL || set_file.function == NULL
+            || !g_type_check_instance_is_a(
+                    (GTypeInstance *)dialog, get_type.function())
+            || get_action.function(dialog)
+                    != ARCHPHENE_GTK_FILE_CHOOSER_ACTION_SAVE) {
+        return original.function(dialog);
+    }
+
+    gchar *name = get_name.function(dialog);
+    const gchar *title = get_title.function(dialog);
+    gpointer native = native_new.function(
+            title == NULL || title[0] == '\0' ? "Save Linux document" : title,
+            get_parent.function(dialog),
+            ARCHPHENE_GTK_FILE_CHOOSER_ACTION_SAVE, "_Save", "_Cancel");
+    if (native == NULL) {
+        g_free(name);
+        return original.function(dialog);
+    }
+    if (name != NULL && name[0] != '\0') set_name.function(native, name);
+    set_overwrite.function(native, get_overwrite.function(dialog));
+    g_free(name);
+
+    write_diagnostic("Delegating GTK3 SaveFile to the Android portal\n");
+    gint response = native_run.function(native);
+    gchar *response_status = g_strdup_printf(
+            "File portal native response: %d\n", response);
+    write_diagnostic(response_status);
+    g_free(response_status);
+    if (response != ARCHPHENE_GTK_RESPONSE_ACCEPT
+            && response != ARCHPHENE_GTK_RESPONSE_OK) {
+        g_object_unref(native);
+        return response;
+    }
+    gpointer file = get_file.function(native);
+    if (file == NULL) {
+        g_object_unref(native);
+        return ARCHPHENE_GTK_RESPONSE_CANCEL;
+    }
+    GError *error = NULL;
+    gboolean selected = set_file.function(dialog, file, &error);
+    g_object_unref(file);
+    g_object_unref(native);
+    if (!selected) {
+        if (error != NULL) {
+            gchar *status = g_strdup_printf(
+                    "File portal could not apply selection: %s\n", error->message);
+            write_diagnostic(status);
+            g_free(status);
+            g_error_free(error);
+        }
+        return ARCHPHENE_GTK_RESPONSE_CANCEL;
+    }
+    /*
+     * GtkFileChooserDialog applies a GFile selection asynchronously while its
+     * normal dialog loop is running. The portal has already ended that loop,
+     * so drain the bounded GLib context until the chooser's public getter can
+     * observe the selection. Returning ACCEPT before this point makes callers
+     * such as editors see a null destination and silently skip their write.
+     */
+    gboolean visible = FALSE;
+    for (guint attempt = 0; attempt < 2000; attempt++) {
+        gpointer applied = get_file.function(dialog);
+        if (applied != NULL) {
+            g_object_unref(applied);
+            visible = TRUE;
+            break;
+        }
+        while (g_main_context_iteration(NULL, FALSE)) {}
+        g_usleep(1000);
+    }
+    if (!visible) {
+        write_diagnostic("File portal selection did not settle\n");
+        return ARCHPHENE_GTK_RESPONSE_CANCEL;
+    }
+    write_diagnostic("File portal SaveFile selection applied\n");
+    return ARCHPHENE_GTK_RESPONSE_ACCEPT;
 }
 
 __attribute__((constructor)) static void preload_init(void)

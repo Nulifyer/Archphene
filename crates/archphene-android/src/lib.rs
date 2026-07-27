@@ -3345,7 +3345,7 @@ mod android {
         };
         if request_length == 0
             || request_length > request_capacity
-            || request_length > 512
+            || request_length > 1024
             || output_capacity < 512
         {
             return i64::from(ERROR_INVALID_ARGUMENT);
@@ -3376,12 +3376,12 @@ mod android {
         else {
             return i64::from(ERROR_INVALID_ARGUMENT);
         };
-        let appearance = if version == "G1" {
+        let (appearance, portal_bus_address) = if version == "G1" {
             if fields.next().is_some() {
                 return i64::from(ERROR_INVALID_ARGUMENT);
             }
-            GuiAppearance::default()
-        } else if version == "G2" {
+            (GuiAppearance::default(), None)
+        } else if version == "G2" || version == "G3" {
             let (
                 Some(dark),
                 Some(font_percent),
@@ -3390,9 +3390,7 @@ mod android {
                 Some(accent),
                 Some(background),
                 Some(foreground),
-                None,
             ) = (
-                fields.next(),
                 fields.next(),
                 fields.next(),
                 fields.next(),
@@ -3404,6 +3402,25 @@ mod android {
             else {
                 return i64::from(ERROR_INVALID_ARGUMENT);
             };
+            let portal_bus_address = if version == "G3" {
+                let Some(address) = fields.next() else {
+                    return i64::from(ERROR_INVALID_ARGUMENT);
+                };
+                if address.len() > 256
+                    || !address.starts_with("unix:path=/data/")
+                    || address
+                        .bytes()
+                        .any(|byte| matches!(byte, 0 | b'\t' | b'\n' | b'\r'))
+                {
+                    return i64::from(ERROR_INVALID_ARGUMENT);
+                }
+                Some(address)
+            } else {
+                None
+            };
+            if fields.next().is_some() {
+                return i64::from(ERROR_INVALID_ARGUMENT);
+            }
             let dark = match dark {
                 "0" => false,
                 "1" => true,
@@ -3432,7 +3449,7 @@ mod android {
                 background,
                 foreground,
             ) {
-                Ok(appearance) => appearance,
+                Ok(appearance) => (appearance, portal_bus_address),
                 Err(_) => return i64::from(ERROR_INVALID_ARGUMENT),
             }
         } else {
@@ -3472,6 +3489,7 @@ mod android {
                 generation,
                 wayland_display,
                 appearance,
+                portal_bus_address,
             )
         };
         match result {

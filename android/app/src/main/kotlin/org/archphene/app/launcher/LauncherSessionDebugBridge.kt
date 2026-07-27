@@ -29,6 +29,21 @@ internal object LauncherSessionDebugBridge {
     ): LauncherSessionDebugResult =
         service?.debugInjectIme(androidPackage, composing, committed, submit)
             ?: LauncherSessionDebugResult(false, 0, "service-not-ready")
+
+    fun requestDocumentSave(
+        androidPackage: String,
+        title: String,
+        suggestedName: String,
+        mimeType: String,
+        payload: ByteArray,
+    ): LauncherSessionDebugResult =
+        service?.debugRequestDocumentSave(
+            androidPackage,
+            title,
+            suggestedName,
+            mimeType,
+            payload,
+        ) ?: LauncherSessionDebugResult(false, 0, "service-not-ready")
 }
 
 internal data class LauncherSessionDebugResult(
