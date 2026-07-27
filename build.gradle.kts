@@ -65,8 +65,17 @@ tasks.register<Exec>("stageArchphenePackageRuntime") {
         file("scripts/stage-archphene-package-runtime.sh"),
         file("prebuilt/gtk3-compat/SHA256SUMS"),
         file("prebuilt/gtk3-compat/manifest.json"),
+        file("prebuilt/qt-bridge/SHA256SUMS"),
+        file("prebuilt/qt-bridge/manifest.json"),
+        file("prebuilt/qt-bridge/manifest-arm64-v8a.json"),
         fileTree("prebuilt/gtk3-compat") {
             include("x86_64/*.so", "aarch64/*.so")
+        },
+        fileTree("prebuilt/qt-bridge") {
+            include("x86_64/libarchphene_qt_platform_theme.so")
+            include("x86_64/libarchphene_qt_style.so")
+            include("x86_64/libarchphene_kde_config.so")
+            include("arm64-v8a/*.so")
         },
         fileTree("tooling/build/ci-package-runtime") {
             include("SHA256SUMS", "**/runtime-root/usr/bin/*", "**/runtime-root/usr/lib/*")

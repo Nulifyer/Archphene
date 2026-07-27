@@ -101,7 +101,7 @@ mod android {
         },
     };
     use archphene_process::{
-        MAX_COMMAND_ARGUMENTS, MAX_COMMAND_OUTPUT_BYTES, MAX_COMMAND_REQUEST_BYTES,
+        GuiAppearance, MAX_COMMAND_ARGUMENTS, MAX_COMMAND_OUTPUT_BYTES, MAX_COMMAND_REQUEST_BYTES,
         MAX_PTY_TRANSFER_BYTES, MAX_TERMINAL_DAMAGE_BYTES, MAX_TERMINAL_SELECTION_BYTES,
         ProcessError,
     };
@@ -159,6 +159,17 @@ mod android {
             digest[index] = (high << 4) | low;
         }
         Ok(digest)
+    }
+
+    fn parse_rgb_hex(value: &str) -> Option<[u8; 3]> {
+        if value.len() != 6 {
+            return None;
+        }
+        let mut color = [0_u8; 3];
+        for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+            color[index] = (hex_value(pair[0])? << 4) | hex_value(pair[1])?;
+        }
+        Some(color)
     }
 
     fn parse_aur_install_filenames(bytes: &[u8]) -> Result<Vec<String>, jint> {
@@ -2635,7 +2646,7 @@ mod android {
         };
         if request_length == 0
             || request_length > request_capacity
-            || request_length > 256
+            || request_length > 512
             || output_capacity < 512
         {
             return i64::from(ERROR_INVALID_ARGUMENT);
@@ -2658,22 +2669,74 @@ mod android {
             return i64::from(ERROR_INVALID_ARGUMENT);
         };
         let mut fields = request.split('\t');
-        let (
-            Some("G1"),
-            Some(android_package),
-            Some(descriptor_id),
-            Some(generation),
-            Some(wayland_display),
-            None,
-        ) = (
-            fields.next(),
-            fields.next(),
-            fields.next(),
-            fields.next(),
-            fields.next(),
-            fields.next(),
-        )
+        let Some(version) = fields.next() else {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        };
+        let (Some(android_package), Some(descriptor_id), Some(generation), Some(wayland_display)) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
         else {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        };
+        let appearance = if version == "G1" {
+            if fields.next().is_some() {
+                return i64::from(ERROR_INVALID_ARGUMENT);
+            }
+            GuiAppearance::default()
+        } else if version == "G2" {
+            let (
+                Some(dark),
+                Some(font_percent),
+                Some(control_visual_dp),
+                Some(control_target_dp),
+                Some(accent),
+                Some(background),
+                Some(foreground),
+                None,
+            ) = (
+                fields.next(),
+                fields.next(),
+                fields.next(),
+                fields.next(),
+                fields.next(),
+                fields.next(),
+                fields.next(),
+                fields.next(),
+            )
+            else {
+                return i64::from(ERROR_INVALID_ARGUMENT);
+            };
+            let dark = match dark {
+                "0" => false,
+                "1" => true,
+                _ => return i64::from(ERROR_INVALID_ARGUMENT),
+            };
+            let (Ok(font_percent), Ok(control_visual_dp), Ok(control_target_dp)) = (
+                font_percent.parse::<u16>(),
+                control_visual_dp.parse::<u16>(),
+                control_target_dp.parse::<u16>(),
+            ) else {
+                return i64::from(ERROR_INVALID_ARGUMENT);
+            };
+            let (Some(accent), Some(background), Some(foreground)) = (
+                parse_rgb_hex(accent),
+                parse_rgb_hex(background),
+                parse_rgb_hex(foreground),
+            ) else {
+                return i64::from(ERROR_INVALID_ARGUMENT);
+            };
+            match GuiAppearance::new(
+                dark,
+                font_percent,
+                control_visual_dp,
+                control_target_dp,
+                accent,
+                background,
+                foreground,
+            ) {
+                Ok(appearance) => appearance,
+                Err(_) => return i64::from(ERROR_INVALID_ARGUMENT),
+            }
+        } else {
             return i64::from(ERROR_INVALID_ARGUMENT);
         };
         if android_package.len() != 53
@@ -2709,6 +2772,7 @@ mod android {
                 descriptor_id,
                 generation,
                 wayland_display,
+                appearance,
             )
         };
         match result {

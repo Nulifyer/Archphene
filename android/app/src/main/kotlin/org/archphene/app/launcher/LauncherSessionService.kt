@@ -6,7 +6,10 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.ApplicationInfo
+import android.content.res.Configuration
+import android.graphics.Color
 import android.os.Binder
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
@@ -43,7 +46,12 @@ class LauncherSessionService : Service() {
         var pumpStarted = false
         var clientLogged = false
         var frameLogged = false
+        var surfaceWidth = 0
+        var surfaceHeight = 0
+        var densityDpi = DEFAULT_DENSITY_DPI
+        var fontScaleMillis = DEFAULT_FONT_SCALE_MILLIS
         var attachmentFramesLogged = 0
+        var lastPresentationSignature = Long.MIN_VALUE
         var inputLogged = false
         var clipboardLogged = false
         val inputRecords = IntArray(MAX_INPUT_RECORDS * INPUT_FIELDS)
@@ -380,6 +388,7 @@ class LauncherSessionService : Service() {
                         width,
                         height,
                         densityDpi,
+                        fontScaleMillis,
                     ).also { attachResult ->
                         if (attachResult == RESULT_OK) {
                             surface = null
@@ -617,10 +626,15 @@ class LauncherSessionService : Service() {
         width: Int,
         height: Int,
         densityDpi: Int,
+        fontScaleMillis: Int,
     ): Int {
         val session = authorizedSession(callingUid, sessionId) ?: return RESULT_UNAUTHORIZED
         val previous = session.surface
         session.surface = surface
+        session.surfaceWidth = width
+        session.surfaceHeight = height
+        session.densityDpi = densityDpi
+        session.fontScaleMillis = fontScaleMillis
         surfaceHandler.post {
             val current =
                 synchronized(this) {
@@ -1039,12 +1053,21 @@ class LauncherSessionService : Service() {
             return
         }
         val linuxHandle =
+            resolvedAppearance(session).let { appearance ->
             runtime.openLauncherProcess(
                 session.identity.androidPackage,
                 session.identity.descriptorIdHex,
                 session.identity.generation,
                 socket.name,
+                appearance.dark,
+                appearance.fontPercent,
+                appearance.controlVisualDp,
+                appearance.controlTargetDp,
+                appearance.accent,
+                appearance.background,
+                appearance.foreground,
             )
+            }
         if (linuxHandle == 0L) {
             Log.e(TAG, "Could not start descriptor process session=${session.id}")
             stopCompositorForStatus(
@@ -1058,6 +1081,83 @@ class LauncherSessionService : Service() {
         session.nextProcessStatusMillis =
             SystemClock.uptimeMillis() + PROCESS_STATUS_DELAY_MILLIS
         Log.i(TAG, "Started manager-owned Linux process session=${session.id}")
+    }
+
+    private data class ResolvedAppearance(
+        val dark: Boolean,
+        val fontPercent: Int,
+        val controlVisualDp: Int,
+        val controlTargetDp: Int,
+        val accent: Int,
+        val background: Int,
+        val foreground: Int,
+    )
+
+    private fun resolvedAppearance(session: Session): ResolvedAppearance {
+        val configuration = resources.configuration
+        val dark =
+            configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
+                Configuration.UI_MODE_NIGHT_YES
+        val shortPixels = minOf(session.surfaceWidth, session.surfaceHeight).coerceAtLeast(1)
+        val densityForMinimum = shortPixels.toLong().times(160).div(432).toInt()
+        val effectiveDensity = minOf(session.densityDpi, densityForMinimum).coerceIn(72, 1_000)
+        val logicalShort = shortPixels.toLong().times(160).div(effectiveDensity).toInt()
+        val phone = logicalShort < 600
+        val visualDp = if (phone) 20 else 18
+        val targetDp = if (phone) 32 else 28
+        val fontPercent =
+            (
+                session.fontScaleMillis
+                    .toLong()
+                    .plus(5)
+                    .div(10)
+            ).toInt().coerceIn(100, 200)
+        val material =
+            if (Build.VERSION.SDK_INT >= 31) {
+                intArrayOf(
+                    getColor(
+                        if (dark) {
+                            android.R.color.system_accent1_200
+                        } else {
+                            android.R.color.system_accent1_600
+                        },
+                    ),
+                    getColor(
+                        if (dark) {
+                            android.R.color.system_neutral1_900
+                        } else {
+                            android.R.color.system_neutral1_10
+                        },
+                    ),
+                    getColor(
+                        if (dark) {
+                            android.R.color.system_neutral1_10
+                        } else {
+                            android.R.color.system_neutral1_900
+                        },
+                    ),
+                )
+            } else {
+                intArrayOf(
+                    if (dark) Color.rgb(86, 188, 236) else Color.rgb(23, 147, 209),
+                    if (dark) Color.rgb(35, 38, 41) else Color.rgb(239, 240, 241),
+                    if (dark) Color.rgb(239, 240, 241) else Color.rgb(35, 38, 41),
+                )
+            }
+        Log.i(
+            TAG,
+            "Resolved launcher appearance session=${session.id} " +
+                "dark=$dark font=$fontPercent controls=${visualDp}dp target=${targetDp}dp",
+        )
+        return ResolvedAppearance(
+            dark,
+            fontPercent,
+            visualDp,
+            targetDp,
+            material[0],
+            material[1],
+            material[2],
+        )
     }
 
     private inner class CompositorPump(
@@ -1101,11 +1201,7 @@ class LauncherSessionService : Service() {
                 session.frameLogged = true
                 notifyStatus(session, STATUS_RUNNING, session.authorization.label)
             }
-            if (
-                result and NativeLauncherCompositor.FLAG_FRAME_PRESENTED != 0 &&
-                session.attachmentFramesLogged < MAX_ATTACHMENT_FRAME_LOGS
-            ) {
-                session.attachmentFramesLogged += 1
+            if (result and NativeLauncherCompositor.FLAG_FRAME_PRESENTED != 0) {
                 val selectedWidth = compositor.presentationComponent(0)
                 val selectedHeight = compositor.presentationComponent(1)
                 val surfaceWidth = compositor.presentationComponent(2)
@@ -1114,25 +1210,41 @@ class LauncherSessionService : Service() {
                 val originalHeight = compositor.presentationComponent(5)
                 val logicalWidth = compositor.presentationComponent(6)
                 val logicalHeight = compositor.presentationComponent(7)
-                Log.i(
-                    TAG,
-                    "Presented Linux frame session=${session.id} " +
-                        "attachmentFrame=${session.attachmentFramesLogged} " +
-                        "selected=${selectedWidth}x$selectedHeight " +
-                        "surface=${surfaceWidth}x$surfaceHeight " +
-                        "original=${originalWidth}x$originalHeight " +
-                        "logical=${logicalWidth}x$logicalHeight " +
-                        "reasons=${compositor.presentationComponent(8)}," +
-                        "${compositor.presentationComponent(9)} " +
-                        "output=${compositor.presentationComponent(10)}x" +
-                        "${compositor.presentationComponent(11)} " +
-                        "mode=${compositor.presentationComponent(12)}x" +
-                        "${compositor.presentationComponent(13)} " +
-                        "commit=${compositor.presentationComponent(14)} " +
-                        "ack=${compositor.presentationComponent(15)} " +
-                        "serial=${compositor.presentationComponent(16)} " +
-                        "pending=${compositor.presentationComponent(17)}",
-                )
+                val bufferScale = compositor.presentationComponent(8)
+                val signature =
+                    originalWidth.toLong().shl(48) xor
+                        originalHeight.toLong().shl(32) xor
+                        logicalWidth.toLong().shl(16) xor
+                        logicalHeight.toLong() xor
+                        bufferScale.toLong().shl(8)
+                if (
+                    session.attachmentFramesLogged < MAX_ATTACHMENT_FRAME_LOGS ||
+                    signature != session.lastPresentationSignature
+                ) {
+                    session.attachmentFramesLogged += 1
+                    session.lastPresentationSignature = signature
+                    Log.i(
+                        TAG,
+                        "Presented Linux frame session=${session.id} " +
+                            "attachmentFrame=${session.attachmentFramesLogged} " +
+                            "selected=${selectedWidth}x$selectedHeight " +
+                            "surface=${surfaceWidth}x$surfaceHeight " +
+                            "original=${originalWidth}x$originalHeight " +
+                            "logical=${logicalWidth}x$logicalHeight " +
+                            "reasons=$bufferScale," +
+                            "${compositor.presentationComponent(9)} " +
+                            "output=${compositor.presentationComponent(10)}x" +
+                            "${compositor.presentationComponent(11)} " +
+                            "mode=${compositor.presentationComponent(12)}x" +
+                            "${compositor.presentationComponent(13)} " +
+                            "commit=${compositor.presentationComponent(14)} " +
+                            "ack=${compositor.presentationComponent(15)} " +
+                            "serial=${compositor.presentationComponent(16)} " +
+                            "pending=${compositor.presentationComponent(17)} " +
+                            "outputEvents=${compositor.presentationComponent(18)} " +
+                            "outputBinds=${compositor.presentationComponent(19)}",
+                    )
+                }
             }
             pumpClipboardTransfers(session, compositor)
             pumpImeState(session, compositor)

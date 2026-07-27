@@ -19,7 +19,9 @@ use archphene_packages::{
     aur::{AurReview, AurSourceDownload, MAX_AUR_SOURCE_BYTES},
     desktop::{DesktopCatalog, ExecArgument},
 };
-use archphene_process::{GuiRegistry, MAX_COMMAND_ARGUMENTS, ProcessError, PtyRegistry, PtyWaiter};
+use archphene_process::{
+    GuiAppearance, GuiRegistry, MAX_COMMAND_ARGUMENTS, ProcessError, PtyRegistry, PtyWaiter,
+};
 use archphene_root::{ArchRoot, BootstrapReport, RootError};
 use archphene_storage::{MirrorCancellation, MirrorImport, MirrorImportReport, StorageError};
 
@@ -567,6 +569,7 @@ impl RuntimeHost {
         descriptor_id_hex: &str,
         generation: u64,
         wayland_display: &str,
+        appearance: GuiAppearance,
     ) -> Result<u64, LauncherProcessError> {
         let (command, arguments) = {
             let descriptor = self
@@ -610,7 +613,7 @@ impl RuntimeHost {
             .package_runtime
             .as_ref()
             .ok_or(PackageRuntimeError::InvalidPath)?
-            .command_environment()?;
+            .command_environment_with_gui(appearance)?;
         if arguments.len() > MAX_COMMAND_ARGUMENTS {
             return Err(LauncherProcessError::Process(ProcessError::InvalidArgument));
         }

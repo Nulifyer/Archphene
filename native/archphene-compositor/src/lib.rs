@@ -246,6 +246,7 @@ struct SurfaceState {
     children_above: Vec<WlSurface>,
     pending_subsurface_stack: Vec<(WlSurface, WlSurface, bool)>,
     xdg_configured: bool,
+    entered_outputs: Vec<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1741,6 +1742,8 @@ fn launcher_presentation_component(state: &CompositorState, component: i32) -> i
         15 => i32::try_from(state.xdg_ack_count).unwrap_or(i32::MAX),
         16 => i32::try_from(state.next_configure_serial).unwrap_or(i32::MAX),
         17 => primary_pending_configures,
+        18 => i32::try_from(state.output_event_count).unwrap_or(i32::MAX),
+        19 => i32::try_from(state.output_binds).unwrap_or(i32::MAX),
         _ => -1,
     }
 }
@@ -4071,6 +4074,37 @@ impl Dispatch<WlDataOffer, DataOfferData> for CompositorState {
         state.data_offer_count = state.data_offer_count.saturating_sub(1);
     }
 }
+fn enter_surface_output(state: &mut CompositorState, surface: &WlSurface, output: &WlOutput) {
+    if !surface.is_alive() || !output.is_alive() || !output.id().same_client_as(&surface.id()) {
+        return;
+    }
+    let Some(data) = surface.data::<SurfaceData>() else {
+        return;
+    };
+    let protocol_id = output.id().protocol_id();
+    let mut surface_state = data.inner.lock().unwrap_or_else(|error| error.into_inner());
+    if surface_state.committed_frame.is_none()
+        || surface_state.entered_outputs.contains(&protocol_id)
+        || surface_state.entered_outputs.len() >= 8
+    {
+        return;
+    }
+    surface_state.entered_outputs.push(protocol_id);
+    drop(surface_state);
+    surface.enter(output);
+    if surface.version() >= 6 {
+        surface.preferred_buffer_scale(state.output_scale);
+        surface.preferred_buffer_transform(wl_output::Transform::Normal);
+    }
+    state.output_event_count = state.output_event_count.saturating_add(1);
+}
+
+fn enter_surface_outputs(state: &mut CompositorState, surface: &WlSurface) {
+    for output in state.outputs.clone() {
+        enter_surface_output(state, surface, &output);
+    }
+}
+
 impl GlobalDispatch<WlOutput, ()> for CompositorState {
     fn bind(
         state: &mut Self,
@@ -4105,18 +4139,8 @@ impl GlobalDispatch<WlOutput, ()> for CompositorState {
             output.scale(state.output_scale);
             output.done();
         }
-        if let Some(surface) = state
-            .keyboard_focus_surface
-            .as_ref()
-            .or(state.pointer_focus_surface.as_ref())
-            .filter(|surface| output.id().same_client_as(&surface.id()))
-        {
-            surface.enter(&output);
-            if surface.version() >= 6 {
-                surface.preferred_buffer_scale(state.output_scale);
-                surface.preferred_buffer_transform(wl_output::Transform::Normal);
-            }
-            state.output_event_count = state.output_event_count.saturating_add(1);
+        for surface in state.surfaces.clone() {
+            enter_surface_output(state, &surface, &output);
         }
         state.output_binds = state.output_binds.saturating_add(1);
         state.output_event_count = state.output_event_count.saturating_add(6);
@@ -4142,6 +4166,16 @@ impl Dispatch<WlOutput, ()> for CompositorState {
 
     fn destroyed(state: &mut Self, _client: ClientId, resource: &WlOutput, _data: &()) {
         state.outputs.retain(|output| output.id() != resource.id());
+        let protocol_id = resource.id().protocol_id();
+        for surface in &state.surfaces {
+            if let Some(data) = surface.data::<SurfaceData>() {
+                data.inner
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .entered_outputs
+                    .retain(|entered| *entered != protocol_id);
+            }
+        }
     }
 }
 
@@ -5552,6 +5586,9 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
                 drop(surface);
 
                 state.surface_commit_count = state.surface_commit_count.saturating_add(1);
+                if has_frame {
+                    enter_surface_outputs(state, resource);
+                }
                 let damage_origin = if publishes_root_frame {
                     Some(root_surface_origin(state))
                 } else {

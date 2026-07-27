@@ -294,12 +294,26 @@ class ArchpheneRuntimeService : Service() {
             descriptorIdHex: String,
             generation: Long,
             waylandDisplay: String,
+            dark: Boolean,
+            fontPercent: Int,
+            controlVisualDp: Int,
+            controlTargetDp: Int,
+            accent: Int,
+            background: Int,
+            foreground: Int,
         ): Long =
             this@ArchpheneRuntimeService.openLauncherProcess(
                 androidPackage,
                 descriptorIdHex,
                 generation,
                 waylandDisplay,
+                dark,
+                fontPercent,
+                controlVisualDp,
+                controlTargetDp,
+                accent,
+                background,
+                foreground,
             )
 
         internal fun closeLauncherProcess(launcherHandle: Long): Boolean =
@@ -1400,6 +1414,13 @@ class ArchpheneRuntimeService : Service() {
         descriptorIdHex: String,
         generation: Long,
         waylandDisplay: String,
+        dark: Boolean,
+        fontPercent: Int,
+        controlVisualDp: Int,
+        controlTargetDp: Int,
+        accent: Int,
+        background: Int,
+        foreground: Int,
     ): Long {
         val activeHandle = readyHandle
         if (
@@ -1407,6 +1428,10 @@ class ArchpheneRuntimeService : Service() {
             androidPackage.length != 53 ||
             descriptorIdHex.length != 64 ||
             generation !in 1..Int.MAX_VALUE.toLong() ||
+            fontPercent !in 100..200 ||
+            controlVisualDp !in 12..48 ||
+            controlTargetDp !in 24..64 ||
+            controlTargetDp < controlVisualDp ||
             waylandDisplay.isEmpty() ||
             waylandDisplay.length > 64 ||
             !waylandDisplay.all { character ->
@@ -1421,7 +1446,9 @@ class ArchpheneRuntimeService : Service() {
             return 0L
         }
         val request =
-            "G1\t$androidPackage\t$descriptorIdHex\t$generation\t$waylandDisplay\n"
+            "G2\t$androidPackage\t$descriptorIdHex\t$generation\t$waylandDisplay\t" +
+                "${if (dark) 1 else 0}\t$fontPercent\t$controlVisualDp\t$controlTargetDp\t" +
+                "${rgbHex(accent)}\t${rgbHex(background)}\t${rgbHex(foreground)}\n"
         val requestBytes = request.toByteArray(StandardCharsets.US_ASCII)
         if (requestBytes.size > launcherAuthorizationRequestBuffer.capacity()) {
             return 0L
@@ -1455,6 +1482,15 @@ class ArchpheneRuntimeService : Service() {
         }
         return launcherHandle
     }
+
+    private fun rgbHex(color: Int): String =
+        String.format(
+            java.util.Locale.ROOT,
+            "%02x%02x%02x",
+            color shr 16 and 0xff,
+            color shr 8 and 0xff,
+            color and 0xff,
+        )
 
     @Synchronized
     private fun closeLauncherProcess(launcherHandle: Long): Boolean {

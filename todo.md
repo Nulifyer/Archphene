@@ -380,8 +380,10 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [x] On physical AArch64, review, build, independently verify, and atomically install the six-output `dotnet-core-bin` split package through the normal AUR UI. Samsung runs SDK 10.0.302, creates/restores/builds/runs an MVC project in shared Home, serves it to the Android browser, and reaps the Kestrel descendant when the shell is stopped.
 - [x] Create a new ASP.NET Core MVC project in shared Arch storage.
 - [ ] Open the project in Code and validate editing, search, Git, terminal PTY, language services, restore/build, and extension-host subprocesses.
-  - [ ] Restore the generic Qt/GTK appearance bridge in the current Rust/Kotlin launch path. The settings modules and former prototype policy still exist, but `archphene-process` currently publishes neither the GTK settings/module variables nor Qt control/theme variables. A full-device Samsung Code capture shows the resulting native GTK folder chooser in the wrong light theme with unusably small text and controls beside the correctly scaled dark Electron UI.
-  - [ ] Fix and regress the Samsung Code native folder chooser's header actions. Folder rows select and navigate, but the visible Open and Cancel actions do not activate through touch, mouse-source injection, or keyboard activation, blocking the normal user flow before the shared `ArchpheneMvp` folder can open.
+  - [x] Open the shared `ArchpheneMvp` folder through Code's stock GTK chooser on Samsung and verify the resulting Explorer tree with a full-device screenshot.
+  - [x] Restore the checksum-pinned generic Qt/GTK appearance bridge in the current Rust/Kotlin launch path. Rust now atomically publishes bounded GTK 3/4 and KDE configuration, exports separate text/control/theme values without global geometry scaling, and loads the verified GTK settings module plus complete Qt platform-theme/style topology. Samsung proves the GTK module loads and follows Android's current light mode; toolkit-specific and live-setting validation remains in the generic appearance matrix.
+  - [x] Fix and regress the Samsung Code native folder chooser's displaced header actions. The compositor now sends `wl_surface.enter` and preferred buffer scale to every mapped surface, not only the surface focused when `wl_output` was bound. The chooser commits scale 3, a tap on the visible Open action activates it, and the selected shared project opens.
+  - [ ] Replace the phone-sized native desktop chooser with a generic Android DocumentsUI/desktop-portal path, or another reviewed mobile secondary-window policy. Correct output scale and input now work, but fitting GTK's roughly 1,390-logical-pixel desktop minimum into a 432dp phone still makes the chooser text and controls too small. Increasing toolkit font scale grows the dialog minimum proportionally and is not a solution.
 - [ ] Run the project under the debugger, stop at breakpoints, inspect state, continue, and restart.
 - [x] Open the served localhost URL in Android's browser and validate routing back to the running Linux process.
 - [ ] Validate the workflow with touch/IME on a phone and keyboard/mouse on tablet or external display.
@@ -394,6 +396,7 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
 - [ ] Define a generic overflow/panning policy for fixed desktop layouts at 200% phone text scaling without app-specific patches.
 - [ ] Finish reproducible AArch64 Qt/KDE and GTK settings bridge builds by pinning the required KConfig and GLib development sysroots.
 - [ ] Complete secondary-window behavior for phone, tablet, freeform, and external displays.
+- [ ] Provide a generic file-dialog bridge from Linux portal requests to Android DocumentsUI while preserving Archphene Home access through the existing `DocumentsProvider`, cancellation, multiple selection, save/create, and descriptor safety.
 - [ ] Validate automatic and explicit appearance settings across:
   - [ ] Qt 6/KDE
   - [ ] GTK 3
@@ -403,6 +406,7 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [ ] Electron/Chromium
   - [ ] XWayland
 - [ ] Keep geometry scale, text scale, visible control size, and touch target size distinct, documented, live where supported, and predictable after relaunch.
+- [ ] Expose three described appearance controls in the manager with Auto as each default: app geometry scale, app text at explicit 100–200%, and control visual size in dp. Use bounded ticked sliders, retain the requested 20dp phone control default, keep touch targets independently accessible, persist overrides, and define whether a running app updates live or on relaunch.
 - [ ] Validate Android light/dark, explicit Archphene override, Material You accents, font settings, phone/tablet/docked auto policy, and runtime display changes.
 - [ ] Continue using full-device screenshots, rendered-pixel checks, accessibility trees, content geometry, input traces, and logs for visual claims.
 

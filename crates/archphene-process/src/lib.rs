@@ -43,6 +43,7 @@ const MAX_GUI_LOG_DRAIN_BYTES: usize = 64 * 1024;
 const GUI_CLOSE_GRACE: Duration = Duration::from_millis(750);
 const GUI_TERMINATE_GRACE: Duration = Duration::from_millis(750);
 const MAX_GDK_PIXBUF_MODULE_FILE_BYTES: u64 = 16 * 1024;
+const GTK_SETTINGS_LOGICAL_PATH: &str = "/home/archphene/.config/gtk-3.0/settings.ini";
 static OUTPUT_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
@@ -121,6 +122,60 @@ impl CommandOutput {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GuiAppearance {
+    dark: bool,
+    font_percent: u16,
+    control_visual_dp: u16,
+    control_target_dp: u16,
+    accent: [u8; 3],
+    background: [u8; 3],
+    foreground: [u8; 3],
+}
+
+impl GuiAppearance {
+    pub fn new(
+        dark: bool,
+        font_percent: u16,
+        control_visual_dp: u16,
+        control_target_dp: u16,
+        accent: [u8; 3],
+        background: [u8; 3],
+        foreground: [u8; 3],
+    ) -> Result<Self, ProcessError> {
+        if !(100..=200).contains(&font_percent)
+            || !(12..=48).contains(&control_visual_dp)
+            || !(24..=64).contains(&control_target_dp)
+            || control_target_dp < control_visual_dp
+        {
+            return Err(ProcessError::InvalidEnvironment);
+        }
+        Ok(Self {
+            dark,
+            font_percent,
+            control_visual_dp,
+            control_target_dp,
+            accent,
+            background,
+            foreground,
+        })
+    }
+}
+
+impl Default for GuiAppearance {
+    fn default() -> Self {
+        Self {
+            dark: false,
+            font_percent: 100,
+            control_visual_dp: 20,
+            control_target_dp: 32,
+            accent: [23, 147, 209],
+            background: [239, 240, 241],
+            foreground: [35, 38, 41],
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct CommandEnvironment {
     arch_root: PathBuf,
@@ -129,6 +184,9 @@ pub struct CommandEnvironment {
     path_bridge: PathBuf,
     command_directory: PathBuf,
     gdk_pixbuf_module_file: Option<PathBuf>,
+    gtk_settings_module: Option<PathBuf>,
+    qt_plugin_root: Option<PathBuf>,
+    appearance: GuiAppearance,
 }
 
 impl CommandEnvironment {
@@ -194,7 +252,24 @@ impl CommandEnvironment {
             path_bridge: resolved_bridge,
             command_directory: command_directory.to_path_buf(),
             gdk_pixbuf_module_file,
+            gtk_settings_module: None,
+            qt_plugin_root: None,
+            appearance: GuiAppearance::default(),
         })
+    }
+
+    pub fn with_gui_support(
+        mut self,
+        gtk_settings_module: Option<&Path>,
+        qt_plugin_root: Option<&Path>,
+        appearance: GuiAppearance,
+    ) -> Result<Self, ProcessError> {
+        self.gtk_settings_module =
+            validate_optional_gui_file(&self.arch_root, gtk_settings_module)?;
+        self.qt_plugin_root = validate_optional_gui_directory(&self.arch_root, qt_plugin_root)?;
+        write_gui_appearance(&self.arch_root, appearance)?;
+        self.appearance = appearance;
+        Ok(self)
     }
 
     pub fn run(&self, command: &str, arguments: &[&str]) -> Result<CommandOutput, ProcessError> {
@@ -449,9 +524,52 @@ impl CommandEnvironment {
             .env("XDG_SESSION_TYPE", "wayland")
             .env("XDG_CURRENT_DESKTOP", "Archphene")
             .env("GDK_BACKEND", "wayland")
+            .env(
+                "GTK_THEME",
+                if self.appearance.dark {
+                    "Adwaita:dark"
+                } else {
+                    "Adwaita"
+                },
+            )
+            .env("ARCHPHENE_GTK_SETTINGS_FILE", GTK_SETTINGS_LOGICAL_PATH)
+            .env("GTK_USE_PORTAL", "0")
+            .env("GIO_USE_VFS", "local")
+            .env("XDG_DATA_DIRS", "/usr/local/share:/usr/share")
+            .env("GSETTINGS_SCHEMA_DIR", "/usr/share/glib-2.0/schemas")
             .env("QT_QPA_PLATFORM", "wayland")
+            .env("QT_QPA_PLATFORMTHEME", "archphene")
+            .env("QT_STYLE_OVERRIDE", "archphene")
+            .env("QT_FONT_DPI", "96")
+            .env("QT_SCALE_FACTOR_ROUNDING_POLICY", "PassThrough")
+            .env(
+                "ARCHPHENE_FONT_POINT_SIZE",
+                ((12_u32 * u32::from(self.appearance.font_percent) + 50) / 100).to_string(),
+            )
+            .env(
+                "ARCHPHENE_QT_CONTROL_MIN_SIZE",
+                self.appearance.control_target_dp.to_string(),
+            )
+            .env(
+                "ARCHPHENE_QT_CONTROL_VISUAL_SIZE",
+                self.appearance.control_visual_dp.to_string(),
+            )
+            .env(
+                "ARCHPHENE_COLOR_SCHEME",
+                if self.appearance.dark {
+                    "dark"
+                } else {
+                    "light"
+                },
+            )
             .env("SDL_VIDEODRIVER", "wayland")
             .env("ARCHPHENE_SUPERVISED_PROCESS_GROUP", "1");
+        if let Some(module) = self.gtk_settings_module.as_ref() {
+            command.env("GTK_MODULES", module);
+        }
+        if let Some(root) = self.qt_plugin_root.as_ref() {
+            command.env("QT_PLUGIN_PATH", root);
+        }
         command
     }
 
@@ -1381,6 +1499,226 @@ fn normalize_under_root(root: &Path, path: &Path) -> Result<PathBuf, ProcessErro
     Ok(normalized)
 }
 
+fn validate_optional_gui_file(
+    arch_root: &Path,
+    path: Option<&Path>,
+) -> Result<Option<PathBuf>, ProcessError> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    if !valid_absolute_path(path) {
+        return Err(ProcessError::InvalidEnvironment);
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_symlink() {
+        return Err(ProcessError::InvalidEnvironment);
+    }
+    let resolved = path.canonicalize()?;
+    let metadata = fs::symlink_metadata(&resolved)?;
+    if !safe_regular_file(&metadata) || resolved == arch_root {
+        return Err(ProcessError::InvalidEnvironment);
+    }
+    Ok(Some(path.to_path_buf()))
+}
+
+fn validate_optional_gui_directory(
+    arch_root: &Path,
+    path: Option<&Path>,
+) -> Result<Option<PathBuf>, ProcessError> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    if !valid_absolute_path(path) || path == arch_root {
+        return Err(ProcessError::InvalidEnvironment);
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() || metadata.mode() & 0o022 != 0 {
+        return Err(ProcessError::InvalidEnvironment);
+    }
+    let resolved_root = arch_root.canonicalize()?;
+    let resolved = path.canonicalize()?;
+    if resolved == resolved_root || !resolved.starts_with(&resolved_root) {
+        return Err(ProcessError::InvalidEnvironment);
+    }
+    Ok(Some(path.to_path_buf()))
+}
+
+fn write_gui_appearance(root: &Path, appearance: GuiAppearance) -> Result<(), ProcessError> {
+    let config = root.join("home/archphene/.config");
+    let gtk3 = config.join("gtk-3.0");
+    let gtk4 = config.join("gtk-4.0");
+    for directory in [&config, &gtk3, &gtk4] {
+        prepare_gui_config_directory(directory)?;
+    }
+
+    let point_size = (12_u32 * u32::from(appearance.font_percent) + 50) / 100;
+    let font_pixels = (16_u32 * u32::from(appearance.font_percent) + 50) / 100;
+    let theme = if appearance.dark {
+        "Adwaita-dark"
+    } else {
+        "Adwaita"
+    };
+    let settings = format!(
+        "[Settings]\n\
+gtk-theme-name={theme}\n\
+gtk-icon-theme-name=Adwaita\n\
+gtk-font-name=Noto Sans {point_size}\n\
+gtk-application-prefer-dark-theme={}\n\
+gtk-menu-images=false\n\
+gtk-button-images=false\n",
+        appearance.dark,
+    );
+    let accent = css_color(appearance.accent);
+    let background = css_color(appearance.background);
+    let foreground = css_color(appearance.foreground);
+    let visual = appearance.control_visual_dp;
+    let target = appearance.control_target_dp;
+    let padding = target.saturating_div(4).max(4);
+    let css = format!(
+        "@define-color accent_color {accent};\n\
+@define-color accent_bg_color {accent};\n\
+@define-color accent_fg_color {background};\n\
+@define-color theme_selected_bg_color {accent};\n\
+@define-color theme_selected_fg_color {background};\n\
+window, dialog, popover, menu {{ font-size: {font_pixels}px; }}\n\
+button, entry, combobox, menuitem, checkbutton, radiobutton {{ min-height: {target}px; }}\n\
+checkbutton check, check, radiobutton radio, radio {{ min-width: {visual}px; min-height: {visual}px; }}\n\
+menubar > menuitem, menu menuitem {{ min-height: {target}px; padding: 0 {padding}px; }}\n\
+headerbar {{ min-height: {target}px; }}\n\
+headerbar button.titlebutton, headerbar .titlebutton {{ min-width: {target}px; min-height: {target}px; padding: 2px; }}\n\
+headerbar button.titlebutton image, headerbar .titlebutton image, .titlebar button.titlebutton image, windowcontrols image {{ min-width: {visual}px; min-height: {visual}px; }}\n\
+scrollbar slider {{ min-width: {visual}px; min-height: {visual}px; }}\n\
+checkbutton check:checked, check:checked, radiobutton radio:checked, radio:checked, switch:checked {{ background-image: none; background-color: @accent_bg_color; color: @accent_fg_color; border-color: @accent_bg_color; }}\n\
+text selection, entry selection, label selection, treeview:selected, row:selected {{ background-color: @accent_bg_color; color: @accent_fg_color; }}\n\
+tooltip {{ background-color: {background}; color: {foreground}; }}\n",
+    );
+    for directory in [&gtk3, &gtk4] {
+        publish_gui_config(&directory.join("settings.ini"), settings.as_bytes())?;
+        publish_gui_config(&directory.join("gtk.css"), css.as_bytes())?;
+    }
+
+    let kde = kde_globals(appearance, point_size);
+    let kde_path = config.join("kdeglobals");
+    if gui_managed_kde_file(&kde_path)? {
+        publish_gui_config(&kde_path, kde.as_bytes())?;
+    }
+    Ok(())
+}
+
+fn prepare_gui_config_directory(path: &Path) -> Result<(), ProcessError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            Err(ProcessError::InvalidEnvironment)
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::create_dir(path)?;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+            Ok(())
+        }
+        Err(error) => Err(ProcessError::Io(error)),
+    }
+}
+
+fn publish_gui_config(path: &Path, content: &[u8]) -> Result<(), ProcessError> {
+    if content.is_empty() || content.len() > 64 * 1024 {
+        return Err(ProcessError::InvalidEnvironment);
+    }
+    let parent = path.parent().ok_or(ProcessError::InvalidEnvironment)?;
+    let name = path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or(ProcessError::InvalidEnvironment)?;
+    let temporary = parent.join(format!(".{name}.archphene-new"));
+    match fs::symlink_metadata(&temporary) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(ProcessError::InvalidEnvironment);
+        }
+        Ok(_) => fs::remove_file(&temporary)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(ProcessError::Io(error)),
+    }
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&temporary)?;
+    file.write_all(content)?;
+    file.sync_all()?;
+    drop(file);
+    fs::rename(&temporary, path)?;
+    Ok(())
+}
+
+fn gui_managed_kde_file(path: &Path) -> Result<bool, ProcessError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(true),
+        Err(error) => return Err(ProcessError::Io(error)),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 64 * 1024 {
+        return Err(ProcessError::InvalidEnvironment);
+    }
+    let content = fs::read(path)?;
+    Ok(
+        content.starts_with(b"# Managed by Archphene appearance settings.\n")
+            || (content
+                .windows(b"ColorScheme=Archphene".len())
+                .any(|value| value == b"ColorScheme=Archphene")
+                && content
+                    .windows(b"[Archphene]".len())
+                    .any(|value| value == b"[Archphene]")),
+    )
+}
+
+fn css_color(color: [u8; 3]) -> String {
+    format!("#{:02x}{:02x}{:02x}", color[0], color[1], color[2])
+}
+
+fn kde_color(color: [u8; 3]) -> String {
+    format!("{},{},{}", color[0], color[1], color[2])
+}
+
+fn kde_globals(appearance: GuiAppearance, point_size: u32) -> String {
+    let background = kde_color(appearance.background);
+    let foreground = kde_color(appearance.foreground);
+    let accent = kde_color(appearance.accent);
+    let alternate = if appearance.dark {
+        "42,46,50"
+    } else {
+        "246,247,248"
+    };
+    let view = if appearance.dark {
+        "27,30,32"
+    } else {
+        "255,255,255"
+    };
+    let button = if appearance.dark {
+        "49,54,59"
+    } else {
+        "239,240,241"
+    };
+    let selection_foreground = background.as_str();
+    format!(
+        "# Managed by Archphene appearance settings.\n\
+[General]\n\
+Name=Archphene {}\n\
+ColorScheme=Archphene{}\n\
+font=Noto Sans,{point_size},-1,5,50,0,0,0,0,0\n\
+fixed=Noto Sans Mono,{point_size},-1,5,50,0,0,0,0,0\n\n\
+[Colors:Window]\nBackgroundNormal={background}\nBackgroundAlternate={alternate}\nForegroundNormal={foreground}\nForegroundInactive={foreground}\nForegroundActive={foreground}\nForegroundLink={accent}\nDecorationFocus={accent}\nDecorationHover={accent}\n\n\
+[Colors:View]\nBackgroundNormal={view}\nBackgroundAlternate={alternate}\nForegroundNormal={foreground}\nForegroundInactive={foreground}\nForegroundActive={foreground}\nForegroundLink={accent}\nForegroundVisited={accent}\nDecorationFocus={accent}\nDecorationHover={accent}\n\n\
+[Colors:Button]\nBackgroundNormal={button}\nBackgroundAlternate={alternate}\nForegroundNormal={foreground}\nForegroundInactive={foreground}\nForegroundActive={foreground}\nForegroundLink={accent}\nDecorationFocus={accent}\nDecorationHover={accent}\n\n\
+[Colors:Selection]\nBackgroundNormal={accent}\nBackgroundAlternate={accent}\nForegroundNormal={selection_foreground}\nForegroundInactive={selection_foreground}\nForegroundActive={selection_foreground}\nDecorationFocus={accent}\nDecorationHover={accent}\n\n\
+[Colors:Tooltip]\nBackgroundNormal={button}\nBackgroundAlternate={alternate}\nForegroundNormal={foreground}\nForegroundInactive={foreground}\nForegroundActive={foreground}\n\n\
+[Archphene]\nControlDensity=automatic\nControlMinSize={}\nControlVisualSize={}\n",
+        if appearance.dark { "Dark" } else { "Light" },
+        if appearance.dark { "Dark" } else { "Light" },
+        appearance.control_target_dp,
+        appearance.control_visual_dp,
+    )
+}
+
 fn valid_absolute_path(path: &Path) -> bool {
     path.is_absolute()
         && !path.as_os_str().is_empty()
@@ -2042,6 +2380,91 @@ mod tests {
         assert_eq!(gui_value("SDL_VIDEODRIVER"), Some(OsStr::new("wayland")));
         assert!(validate_wayland_display("../escape").is_err());
         assert!(validate_wayland_display("/absolute").is_err());
+    }
+
+    #[test]
+    fn gui_appearance_is_bounded_published_and_exported_without_geometry_scaling() {
+        let root = TestRoot::new();
+        root.command("loader");
+        fs::create_dir_all(root.0.join("home/archphene")).expect("home");
+        let native = root.0.join("native");
+        let aliases = root.0.join("run/aliases");
+        let plugins = root.0.join("run/toolkit-plugins");
+        fs::create_dir(&native).expect("native");
+        fs::create_dir_all(&aliases).expect("aliases");
+        fs::create_dir_all(plugins.join("platformthemes")).expect("plugins");
+        fs::create_dir(plugins.join("styles")).expect("styles");
+        let bridge = native.join("libbridge.so");
+        fs::write(&bridge, b"bridge").expect("bridge");
+        fs::set_permissions(&bridge, fs::Permissions::from_mode(0o755)).expect("bridge mode");
+        let bridge_alias = aliases.join("libbridge.so");
+        symlink(&bridge, &bridge_alias).expect("bridge alias");
+        let gtk = native.join("libgtksettings.so");
+        fs::write(&gtk, b"settings").expect("settings module");
+        fs::set_permissions(&gtk, fs::Permissions::from_mode(0o755)).expect("settings mode");
+        let gtk_alias = aliases.join("libgtksettings.so");
+        symlink(&gtk, &gtk_alias).expect("settings alias");
+        let appearance = GuiAppearance::new(
+            true,
+            150,
+            20,
+            32,
+            [0x86, 0x5a, 0xaa],
+            [0x20, 0x21, 0x22],
+            [0xee, 0xef, 0xf0],
+        )
+        .expect("appearance");
+        let environment = CommandEnvironment::new(
+            &root.0,
+            &root.0.join("usr/bin/loader"),
+            aliases.as_os_str(),
+            &bridge_alias,
+            &aliases,
+            None,
+        )
+        .expect("base environment")
+        .with_gui_support(Some(&gtk_alias), Some(&plugins), appearance)
+        .expect("GUI environment");
+        let launch = LaunchPlan {
+            program: root.0.join("usr/bin/loader"),
+            argv0: "loader".to_owned(),
+            interpreter_argument: None,
+            script: None,
+        };
+        let command = environment.build_gui_command(&launch, &[], "launcher.sock");
+        let value = |name: &str| {
+            command
+                .get_envs()
+                .find_map(|(key, value)| (key == name).then_some(value).flatten())
+        };
+        assert_eq!(value("GTK_MODULES"), Some(gtk_alias.as_os_str()));
+        assert_eq!(value("GTK_THEME"), Some(OsStr::new("Adwaita:dark")));
+        assert_eq!(value("GDK_SCALE"), None);
+        assert_eq!(value("GDK_DPI_SCALE"), None);
+        assert_eq!(value("QT_PLUGIN_PATH"), Some(plugins.as_os_str()));
+        assert_eq!(value("ARCHPHENE_FONT_POINT_SIZE"), Some(OsStr::new("18")));
+        assert_eq!(
+            value("ARCHPHENE_QT_CONTROL_MIN_SIZE"),
+            Some(OsStr::new("32"))
+        );
+        assert_eq!(
+            value("ARCHPHENE_QT_CONTROL_VISUAL_SIZE"),
+            Some(OsStr::new("20"))
+        );
+        assert_eq!(value("QT_SCALE_FACTOR"), None);
+        let settings =
+            fs::read_to_string(root.0.join("home/archphene/.config/gtk-3.0/settings.ini"))
+                .expect("GTK settings");
+        assert!(settings.contains("gtk-application-prefer-dark-theme=true"));
+        assert!(settings.contains("gtk-font-name=Noto Sans 18"));
+        let css = fs::read_to_string(root.0.join("home/archphene/.config/gtk-3.0/gtk.css"))
+            .expect("GTK CSS");
+        assert!(css.contains("min-width: 20px"));
+        assert!(css.contains("min-height: 32px"));
+        let kde = fs::read_to_string(root.0.join("home/archphene/.config/kdeglobals"))
+            .expect("KDE settings");
+        assert!(kde.contains("ColorScheme=ArchpheneDark"));
+        assert!(kde.contains("ControlVisualSize=20"));
     }
 
     #[test]

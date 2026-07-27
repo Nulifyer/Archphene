@@ -9,6 +9,10 @@ archphene_require_command sha256sum
   cd "$ARCHPHENE_ROOT/prebuilt/gtk3-compat"
   sha256sum --check --quiet SHA256SUMS
 ) || archphene_die "verified GTK compatibility payload changed"
+(
+  cd "$ARCHPHENE_ROOT/prebuilt/qt-bridge"
+  sha256sum --check --quiet SHA256SUMS
+) || archphene_die "verified Qt bridge payload changed"
 
 generated="$ARCHPHENE_ROOT/android/app/build/generated/packageRuntime"
 staging="$(mktemp -d "$ARCHPHENE_ROOT/tooling/build/package-runtime-stage.XXXXXX")"
@@ -100,15 +104,30 @@ stage_architecture() {
   done < <(find "$glibc_root" -maxdepth 1 -type f -name '*.so.*' | sort)
 
   local gtk_compat="$ARCHPHENE_ROOT/prebuilt/gtk3-compat/$architecture"
+  local qt_compat_architecture="$architecture"
+  [[ "$architecture" == aarch64 ]] && qt_compat_architecture=arm64-v8a
+  local qt_compat="$ARCHPHENE_ROOT/prebuilt/qt-bridge/$qt_compat_architecture"
   archphene_require_file "$gtk_compat/libarchphene_gtk3_pixbuf.so"
   archphene_require_file "$gtk_compat/libarchphene_gtk3_rsvg.so"
   archphene_require_file "$gtk_compat/libarchphene_gtk3_pixbufloader_svg.so"
+  archphene_require_file "$gtk_compat/libarchphene_gtk3_settings.so"
+  archphene_require_file "$qt_compat/libarchphene_qt_platform_theme.so"
+  archphene_require_file "$qt_compat/libarchphene_qt_style.so"
+  archphene_require_file "$qt_compat/libarchphene_kde_config.so"
   sources["libgdk_pixbuf-2.0.so.0"]="$gtk_compat/libarchphene_gtk3_pixbuf.so"
   roles["libgdk_pixbuf-2.0.so.0"]=library
   sources["librsvg-2.so.2"]="$gtk_compat/libarchphene_gtk3_rsvg.so"
   roles["librsvg-2.so.2"]=library
   sources["libarchphene_pixbufloader_svg.so"]="$gtk_compat/libarchphene_gtk3_pixbufloader_svg.so"
   roles["libarchphene_pixbufloader_svg.so"]=library
+  sources["libarchphene_gtk3_settings.so"]="$gtk_compat/libarchphene_gtk3_settings.so"
+  roles["libarchphene_gtk3_settings.so"]=library
+  sources["libarchphene_qt_platform_theme.so"]="$qt_compat/libarchphene_qt_platform_theme.so"
+  roles["libarchphene_qt_platform_theme.so"]=library
+  sources["libarchphene_qt_style.so"]="$qt_compat/libarchphene_qt_style.so"
+  roles["libarchphene_qt_style.so"]=library
+  sources["libarchphene_kde_config.so"]="$qt_compat/libarchphene_kde_config.so"
+  roles["libarchphene_kde_config.so"]=library
 
   declare -A packaged_hashes=()
   local identity packaged size actual_machine

@@ -1434,6 +1434,20 @@ SVG module, and exports it to every Linux child. Full-device emulator and
 Samsung captures show the unmodified native chooser with rendered SVG icons,
 and both Code processes remain alive through selection.
 
+The current Rust/Kotlin launch path now also stages the checksum-pinned GTK
+settings and Qt platform-theme/style modules, publishes bounded GTK 3/4 and KDE
+appearance files atomically, and carries Android light/dark, Material color,
+text, visible-control, and touch-target values through a versioned launcher
+request. It does not reintroduce global Qt or GTK geometry scaling. On Samsung,
+the GTK module records the expected Android-light `Adwaita` and 12-point font
+policy. A separate Wayland defect explained both the chooser's tiny scale and
+its displaced touches: only a focused surface had received `wl_surface.enter`.
+Every mapped surface now receives output membership and preferred buffer scale;
+the stock chooser commits scale 3, its visible Open action works, and Code opens
+the shared `ArchpheneMvp` tree. Its approximately 1,390-logical-pixel desktop
+minimum is still fitted into a 432dp phone, so a generic DocumentsUI/portal
+flow remains required for production phone file selection.
+
 The x86_64 package lane renders immediate durable progress for a real
 `dotnet-sdk` request and resolves the same shared-root `base` plus SDK closure
 for details, download, size preflight, and commit. The original reused-emulator

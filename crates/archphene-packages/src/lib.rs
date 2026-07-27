@@ -16,7 +16,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use archphene_process::{CommandEnvironment, ProcessError};
+use archphene_process::{CommandEnvironment, GuiAppearance, ProcessError};
 use sha2::{Digest, Sha256};
 
 pub const MAX_MANIFEST_BYTES: usize = 32 * 1024;
@@ -37,6 +37,11 @@ const GDK_PIXBUF_MODULE_TEMP_FILE: &str = "run/.gdk-pixbuf-loaders-v1.tmp";
 const GDK_PIXBUF_LIBRARY: &str = "libgdk_pixbuf-2.0.so.0";
 const GDK_PIXBUF_SVG_LIBRARY: &str = "librsvg-2.so.2";
 const GDK_PIXBUF_SVG_LOADER: &str = "libarchphene_pixbufloader_svg.so";
+const GTK_SETTINGS_LIBRARY: &str = "libarchphene_gtk3_settings.so";
+const QT_PLATFORM_THEME_LIBRARY: &str = "libarchphene_qt_platform_theme.so";
+const QT_STYLE_LIBRARY: &str = "libarchphene_qt_style.so";
+const QT_KDE_CONFIG_LIBRARY: &str = "libarchphene_kde_config.so";
+const TOOLKIT_PLUGIN_DIRECTORY: &str = "run/toolkit-plugins-v1";
 const OUTPUT_FILE: &str = "run/package-command-output.tmp";
 const INSTALL_REASON_INTENT_FILE: &str = "run/package-install-reasons-v1";
 const INSTALL_REASON_INTENT_TEMP_FILE: &str = "run/package-install-reasons-v1.tmp";
@@ -333,6 +338,8 @@ pub struct PackageRuntime {
     library_path: OsString,
     executable_path: OsString,
     gdk_pixbuf_module_file: Option<PathBuf>,
+    gtk_settings_module: Option<PathBuf>,
+    qt_plugin_root: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -647,6 +654,10 @@ impl PackageRuntime {
         let mut has_gdk_pixbuf_library = false;
         let mut has_gdk_pixbuf_svg_library = false;
         let mut has_gdk_pixbuf_svg_loader = false;
+        let mut has_gtk_settings = false;
+        let mut has_qt_platform_theme = false;
+        let mut has_qt_style = false;
+        let mut has_qt_kde_config = false;
         let mut tools: [Option<PathBuf>; 5] = std::array::from_fn(|_| None);
         let mut entry_count = 0_usize;
         for (index, line) in manifest.lines().skip(1).enumerate() {
@@ -678,6 +689,10 @@ impl PackageRuntime {
                     has_gdk_pixbuf_library |= entry.logical == GDK_PIXBUF_LIBRARY;
                     has_gdk_pixbuf_svg_library |= entry.logical == GDK_PIXBUF_SVG_LIBRARY;
                     has_gdk_pixbuf_svg_loader |= entry.logical == GDK_PIXBUF_SVG_LOADER;
+                    has_gtk_settings |= entry.logical == GTK_SETTINGS_LIBRARY;
+                    has_qt_platform_theme |= entry.logical == QT_PLATFORM_THEME_LIBRARY;
+                    has_qt_style |= entry.logical == QT_STYLE_LIBRARY;
+                    has_qt_kde_config |= entry.logical == QT_KDE_CONFIG_LIBRARY;
                 }
                 _ => return Err(PackageRuntimeError::InvalidManifest),
             }
@@ -698,6 +713,12 @@ impl PackageRuntime {
         ];
         if gdk_pixbuf_compatibility.iter().any(|present| *present)
             && !gdk_pixbuf_compatibility.iter().all(|present| *present)
+        {
+            return Err(PackageRuntimeError::InvalidManifest);
+        }
+        let qt_compatibility = [has_qt_platform_theme, has_qt_style, has_qt_kde_config];
+        if qt_compatibility.iter().any(|present| *present)
+            && !qt_compatibility.iter().all(|present| *present)
         {
             return Err(PackageRuntimeError::InvalidManifest);
         }
@@ -726,6 +747,12 @@ impl PackageRuntime {
         }
         let gdk_pixbuf_module_file = if has_gdk_pixbuf_svg_loader {
             Some(prepare_gdk_pixbuf_module_file(arch_root, &alias_root)?)
+        } else {
+            None
+        };
+        let gtk_settings_module = has_gtk_settings.then(|| alias_root.join(GTK_SETTINGS_LIBRARY));
+        let qt_plugin_root = if qt_compatibility.iter().all(|present| *present) {
+            Some(prepare_toolkit_plugin_directory(arch_root, &alias_root)?)
         } else {
             None
         };
@@ -774,6 +801,8 @@ impl PackageRuntime {
             library_path,
             executable_path,
             gdk_pixbuf_module_file,
+            gtk_settings_module,
+            qt_plugin_root,
         };
         if runtime.read_pending_mutation()?.is_none() {
             runtime.recover_pending_install_reasons()?;
@@ -3093,6 +3122,19 @@ impl PackageRuntime {
         )
         .map_err(PackageRuntimeError::from)
     }
+
+    pub fn command_environment_with_gui(
+        &self,
+        appearance: GuiAppearance,
+    ) -> Result<CommandEnvironment, PackageRuntimeError> {
+        self.command_environment()?
+            .with_gui_support(
+                self.gtk_settings_module.as_deref(),
+                self.qt_plugin_root.as_deref(),
+                appearance,
+            )
+            .map_err(PackageRuntimeError::from)
+    }
 }
 
 fn system_trust_bundle_ready(arch_root: &Path) -> bool {
@@ -3291,6 +3333,72 @@ fn prepare_gdk_pixbuf_module_file(
     let temporary = arch_root.join(GDK_PIXBUF_MODULE_TEMP_FILE);
     publish_regular_file(&destination, &temporary, content.as_bytes())?;
     Ok(destination)
+}
+
+fn prepare_toolkit_plugin_directory(
+    arch_root: &Path,
+    alias_root: &Path,
+) -> Result<PathBuf, PackageRuntimeError> {
+    let root = arch_root.join(TOOLKIT_PLUGIN_DIRECTORY);
+    prepare_known_directory(&root, &["platformthemes", "styles"])?;
+    let platformthemes = root.join("platformthemes");
+    let styles = root.join("styles");
+    prepare_known_directory(&platformthemes, &[])?;
+    prepare_known_directory(&styles, &[])?;
+    symlink(
+        alias_root.join(QT_PLATFORM_THEME_LIBRARY),
+        platformthemes.join(QT_PLATFORM_THEME_LIBRARY),
+    )?;
+    symlink(
+        alias_root.join(QT_STYLE_LIBRARY),
+        styles.join(QT_STYLE_LIBRARY),
+    )?;
+    // Keep the helper next to the plugin root as well as in the verified
+    // runtime library path. The platform theme can resolve it without adding
+    // another loader search path.
+    symlink(
+        alias_root.join(QT_KDE_CONFIG_LIBRARY),
+        root.join(QT_KDE_CONFIG_LIBRARY),
+    )?;
+    Ok(root)
+}
+
+fn prepare_known_directory(
+    path: &Path,
+    allowed_directories: &[&str],
+) -> Result<(), PackageRuntimeError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(PackageRuntimeError::UnsafeEntry(path.to_path_buf()));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::create_dir(path)?;
+        }
+        Err(error) => return Err(PackageRuntimeError::Io(error)),
+    }
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    let mut count = 0_usize;
+    for entry in fs::read_dir(path)? {
+        count = count.saturating_add(1);
+        if count > 16 {
+            return Err(PackageRuntimeError::InvalidManifest);
+        }
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_str().ok_or(PackageRuntimeError::InvalidPath)?;
+        let metadata = fs::symlink_metadata(entry.path())?;
+        if allowed_directories.contains(&name) {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(PackageRuntimeError::UnsafeEntry(entry.path()));
+            }
+        } else if metadata.file_type().is_symlink() {
+            fs::remove_file(entry.path())?;
+        } else {
+            return Err(PackageRuntimeError::UnsafeEntry(entry.path()));
+        }
+    }
+    Ok(())
 }
 
 struct ManifestEntry<'a> {
@@ -4732,6 +4840,106 @@ library\tlibgdk_pixbuf-2.0.so.0\tlibarchphene_pkg_333333333333333333333333.so\t6
                 RepositoryArchitecture::X86_64,
             ),
             Err(PackageRuntimeError::InvalidManifest)
+        ));
+    }
+
+    #[test]
+    fn toolkit_modules_publish_complete_verified_plugin_topology() {
+        let tree = TestTree::new();
+        fs::create_dir_all(tree.root.join("home/archphene")).expect("home");
+        for (name, content) in [
+            (
+                "libarchphene_pkg_111111111111111111111111.so",
+                b"loader".as_slice(),
+            ),
+            (
+                "libarchphene_pkg_222222222222222222222222.so",
+                b"pacman".as_slice(),
+            ),
+            (
+                "libarchphene_pkg_333333333333333333333333.so",
+                b"keyring".as_slice(),
+            ),
+            (
+                "libarchphene_pkg_444444444444444444444444.so",
+                b"bridge".as_slice(),
+            ),
+            (
+                "libarchphene_pkg_555555555555555555555555.so",
+                b"trust".as_slice(),
+            ),
+            (
+                "libarchphene_pkg_666666666666666666666666.so",
+                b"gtk".as_slice(),
+            ),
+            (
+                "libarchphene_pkg_777777777777777777777777.so",
+                b"platform".as_slice(),
+            ),
+            (
+                "libarchphene_pkg_888888888888888888888888.so",
+                b"style".as_slice(),
+            ),
+            (
+                "libarchphene_pkg_999999999999999999999999.so",
+                b"kconfig".as_slice(),
+            ),
+        ] {
+            tree.file(name, content);
+        }
+        let manifest = b"# org.archphene.package-runtime.v1\n\
+loader\t@loader\tlibarchphene_pkg_111111111111111111111111.so\t6\n\
+tool\t@pacman\tlibarchphene_pkg_222222222222222222222222.so\t6\n\
+keyring\t@keyring\tlibarchphene_pkg_333333333333333333333333.so\t7\n\
+library\tlibarchphene_path_bridge.so\tlibarchphene_pkg_444444444444444444444444.so\t6\n\
+ownertrust\t@ownertrust\tlibarchphene_pkg_555555555555555555555555.so\t5\n\
+library\tlibarchphene_gtk3_settings.so\tlibarchphene_pkg_666666666666666666666666.so\t3\n\
+library\tlibarchphene_qt_platform_theme.so\tlibarchphene_pkg_777777777777777777777777.so\t8\n\
+library\tlibarchphene_qt_style.so\tlibarchphene_pkg_888888888888888888888888.so\t5\n\
+library\tlibarchphene_kde_config.so\tlibarchphene_pkg_999999999999999999999999.so\t7\n";
+        let runtime = PackageRuntime::prepare(
+            &tree.root,
+            &tree.native,
+            manifest,
+            RepositoryArchitecture::X86_64,
+        )
+        .expect("toolkit runtime");
+        let plugin_root = runtime.qt_plugin_root.as_ref().expect("Qt plugin root");
+        assert!(
+            fs::symlink_metadata(
+                plugin_root
+                    .join("platformthemes")
+                    .join(QT_PLATFORM_THEME_LIBRARY),
+            )
+            .expect("platform theme")
+            .file_type()
+            .is_symlink(),
+        );
+        assert!(
+            fs::symlink_metadata(plugin_root.join("styles").join(QT_STYLE_LIBRARY))
+                .expect("style")
+                .file_type()
+                .is_symlink(),
+        );
+        let appearance = GuiAppearance::new(true, 100, 20, 32, [1, 2, 3], [4, 5, 6], [7, 8, 9])
+            .expect("appearance");
+        runtime
+            .command_environment_with_gui(appearance)
+            .expect("GUI environment");
+
+        let partial = manifest
+            .strip_suffix(
+                b"library\tlibarchphene_kde_config.so\tlibarchphene_pkg_999999999999999999999999.so\t7\n",
+            )
+            .expect("partial manifest");
+        assert!(matches!(
+            PackageRuntime::prepare(
+                &tree.root,
+                &tree.native,
+                partial,
+                RepositoryArchitecture::X86_64,
+            ),
+            Err(PackageRuntimeError::InvalidManifest),
         ));
     }
 
