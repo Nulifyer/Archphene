@@ -18,6 +18,8 @@ esac
 
 library="$root/native/archphene-compositor/target/$target/release/libarchphene_compositor.so"
 [[ -f "$library" ]] || { echo "missing compositor library: $library" >&2; exit 1; }
+runtime_probe="$root/tooling/build/native-compositor-probe/$abi/libarchphene_runtime_process_probe.so"
+[[ -f "$runtime_probe" ]] || { echo "missing runtime process probe: $runtime_probe" >&2; exit 1; }
 rm -rf "$out"
 mkdir -p "$out"/{gen,classes,dex,package/lib/$abi}
 
@@ -28,8 +30,12 @@ javac --release 17 -classpath "$platform" -d "$out/classes" "${java_files[@]}"
 mapfile -d '' class_files < <(find "$out/classes" -type f -name '*.class' -print0)
 "$bt/d8" --lib "$platform" --min-api 23 --output "$out/dex" "${class_files[@]}"
 cp "$library" "$out/package/lib/$abi/libarchphene_compositor.so"
+cp "$runtime_probe" \
+  "$out/package/lib/$abi/libarchphene_runtime_process_probe.so"
 (cd "$out/dex" && jar uf "$out/unsigned.apk" classes.dex)
-(cd "$out/package" && jar uf "$out/unsigned.apk" "lib/$abi/libarchphene_compositor.so")
+(cd "$out/package" && jar uf "$out/unsigned.apk" \
+  "lib/$abi/libarchphene_compositor.so" \
+  "lib/$abi/libarchphene_runtime_process_probe.so")
 "$bt/zipalign" -f 4 "$out/unsigned.apk" "$out/aligned.apk"
 "$bt/apksigner" sign --ks "$KEYSTORE_PATH" --ks-key-alias "$KEY_ALIAS" \
   --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEY_PASSWORD \

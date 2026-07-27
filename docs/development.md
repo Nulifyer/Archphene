@@ -125,6 +125,11 @@ Android presentation also crosses one reviewed graphics boundary:
 window/Bitmap storage is exposed to the compositor only as a bounded RGBA byte
 slice after format, dimensions, stride, nullness, and total size are checked.
 
+The same probe packages a tiny executable for the selected ABI and invokes it
+through the production descriptor launcher. It requires exact output and exit
+status, then checks invalid-descriptor rejection; this covers the reviewed
+fork/exec, inherited-FD, wait, and bounded child-output boundary on Android.
+
 ### Secrets desktop-client fixture
 
 Rebuild the KWallet compatibility daemon and official Arch desktop-client

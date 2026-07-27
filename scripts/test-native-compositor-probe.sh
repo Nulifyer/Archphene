@@ -12,7 +12,7 @@ else
     || archphene_die 'native compositor probe is not installed'
 fi
 archphene_adb_run shell am force-stop org.archphene.compositorprobe; archphene_adb_run logcat -c; archphene_adb_run shell am start -W -n org.archphene.compositorprobe/.MainActivity >/dev/null; archphene_adb_run shell wm dismiss-keyguard || true
-key_sent=false; tap_sent=false; scroll_sent=false; touch_sent=false; deadline=$((SECONDS + 60)); completion='generation-checked JNI handles, registry, Android bitmap, xdg toplevel, keyboard input, damage-batched buffer scale/transform, viewporter/fractional scaling, Choreographer-paced frames, MotionEvent pointer/wheel/touch input, cursor surfaces, pointer gestures, nested popup grabs, synchronized subsurface trees, committed parent geometry, demand-driven clipboard, and Android InputConnection UTF-8 text-input v3 lifecycle complete'
+key_sent=false; tap_sent=false; scroll_sent=false; touch_sent=false; deadline=$((SECONDS + 60)); completion='generation-checked JNI handles, registry, runtime fork/exec, Android bitmap, xdg toplevel, keyboard input, damage-batched buffer scale/transform, viewporter/fractional scaling, Choreographer-paced frames, MotionEvent pointer/wheel/touch input, cursor surfaces, pointer gestures, nested popup grabs, synchronized subsurface trees, committed parent geometry, demand-driven clipboard, and Android InputConnection UTF-8 text-input v3 lifecycle complete'
 while ((SECONDS < deadline)); do
   sleep 0.5; output="$(archphene_adb_run logcat -d -s ArchpheneCompositorProbe:I '*:S')"
   if [[ "$key_sent" == false && "$output" == *'keyboard target ready'* ]]; then archphene_adb_run shell input keyevent KEYCODE_DPAD_LEFT; key_sent=true; fi

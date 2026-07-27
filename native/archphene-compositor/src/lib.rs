@@ -10087,9 +10087,8 @@ impl Drop for CompositorCore {
 /// All exported Java symbols are enclosed here, including their conversion of
 /// Java-owned handles, arrays, direct buffers, surfaces, and bitmaps. Existing
 /// null/length/range checks stay next to that conversion before control reaches
-/// the compositor core. Descriptor and Android graphics operations use their
-/// reviewed wrappers; the remaining legacy runtime-process syscall extraction
-/// stays explicit in `todo.md`.
+/// the compositor core. Descriptor, Android graphics, and runtime-process
+/// operations use their reviewed boundary modules.
 #[allow(clippy::missing_safety_doc)]
 #[allow(unsafe_code)]
 #[rustfmt::skip]
@@ -11182,8 +11181,20 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     i32::try_from(core.ime_editor_action(action, time as u32)).unwrap_or(i32::MAX)
 }
 
+/// Reviewed runtime process boundary for fork/exec, process groups, signals,
+/// descriptor inheritance, and child output collection.
+///
+/// Its public surface accepts validated integers/byte manifests and returns
+/// owned Rust values plus errno-style status. All raw libc process operations
+/// remain inside this module.
+#[cfg(any(target_os = "android", test))]
+#[allow(unsafe_code)]
+mod runtime_process_ffi {
 #[cfg(target_os = "android")]
-fn run_runtime_fd(executable_fd: i32) -> (i32, Vec<u8>) {
+use super::*;
+
+#[cfg(target_os = "android")]
+pub(super) fn run_runtime_fd(executable_fd: i32) -> (i32, Vec<u8>) {
     if executable_fd < 0 {
         return (-libc::EBADF, Vec::new());
     }
@@ -11318,7 +11329,7 @@ const MAX_RUNTIME_LINK_NAME: usize = 128;
 #[cfg(any(target_os = "android", test))]
 const MAX_RUNTIME_ENVIRONMENT_MANIFEST: usize = 32 * 1024;
 #[cfg(any(target_os = "android", test))]
-const MAX_RUNTIME_ENVIRONMENT_VARIABLES: usize = 96;
+pub(super) const MAX_RUNTIME_ENVIRONMENT_VARIABLES: usize = 96;
 #[cfg(any(target_os = "android", test))]
 const MAX_RUNTIME_ARGUMENT_MANIFEST: usize = 32 * 1024;
 #[cfg(any(target_os = "android", test))]
@@ -11338,7 +11349,7 @@ fn valid_runtime_link_name(name: &[u8]) -> bool {
 }
 
 #[cfg(any(target_os = "android", test))]
-fn safe_runtime_program_name(name: &[u8]) -> bool {
+pub(super) fn safe_runtime_program_name(name: &[u8]) -> bool {
     !name.is_empty()
         && name.len() <= 128
         && name.iter().all(|byte| {
@@ -11347,7 +11358,7 @@ fn safe_runtime_program_name(name: &[u8]) -> bool {
 }
 
 #[cfg(any(target_os = "android", test))]
-fn parse_runtime_library_manifest(manifest: &[u8]) -> Result<Vec<(i32, String)>, i32> {
+pub(super) fn parse_runtime_library_manifest(manifest: &[u8]) -> Result<Vec<(i32, String)>, i32> {
     if manifest.is_empty()
         || manifest.len() > MAX_RUNTIME_LIBRARY_MANIFEST
         || !manifest.ends_with(b"\n")
@@ -11390,7 +11401,7 @@ fn parse_runtime_library_manifest(manifest: &[u8]) -> Result<Vec<(i32, String)>,
 }
 
 #[cfg(any(target_os = "android", test))]
-fn parse_runtime_environment(
+pub(super) fn parse_runtime_environment(
     manifest: &[u8],
 ) -> Result<Vec<(std::ffi::CString, std::ffi::CString)>, i32> {
     if manifest.is_empty() {
@@ -11429,7 +11440,7 @@ fn parse_runtime_environment(
 }
 
 #[cfg(any(target_os = "android", test))]
-fn parse_runtime_arguments(manifest: &[u8]) -> Result<Vec<std::ffi::CString>, i32> {
+pub(super) fn parse_runtime_arguments(manifest: &[u8]) -> Result<Vec<std::ffi::CString>, i32> {
     if manifest.is_empty() {
         return Ok(Vec::new());
     }
@@ -11449,7 +11460,7 @@ fn parse_runtime_arguments(manifest: &[u8]) -> Result<Vec<std::ffi::CString>, i3
     Ok(result)
 }
 #[cfg(any(target_os = "android", test))]
-fn runtime_plugin_alias(name: &str) -> Option<&'static str> {
+pub(super) fn runtime_plugin_alias(name: &str) -> Option<&'static str> {
     if name.starts_with("libpipewire-module-") && name.ends_with(".so") {
         return Some("pipewire-0.3");
     }
@@ -11477,7 +11488,7 @@ fn cleanup_runtime_fd_view(inherited: &mut Vec<i32>, links: &[PathBuf]) {
 
 #[cfg(any(target_os = "android", test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RuntimeExecutionState {
+pub(super) enum RuntimeExecutionState {
     Starting,
     Running {
         pgid: libc::pid_t,
@@ -11488,7 +11499,7 @@ enum RuntimeExecutionState {
 }
 
 #[cfg(any(target_os = "android", test))]
-const MAX_RUNTIME_EXECUTIONS: usize = 32;
+pub(super) const MAX_RUNTIME_EXECUTIONS: usize = 32;
 
 #[cfg(any(target_os = "android", test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -11498,19 +11509,19 @@ struct RuntimeExecutionEntry {
 }
 
 #[cfg(any(target_os = "android", test))]
-struct RuntimeExecutionRegistry {
+pub(super) struct RuntimeExecutionRegistry {
     entries: [Option<RuntimeExecutionEntry>; MAX_RUNTIME_EXECUTIONS],
 }
 
 #[cfg(any(target_os = "android", test))]
 impl RuntimeExecutionRegistry {
-    const fn new() -> Self {
+    pub(super) const fn new() -> Self {
         Self {
             entries: [None; MAX_RUNTIME_EXECUTIONS],
         }
     }
 
-    fn begin(&mut self, id: i64) -> Result<(), i32> {
+    pub(super) fn begin(&mut self, id: i64) -> Result<(), i32> {
         if let Some(index) = self.index(id) {
             if self.entries[index]
                 .is_some_and(|entry| entry.state == RuntimeExecutionState::Cancelled)
@@ -11530,7 +11541,12 @@ impl RuntimeExecutionRegistry {
         Ok(())
     }
 
-    fn register_process_group(&mut self, id: i64, pgid: libc::pid_t, target: libc::pid_t) -> bool {
+    pub(super) fn register_process_group(
+        &mut self,
+        id: i64,
+        pgid: libc::pid_t,
+        target: libc::pid_t,
+    ) -> bool {
         let Some(entry) = self.entry_mut(id) else {
             return false;
         };
@@ -11547,7 +11563,7 @@ impl RuntimeExecutionRegistry {
         }
     }
 
-    fn cancel(&mut self, id: i64) -> Option<libc::pid_t> {
+    pub(super) fn cancel(&mut self, id: i64) -> Option<libc::pid_t> {
         if let Some(entry) = self.entry_mut(id) {
             return match entry.state {
                 RuntimeExecutionState::Starting => {
@@ -11570,7 +11586,7 @@ impl RuntimeExecutionRegistry {
         None
     }
 
-    fn running_target(&self, id: i64) -> Option<(libc::pid_t, libc::pid_t)> {
+    pub(super) fn running_target(&self, id: i64) -> Option<(libc::pid_t, libc::pid_t)> {
         match self.entry(id)?.state {
             RuntimeExecutionState::Running { pgid, target } => Some((pgid, target)),
             RuntimeExecutionState::Starting
@@ -11579,11 +11595,11 @@ impl RuntimeExecutionRegistry {
         }
     }
 
-    fn state(&self, id: i64) -> Option<RuntimeExecutionState> {
+    pub(super) fn state(&self, id: i64) -> Option<RuntimeExecutionState> {
         self.entry(id).map(|entry| entry.state)
     }
 
-    fn remove(&mut self, id: i64) {
+    pub(super) fn remove(&mut self, id: i64) {
         if let Some(index) = self.index(id) {
             self.entries[index] = None;
         }
@@ -11654,7 +11670,7 @@ impl Drop for RuntimeExecutionGuard {
 }
 
 #[cfg(target_os = "android")]
-fn cancel_runtime_execution(id: i64) {
+pub(super) fn cancel_runtime_execution(id: i64) {
     if id <= 0 {
         return;
     }
@@ -11685,7 +11701,7 @@ fn cancel_runtime_execution(id: i64) {
 }
 
 #[cfg(target_os = "android")]
-fn signal_runtime_execution(id: i64, signal: i32) -> i32 {
+pub(super) fn signal_runtime_execution(id: i64, signal: i32) -> i32 {
     if id <= 0 || (signal != libc::SIGUSR1 && signal != libc::SIGUSR2) {
         return -libc::EINVAL;
     }
@@ -11715,7 +11731,7 @@ fn signal_runtime_execution(id: i64, signal: i32) -> i32 {
 }
 
 #[cfg(target_os = "android")]
-fn forget_runtime_execution(id: i64) {
+pub(super) fn forget_runtime_execution(id: i64) {
     if id <= 0 {
         return;
     }
@@ -11760,7 +11776,7 @@ fn establish_runtime_process_group(child: libc::pid_t) -> bool {
 }
 
 #[cfg(target_os = "android")]
-fn terminate_uid_processes(signal: i32) -> i32 {
+pub(super) fn terminate_uid_processes(signal: i32) -> i32 {
     use std::os::unix::fs::MetadataExt;
 
     let own_pid = unsafe { libc::getpid() };
@@ -11793,7 +11809,7 @@ fn terminate_uid_processes(signal: i32) -> i32 {
 }
 
 #[cfg(target_os = "android")]
-fn run_glibc_fds(
+pub(super) fn run_glibc_fds(
     program_fd: i32,
     loader_fd: i32,
     library_manifest: &[u8],
@@ -12186,6 +12202,10 @@ fn run_glibc_fds(
     };
     (exit_code, output)
 }
+
+}
+#[cfg(any(target_os = "android", test))]
+use runtime_process_ffi::*;
 
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]

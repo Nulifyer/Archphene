@@ -6,6 +6,7 @@ Notable user-facing changes will be recorded here.
 
 ### Added
 
+- Extracted runtime fork/exec, descriptor inheritance, process groups, signals, waits, and bounded child-output collection into a reviewed process boundary. The native Android probe now executes a real ABI-specific child by descriptor, verifies its exact output/exit status and invalid-FD rejection, and passes on the x86_64 emulator and AArch64 Samsung.
 - Confined Android native-window and Bitmap FFI behind retained-window RAII and bounded locked-pixel views. Every format, dimension, stride, null pointer, and byte count is validated before a Rust slice exists, successful locks are paired with one unlock, and the compositor now denies unsafe code outside its three declared boundary modules.
 - Confined compositor descriptor syscalls and Unix ancillary-data layouts to one reviewed wrapper module. Compositor client adoption now crosses from `ParcelFileDescriptor.detachFd()` directly into `OwnedFd`, received `SCM_RIGHTS` descriptors enter RAII immediately, and the complete host suite plus exact x86_64 emulator/AArch64 Samsung probes pass.
 - Replaced compositor raw-pointer JNI handles with fixed synchronized slot/generation registries capped at eight core/probe instances and four generated launchers. Exhaustion, stale use, double destroy, and stale-after-reuse fail closed without per-call heap allocation; direct tests and the exact JNI-name Android probe pass on x86_64 and AArch64.

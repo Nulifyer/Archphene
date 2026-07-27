@@ -34,6 +34,7 @@ import java.io.FileOutputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
+import java.lang.reflect.Method;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -1483,9 +1484,10 @@ public final class MainActivity extends Activity {
                 }
             }
             renderedFrame = runViewportProbe(frameView);
+            runRuntimeProcessProbe();
             passed = true;
             message = "Native Wayland compositor passed\n"
-                    + "generation-checked JNI handles, registry, Android bitmap, xdg toplevel, keyboard input, "
+                    + "generation-checked JNI handles, registry, runtime fork/exec, Android bitmap, xdg toplevel, keyboard input, "
                     + "damage-batched buffer scale/transform, viewporter/fractional scaling, Choreographer-paced frames, MotionEvent pointer/wheel/touch input, cursor surfaces, pointer gestures, nested popup grabs, synchronized subsurface trees, "
                     + "committed parent geometry, demand-driven clipboard, and Android InputConnection UTF-8 text-input v3 lifecycle complete";
         } catch (Exception error) {
@@ -1517,6 +1519,37 @@ public final class MainActivity extends Activity {
                     ? "Native compositor probe passed"
                     : "Native compositor probe failed");
         });
+    }
+
+    private void runRuntimeProcessProbe() throws Exception {
+        File executable = new File(
+                getApplicationInfo().nativeLibraryDir,
+                "libarchphene_runtime_process_probe.so");
+        if (!executable.isFile()) {
+            throw new IllegalStateException("runtime process probe executable is missing");
+        }
+        Method run = Class.forName("org.archphene.bridge.RuntimeFdLauncher")
+                .getDeclaredMethod("nativeRunFd", int.class, byte[].class);
+        run.setAccessible(true);
+        byte[] output = new byte[64 * 1024];
+        int exit;
+        try (ParcelFileDescriptor descriptor = ParcelFileDescriptor.open(
+                executable, ParcelFileDescriptor.MODE_READ_ONLY)) {
+            exit = (Integer) run.invoke(null, descriptor.getFd(), output);
+        }
+        int length = 0;
+        while (length < output.length && output[length] != 0) length++;
+        String text = new String(output, 0, length, StandardCharsets.UTF_8);
+        if (exit != 23 || !text.equals("runtime-process-probe\n")) {
+            throw new IllegalStateException(
+                    "runtime process probe mismatch exit=" + exit + " output=" + text);
+        }
+        java.util.Arrays.fill(output, (byte) 0);
+        int invalid = (Integer) run.invoke(null, -1, output);
+        if (invalid != -android.system.OsConstants.EBADF) {
+            throw new IllegalStateException(
+                    "runtime process invalid-FD result mismatch: " + invalid);
+        }
     }
 
     private void runProviderGrantProbe(TextView result) {

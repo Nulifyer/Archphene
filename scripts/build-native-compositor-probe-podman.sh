@@ -14,6 +14,16 @@ archphene_validate_choice "$android_abi" Android-ABI x86_64 arm64-v8a
 architecture=x86_64
 [[ "$android_abi" == arm64-v8a ]] && architecture=aarch64
 "$ARCHPHENE_SCRIPTS_DIR/build-native-compositor-podman.sh" --architecture "$architecture" --release
+compiler=x86_64-linux-android29-clang
+[[ "$android_abi" == arm64-v8a ]] && compiler=aarch64-linux-android29-clang
+probe_dir="$ARCHPHENE_ROOT/tooling/build/native-compositor-probe/$android_abi"
+mkdir -p "$probe_dir"
+podman run --rm --network=none -v "$ARCHPHENE_ROOT:/workspace" -w /workspace \
+  localhost/archphene-android-native:ndk29-rust1.88 \
+  bash -lc "\"\$ANDROID_SDK_ROOT/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/bin/$compiler\" \
+    -fPIE -pie -O2 -Wall -Wextra -Werror \
+    prototypes/native-compositor-probe/runtime_process_probe.c \
+    -o tooling/build/native-compositor-probe/$android_abi/libarchphene_runtime_process_probe.so"
 archphene_probe_signing_environment
 podman run --rm -v "$ARCHPHENE_ROOT:/workspace" -w /workspace \
   -e "ANDROID_ABI=$android_abi" -e KEYSTORE_PATH -e KEYSTORE_PASSWORD -e KEY_ALIAS -e KEY_PASSWORD \
@@ -21,4 +31,3 @@ podman run --rm -v "$ARCHPHENE_ROOT:/workspace" -w /workspace \
 apk="$ARCHPHENE_ROOT/prototypes/native-compositor-probe/out-$android_abi/archphene-compositor-probe.apk"
 archphene_require_file "$apk"
 archphene_note "Container-built native compositor probe: $apk"
-
