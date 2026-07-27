@@ -704,6 +704,18 @@ class ArchpheneRuntimeService : Service() {
 
     private val binder = LocalBinder()
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val projectSyncProvider by lazy {
+        ProjectSyncProvider(
+            contentResolver,
+            mainHandler,
+            PROJECT_SYNC_PROVIDER_DEADLINE_MILLIS,
+        ) { operation ->
+            folderStatus =
+                "Android file provider stopped responding while attempting to $operation"
+            Log.e(TAG, "$folderStatus; terminating for journal recovery")
+            Process.killProcess(Process.myPid())
+        }
+    }
     @Volatile private var handle = 0L
     @Volatile private var readyHandle = 0L
     @Volatile private var dnsRootReady = false
@@ -1853,6 +1865,7 @@ class ArchpheneRuntimeService : Service() {
         private const val MAX_MIRROR_DEPTH = 64
         private const val MAX_MIRROR_PATH_BYTES = 4 * 1024
         private const val MAX_MIRROR_FILE_BYTES = 2L * 1024 * 1024 * 1024
+        private const val PROJECT_SYNC_PROVIDER_DEADLINE_MILLIS = 30_000L
         private const val SYNC_PLAN_HEADER_BYTES = 136
         private const val SYNC_KIND_ABSENT = 0
         private const val SYNC_KIND_DIRECTORY = 1
@@ -2481,9 +2494,9 @@ class ArchpheneRuntimeService : Service() {
                             }
                             result.deletedDocuments.forEach { document ->
                                 if (
-                                    !DocumentsContract.deleteDocument(
-                                        contentResolver,
+                                    !projectSyncProvider.delete(
                                         document.uri,
+                                        "finalize a committed Android project deletion",
                                     )
                                 ) {
                                     throw IllegalStateException(
@@ -2598,10 +2611,11 @@ class ArchpheneRuntimeService : Service() {
         val childrenUri =
             DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentDocumentId)
         val directories = ArrayList<MirrorDirectory>()
-        val cursor =
-            contentResolver.query(childrenUri, projection, null, null, null)
-                ?: throw IllegalStateException("Android provider returned no folder listing")
-        cursor.use {
+        projectSyncProvider.query(
+            childrenUri,
+            projection,
+            "list the Android project directory",
+        ) {
             while (it.moveToNext()) {
                 checkFolderMirrorCancellation()
                 val documentId =
@@ -2660,10 +2674,11 @@ class ArchpheneRuntimeService : Service() {
                     val expectedBytes =
                         if (it.isNull(3) || it.getLong(3) < 0) -1L else it.getLong(3)
                     val descriptor =
-                        contentResolver.openFileDescriptor(documentUri, "r", null)
-                            ?: throw IllegalStateException(
-                                "Android provider returned no file descriptor",
-                            )
+                        projectSyncProvider.open(
+                            documentUri,
+                            "r",
+                            "open an Android project file",
+                        )
                     descriptor.use { source ->
                         requireMirrorSuccess(
                             NativeRuntime.nativeAddProjectSyncAndroidFile(
@@ -2782,8 +2797,11 @@ class ArchpheneRuntimeService : Service() {
                             remote[entry.path]
                                 ?: error("Android conflict source disappeared")
                         val descriptor =
-                            contentResolver.openFileDescriptor(remoteEntry.uri, "r", null)
-                                ?: error("Android provider returned no conflict descriptor")
+                            projectSyncProvider.open(
+                                remoteEntry.uri,
+                                "r",
+                                "open an Android conflict file",
+                            )
                         descriptor.use { source ->
                             val length =
                                 putProjectSyncRequest(
@@ -2885,20 +2903,27 @@ class ArchpheneRuntimeService : Service() {
                 target.uri,
                 target.documentId,
             )
-        val cursor =
-            contentResolver.query(
+        val empty =
+            projectSyncProvider.query(
                 childrenUri,
                 arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID),
-                null,
-                null,
-                null,
-            ) ?: error("Android provider returned no directory listing")
-        cursor.use {
+                "verify an Android project directory is empty",
+            ) {
             if (it.moveToFirst()) {
-                return false
+                    false
+                } else {
+                    true
+                }
             }
+        if (!empty) {
+            return false
         }
-        check(DocumentsContract.deleteDocument(contentResolver, target.uri)) {
+        check(
+            projectSyncProvider.delete(
+                target.uri,
+                "delete an empty Android project directory",
+            ),
+        ) {
             "Android provider retained an empty project directory"
         }
         remote.remove(path)
@@ -2946,7 +2971,11 @@ class ArchpheneRuntimeService : Service() {
             ),
         )
         val backup =
-            DocumentsContract.renameDocument(contentResolver, target.uri, backupName)
+            projectSyncProvider.rename(
+                target.uri,
+                backupName,
+                "stage an Android project deletion",
+            )
                 ?: error("Android provider could not stage project deletion")
         check(queryProjectSyncDocumentName(backup) == backupName) {
             "Android provider changed the deletion backup name"
@@ -2970,8 +2999,11 @@ class ArchpheneRuntimeService : Service() {
             entry.android?.takeIf { it.kind == SYNC_KIND_FILE }
                 ?: error("Android pull fingerprint is invalid")
         val descriptor =
-            contentResolver.openFileDescriptor(remote.uri, "r", null)
-                ?: error("Android provider returned no project descriptor")
+            projectSyncProvider.open(
+                remote.uri,
+                "r",
+                "open an Android project file for Linux",
+            )
         descriptor.use { source ->
             val length =
                 putProjectSyncRequest(
@@ -3040,11 +3072,11 @@ class ArchpheneRuntimeService : Service() {
             ),
         )
         val stagingUri =
-            DocumentsContract.createDocument(
-                contentResolver,
+            projectSyncProvider.create(
                 parentUri,
                 entry.android?.let { remote[entry.path]?.mime } ?: projectSyncMime(name),
                 stagingName,
+                "create an Android synchronization staging file",
             ) ?: error("Android provider could not create a synchronization staging file")
         check(queryProjectSyncDocumentName(stagingUri) == stagingName) {
             "Android provider changed the synchronization staging name"
@@ -3071,8 +3103,11 @@ class ArchpheneRuntimeService : Service() {
             )
             val source = ParcelFileDescriptor.adoptFd(sourceDescriptor)
             val destination =
-                contentResolver.openFileDescriptor(stagingUri, "rwt", null)
-                    ?: error("Android provider returned no staging descriptor")
+                projectSyncProvider.open(
+                    stagingUri,
+                    "rwt",
+                    "open an Android synchronization staging file",
+                )
             source.use { inputDescriptor ->
                 destination.use { outputDescriptor ->
                     ParcelFileDescriptor.AutoCloseInputStream(inputDescriptor).use { input ->
@@ -3106,19 +3141,19 @@ class ArchpheneRuntimeService : Service() {
                         ?: error("Android replacement has no expected fingerprint")
                 verifyProjectSyncAndroidFingerprint(activeHandle, existing.uri, expected, output)
                 val backupUri =
-                    DocumentsContract.renameDocument(
-                        contentResolver,
+                    projectSyncProvider.rename(
                         existing.uri,
                         backupName,
+                        "stage the previous Android project file",
                     ) ?: error("Android provider could not stage the previous project file")
                 updateProjectSyncJournalPhase(SYNC_JOURNAL_BACKED_UP)
                 holdProjectSyncTestPhase(SYNC_TEST_PHASE_BACKED_UP)
                 try {
                     val published =
-                        DocumentsContract.renameDocument(
-                            contentResolver,
+                        projectSyncProvider.rename(
                             stagingUri,
                             name,
+                            "publish an Android project file",
                         ) ?: error("Android provider could not publish the project file")
                     stagingPublished = true
                     check(queryProjectSyncDocumentName(published) == name) {
@@ -3127,7 +3162,12 @@ class ArchpheneRuntimeService : Service() {
                     verifyProjectSyncAndroidFingerprint(activeHandle, published, linux, output)
                     updateProjectSyncJournalPhase(SYNC_JOURNAL_PUBLISHED)
                     holdProjectSyncTestPhase(SYNC_TEST_PHASE_PUBLISHED)
-                    check(DocumentsContract.deleteDocument(contentResolver, backupUri)) {
+                    check(
+                        projectSyncProvider.delete(
+                            backupUri,
+                            "remove the previous Android project file",
+                        ),
+                    ) {
                         "Android provider retained the previous project file"
                     }
                     clearProjectSyncJournal()
@@ -3140,17 +3180,21 @@ class ArchpheneRuntimeService : Service() {
                         )
                 } catch (error: Exception) {
                     runCatching {
-                        DocumentsContract.renameDocument(
-                            contentResolver,
+                        projectSyncProvider.rename(
                             backupUri,
                             name,
+                            "restore the previous Android project file",
                         )
                     }
                     throw error
                 }
             } else {
                 val published =
-                    DocumentsContract.renameDocument(contentResolver, stagingUri, name)
+                    projectSyncProvider.rename(
+                        stagingUri,
+                        name,
+                        "publish a new Android project file",
+                    )
                         ?: error("Android provider could not publish the project file")
                 stagingPublished = true
                 check(queryProjectSyncDocumentName(published) == name) {
@@ -3171,7 +3215,10 @@ class ArchpheneRuntimeService : Service() {
         } finally {
             if (!stagingPublished) {
                 runCatching {
-                    DocumentsContract.deleteDocument(contentResolver, stagingUri)
+                    projectSyncProvider.delete(
+                        stagingUri,
+                        "discard an Android synchronization staging file",
+                    )
                 }
             }
         }
@@ -3191,11 +3238,11 @@ class ArchpheneRuntimeService : Service() {
         val name = if (slash < 0) path else path.substring(slash + 1)
         val parentUri = projectSyncAndroidParent(treeUri, remote, parentPath)
         val created =
-            DocumentsContract.createDocument(
-                contentResolver,
+            projectSyncProvider.create(
                 parentUri,
                 DocumentsContract.Document.MIME_TYPE_DIR,
                 name,
+                "create an Android project directory",
             ) ?: error("Android provider could not create project directory")
         check(queryProjectSyncDocumentName(created) == name) {
             "Android provider changed the project directory name"
@@ -3224,19 +3271,15 @@ class ArchpheneRuntimeService : Service() {
         }
 
     private fun queryProjectSyncDocumentName(uri: Uri): String {
-        val cursor =
-            contentResolver.query(
+        return projectSyncProvider.query(
                 uri,
                 arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME),
-                null,
-                null,
-                null,
-            ) ?: error("Android provider returned no document metadata")
-        cursor.use {
+                "read Android project document metadata",
+            ) {
             check(it.moveToFirst() && !it.isNull(0)) {
                 "Android provider returned no document name"
             }
-            return it.getString(0)
+                it.getString(0)
         }
     }
 
@@ -3255,8 +3298,11 @@ class ArchpheneRuntimeService : Service() {
         output: ByteBuffer,
     ) {
         val descriptor =
-            contentResolver.openFileDescriptor(uri, "r", null)
-                ?: error("Android provider returned no verification descriptor")
+            projectSyncProvider.open(
+                uri,
+                "r",
+                "open an Android project file for verification",
+            )
         descriptor.use { source ->
             output.clear()
             val length =
@@ -3454,7 +3500,12 @@ class ArchpheneRuntimeService : Service() {
                     "Committed Android deletion target reappeared"
                 }
                 backup?.let {
-                    check(DocumentsContract.deleteDocument(contentResolver, it.uri)) {
+                    check(
+                        projectSyncProvider.delete(
+                            it.uri,
+                            "finalize a recovered Android project deletion",
+                        ),
+                    ) {
                         "Android provider retained a committed deletion backup"
                     }
                 }
@@ -3464,10 +3515,10 @@ class ArchpheneRuntimeService : Service() {
             when {
                 backup != null && target == null -> {
                     val restored =
-                        DocumentsContract.renameDocument(
-                            contentResolver,
+                        projectSyncProvider.rename(
                             backup.uri,
                             journal.targetName,
+                            "restore an interrupted Android project deletion",
                         ) ?: error("Android provider could not restore interrupted deletion")
                     verifyProjectSyncAndroidFingerprint(
                         activeHandle,
@@ -3483,7 +3534,12 @@ class ArchpheneRuntimeService : Service() {
                         decodeProjectSyncFingerprintText(journal.expected),
                         output,
                     )
-                    check(DocumentsContract.deleteDocument(contentResolver, backup.uri)) {
+                    check(
+                        projectSyncProvider.delete(
+                            backup.uri,
+                            "remove a duplicate Android deletion backup",
+                        ),
+                    ) {
                         "Android provider retained duplicate deletion backup"
                     }
                 }
@@ -3512,22 +3568,32 @@ class ArchpheneRuntimeService : Service() {
         when {
             targetIsPublished -> {
                 staging?.let {
-                    check(DocumentsContract.deleteDocument(contentResolver, it.uri)) {
+                    check(
+                        projectSyncProvider.delete(
+                            it.uri,
+                            "discard recovered Android synchronization staging",
+                        ),
+                    ) {
                         "Android provider retained synchronization staging"
                     }
                 }
                 backup?.let {
-                    check(DocumentsContract.deleteDocument(contentResolver, it.uri)) {
+                    check(
+                        projectSyncProvider.delete(
+                            it.uri,
+                            "finalize a recovered Android synchronization backup",
+                        ),
+                    ) {
                         "Android provider retained synchronization backup"
                     }
                 }
             }
             backup != null && target == null -> {
                 val restored =
-                    DocumentsContract.renameDocument(
-                        contentResolver,
+                    projectSyncProvider.rename(
                         backup.uri,
                         journal.targetName,
+                        "restore an interrupted Android project update",
                     ) ?: error("Android provider could not restore interrupted update")
                 if (journal.hadOriginal) {
                     check(queryProjectSyncDocumentName(restored) == journal.targetName) {
@@ -3535,7 +3601,12 @@ class ArchpheneRuntimeService : Service() {
                     }
                 }
                 staging?.let {
-                    check(DocumentsContract.deleteDocument(contentResolver, it.uri)) {
+                    check(
+                        projectSyncProvider.delete(
+                            it.uri,
+                            "discard interrupted Android synchronization staging",
+                        ),
+                    ) {
                         "Android provider retained synchronization staging"
                     }
                 }
@@ -3548,14 +3619,24 @@ class ArchpheneRuntimeService : Service() {
                     "Interrupted Android update collided with a new target"
                 }
                 staging?.let {
-                    check(DocumentsContract.deleteDocument(contentResolver, it.uri)) {
+                    check(
+                        projectSyncProvider.delete(
+                            it.uri,
+                            "discard collided Android synchronization staging",
+                        ),
+                    ) {
                         "Android provider retained synchronization staging"
                     }
                 }
             }
             !journal.hadOriginal -> {
                 staging?.let {
-                    check(DocumentsContract.deleteDocument(contentResolver, it.uri)) {
+                    check(
+                        projectSyncProvider.delete(
+                            it.uri,
+                            "discard new-file Android synchronization staging",
+                        ),
+                    ) {
                         "Android provider retained synchronization staging"
                     }
                 }
@@ -3594,19 +3675,15 @@ class ArchpheneRuntimeService : Service() {
                 parentUri,
                 DocumentsContract.getDocumentId(parentUri),
             )
-        val cursor =
-            contentResolver.query(
+        return projectSyncProvider.query(
                 children,
                 arrayOf(
                     DocumentsContract.Document.COLUMN_DOCUMENT_ID,
                     DocumentsContract.Document.COLUMN_DISPLAY_NAME,
                     DocumentsContract.Document.COLUMN_MIME_TYPE,
                 ),
-                null,
-                null,
-                null,
-            ) ?: error("Android provider returned no recovery listing")
-        cursor.use {
+                "list Android project recovery documents",
+            ) {
             var match: ProjectSyncRemoteEntry? = null
             while (it.moveToNext()) {
                 if (it.getString(1) != name) continue
@@ -3621,7 +3698,7 @@ class ArchpheneRuntimeService : Service() {
                         mime == DocumentsContract.Document.MIME_TYPE_DIR,
                     )
             }
-            return match
+                match
         }
     }
 
@@ -3643,6 +3720,7 @@ class ArchpheneRuntimeService : Service() {
         }
         folderMirrorCancellationRequested = true
         folderStatus = "Cancelling the project operation…"
+        projectSyncProvider.cancel()
         val activeHandle = readyHandle
         if (activeHandle != 0L) {
             if (folderSyncRunning) {
@@ -3673,10 +3751,11 @@ class ArchpheneRuntimeService : Service() {
         val childUri =
             DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentDocumentId)
         val directories = ArrayList<MirrorDirectory>()
-        val cursor =
-            contentResolver.query(childUri, projection, null, null, null)
-                ?: throw IllegalStateException("Android provider returned no folder listing")
-        cursor.use {
+        projectSyncProvider.query(
+            childUri,
+            projection,
+            "list the Android project directory for its initial mirror",
+        ) {
             while (it.moveToNext()) {
                 checkFolderMirrorCancellation()
                 progress.entries++
@@ -3720,10 +3799,11 @@ class ArchpheneRuntimeService : Service() {
                     val documentUri =
                         DocumentsContract.buildDocumentUriUsingTree(treeUri, documentId)
                     val descriptor =
-                        contentResolver.openFileDescriptor(documentUri, "r", null)
-                            ?: throw IllegalStateException(
-                                "Android provider returned no file descriptor",
-                            )
+                        projectSyncProvider.open(
+                            documentUri,
+                            "r",
+                            "open an Android project file for its initial mirror",
+                        )
                     val copied =
                         descriptor.use {
                             val length = putUtf8Request(request, relativePath)

@@ -121,9 +121,8 @@ inspected full-device gates pass on the exact-ABI emulator and Samsung.
 The first import remains a snapshot rather than a live mount. Afterward the
 user invokes explicit Sync to reconcile changes in either direction; Linux
 applications continue to use the stable private POSIX path between syncs.
-Provider-call deadlines and durable retry/conflict history remain before this
-becomes the completed folder bridge. Exact recursive content, empty files,
-nested dotfiles,
+Durable retry/conflict history remains before this becomes the completed
+folder bridge. Exact recursive content, empty files, nested dotfiles,
 stale-stage recovery, restart persistence, and grant removal pass on both
 exact-ABI targets; the new mutation and crash-recovery matrix currently passes
 on physical AArch64.
@@ -182,13 +181,18 @@ Android descriptor hashes, Linux snapshots, verified opens, pulls, and
 conflict copies without waiting for the main native runtime lock; exact
 256 MiB cancellation fixtures on both targets leave neither partial Linux nor
 Android files. Forced death before and after Android replacement publication
-also proves rollback/retry and published-version finalization. SAF provider
-call deadlines and durable retry/conflict history remain.
+also proves rollback/retry and published-version finalization. One bounded SAF
+bridge now gives initial-mirror and synchronization listings, metadata queries,
+and descriptor opens Android cancellation signals plus 30-second deadlines.
+Document mutations have no Android cancellation API, so their deadline
+watchdog terminates the manager and lets the persisted journal or next
+three-way scan resolve the ambiguous result. Durable retry/conflict history
+remains.
 
 The SAF capability itself is never presented as a POSIX mount; Linux sees the
 private POSIX mirror and changes cross the boundary only during explicit Sync.
-Exports, drag-and-drop, durable per-operation history, provider timeouts, and
-richer `/mnt/android` mapping status are still planned.
+Exports, drag-and-drop, durable per-operation history, and richer
+`/mnt/android` mapping status are still planned.
 
 ## Virtual Linux Layout
 
