@@ -87,15 +87,16 @@ destination. Duplicate names receive numbered variants and interrupted
 staging is discarded explicitly on the next attempt. The exact content,
 collision, restart-status, and system-picker gates pass on both targets.
 
-The Files page can also select one visible regular file from Archphene Home
-and hand it to Android without exporting another copy. **Open** resolves the
-document MIME type and sends one `ACTION_VIEW` content URI to Android's system
-chooser; **Share** sends one `ACTION_SEND` stream URI. Both paths reject other
-authorities, directories, blank MIME types, and oversized URIs, exclude the
-manager to prevent a self-import loop, and grant read access without write
-access. Exact picker origin, URI, MIME, grant, cleanup, fatal-log, and
-full-device visual gates pass on the x86_64 emulator and physical AArch64
-Samsung.
+The Files page can also hand visible regular files from Archphene Home to
+Android without exporting another copy. **Open** resolves one document's MIME
+type and sends one `ACTION_VIEW` content URI to Android's system chooser.
+**Share** sends one `ACTION_SEND` URI or up to 32 deduplicated
+`ACTION_SEND_MULTIPLE` URIs with an exact, same-family, or general common MIME
+type. Both paths reject other authorities, directories, blank MIME types, and
+oversized URIs, exclude the manager to prevent a self-import loop, and grant
+read access without write access. Exact picker origin, URI, MIME, grant,
+cleanup, fatal-log, single-share-regression, and full-device visual gates pass
+on the x86_64 emulator and physical AArch64 Samsung.
 
 **Export** uses the same Archphene Home source picker, then lets Android choose
 an `ACTION_CREATE_DOCUMENT` destination and filename. Android owns both URI
@@ -323,7 +324,7 @@ export/import workflow exists, users should:
 
 - synchronize important project trees to their connected Android folders;
 - use **Archphene Home** in Android Files to copy ordinary visible home files;
-- use the manager's Share action for an individual visible regular file.
+- use the manager's Share action for one or several visible regular files.
 
 These routes do not include hidden configuration, package state, sockets,
 symlinks, or the rest of the Arch root. They are not a full-environment backup.

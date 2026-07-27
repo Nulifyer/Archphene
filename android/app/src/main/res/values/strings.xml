@@ -87,8 +87,10 @@
     <string name="export_linux_file_queued">Linux file export queued</string>
     <string name="share_file">Share</string>
     <string name="share_linux_file_chooser">Share Linux file</string>
+    <string name="share_linux_files_chooser">Share Linux files</string>
     <string name="share_linux_file_only">Choose a file from Archphene Home</string>
     <string name="share_linux_file_unavailable">This Linux file cannot be shared</string>
+    <string name="share_linux_file_limit">Choose at most 32 Linux files</string>
     <string name="document_import_prompt">Android files can be copied into ~/Downloads</string>
     <string name="document_import_unavailable">File import unavailable while Linux starts</string>
     <string name="document_import_queued">Waiting for the shared Linux home…</string>

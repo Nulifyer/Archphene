@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.ClipData
+import android.content.ClipDescription
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -1934,7 +1935,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             OPEN_DOCUMENT_REQUEST -> data?.data?.let(::viewLinuxDocument)
             EXPORT_SOURCE_DOCUMENT_REQUEST -> data?.data?.let(::createAndroidExportDocument)
             EXPORT_TARGET_DOCUMENT_REQUEST -> data?.data?.let(::queueDocumentExport)
-            SHARE_DOCUMENT_REQUEST -> data?.data?.let(::shareLinuxDocument)
+            SHARE_DOCUMENT_REQUEST -> data?.let(::shareLinuxDocuments)
             FOLDER_GRANT_REQUEST -> {
                 val uri = data?.data ?: return
                 queueFolderGrant(uri, data.flags)
@@ -3270,10 +3271,13 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     }
 
     private fun openLinuxDocumentForShare() {
-        openLinuxDocumentPicker(SHARE_DOCUMENT_REQUEST)
+        openLinuxDocumentPicker(SHARE_DOCUMENT_REQUEST, allowMultiple = true)
     }
 
-    private fun openLinuxDocumentPicker(requestCode: Int) {
+    private fun openLinuxDocumentPicker(
+        requestCode: Int,
+        allowMultiple: Boolean = false,
+    ) {
         selectManagerSection(MANAGER_SECTION_FILES)
         val authority = "$packageName.documents"
         val picker =
@@ -3284,6 +3288,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     DocumentsContract.EXTRA_INITIAL_URI,
                     DocumentsContract.buildRootUri(authority, DOCUMENTS_ROOT_ID),
                 )
+                putExtra(Intent.EXTRA_ALLOW_MULTIPLE, allowMultiple)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
         @Suppress("DEPRECATION")
@@ -3354,25 +3359,92 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         }
     }
 
-    private fun shareLinuxDocument(uri: Uri) {
-        val mimeType =
-            validatedLinuxDocumentMimeType(
-                uri,
-                R.string.share_linux_file_only,
+    private fun shareLinuxDocuments(result: Intent) {
+        val clip = result.clipData
+        val initialCapacity =
+            minOf(clip?.itemCount ?: 1, DocumentSharePolicy.MAX_DOCUMENTS)
+        val uris = ArrayList<Uri>(initialCapacity)
+        val seen = HashSet<Uri>(initialCapacity)
+        if (clip != null) {
+            if (clip.itemCount > DocumentSharePolicy.MAX_DOCUMENTS) {
+                Toast.makeText(
+                    this,
+                    R.string.share_linux_file_limit,
+                    Toast.LENGTH_LONG,
+                ).show()
+                return
+            }
+            for (index in 0 until clip.itemCount) {
+                val uri = clip.getItemAt(index).uri ?: continue
+                if (seen.add(uri)) {
+                    uris.add(uri)
+                }
+            }
+        } else {
+            result.data?.let { uri ->
+                seen.add(uri)
+                uris.add(uri)
+            }
+        }
+        if (uris.isEmpty()) {
+            Toast.makeText(
+                this,
                 R.string.share_linux_file_unavailable,
-            ) ?: return
+                Toast.LENGTH_LONG,
+            ).show()
+            return
+        }
+        val mimeTypes = ArrayList<String>(uris.size)
+        for (uri in uris) {
+            val mimeType =
+                validatedLinuxDocumentMimeType(
+                    uri,
+                    R.string.share_linux_file_only,
+                    R.string.share_linux_file_unavailable,
+                ) ?: return
+            mimeTypes.add(mimeType)
+        }
+        val commonMimeType = DocumentSharePolicy.commonMimeType(mimeTypes)
+        val sharedClip =
+            ClipData(
+                ClipDescription(
+                    getString(R.string.app_name),
+                    arrayOf(commonMimeType),
+                ),
+                ClipData.Item(uris.first()),
+            ).apply {
+                for (index in 1 until uris.size) {
+                    addItem(ClipData.Item(uris[index]))
+                }
+            }
         val share =
-            Intent(Intent.ACTION_SEND).apply {
-                type = mimeType
-                putExtra(Intent.EXTRA_STREAM, uri)
-                clipData = ClipData.newUri(contentResolver, getString(R.string.app_name), uri)
+            Intent(
+                if (uris.size == 1) {
+                    Intent.ACTION_SEND
+                } else {
+                    Intent.ACTION_SEND_MULTIPLE
+                },
+            ).apply {
+                type = commonMimeType
+                if (uris.size == 1) {
+                    putExtra(Intent.EXTRA_STREAM, uris.first())
+                } else {
+                    putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+                }
+                clipData = sharedClip
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
         try {
             val chooser =
                 Intent.createChooser(
                     share,
-                    getString(R.string.share_linux_file_chooser),
+                    getString(
+                        if (uris.size == 1) {
+                            R.string.share_linux_file_chooser
+                        } else {
+                            R.string.share_linux_files_chooser
+                        },
+                    ),
                 ).apply {
                     putExtra(
                         Intent.EXTRA_EXCLUDE_COMPONENTS,

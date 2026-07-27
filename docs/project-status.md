@@ -572,17 +572,20 @@ system-picker, cleanup, scoped-log, and full-device visual gates pass on the
 x86_64 emulator and physical AArch64 Samsung. Multi-document and folder import,
 drag-and-drop, progress/cancel, provider timeouts, and export remain open.
 
-The Files page can now open or share one visible Linux file through Android's
-standard flows. Both actions open DocumentsUI at Archphene Home and accept only
-a bounded regular document URI from Archphene's own provider. Open sends the
-resolved MIME type, URI, ClipData, and read-only grant through `ACTION_VIEW`;
-Share sends the same scoped document through `ACTION_SEND`. Archphene itself is
-excluded to avoid copying its own file back into Downloads. State-preserving
-scripts select an exact Shared fixture and verify each chooser's URI, MIME, and
-read-without-write grant on the emulator and Samsung, with cleanup and
-visually inspected full-device phone/tablet frames. Independent physical and
-emulator Share runs also select Messages and show Android granting that
-separate UID temporary read access without sending anything.
+The Files page can now open one visible Linux file or share one through 32
+visible Linux files through Android's standard flows. Both actions open
+DocumentsUI at Archphene Home and accept only bounded regular document URIs
+from Archphene's own provider. Open sends the resolved MIME type, URI,
+ClipData, and read-only grant through `ACTION_VIEW`; Share uses `ACTION_SEND`
+for one URI and `ACTION_SEND_MULTIPLE` for several, deduplicates the selection,
+and negotiates an exact, same-family, or general common MIME type. Archphene
+itself is excluded to avoid copying its own files back into Downloads.
+State-preserving scripts verify each chooser's exact URI set, MIME clip, and
+read-without-write grants on the emulator and Samsung, with cleanup, fatal-log
+checks, and visually inspected full-device selection/chooser frames.
+Independent physical and emulator single-file Share runs also select Messages
+and show Android granting that separate UID temporary read access without
+sending anything.
 
 The Files page also exports one regular Archphene Home document to an
 Android-selected `ACTION_CREATE_DOCUMENT` destination. Android owns and opens
@@ -593,10 +596,9 @@ target exists, then retries into Android Downloads, compares the complete
 source and destination digests, proves the Linux source was not changed,
 restarts the manager to verify durable completion presentation, removes both
 fixtures, rejects Archphene-owned StrictMode and fatal logs, and retains
-visually inspected full-device phone/wide frames. Multi-file share, transfer
-progress/cancel, process-death
-partial-output recovery, Linux desktop-portal Save As, and durable Open/Share
-result presentation remain pending.
+visually inspected full-device phone/wide frames. Transfer progress/cancel,
+process-death partial-output recovery, Linux desktop-portal Save As, and
+durable Open/Share result presentation remain pending.
 
 The replacement also owns a fixed 11,808-byte package-operation journal. It
 holds at most 32 bounded jobs, enforces legal transitions, publishes updates
