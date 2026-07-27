@@ -131,6 +131,19 @@ done
   archphene_die "share chooser unexpectedly received a write URI grant"
 archphene_adb_run exec-out screencap -p \
   >"$output_dir/$serial-chooser.png"
+archphene_wait_log 'Android document handoff persisted' 15 >/dev/null
+
+archphene_adb_run shell am force-stop com.android.intentresolver >/dev/null 2>&1 || true
+archphene_adb_run shell am force-stop "$package" >/dev/null
+archphene_adb_run logcat -c
+archphene_adb_run shell am start -W -n "$activity" >/dev/null
+archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 20 >/dev/null
+archphene_open_manager_section Files "document-multi-share-restart-files-$serial"
+archphene_wait_ui_exact_text \
+  "Opened Android sharing for 2 Linux files" \
+  "document-multi-share-restart-status-$serial" 15
+archphene_adb_run exec-out screencap -p \
+  >"$output_dir/$serial-restart.png"
 
 fatal_log="$(archphene_adb_run logcat -d -v brief \
   -s AndroidRuntime:E libc:F '*:S' 2>/dev/null || true)"
@@ -142,5 +155,6 @@ cleanup
 archphene_note "Archphene multi-document share passed on $serial"
 archphene_note "  DocumentsUI selected two exact Shared fixtures"
 archphene_note "  Android chooser received two read-only text/plain content URIs"
+archphene_note "  Multi-file sharing handoff status survived manager restart"
 archphene_note \
-  "  Full-device screenshots: $output_dir/$serial-{selection,chooser}.png"
+  "  Full-device screenshots: $output_dir/$serial-{selection,chooser,restart}.png"

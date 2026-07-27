@@ -145,6 +145,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private var pendingExportSourceUri: Uri? = null
     private var pendingExportTargetUri: Uri? = null
     private var pendingExportGrantFlags = 0
+    private var pendingDocumentHandoffMessage: String? = null
+    private var pendingDocumentHandoffFailed = false
     private var pendingFolderUri: Uri? = null
     private var pendingFolderFlags = 0
     private var selectedManagerSection = MANAGER_SECTION_PACKAGES
@@ -1727,6 +1729,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 0,
             ),
         )
+        configureDebugDocumentHandoff(intent)
         startService(Intent(this, ArchpheneRuntimeService::class.java))
         val restoredImport =
             savedInstanceState
@@ -1747,6 +1750,10 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 ?.let(Uri::parse)
         pendingExportGrantFlags =
             savedInstanceState?.getInt(PENDING_EXPORT_GRANT_FLAGS_STATE, 0) ?: 0
+        pendingDocumentHandoffMessage =
+            savedInstanceState?.getString(PENDING_DOCUMENT_HANDOFF_MESSAGE_STATE)
+        pendingDocumentHandoffFailed =
+            savedInstanceState?.getBoolean(PENDING_DOCUMENT_HANDOFF_FAILED_STATE, false) ?: false
         val restoredFolder =
             savedInstanceState
                 ?.getString(PENDING_FOLDER_URI_STATE)
@@ -1826,6 +1833,20 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         queueIncomingImport(intent)
         showDebugAurReview(intent)
         showDebugTerminalIme(intent)
+        configureDebugDocumentHandoff(intent)
+    }
+
+    private fun configureDebugDocumentHandoff(source: Intent) {
+        val enabled =
+            source.getBooleanExtra(
+                ArchpheneRuntimeService.EXTRA_DEBUG_DOCUMENT_HANDOFF_FAILURE,
+                false,
+            )
+        source.removeExtra(ArchpheneRuntimeService.EXTRA_DEBUG_DOCUMENT_HANDOFF_FAILURE)
+        ArchpheneRuntimeService.setDebugDocumentHandoffFailure(
+            applicationInfo.flags,
+            enabled,
+        )
     }
 
     private fun showDebugTerminalIme(source: Intent) {
@@ -1926,6 +1947,13 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             outState.putString(PENDING_EXPORT_TARGET_URI_STATE, uri.toString())
             outState.putInt(PENDING_EXPORT_GRANT_FLAGS_STATE, pendingExportGrantFlags)
         }
+        pendingDocumentHandoffMessage?.let { message ->
+            outState.putString(PENDING_DOCUMENT_HANDOFF_MESSAGE_STATE, message)
+            outState.putBoolean(
+                PENDING_DOCUMENT_HANDOFF_FAILED_STATE,
+                pendingDocumentHandoffFailed,
+            )
+        }
         pendingFolderUri?.let { uri ->
             outState.putString(PENDING_FOLDER_URI_STATE, uri.toString())
             outState.putInt(PENDING_FOLDER_FLAGS_STATE, pendingFolderFlags)
@@ -1981,6 +2009,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private fun updateStatus() {
         dispatchPendingImport()
         dispatchPendingExport()
+        dispatchPendingDocumentHandoff()
         dispatchPendingFolderGrant()
         // Launcher APK publication can require Android-owned confirmation.
         // Drive it only from the visible Activity so modern Android versions
@@ -3335,31 +3364,29 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 R.string.open_linux_file_only,
                 R.string.open_linux_file_unavailable,
             ) ?: return
+        val displayName = linuxDocumentDisplayName(uri)
         val view =
             Intent(Intent.ACTION_VIEW).apply {
                 setDataAndType(uri, mimeType)
                 clipData = ClipData.newUri(contentResolver, getString(R.string.app_name), uri)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
-        try {
-            val chooser =
-                Intent.createChooser(
-                    view,
-                    getString(R.string.open_linux_file_chooser),
-                ).apply {
-                    putExtra(
-                        Intent.EXTRA_EXCLUDE_COMPONENTS,
-                        arrayOf(ComponentName(this@MainActivity, MainActivity::class.java)),
-                    )
-                }
-            startActivity(chooser)
-        } catch (_: android.content.ActivityNotFoundException) {
-            Toast.makeText(
-                this,
-                R.string.open_linux_file_unavailable,
-                Toast.LENGTH_LONG,
-            ).show()
-        }
+        val chooser =
+            Intent.createChooser(
+                view,
+                getString(R.string.open_linux_file_chooser),
+            ).apply {
+                putExtra(
+                    Intent.EXTRA_EXCLUDE_COMPONENTS,
+                    arrayOf(ComponentName(this@MainActivity, MainActivity::class.java)),
+                )
+            }
+        startDocumentHandoff(
+            chooser,
+            getString(R.string.open_linux_file_handoff, displayName),
+            getString(R.string.open_linux_file_failed, displayName),
+            R.string.open_linux_file_unavailable,
+        )
     }
 
     private fun createAndroidExportDocument(uri: Uri) {
@@ -3470,30 +3497,58 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 clipData = sharedClip
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
+        val chooser =
+            Intent.createChooser(
+                share,
+                getString(
+                    if (uris.size == 1) {
+                        R.string.share_linux_file_chooser
+                    } else {
+                        R.string.share_linux_files_chooser
+                    },
+                ),
+            ).apply {
+                putExtra(
+                    Intent.EXTRA_EXCLUDE_COMPONENTS,
+                    arrayOf(ComponentName(this@MainActivity, MainActivity::class.java)),
+                )
+            }
+        val successMessage =
+            if (uris.size == 1) {
+                getString(
+                    R.string.share_linux_file_handoff,
+                    linuxDocumentDisplayName(uris.first()),
+                )
+            } else {
+                getString(R.string.share_linux_files_handoff, uris.size)
+            }
+        startDocumentHandoff(
+            chooser,
+            successMessage,
+            getString(R.string.share_linux_file_failed),
+            R.string.share_linux_file_unavailable,
+        )
+    }
+
+    private fun startDocumentHandoff(
+        chooser: Intent,
+        successMessage: String,
+        failureMessage: String,
+        unavailableMessage: Int,
+    ) {
         try {
-            val chooser =
-                Intent.createChooser(
-                    share,
-                    getString(
-                        if (uris.size == 1) {
-                            R.string.share_linux_file_chooser
-                        } else {
-                            R.string.share_linux_files_chooser
-                        },
-                    ),
-                ).apply {
-                    putExtra(
-                        Intent.EXTRA_EXCLUDE_COMPONENTS,
-                        arrayOf(ComponentName(this@MainActivity, MainActivity::class.java)),
-                    )
-                }
+            if (
+                ArchpheneRuntimeService.consumeDebugDocumentHandoffFailure(
+                    applicationInfo.flags,
+                )
+            ) {
+                throw android.content.ActivityNotFoundException("Debug document handoff failure")
+            }
             startActivity(chooser)
+            queueDocumentHandoff(successMessage, failed = false)
         } catch (_: android.content.ActivityNotFoundException) {
-            Toast.makeText(
-                this,
-                R.string.share_linux_file_unavailable,
-                Toast.LENGTH_LONG,
-            ).show()
+            queueDocumentHandoff(failureMessage, failed = true)
+            Toast.makeText(this, unavailableMessage, Toast.LENGTH_LONG).show()
         }
     }
 
@@ -3708,6 +3763,26 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         }
     }
 
+    private fun queueDocumentHandoff(
+        message: String,
+        failed: Boolean,
+    ) {
+        selectManagerSection(MANAGER_SECTION_FILES)
+        pendingDocumentHandoffMessage = message
+        pendingDocumentHandoffFailed = failed
+        setTextIfChanged(storageStatusView, message)
+        dispatchPendingDocumentHandoff()
+    }
+
+    private fun dispatchPendingDocumentHandoff() {
+        val message = pendingDocumentHandoffMessage ?: return
+        val binder = runtimeBinder ?: return
+        if (binder.recordDocumentHandoff(message, pendingDocumentHandoffFailed)) {
+            pendingDocumentHandoffMessage = null
+            pendingDocumentHandoffFailed = false
+        }
+    }
+
     private fun requestSessionNotificationPermission() {
         if (
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
@@ -3775,6 +3850,10 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         private const val PENDING_EXPORT_SOURCE_URI_STATE = "pending_export_source_uri"
         private const val PENDING_EXPORT_TARGET_URI_STATE = "pending_export_target_uri"
         private const val PENDING_EXPORT_GRANT_FLAGS_STATE = "pending_export_grant_flags"
+        private const val PENDING_DOCUMENT_HANDOFF_MESSAGE_STATE =
+            "pending_document_handoff_message"
+        private const val PENDING_DOCUMENT_HANDOFF_FAILED_STATE =
+            "pending_document_handoff_failed"
         private const val PENDING_FOLDER_URI_STATE = "pending_folder_uri"
         private const val PENDING_FOLDER_FLAGS_STATE = "pending_folder_flags"
         private const val MANAGER_SECTION_STATE = "manager_section"

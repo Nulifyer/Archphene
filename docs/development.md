@@ -411,14 +411,17 @@ Each gate creates and removes unique Shared fixtures and starts Android's
 picker at Archphene Home. Open and single-file Share verify that the system
 chooser receives the exact MIME-typed URI with read permission and no write
 permission. Multi-file Share selects two fixtures and verifies both exact
-read-only URIs and their common MIME clip. Export first cancels Android's
-create-document picker, then retries into Downloads and verifies exact
-destination bytes, unchanged source bytes, and completion status across
-manager restart. The recovery gate inspects live progress, cancels a nonempty
-transfer, then kills the manager during another nonempty transfer and proves
-restart removes the partial Android output through its persisted write grant.
-Picker, chooser, manager, and destination evidence is always captured as
-full-device screenshots.
+read-only URIs and their common MIME clip. Open additionally forces the
+chooser-launch failure path. Open success/failure and single/multiple Share
+handoff status must survive a manager process restart; the status means only
+that Android's chooser opened, not that an external app completed the action.
+Export first cancels Android's create-document picker, then retries into
+Downloads and verifies exact destination bytes, unchanged source bytes, and
+completion status across manager restart. The recovery gate inspects live
+progress, cancels a nonempty transfer, then kills the manager during another
+nonempty transfer and proves restart removes the partial Android output through
+its persisted write grant. Picker, chooser, manager, and destination evidence
+is always captured as full-device screenshots.
 
 The AArch64 native readiness gate uses the configured host NDK when available
 and otherwise runs in the pinned Android-native Podman image, so it does not

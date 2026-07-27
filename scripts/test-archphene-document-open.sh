@@ -104,6 +104,53 @@ for line in lines:
 [[ "$chooser_record" != *"writeUriPermissions"* ]] ||
   archphene_die "open chooser unexpectedly received a write URI grant"
 archphene_adb_run exec-out screencap -p >"$output_dir/$serial-chooser.png"
+archphene_wait_log 'Android document handoff persisted' 15 >/dev/null
+
+archphene_adb_run shell am force-stop com.android.intentresolver >/dev/null 2>&1 || true
+archphene_adb_run shell am force-stop "$package" >/dev/null
+archphene_adb_run logcat -c
+archphene_adb_run shell am start -W -n "$activity" >/dev/null
+archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 20 >/dev/null
+archphene_open_manager_section Files "document-open-restart-files-$serial"
+archphene_wait_ui_exact_text \
+  "Offered $fixture to Android viewers" \
+  "document-open-restart-status-$serial" 15
+archphene_adb_run exec-out screencap -p >"$output_dir/$serial-restart.png"
+
+archphene_adb_run shell am force-stop "$package" >/dev/null
+archphene_adb_run logcat -c
+archphene_adb_run shell am start -W -n "$activity" \
+  --ez org.archphene.app.extra.DEBUG_DOCUMENT_HANDOFF_FAILURE true >/dev/null
+archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 20 >/dev/null
+archphene_open_manager_section Files "document-open-failure-files-$serial"
+archphene_wait_ui_exact_text "Open" "document-open-failure-action-$serial" 15
+archphene_tap_text "$ARCHPHENE_UI" "Open"
+archphene_wait_ui_exact_text \
+  "Archphene Home" "document-open-failure-picker-$serial" 20
+archphene_wait_ui_exact_text "Shared" "document-open-failure-shared-$serial" 15
+archphene_tap_text "$ARCHPHENE_UI" "Shared"
+archphene_wait_ui_exact_text \
+  "$fixture" "document-open-failure-fixture-$serial" 15
+archphene_tap_text "$ARCHPHENE_UI" "$fixture"
+archphene_wait_log 'Android document handoff failure persisted' 15 >/dev/null
+archphene_wait_ui_exact_text \
+  "Could not offer $fixture to Android viewers" \
+  "document-open-failure-status-$serial" 15
+archphene_adb_run exec-out screencap -p >"$output_dir/$serial-failure.png"
+failure_activities="$(archphene_adb_run shell dumpsys activity activities)"
+[[ "$failure_activities" != *ChooserActivity* ]] ||
+  archphene_die "forced open failure unexpectedly launched Android's chooser"
+
+archphene_adb_run shell am force-stop "$package" >/dev/null
+archphene_adb_run logcat -c
+archphene_adb_run shell am start -W -n "$activity" >/dev/null
+archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 20 >/dev/null
+archphene_open_manager_section Files "document-open-failure-restart-files-$serial"
+archphene_wait_ui_exact_text \
+  "Could not offer $fixture to Android viewers" \
+  "document-open-failure-restart-status-$serial" 15
+archphene_adb_run exec-out screencap -p \
+  >"$output_dir/$serial-failure-restart.png"
 
 fatal_log="$(archphene_adb_run logcat -d -v brief \
   -s AndroidRuntime:E libc:F '*:S' 2>/dev/null || true)"
@@ -115,5 +162,6 @@ cleanup
 archphene_note "Archphene document open passed on $serial"
 archphene_note "  Picker opened at Archphene Home and selected the exact Shared fixture"
 archphene_note "  Android chooser received one read-only text/plain ACTION_VIEW URI"
+archphene_note "  Chooser handoff and forced failure statuses survived manager restart"
 archphene_note \
-  "  Full-device screenshots: $output_dir/$serial-{picker,chooser}.png"
+  "  Full-device screenshots: $output_dir/$serial-{picker,chooser,restart,failure,failure-restart}.png"

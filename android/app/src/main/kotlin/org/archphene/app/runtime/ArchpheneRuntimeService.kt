@@ -636,6 +636,11 @@ class ArchpheneRuntimeService : Service() {
             return true
         }
 
+        fun recordDocumentHandoff(
+            message: String,
+            failed: Boolean,
+        ): Boolean = requestDocumentHandoff(message, failed)
+
         fun connectAndroidFolder(
             uri: Uri,
             flags: Int,
@@ -1915,7 +1920,10 @@ class ArchpheneRuntimeService : Service() {
     companion object {
         internal const val EXTRA_DEBUG_DOCUMENT_EXPORT_CHUNK_DELAY_MILLIS =
             "org.archphene.app.extra.DEBUG_DOCUMENT_EXPORT_CHUNK_DELAY_MILLIS"
+        internal const val EXTRA_DEBUG_DOCUMENT_HANDOFF_FAILURE =
+            "org.archphene.app.extra.DEBUG_DOCUMENT_HANDOFF_FAILURE"
         private val DEBUG_DOCUMENT_EXPORT_CHUNK_DELAY_MILLIS = AtomicLong()
+        private val DEBUG_DOCUMENT_HANDOFF_FAILURE = AtomicBoolean()
 
         internal fun setDebugDocumentExportChunkDelay(
             applicationFlags: Int,
@@ -1932,6 +1940,22 @@ class ArchpheneRuntimeService : Service() {
             )
             Log.i(TAG, "Debug document export chunk delay configured")
         }
+
+        internal fun setDebugDocumentHandoffFailure(
+            applicationFlags: Int,
+            enabled: Boolean,
+        ) {
+            if (
+                applicationFlags and ApplicationInfo.FLAG_DEBUGGABLE != 0 &&
+                enabled
+            ) {
+                DEBUG_DOCUMENT_HANDOFF_FAILURE.set(true)
+            }
+        }
+
+        internal fun consumeDebugDocumentHandoffFailure(applicationFlags: Int): Boolean =
+            applicationFlags and ApplicationInfo.FLAG_DEBUGGABLE != 0 &&
+                DEBUG_DOCUMENT_HANDOFF_FAILURE.compareAndSet(true, false)
 
         private const val TAG = "ArchpheneRuntime"
         private const val SHELL_SCROLLBACK_BYTES = 16 * 1024
@@ -2080,6 +2104,7 @@ class ArchpheneRuntimeService : Service() {
         private const val MAX_STORAGE_NAME_BYTES = 255
         private const val MAX_FOLDER_LABEL_BYTES = 128
         private const val MAX_STORAGE_TRANSFER_BYTES = 16L * 1024 * 1024 * 1024
+        private const val MAX_DOCUMENT_HANDOFF_MESSAGE_BYTES = 1024
         private const val MAX_DOCUMENT_EXPORT_TEST_CHUNK_DELAY_MILLIS = 100
         private const val DOCUMENT_EXPORT_DELETE_SETTLE_MILLIS = 1_000L
         private val PROCESS_STORAGE_ACTIVE = AtomicBoolean()
@@ -3986,6 +4011,64 @@ class ArchpheneRuntimeService : Service() {
             PROCESS_STORAGE_ACTIVE.set(false)
             storageStatus = "Import failed: ${error.message ?: error.javaClass.simpleName}"
             Log.e(TAG, "Could not start Android document import", error)
+            false
+        }
+    }
+
+    @Synchronized
+    private fun requestDocumentHandoff(
+        message: String,
+        failed: Boolean,
+    ): Boolean {
+        val messageBytes = message.toByteArray(StandardCharsets.UTF_8)
+        if (
+            readyHandle == 0L ||
+            storageDocumentActive ||
+            messageBytes.size !in 1..MAX_DOCUMENT_HANDOFF_MESSAGE_BYTES ||
+            message.any(Char::isISOControl)
+        ) {
+            return false
+        }
+        if (!PROCESS_STORAGE_ACTIVE.compareAndSet(false, true)) {
+            return false
+        }
+        storageDocumentActive = true
+        storageStatus = message
+        val worker =
+            Thread(
+                {
+                    requireRuntimeWorker("Android document handoff status")
+                    try {
+                        persistStorageStatus(
+                            if (failed) STORAGE_FAILED else STORAGE_COMPLETE,
+                            message,
+                        )
+                        Log.i(
+                            TAG,
+                            if (failed) {
+                                "Android document handoff failure persisted"
+                            } else {
+                                "Android document handoff persisted"
+                            },
+                        )
+                    } finally {
+                        storageDocumentActive = false
+                        PROCESS_STORAGE_ACTIVE.set(false)
+                        storageThread = null
+                        stopWhenUnobservedAndIdle()
+                    }
+                },
+                "ArchpheneDocumentHandoff",
+            )
+        storageThread = worker
+        return try {
+            worker.start()
+            true
+        } catch (error: Exception) {
+            storageThread = null
+            storageDocumentActive = false
+            PROCESS_STORAGE_ACTIVE.set(false)
+            Log.e(TAG, "Could not persist Android document handoff", error)
             false
         }
     }

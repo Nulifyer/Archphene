@@ -585,7 +585,11 @@ read-without-write grants on the emulator and Samsung, with cleanup, fatal-log
 checks, and visually inspected full-device selection/chooser frames.
 Independent physical and emulator single-file Share runs also select Messages
 and show Android granting that separate UID temporary read access without
-sending anything.
+sending anything. The manager records only evidence it actually has: that the
+Android chooser was opened, or that launching it failed. It does not claim an
+external viewer or recipient completed the action. Open success, a forced
+chooser-launch failure, single Share, and two-file Share status all survive
+manager process restart on both exact ABIs, with inspected full-device frames.
 
 The Files page also exports one regular Archphene Home document to an
 Android-selected `ACTION_CREATE_DOCUMENT` destination. Android owns and opens
@@ -599,8 +603,7 @@ cover picker cancellation, normal exact-byte completion/restart, visible
 byte/percent progress, chunk-boundary cancellation, and manager death after a
 real nonempty partial write. Both destinations are removed, the Linux source
 is unchanged, and full-device phone/wide frames plus fatal-log checks pass on
-the emulator and Samsung. Linux desktop-portal Save As and durable Open/Share
-result presentation remain pending.
+the emulator and Samsung. Linux desktop-portal Save As remains pending.
 
 The replacement also owns a fixed 11,808-byte package-operation journal. It
 holds at most 32 bounded jobs, enforces legal transitions, publishes updates

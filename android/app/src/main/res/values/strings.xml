@@ -80,6 +80,8 @@
     <string name="open_linux_file_chooser">Open Linux file with</string>
     <string name="open_linux_file_only">Choose a file from Archphene Home</string>
     <string name="open_linux_file_unavailable">This Linux file cannot be opened in Android</string>
+    <string name="open_linux_file_handoff">Offered %1$s to Android viewers</string>
+    <string name="open_linux_file_failed">Could not offer %1$s to Android viewers</string>
     <string name="export_file">Export</string>
     <string name="cancel_export">Cancel export</string>
     <string name="export_linux_file_only">Choose a file from Archphene Home</string>
@@ -92,6 +94,9 @@
     <string name="share_linux_file_only">Choose a file from Archphene Home</string>
     <string name="share_linux_file_unavailable">This Linux file cannot be shared</string>
     <string name="share_linux_file_limit">Choose at most 32 Linux files</string>
+    <string name="share_linux_file_handoff">Opened Android sharing for %1$s</string>
+    <string name="share_linux_files_handoff">Opened Android sharing for %1$d Linux files</string>
+    <string name="share_linux_file_failed">Could not open Android sharing</string>
     <string name="document_import_prompt">Android files can be copied into ~/Downloads</string>
     <string name="document_import_unavailable">File import unavailable while Linux starts</string>
     <string name="document_import_queued">Waiting for the shared Linux home…</string>
