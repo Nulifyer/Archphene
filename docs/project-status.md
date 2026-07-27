@@ -437,7 +437,9 @@ discard stale horizontal scroll offsets during state polling. Eight
 production-classifier fixtures pass from the exact APK on the emulator and
 Samsung, with settled full-device screenshots confirming that short package
 names and the longest partial-mutation guidance remain fully on-screen.
-Repair/rollback tooling for partial transactions remains pending.
+Forward Repair is implemented and tested for interrupted removal and a
+partially committed install filesystem. Exact rollback to older archives and
+broader database-corruption recovery remain pending.
 
 Linux-storage failures now expose Clear cache before Review. The operation runs
 off the Activity thread through a dedicated Rust/JNI boundary and is limited to
@@ -674,9 +676,16 @@ state, and only then clears the intent. A deterministic same-UID `SIGKILL` at
 the committed `strace` removal boundary passes on the x86_64 emulator and
 AArch64 Samsung: both show the failed mutation and Repair action in full-device
 screenshots, complete the removal, clear the intent, and restore `strace`
-through the normal signed package flow. Mid-pacman partial-file/database
-failure injection, exact rollback to older archives, and whole-operation AUR
-recovery remain open.
+through the normal signed package flow. A second exact-ABI gate leaves pacman's
+database at the current Foot version while removing its installed executable.
+Repair deliberately omits pacman's normal `--needed` optimization, forcibly
+reinstalls the complete retained signed closure, restores the executable,
+preserves the exact version and explicit install reason, and clears the intent,
+reason journal, database lock, and partial cache state on both devices.
+Launcher reconciliation and publication remain paused while the mutation is
+pending, so a transiently missing desktop file cannot launch Android's wrapper
+uninstall confirmation before Repair. Broader partial-database injection, exact
+rollback to older archives, and whole-operation AUR recovery remain open.
 
 The generic compatibility layer maps Linux root ownership to the Android app
 UID, copies when SELinux rejects hard links, avoids Android app seccomp's
@@ -684,9 +693,9 @@ blocked `fchmodat2`, and maps generic root-relative mutation calls without
 package-specific changes. The current path validates pacman's local database
 and proves the requested package and version. A real AArch64 older-to-newer
 upgrade now passes; the x86_64 replay and replacement coverage remain open.
-Scriptlets/hooks remain disabled, and replacement, mid-pacman partial-state injection, exact
-rollback, whole-operation AUR recovery, orphan cleanup, and low-storage
-behavior remain open.
+Scriptlets/hooks remain disabled, and replacement, broader partial-database
+injection, exact rollback, whole-operation AUR recovery, orphan cleanup, and
+low-storage behavior remain open.
 
 Package operations are now user-cancellable while queued, resolving,
 downloading, or verifying. The Activity enables a visible Cancel action

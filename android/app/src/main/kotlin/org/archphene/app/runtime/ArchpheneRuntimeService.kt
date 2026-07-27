@@ -265,7 +265,11 @@ class ArchpheneRuntimeService : Service() {
 
         fun resumeLauncherPublisher(): Boolean {
             val activeHandle = readyHandle
-            if (activeHandle == 0L || !launcherPublicationPending) {
+            if (
+                activeHandle == 0L ||
+                !launcherPublicationPending ||
+                packageMutationStatus.isNotEmpty()
+            ) {
                 return false
             }
             if (!packageManager.canRequestPackageInstalls()) {
@@ -4204,12 +4208,21 @@ class ArchpheneRuntimeService : Service() {
                         dnsRootReady = true
                         publishAndroidDns(activeHandle)
                         val packageVersion = preparePackageRuntime(activeHandle)
-                        refreshPackageInventory(activeHandle)
-                        reconcileInstalledLaunchers(activeHandle)
-                        refreshDesktopEntries(activeHandle)
-                        refreshShellChoices(activeHandle)
                         jobStatus = readLatestPackageJob(activeHandle)
                         refreshPendingPackageMutation(activeHandle)
+                        if (packageMutationStatus.isEmpty()) {
+                            refreshPackageInventory(activeHandle)
+                            reconcileInstalledLaunchers(activeHandle)
+                            refreshDesktopEntries(activeHandle)
+                        } else {
+                            // A partially committed package transaction can
+                            // temporarily hide desktop files. Keep installed
+                            // package data available, but do not interpret that
+                            // transient tree as a request to remove launchers.
+                            refreshInstalledPackages(activeHandle)
+                            launcherPublicationPending = false
+                        }
+                        refreshShellChoices(activeHandle)
                         restorePackageRecovery()
                         mainHandler.post {
                             if (handle != activeHandle) {
@@ -9163,9 +9176,14 @@ class ArchpheneRuntimeService : Service() {
                         val mutationStarted = !cancelled && recordedPhase >= 4
                         val installedStateRefreshed =
                             if (mutationStarted) {
-                                val refreshed = refreshPackageInventory(activeHandle)
-                                refreshShellChoices(activeHandle)
                                 refreshPendingPackageMutation(activeHandle)
+                                val refreshed =
+                                    if (packageMutationStatus.isEmpty()) {
+                                        refreshPackageInventory(activeHandle)
+                                    } else {
+                                        refreshInstalledPackages(activeHandle)
+                                    }
+                                refreshShellChoices(activeHandle)
                                 refreshed
                             } else {
                                 true
@@ -9407,9 +9425,9 @@ class ArchpheneRuntimeService : Service() {
                             packageName,
                             scratch,
                         )
+                        packageMutationStatus = ""
                         refreshPackageInventory(activeHandle)
                         refreshShellChoices(activeHandle)
-                        packageMutationStatus = ""
                         record(
                             NativeRuntime.JOB_COMPLETE,
                             4,
@@ -9418,9 +9436,13 @@ class ArchpheneRuntimeService : Service() {
                         )
                         Log.i(TAG, "Repaired interrupted package transaction for $packageName")
                     } catch (error: Exception) {
-                        refreshPackageInventory(activeHandle)
-                        refreshShellChoices(activeHandle)
                         refreshPendingPackageMutation(activeHandle)
+                        if (packageMutationStatus.isEmpty()) {
+                            refreshPackageInventory(activeHandle)
+                        } else {
+                            refreshInstalledPackages(activeHandle)
+                        }
+                        refreshShellChoices(activeHandle)
                         val message =
                             boundedJobMessage(
                                 "Package repair did not finish: " +
@@ -9593,9 +9615,14 @@ class ArchpheneRuntimeService : Service() {
                         val mutationStarted = !cancelled && recordedPhase >= 3
                         val installedStateRefreshed =
                             if (mutationStarted) {
-                                val refreshed = refreshPackageInventory(activeHandle)
-                                refreshShellChoices(activeHandle)
                                 refreshPendingPackageMutation(activeHandle)
+                                val refreshed =
+                                    if (packageMutationStatus.isEmpty()) {
+                                        refreshPackageInventory(activeHandle)
+                                    } else {
+                                        refreshInstalledPackages(activeHandle)
+                                    }
+                                refreshShellChoices(activeHandle)
                                 refreshed
                             } else {
                                 true

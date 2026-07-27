@@ -1494,9 +1494,19 @@ impl PackageRuntime {
     pub fn install(&self, package: &str) -> Result<ToolOutput, PackageRuntimeError> {
         let resolution = self.resolve(package)?;
         if package == BASE_PACKAGE {
-            self.install_resolution(&resolution, &[BASE_PACKAGE], package)?;
+            self.install_resolution(
+                &resolution,
+                &[BASE_PACKAGE],
+                package,
+                InstallResolutionMode::Normal,
+            )?;
         } else {
-            self.install_resolution(&resolution, &[BASE_PACKAGE, package], package)?;
+            self.install_resolution(
+                &resolution,
+                &[BASE_PACKAGE, package],
+                package,
+                InstallResolutionMode::Normal,
+            )?;
         }
         let installed = self.installed_version(package)?;
         let expected = resolution
@@ -1526,7 +1536,12 @@ impl PackageRuntime {
         // explicit, then promotes only packages already recorded as explicit.
         // In particular, selecting an installed dependency in the manager must
         // not silently turn it into a user-owned package.
-        self.install_resolution(&resolution, &[BASE_PACKAGE], package)?;
+        self.install_resolution(
+            &resolution,
+            &[BASE_PACKAGE],
+            package,
+            InstallResolutionMode::Normal,
+        )?;
         let installed = self.installed_version(package)?;
         let expected = resolved_version(&resolution, package)?;
         if installed.as_str()? != expected {
@@ -1571,7 +1586,12 @@ impl PackageRuntime {
         }
         let resolution = self.resolve_targets(&targets)?;
         let recovery_target = packages.first().copied().unwrap_or(BASE_PACKAGE);
-        self.install_resolution(&resolution, &[BASE_PACKAGE], recovery_target)
+        self.install_resolution(
+            &resolution,
+            &[BASE_PACKAGE],
+            recovery_target,
+            InstallResolutionMode::Normal,
+        )
     }
 
     pub fn install_verified_aur_archive(
@@ -1912,6 +1932,7 @@ impl PackageRuntime {
         resolution: &PackageResolution,
         explicit_targets: &[&str],
         recovery_target: &str,
+        mode: InstallResolutionMode,
     ) -> Result<(), PackageRuntimeError> {
         let package_count = resolution.as_str()?.lines().count();
         let mut archives = Vec::with_capacity(package_count);
@@ -2005,10 +2026,8 @@ impl PackageRuntime {
             "--noconfirm",
             "--noprogressbar",
             "--noscriptlet",
-            "--needed",
-            "--asdeps",
-            "-U",
         ];
+        append_install_transaction_mode(&mut transaction_arguments, mode);
         transaction_arguments.extend(archives.iter().map(|archive| archive.path.as_str()));
         if let Err(error) = self.run_bytes_with_timeout(
             PackageTool::Pacman,
@@ -2160,7 +2179,12 @@ impl PackageRuntime {
                     .iter()
                     .map(String::as_str)
                     .collect::<Vec<_>>();
-                self.install_resolution(&resolution, &explicit, &request)?;
+                self.install_resolution(
+                    &resolution,
+                    &explicit,
+                    &request,
+                    InstallResolutionMode::Repair,
+                )?;
                 let expected = resolved_version(&resolution, &request)?;
                 let installed = self.installed_version(&request)?;
                 if installed.as_str()? != expected {
@@ -4253,6 +4277,19 @@ struct InstallArchive {
     explicitly_installed: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InstallResolutionMode {
+    Normal,
+    Repair,
+}
+
+fn append_install_transaction_mode(arguments: &mut Vec<&str>, mode: InstallResolutionMode) {
+    if mode == InstallResolutionMode::Normal {
+        arguments.push("--needed");
+    }
+    arguments.extend_from_slice(&["--asdeps", "-U"]);
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum PackageMutationIntent {
     Install {
@@ -5734,6 +5771,17 @@ https://geo.mirror.pkgbuild.com/extra/os/x86_64/{filename}\t{}\n",
         assert!(archives[1].explicitly_installed);
         assert!(!archives[2].explicitly_installed);
         assert!(!archives[3].explicitly_installed);
+    }
+
+    #[test]
+    fn repair_reinstalls_retained_archives_even_when_the_database_is_current() {
+        let mut normal = vec!["--noscriptlet"];
+        append_install_transaction_mode(&mut normal, InstallResolutionMode::Normal);
+        assert_eq!(normal, ["--noscriptlet", "--needed", "--asdeps", "-U"],);
+
+        let mut repair = vec!["--noscriptlet"];
+        append_install_transaction_mode(&mut repair, InstallResolutionMode::Repair);
+        assert_eq!(repair, ["--noscriptlet", "--asdeps", "-U"]);
     }
 
     #[test]
