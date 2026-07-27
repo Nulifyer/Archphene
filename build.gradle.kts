@@ -37,6 +37,27 @@ tasks.register<Exec>("buildArchpheneCompositor") {
     outputs.dir("android/app/build/generated/compositorJniLibs")
 }
 
+val verifyArchpheneTerminalFont =
+    tasks.register<Exec>("verifyArchpheneTerminalFont") {
+        workingDir("third_party/jetbrains-mono-nerd-font")
+        commandLine("sha256sum", "--check", "--quiet", "SHA256SUMS")
+        inputs.files(
+            "third_party/jetbrains-mono-nerd-font/JetBrainsMonoNLNerdFontMono-Regular.ttf",
+            "third_party/jetbrains-mono-nerd-font/OFL.txt",
+            "third_party/jetbrains-mono-nerd-font/SHA256SUMS",
+        )
+    }
+
+tasks.register<Sync>("stageArchpheneTerminalFont") {
+    dependsOn(verifyArchpheneTerminalFont)
+    from("third_party/jetbrains-mono-nerd-font/JetBrainsMonoNLNerdFontMono-Regular.ttf")
+    from("third_party/jetbrains-mono-nerd-font/OFL.txt") {
+        into("licenses")
+        rename { "JetBrainsMonoNerdFont-OFL.txt" }
+    }
+    into("android/app/build/generated/terminalFont/assets")
+}
+
 val rebuildArchphenePackageRuntimePathBridges =
     tasks.register<Exec>("rebuildArchphenePackageRuntimePathBridges") {
         workingDir(rootDir)

@@ -47,7 +47,11 @@ internal class RuntimeSurfaceView(
             ?: AUTOMATIC_TERMINAL_TEXT_SP
     private val textPaint =
         Paint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG).apply {
-            typeface = Typeface.MONOSPACE
+            typeface =
+                Typeface.createFromAsset(
+                    context.assets,
+                    TERMINAL_FONT_ASSET,
+                )
             textSize =
                 TypedValue.applyDimension(
                     TypedValue.COMPLEX_UNIT_SP,
@@ -770,22 +774,16 @@ internal class RuntimeSurfaceView(
             textPaint.textSkewX =
                 if (attributes and ATTRIBUTE_ITALIC != 0) ITALIC_TEXT_SKEW else 0f
             textPaint.isStrikeThruText = attributes and ATTRIBUTE_STRIKE != 0
-            var column = runStart
-            while (column < runEnd) {
+            for (column in runStart until runEnd) {
                 if (isBlankGlyph(start + column)) {
-                    column++
                     continue
                 }
-                val glyphStartColumn = column
-                do {
-                    column++
-                } while (column < runEnd && !isBlankGlyph(start + column))
-                val glyphCount = packGlyphRun(start + glyphStartColumn, start + column)
+                val glyphCount = packGlyphRun(start + column, start + column + 1)
                 canvas.drawText(
                     rowGlyphScratch,
                     0,
                     glyphCount,
-                    CONTENT_PADDING + glyphStartColumn * cellWidth,
+                    CONTENT_PADDING + column * cellWidth,
                     baseline,
                     textPaint,
                 )
@@ -1984,6 +1982,8 @@ internal class RuntimeSurfaceView(
         private const val NANOS_PER_MILLISECOND = 1_000_000L
         private const val AUTOMATIC_TEXT_SIZE = 0
         private const val AUTOMATIC_TERMINAL_TEXT_SP = 16
+        private const val TERMINAL_FONT_ASSET =
+            "JetBrainsMonoNLNerdFontMono-Regular.ttf"
         private const val MIN_TERMINAL_TEXT_SP = 10
         private const val MAX_TERMINAL_TEXT_SP = 32
         private const val TEXT_SIZE_UNCHANGED = -1

@@ -863,7 +863,7 @@ lint passes.
 Android rendering is now connected as a bounded first production slice.
 Starting a shared shell replaces the package workspace with the available
 full-height terminal surface instead of a clipped 64 dp diagnostic strip. The
-view measures 14sp monospace cells, resizes the real PTY to the resulting
+view measures scaled automatic monospace cells, resizes the real PTY to the resulting
 rows and columns, stores only the current dimensioned primitive cell arrays,
 and draws Android `RenderNode` rows. A Service-owned 640,032-byte direct buffer
 is allocated lazily once and survives Activity recreation. The Choreographer
@@ -985,6 +985,13 @@ item restore Auto. Pinch motion previews with a canvas transform and commits
 font metrics, cached-row re-recording, persistence, and the coarse PTY resize
 only when the gesture ends.
 
+The manager Terminal uses the repository's checksum-pinned, no-ligature
+JetBrains Mono face and packages its OFL license instead of trusting Android's
+device-dependent generic `monospace` alias. Every grapheme is painted at its
+explicit cell coordinate using existing scratch storage. This removed an OEM
+regression where Samsung compressed a packed prompt while leaving the typed
+cell and cursor on the wider terminal grid.
+
 Exact-ABI device gates prove Auto, explicit 20sp, touch/hardware controls,
 process-restart persistence, reset, scoped logs, and full-device screenshots
 on the emulator and Samsung. The broad PTY/input/lifecycle gate and
@@ -1004,10 +1011,8 @@ Rust preserves decomposed combining text, CJK width, regional-indicator flags,
 emoji modifiers, and ZWJ families. Wide cells are normalized after overwrite,
 insert/delete/erase, and resize so edits cannot leave orphaned continuation
 cells. Android uses dimension-bound primitive arrays and one reusable UTF-16
-row scratch buffer rather than per-cell strings. It shapes contiguous nonblank
-grapheme runs while anchoring runs after blank cells to their exact terminal
-column; a Samsung full-device gate exposed and fixed the prior proportional
-whitespace drift.
+row scratch buffer rather than per-cell strings. It anchors each grapheme to
+its exact terminal column, including after blank cells.
 
 Palette colors remain integer indexes; direct SGR `38;2`/`48;2` colors carry
 exact 24-bit RGB. Android stores attributes in unused high bits of its
