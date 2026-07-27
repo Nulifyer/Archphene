@@ -32,6 +32,30 @@ though Gradle itself is intentionally run on the pinned JDK 26.0.1.
 
 Build outputs, SDKs, downloaded packages, signing files, screenshots, and test artifacts are ignored.
 
+## Device performance baseline
+
+Run the state-preserving idle-manager gate against each maintained target:
+
+```bash
+./scripts/test-archphene-performance.sh --serial emulator-5554
+./scripts/test-archphene-performance.sh --serial <adb-serial>
+```
+
+It measures three cold and three retained-process launches, switches to one
+other manager section and restores the original selection, then records memory,
+heap, frame, view, thread, descriptor, and idle-child metrics. Results are
+written under `tooling/build/performance/` as JSON plus a full-device
+screenshot. The interaction timing includes ADB and UIAutomator capture, so it
+is an end-to-end automation-response ceiling rather than a claim about raw
+touch latency. OEM builds that omit Android's native-allocation table report
+that field as unavailable instead of zero.
+
+Budgets have `ARCHPHENE_MAX_*` environment overrides for deliberate device
+profiles. Defaults reject cold launch over 1.5 seconds, retained launch over
+750 ms, PSS over 160 MiB, RSS over 300 MiB, Java or native heap PSS over 64 MiB,
+more than 64 threads or 256 descriptors, any idle child process, frame p95 over
+250 ms, or more than 50% jank in the short navigation sample.
+
 ## Build in Linux
 
 Use the Podman launcher:

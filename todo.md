@@ -230,6 +230,8 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [x] Replace the compositor runtime execution/cancellation `HashMap` with a fixed 32-entry state registry. Unknown early-cancel IDs can no longer grow process-global memory; duplicate, full, cancellation, process registration, removal, and slot-reuse transitions have direct tests.
 - [ ] Keep blocking I/O, package work, and filesystem synchronization off Android's main thread and compositor/render threads.
 - [ ] Measure cold/warm startup, RSS/PSS, Java/Kotlin allocations and GC, native allocations, JNI calls, copied bytes, frame time, input latency, descriptors, threads, and child processes.
+  - [x] Add a state-preserving exact-device baseline for three cold and three retained-process launches, UI-automation response, PSS/RSS and Java/native heap PSS, exposed native-allocation counts, frames/jank/p95, views, threads, descriptors, idle child processes, fatal logs, JSON output, and full-device screenshots. Current x86_64 emulator/AArch64 Samsung medians are 306/503 ms cold and 21/61 ms hot; both stay inside explicit budgets.
+  - [ ] Instrument exact JNI call/copy byte counts, ART allocation/GC events where the platform exposes them, and lower-overhead raw input-to-frame latency; extend the baseline to active Terminal and Linux GUI sessions.
 - [ ] Add allocation-count and steady-state soak gates; performance regressions fail CI rather than becoming documentation notes.
 - [ ] Use release builds, R8, baseline profiles, stripped native libraries, panic-abort, and LTO only after debug diagnostics and tests remain adequate.
 
