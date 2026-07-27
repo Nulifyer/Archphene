@@ -1339,9 +1339,8 @@ process. That process still reports `--use-gl=disabled`, so this is not an
 accelerated-rendering claim. Android blocks
 Chromium's normal namespace sandbox; Archphene needs a reviewed generic
 Electron policy and clear reduced-isolation disclosure before automating that
-flag. Accelerated rendering, the marketplace's Code UI flow,
-editor/debugger, extensions, IME/clipboard/dialogs, and broader lifecycle
-remain open.
+flag. Accelerated rendering, broader editor/IME/clipboard behavior, the C#
+debugger, and sustained lifecycle remain open.
 
 Current x86_64 Code-OSS now also reaches its full Ozone/Wayland workbench with
 the shared process, Node workers, extension host, file watcher, and integrated
@@ -1386,8 +1385,25 @@ state, the exact checksum-named patched libc mapped by the live child, scoped
 fatal logs, cleanup, and full-device screenshots. AArch64 additionally exposed
 and fixed versioned `dlopen@GLIBC_2.34` interposition needed by p11-kit; generic
 `statx` fallback, safe parent-path/symlink handling, and large-file temporary
-entry points now have host regressions. The remaining marketplace work is the
-Code UI/extension workflow, not private-root DNS or TLS.
+entry points now have host regressions.
+
+The real Code extension workflow now passes on both targets. Code - OSS searches
+Open VSX and installs Red Hat YAML on x86_64; Visual Studio Code performs the
+equivalent search and install through Microsoft's gallery on AArch64. Both
+workbenches retain the extension, open a real YAML document, and record
+`redhat.vscode-yaml` activation on `onLanguage:yaml` followed by successful
+document-symbol, link, folding, code-action, and diagnostic providers.
+
+That workflow exposed a separate generic GTK regression. Arch's current
+GdkPixbuf delegates SVG loading to Glycin, whose helper starts through
+Bubblewrap; Android's application sandbox cannot create Bubblewrap's nested
+namespace, so Code's native GTK file chooser aborted while loading an Adwaita
+SVG icon. The shared package runtime now publishes the repository's
+checksum-pinned no-Glycin GdkPixbuf and librsvg compatibility libraries for the
+exact ABI, creates a bounded mode-0600 loader cache that names only the verified
+SVG module, and exports it to every Linux child. Full-device emulator and
+Samsung captures show the unmodified native chooser with rendered SVG icons,
+and both Code processes remain alive through selection.
 
 The x86_64 package lane renders immediate durable progress for a real
 `dotnet-sdk` request and resolves the same shared-root `base` plus SDK closure

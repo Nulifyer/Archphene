@@ -5,7 +5,7 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Component, Path, PathBuf};
@@ -42,6 +42,7 @@ const MAX_SHEBANG_BYTES: usize = 256;
 const MAX_GUI_LOG_DRAIN_BYTES: usize = 64 * 1024;
 const GUI_CLOSE_GRACE: Duration = Duration::from_millis(750);
 const GUI_TERMINATE_GRACE: Duration = Duration::from_millis(750);
+const MAX_GDK_PIXBUF_MODULE_FILE_BYTES: u64 = 16 * 1024;
 static OUTPUT_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
@@ -127,6 +128,7 @@ pub struct CommandEnvironment {
     library_path: OsString,
     path_bridge: PathBuf,
     command_directory: PathBuf,
+    gdk_pixbuf_module_file: Option<PathBuf>,
 }
 
 impl CommandEnvironment {
@@ -136,6 +138,7 @@ impl CommandEnvironment {
         library_path: &OsStr,
         path_bridge: &Path,
         command_directory: &Path,
+        gdk_pixbuf_module_file: Option<&Path>,
     ) -> Result<Self, ProcessError> {
         for path in [arch_root, loader, path_bridge, command_directory] {
             if !valid_absolute_path(path) {
@@ -161,12 +164,36 @@ impl CommandEnvironment {
         {
             return Err(ProcessError::InvalidEnvironment);
         }
+        let gdk_pixbuf_module_file = match gdk_pixbuf_module_file {
+            Some(path) => {
+                if !valid_absolute_path(path) {
+                    return Err(ProcessError::InvalidEnvironment);
+                }
+                let metadata = fs::symlink_metadata(path)?;
+                if metadata.file_type().is_symlink()
+                    || !metadata.is_file()
+                    || metadata.permissions().mode() & 0o022 != 0
+                    || metadata.len() == 0
+                    || metadata.len() > MAX_GDK_PIXBUF_MODULE_FILE_BYTES
+                {
+                    return Err(ProcessError::InvalidEnvironment);
+                }
+                let resolved = path.canonicalize()?;
+                let resolved_root = arch_root.canonicalize()?;
+                if resolved == resolved_root || !resolved.starts_with(&resolved_root) {
+                    return Err(ProcessError::InvalidEnvironment);
+                }
+                Some(resolved)
+            }
+            None => None,
+        };
         Ok(Self {
             arch_root: arch_root.to_path_buf(),
             loader: loader.to_path_buf(),
             library_path: library_path.to_os_string(),
             path_bridge: resolved_bridge,
             command_directory: command_directory.to_path_buf(),
+            gdk_pixbuf_module_file,
         })
     }
 
@@ -404,6 +431,9 @@ impl CommandEnvironment {
             .env("ARCHPHENE_RUNTIME_ROOT", &self.arch_root)
             .env("ARCHPHENE_RUNTIME_PROGRAM_PATH", &launch.program)
             .env("ARCHPHENE_FAKE_CHROOT", "1");
+        if let Some(module_file) = self.gdk_pixbuf_module_file.as_ref() {
+            command.env("GDK_PIXBUF_MODULE_FILE", module_file);
+        }
         command
     }
 
@@ -1695,12 +1725,15 @@ mod tests {
             .expect("bridge mode");
         let bridge_alias = aliases.join("libbridge.so");
         symlink(&bridge, &bridge_alias).expect("bridge alias");
+        let pixbuf_modules = root.0.join("run/gdk-pixbuf-loaders.cache");
+        fs::write(&pixbuf_modules, b"verified module cache").expect("pixbuf module cache");
         let environment = CommandEnvironment::new(
             &root.0,
             &root.0.join("usr/bin/loader"),
             aliases.as_os_str(),
             &bridge_alias,
             &aliases,
+            Some(&pixbuf_modules),
         )
         .expect("command environment");
         assert_eq!(environment.path_bridge, bridge);
@@ -1753,6 +1786,10 @@ mod tests {
         assert_eq!(
             value("ARCHPHENE_RUNTIME_PROGRAM_PATH"),
             Some(launch.program.as_os_str()),
+        );
+        assert_eq!(
+            value("GDK_PIXBUF_MODULE_FILE"),
+            Some(pixbuf_modules.as_os_str()),
         );
         assert_eq!(value("ARCHPHENE_ROOT_IDENTITY"), None);
 

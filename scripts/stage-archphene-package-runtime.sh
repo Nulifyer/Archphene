@@ -5,6 +5,11 @@ source "$(dirname "$0")/lib/common.sh"
 archphene_require_command readelf
 archphene_require_command sha256sum
 
+(
+  cd "$ARCHPHENE_ROOT/prebuilt/gtk3-compat"
+  sha256sum --check --quiet SHA256SUMS
+) || archphene_die "verified GTK compatibility payload changed"
+
 generated="$ARCHPHENE_ROOT/android/app/build/generated/packageRuntime"
 staging="$(mktemp -d "$ARCHPHENE_ROOT/tooling/build/package-runtime-stage.XXXXXX")"
 trap 'rm -rf "$staging"' EXIT
@@ -93,6 +98,17 @@ stage_architecture() {
     sources["$logical"]="$source_file"
     roles["$logical"]=library
   done < <(find "$glibc_root" -maxdepth 1 -type f -name '*.so.*' | sort)
+
+  local gtk_compat="$ARCHPHENE_ROOT/prebuilt/gtk3-compat/$architecture"
+  archphene_require_file "$gtk_compat/libarchphene_gtk3_pixbuf.so"
+  archphene_require_file "$gtk_compat/libarchphene_gtk3_rsvg.so"
+  archphene_require_file "$gtk_compat/libarchphene_gtk3_pixbufloader_svg.so"
+  sources["libgdk_pixbuf-2.0.so.0"]="$gtk_compat/libarchphene_gtk3_pixbuf.so"
+  roles["libgdk_pixbuf-2.0.so.0"]=library
+  sources["librsvg-2.so.2"]="$gtk_compat/libarchphene_gtk3_rsvg.so"
+  roles["librsvg-2.so.2"]=library
+  sources["libarchphene_pixbufloader_svg.so"]="$gtk_compat/libarchphene_gtk3_pixbufloader_svg.so"
+  roles["libarchphene_pixbufloader_svg.so"]=library
 
   declare -A packaged_hashes=()
   local identity packaged size actual_machine

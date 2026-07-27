@@ -63,6 +63,11 @@ tasks.register<Exec>("stageArchphenePackageRuntime") {
     commandLine("bash", "scripts/stage-archphene-package-runtime.sh")
     inputs.files(
         file("scripts/stage-archphene-package-runtime.sh"),
+        file("prebuilt/gtk3-compat/SHA256SUMS"),
+        file("prebuilt/gtk3-compat/manifest.json"),
+        fileTree("prebuilt/gtk3-compat") {
+            include("x86_64/*.so", "aarch64/*.so")
+        },
         fileTree("tooling/build/ci-package-runtime") {
             include("SHA256SUMS", "**/runtime-root/usr/bin/*", "**/runtime-root/usr/lib/*")
             include("**/elf-needed-resolved.tsv", "**/glibc-archphene-runtime-x86_64/*")

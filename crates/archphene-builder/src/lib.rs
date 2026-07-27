@@ -772,6 +772,7 @@ impl BuilderRuntime {
             &library_path,
             &alias_path.join(BUILDER_RUNTIME_PATH_BRIDGE),
             &alias_path,
+            None,
         )?;
         Ok(Self {
             environment,

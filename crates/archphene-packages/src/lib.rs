@@ -32,6 +32,11 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const TRANSACTION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const MAX_PACKAGE_TRANSACTION_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 const ALIAS_DIRECTORY: &str = "run/package-runtime-v1";
+const GDK_PIXBUF_MODULE_FILE: &str = "run/gdk-pixbuf-loaders-v1.cache";
+const GDK_PIXBUF_MODULE_TEMP_FILE: &str = "run/.gdk-pixbuf-loaders-v1.tmp";
+const GDK_PIXBUF_LIBRARY: &str = "libgdk_pixbuf-2.0.so.0";
+const GDK_PIXBUF_SVG_LIBRARY: &str = "librsvg-2.so.2";
+const GDK_PIXBUF_SVG_LOADER: &str = "libarchphene_pixbufloader_svg.so";
 const OUTPUT_FILE: &str = "run/package-command-output.tmp";
 const INSTALL_REASON_INTENT_FILE: &str = "run/package-install-reasons-v1";
 const INSTALL_REASON_INTENT_TEMP_FILE: &str = "run/package-install-reasons-v1.tmp";
@@ -327,6 +332,7 @@ pub struct PackageRuntime {
     tools: [Option<PathBuf>; 5],
     library_path: OsString,
     executable_path: OsString,
+    gdk_pixbuf_module_file: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -629,6 +635,9 @@ impl PackageRuntime {
         let mut keyring = None;
         let mut ownertrust = None;
         let mut has_path_bridge = false;
+        let mut has_gdk_pixbuf_library = false;
+        let mut has_gdk_pixbuf_svg_library = false;
+        let mut has_gdk_pixbuf_svg_loader = false;
         let mut tools: [Option<PathBuf>; 5] = std::array::from_fn(|_| None);
         let mut entry_count = 0_usize;
         for (index, line) in manifest.lines().skip(1).enumerate() {
@@ -657,6 +666,9 @@ impl PackageRuntime {
                 }
                 "library" if !entry.logical.starts_with('@') => {
                     has_path_bridge |= entry.logical == PATH_BRIDGE_NAME;
+                    has_gdk_pixbuf_library |= entry.logical == GDK_PIXBUF_LIBRARY;
+                    has_gdk_pixbuf_svg_library |= entry.logical == GDK_PIXBUF_SVG_LIBRARY;
+                    has_gdk_pixbuf_svg_loader |= entry.logical == GDK_PIXBUF_SVG_LOADER;
                 }
                 _ => return Err(PackageRuntimeError::InvalidManifest),
             }
@@ -669,6 +681,16 @@ impl PackageRuntime {
         let ownertrust = ownertrust.ok_or(PackageRuntimeError::MissingEntry("@ownertrust"))?;
         if !has_path_bridge {
             return Err(PackageRuntimeError::MissingEntry(PATH_BRIDGE_NAME));
+        }
+        let gdk_pixbuf_compatibility = [
+            has_gdk_pixbuf_library,
+            has_gdk_pixbuf_svg_library,
+            has_gdk_pixbuf_svg_loader,
+        ];
+        if gdk_pixbuf_compatibility.iter().any(|present| *present)
+            && !gdk_pixbuf_compatibility.iter().all(|present| *present)
+        {
+            return Err(PackageRuntimeError::InvalidManifest);
         }
         if tools[PackageTool::Pacman.index()].is_none() {
             return Err(PackageRuntimeError::MissingEntry("@pacman"));
@@ -693,6 +715,11 @@ impl PackageRuntime {
                 )?;
             }
         }
+        let gdk_pixbuf_module_file = if has_gdk_pixbuf_svg_loader {
+            Some(prepare_gdk_pixbuf_module_file(arch_root, &alias_root)?)
+        } else {
+            None
+        };
 
         let pacman_config = arch_root.join(PACMAN_CONFIG_FILE);
         publish_regular_file(
@@ -737,6 +764,7 @@ impl PackageRuntime {
             tools,
             library_path,
             executable_path,
+            gdk_pixbuf_module_file,
         };
         if runtime.read_pending_mutation()?.is_none() {
             runtime.recover_pending_install_reasons()?;
@@ -2879,6 +2907,7 @@ impl PackageRuntime {
             &self.library_path,
             &self.path_bridge,
             &self.alias_root,
+            self.gdk_pixbuf_module_file.as_deref(),
         )
         .map_err(PackageRuntimeError::from)
     }
@@ -3039,6 +3068,47 @@ fn publish_regular_file(
     drop(file);
     fs::rename(temporary, destination)?;
     Ok(())
+}
+
+fn prepare_gdk_pixbuf_module_file(
+    arch_root: &Path,
+    alias_root: &Path,
+) -> Result<PathBuf, PackageRuntimeError> {
+    let loader = alias_root.join(GDK_PIXBUF_SVG_LOADER);
+    let loader_metadata = fs::symlink_metadata(&loader)?;
+    if !loader_metadata.file_type().is_symlink() {
+        return Err(PackageRuntimeError::UnsafeEntry(loader));
+    }
+    let resolved_loader = loader.canonicalize()?;
+    let resolved_loader_metadata = fs::symlink_metadata(&resolved_loader)?;
+    let resolved_alias_root = alias_root.canonicalize()?;
+    let resolved_arch_root = arch_root.canonicalize()?;
+    if resolved_alias_root == resolved_arch_root
+        || !resolved_alias_root.starts_with(&resolved_arch_root)
+        || resolved_loader == resolved_arch_root
+        || resolved_loader_metadata.file_type().is_symlink()
+        || !resolved_loader_metadata.is_file()
+    {
+        return Err(PackageRuntimeError::UnsafeEntry(resolved_loader));
+    }
+    let loader_path = loader.to_str().ok_or(PackageRuntimeError::InvalidPath)?;
+    if loader_path.contains(['\n', '\r', '"']) {
+        return Err(PackageRuntimeError::InvalidPath);
+    }
+    let content = format!(
+        "# GdkPixbuf Image Loader Modules file\n\
+\"{loader_path}\"\n\
+\"svg\" 6 \"gdk-pixbuf\" \"Scalable Vector Graphics\" \"LGPL\"\n\
+\"image/svg+xml\" \"image/svg\" \"image/svg-xml\" \"image/vnd.adobe.svg+xml\" \
+\"text/xml-svg\" \"image/svg+xml-compressed\" \"\"\n\
+\"svg\" \"svgz\" \"svg.gz\" \"\"\n\
+\" <svg\" \"*    \" 100\n\
+\" <!DOCTYPE svg\" \"*             \" 100\n"
+    );
+    let destination = arch_root.join(GDK_PIXBUF_MODULE_FILE);
+    let temporary = arch_root.join(GDK_PIXBUF_MODULE_TEMP_FILE);
+    publish_regular_file(&destination, &temporary, content.as_bytes())?;
+    Ok(destination)
 }
 
 struct ManifestEntry<'a> {
@@ -4417,6 +4487,70 @@ library\tlibalpm.so.16\tlibarchphene_pkg_333333333333333333333333.so\t7\n";
                     .as_encoded_bytes()
             )
         );
+    }
+
+    #[test]
+    fn gdk_pixbuf_compatibility_is_complete_bounded_and_published() {
+        let tree = TestTree::new();
+        tree.file("libarchphene_pkg_111111111111111111111111.so", b"loader");
+        tree.file("libarchphene_pkg_222222222222222222222222.so", b"pacman");
+        tree.file("libarchphene_pkg_333333333333333333333333.so", b"pixbuf");
+        tree.file("libarchphene_pkg_444444444444444444444444.so", b"keyring");
+        tree.file("libarchphene_pkg_555555555555555555555555.so", b"bridge");
+        tree.file("libarchphene_pkg_666666666666666666666666.so", b"trust");
+        tree.file("libarchphene_pkg_777777777777777777777777.so", b"rsvg");
+        tree.file(
+            "libarchphene_pkg_888888888888888888888888.so",
+            b"svg loader",
+        );
+        let manifest = b"# org.archphene.package-runtime.v1\n\
+loader\t@loader\tlibarchphene_pkg_111111111111111111111111.so\t6\n\
+tool\t@pacman\tlibarchphene_pkg_222222222222222222222222.so\t6\n\
+keyring\t@keyring\tlibarchphene_pkg_444444444444444444444444.so\t7\n\
+ownertrust\t@ownertrust\tlibarchphene_pkg_666666666666666666666666.so\t5\n\
+library\tlibarchphene_path_bridge.so\tlibarchphene_pkg_555555555555555555555555.so\t6\n\
+library\tlibgdk_pixbuf-2.0.so.0\tlibarchphene_pkg_333333333333333333333333.so\t6\n\
+library\tlibrsvg-2.so.2\tlibarchphene_pkg_777777777777777777777777.so\t4\n\
+library\tlibarchphene_pixbufloader_svg.so\tlibarchphene_pkg_888888888888888888888888.so\t10\n";
+        let runtime = PackageRuntime::prepare(
+            &tree.root,
+            &tree.native,
+            manifest,
+            RepositoryArchitecture::X86_64,
+        )
+        .expect("GTK compatibility runtime");
+        let module_file = runtime
+            .gdk_pixbuf_module_file
+            .as_ref()
+            .expect("module file");
+        let content = fs::read_to_string(module_file).expect("module cache");
+        assert!(content.contains("libarchphene_pixbufloader_svg.so"));
+        assert!(content.contains("\"image/svg+xml\""));
+        assert_eq!(
+            fs::metadata(module_file)
+                .expect("module metadata")
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o600
+        );
+
+        let partial = b"# org.archphene.package-runtime.v1\n\
+loader\t@loader\tlibarchphene_pkg_111111111111111111111111.so\t6\n\
+tool\t@pacman\tlibarchphene_pkg_222222222222222222222222.so\t6\n\
+keyring\t@keyring\tlibarchphene_pkg_444444444444444444444444.so\t7\n\
+ownertrust\t@ownertrust\tlibarchphene_pkg_666666666666666666666666.so\t5\n\
+library\tlibarchphene_path_bridge.so\tlibarchphene_pkg_555555555555555555555555.so\t6\n\
+library\tlibgdk_pixbuf-2.0.so.0\tlibarchphene_pkg_333333333333333333333333.so\t6\n";
+        assert!(matches!(
+            PackageRuntime::prepare(
+                &tree.root,
+                &tree.native,
+                partial,
+                RepositoryArchitecture::X86_64,
+            ),
+            Err(PackageRuntimeError::InvalidManifest)
+        ));
     }
 
     #[test]
