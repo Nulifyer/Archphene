@@ -7,7 +7,9 @@ import android.net.Uri
 import android.os.ParcelFileDescriptor
 import android.os.Process
 import android.os.SystemClock
+import android.system.ErrnoException
 import android.system.Os
+import android.system.OsConstants
 import android.util.Base64
 import android.util.Log
 import java.io.BufferedReader
@@ -21,11 +23,19 @@ import java.nio.charset.CodingErrorAction
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.security.SecureRandom
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 
 internal data class LauncherPortalSaveResult(
     val descriptor: ParcelFileDescriptor?,
+    val cancelled: Boolean,
+)
+
+internal data class LauncherPortalOpenResult(
+    val descriptor: ParcelFileDescriptor?,
+    val displayName: String,
+    val writable: Boolean,
     val cancelled: Boolean,
 )
 
@@ -41,13 +51,17 @@ internal class LauncherPortalBridge(
     private val sessionId: Int,
     private val appName: String,
     private val archRoot: File,
+    private val dark: Boolean,
+    private val accent: Int,
     private val requestSave: (String, String, String) -> LauncherPortalSaveResult,
+    private val requestOpen: (String, String) -> LauncherPortalOpenResult,
 ) : Closeable {
     private class ActiveSave(
         val staging: File,
         val output: ParcelFileDescriptor.AutoCloseOutputStream,
         val initialModified: Long,
         val createdAtMillis: Long,
+        var destinationLength: Long,
     ) {
         val copyBuffer = ByteArray(COPY_BUFFER_BYTES)
         var observedLength = -1L
@@ -56,6 +70,7 @@ internal class LauncherPortalBridge(
         var copiedLength = -1L
         var copiedModified = -1L
         var writeObserved = false
+        var truncateFallbackLogged = false
     }
 
     private val random = SecureRandom()
@@ -66,6 +81,8 @@ internal class LauncherPortalBridge(
         File(archRoot, "home/archphene/.cache/archphene/portal-save")
     private val savesDirectory =
         File(savesBaseDirectory, "$sessionId-$instanceToken")
+    private val importsDirectory =
+        File(archRoot, "home/archphene/Documents/Android")
     private val activeSaves = ArrayList<ActiveSave>(MAX_ACTIVE_SAVES)
     @Volatile private var saveSnapshot = emptyArray<ActiveSave>()
     @Volatile private var running = false
@@ -85,6 +102,7 @@ internal class LauncherPortalBridge(
         check(!running) { "Portal bridge is already running" }
         requireDirectory(runtimeDirectory)
         prepareSavesDirectory()
+        prepareImportsDirectory()
         val socketName =
             "archphene.portal.${Process.myPid()}.$sessionId.${randomHex(8)}"
         val localServer = LocalServerSocket(socketName)
@@ -158,6 +176,9 @@ internal class LauncherPortalBridge(
                     environment()["ARCHPHENE_ANDROID_BROKER"] = brokerAddress
                     environment()["ARCHPHENE_RUNTIME_DIR"] = runtimeDirectory.absolutePath
                     environment()["ARCHPHENE_APP_NAME"] = appName
+                    environment()["ARCHPHENE_COLOR_SCHEME"] = if (dark) "dark" else "light"
+                    environment()["ARCHPHENE_ACCENT_RGB"] =
+                        String.format(Locale.ROOT, "%06x", accent and 0x00ff_ffff)
                     environment()["ARCHPHENE_ENABLE_SECRETS"] = "0"
                     environment()["ARCHPHENE_ENABLE_CAMERA"] = "0"
                     environment()["ARCHPHENE_ENABLE_ACCESSIBILITY"] = "0"
@@ -165,7 +186,7 @@ internal class LauncherPortalBridge(
                 .also { process -> drain(process, "portal") }
         SystemClock.sleep(PORTAL_READY_DELAY_MILLIS)
         check(portal?.isAlive == true) { "Private portal frontend exited during startup" }
-        Log.i(TAG, "Private SaveFile portal ready session=$sessionId")
+        Log.i(TAG, "Private desktop portal ready session=$sessionId")
     }
 
     private fun acceptLoop(localServer: LocalServerSocket) {
@@ -194,44 +215,90 @@ internal class LauncherPortalBridge(
                     return
                 }
                 val fields = request.split('\t')
-                if (fields.size != 5 || fields[0] != "ARCHPHENE/2" || fields[1] != "SAVE_FILE") {
+                if (fields.isEmpty() || fields[0] != "ARCHPHENE/2") {
                     writeResponse(client, "ERROR\tUNSUPPORTED")
                     return
                 }
-                val title = decodeField(fields[2], MAX_TITLE_BYTES)
-                val name = decodeField(fields[3], MAX_NAME_BYTES)
-                val mime = decodeField(fields[4], MAX_MIME_BYTES)
-                if (
-                    title == null ||
-                    name == null ||
-                    mime == null ||
-                    title.isBlank() ||
-                    !safeName(name) ||
-                    !safeMime(mime)
-                ) {
-                    writeResponse(client, "ERROR\tINVALID_REQUEST")
-                    return
+                when (fields.getOrNull(1)) {
+                    "SAVE_FILE" -> handleSaveRequest(client, fields)
+                    "OPEN_FILE" -> handleOpenRequest(client, fields)
+                    else -> writeResponse(client, "ERROR\tUNSUPPORTED")
                 }
-                val result = requestSave(title, name, mime)
-                val descriptor = result.descriptor
-                if (descriptor == null) {
-                    writeResponse(client, if (result.cancelled) "CANCEL" else "ERROR\tFAILED")
-                    return
-                }
-                val uri =
-                    runCatching { beginSave(name, descriptor) }
-                        .getOrElse { error ->
-                            descriptor.close()
-                            Log.e(TAG, "Could not create portal staging file session=$sessionId", error)
-                            writeResponse(client, "ERROR\tFAILED")
-                            return
-                        }
-                writeResponse(client, "OK\t${encodeField(uri)}")
             }.onFailure { error ->
                 Log.w(TAG, "Portal broker request failed session=$sessionId", error)
                 runCatching { writeResponse(client, "ERROR\tFAILED") }
             }
         }
+    }
+
+    private fun handleSaveRequest(
+        client: LocalSocket,
+        fields: List<String>,
+    ) {
+        if (fields.size != 5) {
+            writeResponse(client, "ERROR\tINVALID_REQUEST")
+            return
+        }
+        val title = decodeField(fields[2], MAX_TITLE_BYTES)
+        val name = decodeField(fields[3], MAX_NAME_BYTES)
+        val mime = decodeField(fields[4], MAX_MIME_BYTES)
+        if (
+            title == null ||
+            name == null ||
+            mime == null ||
+            title.isBlank() ||
+            !safeName(name) ||
+            !safeMime(mime)
+        ) {
+            writeResponse(client, "ERROR\tINVALID_REQUEST")
+            return
+        }
+        val result = requestSave(title, name, mime)
+        val descriptor = result.descriptor
+        if (descriptor == null) {
+            writeResponse(client, if (result.cancelled) "CANCEL" else "ERROR\tFAILED")
+            return
+        }
+        val uri =
+            runCatching { beginSave(name, descriptor) }
+                .getOrElse { error ->
+                    descriptor.close()
+                    Log.e(TAG, "Could not create portal staging file session=$sessionId", error)
+                    writeResponse(client, "ERROR\tFAILED")
+                    return
+                }
+        writeResponse(client, "OK\t${encodeField(uri)}")
+    }
+
+    private fun handleOpenRequest(
+        client: LocalSocket,
+        fields: List<String>,
+    ) {
+        if (fields.size != 4) {
+            writeResponse(client, "ERROR\tINVALID_REQUEST")
+            return
+        }
+        val title = decodeField(fields[2], MAX_TITLE_BYTES)
+        val mime = decodeField(fields[3], MAX_MIME_BYTES)
+        if (title == null || mime == null || title.isBlank() || !safeMime(mime)) {
+            writeResponse(client, "ERROR\tINVALID_REQUEST")
+            return
+        }
+        val result = requestOpen(title, mime)
+        val descriptor = result.descriptor
+        if (descriptor == null) {
+            writeResponse(client, if (result.cancelled) "CANCEL" else "ERROR\tFAILED")
+            return
+        }
+        val uri =
+            runCatching { beginOpen(result.displayName, descriptor, result.writable) }
+                .getOrElse { error ->
+                    descriptor.close()
+                    Log.e(TAG, "Could not import portal document session=$sessionId", error)
+                    writeResponse(client, "ERROR\tFAILED")
+                    return
+                }
+        writeResponse(client, "OK\t${encodeField(uri)}")
     }
 
     @Synchronized
@@ -240,25 +307,89 @@ internal class LauncherPortalBridge(
         descriptor: ParcelFileDescriptor,
     ): String {
         check(running && activeSaves.size < MAX_ACTIVE_SAVES)
-        val saveId = nextSaveId++
-        val staging = File(savesDirectory, "$saveId-${randomHex(8)}-$suggestedName")
-        val canonicalDirectory = savesDirectory.canonicalFile
-        val canonicalStaging = staging.canonicalFile
-        check(canonicalStaging.parentFile == canonicalDirectory)
-        check(canonicalStaging.createNewFile()) { "Portal staging file already exists" }
         val output = ParcelFileDescriptor.AutoCloseOutputStream(descriptor)
+        val destinationLength = Os.fstat(output.fd).st_size
+        check(destinationLength in 0..MAX_SAVE_BYTES) {
+            "Portal destination has an invalid initial size"
+        }
+        val canonicalStaging = createStaging(suggestedName)
         activeSaves +=
             ActiveSave(
                 canonicalStaging,
                 output,
                 canonicalStaging.lastModified(),
                 SystemClock.uptimeMillis(),
+                destinationLength,
             )
         saveSnapshot = activeSaves.toTypedArray()
         val logicalPath =
             "/home/archphene/.cache/archphene/portal-save/" +
                 "$sessionId-$instanceToken/${canonicalStaging.name}"
         return Uri.Builder().scheme("file").path(logicalPath).build().toString()
+    }
+
+    @Synchronized
+    private fun beginOpen(
+        displayName: String,
+        descriptor: ParcelFileDescriptor,
+        writable: Boolean,
+    ): String {
+        check(running)
+        check(safeName(displayName))
+        val imported = createImport(displayName)
+        try {
+            ParcelFileDescriptor.AutoCloseInputStream(descriptor).use { input ->
+                FileOutputStream(imported, false).use { output ->
+                    val buffer = ByteArray(COPY_BUFFER_BYTES)
+                    var copied = 0L
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        copied += count
+                        check(copied <= MAX_SAVE_BYTES) {
+                            "Portal document exceeds the size limit"
+                        }
+                        output.write(buffer, 0, count)
+                    }
+                    output.fd.sync()
+                }
+            }
+        } catch (error: Exception) {
+            runCatching { descriptor.close() }
+            runCatching { imported.delete() }
+            throw error
+        }
+        if (writable) {
+            Log.w(TAG, "Ignored untrusted writable OpenFile hint session=$sessionId")
+        }
+        val logicalPath = "/home/archphene/Documents/Android/${imported.name}"
+        return Uri.Builder().scheme("file").path(logicalPath).build().toString()
+    }
+
+    private fun createStaging(suggestedName: String): File {
+        val saveId = nextSaveId++
+        val staging = File(savesDirectory, "$saveId-${randomHex(8)}-$suggestedName")
+        val canonicalDirectory = savesDirectory.canonicalFile
+        val canonicalStaging = staging.canonicalFile
+        check(canonicalStaging.parentFile == canonicalDirectory)
+        check(canonicalStaging.createNewFile()) { "Portal staging file already exists" }
+        return canonicalStaging
+    }
+
+    private fun createImport(displayName: String): File {
+        val canonicalDirectory = importsDirectory.canonicalFile
+        val extensionIndex =
+            displayName.lastIndexOf('.').takeIf { index -> index > 0 } ?: displayName.length
+        val stem = displayName.substring(0, extensionIndex)
+        val extension = displayName.substring(extensionIndex)
+        for (attempt in 1..MAX_IMPORT_COLLISIONS) {
+            val candidateName =
+                if (attempt == 1) displayName else "$stem ($attempt)$extension"
+            val candidate = File(canonicalDirectory, candidateName).canonicalFile
+            check(candidate.parentFile == canonicalDirectory)
+            if (candidate.createNewFile()) return candidate
+        }
+        error("Too many imported documents with the same display name")
     }
 
     private fun mirrorLoop() {
@@ -310,7 +441,23 @@ internal class LauncherPortalBridge(
         save: ActiveSave,
         expectedLength: Long,
     ) {
-        Os.ftruncate(save.output.fd, 0)
+        try {
+            Os.ftruncate(save.output.fd, 0)
+        } catch (error: ErrnoException) {
+            if (
+                error.errno != OsConstants.EIO ||
+                expectedLength < save.destinationLength
+            ) {
+                throw error
+            }
+            if (!save.truncateFallbackLogged) {
+                save.truncateFallbackLogged = true
+                Log.w(
+                    TAG,
+                    "Provider cannot truncate; using length-safe overwrite session=$sessionId",
+                )
+            }
+        }
         Os.lseek(save.output.fd, 0, 0)
         FileInputStream(save.staging).use { input ->
             var copied = 0L
@@ -325,6 +472,7 @@ internal class LauncherPortalBridge(
         }
         save.output.flush()
         Os.fsync(save.output.fd)
+        save.destinationLength = expectedLength
     }
 
     override fun close() {
@@ -356,8 +504,14 @@ internal class LauncherPortalBridge(
         joinWorker(brokerWorker)
         for (save in saves) {
             runCatching {
-                if (save.staging.isFile && save.staging.length() <= MAX_SAVE_BYTES) {
-                    copySave(save, save.staging.length())
+                val length = save.staging.length()
+                val modified = save.staging.lastModified()
+                if (
+                    save.staging.isFile &&
+                    length <= MAX_SAVE_BYTES &&
+                    (length != save.copiedLength || modified != save.copiedModified)
+                ) {
+                    copySave(save, length)
                 }
             }.onFailure { error ->
                 Log.e(TAG, "Final portal document mirror failed session=$sessionId", error)
@@ -398,6 +552,16 @@ internal class LauncherPortalBridge(
                 "Unsafe stale portal save"
             }
             check(entry.delete()) { "Could not remove stale portal save" }
+        }
+    }
+
+    private fun prepareImportsDirectory() {
+        requireTrustedDirectoryChain(archRoot, importsDirectory)
+        check(
+            importsDirectory.canonicalFile.toPath()
+                .startsWith(archRoot.canonicalFile.toPath()),
+        ) {
+            "Portal import directory escaped the Arch root"
         }
     }
 
@@ -535,14 +699,58 @@ internal class LauncherPortalBridge(
         private const val MAX_NAME_BYTES = 512
         private const val MAX_MIME_BYTES = 128
         private const val MAX_ACTIVE_SAVES = 8
+        private const val MAX_IMPORT_COLLISIONS = 1_000
         private const val MAX_SAVE_BYTES = 512L * 1024 * 1024
         private const val COPY_BUFFER_BYTES = 64 * 1024
         private const val MIRROR_POLL_MILLIS = 250L
         private const val REQUIRED_STABLE_POLLS = 2
         private const val EMPTY_SAVE_GRACE_MILLIS = 5_000L
         private const val MAX_RECOVERED_SAVE_DIRECTORIES = 128
+        private const val MAX_RUNTIME_ENTRIES = 4
         private val STALE_SAVE_DIRECTORY_NAME =
             Regex("[1-9][0-9]*(-[0-9a-f]{16})?")
+        private val STALE_RUNTIME_DIRECTORY_NAME =
+            Regex("p[1-9][0-9]*-[0-9a-f]{16}")
+
+        fun recoverStaleRuntime(cacheRoot: File) {
+            check(
+                cacheRoot.isDirectory &&
+                    !Files.isSymbolicLink(cacheRoot.toPath()),
+            ) {
+                "Invalid portal cache root"
+            }
+            val directories =
+                cacheRoot.listFiles { entry ->
+                    entry.name.matches(STALE_RUNTIME_DIRECTORY_NAME)
+                } ?: error("Could not inspect stale portal runtime directories")
+            check(directories.size <= MAX_RECOVERED_SAVE_DIRECTORIES) {
+                "Too many stale portal runtime directories"
+            }
+            for (directory in directories) {
+                check(
+                    !Files.isSymbolicLink(directory.toPath()) &&
+                        Files.isDirectory(directory.toPath(), LinkOption.NOFOLLOW_LINKS) &&
+                        directory.canonicalFile.parentFile == cacheRoot.canonicalFile,
+                ) {
+                    "Unsafe stale portal runtime directory"
+                }
+                val entries =
+                    directory.listFiles() ?: error("Could not inspect stale portal runtime")
+                check(entries.size <= MAX_RUNTIME_ENTRIES) {
+                    "Too many files in stale portal runtime directory"
+                }
+                for (entry in entries) {
+                    check(
+                        !Files.isSymbolicLink(entry.toPath()) &&
+                            entry.canonicalFile.parentFile == directory.canonicalFile,
+                    ) {
+                        "Unsafe stale portal runtime entry"
+                    }
+                    check(entry.delete()) { "Could not remove stale portal runtime entry" }
+                }
+                check(directory.delete()) { "Could not remove stale portal runtime directory" }
+            }
+        }
 
         fun recoverStaleSaves(archRoot: File) {
             if (!archRoot.exists()) return

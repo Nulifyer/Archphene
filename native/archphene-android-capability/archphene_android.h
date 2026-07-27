@@ -15,6 +15,9 @@ int archphene_android_print_pdf(
 int archphene_android_save_file(
         const char *title, const char *suggested_name, const char *mime_type,
         char *uri, size_t uri_size, char *response, size_t response_size);
+int archphene_android_open_file(
+        const char *title, const char *mime_type,
+        char *uri, size_t uri_size, char *response, size_t response_size);
 int archphene_android_request_audio_input(char *response, size_t response_size);
 int archphene_android_check_audio_input(char *response, size_t response_size);
 int archphene_android_request_camera(char *response, size_t response_size);

@@ -21,6 +21,7 @@
 #define PORTAL_NAME "org.freedesktop.portal.Desktop"
 #define PORTAL_OPEN_URI "org.freedesktop.portal.OpenURI"
 #define PORTAL_FILE_CHOOSER "org.freedesktop.portal.FileChooser"
+#define PORTAL_SETTINGS "org.freedesktop.portal.Settings"
 #define PORTAL_NOTIFICATION "org.freedesktop.portal.Notification"
 #define PORTAL_PRINT "org.freedesktop.portal.Print"
 #define PORTAL_CAMERA "org.freedesktop.portal.Camera"
@@ -42,9 +43,22 @@ static const char portal_xml[] =
         "<arg type='a{sv}' direction='in'/><arg type='b' direction='out'/></method>"
         "<property name='version' type='u' access='read'/></interface>"
         "<interface name='org.freedesktop.portal.FileChooser'>"
+        "<method name='OpenFile'><arg type='s' direction='in'/>"
+        "<arg type='s' direction='in'/><arg type='a{sv}' direction='in'/>"
+        "<arg type='o' direction='out'/></method>"
         "<method name='SaveFile'><arg type='s' direction='in'/>"
         "<arg type='s' direction='in'/><arg type='a{sv}' direction='in'/>"
         "<arg type='o' direction='out'/></method>"
+        "<property name='version' type='u' access='read'/></interface>"
+        "<interface name='org.freedesktop.portal.Settings'>"
+        "<method name='ReadAll'><arg type='as' direction='in'/>"
+        "<arg type='a{sa{sv}}' direction='out'/></method>"
+        "<method name='Read'><arg type='s' direction='in'/>"
+        "<arg type='s' direction='in'/><arg type='v' direction='out'/></method>"
+        "<method name='ReadOne'><arg type='s' direction='in'/>"
+        "<arg type='s' direction='in'/><arg type='v' direction='out'/></method>"
+        "<signal name='SettingChanged'><arg type='s'/><arg type='s'/>"
+        "<arg type='v'/></signal>"
         "<property name='version' type='u' access='read'/></interface>"
         "<interface name='org.freedesktop.portal.Notification'>"
         "<method name='AddNotification'><arg type='s' direction='in'/>"
@@ -107,6 +121,12 @@ static dbus_bool_t send_message(DBusConnection *connection, DBusMessage *message
 
 static void send_error(DBusConnection *connection, DBusMessage *request,
         const char *name, const char *detail) {
+    /*
+     * D-Bus method calls may explicitly suppress replies. Sending even an
+     * error for such a call is unsolicited and the bus correctly rejects it
+     * as requested_reply=0.
+     */
+    if (dbus_message_get_no_reply(request)) return;
     send_message(connection, dbus_message_new_error(request, name, detail));
 }
 
@@ -201,6 +221,35 @@ static void read_save_options(
                 DBusMessageIter value;
                 dbus_message_iter_recurse(&entry, &value);
                 (void)copy_basic_string(&value, name, name_size);
+            }
+        }
+        dbus_message_iter_next(&entries);
+    }
+}
+
+static void read_open_options(
+        DBusMessageIter *array, dbus_bool_t *multiple, dbus_bool_t *directory) {
+    *multiple = FALSE;
+    *directory = FALSE;
+    if (dbus_message_iter_get_arg_type(array) != DBUS_TYPE_ARRAY) return;
+    DBusMessageIter entries;
+    dbus_message_iter_recurse(array, &entries);
+    while (dbus_message_iter_get_arg_type(&entries) == DBUS_TYPE_DICT_ENTRY) {
+        DBusMessageIter entry;
+        dbus_message_iter_recurse(&entries, &entry);
+        if (dbus_message_iter_get_arg_type(&entry) == DBUS_TYPE_STRING) {
+            const char *key = NULL;
+            dbus_message_iter_get_basic(&entry, &key);
+            if (dbus_message_iter_next(&entry)
+                    && dbus_message_iter_get_arg_type(&entry) == DBUS_TYPE_VARIANT) {
+                DBusMessageIter value;
+                dbus_message_iter_recurse(&entry, &value);
+                if (dbus_message_iter_get_arg_type(&value) == DBUS_TYPE_BOOLEAN) {
+                    dbus_bool_t enabled = FALSE;
+                    dbus_message_iter_get_basic(&value, &enabled);
+                    if (strcmp(key, "multiple") == 0) *multiple = enabled;
+                    else if (strcmp(key, "directory") == 0) *directory = enabled;
+                }
             }
         }
         dbus_message_iter_next(&entries);
@@ -376,6 +425,208 @@ static dbus_bool_t append_named_uint(
             && dbus_message_iter_append_basic(&variant, DBUS_TYPE_UINT32, &value)
             && dbus_message_iter_close_container(&entry, &variant)
             && dbus_message_iter_close_container(dict, &entry);
+}
+
+static uint32_t appearance_color_scheme(void) {
+    const char *value = getenv("ARCHPHENE_COLOR_SCHEME");
+    if (value != NULL && strcmp(value, "dark") == 0) return 1;
+    if (value != NULL && strcmp(value, "light") == 0) return 2;
+    return 0;
+}
+
+static dbus_bool_t appearance_accent(double *red, double *green, double *blue) {
+    const char *value = getenv("ARCHPHENE_ACCENT_RGB");
+    if (value == NULL || strlen(value) != 6) return FALSE;
+    unsigned int components[3] = {0};
+    for (size_t index = 0; index < 3; index++) {
+        unsigned int component = 0;
+        for (size_t digit = 0; digit < 2; digit++) {
+            unsigned char character = (unsigned char)value[index * 2 + digit];
+            unsigned int decoded;
+            if (character >= '0' && character <= '9') decoded = character - '0';
+            else if (character >= 'a' && character <= 'f') decoded = character - 'a' + 10;
+            else if (character >= 'A' && character <= 'F') decoded = character - 'A' + 10;
+            else return FALSE;
+            component = component * 16 + decoded;
+        }
+        components[index] = component;
+    }
+    *red = components[0] / 255.0;
+    *green = components[1] / 255.0;
+    *blue = components[2] / 255.0;
+    return TRUE;
+}
+
+static dbus_bool_t appearance_accent_available(void) {
+    double red;
+    double green;
+    double blue;
+    return appearance_accent(&red, &green, &blue);
+}
+
+static dbus_bool_t known_appearance_key(const char *key) {
+    return key != NULL && (strcmp(key, "color-scheme") == 0
+            || strcmp(key, "accent-color") == 0
+            || strcmp(key, "contrast") == 0
+            || strcmp(key, "reduced-motion") == 0);
+}
+
+static dbus_bool_t append_appearance_value(
+        DBusMessageIter *parent, const char *key) {
+    DBusMessageIter variant;
+    if (strcmp(key, "accent-color") == 0) {
+        double red;
+        double green;
+        double blue;
+        if (!appearance_accent(&red, &green, &blue)
+                || !dbus_message_iter_open_container(
+                        parent, DBUS_TYPE_VARIANT, "(ddd)", &variant)) {
+            return FALSE;
+        }
+        DBusMessageIter tuple;
+        dbus_bool_t ok = dbus_message_iter_open_container(
+                    &variant, DBUS_TYPE_STRUCT, NULL, &tuple)
+                && dbus_message_iter_append_basic(&tuple, DBUS_TYPE_DOUBLE, &red)
+                && dbus_message_iter_append_basic(&tuple, DBUS_TYPE_DOUBLE, &green)
+                && dbus_message_iter_append_basic(&tuple, DBUS_TYPE_DOUBLE, &blue)
+                && dbus_message_iter_close_container(&variant, &tuple)
+                && dbus_message_iter_close_container(parent, &variant);
+        return ok;
+    }
+    uint32_t value = strcmp(key, "color-scheme") == 0
+            ? appearance_color_scheme() : 0;
+    return dbus_message_iter_open_container(
+                parent, DBUS_TYPE_VARIANT, "u", &variant)
+            && dbus_message_iter_append_basic(&variant, DBUS_TYPE_UINT32, &value)
+            && dbus_message_iter_close_container(parent, &variant);
+}
+
+static dbus_bool_t append_appearance_entry(
+        DBusMessageIter *dict, const char *key) {
+    DBusMessageIter entry;
+    return dbus_message_iter_open_container(
+                dict, DBUS_TYPE_DICT_ENTRY, NULL, &entry)
+            && dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &key)
+            && append_appearance_value(&entry, key)
+            && dbus_message_iter_close_container(dict, &entry);
+}
+
+static dbus_bool_t requested_appearance_namespace(
+        DBusMessageIter *arguments, dbus_bool_t *valid) {
+    *valid = FALSE;
+    if (dbus_message_iter_get_arg_type(arguments) != DBUS_TYPE_ARRAY) return FALSE;
+    DBusMessageIter namespaces;
+    dbus_message_iter_recurse(arguments, &namespaces);
+    dbus_bool_t requested =
+            dbus_message_iter_get_arg_type(&namespaces) == DBUS_TYPE_INVALID;
+    while (dbus_message_iter_get_arg_type(&namespaces) != DBUS_TYPE_INVALID) {
+        if (dbus_message_iter_get_arg_type(&namespaces) != DBUS_TYPE_STRING) return FALSE;
+        const char *value = NULL;
+        dbus_message_iter_get_basic(&namespaces, &value);
+        if (value == NULL || strlen(value) > 127) return FALSE;
+        size_t length = strlen(value);
+        if (length == 0 || strcmp(value, "org.freedesktop.appearance") == 0
+                || (value[length - 1] == '*'
+                    && strncmp("org.freedesktop.appearance", value, length - 1) == 0)) {
+            requested = TRUE;
+        }
+        dbus_message_iter_next(&namespaces);
+    }
+    *valid = TRUE;
+    return requested;
+}
+
+static void handle_settings_read_all(
+        DBusConnection *connection, DBusMessage *request) {
+    DBusMessageIter arguments;
+    dbus_bool_t valid = FALSE;
+    if (!dbus_message_iter_init(request, &arguments)) {
+        send_error(connection, request, DBUS_ERROR_INVALID_ARGS, "Expected namespace array");
+        return;
+    }
+    dbus_bool_t include_appearance =
+            requested_appearance_namespace(&arguments, &valid);
+    if (!valid || dbus_message_iter_next(&arguments)) {
+        send_error(connection, request, DBUS_ERROR_INVALID_ARGS, "Expected namespace array");
+        return;
+    }
+    DBusMessage *reply = dbus_message_new_method_return(request);
+    DBusMessageIter output;
+    DBusMessageIter namespaces;
+    if (reply == NULL) return;
+    dbus_message_iter_init_append(reply, &output);
+    dbus_bool_t ok = dbus_message_iter_open_container(
+            &output, DBUS_TYPE_ARRAY, "{sa{sv}}", &namespaces);
+    if (ok && include_appearance) {
+        const char *name = "org.freedesktop.appearance";
+        DBusMessageIter namespace_entry;
+        DBusMessageIter settings;
+        ok = dbus_message_iter_open_container(
+                    &namespaces, DBUS_TYPE_DICT_ENTRY, NULL, &namespace_entry)
+                && dbus_message_iter_append_basic(
+                    &namespace_entry, DBUS_TYPE_STRING, &name)
+                && dbus_message_iter_open_container(
+                    &namespace_entry, DBUS_TYPE_ARRAY, "{sv}", &settings)
+                && append_appearance_entry(&settings, "color-scheme")
+                && (!appearance_accent_available()
+                    || append_appearance_entry(&settings, "accent-color"))
+                && append_appearance_entry(&settings, "contrast")
+                && append_appearance_entry(&settings, "reduced-motion")
+                && dbus_message_iter_close_container(&namespace_entry, &settings)
+                && dbus_message_iter_close_container(&namespaces, &namespace_entry);
+    }
+    ok = ok && dbus_message_iter_close_container(&output, &namespaces);
+    if (!ok) {
+        dbus_message_unref(reply);
+        send_error(connection, request, DBUS_ERROR_NO_MEMORY,
+                "Could not create settings response");
+        return;
+    }
+    send_message(connection, reply);
+}
+
+static void handle_settings_read(
+        DBusConnection *connection, DBusMessage *request, dbus_bool_t legacy) {
+    DBusError error = DBUS_ERROR_INIT;
+    const char *namespace = NULL;
+    const char *key = NULL;
+    if (!dbus_message_get_args(request, &error,
+            DBUS_TYPE_STRING, &namespace,
+            DBUS_TYPE_STRING, &key,
+            DBUS_TYPE_INVALID)) {
+        send_error(connection, request, DBUS_ERROR_INVALID_ARGS, "Expected namespace and key");
+        dbus_error_free(&error);
+        return;
+    }
+    if (namespace == NULL || strcmp(namespace, "org.freedesktop.appearance") != 0
+            || !known_appearance_key(key)
+            || (strcmp(key, "accent-color") == 0
+                && !appearance_accent_available())) {
+        send_error(connection, request, DBUS_ERROR_UNKNOWN_PROPERTY,
+                "Unknown portal setting");
+        return;
+    }
+    DBusMessage *reply = dbus_message_new_method_return(request);
+    DBusMessageIter output;
+    if (reply == NULL) return;
+    dbus_message_iter_init_append(reply, &output);
+    dbus_bool_t ok;
+    if (legacy) {
+        DBusMessageIter outer;
+        ok = dbus_message_iter_open_container(
+                    &output, DBUS_TYPE_VARIANT, "v", &outer)
+                && append_appearance_value(&outer, key)
+                && dbus_message_iter_close_container(&output, &outer);
+    } else {
+        ok = append_appearance_value(&output, key);
+    }
+    if (!ok) {
+        dbus_message_unref(reply);
+        send_error(connection, request, DBUS_ERROR_NO_MEMORY,
+                "Could not create setting response");
+        return;
+    }
+    send_message(connection, reply);
 }
 
 static void emit_print_prepare_response(
@@ -595,6 +846,45 @@ static dbus_bool_t safe_suggested_name(const char *name) {
     return TRUE;
 }
 
+static void handle_open_file(DBusConnection *connection, DBusMessage *request) {
+    DBusMessageIter args;
+    char title[257] = {0};
+    if (!dbus_message_iter_init(request, &args)
+            || dbus_message_iter_get_arg_type(&args) != DBUS_TYPE_STRING
+            || !dbus_message_iter_next(&args)
+            || copy_basic_string(&args, title, sizeof(title)) != 0
+            || !dbus_message_iter_next(&args)
+            || dbus_message_iter_get_arg_type(&args) != DBUS_TYPE_ARRAY) {
+        send_error(connection, request, DBUS_ERROR_INVALID_ARGS, "Expected (ssa{sv})");
+        return;
+    }
+    dbus_bool_t multiple = FALSE;
+    dbus_bool_t directory = FALSE;
+    read_open_options(&args, &multiple, &directory);
+    if (title[0] == '\0') snprintf(title, sizeof(title), "Open Linux document");
+    char path[256];
+    make_request_path(request, &args, path, sizeof(path));
+    if (!send_request_reply(connection, request, path)) return;
+
+    char uri[4097] = {0};
+    char response[256] = {0};
+    int result = -1;
+    if (!multiple && !directory) {
+        result = archphene_android_open_file(
+                title, "*/*", uri, sizeof(uri), response, sizeof(response));
+    } else {
+        snprintf(response, sizeof(response), "ERROR\tUNSUPPORTED_SELECTION");
+    }
+    uint32_t portal_response =
+            result == 0 ? 0u : (strcmp(response, "CANCEL") == 0 ? 1u : 2u);
+    dbus_bool_t emitted = emit_file_chooser_response(
+            connection, path, dbus_message_get_sender(request),
+            portal_response, result == 0 ? uri : NULL);
+    fprintf(stderr,
+            "OpenFile completed path=%s broker=%d response=%u emitted=%d\n",
+            path, result, portal_response, emitted ? 1 : 0);
+}
+
 static void handle_save_file(DBusConnection *connection, DBusMessage *request) {
     DBusMessageIter args;
     char title[257] = {0};
@@ -781,8 +1071,9 @@ static void handle_properties(DBusConnection *connection, DBusMessage *request) 
     dbus_bool_t printing = strcmp(interface, PORTAL_PRINT) == 0;
     dbus_bool_t camera = strcmp(interface, PORTAL_CAMERA) == 0;
     dbus_bool_t chooser = strcmp(interface, PORTAL_FILE_CHOOSER) == 0;
-    uint32_t version = chooser ? 4u
-            : (camera ? 1u : (notification ? 2u : (printing ? 4u : 5u)));
+    dbus_bool_t settings = strcmp(interface, PORTAL_SETTINGS) == 0;
+    uint32_t version = settings ? 2u : (chooser ? 4u
+            : (camera ? 1u : (notification ? 2u : (printing ? 4u : 5u))));
     if (dbus_message_is_method_call(request, PROPERTIES, "Get")) {
         char property[64] = {0};
         if (!dbus_message_iter_next(&args)
@@ -797,7 +1088,7 @@ static void handle_properties(DBusConnection *connection, DBusMessage *request) 
         dbus_message_iter_init_append(reply, &output);
         dbus_bool_t ok = FALSE;
         if (strcmp(property, "version") == 0
-                && (camera || notification || printing || chooser
+                && (camera || notification || printing || chooser || settings
                     || strcmp(interface, PORTAL_OPEN_URI) == 0)) {
             ok = dbus_message_iter_open_container(&output, DBUS_TYPE_VARIANT, "u", &variant)
                     && dbus_message_iter_append_basic(&variant, DBUS_TYPE_UINT32, &version)
@@ -821,7 +1112,7 @@ static void handle_properties(DBusConnection *connection, DBusMessage *request) 
         send_message(connection, reply);
         return;
     }
-    if (!camera && !notification && !printing && !chooser
+    if (!camera && !notification && !printing && !chooser && !settings
             && strcmp(interface, PORTAL_OPEN_URI) != 0) {
         send_error(connection, request, DBUS_ERROR_UNKNOWN_INTERFACE, "Unknown interface");
         return;
@@ -874,8 +1165,16 @@ static void handle_message(DBusConnection *connection, DBusMessage *request) {
         handle_open_uri(connection, request);
     } else if (dbus_message_is_method_call(request, PORTAL_OPEN_URI, "SchemeSupported")) {
         handle_scheme_supported(connection, request);
+    } else if (dbus_message_is_method_call(request, PORTAL_FILE_CHOOSER, "OpenFile")) {
+        handle_open_file(connection, request);
     } else if (dbus_message_is_method_call(request, PORTAL_FILE_CHOOSER, "SaveFile")) {
         handle_save_file(connection, request);
+    } else if (dbus_message_is_method_call(request, PORTAL_SETTINGS, "ReadAll")) {
+        handle_settings_read_all(connection, request);
+    } else if (dbus_message_is_method_call(request, PORTAL_SETTINGS, "Read")) {
+        handle_settings_read(connection, request, TRUE);
+    } else if (dbus_message_is_method_call(request, PORTAL_SETTINGS, "ReadOne")) {
+        handle_settings_read(connection, request, FALSE);
     } else if (dbus_message_is_method_call(request, PORTAL_CAMERA, "AccessCamera")) {
         handle_camera_access(connection, request);
     } else if (dbus_message_is_method_call(

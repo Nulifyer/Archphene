@@ -614,9 +614,140 @@ static void camera_open(DBusConnection *connection) {
     printf("PASS portal PipeWire remote descriptor\n");
 }
 
+static DBusMessage *read_setting(
+        DBusConnection *connection, const char *method, const char *key) {
+    const char *namespace = "org.freedesktop.appearance";
+    DBusMessage *request = dbus_message_new_method_call(
+            PORTAL_NAME, PORTAL_PATH,
+            "org.freedesktop.portal.Settings", method);
+    if (request == NULL || !dbus_message_append_args(request,
+            DBUS_TYPE_STRING, &namespace,
+            DBUS_TYPE_STRING, &key,
+            DBUS_TYPE_INVALID)) {
+        if (request != NULL) dbus_message_unref(request);
+        fprintf(stderr, "FAIL portal Settings.%s arguments\n", method);
+        exit(1);
+    }
+    return call(connection, request, method);
+}
+
+static void settings_contract(DBusConnection *connection) {
+    uint32_t version = portal_version(connection,
+            "org.freedesktop.portal.Settings", "portal Settings version");
+    if (version < 2) {
+        fprintf(stderr, "FAIL portal Settings version: %u\n", version);
+        exit(1);
+    }
+
+    DBusMessage *reply = read_setting(connection, "ReadOne", "color-scheme");
+    DBusMessageIter value;
+    DBusMessageIter variant;
+    uint32_t scheme = 0;
+    if (!dbus_message_iter_init(reply, &value)
+            || dbus_message_iter_get_arg_type(&value) != DBUS_TYPE_VARIANT) {
+        dbus_message_unref(reply);
+        fprintf(stderr, "FAIL Settings.ReadOne color-scheme reply\n");
+        exit(1);
+    }
+    dbus_message_iter_recurse(&value, &variant);
+    if (dbus_message_iter_get_arg_type(&variant) != DBUS_TYPE_UINT32) {
+        dbus_message_unref(reply);
+        fprintf(stderr, "FAIL Settings.ReadOne color-scheme type\n");
+        exit(1);
+    }
+    dbus_message_iter_get_basic(&variant, &scheme);
+    dbus_message_unref(reply);
+    if (scheme != 1 && scheme != 2) {
+        fprintf(stderr, "FAIL Settings color-scheme=%u\n", scheme);
+        exit(1);
+    }
+
+    reply = read_setting(connection, "ReadOne", "accent-color");
+    if (!dbus_message_iter_init(reply, &value)
+            || dbus_message_iter_get_arg_type(&value) != DBUS_TYPE_VARIANT) {
+        dbus_message_unref(reply);
+        fprintf(stderr, "FAIL Settings.ReadOne accent reply\n");
+        exit(1);
+    }
+    dbus_message_iter_recurse(&value, &variant);
+    if (dbus_message_iter_get_arg_type(&variant) != DBUS_TYPE_STRUCT) {
+        dbus_message_unref(reply);
+        fprintf(stderr, "FAIL Settings.ReadOne accent type\n");
+        exit(1);
+    }
+    DBusMessageIter tuple;
+    dbus_message_iter_recurse(&variant, &tuple);
+    for (unsigned int component = 0; component < 3; component++) {
+        double channel = -1.0;
+        if (dbus_message_iter_get_arg_type(&tuple) != DBUS_TYPE_DOUBLE) {
+            dbus_message_unref(reply);
+            fprintf(stderr, "FAIL Settings.ReadOne accent component\n");
+            exit(1);
+        }
+        dbus_message_iter_get_basic(&tuple, &channel);
+        if (channel < 0.0 || channel > 1.0) {
+            dbus_message_unref(reply);
+            fprintf(stderr, "FAIL Settings accent channel=%f\n", channel);
+            exit(1);
+        }
+        dbus_message_iter_next(&tuple);
+    }
+    if (dbus_message_iter_get_arg_type(&tuple) != DBUS_TYPE_INVALID) {
+        dbus_message_unref(reply);
+        fprintf(stderr, "FAIL Settings accent tuple length\n");
+        exit(1);
+    }
+    dbus_message_unref(reply);
+
+    const char *namespace = "org.freedesktop.appearance";
+    DBusMessage *request = dbus_message_new_method_call(
+            PORTAL_NAME, PORTAL_PATH,
+            "org.freedesktop.portal.Settings", "ReadAll");
+    DBusMessageIter arguments;
+    DBusMessageIter namespaces;
+    if (request == NULL) {
+        fprintf(stderr, "FAIL Settings.ReadAll allocation\n");
+        exit(1);
+    }
+    dbus_message_iter_init_append(request, &arguments);
+    if (!dbus_message_iter_open_container(
+                &arguments, DBUS_TYPE_ARRAY, "s", &namespaces)
+            || !dbus_message_iter_append_basic(
+                &namespaces, DBUS_TYPE_STRING, &namespace)
+            || !dbus_message_iter_close_container(&arguments, &namespaces)) {
+        dbus_message_unref(request);
+        fprintf(stderr, "FAIL Settings.ReadAll arguments\n");
+        exit(1);
+    }
+    reply = call(connection, request, "Settings.ReadAll");
+    if (!dbus_message_has_signature(reply, "a{sa{sv}}")) {
+        dbus_message_unref(reply);
+        fprintf(stderr, "FAIL Settings.ReadAll signature\n");
+        exit(1);
+    }
+    dbus_message_unref(reply);
+
+    reply = read_setting(connection, "Read", "color-scheme");
+    if (!dbus_message_iter_init(reply, &value)
+            || dbus_message_iter_get_arg_type(&value) != DBUS_TYPE_VARIANT) {
+        dbus_message_unref(reply);
+        fprintf(stderr, "FAIL legacy Settings.Read outer type\n");
+        exit(1);
+    }
+    dbus_message_iter_recurse(&value, &variant);
+    if (dbus_message_iter_get_arg_type(&variant) != DBUS_TYPE_VARIANT) {
+        dbus_message_unref(reply);
+        fprintf(stderr, "FAIL legacy Settings.Read nested type\n");
+        exit(1);
+    }
+    dbus_message_unref(reply);
+    printf("PASS portal Settings version=%u scheme=%u accent and ReadAll\n",
+            version, scheme);
+}
+
 int main(int argc, char **argv) {
     if (argc < 2 || argc > 3) {
-        fprintf(stderr, "usage: %s contract|notify|withdraw [classic-id] | open URI | print PDF | print-pipe | camera-access | camera-open\n",
+        fprintf(stderr, "usage: %s contract|settings|notify|withdraw [classic-id] | open URI | print PDF | print-pipe | camera-access | camera-open\n",
                 argv[0]);
         return 2;
     }
@@ -635,6 +766,8 @@ int main(int argc, char **argv) {
     if (strcmp(argv[1], "contract") == 0 && argc == 2) {
         check_contract(connection);
         prepare_print(connection);
+    } else if (strcmp(argv[1], "settings") == 0 && argc == 2) {
+        settings_contract(connection);
     } else if (strcmp(argv[1], "notify") == 0 && argc == 2) {
         notify(connection);
     } else if (strcmp(argv[1], "withdraw") == 0) {

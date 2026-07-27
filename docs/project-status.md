@@ -1617,9 +1617,25 @@ policy. A separate Wayland defect explained both the chooser's tiny scale and
 its displaced touches: only a focused surface had received `wl_surface.enter`.
 Every mapped surface now receives output membership and preferred buffer scale;
 the stock chooser commits scale 3, its visible Open action works, and Code opens
-the shared `ArchpheneMvp` tree. Its approximately 1,390-logical-pixel desktop
-minimum is still fitted into a 432dp phone, so a generic DocumentsUI/portal
-flow remains required for production phone file selection.
+the shared `ArchpheneMvp` tree.
+
+The private portal now replaces stock GTK 3 single-file Open and Save As
+dialogs with Android DocumentsUI. Save As mirrors stable writes through a
+bounded private staging file into the chosen Android descriptor. Open imports
+at most 512 MiB into a durable, collision-safe
+`~/Documents/Android/<display name>` copy; Android URIs and grants never cross
+into Linux, and editing the imported copy does not claim to update the original
+provider document. Cancellation, exact bytes, full-device captures, scoped
+fatal logs, and the current x86_64/AArch64 wrapper ABIs pass on the emulator and
+Samsung. Folder/multiple selection and Qt 6, GTK 4, and Electron caller
+validation remain.
+
+The same private frontend implements XDG Settings portal v2 for the standard
+appearance color scheme, accent, contrast, and reduced-motion keys, including
+the intentionally nested legacy `Read` result. It honors D-Bus no-reply calls,
+removing GTK's rejected startup error. The contract probe passes on both exact
+ABIs. Values are currently a per-launch snapshot; live `SettingChanged`
+signals remain pending.
 
 The x86_64 package lane renders immediate durable progress for a real
 `dotnet-sdk` request and resolves the same shared-root `base` plus SDK closure

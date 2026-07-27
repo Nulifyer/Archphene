@@ -286,6 +286,35 @@ int archphene_android_save_file(
     return base64url_decode(encoded_uri, uri, uri_size);
 }
 
+int archphene_android_open_file(
+        const char *title, const char *mime_type,
+        char *uri, size_t uri_size, char *response, size_t response_size) {
+    char encoded_title[MAX_FIELD * 2];
+    char encoded_mime[MAX_FIELD * 2];
+    char request[MAX_REQUEST];
+    if (base64url(title, encoded_title, sizeof(encoded_title)) != 0
+            || base64url(mime_type, encoded_mime, sizeof(encoded_mime)) != 0
+            || uri == NULL || uri_size < 2) {
+        errno = EINVAL;
+        return -1;
+    }
+    int length = snprintf(request, sizeof(request),
+            "ARCHPHENE/2\tOPEN_FILE\t%s\t%s", encoded_title, encoded_mime);
+    if (length <= 0 || (size_t)length >= sizeof(request)) {
+        errno = ENOSPC;
+        return -1;
+    }
+    int result = broker_request(request, response, response_size);
+    if (result != 0) return result;
+    const char *encoded_uri = response;
+    if (strncmp(response, "OK\t", 3) == 0) encoded_uri = response + 3;
+    else {
+        errno = EPROTO;
+        return -1;
+    }
+    return base64url_decode(encoded_uri, uri, uri_size);
+}
+
 int archphene_android_request_audio_input(char *response, size_t response_size) {
     return broker_request("ARCHPHENE/1\tREQUEST_AUDIO_INPUT", response, response_size);
 }

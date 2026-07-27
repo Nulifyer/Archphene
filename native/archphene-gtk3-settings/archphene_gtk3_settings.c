@@ -50,6 +50,7 @@ static gpointer active_css_provider;
 static gboolean refresh_started;
 
 enum {
+    ARCHPHENE_GTK_FILE_CHOOSER_ACTION_OPEN = 0,
     ARCHPHENE_GTK_FILE_CHOOSER_ACTION_SAVE = 1,
     ARCHPHENE_GTK_RESPONSE_ACCEPT = -3,
     ARCHPHENE_GTK_RESPONSE_OK = -5,
@@ -276,7 +277,7 @@ static void start_refresh(void)
 /*
  * GtkFileChooserDialog predates the portal-aware GtkFileChooserNative API and
  * remains common in otherwise unmodified GTK3 applications. Intercept only its
- * synchronous SaveFile path and delegate to GtkFileChooserNative. The native
+ * synchronous OpenFile and SaveFile paths and delegate to GtkFileChooserNative. The native
  * object preserves GTK's portal protocol implementation while the original
  * dialog retains application-owned state such as encoding controls.
  */
@@ -347,27 +348,40 @@ G_MODULE_EXPORT gint gtk_dialog_run(gpointer dialog)
             || set_overwrite.function == NULL || native_run.function == NULL
             || get_file.function == NULL || set_file.function == NULL
             || !g_type_check_instance_is_a(
-                    (GTypeInstance *)dialog, get_type.function())
-            || get_action.function(dialog)
-                    != ARCHPHENE_GTK_FILE_CHOOSER_ACTION_SAVE) {
+                    (GTypeInstance *)dialog, get_type.function())) {
         return original.function(dialog);
     }
 
-    gchar *name = get_name.function(dialog);
+    gint action = get_action.function(dialog);
+    if (action != ARCHPHENE_GTK_FILE_CHOOSER_ACTION_OPEN
+            && action != ARCHPHENE_GTK_FILE_CHOOSER_ACTION_SAVE) {
+        return original.function(dialog);
+    }
+    gchar *name = action == ARCHPHENE_GTK_FILE_CHOOSER_ACTION_SAVE
+            ? get_name.function(dialog) : NULL;
     const gchar *title = get_title.function(dialog);
     gpointer native = native_new.function(
-            title == NULL || title[0] == '\0' ? "Save Linux document" : title,
+            title == NULL || title[0] == '\0'
+                ? (action == ARCHPHENE_GTK_FILE_CHOOSER_ACTION_SAVE
+                    ? "Save Linux document" : "Open Linux document")
+                : title,
             get_parent.function(dialog),
-            ARCHPHENE_GTK_FILE_CHOOSER_ACTION_SAVE, "_Save", "_Cancel");
+            action,
+            action == ARCHPHENE_GTK_FILE_CHOOSER_ACTION_SAVE ? "_Save" : "_Open",
+            "_Cancel");
     if (native == NULL) {
         g_free(name);
         return original.function(dialog);
     }
-    if (name != NULL && name[0] != '\0') set_name.function(native, name);
-    set_overwrite.function(native, get_overwrite.function(dialog));
+    if (action == ARCHPHENE_GTK_FILE_CHOOSER_ACTION_SAVE) {
+        if (name != NULL && name[0] != '\0') set_name.function(native, name);
+        set_overwrite.function(native, get_overwrite.function(dialog));
+    }
     g_free(name);
 
-    write_diagnostic("Delegating GTK3 SaveFile to the Android portal\n");
+    write_diagnostic(action == ARCHPHENE_GTK_FILE_CHOOSER_ACTION_SAVE
+            ? "Delegating GTK3 SaveFile to the Android portal\n"
+            : "Delegating GTK3 OpenFile to the Android portal\n");
     gint response = native_run.function(native);
     gchar *response_status = g_strdup_printf(
             "File portal native response: %d\n", response);
@@ -419,7 +433,9 @@ G_MODULE_EXPORT gint gtk_dialog_run(gpointer dialog)
         write_diagnostic("File portal selection did not settle\n");
         return ARCHPHENE_GTK_RESPONSE_CANCEL;
     }
-    write_diagnostic("File portal SaveFile selection applied\n");
+    write_diagnostic(action == ARCHPHENE_GTK_FILE_CHOOSER_ACTION_SAVE
+            ? "File portal SaveFile selection applied\n"
+            : "File portal OpenFile selection applied\n");
     return ARCHPHENE_GTK_RESPONSE_ACCEPT;
 }
 

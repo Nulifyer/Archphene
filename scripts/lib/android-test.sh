@@ -143,16 +143,25 @@ archphene_open_documents_download_root() {
     "$ui" 'content-desc="Show roots"' "DocumentsUI roots"
   archphene_wait_ui 'text="(?:Open from|Save to)"' "$name-drawer" 15
   ui="$ARCHPHENE_UI"
+  if [[ "$ui" == *'text="Downloads"'* ]]; then
+    archphene_tap_text "$ui" "Downloads"
+    archphene_wait_ui_exact_text "Downloads" "$name-download" 15
+    return 0
+  fi
   root_label="$(
     python3 -c '
 import sys
 import xml.etree.ElementTree as ET
 root = ET.fromstring(sys.stdin.read())
+virtual = {
+    "Recent", "Images", "Audio", "Videos", "Documents", "Downloads",
+    "Archphene Apps", "Archphene Home", "Bug reports",
+}
 for node in root.iter("node"):
     if (
         node.attrib.get("resource-id") == "android:id/title"
         and node.attrib.get("text")
-        and node.attrib.get("text") != "Archphene Home"
+        and node.attrib.get("text") not in virtual
     ):
         print(node.attrib["text"])
         break
@@ -161,10 +170,10 @@ for node in root.iter("node"):
   [[ -n "$root_label" ]] ||
     archphene_die "DocumentsUI does not expose device storage"
   archphene_tap_text "$ui" "$root_label"
-  if [[ "$root_label" == "Downloads" ]]; then
-    archphene_wait_ui_exact_text "Downloads" "$name-download" 15
-    return 0
+  archphene_wait_ui 'text="Downloads?"' "$name-download" 15
+  if [[ "$ARCHPHENE_UI" == *'text="Downloads"'* ]]; then
+    archphene_tap_text "$ARCHPHENE_UI" "Downloads"
+  else
+    archphene_tap_text "$ARCHPHENE_UI" "Download"
   fi
-  archphene_wait_ui_exact_text "Download" "$name-download" 15
-  archphene_tap_text "$ARCHPHENE_UI" "Download"
 }

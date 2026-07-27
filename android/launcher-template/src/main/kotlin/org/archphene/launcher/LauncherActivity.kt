@@ -10,16 +10,19 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.net.Uri
 import android.os.Build
 import android.os.Binder
 import android.os.Bundle
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Looper
 import android.os.Parcel
 import android.os.ParcelFileDescriptor
 import android.os.RemoteException
 import android.os.SystemClock
+import android.provider.OpenableColumns
 import android.text.Editable
 import android.text.InputType
 import android.text.Selection
@@ -59,6 +62,8 @@ class LauncherActivity :
     private lateinit var surfaceView: LauncherSurfaceView
     private lateinit var content: FrameLayout
     private val handler = Handler(Looper.getMainLooper())
+    private val documentThread = HandlerThread("ArchpheneDocument").apply { start() }
+    private val documentHandler = Handler(documentThread.looper)
     private var remote: IBinder? = null
     private var sessionId = 0
     private var attempts = 0
@@ -83,6 +88,7 @@ class LauncherActivity :
     private var hasPendingLinuxClipboard = false
     private var pendingLinuxClipboardText: String? = null
     private var pendingDocumentRequestId = 0
+    private var pendingDocumentOperation = 0
     private val clipboardManager by lazy {
         getSystemService(ClipboardManager::class.java)
     }
@@ -191,14 +197,18 @@ class LauncherActivity :
                             val mimeType = data.readString()
                             if (
                                 requestId <= 0 ||
-                                operation != DOCUMENT_OPERATION_SAVE ||
+                                operation !in DOCUMENT_OPERATION_SAVE..DOCUMENT_OPERATION_OPEN ||
                                 title.isNullOrBlank() ||
                                 title.length > MAX_DOCUMENT_TITLE_UTF16 ||
-                                suggestedName.isNullOrBlank() ||
-                                suggestedName.length > MAX_DOCUMENT_NAME_UTF16 ||
-                                suggestedName.indexOf('/') >= 0 ||
-                                suggestedName.indexOf('\\') >= 0 ||
-                                suggestedName.indexOf('\u0000') >= 0 ||
+                                suggestedName == null ||
+                                (operation == DOCUMENT_OPERATION_SAVE &&
+                                    (suggestedName.isBlank() ||
+                                        suggestedName.length > MAX_DOCUMENT_NAME_UTF16 ||
+                                        suggestedName.indexOf('/') >= 0 ||
+                                        suggestedName.indexOf('\\') >= 0 ||
+                                        suggestedName.indexOf('\u0000') >= 0)) ||
+                                (operation == DOCUMENT_OPERATION_OPEN &&
+                                    suggestedName.isNotEmpty()) ||
                                 mimeType.isNullOrBlank() ||
                                 mimeType.length > MAX_DOCUMENT_MIME_UTF16 ||
                                 mimeType.indexOf('/') <= 0 ||
@@ -208,12 +218,16 @@ class LauncherActivity :
                                 return@runCatching false
                             }
                             handler.post {
-                                beginDocumentSave(
-                                    requestId,
-                                    title,
-                                    suggestedName,
-                                    mimeType,
-                                )
+                                if (operation == DOCUMENT_OPERATION_SAVE) {
+                                    beginDocumentSave(
+                                        requestId,
+                                        title,
+                                        suggestedName,
+                                        mimeType,
+                                    )
+                                } else {
+                                    beginDocumentOpen(requestId, title, mimeType)
+                                }
                             }
                             true
                         }
@@ -246,6 +260,7 @@ class LauncherActivity :
                 hasPendingLinuxClipboard = false
                 pendingLinuxClipboardText = null
                 pendingDocumentRequestId = 0
+                pendingDocumentOperation = 0
                 applyImeState(ImeState(false, 0, "", 0, 0, 0, 0))
                 status.setText(R.string.launcher_disconnected)
                 status.visibility = View.VISIBLE
@@ -494,6 +509,7 @@ class LauncherActivity :
             unbindService(connection)
             binding = false
         }
+        documentThread.quitSafely()
         super.onDestroy()
     }
 
@@ -509,31 +525,68 @@ class LauncherActivity :
             "Android activity result request=$requestCode result=$resultCode " +
                 "documentPending=${pendingDocumentRequestId > 0}",
         )
-        if (requestCode != DOCUMENT_SAVE_REQUEST_CODE) {
+        if (
+            requestCode != DOCUMENT_SAVE_REQUEST_CODE &&
+            requestCode != DOCUMENT_OPEN_REQUEST_CODE
+        ) {
             return
         }
         val requestId = pendingDocumentRequestId
+        val operation = pendingDocumentOperation
         pendingDocumentRequestId = 0
-        if (requestId <= 0) {
+        pendingDocumentOperation = 0
+        if (
+            requestId <= 0 ||
+            operation !in DOCUMENT_OPERATION_SAVE..DOCUMENT_OPERATION_OPEN
+        ) {
             return
         }
         if (resultCode != Activity.RESULT_OK || data?.data == null) {
-            sendDocumentResult(requestId, DOCUMENT_RESULT_CANCELLED, null)
+            sendDocumentResult(
+                requestId,
+                operation,
+                DOCUMENT_RESULT_CANCELLED,
+                null,
+                "",
+                false,
+            )
             return
         }
-        val descriptor =
-            runCatching {
-                contentResolver.openFileDescriptor(checkNotNull(data.data), "w")
-            }.getOrElse { error ->
-                Log.w(TAG, "Could not open Android document destination", error)
-                null
+        val resultIntent = checkNotNull(data)
+        val uri = checkNotNull(resultIntent.data)
+        documentHandler.post {
+            if (operation == DOCUMENT_OPERATION_SAVE) {
+                val descriptor =
+                    runCatching {
+                        contentResolver.openFileDescriptor(uri, "w")
+                    }.getOrElse { error ->
+                        Log.w(TAG, "Could not open Android document destination", error)
+                        null
+                    }
+                if (descriptor == null) {
+                    sendDocumentResult(
+                        requestId,
+                        operation,
+                        DOCUMENT_RESULT_FAILED,
+                        null,
+                        "",
+                        false,
+                    )
+                } else {
+                    descriptor.use {
+                        sendDocumentResult(
+                            requestId,
+                            operation,
+                            DOCUMENT_RESULT_SUCCESS,
+                            it,
+                            "",
+                            true,
+                        )
+                    }
+                }
+            } else {
+                sendOpenDocumentResult(requestId, uri)
             }
-        if (descriptor == null) {
-            sendDocumentResult(requestId, DOCUMENT_RESULT_FAILED, null)
-            return
-        }
-        descriptor.use {
-            sendDocumentResult(requestId, DOCUMENT_RESULT_SUCCESS, it)
         }
     }
 
@@ -1517,10 +1570,18 @@ class LauncherActivity :
             isFinishing ||
             isDestroyed
         ) {
-            sendDocumentResult(requestId, DOCUMENT_RESULT_FAILED, null)
+            sendDocumentResult(
+                requestId,
+                DOCUMENT_OPERATION_SAVE,
+                DOCUMENT_RESULT_FAILED,
+                null,
+                "",
+                false,
+            )
             return
         }
         pendingDocumentRequestId = requestId
+        pendingDocumentOperation = DOCUMENT_OPERATION_SAVE
         val intent =
             Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
                 addCategory(Intent.CATEGORY_OPENABLE)
@@ -1535,35 +1596,206 @@ class LauncherActivity :
             startActivityForResult(intent, DOCUMENT_SAVE_REQUEST_CODE)
         } catch (error: ActivityNotFoundException) {
             pendingDocumentRequestId = 0
+            pendingDocumentOperation = 0
             Log.w(TAG, "No Android document provider is available", error)
-            sendDocumentResult(requestId, DOCUMENT_RESULT_FAILED, null)
+            sendDocumentResult(
+                requestId,
+                DOCUMENT_OPERATION_SAVE,
+                DOCUMENT_RESULT_FAILED,
+                null,
+                "",
+                false,
+            )
         } catch (error: RuntimeException) {
             pendingDocumentRequestId = 0
+            pendingDocumentOperation = 0
             Log.w(TAG, "Could not open Android document chooser", error)
-            sendDocumentResult(requestId, DOCUMENT_RESULT_FAILED, null)
+            sendDocumentResult(
+                requestId,
+                DOCUMENT_OPERATION_SAVE,
+                DOCUMENT_RESULT_FAILED,
+                null,
+                "",
+                false,
+            )
+        }
+    }
+
+    private fun beginDocumentOpen(
+        requestId: Int,
+        title: String,
+        mimeType: String,
+    ) {
+        if (
+            requestId <= 0 ||
+            sessionId <= 0 ||
+            remote == null ||
+            pendingDocumentRequestId != 0 ||
+            isFinishing ||
+            isDestroyed
+        ) {
+            sendDocumentResult(
+                requestId,
+                DOCUMENT_OPERATION_OPEN,
+                DOCUMENT_RESULT_FAILED,
+                null,
+                "",
+                false,
+            )
+            return
+        }
+        pendingDocumentRequestId = requestId
+        pendingDocumentOperation = DOCUMENT_OPERATION_OPEN
+        val intent =
+            Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = mimeType
+                addFlags(
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                )
+                putExtra(Intent.EXTRA_TITLE, title)
+            }
+        try {
+            startActivityForResult(intent, DOCUMENT_OPEN_REQUEST_CODE)
+        } catch (error: ActivityNotFoundException) {
+            pendingDocumentRequestId = 0
+            pendingDocumentOperation = 0
+            Log.w(TAG, "No Android document provider is available", error)
+            sendDocumentResult(
+                requestId,
+                DOCUMENT_OPERATION_OPEN,
+                DOCUMENT_RESULT_FAILED,
+                null,
+                "",
+                false,
+            )
+        } catch (error: RuntimeException) {
+            pendingDocumentRequestId = 0
+            pendingDocumentOperation = 0
+            Log.w(TAG, "Could not open Android document chooser", error)
+            sendDocumentResult(
+                requestId,
+                DOCUMENT_OPERATION_OPEN,
+                DOCUMENT_RESULT_FAILED,
+                null,
+                "",
+                false,
+            )
         }
     }
 
     private fun cancelPendingDocumentRequest() {
         val requestId = pendingDocumentRequestId
+        val operation = pendingDocumentOperation
         pendingDocumentRequestId = 0
-        if (requestId > 0) {
-            sendDocumentResult(requestId, DOCUMENT_RESULT_CANCELLED, null)
+        pendingDocumentOperation = 0
+        if (
+            requestId > 0 &&
+            operation in DOCUMENT_OPERATION_SAVE..DOCUMENT_OPERATION_OPEN
+        ) {
+            sendDocumentResult(
+                requestId,
+                operation,
+                DOCUMENT_RESULT_CANCELLED,
+                null,
+                "",
+                false,
+            )
         }
     }
 
+    private fun sendOpenDocumentResult(
+        requestId: Int,
+        uri: Uri,
+    ) {
+        val displayName = queryDocumentName(uri)
+        if (displayName == null) {
+            sendDocumentResult(
+                requestId,
+                DOCUMENT_OPERATION_OPEN,
+                DOCUMENT_RESULT_FAILED,
+                null,
+                "",
+                false,
+            )
+            return
+        }
+        val descriptor =
+            runCatching { contentResolver.openFileDescriptor(uri, "r") }
+                .getOrElse { error ->
+                    Log.w(TAG, "Could not open Android document source", error)
+                    null
+                }
+        if (descriptor == null) {
+            sendDocumentResult(
+                requestId,
+                DOCUMENT_OPERATION_OPEN,
+                DOCUMENT_RESULT_FAILED,
+                null,
+                "",
+                false,
+            )
+            return
+        }
+        descriptor.use {
+            sendDocumentResult(
+                requestId,
+                DOCUMENT_OPERATION_OPEN,
+                DOCUMENT_RESULT_SUCCESS,
+                it,
+                displayName,
+                false,
+            )
+        }
+    }
+
+    private fun queryDocumentName(uri: Uri): String? =
+        runCatching {
+            contentResolver.query(
+                uri,
+                arrayOf(OpenableColumns.DISPLAY_NAME),
+                null,
+                null,
+                null,
+            )?.use { cursor ->
+                if (!cursor.moveToFirst()) return@use null
+                val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (index < 0) return@use null
+                cursor.getString(index)?.takeIf(::safeDocumentName)
+            }
+        }.getOrNull()
+
+    private fun safeDocumentName(name: String): Boolean =
+        name.length in 1..MAX_DOCUMENT_NAME_UTF16 &&
+            name != "." &&
+            name != ".." &&
+            name.none { character ->
+                character == '/' ||
+                    character == '\\' ||
+                    character == '\u0000' ||
+                    character.code < 32 ||
+                    character.code == 127
+            }
+
     private fun sendDocumentResult(
         requestId: Int,
+        operation: Int,
         result: Int,
         descriptor: ParcelFileDescriptor?,
+        displayName: String,
+        writable: Boolean,
     ): Boolean {
         val service = remote ?: return false
         val activeSession = sessionId
         if (
             activeSession <= 0 ||
             requestId <= 0 ||
+            operation !in DOCUMENT_OPERATION_SAVE..DOCUMENT_OPERATION_OPEN ||
             result !in DOCUMENT_RESULT_SUCCESS..DOCUMENT_RESULT_FAILED ||
-            (result == DOCUMENT_RESULT_SUCCESS) != (descriptor != null)
+            (result == DOCUMENT_RESULT_SUCCESS) != (descriptor != null) ||
+            (operation == DOCUMENT_OPERATION_OPEN &&
+                result == DOCUMENT_RESULT_SUCCESS &&
+                !safeDocumentName(displayName))
         ) {
             return false
         }
@@ -1576,6 +1808,10 @@ class LauncherActivity :
             parcel.writeInt(requestId)
             parcel.writeInt(result)
             if (descriptor != null) {
+                if (operation == DOCUMENT_OPERATION_OPEN) {
+                    parcel.writeString(displayName)
+                    parcel.writeInt(if (writable) 1 else 0)
+                }
                 descriptor.writeToParcel(parcel, 0)
             }
             service.transact(TRANSACTION_DOCUMENT_RESULT, parcel, reply, 0) &&
@@ -1676,7 +1912,9 @@ class LauncherActivity :
         // Activity results retain only the low 16 request-code bits on some
         // Android releases. Keep this explicit launcher code in that range.
         private const val DOCUMENT_SAVE_REQUEST_CODE = 7_143
+        private const val DOCUMENT_OPEN_REQUEST_CODE = 7_144
         private const val DOCUMENT_OPERATION_SAVE = 1
+        private const val DOCUMENT_OPERATION_OPEN = 2
         private const val DOCUMENT_RESULT_SUCCESS = 1
         private const val DOCUMENT_RESULT_CANCELLED = 2
         private const val DOCUMENT_RESULT_FAILED = 3
