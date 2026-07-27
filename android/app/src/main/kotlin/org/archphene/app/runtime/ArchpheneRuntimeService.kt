@@ -720,6 +720,87 @@ class ArchpheneRuntimeService : Service() {
     private val projectSyncJournalStore by lazy {
         ProjectSyncJournalStore(File(filesDir, SYNC_JOURNAL_FILE))
     }
+    private val projectSyncAndroidDocuments by lazy {
+        ProjectSyncAndroidDocuments(projectSyncProvider)
+    }
+    private val projectSyncRecoveryCoordinator by lazy {
+        ProjectSyncRecoveryCoordinator(
+            projectSyncProvider,
+            projectSyncAndroidDocuments,
+            projectSyncJournalStore,
+        )
+    }
+    private val projectSyncTransactionCoordinator by lazy {
+        ProjectSyncTransactionCoordinator(
+            projectSyncProvider,
+            object : ProjectSyncMutationBackend {
+                override fun createAndroidDirectory(
+                    context: ProjectSyncTransactionContext,
+                    entry: ProjectSyncPlanEntry,
+                ) {
+                    createProjectSyncAndroidDirectory(
+                        context.treeUri,
+                        context.remote,
+                        entry.path,
+                    )
+                }
+
+                override fun pushAndroidFile(
+                    context: ProjectSyncTransactionContext,
+                    entry: ProjectSyncPlanEntry,
+                ) {
+                    pushProjectSyncAndroidFile(
+                        context.activeHandle,
+                        context.treeUri,
+                        context.mappingId,
+                        context.remote,
+                        entry,
+                        context.request,
+                        context.output,
+                    )
+                }
+
+                override fun pullLinuxFile(
+                    context: ProjectSyncTransactionContext,
+                    entry: ProjectSyncPlanEntry,
+                ) {
+                    pullProjectSyncLinuxFile(
+                        context.activeHandle,
+                        context.remote[entry.path]
+                            ?: error("Android synchronization source disappeared"),
+                        entry,
+                        context.request,
+                        context.output,
+                    )
+                }
+
+                override fun stageAndroidDeletion(
+                    context: ProjectSyncTransactionContext,
+                    entry: ProjectSyncPlanEntry,
+                    result: ProjectSyncResult,
+                ) {
+                    stageProjectSyncAndroidDeletion(
+                        context.activeHandle,
+                        context.treeUri,
+                        context.mappingId,
+                        context.remote,
+                        entry,
+                        context.output,
+                        result,
+                    )
+                }
+
+                override fun deleteAndroidDirectory(
+                    context: ProjectSyncTransactionContext,
+                    entry: ProjectSyncPlanEntry,
+                ): Boolean =
+                    deleteProjectSyncAndroidDirectory(context.remote, entry.path)
+            },
+            ::checkFolderMirrorCancellation,
+        ) { index, total ->
+            folderStatus = "Synchronizing $index of $total…"
+        }
+    }
     private val projectSyncHistoryStore by lazy {
         ProjectSyncHistoryStore(File(filesDir, SYNC_HISTORY_FILE))
     }
@@ -1204,21 +1285,6 @@ class ArchpheneRuntimeService : Service() {
         var entries = 0
         var bytes = 0L
     }
-
-    private data class ProjectSyncDeletedDocument(
-        val uri: Uri,
-        val expected: ProjectSyncFingerprint,
-    )
-
-    private data class ProjectSyncResult(
-        var pulled: Int = 0,
-        var pushed: Int = 0,
-        var deferredDeletes: Int = 0,
-        var androidDeletesApplied: Int = 0,
-        val conflictPaths: MutableSet<String> = linkedSetOf(),
-        val ignoredDocumentIds: MutableSet<String> = linkedSetOf(),
-        val deletedDocuments: MutableList<ProjectSyncDeletedDocument> = ArrayList(),
-    )
 
     private class PackageIoScratch {
         val requestBuffer: ByteBuffer = ByteBuffer.allocateDirect(512)
@@ -2455,7 +2521,15 @@ class ArchpheneRuntimeService : Service() {
                             )
                             nativeStarted = true
                             if (pass == 1) {
-                                recoverProjectSyncJournal(activeHandle, activeUri, output)
+                                if (
+                                    projectSyncRecoveryCoordinator.recover(
+                                        activeHandle,
+                                        activeUri,
+                                        output,
+                                    )
+                                ) {
+                                    Log.i(TAG, "Recovered interrupted Android project synchronization")
+                                }
                             }
                             checkFolderMirrorCancellation()
                             val remote =
@@ -2532,14 +2606,16 @@ class ArchpheneRuntimeService : Service() {
                                 "Applying ${plan.count { it.action != SYNC_ACTION_CONVERGED }} " +
                                     "project change(s)…"
                             val result =
-                                executeProjectSyncPlan(
-                                    activeHandle,
-                                    activeUri,
-                                    mappingId,
-                                    remote,
+                                projectSyncTransactionCoordinator.execute(
+                                    ProjectSyncTransactionContext(
+                                        activeHandle,
+                                        activeUri,
+                                        mappingId,
+                                        remote,
+                                        request,
+                                        output,
+                                    ),
                                     plan,
-                                    request,
-                                    output,
                                 )
                             checkFolderMirrorCancellation()
                             output.clear()
@@ -2559,7 +2635,7 @@ class ArchpheneRuntimeService : Service() {
                                 result.ignoredDocumentIds,
                             )
                             result.deletedDocuments.forEach { document ->
-                                verifyProjectSyncAndroidFingerprint(
+                                projectSyncAndroidDocuments.verifyFingerprint(
                                     activeHandle,
                                     document.uri,
                                     document.expected,
@@ -2671,172 +2747,6 @@ class ArchpheneRuntimeService : Service() {
         }
     }
 
-    private fun executeProjectSyncPlan(
-        activeHandle: Long,
-        treeUri: Uri,
-        mappingId: String,
-        remote: LinkedHashMap<String, ProjectSyncRemoteEntry>,
-        plan: List<ProjectSyncPlanEntry>,
-        request: ByteBuffer,
-        output: ByteBuffer,
-    ): ProjectSyncResult {
-        val result = ProjectSyncResult()
-        plan.forEach { entry ->
-            checkFolderMirrorCancellation()
-            when {
-                entry.action == SYNC_ACTION_PUSH_ANDROID &&
-                    entry.linux?.kind == SYNC_KIND_DIRECTORY -> {
-                    createProjectSyncAndroidDirectory(treeUri, remote, entry.path)
-                    result.pushed++
-                }
-                entry.action == SYNC_ACTION_PULL_LINUX &&
-                    entry.android?.kind == SYNC_KIND_DIRECTORY -> {
-                    val length = putProjectSyncRequest(request, entry.path)
-                    output.clear()
-                    requireMirrorSuccess(
-                        NativeRuntime.nativeExecuteProjectSyncLocal(
-                            activeHandle,
-                            SYNC_LOCAL_CREATE_DIRECTORY,
-                            request,
-                            length,
-                            -1,
-                            output,
-                        ).toLong(),
-                        output,
-                        "create Linux project directory",
-                    )
-                    result.pulled++
-                }
-            }
-        }
-
-        plan.forEachIndexed { index, entry ->
-            checkFolderMirrorCancellation()
-            folderStatus = "Synchronizing ${index + 1} of ${plan.size}…"
-            when (entry.action) {
-                SYNC_ACTION_PUSH_ANDROID -> {
-                    if (entry.linux?.kind == SYNC_KIND_FILE) {
-                        pushProjectSyncAndroidFile(
-                            activeHandle,
-                            treeUri,
-                            mappingId,
-                            remote,
-                            entry,
-                            request,
-                            output,
-                        )
-                        result.pushed++
-                    }
-                }
-                SYNC_ACTION_PULL_LINUX -> {
-                    if (entry.android?.kind == SYNC_KIND_FILE) {
-                        pullProjectSyncLinuxFile(
-                            activeHandle,
-                            remote[entry.path]
-                                ?: error("Android synchronization source disappeared"),
-                            entry,
-                            request,
-                            output,
-                        )
-                        result.pulled++
-                    }
-                }
-                SYNC_ACTION_CONFLICT -> {
-                    if (entry.android?.kind == SYNC_KIND_FILE) {
-                        val remoteEntry =
-                            remote[entry.path]
-                                ?: error("Android conflict source disappeared")
-                        val descriptor =
-                            projectSyncProvider.open(
-                                remoteEntry.uri,
-                                "r",
-                                "open an Android conflict file",
-                            )
-                        descriptor.use { source ->
-                            val length =
-                                putProjectSyncRequest(
-                                    request,
-                                    entry.path,
-                                    entry.android.encode(),
-                                )
-                            output.clear()
-                            requireMirrorSuccess(
-                                NativeRuntime.nativeExecuteProjectSyncLocal(
-                                    activeHandle,
-                                    SYNC_LOCAL_PRESERVE_CONFLICT,
-                                    request,
-                                    length,
-                                    source.fd,
-                                    output,
-                                ).toLong(),
-                                output,
-                                "preserve Android project conflict",
-                            )
-                        }
-                    }
-                    result.conflictPaths.add(entry.path)
-                }
-            }
-        }
-
-        plan.asReversed().forEach { entry ->
-            checkFolderMirrorCancellation()
-            when (entry.action) {
-                SYNC_ACTION_DELETE_LINUX -> {
-                    val expected =
-                        entry.linux
-                            ?: error("Linux deletion has no expected fingerprint")
-                    val length =
-                        putProjectSyncRequest(request, entry.path, expected.encode())
-                    output.clear()
-                    requireMirrorSuccess(
-                        NativeRuntime.nativeExecuteProjectSyncLocal(
-                            activeHandle,
-                            SYNC_LOCAL_DELETE,
-                            request,
-                            length,
-                            -1,
-                            output,
-                        ).toLong(),
-                        output,
-                        "delete Linux project entry",
-                    )
-                    result.pulled++
-                }
-                SYNC_ACTION_DELETE_ANDROID -> {
-                    when {
-                        result.deletedDocuments.isEmpty() &&
-                            entry.android?.kind == SYNC_KIND_FILE -> {
-                            stageProjectSyncAndroidDeletion(
-                                activeHandle,
-                                treeUri,
-                                mappingId,
-                                remote,
-                                entry,
-                                output,
-                                result,
-                            )
-                            result.pushed++
-                            result.androidDeletesApplied++
-                        }
-                        entry.android?.kind == SYNC_KIND_DIRECTORY &&
-                            deleteProjectSyncAndroidDirectory(remote, entry.path) -> {
-                            result.pushed++
-                            result.androidDeletesApplied++
-                        }
-                        else -> {
-                            // One remote file deletion is journaled per baseline
-                            // checkpoint. Later files and nonempty directories
-                            // are retried automatically after that checkpoint.
-                            result.deferredDeletes++
-                        }
-                    }
-                }
-            }
-        }
-        return result
-    }
-
     private fun deleteProjectSyncAndroidDirectory(
         remote: LinkedHashMap<String, ProjectSyncRemoteEntry>,
         path: String,
@@ -2845,7 +2755,7 @@ class ArchpheneRuntimeService : Service() {
             remote[path]?.takeIf(ProjectSyncRemoteEntry::directory)
                 ?: error("Android directory deletion target disappeared")
         val expectedName = path.substringAfterLast('/')
-        check(queryProjectSyncDocumentName(target.uri) == expectedName) {
+        check(projectSyncAndroidDocuments.queryName(target.uri) == expectedName) {
             "Android project directory changed during synchronization"
         }
         val childrenUri =
@@ -2895,7 +2805,7 @@ class ArchpheneRuntimeService : Service() {
         val target =
             remote[entry.path]?.takeIf { !it.directory }
                 ?: error("Android deletion target disappeared")
-        verifyProjectSyncAndroidFingerprint(activeHandle, target.uri, expected, output)
+        projectSyncAndroidDocuments.verifyFingerprint(activeHandle, target.uri, expected, output)
         val slash = entry.path.lastIndexOf('/')
         val parentPath = if (slash < 0) "" else entry.path.substring(0, slash)
         val name = if (slash < 0) entry.path else entry.path.substring(slash + 1)
@@ -2927,7 +2837,7 @@ class ArchpheneRuntimeService : Service() {
                 "stage an Android project deletion",
             )
                 ?: error("Android provider could not stage project deletion")
-        check(queryProjectSyncDocumentName(backup) == backupName) {
+        check(projectSyncAndroidDocuments.queryName(backup) == backupName) {
             "Android provider changed the deletion backup name"
         }
         projectSyncJournalStore.updatePhase(SYNC_JOURNAL_BACKED_UP)
@@ -3028,7 +2938,7 @@ class ArchpheneRuntimeService : Service() {
                 stagingName,
                 "create an Android synchronization staging file",
             ) ?: error("Android provider could not create a synchronization staging file")
-        check(queryProjectSyncDocumentName(stagingUri) == stagingName) {
+        check(projectSyncAndroidDocuments.queryName(stagingUri) == stagingName) {
             "Android provider changed the synchronization staging name"
         }
         projectSyncJournalStore.updatePhase(SYNC_JOURNAL_STAGED)
@@ -3083,13 +2993,23 @@ class ArchpheneRuntimeService : Service() {
                     }
                 }
             }
-            verifyProjectSyncAndroidFingerprint(activeHandle, stagingUri, linux, output)
+            projectSyncAndroidDocuments.verifyFingerprint(
+                activeHandle,
+                stagingUri,
+                linux,
+                output,
+            )
             val existing = remote[entry.path]
             if (existing != null) {
                 val expected =
                     entry.android
                         ?: error("Android replacement has no expected fingerprint")
-                verifyProjectSyncAndroidFingerprint(activeHandle, existing.uri, expected, output)
+                projectSyncAndroidDocuments.verifyFingerprint(
+                    activeHandle,
+                    existing.uri,
+                    expected,
+                    output,
+                )
                 val backupUri =
                     projectSyncProvider.rename(
                         existing.uri,
@@ -3106,10 +3026,15 @@ class ArchpheneRuntimeService : Service() {
                             "publish an Android project file",
                         ) ?: error("Android provider could not publish the project file")
                     stagingPublished = true
-                    check(queryProjectSyncDocumentName(published) == name) {
+                    check(projectSyncAndroidDocuments.queryName(published) == name) {
                         "Android provider changed the published project name"
                     }
-                    verifyProjectSyncAndroidFingerprint(activeHandle, published, linux, output)
+                    projectSyncAndroidDocuments.verifyFingerprint(
+                        activeHandle,
+                        published,
+                        linux,
+                        output,
+                    )
                     projectSyncJournalStore.updatePhase(SYNC_JOURNAL_PUBLISHED)
                     holdProjectSyncTestPhase(SYNC_TEST_PHASE_PUBLISHED)
                     check(
@@ -3147,10 +3072,15 @@ class ArchpheneRuntimeService : Service() {
                     )
                         ?: error("Android provider could not publish the project file")
                 stagingPublished = true
-                check(queryProjectSyncDocumentName(published) == name) {
+                check(projectSyncAndroidDocuments.queryName(published) == name) {
                     "Android provider changed the published project name"
                 }
-                verifyProjectSyncAndroidFingerprint(activeHandle, published, linux, output)
+                projectSyncAndroidDocuments.verifyFingerprint(
+                    activeHandle,
+                    published,
+                    linux,
+                    output,
+                )
                 projectSyncJournalStore.updatePhase(SYNC_JOURNAL_PUBLISHED)
                 holdProjectSyncTestPhase(SYNC_TEST_PHASE_PUBLISHED)
                 projectSyncJournalStore.clear()
@@ -3194,7 +3124,7 @@ class ArchpheneRuntimeService : Service() {
                 name,
                 "create an Android project directory",
             ) ?: error("Android provider could not create project directory")
-        check(queryProjectSyncDocumentName(created) == name) {
+        check(projectSyncAndroidDocuments.queryName(created) == name) {
             "Android provider changed the project directory name"
         }
         return ProjectSyncRemoteEntry(
@@ -3220,57 +3150,12 @@ class ArchpheneRuntimeService : Service() {
                 ?: error("Android project parent is unavailable")
         }
 
-    private fun queryProjectSyncDocumentName(uri: Uri): String {
-        return projectSyncProvider.query(
-                uri,
-                arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME),
-                "read Android project document metadata",
-            ) {
-            check(it.moveToFirst() && !it.isNull(0)) {
-                "Android provider returned no document name"
-            }
-                it.getString(0)
-        }
-    }
-
     private fun projectSyncMime(name: String): String {
         val extension =
             name.substringAfterLast('.', "").lowercase().takeIf(String::isNotEmpty)
         return extension
             ?.let { MimeTypeMap.getSingleton().getMimeTypeFromExtension(it) }
             ?: "application/octet-stream"
-    }
-
-    private fun verifyProjectSyncAndroidFingerprint(
-        activeHandle: Long,
-        uri: Uri,
-        expected: ProjectSyncFingerprint,
-        output: ByteBuffer,
-    ) {
-        val descriptor =
-            projectSyncProvider.open(
-                uri,
-                "r",
-                "open an Android project file for verification",
-            )
-        descriptor.use { source ->
-            output.clear()
-            val length =
-                NativeRuntime.nativeFingerprintProjectSyncFile(
-                    activeHandle,
-                    source.fd,
-                    expected.bytes,
-                    output,
-                )
-            requireMirrorSuccess(
-                length.toLong(),
-                output,
-                "verify Android project file",
-            )
-            check(readCString(output) == expected.encode()) {
-                "Android project file changed during synchronization"
-            }
-        }
     }
 
     private fun holdProjectSyncTestPhase(phase: String) {
@@ -3288,217 +3173,6 @@ class ArchpheneRuntimeService : Service() {
         }
         Log.i(TAG, "Project sync test holding phase=$phase for ${holdMillis}ms")
         Thread.sleep(holdMillis)
-    }
-
-    private fun recoverProjectSyncJournal(
-        activeHandle: Long,
-        activeTreeUri: Uri,
-        output: ByteBuffer,
-    ) {
-        val journal = projectSyncJournalStore.load() ?: return
-        check(journal.treeUri == activeTreeUri.toString()) {
-            "An interrupted synchronization belongs to another Android folder"
-        }
-        val parentUri =
-            Uri.parse(journal.parentUri)
-                .takeIf { it.scheme == "content" }
-                ?: error("Project synchronization journal parent is invalid")
-        val target = findProjectSyncAndroidChild(parentUri, journal.targetName)
-        val staging =
-            journal.stagingName
-                .takeIf(String::isNotEmpty)
-                ?.let { findProjectSyncAndroidChild(parentUri, it) }
-        val backup =
-            journal.backupName
-                .takeIf(String::isNotEmpty)
-                ?.let { findProjectSyncAndroidChild(parentUri, it) }
-        if (journal.operation == SYNC_JOURNAL_DELETE) {
-            if (journal.phase == SYNC_JOURNAL_COMMITTED) {
-                check(target == null) {
-                    "Committed Android deletion target reappeared"
-                }
-                backup?.let {
-                    check(
-                        projectSyncProvider.delete(
-                            it.uri,
-                            "finalize a recovered Android project deletion",
-                        ),
-                    ) {
-                        "Android provider retained a committed deletion backup"
-                    }
-                }
-                projectSyncJournalStore.clear()
-                return
-            }
-            when {
-                backup != null && target == null -> {
-                    val restored =
-                        projectSyncProvider.rename(
-                            backup.uri,
-                            journal.targetName,
-                            "restore an interrupted Android project deletion",
-                        ) ?: error("Android provider could not restore interrupted deletion")
-                    verifyProjectSyncAndroidFingerprint(
-                        activeHandle,
-                        restored,
-                        decodeProjectSyncFingerprintText(journal.expected),
-                        output,
-                    )
-                }
-                backup != null && target != null -> {
-                    verifyProjectSyncAndroidFingerprint(
-                        activeHandle,
-                        target.uri,
-                        decodeProjectSyncFingerprintText(journal.expected),
-                        output,
-                    )
-                    check(
-                        projectSyncProvider.delete(
-                            backup.uri,
-                            "remove a duplicate Android deletion backup",
-                        ),
-                    ) {
-                        "Android provider retained duplicate deletion backup"
-                    }
-                }
-                backup == null && target != null -> {
-                    verifyProjectSyncAndroidFingerprint(
-                        activeHandle,
-                        target.uri,
-                        decodeProjectSyncFingerprintText(journal.expected),
-                        output,
-                    )
-                }
-                else -> error("Interrupted Android deletion lost both versions")
-            }
-            projectSyncJournalStore.clear()
-            return
-        }
-
-        val expected = decodeProjectSyncFingerprintText(journal.expected)
-        val targetIsPublished =
-            target?.let {
-                runCatching {
-                    verifyProjectSyncAndroidFingerprint(activeHandle, it.uri, expected, output)
-                    true
-                }.getOrDefault(false)
-            } == true
-        when {
-            targetIsPublished -> {
-                staging?.let {
-                    check(
-                        projectSyncProvider.delete(
-                            it.uri,
-                            "discard recovered Android synchronization staging",
-                        ),
-                    ) {
-                        "Android provider retained synchronization staging"
-                    }
-                }
-                backup?.let {
-                    check(
-                        projectSyncProvider.delete(
-                            it.uri,
-                            "finalize a recovered Android synchronization backup",
-                        ),
-                    ) {
-                        "Android provider retained synchronization backup"
-                    }
-                }
-            }
-            backup != null && target == null -> {
-                val restored =
-                    projectSyncProvider.rename(
-                        backup.uri,
-                        journal.targetName,
-                        "restore an interrupted Android project update",
-                    ) ?: error("Android provider could not restore interrupted update")
-                if (journal.hadOriginal) {
-                    check(queryProjectSyncDocumentName(restored) == journal.targetName) {
-                        "Android provider changed restored project name"
-                    }
-                }
-                staging?.let {
-                    check(
-                        projectSyncProvider.delete(
-                            it.uri,
-                            "discard interrupted Android synchronization staging",
-                        ),
-                    ) {
-                        "Android provider retained synchronization staging"
-                    }
-                }
-            }
-            backup != null && target != null -> {
-                error("Interrupted Android update retained two unequal versions")
-            }
-            target != null -> {
-                check(journal.hadOriginal) {
-                    "Interrupted Android update collided with a new target"
-                }
-                staging?.let {
-                    check(
-                        projectSyncProvider.delete(
-                            it.uri,
-                            "discard collided Android synchronization staging",
-                        ),
-                    ) {
-                        "Android provider retained synchronization staging"
-                    }
-                }
-            }
-            !journal.hadOriginal -> {
-                staging?.let {
-                    check(
-                        projectSyncProvider.delete(
-                            it.uri,
-                            "discard new-file Android synchronization staging",
-                        ),
-                    ) {
-                        "Android provider retained synchronization staging"
-                    }
-                }
-            }
-            else -> error("Interrupted Android update lost the previous project file")
-        }
-        projectSyncJournalStore.clear()
-        Log.i(TAG, "Recovered interrupted Android project synchronization")
-    }
-
-    private fun findProjectSyncAndroidChild(
-        parentUri: Uri,
-        name: String,
-    ): ProjectSyncRemoteEntry? {
-        val children =
-            DocumentsContract.buildChildDocumentsUriUsingTree(
-                parentUri,
-                DocumentsContract.getDocumentId(parentUri),
-            )
-        return projectSyncProvider.query(
-                children,
-                arrayOf(
-                    DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-                    DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-                    DocumentsContract.Document.COLUMN_MIME_TYPE,
-                ),
-                "list Android project recovery documents",
-            ) {
-            var match: ProjectSyncRemoteEntry? = null
-            while (it.moveToNext()) {
-                if (it.getString(1) != name) continue
-                check(match == null) { "Android provider returned duplicate recovery names" }
-                val id = it.getString(0) ?: error("Android recovery document has no ID")
-                val mime = it.getString(2) ?: "application/octet-stream"
-                match =
-                    ProjectSyncRemoteEntry(
-                        id,
-                        DocumentsContract.buildDocumentUriUsingTree(parentUri, id),
-                        mime,
-                        mime == DocumentsContract.Document.MIME_TYPE_DIR,
-                    )
-            }
-                match
-        }
     }
 
     private fun ByteArray.toHex(): String {

@@ -48,6 +48,9 @@ internal data class ProjectSyncPlanEntry(
     val android: ProjectSyncFingerprint?,
 )
 
+internal class ProjectSyncFingerprintMismatch :
+    IllegalStateException("Android project file changed during synchronization")
+
 internal fun decodeProjectSyncPlanEntry(
     source: ByteBuffer,
     length: Int,
