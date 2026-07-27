@@ -56,6 +56,31 @@ profiles. Defaults reject cold launch over 1.5 seconds, retained launch over
 more than 64 threads or 256 descriptors, any idle child process, frame p95 over
 250 ms, or more than 50% jank in the short navigation sample.
 
+## Foot manager-session workflow
+
+Run the complete current-architecture Foot workflow with the matching APK and
+the installed manager-generated Foot package:
+
+```bash
+./scripts/test-foot-workflows.sh \
+  --serial emulator-5554 \
+  --apk tooling/build/apk/app-debug-x86_64.apk \
+  --package <generated-foot-package>
+./scripts/test-foot-workflows.sh \
+  --serial <adb-serial> \
+  --apk tooling/build/apk/app-debug-arm64-v8a.apk \
+  --package <generated-foot-package>
+```
+
+The gate updates the manager without clearing its private Arch root and requires
+a current generated launcher. Unicode IME control enters through a debug-only
+manager-session boundary; the launcher itself has no test intent. Selection
+uses real wrapper mouse input, clipboard transfer uses the authenticated Binder
+and clipboard-worker paths, and lifecycle checks retain the same manager-owned
+Linux process through resize before testing close, force-stop cleanup, and a
+cold relaunch. Full-device PNGs and raw comparison frames are written under
+`tooling/build/foot-workflows/`.
+
 ## Main-thread I/O diagnostics
 
 Debug APKs enable StrictMode after framework application initialization. Run

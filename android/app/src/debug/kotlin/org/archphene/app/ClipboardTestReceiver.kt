@@ -5,6 +5,9 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.util.Base64
+import java.nio.charset.CodingErrorAction
+import java.nio.charset.StandardCharsets
 
 internal class ClipboardTestReceiver : BroadcastReceiver() {
     override fun onReceive(
@@ -14,7 +17,13 @@ internal class ClipboardTestReceiver : BroadcastReceiver() {
         if (intent.action != ACTION_SET_CLIPBOARD) {
             return
         }
-        val text = intent.getStringExtra(EXTRA_TEXT) ?: return
+        val encoded = intent.getStringExtra(EXTRA_TEXT_BASE64)
+        val text =
+            if (encoded == null) {
+                intent.getStringExtra(EXTRA_TEXT) ?: return
+            } else {
+                decodeUtf8(encoded) ?: return
+            }
         if (text.length > MAX_TEXT_CHARACTERS) {
             return
         }
@@ -23,11 +32,30 @@ internal class ClipboardTestReceiver : BroadcastReceiver() {
             ?.setPrimaryClip(ClipData.newPlainText(CLIP_LABEL, text))
     }
 
+    private fun decodeUtf8(encoded: String): String? {
+        if (encoded.length > MAX_BASE64_CHARACTERS) {
+            return null
+        }
+        val bytes = runCatching { Base64.decode(encoded, Base64.DEFAULT) }.getOrNull() ?: return null
+        if (bytes.size > MAX_TEXT_BYTES) {
+            return null
+        }
+        val decoder =
+            StandardCharsets.UTF_8
+                .newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+        return runCatching { decoder.decode(java.nio.ByteBuffer.wrap(bytes)).toString() }.getOrNull()
+    }
+
     private companion object {
         private const val ACTION_SET_CLIPBOARD =
             "org.archphene.app.debug.action.SET_TEST_CLIPBOARD"
         private const val EXTRA_TEXT = "text"
+        private const val EXTRA_TEXT_BASE64 = "text_base64"
         private const val MAX_TEXT_CHARACTERS = 2 * 1024
+        private const val MAX_TEXT_BYTES = 8 * 1024
+        private const val MAX_BASE64_CHARACTERS = 12 * 1024
         private const val CLIP_LABEL = "Archphene debug test"
     }
 }

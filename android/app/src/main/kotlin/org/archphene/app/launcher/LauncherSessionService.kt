@@ -19,6 +19,7 @@ import android.os.RemoteException
 import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
+import android.view.inputmethod.EditorInfo
 import org.archphene.app.appearance.LinuxAppearanceOverrides
 import org.archphene.app.appearance.LinuxAppearancePreferences
 import java.io.File
@@ -140,6 +141,9 @@ class LauncherSessionService : Service() {
         if (!runtimeBound) {
             Log.e(TAG, "Could not bind the shared runtime")
         }
+        if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) {
+            LauncherSessionDebugBridge.attach(this)
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? =
@@ -150,6 +154,7 @@ class LauncherSessionService : Service() {
         }
 
     override fun onDestroy() {
+        LauncherSessionDebugBridge.detach(this)
         clearSessions()
         runtimeBinder = null
         if (runtimeBound) {
@@ -810,12 +815,7 @@ class LauncherSessionService : Service() {
             if (session.imeSize >= MAX_IME_COMMANDS) {
                 return RESULT_BUSY
             }
-            val index = (session.imeHead + session.imeSize) % MAX_IME_COMMANDS
-            session.imeOperations[index] = operation
-            session.imeTexts[index] = text
-            session.imeA[index] = a
-            session.imeB[index] = b
-            session.imeSize++
+            appendImeCommand(session, operation, text, a, b)
             if (!session.imePosted) {
                 session.imePosted = true
                 surfaceHandler.post(checkNotNull(session.imeDrain))
@@ -906,6 +906,131 @@ class LauncherSessionService : Service() {
         val length = session.imeBuffer.position()
         session.imeBuffer.position(0)
         return length
+    }
+
+    /**
+     * Debug-build device tests use the manager as the session-control boundary.
+     * This deliberately does not expose test extras from generated launcher
+     * Activities, and it cannot be reached from a release-build component.
+     */
+    @Synchronized
+    internal fun debugInjectIme(
+        androidPackage: String,
+        composing: String,
+        committed: String,
+        submit: Boolean,
+    ): LauncherSessionDebugResult {
+        if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0) {
+            return LauncherSessionDebugResult(false, 0, "release-build")
+        }
+        if (
+            androidPackage.length != 53 ||
+            !androidPackage.startsWith(LAUNCHER_PACKAGE_PREFIX)
+        ) {
+            return LauncherSessionDebugResult(false, 0, "invalid-package")
+        }
+        for (index in LAUNCHER_PACKAGE_PREFIX.length until androidPackage.length) {
+            val character = androidPackage[index]
+            if (character !in '0'..'9' && character !in 'a'..'f') {
+                return LauncherSessionDebugResult(false, 0, "invalid-package")
+            }
+        }
+        if (
+            composing.length > MAX_IME_UTF16 ||
+            committed.length > MAX_IME_UTF16 ||
+            !hasWellFormedUtf16(composing) ||
+            !hasWellFormedUtf16(committed)
+        ) {
+            return LauncherSessionDebugResult(false, 0, "invalid-text")
+        }
+        val composingBytes = utf8Length(composing)
+        val committedBytes = utf8Length(committed)
+        if (
+            composingBytes !in 0..MAX_IME_BYTES ||
+            committedBytes !in 0..MAX_IME_BYTES
+        ) {
+            return LauncherSessionDebugResult(false, 0, "invalid-text")
+        }
+        var session: Session? = null
+        var matching = 0
+        for (candidate in sessions.values) {
+            if (candidate.active && candidate.identity.androidPackage == androidPackage) {
+                session = candidate
+                matching++
+            }
+        }
+        if (matching != 1) {
+            return LauncherSessionDebugResult(false, 0, "active-session-count-$matching")
+        }
+        val activeSession = checkNotNull(session)
+        if (activeSession.surface == null || activeSession.compositor == null) {
+            return LauncherSessionDebugResult(false, activeSession.id, "surface-not-ready")
+        }
+        val commandCount =
+            (if (composing.isNotEmpty()) 1 else 0) +
+                1 +
+                (if (submit) 1 else 0)
+        synchronized(activeSession) {
+            if (commandCount > MAX_IME_COMMANDS - activeSession.imeSize) {
+                return LauncherSessionDebugResult(false, activeSession.id, "queue-busy")
+            }
+            if (composing.isNotEmpty()) {
+                appendImeCommand(
+                    activeSession,
+                    IME_PREEDIT,
+                    composing,
+                    composingBytes,
+                    composingBytes,
+                )
+            }
+            appendImeCommand(activeSession, IME_COMMIT, committed, 0, 0)
+            if (submit) {
+                appendImeCommand(
+                    activeSession,
+                    IME_EDITOR_ACTION,
+                    null,
+                    EditorInfo.IME_ACTION_DONE,
+                    0,
+                )
+            }
+            if (!activeSession.imePosted) {
+                activeSession.imePosted = true
+                surfaceHandler.post(checkNotNull(activeSession.imeDrain))
+            }
+        }
+        return LauncherSessionDebugResult(true, activeSession.id, "accepted")
+    }
+
+    private fun appendImeCommand(
+        session: Session,
+        operation: Int,
+        text: String?,
+        a: Int,
+        b: Int,
+    ) {
+        val index = (session.imeHead + session.imeSize) % MAX_IME_COMMANDS
+        session.imeOperations[index] = operation
+        session.imeTexts[index] = text
+        session.imeA[index] = a
+        session.imeB[index] = b
+        session.imeSize++
+    }
+
+    private fun utf8Length(text: String): Int {
+        var utf16 = 0
+        var bytes = 0
+        while (utf16 < text.length) {
+            val codePoint = text.codePointAt(utf16)
+            bytes +=
+                when {
+                    codePoint <= 0x7f -> 1
+                    codePoint <= 0x7ff -> 2
+                    codePoint <= 0xffff -> 3
+                    else -> 4
+                }
+            utf16 += Character.charCount(codePoint)
+        }
+        return bytes
     }
 
     private fun validInputRecord(
@@ -1751,6 +1876,7 @@ class LauncherSessionService : Service() {
     private companion object {
         private const val TAG = "ArchpheneLauncherSession"
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
+        private const val LAUNCHER_PACKAGE_PREFIX = "org.archphene.linux.p"
         private const val INTERFACE = "org.archphene.launcher.ISessionV1"
         private const val PROTOCOL_VERSION = 1
         private const val TRANSACTION_OPEN = IBinder.FIRST_CALL_TRANSACTION

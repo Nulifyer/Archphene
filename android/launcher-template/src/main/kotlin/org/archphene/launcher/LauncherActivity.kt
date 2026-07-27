@@ -675,6 +675,8 @@ class LauncherActivity :
             MotionEvent.ACTION_DOWN ->
                 if (reported != 0) reported else pointerButtonState or MotionEvent.BUTTON_PRIMARY
             MotionEvent.ACTION_UP -> 0
+            MotionEvent.ACTION_MOVE ->
+                if (reported != 0) reported else pointerButtonState
             else -> reported
         } and POINTER_BUTTON_MASK
     }

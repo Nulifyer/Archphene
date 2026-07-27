@@ -69,10 +69,13 @@ def main() -> None:
                 xs.append(x)
     if not xs:
         raise SystemExit("Foot output row contains no selectable glyphs")
-    x1 = max(left, min(xs) - 3)
+    # End the right-to-left drag inside the first glyph's cell. Ending just
+    # before the painted glyph snaps Foot's selection to the preceding
+    # indentation cell and copies one unwanted leading space.
+    x1 = max(left, min(xs) + 3)
     x2 = min(right - 1, max(xs) + 5)
-    if x1 < max(32, width // 20):
-        raise SystemExit("Foot output begins inside Android's gesture edge")
+    if x2 < max(32, width // 20):
+        raise SystemExit("Foot output ends inside Android's gesture edge")
     if x2 - x1 < 20:
         raise SystemExit("Foot output selection is implausibly narrow")
     print(x1, y, x2, y)

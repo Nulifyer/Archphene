@@ -3,38 +3,53 @@ set -euo pipefail
 
 source "$(dirname "$0")/lib/android-test.sh"
 
-serial=emulator-5554
-package=org.archphene.linux.p73ccc00a787cdc19febdd4a01d4b9d10
+serial=
+apk=
+package=
 artifact_dir=
 while (($#)); do
   case "$1" in
-    --serial) serial="${2:?}"; shift 2 ;;
-    --package) package="${2:?}"; shift 2 ;;
-    --artifact-dir) artifact_dir="${2:?}"; shift 2 ;;
+    --serial) serial="${2:?missing value for --serial}"; shift 2 ;;
+    --apk) apk="${2:?missing value for --apk}"; shift 2 ;;
+    --package) package="${2:?missing value for --package}"; shift 2 ;;
+    --artifact-dir) artifact_dir="${2:?missing value for --artifact-dir}"; shift 2 ;;
+    -h|--help)
+      echo "usage: $0 --serial SERIAL --apk PATH --package CURRENT_FOOT_LAUNCHER [--artifact-dir PATH]"
+      exit 0
+      ;;
     *) archphene_die "unknown argument: $1" ;;
   esac
 done
+[[ -n "$serial" ]] || archphene_die "--serial is required"
+[[ -n "$apk" ]] || archphene_die "--apk is required"
+[[ "$package" =~ ^org\.archphene\.linux\.p[0-9a-f]{32}$ ]] ||
+  archphene_die "--package must be a generated Archphene launcher"
 
 archphene_test_init "$serial"
-archphene_adb_run shell pm path "$package" >/dev/null \
-  || archphene_die "Foot wrapper is not installed: $package"
+archphene_require_file "$apk"
+manager=org.archphene.app.debug
+manager_activity="$manager/org.archphene.app.MainActivity"
 activity="$(archphene_launcher "$package")"
 safe_serial="${serial//[^A-Za-z0-9._-]/_}"
-artifact_dir="${artifact_dir:-$ARCHPHENE_ROOT/tooling/artifacts/foot-workflows/$safe_serial}"
+artifact_dir="${artifact_dir:-$ARCHPHENE_ROOT/tooling/build/foot-workflows/$safe_serial}"
 mkdir -p "$artifact_dir"
+
 ime_file=foot-ime-workflow.txt
 clipboard_file=foot-clipboard-workflow.txt
 selection_file=foot-selection-workflow.txt
+selection_render_file=foot-selection-render-ready.txt
+scroll_file=foot-scroll-ready.txt
 lifecycle_file=foot-lifecycle-workflow.txt
-linux_home="/data/user/0/$package/files/linux-home"
+manager_home=files/arch-root/home/archphene
 screen_size="$(archphene_adb_run shell wm size | tr -d '\r')"
 override_size="$(sed -n 's/^Override size: //p' <<<"$screen_size")"
 physical_size="$(sed -n 's/^Physical size: //p' <<<"$screen_size")"
 size_changed=false
-clipboard_session=false
 
 restore_size() {
-  if [[ "$size_changed" != true ]]; then return; fi
+  if [[ "$size_changed" != true ]]; then
+    return
+  fi
   if [[ -n "$override_size" ]]; then
     archphene_adb_run shell wm size "$override_size" >/dev/null 2>&1 || true
   else
@@ -42,172 +57,316 @@ restore_size() {
   fi
   size_changed=false
 }
+
 cleanup() {
   restore_size
-  if [[ "$clipboard_session" == true ]]; then
-    close_with_back >/dev/null 2>&1 || true
-  fi
   archphene_adb_run shell am force-stop "$package" >/dev/null 2>&1 || true
-  archphene_adb_run shell run-as "$package" rm -f \
-    "files/linux-home/$ime_file" "files/linux-home/$clipboard_file" \
-    "files/linux-home/$selection_file" "files/linux-home/$lifecycle_file" \
+  archphene_adb_run shell run-as "$manager" rm -f \
+    "$manager_home/$ime_file" \
+    "$manager_home/$clipboard_file" \
+    "$manager_home/$selection_file" \
+    "$manager_home/$selection_render_file" \
+    "$manager_home/$scroll_file" \
+    "$manager_home/$lifecycle_file" \
     >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
 wait_file() {
-  local path="$1" expected="$2" deadline=$((SECONDS + 20)) value
+  local name="$1" expected="$2" deadline=$((SECONDS + 20)) value
   while ((SECONDS < deadline)); do
-    value="$(archphene_adb_run shell run-as "$package" cat "$path" 2>/dev/null \
-      | tr -d '\r' || true)"
+    value="$(
+      archphene_adb_run shell run-as "$manager" \
+        cat "$manager_home/$name" 2>/dev/null |
+        tr -d '\r' || true
+    )"
     [[ "$value" == "$expected" ]] && return 0
-    sleep .3
+    sleep 0.3
   done
-  archphene_die "Foot file did not contain expected UTF-8 text: $path"
+  archphene_die \
+    "shared Foot file did not contain expected UTF-8 text: $name actual=$(printf %q "$value")"
 }
-key_chord() {
-  archphene_adb_run shell input keyboard keycombination "$@"
+
+process_tree() {
+  archphene_adb_run shell ps -A -o PID,PPID,PGID,NAME,ARGS | tr -d '\r'
 }
+
+foot_pid() {
+  process_tree | awk '/--argv0 foot / { print $1; exit }'
+}
+
+current_pids() {
+  local wrapper linux
+  wrapper="$(archphene_android_pid "$package")"
+  linux="$(foot_pid)"
+  [[ "$wrapper" =~ ^[1-9][0-9]*$ && "$linux" =~ ^[1-9][0-9]*$ ]] || return 1
+  printf '%s %s\n' "$wrapper" "$linux"
+}
+
+wait_foreground() {
+  local expected="$1" deadline=$((SECONDS + 15)) top
+  while ((SECONDS < deadline)); do
+    top="$(
+      archphene_adb_run shell dumpsys activity activities |
+        awk '/topResumedActivity=/ { print; exit }'
+    )"
+    [[ "$top" == *"$expected"* ]] && return 0
+    sleep 0.25
+  done
+  archphene_die "timed out waiting for foreground package: $expected"
+}
+
+capture_png() {
+  archphene_adb_run exec-out screencap -p >"$artifact_dir/$1.png"
+}
+
+capture_raw() {
+  archphene_adb_run exec-out screencap >"$artifact_dir/$1.raw"
+}
+
 inject_text() {
   local value="$1" submit="${2:-false}" composing="${3:-}"
-  local value_base64 composing_base64
+  local value_base64 composing_base64 log
   local -a composing_extra=()
   value_base64="$(printf %s "$value" | base64 -w0)"
   if [[ -n "$composing" ]]; then
     composing_base64="$(printf %s "$composing" | base64 -w0)"
-    composing_extra=(--es archphene_test_ime_composing_base64 "$composing_base64")
+    composing_extra=(--es composing_base64 "$composing_base64")
   fi
   archphene_adb_run logcat -c
-  archphene_adb_run shell am start -W -n "$activity" \
+  archphene_adb_run shell am broadcast \
+    -n "$manager/org.archphene.app.LauncherSessionTestReceiver" \
+    -a org.archphene.app.debug.action.INJECT_LAUNCHER_IME \
+    --es token launcher-session-gate \
+    --es package "$package" \
     "${composing_extra[@]}" \
-    --es archphene_test_ime_commit_base64 "$value_base64" \
-    --ez archphene_test_ime_submit "$submit" >/dev/null
-  archphene_wait_log "Injected test IME preeditBytes=[0-9]+.*submit=$submit" 20 \
-    'ArchpheneInput:I AndroidRuntime:E *:S' >/dev/null
+    --es committed_base64 "$value_base64" \
+    --ez submit "$submit" >/dev/null
+  log="$(
+    archphene_wait_log \
+      "Manager session IME package=$package.*submit=$submit result=accepted" \
+      20 'ArchpheneLauncherSessionProbe:I AndroidRuntime:E *:S'
+  )"
+  [[ "$log" != *'FATAL EXCEPTION'* ]] ||
+    archphene_die "Foot crashed while accepting manager-session IME"
+  # The debug receiver only enqueues work. Let the compositor owner drain it
+  # before a following real key event is delivered through the wrapper Binder.
+  sleep 0.2
 }
-hide_ime() {
-  archphene_adb_run logcat -c
-  archphene_adb_run shell am start -W -n "$activity" \
-    --ez archphene_test_hide_ime true >/dev/null
-  archphene_wait_log 'Test IME hidden with Linux focus retained' 20 \
-    'ArchpheneInput:I AndroidRuntime:E *:S' >/dev/null
-  sleep .5
+
+key_chord() {
+  # Android's zero/default synthetic chord duration can leave the final key
+  # repeating on some emulator and OEM builds. An explicit short hold produces
+  # one ordinary hardware chord with ordered down/up events.
+  archphene_adb_run shell input keyboard keycombination -t 30 "$@" >/dev/null
 }
-current_pids() {
-  local android linux
-  android="$(archphene_android_pid "$package")"
-  linux="$(archphene_linux_loader_pid "$android")"
-  [[ -n "$android" && -n "$linux" ]] || return 1
-  printf '%s %s\n' "$android" "$linux"
+
+hide_ime_if_visible() {
+  local state before top
+  state="$(archphene_adb_run shell dumpsys window displays 2>/dev/null || true)"
+  if archphene_regex_contains "$state" 'type=ime[^\n]*visible=true'; then
+    before="$(archphene_android_pid "$package")"
+    archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null
+    sleep 0.7
+    [[ "$(archphene_android_pid "$package")" == "$before" ]] ||
+      archphene_die "hiding the Android IME closed the Foot launcher"
+    top="$(
+      archphene_adb_run shell dumpsys activity activities |
+        awk '/topResumedActivity=/ { print; exit }'
+    )"
+    [[ "$top" == *"$package"* ]] ||
+      archphene_die "hiding the Android IME moved focus away from Foot: $top"
+  fi
 }
+
 close_with_back() {
   local attempt deadline log
-  archphene_adb_run logcat -c
   for attempt in 1 2 3 4; do
-    archphene_adb_run shell input keyevent KEYCODE_BACK
+    archphene_adb_run logcat -c
+    archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null
     deadline=$((SECONDS + 5))
     while ((SECONDS < deadline)); do
-      log="$(archphene_adb_run logcat -d -v brief -s \
-        ArchpheneLinuxApp:I AndroidRuntime:E '*:S' 2>/dev/null || true)"
-      if [[ "$log" == *'Linux runtime exited; finishing Android host'* \
-          && "$log" == *'Android host destroyed after runtime shutdown'* ]]; then
-        archphene_adb_run shell am force-stop "$package"
+      log="$(
+        archphene_adb_run logcat -d -v brief \
+          -s ArchpheneLauncherSession:I AndroidRuntime:E '*:S' 2>/dev/null || true
+      )"
+      if archphene_regex_contains \
+        "$log" \
+        'Closed launcher session=|Client Binder died for launcher session='; then
         return 0
       fi
-      sleep .25
+      sleep 0.25
     done
   done
   return 1
 }
 
+archphene_adb_run install -r "$apk" >/dev/null
+archphene_adb_run shell am force-stop "$manager" >/dev/null
+archphene_adb_run logcat -b crash -c
+archphene_adb_run logcat -c
+archphene_adb_run shell am start -W -n "$manager_activity" >/dev/null
+archphene_wait_log \
+  'Package runtime ready:.*Pacman v[0-9]' 30 \
+  'ArchpheneRuntime:V AndroidRuntime:E *:S' >/dev/null
+
+archphene_adb_run shell run-as "$manager" rm -f \
+  "$manager_home/$ime_file" \
+  "$manager_home/$clipboard_file" \
+  "$manager_home/$selection_file" \
+  "$manager_home/$selection_render_file" \
+  "$manager_home/$scroll_file" \
+  "$manager_home/$lifecycle_file"
+archphene_adb_run shell am force-stop "$package" >/dev/null
+archphene_adb_run logcat -c
+archphene_adb_run shell am start -W -n "$activity" >/dev/null
+archphene_wait_log \
+  'Linux Wayland client connected session=' 30 \
+  'ArchpheneLauncherSession:V AndroidRuntime:E *:S' >/dev/null
+archphene_wait_log \
+  'Presented Linux frame session=.*attachmentFrame=1' 30 \
+  'ArchpheneLauncherSession:V AndroidRuntime:E *:S' >/dev/null
+
+# Exercise UTF-8 preedit, commit, and editor action through the manager-owned
+# active session. Generated launcher APKs intentionally contain no test extras.
 ime_value='Archphene-é-雪-🙂'
-ime_command="printf '$ime_value' > $linux_home/$ime_file"
-ime_command_base64="$(printf %s "$ime_command" | base64 -w0)"
-ime_composing_base64="$(printf %s 'Archphene-preedit-雪' | base64 -w0)"
-archphene_adb_run shell am force-stop "$package"
-archphene_adb_run logcat -c
-archphene_adb_run shell am start -W -n "$activity" \
-  --es archphene_test_ime_composing_base64 "$ime_composing_base64" \
-  --es archphene_test_ime_commit_base64 "$ime_command_base64" \
-  --ez archphene_test_ime_submit true >/dev/null
-ime_log="$(archphene_wait_log 'Injected test IME preeditBytes=[1-9][0-9]*.*submit=true' 45 \
-  'ArchpheneInput:I ArchpheneLinuxApp:V AndroidRuntime:E *:S')"
-[[ "$ime_log" != *'FATAL EXCEPTION'* ]] || archphene_die 'Foot crashed during IME composition'
-wait_file "files/linux-home/$ime_file" "$ime_value"
+inject_text \
+  "printf '$ime_value' > ~/$ime_file" \
+  true \
+  'Archphene-preedit-雪'
+wait_file "$ime_file" "$ime_value"
+capture_png ime
 
-# Start a fresh Activity so the debug clipboard seed can snapshot and restore
-# the user's previous clipboard when this session closes normally.
-close_with_back || archphene_die 'Foot did not exit after initial IME workflow'
-clipboard_value='Archphene-clipboard-é-雪-🙂'
-archphene_adb_run logcat -c
-archphene_adb_run shell am start -W -n "$activity" \
-  --es archphene_test_android_clipboard "$clipboard_value" \
-  --ez archphene_test_restore_clipboard_on_destroy true >/dev/null
-clipboard_session=true
-archphene_wait_log 'mapped=true.*primary=true.*title=foot' 45 \
-  'ArchpheneInput:V ArchpheneLinuxApp:V AndroidRuntime:E *:S' >/dev/null
-sleep 1
-inject_text 'printf '
-key_chord KEYCODE_CTRL_LEFT KEYCODE_SHIFT_LEFT KEYCODE_V
-inject_text " > $linux_home/$clipboard_file" true
-wait_file "files/linux-home/$clipboard_file" "$clipboard_value"
-
-# Produce a single-token output row, detect its rendered glyph bounds, select
-# it with a real mouse drag, copy through Foot, and paste it into a shell file.
+# Put the manager in front before its debug receiver seeds Android's real
+# ClipboardManager. Returning to the singleTask launcher makes its normal focus
+# callback submit the clipboard over authenticated Binder. This avoids relying
+# on OEM delivery of a clipboard-listener callback to a background writer.
+# The existing wrapper and Linux process must survive the round trip.
 selection_value="ARCHPHENE_SELECTION_${RANDOM}_${RANDOM}"
-inject_text "echo '    $selection_value'" true
-sleep 1
-hide_ime
-archphene_adb_run exec-out screencap >"$artifact_dir/selection.raw"
-read -r x1 y1 x2 y2 <<<"$(python3 \
-  "$ARCHPHENE_SCRIPTS_DIR/lib/foot-selection-geometry.py" \
-  "$artifact_dir/selection.raw")"
-archphene_adb_run shell input mouse swipe "$x1" "$y1" "$x2" "$y2" 700
-sleep .5
-archphene_adb_run exec-out screencap >"$artifact_dir/selection-highlight.raw"
+selection_length="${#selection_value}"
+clipboard_value="Archphene-clipboard-é-雪-🙂-${RANDOM}_${RANDOM}"
+clipboard_command="printf '%s' '$clipboard_value' > ~/$clipboard_file; echo '    $selection_value'; printf READY > ~/$selection_render_file; bind 'set enable-bracketed-paste off'; IFS= read -r -N $selection_length archphene_selected; bind 'set enable-bracketed-paste on'; printf '%s' \"\$archphene_selected\" > ~/$selection_file; for i in {1..200}; do echo \"\$i\"; done; printf READY > ~/$scroll_file"
+clipboard_command_base64="$(printf %s "$clipboard_command" | base64 -w0)"
+read -r clipboard_wrapper_pid clipboard_linux_pid < <(current_pids)
+archphene_adb_run shell am start -W -n "$manager_activity" >/dev/null
+wait_foreground "$manager"
+archphene_adb_run logcat -c
+archphene_adb_run shell am broadcast \
+  -n "$manager/org.archphene.app.ClipboardTestReceiver" \
+  -a org.archphene.app.debug.action.SET_TEST_CLIPBOARD \
+  --es text_base64 "$clipboard_command_base64" >/dev/null
+archphene_adb_run shell am start -W -n "$activity" >/dev/null
+wait_foreground "$package"
+read -r resumed_wrapper_pid resumed_linux_pid < <(current_pids)
+[[ "$resumed_wrapper_pid" == "$clipboard_wrapper_pid" ]] ||
+  archphene_die "Foot wrapper restarted during Android clipboard focus round trip"
+[[ "$resumed_linux_pid" == "$clipboard_linux_pid" ]] ||
+  archphene_die "Foot Linux process restarted during Android clipboard focus round trip"
+sleep 0.4
+archphene_adb_run logcat -c
+key_chord KEYCODE_CTRL_LEFT KEYCODE_SHIFT_LEFT KEYCODE_V
+archphene_wait_log \
+  'Wrote first Android clipboard transfer.*on ArchpheneLauncherClipboard' \
+  20 'ArchpheneLauncherSession:V AndroidRuntime:E *:S' >/dev/null
+# The worker log proves the Wayland data-source write completed; Foot consumes
+# and renders those bytes on its own event loop. Do not race the following real
+# Enter key ahead of that client-side paste.
+sleep 0.7
+capture_png android-clipboard-paste
+archphene_adb_run shell input keyevent KEYCODE_ENTER >/dev/null
+wait_file "$clipboard_file" "$clipboard_value"
+wait_file "$selection_render_file" READY
+capture_png clipboard
+hide_ime_if_visible
+
+# Render a single token, select its actual on-screen glyph bounds with a real
+# pointer drag, copy it through Foot, and paste it back into the shared home.
+sleep 0.7
+capture_raw selection-locator
+selection_geometry="$(
+  python3 \
+    "$ARCHPHENE_SCRIPTS_DIR/lib/foot-selection-geometry.py" \
+    "$artifact_dir/selection-locator.raw"
+)" || archphene_die "could not locate Foot's rendered selection row"
+read -r x1 y1 x2 y2 <<<"$selection_geometry"
+capture_raw selection
+capture_png selection
+archphene_adb_run logcat -c
+archphene_adb_run shell input mouse swipe "$x2" "$y2" "$x1" "$y1" 700
+sleep 0.5
+[[ -n "$(archphene_android_pid "$package" 2>/dev/null || true)" ]] ||
+  archphene_die "Foot launcher left the foreground during pointer selection"
+top_activity="$(
+  archphene_adb_run shell dumpsys activity activities |
+    awk '/topResumedActivity=/ { print; exit }'
+)"
+[[ "$top_activity" == *"$package"* ]] ||
+  archphene_die "pointer selection moved focus away from Foot: $top_activity"
+capture_raw selection-highlight
+capture_png selection-highlight
 python3 "$ARCHPHENE_SCRIPTS_DIR/lib/theme-frame-check.py" different \
   "$artifact_dir/selection.raw" "$artifact_dir/selection-highlight.raw" \
-  --minimum-changed-ratio 0.0002 --minimum-difference 0.1 \
-  --top-percent 8 --bottom-percent 55
+  --minimum-changed-ratio 0.0002 \
+  --minimum-difference 0.1 \
+  --top-percent 8 \
+  --bottom-percent 55
+archphene_adb_run logcat -c
 key_chord KEYCODE_CTRL_LEFT KEYCODE_SHIFT_LEFT KEYCODE_C
-sleep .5
-inject_text 'printf '
+archphene_wait_log \
+  'Read first Linux clipboard transfer.*on ArchpheneLauncherClipboard' \
+  20 'ArchpheneLauncherSession:V AndroidRuntime:E *:S' >/dev/null
 key_chord KEYCODE_CTRL_LEFT KEYCODE_SHIFT_LEFT KEYCODE_V
-inject_text " > $linux_home/$selection_file" true
-wait_file "files/linux-home/$selection_file" "$selection_value"
+sleep 0.7
+capture_png linux-clipboard-paste
+wait_file "$selection_file" "$selection_value"
+wait_file "$scroll_file" READY
 
-# Generate real scrollback, move away from the live bottom, and require a
-# visibly different Linux frame without process churn.
-inject_text 'for i in {1..200}; do echo "$i"; done' true
-sleep 2
-archphene_adb_run exec-out screencap >"$artifact_dir/scroll-bottom.raw"
+# Generate scrollback and require a visibly changed full-device frame.
+hide_ime_if_visible
+# Android's clipboard preview is part of the real user-visible screen. Let its
+# transient animation settle so the comparison measures Foot scrollback.
+sleep 4
+capture_png scroll-bottom
+sleep 0.3
+capture_raw scroll-bottom
 key_chord KEYCODE_SHIFT_LEFT KEYCODE_PAGE_UP
-sleep 1
-archphene_adb_run exec-out screencap >"$artifact_dir/scroll-up.raw"
-scroll_method=shift-page-up
+sleep 1.5
+capture_png scroll-up
+sleep 0.3
+capture_raw scroll-up
 if ! python3 "$ARCHPHENE_SCRIPTS_DIR/lib/theme-frame-check.py" different \
   "$artifact_dir/scroll-bottom.raw" "$artifact_dir/scroll-up.raw" \
-  --minimum-changed-ratio 0.002 --minimum-difference 0.2 \
-  --top-percent 8 --bottom-percent 55 >/dev/null 2>&1; then
-  scroll_method=mouse-wheel
+  --minimum-changed-ratio 0.002 \
+  --minimum-difference 0.2 \
+  --left-percent 0 \
+  --right-percent 35 \
+  --top-percent 8 \
+  --bottom-percent 55 >/dev/null 2>&1; then
   for _ in 1 2 3 4; do
     archphene_adb_run shell input mouse scroll 500 500 --axis VSCROLL,5
   done
-  sleep 1
-  archphene_adb_run exec-out screencap >"$artifact_dir/scroll-up.raw"
+  sleep 1.5
+  capture_png scroll-up
+  sleep 0.3
+  capture_raw scroll-up
 fi
 python3 "$ARCHPHENE_SCRIPTS_DIR/lib/theme-frame-check.py" different \
   "$artifact_dir/scroll-bottom.raw" "$artifact_dir/scroll-up.raw" \
-  --minimum-changed-ratio 0.002 --minimum-difference 0.2 \
-  --top-percent 8 --bottom-percent 55
+  --minimum-changed-ratio 0.002 \
+  --minimum-difference 0.2 \
+  --left-percent 0 \
+  --right-percent 35 \
+  --top-percent 8 \
+  --bottom-percent 55
 key_chord KEYCODE_CTRL_LEFT KEYCODE_SHIFT_LEFT KEYCODE_MOVE_END
-read -r flow_android flow_linux <<<"$(current_pids)"
+read -r flow_wrapper flow_linux <<<"$(current_pids)"
+flow_manager="$(archphene_android_pid "$manager")"
 
-# Change Android's logical display size live, prove the same Activity and Linux
-# loader survive, then restore the user's exact prior override state.
+# Resize Android's logical display and prove the manager, wrapper, and Linux
+# process all survive. Restore the user's exact prior override on every exit.
 base_size="${override_size:-$physical_size}"
-[[ "$base_size" =~ ^([0-9]+)x([0-9]+)$ ]] \
-  || archphene_die "could not parse display size: $screen_size"
+[[ "$base_size" =~ ^([0-9]+)x([0-9]+)$ ]] ||
+  archphene_die "could not parse display size: $screen_size"
 base_width="${BASH_REMATCH[1]}"
 base_height="${BASH_REMATCH[2]}"
 resize_width=$((base_width > 900 ? base_width - 120 : base_width + 120))
@@ -215,43 +374,78 @@ resize_height=$((base_height > 1500 ? base_height - 200 : base_height + 200))
 archphene_adb_run logcat -c
 archphene_adb_run shell wm size "${resize_width}x${resize_height}"
 size_changed=true
-archphene_wait_log "output frame=${resize_width}x[0-9]+" 30 \
-  'ArchpheneInput:I ArchpheneLinuxApp:V AndroidRuntime:E *:S' >/dev/null
-read -r resized_android resized_linux <<<"$(current_pids)"
-[[ "$resized_android" == "$flow_android" && "$resized_linux" == "$flow_linux" ]] \
-  || archphene_die 'Foot restarted during live display resize'
-archphene_adb_run exec-out screencap >"$artifact_dir/resized.raw"
+archphene_wait_log \
+  "Attached launcher Surface session=.*size=${resize_width}x" \
+  30 'ArchpheneLauncherSession:V AndroidRuntime:E *:S' >/dev/null
+read -r resized_wrapper resized_linux <<<"$(current_pids)"
+[[ "$resized_wrapper" == "$flow_wrapper" &&
+   "$resized_linux" == "$flow_linux" &&
+   "$(archphene_android_pid "$manager")" == "$flow_manager" ]] ||
+  archphene_die "Foot processes restarted during live display resize"
+capture_png resized
 restore_size
-sleep 2
-read -r restored_android restored_linux <<<"$(current_pids)"
-[[ "$restored_android" == "$flow_android" && "$restored_linux" == "$flow_linux" ]] \
-  || archphene_die 'Foot restarted while restoring display size'
+sleep 1
+read -r restored_wrapper restored_linux <<<"$(current_pids)"
+[[ "$restored_wrapper" == "$flow_wrapper" &&
+   "$restored_linux" == "$flow_linux" ]] ||
+  archphene_die "Foot processes restarted while restoring display size"
 
-# Close normally first so the test clipboard is restored, then exercise an
-# abrupt force-stop and a clean cold relaunch with new processes.
-close_with_back || archphene_die 'Foot did not exit after closing its primary window'
-clipboard_session=false
+# Prove graceful close, Binder-death cleanup after force-stop, and a fresh cold
+# launcher/process pair which still writes to the same shared Linux home.
+close_with_back || archphene_die "Foot did not close through Android Back"
+deadline=$((SECONDS + 15))
+while ((SECONDS < deadline)) && archphene_adb_run shell test -e "/proc/$flow_linux"; do
+  sleep 0.2
+done
+archphene_adb_run shell test ! -e "/proc/$flow_linux" ||
+  archphene_die "manager-owned Foot process survived graceful launcher close"
 
 archphene_adb_run logcat -c
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
-archphene_wait_log 'mapped=true.*primary=true.*title=foot' 45 \
-  'ArchpheneInput:V ArchpheneLinuxApp:V AndroidRuntime:E *:S' >/dev/null
-read -r before_stop_android before_stop_linux <<<"$(current_pids)"
+archphene_wait_log \
+  'Presented Linux frame session=.*attachmentFrame=1' 30 \
+  'ArchpheneLauncherSession:V AndroidRuntime:E *:S' >/dev/null
+read -r before_stop_wrapper before_stop_linux <<<"$(current_pids)"
 archphene_adb_run shell am force-stop "$package"
-deadline=$((SECONDS + 20))
-while ((SECONDS < deadline)) && [[ -n "$(archphene_android_pid "$package" || true)" ]]; do
-  sleep .2
+deadline=$((SECONDS + 15))
+while ((SECONDS < deadline)); do
+  if ! archphene_android_pid "$package" >/dev/null 2>&1 &&
+     ! archphene_adb_run shell test -e "/proc/$before_stop_linux"; then
+    break
+  fi
+  sleep 0.2
 done
-[[ -z "$(archphene_android_pid "$package" || true)" ]] \
-  || archphene_die 'Foot Android process survived force-stop'
-archphene_adb_run shell am start -W -n "$activity" >/dev/null
-archphene_wait_log 'mapped=true.*primary=true.*title=foot' 45 \
-  'ArchpheneInput:V ArchpheneLinuxApp:V AndroidRuntime:E *:S' >/dev/null
-read -r relaunched_android relaunched_linux <<<"$(current_pids)"
-[[ "$relaunched_android" != "$before_stop_android" \
-    && "$relaunched_linux" != "$before_stop_linux" ]] \
-  || archphene_die 'Foot destructive relaunch reused stale processes'
-inject_text "printf ARCHPHENE_LIFECYCLE_OK > $linux_home/$lifecycle_file" true
-wait_file "files/linux-home/$lifecycle_file" ARCHPHENE_LIFECYCLE_OK
+archphene_android_pid "$package" >/dev/null 2>&1 &&
+  archphene_die "Foot wrapper survived force-stop"
+archphene_adb_run shell test -e "/proc/$before_stop_linux" &&
+  archphene_die "manager-owned Foot process survived wrapper force-stop"
 
-archphene_note "Foot workflows passed on $serial: UTF-8 composition, bidirectional clipboard/selection, scrollback ($scroll_method), live resize, graceful close, force-stop, and cold relaunch. Evidence: $artifact_dir"
+archphene_adb_run logcat -c
+archphene_adb_run shell am start -W -n "$activity" >/dev/null
+archphene_wait_log \
+  'Presented Linux frame session=.*attachmentFrame=1' 30 \
+  'ArchpheneLauncherSession:V AndroidRuntime:E *:S' >/dev/null
+read -r relaunched_wrapper relaunched_linux <<<"$(current_pids)"
+[[ "$relaunched_wrapper" != "$before_stop_wrapper" &&
+   "$relaunched_linux" != "$before_stop_linux" ]] ||
+  archphene_die "Foot destructive relaunch reused stale processes"
+inject_text "printf ARCHPHENE_LIFECYCLE_OK > ~/$lifecycle_file" true
+wait_file "$lifecycle_file" ARCHPHENE_LIFECYCLE_OK
+capture_png lifecycle
+
+fatal_log="$(
+  {
+    archphene_adb_run logcat -b crash -d -v brief 2>/dev/null || true
+    archphene_adb_run logcat -d -v brief \
+      -s ArchpheneLauncherSession:E AndroidRuntime:E libc:F '*:S' 2>/dev/null || true
+  }
+)"
+[[ "$fatal_log" != *'FATAL EXCEPTION'* && "$fatal_log" != *'Fatal signal'* ]] ||
+  archphene_die "Foot workflow emitted a fatal event: $fatal_log"
+
+trap - EXIT
+cleanup
+archphene_note "Foot manager-session workflows passed on $serial"
+archphene_note "  UTF-8 IME, real Android/Linux clipboard, pointer selection, and scrollback passed"
+archphene_note "  Live resize, graceful close, force-stop cleanup, and cold relaunch passed"
+archphene_note "  Full-device screenshots and raw comparison frames: $artifact_dir"
