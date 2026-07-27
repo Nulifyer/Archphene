@@ -15,6 +15,7 @@ internal class NativeLauncherCompositor(
     width: Int,
     height: Int,
     densityDpi: Int,
+    geometryPercent: Int,
 ) : AutoCloseable {
     private var handle =
         nativeCreate(
@@ -22,6 +23,7 @@ internal class NativeLauncherCompositor(
             width,
             height,
             densityDpi,
+            geometryPercent,
         )
 
     init {
@@ -33,7 +35,16 @@ internal class NativeLauncherCompositor(
         width: Int,
         height: Int,
         densityDpi: Int,
-    ): Boolean = nativeAttachSurface(handle, surface, width, height, densityDpi) == 0
+        geometryPercent: Int,
+    ): Boolean =
+        nativeAttachSurface(
+            handle,
+            surface,
+            width,
+            height,
+            densityDpi,
+            geometryPercent,
+        ) == 0
 
     fun detach() {
         if (handle != 0L) {
@@ -212,6 +223,7 @@ internal class NativeLauncherCompositor(
         width: Int,
         height: Int,
         densityDpi: Int,
+        geometryPercent: Int,
     ): Long
 
     private external fun nativeAttachSurface(
@@ -220,6 +232,7 @@ internal class NativeLauncherCompositor(
         width: Int,
         height: Int,
         densityDpi: Int,
+        geometryPercent: Int,
     ): Int
 
     private external fun nativeDetachSurface(handle: Long)

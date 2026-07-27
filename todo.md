@@ -400,7 +400,8 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
 ## P1 - Generic desktop integration quality
 
 - [x] Replace global `QT_SCALE_FACTOR` compatibility behavior with compositor-advertised logical size plus integer/fractional output scale; physical Samsung portrait/landscape reconfiguration passes without app-specific settings.
-- [ ] Extend the compositor density gate to live moves between Android displays and user-selected geometry scale.
+- [x] Extend the compositor density gate to a bounded user-selected geometry scale. Auto retains the 432dp desktop floor; explicit 75%, 100%, 125%, and 150% values scale that automatic baseline in the compositor rather than injecting toolkit-specific geometry variables. Native tests cover every accepted bound, and Samsung Code proves the 125% output resolves to 346×705 logical pixels.
+- [ ] Validate live moves between Android displays while an explicit geometry scale is active.
 - [ ] Define a generic overflow/panning policy for fixed desktop layouts at 200% phone text scaling without app-specific patches.
 - [ ] Finish reproducible AArch64 Qt/KDE and GTK settings bridge builds by pinning the required KConfig and GLib development sysroots.
 - [ ] Complete secondary-window behavior for phone, tablet, freeform, and external displays.
@@ -413,8 +414,9 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [ ] SDL
   - [ ] Electron/Chromium
   - [ ] XWayland
-- [ ] Keep geometry scale, text scale, visible control size, and touch target size distinct, documented, live where supported, and predictable after relaunch.
-- [ ] Expose three described appearance controls in the manager with Auto as each default: app geometry scale, app text at explicit 100–200%, and control visual size in dp. Use bounded ticked sliders, retain the requested 20dp phone control default, keep touch targets independently accessible, persist overrides, and define whether a running app updates live or on relaunch.
+- [x] Keep geometry scale, text scale, visible control size, and touch target size distinct, documented, persisted, and predictable after relaunch.
+- [ ] Evaluate safe live appearance updates per toolkit; keep relaunch semantics when a toolkit cannot update geometry, fonts, and controls consistently.
+- [x] Expose three described appearance controls in the manager with Auto as each default: app geometry scale, app text at explicit 100–200%, and control visual size in dp. The bounded ticked sliders retain the requested 20dp phone control default and keep touch targets separate. Samsung proves all three overrides persist, an active Code session keeps its launch snapshot after the settings return to Auto, and a fresh Code launch resolves Auto again. The x86_64 emulator independently passes the full-device manager layout and accessibility-tree check.
 - [ ] Validate Android light/dark, explicit Archphene override, Material You accents, font settings, phone/tablet/docked auto policy, and runtime display changes.
 - [ ] Continue using full-device screenshots, rendered-pixel checks, accessibility trees, content geometry, input traces, and logs for visual claims.
 

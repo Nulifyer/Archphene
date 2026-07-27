@@ -40,6 +40,7 @@ import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
+import org.archphene.app.appearance.LinuxAppearanceSettingsView
 import org.archphene.app.runtime.ArchpheneRuntimeService
 import org.archphene.app.runtime.AvailablePackageSnapshot
 import org.archphene.app.runtime.InstalledPackageSnapshot
@@ -83,12 +84,14 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private lateinit var managerPanel: FrameLayout
     private lateinit var packagePanel: LinearLayout
     private lateinit var filesPanel: ScrollView
+    private lateinit var settingsPanel: ScrollView
     private lateinit var terminalEmptyPanel: LinearLayout
     private lateinit var terminalControls: LinearLayout
     private lateinit var runtimePanel: FrameLayout
     private lateinit var packagesNavigationButton: Button
     private lateinit var filesNavigationButton: Button
     private lateinit var terminalNavigationButton: Button
+    private lateinit var settingsNavigationButton: Button
     private lateinit var installButton: Button
     private lateinit var removeButton: Button
     private lateinit var aurReviewButton: Button
@@ -198,7 +201,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                         MANAGER_SECTION_PREFERENCE,
                         MANAGER_SECTION_PACKAGES,
                     )
-            ).coerceIn(MANAGER_SECTION_PACKAGES, MANAGER_SECTION_TERMINAL)
+            ).coerceIn(MANAGER_SECTION_PACKAGES, MANAGER_SECTION_SETTINGS)
         showingInstalledPackages =
             savedInstanceState?.getBoolean(PACKAGE_RESULT_MODE_STATE, true) ?: true
         showingPackageDetails =
@@ -1366,6 +1369,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     ),
                 )
             }
+        settingsPanel = LinuxAppearanceSettingsView(this)
         terminalEmptyPanel =
             LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
@@ -1421,6 +1425,13 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     ),
                 )
                 addView(
+                    settingsPanel,
+                    FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                    ),
+                )
+                addView(
                     terminalEmptyPanel,
                     FrameLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1466,6 +1477,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             managerNavigationButton(R.string.files, MANAGER_SECTION_FILES)
         terminalNavigationButton =
             managerNavigationButton(R.string.terminal, MANAGER_SECTION_TERMINAL)
+        settingsNavigationButton =
+            managerNavigationButton(R.string.settings, MANAGER_SECTION_SETTINGS)
         val navigationSurface =
             LinearLayout(this).apply {
                 orientation =
@@ -1512,6 +1525,13 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                             dp(64),
                         ),
                     )
+                    addView(
+                        settingsNavigationButton,
+                        LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            dp(64),
+                        ),
+                    )
                 } else {
                     addView(
                         packagesNavigationButton,
@@ -1523,6 +1543,10 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     )
                     addView(
                         terminalNavigationButton,
+                        LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f),
+                    )
+                    addView(
+                        settingsNavigationButton,
                         LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f),
                     )
                 }
@@ -2894,6 +2918,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             selectedManagerSection == MANAGER_SECTION_FILES
         val terminalSelected =
             selectedManagerSection == MANAGER_SECTION_TERMINAL
+        val settingsVisible =
+            selectedManagerSection == MANAGER_SECTION_SETTINGS
         setVisibilityIfChanged(
             packagePanel,
             if (packagesVisible) View.VISIBLE else View.GONE,
@@ -2901,6 +2927,10 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         setVisibilityIfChanged(
             filesPanel,
             if (filesVisible) View.VISIBLE else View.GONE,
+        )
+        setVisibilityIfChanged(
+            settingsPanel,
+            if (settingsVisible) View.VISIBLE else View.GONE,
         )
         setVisibilityIfChanged(
             terminalEmptyPanel,
@@ -2924,6 +2954,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         setSelectedIfChanged(packagesNavigationButton, packagesVisible)
         setSelectedIfChanged(filesNavigationButton, filesVisible)
         setSelectedIfChanged(terminalNavigationButton, terminalSelected)
+        setSelectedIfChanged(settingsNavigationButton, settingsVisible)
     }
 
     private fun setVisibilityIfChanged(view: View, visibility: Int) {
@@ -3182,6 +3213,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         private const val MANAGER_SECTION_PACKAGES = 0
         private const val MANAGER_SECTION_FILES = 1
         private const val MANAGER_SECTION_TERMINAL = 2
+        private const val MANAGER_SECTION_SETTINGS = 3
         private const val MIN_TERMINAL_DESCRIPTION_HEIGHT_DP = 480
         private const val WIDE_MANAGER_BREAKPOINT_DP = 840
         private const val WIDE_NAVIGATION_WIDTH_DP = 176

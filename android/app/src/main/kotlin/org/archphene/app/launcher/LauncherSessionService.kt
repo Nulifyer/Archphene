@@ -18,6 +18,8 @@ import android.os.RemoteException
 import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
+import org.archphene.app.appearance.LinuxAppearanceOverrides
+import org.archphene.app.appearance.LinuxAppearancePreferences
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -35,6 +37,7 @@ class LauncherSessionService : Service() {
         val identity: VerifiedLauncherIdentity,
         val clientToken: IBinder,
         val authorization: LauncherAuthorization,
+        val appearanceOverrides: LinuxAppearanceOverrides,
     ) {
         var surface: Surface? = null
         @Volatile var active = true
@@ -601,7 +604,15 @@ class LauncherSessionService : Service() {
         if (sessionId <= 0 || sessions.containsKey(sessionId)) {
             return OpenResult(RESULT_BUSY, 0, null)
         }
-        val session = Session(sessionId, callingUid, identity, clientToken, authorization)
+        val session =
+            Session(
+                sessionId,
+                callingUid,
+                identity,
+                clientToken,
+                authorization,
+                LinuxAppearancePreferences.read(this),
+            )
         session.inputDrain = Runnable { drainInput(session) }
         session.imeDrain = Runnable { drainIme(session) }
         try {
@@ -990,13 +1001,22 @@ class LauncherSessionService : Service() {
                                 width,
                                 height,
                                 densityDpi,
+                                session.appearanceOverrides.geometryPercent,
                             ).also {
                                 session.compositor = it
                                 session.compositorSocket = socket
                                 session.lastImeChangeSerial = Int.MIN_VALUE
                             }
                         }
-            check(compositor.attach(surface, width, height, densityDpi)) {
+            check(
+                compositor.attach(
+                    surface,
+                    width,
+                    height,
+                    densityDpi,
+                    session.appearanceOverrides.geometryPercent,
+                ),
+            ) {
                 "ANativeWindow attachment failed"
             }
             session.attachmentFramesLogged = 0
@@ -1103,15 +1123,20 @@ class LauncherSessionService : Service() {
         val effectiveDensity = minOf(session.densityDpi, densityForMinimum).coerceIn(72, 1_000)
         val logicalShort = shortPixels.toLong().times(160).div(effectiveDensity).toInt()
         val phone = logicalShort < 600
-        val visualDp = if (phone) 20 else 18
-        val targetDp = if (phone) 32 else 28
+        val visualDp =
+            session.appearanceOverrides.controlVisualDp.takeIf {
+                it != LinuxAppearancePreferences.AUTO
+            } ?: if (phone) 20 else 18
+        val targetDp = maxOf(if (phone) 32 else 28, visualDp)
         val fontPercent =
-            (
-                session.fontScaleMillis
-                    .toLong()
-                    .plus(5)
-                    .div(10)
-            ).toInt().coerceIn(100, 200)
+            session.appearanceOverrides.fontPercent.takeIf {
+                it != LinuxAppearancePreferences.AUTO
+            } ?: (
+                    session.fontScaleMillis
+                        .toLong()
+                        .plus(5)
+                        .div(10)
+                ).toInt().coerceIn(100, 200)
         val material =
             if (Build.VERSION.SDK_INT >= 31) {
                 intArrayOf(
@@ -1147,6 +1172,7 @@ class LauncherSessionService : Service() {
         Log.i(
             TAG,
             "Resolved launcher appearance session=${session.id} " +
+                "geometry=${session.appearanceOverrides.geometryPercent.takeIf { it != 0 } ?: "auto"} " +
                 "dark=$dark font=$fontPercent controls=${visualDp}dp target=${targetDp}dp",
         )
         return ResolvedAppearance(

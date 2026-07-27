@@ -1110,9 +1110,11 @@ impl LauncherSurfaceCompositor {
         width: i32,
         height: i32,
         density_dpi: i32,
+        geometry_percent: i32,
     ) -> i32 {
         if !valid_launcher_surface_size(width, height)
             || !valid_launcher_density(density_dpi)
+            || !valid_launcher_geometry_percent(geometry_percent)
             || surface.is_null()
         {
             return -2;
@@ -1121,7 +1123,7 @@ impl LauncherSurfaceCompositor {
         if window.is_null() {
             return -3;
         }
-        let density_dpi = launcher_auto_density_dpi(width, height, density_dpi);
+        let density_dpi = launcher_density_dpi(width, height, density_dpi, geometry_percent);
         let logical_width = launcher_logical_extent(width, density_dpi);
         let logical_height = launcher_logical_extent(height, density_dpi);
         const AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM: i32 = 1;
@@ -1144,7 +1146,7 @@ impl LauncherSurfaceCompositor {
         self.buffer_width = logical_width;
         self.buffer_height = logical_height;
         self.last_presented_commit = u32::MAX;
-        configure_launcher_output(&mut self.core, width, height, density_dpi);
+        configure_launcher_output_resolved(&mut self.core, width, height, density_dpi);
         0
     }
 
@@ -1200,6 +1202,11 @@ fn valid_launcher_density(density_dpi: i32) -> bool {
 }
 
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn valid_launcher_geometry_percent(geometry_percent: i32) -> bool {
+    geometry_percent == 0 || matches!(geometry_percent, 75 | 100 | 125 | 150)
+}
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 fn launcher_logical_extent(physical: i32, density_dpi: i32) -> i32 {
     i32::try_from((i64::from(physical) * 160 + i64::from(density_dpi) / 2) / i64::from(density_dpi))
         .unwrap_or(1)
@@ -1222,16 +1229,49 @@ fn launcher_auto_density_dpi(width: i32, height: i32, android_density_dpi: i32) 
 }
 
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn launcher_density_dpi(
+    width: i32,
+    height: i32,
+    android_density_dpi: i32,
+    geometry_percent: i32,
+) -> i32 {
+    let automatic = launcher_auto_density_dpi(width, height, android_density_dpi);
+    if geometry_percent == 0 {
+        automatic
+    } else {
+        automatic
+            .saturating_mul(geometry_percent)
+            .saturating_add(50)
+            .saturating_div(100)
+            .clamp(72, 1_000)
+    }
+}
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 fn configure_launcher_output(
     core: &mut CompositorCore,
     width: i32,
     height: i32,
     density_dpi: i32,
+    geometry_percent: i32,
 ) -> u32 {
-    if !valid_launcher_surface_size(width, height) || !valid_launcher_density(density_dpi) {
+    if !valid_launcher_surface_size(width, height)
+        || !valid_launcher_density(density_dpi)
+        || !valid_launcher_geometry_percent(geometry_percent)
+    {
         return 0;
     }
-    let density_dpi = launcher_auto_density_dpi(width, height, density_dpi);
+    let density_dpi = launcher_density_dpi(width, height, density_dpi, geometry_percent);
+    configure_launcher_output_resolved(core, width, height, density_dpi)
+}
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn configure_launcher_output_resolved(
+    core: &mut CompositorCore,
+    width: i32,
+    height: i32,
+    density_dpi: i32,
+) -> u32 {
     let logical_width = launcher_logical_extent(width, density_dpi);
     let logical_height = launcher_logical_extent(height, density_dpi);
     let scale = density_dpi.saturating_add(159).saturating_div(160).max(1);
@@ -11748,8 +11788,12 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
     width: i32,
     height: i32,
     density_dpi: i32,
+    geometry_percent: i32,
 ) -> i64 {
-    if !valid_launcher_surface_size(width, height) || !valid_launcher_density(density_dpi) {
+    if !valid_launcher_surface_size(width, height)
+        || !valid_launcher_density(density_dpi)
+        || !valid_launcher_geometry_percent(geometry_percent)
+    {
         return 0;
     }
     let Some(socket_path) =
@@ -11774,7 +11818,7 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
     if core.bind_socket(Path::new(&socket_path)).is_err() {
         return 0;
     }
-    configure_launcher_output(&mut core, width, height, density_dpi);
+    configure_launcher_output(&mut core, width, height, density_dpi, geometry_percent);
     Box::into_raw(Box::new(LauncherSurfaceCompositor {
         core,
         window: ptr::null_mut(),
@@ -11796,11 +11840,19 @@ pub unsafe extern "system" fn Java_org_archphene_app_launcher_NativeLauncherComp
     width: i32,
     height: i32,
     density_dpi: i32,
+    geometry_percent: i32,
 ) -> i32 {
     let Some(compositor) = (unsafe { (handle as *mut LauncherSurfaceCompositor).as_mut() }) else {
         return -1;
     };
-    compositor.attach_surface(environment, surface, width, height, density_dpi)
+    compositor.attach_surface(
+        environment,
+        surface,
+        width,
+        height,
+        density_dpi,
+        geometry_percent,
+    )
 }
 
 #[cfg(target_os = "android")]
@@ -14244,7 +14296,7 @@ mod tests {
     fn launcher_density_separates_android_pixels_from_wayland_coordinates() {
         let mut core = CompositorCore::new().expect("compositor");
         core.set_toplevel_tiling(true);
-        assert_eq!(configure_launcher_output(&mut core, 1080, 2316, 450), 0);
+        assert_eq!(configure_launcher_output(&mut core, 1080, 2316, 450, 0), 0);
         assert_eq!(
             (core.state.output_width, core.state.output_height),
             (432, 926)
@@ -14273,6 +14325,31 @@ mod tests {
         assert_eq!(launcher_auto_density_dpi(2316, 978, 420), 362);
         assert_eq!(launcher_auto_density_dpi(1920, 1080, 160), 160);
         assert_eq!(launcher_auto_density_dpi(2560, 1600, 320), 320);
+    }
+
+    #[test]
+    fn launcher_explicit_geometry_scales_the_automatic_baseline() {
+        assert_eq!(launcher_density_dpi(1080, 2202, 420, 0), 400);
+        assert_eq!(launcher_density_dpi(1080, 2202, 420, 75), 300);
+        assert_eq!(launcher_density_dpi(1080, 2202, 420, 100), 400);
+        assert_eq!(launcher_density_dpi(1080, 2202, 420, 125), 500);
+        assert_eq!(launcher_density_dpi(1080, 2202, 420, 150), 600);
+        assert!(valid_launcher_geometry_percent(0));
+        assert!(valid_launcher_geometry_percent(150));
+        assert!(!valid_launcher_geometry_percent(50));
+        assert!(!valid_launcher_geometry_percent(200));
+
+        let mut core = CompositorCore::new().expect("compositor");
+        core.set_toplevel_tiling(true);
+        assert_eq!(
+            configure_launcher_output(&mut core, 1080, 2202, 420, 125),
+            0
+        );
+        assert_eq!(
+            (core.state.output_width, core.state.output_height),
+            (346, 705)
+        );
+        assert_eq!(core.state.output_fractional_scale, 375);
     }
 
     #[test]
