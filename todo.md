@@ -219,6 +219,7 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
 - [ ] Do not allocate or free heap objects in frame, pointer-motion, touch-motion, audio-callback, or compositor dispatch hot paths after warm-up.
 - [ ] Put explicit limits on queues, strings, paths, manifests, documents, windows, processes, descriptors, and package operations; apply backpressure rather than unbounded growth.
 - [ ] Confine Rust `unsafe` to reviewed FFI/syscall modules with safe wrappers, ownership documentation, null/alignment/length validation, and targeted tests.
+  - [x] Enforce `unsafe_op_in_unsafe_fn` in every production crate that contains unsafe code, deny unsafe outside the existing Android JNI, Builder JNI, process-syscall, and storage-syscall modules, and keep the remaining compositor-wide confinement work explicit.
 - [ ] Keep the only global JNI state to a bounded synchronized handle registry; capability state stays in its owned runtime. Handles have generation checks, deterministic destruction, and use-after-close rejection.
 - [ ] Keep blocking I/O, package work, and filesystem synchronization off Android's main thread and compositor/render threads.
 - [ ] Measure cold/warm startup, RSS/PSS, Java/Kotlin allocations and GC, native allocations, JNI calls, copied bytes, frame time, input latency, descriptors, threads, and child processes.

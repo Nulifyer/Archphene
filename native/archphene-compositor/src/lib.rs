@@ -1,3 +1,5 @@
+#![deny(unsafe_op_in_unsafe_fn)]
+
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{self, Write};
@@ -10892,9 +10894,13 @@ const MAX_RUNTIME_LIBRARIES: usize = 510;
 const MAX_RUNTIME_LIBRARY_MANIFEST: usize = 128 * 1024;
 #[cfg(any(target_os = "android", test))]
 const MAX_RUNTIME_LINK_NAME: usize = 128;
+#[cfg(any(target_os = "android", test))]
 const MAX_RUNTIME_ENVIRONMENT_MANIFEST: usize = 32 * 1024;
+#[cfg(any(target_os = "android", test))]
 const MAX_RUNTIME_ENVIRONMENT_VARIABLES: usize = 96;
+#[cfg(any(target_os = "android", test))]
 const MAX_RUNTIME_ARGUMENT_MANIFEST: usize = 32 * 1024;
+#[cfg(any(target_os = "android", test))]
 const MAX_RUNTIME_ARGUMENTS: usize = 32;
 
 #[cfg(any(target_os = "android", test))]

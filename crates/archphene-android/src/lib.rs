@@ -1,4 +1,5 @@
 #![deny(unsafe_code)]
+#![deny(unsafe_op_in_unsafe_fn)]
 
 #[cfg(any(target_os = "android", test))]
 use archphene_runtime::RuntimeHost;
