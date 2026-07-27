@@ -3,6 +3,7 @@ package org.archphene.app
 import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.ClipData
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -99,6 +100,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private lateinit var commandButton: Button
     private lateinit var ptyButton: Button
     private lateinit var importButton: Button
+    private lateinit var shareButton: Button
     private lateinit var folderButton: Button
     private lateinit var folderMirrorButton: Button
     private lateinit var folderDisconnectButton: Button
@@ -177,6 +179,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 commandButton.isEnabled = false
                 ptyButton.isEnabled = false
                 importButton.isEnabled = false
+                shareButton.isEnabled = false
                 folderButton.isEnabled = false
                 folderMirrorButton.isEnabled = false
                 folderDisconnectButton.isEnabled = false
@@ -924,6 +927,11 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 setText(R.string.import_file)
                 setOnClickListener { openAndroidDocument() }
             }
+        shareButton =
+            Button(this).apply {
+                setText(R.string.share_file)
+                setOnClickListener { openLinuxDocumentForShare() }
+            }
         val storageRow =
             LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
@@ -936,7 +944,25 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     ),
                 )
                 addView(
-                    importButton,
+                    LinearLayout(this@MainActivity).apply {
+                        orientation = LinearLayout.VERTICAL
+                        addView(
+                            importButton,
+                            LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                0,
+                                1f,
+                            ),
+                        )
+                        addView(
+                            shareButton,
+                            LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                0,
+                                1f,
+                            ),
+                        )
+                    },
                     LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.WRAP_CONTENT,
                         ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1313,10 +1339,6 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                             ),
                         )
                         if (wideManagerLayout) {
-                            (importButton.layoutParams as LinearLayout.LayoutParams).apply {
-                                height = dp(64)
-                                gravity = Gravity.CENTER_VERTICAL
-                            }
                             addView(
                                 LinearLayout(this@MainActivity).apply {
                                     orientation = LinearLayout.HORIZONTAL
@@ -1349,7 +1371,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                                 storageRow,
                                 LinearLayout.LayoutParams(
                                     ViewGroup.LayoutParams.MATCH_PARENT,
-                                    dp(72),
+                                    dp(112),
                                 ),
                             )
                             addView(
@@ -1815,6 +1837,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         }
         when (requestCode) {
             IMPORT_DOCUMENT_REQUEST -> data?.data?.let(::queueDocumentImport)
+            SHARE_DOCUMENT_REQUEST -> data?.data?.let(::shareLinuxDocument)
             FOLDER_GRANT_REQUEST -> {
                 val uri = data?.data ?: return
                 queueFolderGrant(uri, data.flags)
@@ -2780,6 +2803,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             commandButton.isEnabled = false
             ptyButton.isEnabled = false
             importButton.isEnabled = false
+            shareButton.isEnabled = false
             folderButton.isEnabled = false
             folderMirrorButton.isEnabled = false
             folderDisconnectButton.isEnabled = false
@@ -2811,6 +2835,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         setTextIfChanged(ptyButton, binder.sharedShellActionLabel)
         ptyButton.isEnabled = binder.sharedShellActionAvailable
         importButton.isEnabled = binder.documentImportAvailable && pendingImportUri == null
+        shareButton.isEnabled = binder.documentImportAvailable
         setTextIfChanged(folderButton, binder.folderGrantActionLabel)
         folderButton.isEnabled = binder.folderGrantAvailable && pendingFolderUri == null
         setTextIfChanged(folderMirrorButton, binder.folderMirrorActionLabel)
@@ -3086,6 +3111,79 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         startActivityForResult(picker, FOLDER_GRANT_REQUEST)
     }
 
+    private fun openLinuxDocumentForShare() {
+        selectManagerSection(MANAGER_SECTION_FILES)
+        val authority = "$packageName.documents"
+        val picker =
+            Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "*/*"
+                putExtra(
+                    DocumentsContract.EXTRA_INITIAL_URI,
+                    DocumentsContract.buildRootUri(authority, DOCUMENTS_ROOT_ID),
+                )
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+        @Suppress("DEPRECATION")
+        startActivityForResult(picker, SHARE_DOCUMENT_REQUEST)
+    }
+
+    private fun shareLinuxDocument(uri: Uri) {
+        val authority = "$packageName.documents"
+        if (
+            uri.scheme != "content" ||
+            uri.authority != authority ||
+            uri.toString().toByteArray(Charsets.UTF_8).size !in 1..MAX_DOCUMENT_URI_BYTES
+        ) {
+            Toast.makeText(
+                this,
+                R.string.share_linux_file_only,
+                Toast.LENGTH_LONG,
+            ).show()
+            return
+        }
+        val mimeType =
+            try {
+                contentResolver.getType(uri)
+            } catch (_: RuntimeException) {
+                null
+            }
+        if (mimeType.isNullOrBlank() || mimeType == DocumentsContract.Document.MIME_TYPE_DIR) {
+            Toast.makeText(
+                this,
+                R.string.share_linux_file_unavailable,
+                Toast.LENGTH_LONG,
+            ).show()
+            return
+        }
+        val share =
+            Intent(Intent.ACTION_SEND).apply {
+                type = mimeType
+                putExtra(Intent.EXTRA_STREAM, uri)
+                clipData = ClipData.newUri(contentResolver, getString(R.string.app_name), uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+        try {
+            val chooser =
+                Intent.createChooser(
+                    share,
+                    getString(R.string.share_linux_file_chooser),
+                ).apply {
+                    putExtra(
+                        Intent.EXTRA_EXCLUDE_COMPONENTS,
+                        arrayOf(ComponentName(this@MainActivity, MainActivity::class.java)),
+                    )
+                }
+            startActivity(chooser)
+        } catch (_: android.content.ActivityNotFoundException) {
+            Toast.makeText(
+                this,
+                R.string.share_linux_file_unavailable,
+                Toast.LENGTH_LONG,
+            ).show()
+        }
+    }
+
     private fun queueFolderGrant(
         uri: Uri,
         resultFlags: Int,
@@ -3243,6 +3341,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         private const val SESSION_NOTIFICATION_PERMISSION_REQUEST = 0x4152
         private const val IMPORT_DOCUMENT_REQUEST = 0x4153
         private const val FOLDER_GRANT_REQUEST = 0x4154
+        private const val SHARE_DOCUMENT_REQUEST = 0x4155
         private const val PENDING_IMPORT_URI_STATE = "pending_import_uri"
         private const val PENDING_FOLDER_URI_STATE = "pending_folder_uri"
         private const val PENDING_FOLDER_FLAGS_STATE = "pending_folder_flags"
@@ -3262,6 +3361,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         private const val WIDE_NAVIGATION_WIDTH_DP = 176
         private const val WIDE_FILE_CARD_HEIGHT_DP = 136
         private const val MAX_FOLDER_URI_BYTES = 4 * 1024
+        private const val MAX_DOCUMENT_URI_BYTES = 4 * 1024
+        private const val DOCUMENTS_ROOT_ID = "archphene-home"
         private const val LAUNCHER_STATUS_NEEDS_REVIEW = 10
         private const val DEBUG_SHOW_AUR_REVIEW_ACTION =
             "org.archphene.app.debug.action.SHOW_AUR_REVIEW"

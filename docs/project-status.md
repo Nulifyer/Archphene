@@ -502,6 +502,19 @@ system-picker, cleanup, scoped-log, and full-device visual gates pass on the
 x86_64 emulator and physical AArch64 Samsung. Multi-document and folder import,
 drag-and-drop, progress/cancel, provider timeouts, and export remain open.
 
+The Files page can now send one visible Linux file through Android's standard
+share flow. Share opens DocumentsUI at Archphene Home and accepts only a
+bounded regular document URI from Archphene's own provider. The outgoing
+chooser receives the resolved MIME type, one ClipData/stream URI, read
+permission, and no write permission; Archphene itself is excluded to avoid
+copying its own file back into Downloads. A state-preserving script selects an
+exact Shared fixture and verifies the chooser grant on the emulator and
+Samsung, with full-device picker/chooser frames and cleanup. Independent
+physical and emulator runs select Messages and show Android granting that
+separate UID temporary read access without sending anything. Direct open,
+Save As/export, multiple-file share, and durable share-result presentation
+remain pending.
+
 The replacement also owns a fixed 11,808-byte package-operation journal. It
 holds at most 32 bounded jobs, enforces legal transitions, publishes updates
 atomically, detects corruption, rejects symlink substitution, converts
@@ -1558,6 +1571,15 @@ the Archphene Home and snapshot boundary, DocumentsProvider CRUD/security gates
 pass on x86_64 and AArch64, and a full-device Samsung Foot/Bash run reads an
 Android-side Shared fixture through the Linux alias. The complete Rust workspace
 passes 248 tests; Android debug lint and the minified release build pass.
+
+The manager's new Share action opens at Archphene Home, selects only its own
+bounded regular provider documents, excludes Archphene as a circular target,
+and gives Android's chooser an exact MIME-typed read-only URI grant. The
+state-preserving exact-APK gate and full-device picker/chooser review pass on
+both targets; separate emulator and Samsung Messages runs receive the
+temporary cross-UID read grant without sending the fixture. A non-destructive
+wide-layout gate also verifies side-by-side file cards and equal 68 dp Import
+and Share actions.
 
 ## Validated
 

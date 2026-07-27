@@ -252,6 +252,8 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [x] Pass exact ACTION_VIEW/ACTION_SEND content, duplicate-name, process-restart status, system-picker launch, fatal-log, cleanup, and visually inspected full-device gates on the emulator and Samsung.
   - [ ] Add multi-document, directory-tree, drag-and-drop, progress/cancel, provider-timeout, and conflict-aware synchronized import.
 - [ ] Support Archphene-to-Android open, save, export, and share flows.
+  - [x] Add a manager Share action that opens Android's picker at Archphene Home, accepts only a bounded regular document from Archphene's own provider, excludes the manager self-import loop, and sends one MIME-typed content URI with read permission and no write permission through the system chooser. Exact-URI, scoped-log, cleanup, and visually inspected full-device gates pass on the emulator and Samsung; an independent Messages target receives the temporary cross-UID read grant without sending the fixture.
+  - [ ] Add direct open, Save As/export, multiple-file share, progress/cancel, and durable result/error presentation.
 - [ ] Avoid `MANAGE_EXTERNAL_STORAGE` as the default; evaluate an optional advanced/sideloaded mode only if SAF cannot satisfy a demonstrated workflow.
 - [ ] Test grant creation, persistence, revocation, rename, deletion, conflicts, large trees, offline providers, uninstall behavior, and malicious paths.
 
