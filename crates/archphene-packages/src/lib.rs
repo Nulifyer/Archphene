@@ -51,6 +51,7 @@ const PACKAGE_MUTATION_INTENT_FILE: &str = "run/package-mutation-v1";
 const PACKAGE_MUTATION_INTENT_TEMP_FILE: &str = "run/package-mutation-v1.tmp";
 const PACKAGE_MUTATION_INTENT_HEADER: &str = "org.archphene.package-mutation.v1";
 const PACKAGE_MUTATION_INTENT_LIMIT: u64 = 384 * 1024;
+const PACKAGE_DATABASE_REPAIR_DIRECTORY: &str = "run/package-database-repair-v1";
 const PACMAN_CONFIG_FILE: &str = "etc/pacman.conf";
 const PACMAN_CONFIG_TEMP_FILE: &str = "etc/pacman.conf.tmp";
 const AUR_PACMAN_CONFIG_FILE: &str = "etc/pacman-aur.conf";
@@ -75,6 +76,8 @@ const SHELLS_FILE: &str = "etc/shells";
 const SHELLS_FILE_LIMIT: u64 = 4 * 1024;
 const LOCAL_DATABASE_ENTRY_LIMIT: usize = 4096;
 const LOCAL_DATABASE_DIRECTORY_ENTRY_LIMIT: usize = 8192;
+const LOCAL_DATABASE_PACKAGE_FILE_LIMIT: u64 = 16 * 1024 * 1024;
+const LOCAL_DATABASE_PACKAGE_FILE_COUNT: usize = 5;
 const LOCAL_DESCRIPTION_LIMIT: u64 = 64 * 1024;
 const LOCAL_FILES_LIMIT: u64 = 8 * 1024 * 1024;
 const LOCAL_FILES_TOTAL_LIMIT: u64 = 128 * 1024 * 1024;
@@ -1962,6 +1965,10 @@ impl PackageRuntime {
             return Err(PackageRuntimeError::InvalidResolution);
         }
         self.preserve_explicit_install_reasons(&mut archives)?;
+        self.preserve_pending_install_reasons(&mut archives)?;
+        if mode == InstallResolutionMode::Repair {
+            self.prepare_database_repair(&archives)?;
+        }
 
         let config = self
             .pacman_config
@@ -1984,6 +1991,16 @@ impl PackageRuntime {
         let cache = cache_path
             .to_str()
             .ok_or(PackageRuntimeError::InvalidPath)?;
+        if mode == InstallResolutionMode::Repair {
+            self.restore_database_repair_records(
+                &archives,
+                config,
+                root,
+                database,
+                trust_directory,
+                cache,
+            )?;
+        }
         let mut plan_arguments = vec![
             "--config",
             config,
@@ -2052,6 +2069,9 @@ impl PackageRuntime {
         let expected = resolved_version(resolution, recovery_target)?;
         if self.installed_version(recovery_target)?.as_str()? != expected {
             return Err(PackageRuntimeError::InvalidResolution);
+        }
+        if mode == InstallResolutionMode::Repair {
+            self.clear_database_repair(&archives)?;
         }
         self.clear_pending_mutation()?;
         self.refresh_system_trust()?;
@@ -2392,10 +2412,28 @@ impl PackageRuntime {
     }
 
     fn recover_pending_install_reasons(&self) -> Result<(), PackageRuntimeError> {
+        let packages = self.read_pending_install_reasons()?;
+        if packages.is_empty() {
+            return Ok(());
+        }
+        let path = self.arch_root.join(INSTALL_REASON_INTENT_FILE);
+        self.recover_database_lock()?;
+        for package in &packages {
+            if !self.installed_version(package)?.as_bytes().is_empty() {
+                self.mark_explicitly_installed(package)?;
+            }
+        }
+        self.validate_local_database()?;
+        fs::remove_file(&path)?;
+        File::open(path.parent().ok_or(PackageRuntimeError::InvalidPath)?)?.sync_all()?;
+        Ok(())
+    }
+
+    fn read_pending_install_reasons(&self) -> Result<Vec<String>, PackageRuntimeError> {
         let path = self.arch_root.join(INSTALL_REASON_INTENT_FILE);
         let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(PackageRuntimeError::Io(error)),
         };
         if metadata.file_type().is_symlink()
@@ -2412,16 +2450,158 @@ impl PackageRuntime {
         }
         let content =
             std::str::from_utf8(&content).map_err(|_| PackageRuntimeError::InvalidResolution)?;
-        let packages = parse_install_reason_intent(content)?;
-        self.recover_database_lock()?;
-        for package in packages {
-            if !self.installed_version(package)?.as_bytes().is_empty() {
-                self.mark_explicitly_installed(package)?;
+        Ok(parse_install_reason_intent(content)?
+            .into_iter()
+            .map(str::to_owned)
+            .collect())
+    }
+
+    fn preserve_pending_install_reasons(
+        &self,
+        archives: &mut [InstallArchive],
+    ) -> Result<(), PackageRuntimeError> {
+        for package in self.read_pending_install_reasons()? {
+            let archive = archives
+                .iter_mut()
+                .find(|archive| archive.name == package)
+                .ok_or(PackageRuntimeError::InvalidResolution)?;
+            archive.explicitly_installed = true;
+        }
+        Ok(())
+    }
+
+    fn prepare_database_repair(
+        &self,
+        archives: &[InstallArchive],
+    ) -> Result<(), PackageRuntimeError> {
+        let local = self.arch_root.join("var/lib/pacman/local");
+        let quarantine = self.arch_root.join(PACKAGE_DATABASE_REPAIR_DIRECTORY);
+        prepare_private_directory(&quarantine)?;
+        for archive in archives {
+            let entry_name = format!("{}-{}", archive.name, archive.version);
+            let entry = local.join(&entry_name);
+            let retained = quarantine.join(&entry_name);
+            validate_database_repair_entry_if_present(&retained)?;
+            let metadata = match fs::symlink_metadata(&entry) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(PackageRuntimeError::Io(error)),
+            };
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(PackageRuntimeError::UnsafeEntry(entry));
+            }
+            if local_database_entry_matches(&entry, &archive.name, &archive.version)? {
+                continue;
+            }
+            if retained.exists() {
+                remove_database_repair_entry(&entry)?;
+            } else {
+                validate_database_repair_entry(&entry)?;
+                fs::rename(&entry, &retained)?;
+                fs::set_permissions(&retained, fs::Permissions::from_mode(0o700))?;
+                File::open(&local)?.sync_all()?;
+                File::open(&quarantine)?.sync_all()?;
             }
         }
-        self.validate_local_database()?;
-        fs::remove_file(&path)?;
-        File::open(path.parent().ok_or(PackageRuntimeError::InvalidPath)?)?.sync_all()?;
+        Ok(())
+    }
+
+    fn restore_database_repair_records(
+        &self,
+        archives: &[InstallArchive],
+        config: &str,
+        root: &str,
+        database: &str,
+        trust_directory: &str,
+        cache: &str,
+    ) -> Result<(), PackageRuntimeError> {
+        let local = self.arch_root.join("var/lib/pacman/local");
+        let quarantine = self.arch_root.join(PACKAGE_DATABASE_REPAIR_DIRECTORY);
+        let mut damaged = Vec::with_capacity(archives.len());
+        for archive in archives {
+            let entry_name = format!("{}-{}", archive.name, archive.version);
+            let retained = quarantine.join(&entry_name);
+            if !retained.exists() {
+                continue;
+            }
+            validate_database_repair_entry(&retained)?;
+            let entry = local.join(entry_name);
+            if !local_database_entry_matches(&entry, &archive.name, &archive.version)? {
+                damaged.push(archive);
+            }
+        }
+        if damaged.is_empty() {
+            return Ok(());
+        }
+        let mut arguments = vec![
+            "--config",
+            config,
+            "--root",
+            root,
+            "--dbpath",
+            database,
+            "--gpgdir",
+            trust_directory,
+            "--cachedir",
+            cache,
+            "--noconfirm",
+            "--noprogressbar",
+            "--noscriptlet",
+            "--dbonly",
+            "--asdeps",
+            "-U",
+        ];
+        arguments.extend(damaged.iter().map(|archive| archive.path.as_str()));
+        if let Err(error) = self.run_bytes_with_timeout(
+            PackageTool::Pacman,
+            &arguments,
+            TRANSACTION_TIMEOUT,
+            MAX_PACKAGE_TRANSACTION_OUTPUT_BYTES,
+            false,
+        ) {
+            let _ = self.recover_database_lock();
+            return Err(error);
+        }
+        for archive in damaged {
+            if !local_database_entry_matches(
+                &local.join(format!("{}-{}", archive.name, archive.version)),
+                &archive.name,
+                &archive.version,
+            )? {
+                return Err(PackageRuntimeError::InvalidResolution);
+            }
+        }
+        Ok(())
+    }
+
+    fn clear_database_repair(
+        &self,
+        archives: &[InstallArchive],
+    ) -> Result<(), PackageRuntimeError> {
+        let quarantine = self.arch_root.join(PACKAGE_DATABASE_REPAIR_DIRECTORY);
+        let metadata = match fs::symlink_metadata(&quarantine) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(PackageRuntimeError::Io(error)),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(PackageRuntimeError::UnsafeEntry(quarantine));
+        }
+        for archive in archives {
+            remove_database_repair_entry_if_present(
+                &quarantine.join(format!("{}-{}", archive.name, archive.version)),
+            )?;
+        }
+        if fs::read_dir(&quarantine)?.next().is_some() {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        fs::remove_dir(&quarantine)?;
+        File::open(
+            quarantine
+                .parent()
+                .ok_or(PackageRuntimeError::InvalidPath)?,
+        )?
+        .sync_all()?;
         Ok(())
     }
 
@@ -4126,6 +4306,114 @@ fn process_local_files_line(
     }
 }
 
+fn local_database_entry_matches(
+    entry: &Path,
+    expected_name: &str,
+    expected_version: &str,
+) -> Result<bool, PackageRuntimeError> {
+    let description = entry.join("desc");
+    let metadata = match fs::symlink_metadata(&description) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(PackageRuntimeError::Io(error)),
+    };
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > LOCAL_DESCRIPTION_LIMIT
+    {
+        return Ok(false);
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW | O_CLOEXEC)
+        .open(&description)?;
+    let opened = file.metadata()?;
+    if !opened.is_file() || opened.len() != metadata.len() {
+        return Err(PackageRuntimeError::SizeMismatch);
+    }
+    let mut content = String::with_capacity(
+        usize::try_from(opened.len()).map_err(|_| PackageRuntimeError::OutputLimit)?,
+    );
+    if file.read_to_string(&mut content).is_err() {
+        return Ok(false);
+    }
+    let name = local_description_field(&content, "%NAME%");
+    let version = local_description_field(&content, "%VERSION%");
+    Ok(matches!(
+        (name, version),
+        (Ok(Some(name)), Ok(Some(version)))
+            if name == expected_name && version == expected_version
+    ))
+}
+
+fn validate_database_repair_entry_if_present(path: &Path) -> Result<(), PackageRuntimeError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => validate_database_repair_entry(path),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(PackageRuntimeError::Io(error)),
+    }
+}
+
+fn validate_database_repair_entry(path: &Path) -> Result<(), PackageRuntimeError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(PackageRuntimeError::UnsafeEntry(path.to_path_buf()));
+    }
+    let mut count = 0_usize;
+    for entry in fs::read_dir(path)? {
+        count = count.saturating_add(1);
+        if count > LOCAL_DATABASE_PACKAGE_FILE_COUNT {
+            return Err(PackageRuntimeError::OutputLimit);
+        }
+        let entry = entry?;
+        let entry_path = entry.path();
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| PackageRuntimeError::UnsafeEntry(entry_path.clone()))?;
+        if !matches!(
+            name.as_str(),
+            "desc" | "files" | "mtree" | "install" | "changelog"
+        ) {
+            return Err(PackageRuntimeError::UnsafeEntry(entry_path));
+        }
+        let metadata = fs::symlink_metadata(&entry_path)?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || metadata.len() > LOCAL_DATABASE_PACKAGE_FILE_LIMIT
+        {
+            return Err(PackageRuntimeError::UnsafeEntry(entry_path));
+        }
+    }
+    Ok(())
+}
+
+fn remove_database_repair_entry_if_present(path: &Path) -> Result<(), PackageRuntimeError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => remove_database_repair_entry(path),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(PackageRuntimeError::Io(error)),
+    }
+}
+
+fn remove_database_repair_entry(path: &Path) -> Result<(), PackageRuntimeError> {
+    validate_database_repair_entry(path)?;
+    let directory = File::open(path)?;
+    let mut files = Vec::with_capacity(LOCAL_DATABASE_PACKAGE_FILE_COUNT);
+    for entry in fs::read_dir(path)? {
+        files.push(entry?.path());
+    }
+    for file in files {
+        fs::remove_file(file)?;
+    }
+    directory.sync_all()?;
+    drop(directory);
+    fs::remove_dir(path)?;
+    File::open(path.parent().ok_or(PackageRuntimeError::InvalidPath)?)?.sync_all()?;
+    Ok(())
+}
+
 fn local_description_field<'a>(
     input: &'a str,
     field: &str,
@@ -5782,6 +6070,75 @@ https://geo.mirror.pkgbuild.com/extra/os/x86_64/{filename}\t{}\n",
         let mut repair = vec!["--noscriptlet"];
         append_install_transaction_mode(&mut repair, InstallResolutionMode::Repair);
         assert_eq!(repair, ["--noscriptlet", "--asdeps", "-U"]);
+    }
+
+    #[test]
+    fn repair_quarantines_only_the_exact_corrupt_local_database_entry() {
+        let tree = TestTree::new();
+        let runtime = tree.package_runtime();
+        tree.local_package("foot-1.0-1", "foot", b"%FILES%\nusr/bin/foot\n");
+        let local_entry = tree.root.join("var/lib/pacman/local/foot-1.0-1");
+        fs::remove_file(local_entry.join("desc")).expect("damage local description");
+        let archives = vec![InstallArchive {
+            path: tree
+                .root
+                .join("var/cache/pacman/pkg/foot-1.0-1-x86_64.pkg.tar.zst")
+                .to_string_lossy()
+                .into_owned(),
+            name: "foot".to_owned(),
+            version: "1.0-1".to_owned(),
+            explicitly_installed: true,
+        }];
+
+        runtime
+            .prepare_database_repair(&archives)
+            .expect("quarantine damaged entry");
+        let retained = tree
+            .root
+            .join(PACKAGE_DATABASE_REPAIR_DIRECTORY)
+            .join("foot-1.0-1");
+        assert!(!local_entry.exists());
+        assert!(retained.join("files").is_file());
+
+        fs::create_dir(&local_entry).expect("second partial entry");
+        fs::write(local_entry.join("desc"), b"").expect("empty second description");
+        runtime
+            .prepare_database_repair(&archives)
+            .expect("discard bounded second partial entry");
+        assert!(!local_entry.exists());
+        assert!(retained.is_dir());
+
+        tree.local_package("foot-1.0-1", "foot", b"%FILES%\nusr/bin/foot\n");
+        runtime
+            .prepare_database_repair(&archives)
+            .expect("retain complete replacement");
+        assert!(local_entry.is_dir());
+        runtime
+            .clear_database_repair(&archives)
+            .expect("clear retained damaged entry");
+        assert!(local_entry.is_dir());
+        assert!(!retained.exists());
+    }
+
+    #[test]
+    fn repair_preserves_explicit_reasons_from_the_original_intent() {
+        let tree = TestTree::new();
+        let runtime = tree.package_runtime();
+        let intent = tree.root.join(INSTALL_REASON_INTENT_FILE);
+        fs::write(&intent, format!("{INSTALL_REASON_INTENT_HEADER}\nfoot\n"))
+            .expect("reason intent");
+        fs::set_permissions(&intent, fs::Permissions::from_mode(0o600))
+            .expect("reason intent mode");
+        let mut archives = vec![InstallArchive {
+            path: "foot.pkg.tar.zst".to_owned(),
+            name: "foot".to_owned(),
+            version: "1.0-1".to_owned(),
+            explicitly_installed: false,
+        }];
+        runtime
+            .preserve_pending_install_reasons(&mut archives)
+            .expect("preserve retained reason");
+        assert!(archives[0].explicitly_installed);
     }
 
     #[test]

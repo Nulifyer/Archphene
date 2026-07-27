@@ -439,7 +439,7 @@ Samsung, with settled full-device screenshots confirming that short package
 names and the longest partial-mutation guidance remain fully on-screen.
 Forward Repair is implemented and tested for interrupted removal and a
 partially committed install filesystem. Exact rollback to older archives and
-broader database-corruption recovery remain pending.
+the broader install/remove database-corruption matrix remain pending.
 
 Linux-storage failures now expose Clear cache before Review. The operation runs
 off the Activity thread through a dedicated Rust/JNI boundary and is limited to
@@ -684,7 +684,17 @@ preserves the exact version and explicit install reason, and clears the intent,
 reason journal, database lock, and partial cache state on both devices.
 Launcher reconciliation and publication remain paused while the mutation is
 pending, so a transiently missing desktop file cannot launch Android's wrapper
-uninstall confirmation before Repair. Broader partial-database injection, exact
+uninstall confirmation before Repair.
+
+A third exact-ABI gate removes both Foot's executable and its pacman local
+`desc` record. Repair quarantines only the exact damaged `name-version`
+directory after bounded no-link validation, rebuilds that record from the
+already verified signed archive with pacman's database-only mode, then performs
+the normal forced reinstall. The original install-reason intent is merged
+rather than overwritten. The restored `desc`, `files`, and `mtree`, exact
+version/reason, database validation, quarantine cleanup, transaction cleanup,
+launcher inventory, and full-device presentation pass on the emulator and
+Samsung. Broader multi-entry and removal-side database injection, exact
 rollback to older archives, and whole-operation AUR recovery remain open.
 
 The generic compatibility layer maps Linux root ownership to the Android app
@@ -693,9 +703,9 @@ blocked `fchmodat2`, and maps generic root-relative mutation calls without
 package-specific changes. The current path validates pacman's local database
 and proves the requested package and version. A real AArch64 older-to-newer
 upgrade now passes; the x86_64 replay and replacement coverage remain open.
-Scriptlets/hooks remain disabled, and replacement, broader partial-database
-injection, exact rollback, whole-operation AUR recovery, orphan cleanup, and
-low-storage behavior remain open.
+Scriptlets/hooks remain disabled, and replacement, broader multi-entry and
+removal-side partial-database injection, exact rollback, whole-operation AUR
+recovery, orphan cleanup, and low-storage behavior remain open.
 
 Package operations are now user-cancellable while queued, resolving,
 downloading, or verifying. The Activity enables a visible Cancel action
