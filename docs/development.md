@@ -386,6 +386,24 @@ system-mode regressions with:
 ./scripts/test-kate-live-theme.sh --serial emulator-5554
 ```
 
+Run the outbound Android document gates with each matching exact-ABI manager
+APK:
+
+```bash
+./scripts/test-archphene-document-open.sh \
+  --serial emulator-5554 \
+  --apk tooling/build/apk/app-debug-x86_64.apk
+./scripts/test-archphene-document-share.sh \
+  --serial <adb-serial> \
+  --apk tooling/build/apk/app-debug-arm64-v8a.apk
+```
+
+Each gate creates and removes one unique Shared fixture, starts Android's
+picker at Archphene Home, selects the exact document, and verifies the system
+chooser receives its MIME-typed URI with read permission and no write
+permission. Picker and chooser evidence is always captured as full-device
+screenshots.
+
 The AArch64 native readiness gate uses the configured host NDK when available
 and otherwise runs in the pinned Android-native Podman image, so it does not
 require a second host-side SDK installation:

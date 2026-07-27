@@ -572,18 +572,18 @@ system-picker, cleanup, scoped-log, and full-device visual gates pass on the
 x86_64 emulator and physical AArch64 Samsung. Multi-document and folder import,
 drag-and-drop, progress/cancel, provider timeouts, and export remain open.
 
-The Files page can now send one visible Linux file through Android's standard
-share flow. Share opens DocumentsUI at Archphene Home and accepts only a
-bounded regular document URI from Archphene's own provider. The outgoing
-chooser receives the resolved MIME type, one ClipData/stream URI, read
-permission, and no write permission; Archphene itself is excluded to avoid
-copying its own file back into Downloads. A state-preserving script selects an
-exact Shared fixture and verifies the chooser grant on the emulator and
-Samsung, with full-device picker/chooser frames and cleanup. Independent
-physical and emulator runs select Messages and show Android granting that
-separate UID temporary read access without sending anything. Direct open,
-Save As/export, multiple-file share, and durable share-result presentation
-remain pending.
+The Files page can now open or share one visible Linux file through Android's
+standard flows. Both actions open DocumentsUI at Archphene Home and accept only
+a bounded regular document URI from Archphene's own provider. Open sends the
+resolved MIME type, URI, ClipData, and read-only grant through `ACTION_VIEW`;
+Share sends the same scoped document through `ACTION_SEND`. Archphene itself is
+excluded to avoid copying its own file back into Downloads. State-preserving
+scripts select an exact Shared fixture and verify each chooser's URI, MIME, and
+read-without-write grant on the emulator and Samsung, with cleanup and
+visually inspected full-device phone/tablet frames. Independent physical and
+emulator Share runs also select Messages and show Android granting that
+separate UID temporary read access without sending anything. Save As/export,
+multiple-file share, and durable result presentation remain pending.
 
 The replacement also owns a fixed 11,808-byte package-operation journal. It
 holds at most 32 bounded jobs, enforces legal transitions, publishes updates

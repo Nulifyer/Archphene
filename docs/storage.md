@@ -87,6 +87,16 @@ destination. Duplicate names receive numbered variants and interrupted
 staging is discarded explicitly on the next attempt. The exact content,
 collision, restart-status, and system-picker gates pass on both targets.
 
+The Files page can also select one visible regular file from Archphene Home
+and hand it to Android without exporting another copy. **Open** resolves the
+document MIME type and sends one `ACTION_VIEW` content URI to Android's system
+chooser; **Share** sends one `ACTION_SEND` stream URI. Both paths reject other
+authorities, directories, blank MIME types, and oversized URIs, exclude the
+manager to prevent a self-import loop, and grant read access without write
+access. Exact picker origin, URI, MIME, grant, cleanup, fatal-log, and
+full-device visual gates pass on the x86_64 emulator and physical AArch64
+Samsung.
+
 The manager can now connect exactly one user-selected Android folder through
 `ACTION_OPEN_DOCUMENT_TREE`. It persists only Android's scoped URI capability,
 shows whether the provider granted read/write or read-only access, keeps the
@@ -196,8 +206,8 @@ progress frames pass on both maintained ABIs.
 
 The SAF capability itself is never presented as a POSIX mount; Linux sees the
 private POSIX mirror and changes cross the boundary only during explicit Sync.
-Direct Save As/export, multi-file share, drag-and-drop import, byte-level
-transfer progress, and richer `/mnt/android` mapping status are still planned.
+Save As/export, multi-file share, drag-and-drop import, byte-level transfer
+progress, and richer `/mnt/android` mapping status are still planned.
 
 ## Virtual Linux Layout
 
@@ -259,7 +269,8 @@ URI.
 | `/home/archphene/.cache` | shared private Arch data | no prompt | Archphene app sandbox |
 | `/home/archphene/.config` | shared private Arch data | no prompt | Archphene app sandbox |
 | Visible `/home/archphene` files in Android | Archphene `DocumentsProvider` | Android URI grant | Android DocumentsUI |
-| `Open File` | content URI from `ACTION_OPEN_DOCUMENT` | prompt per document unless persisted | Android DocumentsUI |
+| Import an Android file | content URI from `ACTION_OPEN_DOCUMENT` | prompt per document unless persisted | Android DocumentsUI |
+| Open a Linux file in Android | Archphene content URI sent through `ACTION_VIEW` | choose the Linux file, then an Android viewer | Archphene `DocumentsProvider` and Android resolver |
 | `Save As` or export | content URI from `ACTION_CREATE_DOCUMENT` | prompt per target | Android DocumentsUI |
 | Connected Android folder | one persisted tree URI from `ACTION_OPEN_DOCUMENT_TREE` plus a private synchronized mirror | prompt once, again after removal/revocation | Android DocumentsUI |
 | Background project file read/write | `$HOME/Projects/<name>` private POSIX mirror | no repeat prompt after sync setup | Archphene sandbox; explicit Sync crosses the persisted URI grant |
