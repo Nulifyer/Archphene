@@ -425,14 +425,14 @@ class ArchpheneRuntimeService : Service() {
                     else -> "Review"
                 }
 
-        val documentImportStatus: String
+        val documentTransferStatus: String
             get() = storageStatus
 
-        val documentImportAvailable: Boolean
+        val documentTransferAvailable: Boolean
             get() = readyHandle != 0L && !PROCESS_STORAGE_ACTIVE.get()
 
-        val documentImportRunning: Boolean
-            get() = storageImportActive
+        val documentTransferRunning: Boolean
+            get() = storageDocumentActive
 
         val folderGrantStatus: String
             get() = folderStatus
@@ -613,6 +613,11 @@ class ArchpheneRuntimeService : Service() {
         }
 
         fun importAndroidDocument(uri: Uri): Boolean = requestDocumentImport(uri)
+
+        fun exportLinuxDocument(
+            sourceUri: Uri,
+            destinationUri: Uri,
+        ): Boolean = requestDocumentExport(sourceUri, destinationUri)
 
         fun connectAndroidFolder(
             uri: Uri,
@@ -963,8 +968,8 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var packageCancellationRequested = false
     @Volatile private var activePackageConnection: HttpsURLConnection? = null
     @Volatile private var commandActive = false
-    @Volatile private var storageImportActive = false
-    @Volatile private var storageStatus = "Import an Android file into ~/Downloads"
+    @Volatile private var storageDocumentActive = false
+    @Volatile private var storageStatus = "Import from Android, or open/export Linux files"
     @Volatile private var folderOperationActive = false
     @Volatile private var folderStateReady = false
     @Volatile private var folderConnected = false
@@ -2031,7 +2036,7 @@ class ArchpheneRuntimeService : Service() {
         private const val MAX_STORAGE_REQUEST_BYTES = 4 * 1024
         private const val MAX_STORAGE_NAME_BYTES = 255
         private const val MAX_FOLDER_LABEL_BYTES = 128
-        private const val MAX_STORAGE_IMPORT_BYTES = 16L * 1024 * 1024 * 1024
+        private const val MAX_STORAGE_TRANSFER_BYTES = 16L * 1024 * 1024 * 1024
         private val PROCESS_STORAGE_ACTIVE = AtomicBoolean()
         private val FOLDER_MAPPING_ID_PATTERN = Regex("[0-9a-f]{32}")
         private val FOLDER_MAPPING_RANDOM = SecureRandom()
@@ -2044,10 +2049,10 @@ class ArchpheneRuntimeService : Service() {
         val message =
             preferences.getString(
                 STORAGE_MESSAGE,
-                "Import an Android file into ~/Downloads",
-            ) ?: "Import an Android file into ~/Downloads"
+                "Import from Android, or open/export Linux files",
+            ) ?: "Import from Android, or open/export Linux files"
         if (state == STORAGE_RUNNING) {
-            storageStatus = "The previous file import was interrupted. Choose the file again."
+            storageStatus = "The previous document transfer was interrupted. Choose it again."
             preferences
                 .edit()
                 .putString(STORAGE_STATE, STORAGE_FAILED)
@@ -3775,7 +3780,7 @@ class ArchpheneRuntimeService : Service() {
         val encodedUri = uri.toString().toByteArray(StandardCharsets.UTF_8)
         if (
             readyHandle == 0L ||
-            storageImportActive ||
+            storageDocumentActive ||
             uri.scheme != "content" ||
             encodedUri.isEmpty() ||
             encodedUri.size > MAX_STORAGE_URI_BYTES
@@ -3788,7 +3793,7 @@ class ArchpheneRuntimeService : Service() {
         if (!PROCESS_STORAGE_ACTIVE.compareAndSet(false, true)) {
             return false
         }
-        storageImportActive = true
+        storageDocumentActive = true
         storageStatus = "Opening the selected Android document…"
         val worker =
             Thread(
@@ -3844,7 +3849,7 @@ class ArchpheneRuntimeService : Service() {
                                 ?: throw IllegalStateException("Invalid imported byte count")
                         if (
                             !safeVisibleName(importedName) ||
-                            importedBytes !in 0..MAX_STORAGE_IMPORT_BYTES
+                            importedBytes !in 0..MAX_STORAGE_TRANSFER_BYTES
                         ) {
                             throw IllegalStateException("Unsafe native import response")
                         }
@@ -3862,7 +3867,7 @@ class ArchpheneRuntimeService : Service() {
                         persistStorageStatus(STORAGE_FAILED, status)
                         Log.e(TAG, "Android document import failed", error)
                     } finally {
-                        storageImportActive = false
+                        storageDocumentActive = false
                         PROCESS_STORAGE_ACTIVE.set(false)
                         storageThread = null
                         stopWhenUnobservedAndIdle()
@@ -3877,10 +3882,154 @@ class ArchpheneRuntimeService : Service() {
             true
         } catch (error: Exception) {
             storageThread = null
-            storageImportActive = false
+            storageDocumentActive = false
             PROCESS_STORAGE_ACTIVE.set(false)
             storageStatus = "Import failed: ${error.message ?: error.javaClass.simpleName}"
             Log.e(TAG, "Could not start Android document import", error)
+            false
+        }
+    }
+
+    @Synchronized
+    private fun requestDocumentExport(
+        sourceUri: Uri,
+        destinationUri: Uri,
+    ): Boolean {
+        val sourceBytes = sourceUri.toString().toByteArray(StandardCharsets.UTF_8)
+        val destinationBytes = destinationUri.toString().toByteArray(StandardCharsets.UTF_8)
+        if (
+            readyHandle == 0L ||
+            storageDocumentActive ||
+            sourceUri.scheme != "content" ||
+            sourceUri.authority != "$packageName.documents" ||
+            destinationUri.scheme != "content" ||
+            sourceBytes.isEmpty() ||
+            sourceBytes.size > MAX_STORAGE_URI_BYTES ||
+            destinationBytes.isEmpty() ||
+            destinationBytes.size > MAX_STORAGE_URI_BYTES
+        ) {
+            if (
+                sourceUri.scheme != "content" ||
+                sourceUri.authority != "$packageName.documents" ||
+                destinationUri.scheme != "content" ||
+                sourceBytes.size > MAX_STORAGE_URI_BYTES ||
+                destinationBytes.size > MAX_STORAGE_URI_BYTES
+            ) {
+                storageStatus = "Choose a Linux file and an Android destination"
+            }
+            return false
+        }
+        if (!PROCESS_STORAGE_ACTIVE.compareAndSet(false, true)) {
+            return false
+        }
+        storageDocumentActive = true
+        storageStatus = "Opening the Linux file and Android destination…"
+        val worker =
+            Thread(
+                {
+                    requireRuntimeWorker("Linux document export")
+                    var deleteIncompleteDestination = true
+                    try {
+                        val displayName = safeImportDisplayName(sourceUri)
+                        persistStorageStatus(
+                            STORAGE_RUNNING,
+                            "Saving a copy of $displayName to Android…",
+                        )
+                        val output = ByteBuffer.allocateDirect(NativeRuntime.STORAGE_OUTPUT_SIZE)
+                        val source =
+                            contentResolver.openFileDescriptor(sourceUri, "r", null)
+                                ?: throw IllegalStateException(
+                                    "Archphene returned no source file descriptor",
+                                )
+                        val destination =
+                            contentResolver.openFileDescriptor(destinationUri, "w", null)
+                                ?: throw IllegalStateException(
+                                    "Android provider returned no destination file descriptor",
+                                )
+                        val result =
+                            source.use { sourceDescriptor ->
+                                destination.use { destinationDescriptor ->
+                                    NativeRuntime.nativeExportHomeDocument(
+                                        sourceDescriptor.fd,
+                                        destinationDescriptor.fd,
+                                        output,
+                                    )
+                                }
+                            }
+                        val response = readCString(output)
+                        if (
+                            result <= 0 ||
+                            result != response.toByteArray(StandardCharsets.UTF_8).size
+                        ) {
+                            throw IllegalStateException(
+                                response.ifEmpty { "Native storage error $result" },
+                            )
+                        }
+                        val exportedBytes =
+                            response.toLongOrNull()
+                                ?: throw IllegalStateException("Invalid exported byte count")
+                        if (exportedBytes !in 0..MAX_STORAGE_TRANSFER_BYTES) {
+                            throw IllegalStateException("Unsafe native export response")
+                        }
+                        deleteIncompleteDestination = false
+                        val status =
+                            "Saved a copy of $displayName " +
+                                "(${formatStorageBytes(exportedBytes)}) to Android"
+                        persistStorageStatus(STORAGE_COMPLETE, status)
+                        Log.i(
+                            TAG,
+                            "Linux document exported name=$displayName bytes=$exportedBytes",
+                        )
+                    } catch (error: Exception) {
+                        var cleanupFailed = false
+                        if (deleteIncompleteDestination) {
+                            val removed =
+                                runCatching {
+                                    DocumentsContract.deleteDocument(
+                                        contentResolver,
+                                        destinationUri,
+                                    )
+                                }.onFailure { cleanupError ->
+                                    Log.w(
+                                        TAG,
+                                        "Could not remove incomplete Android export",
+                                        cleanupError,
+                                    )
+                                }.getOrDefault(false)
+                            cleanupFailed = !removed
+                            if (cleanupFailed) {
+                                Log.w(TAG, "Android provider kept an incomplete export")
+                            }
+                        }
+                        val status =
+                            "Export failed: ${error.message ?: error.javaClass.simpleName}" +
+                                if (cleanupFailed) {
+                                    ". The Android provider may have kept an incomplete file."
+                                } else {
+                                    ""
+                                }
+                        persistStorageStatus(STORAGE_FAILED, status)
+                        Log.e(TAG, "Linux document export failed", error)
+                    } finally {
+                        storageDocumentActive = false
+                        PROCESS_STORAGE_ACTIVE.set(false)
+                        storageThread = null
+                        stopWhenUnobservedAndIdle()
+                    }
+                },
+                "ArchpheneExport",
+            )
+        storageThread = worker
+        return try {
+            worker.start()
+            promoteWorkToForeground()
+            true
+        } catch (error: Exception) {
+            storageThread = null
+            storageDocumentActive = false
+            PROCESS_STORAGE_ACTIVE.set(false)
+            storageStatus = "Export failed: ${error.message ?: error.javaClass.simpleName}"
+            Log.e(TAG, "Could not start Linux document export", error)
             false
         }
     }
@@ -4079,7 +4228,7 @@ class ArchpheneRuntimeService : Service() {
         catalogRefreshActive ||
             packageOperationActive ||
             commandActive ||
-            storageImportActive ||
+            storageDocumentActive ||
             folderOperationActive
 
     private fun removeSessionNotification() {
@@ -11718,7 +11867,7 @@ class ArchpheneRuntimeService : Service() {
             packageOperationActive ||
             commandActive ||
             shellActive ||
-            storageImportActive ||
+            storageDocumentActive ||
             folderOperationActive
 
     private fun stopWhenUnobservedAndIdle() {

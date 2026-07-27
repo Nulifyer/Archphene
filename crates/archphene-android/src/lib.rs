@@ -802,6 +802,29 @@ mod android {
     }
 
     #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeExportHomeDocument(
+        environment: JNIEnv,
+        _class: JClass,
+        source_descriptor: jint,
+        destination_descriptor: jint,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        if source_descriptor < 0 || destination_descriptor < 0 {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let Ok(output) = storage_output(&environment, &output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        match archphene_storage::copy_document_between_fds(
+            source_descriptor,
+            destination_descriptor,
+        ) {
+            Ok(bytes) => copy_storage_value(&bytes.to_string(), output),
+            Err(error) => copy_storage_error(&error, output),
+        }
+    }
+
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeBeginProjectMirror(
         environment: JNIEnv,
         _class: JClass,

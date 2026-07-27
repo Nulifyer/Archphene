@@ -107,6 +107,11 @@ internal object NativeRuntime {
         sourceDescriptor: Int,
         outputBuffer: ByteBuffer,
     ): Int
+    external fun nativeExportHomeDocument(
+        sourceDescriptor: Int,
+        destinationDescriptor: Int,
+        outputBuffer: ByteBuffer,
+    ): Int
     external fun nativeBeginProjectMirror(
         handle: Long,
         requestBuffer: ByteBuffer,

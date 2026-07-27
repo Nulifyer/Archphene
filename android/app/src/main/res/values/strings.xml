@@ -80,6 +80,11 @@
     <string name="open_linux_file_chooser">Open Linux file with</string>
     <string name="open_linux_file_only">Choose a file from Archphene Home</string>
     <string name="open_linux_file_unavailable">This Linux file cannot be opened in Android</string>
+    <string name="export_file">Export</string>
+    <string name="export_linux_file_only">Choose a file from Archphene Home</string>
+    <string name="export_linux_file_unavailable">This Linux file cannot be exported to Android</string>
+    <string name="export_linux_file_fallback_name">Archphene file</string>
+    <string name="export_linux_file_queued">Linux file export queued</string>
     <string name="share_file">Share</string>
     <string name="share_linux_file_chooser">Share Linux file</string>
     <string name="share_linux_file_only">Choose a file from Archphene Home</string>

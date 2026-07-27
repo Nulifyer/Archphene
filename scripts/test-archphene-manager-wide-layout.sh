@@ -112,7 +112,7 @@ def center(text):
         return ((values[0] + values[2]) // 2, (values[1] + values[3]) // 2)
     raise SystemExit(f"missing node: {text}")
 
-file_card = center("Import an Android file into ~/Downloads")
+file_card = center("Import from Android, or open/export Linux files")
 folder_card = center("No Android folder connected")
 if folder_card[0] <= file_card[0] + 320:
     raise SystemExit("wide file actions are not side by side")

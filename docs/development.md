@@ -393,16 +393,21 @@ APK:
 ./scripts/test-archphene-document-open.sh \
   --serial emulator-5554 \
   --apk tooling/build/apk/app-debug-x86_64.apk
+./scripts/test-archphene-document-export.sh \
+  --serial emulator-5554 \
+  --apk tooling/build/apk/app-debug-x86_64.apk
 ./scripts/test-archphene-document-share.sh \
   --serial <adb-serial> \
   --apk tooling/build/apk/app-debug-arm64-v8a.apk
 ```
 
-Each gate creates and removes one unique Shared fixture, starts Android's
-picker at Archphene Home, selects the exact document, and verifies the system
-chooser receives its MIME-typed URI with read permission and no write
-permission. Picker and chooser evidence is always captured as full-device
-screenshots.
+Each gate creates and removes one unique Shared fixture and starts Android's
+picker at Archphene Home. Open and Share verify the system chooser receives the
+exact MIME-typed URI with read permission and no write permission. Export
+first cancels Android's create-document picker, then retries into Downloads and
+verifies exact destination bytes, unchanged source bytes, and completion status
+across manager restart. Picker, chooser, manager, and destination evidence is
+always captured as full-device screenshots.
 
 The AArch64 native readiness gate uses the configured host NDK when available
 and otherwise runs in the pinned Android-native Podman image, so it does not

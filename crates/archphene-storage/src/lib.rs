@@ -175,7 +175,7 @@ pub const BASH_PROFILE_STARTUP_ID: &str = "bash-profile";
 pub const MAX_DOCUMENT_ID_BYTES: usize = 1024;
 pub const MAX_DOCUMENT_DEPTH: usize = 32;
 pub const MAX_DOCUMENT_NAME_BYTES: usize = 255;
-pub const MAX_IMPORT_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+pub const MAX_DOCUMENT_TRANSFER_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 pub const MAX_MIRROR_ENTRIES: u32 = 10_000;
 pub const MAX_MIRROR_DEPTH: usize = 64;
 pub const MAX_MIRROR_PATH_BYTES: usize = 4 * 1024;
@@ -207,7 +207,7 @@ pub enum StorageError {
     InvalidDocument,
     HiddenDocument,
     RootMutation,
-    ImportTooLarge,
+    DocumentTooLarge,
     ImportCollision,
     MirrorBusy,
     MirrorExists,
@@ -227,7 +227,7 @@ impl fmt::Display for StorageError {
             Self::InvalidDocument => formatter.write_str("invalid Archphene document"),
             Self::HiddenDocument => formatter.write_str("private Archphene document"),
             Self::RootMutation => formatter.write_str("cannot mutate Archphene home"),
-            Self::ImportTooLarge => formatter.write_str("Android document exceeds 16 GiB"),
+            Self::DocumentTooLarge => formatter.write_str("document exceeds 16 GiB"),
             Self::ImportCollision => {
                 formatter.write_str("too many documents use this imported name")
             }
@@ -1925,21 +1925,7 @@ pub fn import_document<R: Read>(
         0o600,
     )?;
     let result = (|| {
-        let mut bytes = 0_u64;
-        let mut buffer = [0_u8; 32 * 1024];
-        loop {
-            let count = source.read(&mut buffer)?;
-            if count == 0 {
-                break;
-            }
-            bytes = bytes
-                .checked_add(count as u64)
-                .ok_or(StorageError::ImportTooLarge)?;
-            if bytes > MAX_IMPORT_BYTES {
-                return Err(StorageError::ImportTooLarge);
-            }
-            pending.write_all(&buffer[..count])?;
-        }
+        let bytes = copy_bounded_document(source, &mut pending)?;
         pending.sync_all()?;
         drop(pending);
 
@@ -1972,6 +1958,42 @@ pub fn import_document<R: Read>(
         let _ = staging.sync_all();
     }
     result
+}
+
+pub fn copy_document_between_fds(
+    source_descriptor: RawFd,
+    destination_descriptor: RawFd,
+) -> Result<u64, StorageError> {
+    if source_descriptor < 0 || destination_descriptor < 0 {
+        return Err(StorageError::InvalidDocument);
+    }
+    let mut source = sys::duplicate(source_descriptor)?;
+    let mut destination = sys::duplicate(destination_descriptor)?;
+    let bytes = copy_bounded_document(&mut source, &mut destination)?;
+    destination.flush()?;
+    Ok(bytes)
+}
+
+fn copy_bounded_document<R: Read, W: Write>(
+    source: &mut R,
+    destination: &mut W,
+) -> Result<u64, StorageError> {
+    let mut bytes = 0_u64;
+    let mut buffer = [0_u8; 32 * 1024];
+    loop {
+        let count = source.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        bytes = bytes
+            .checked_add(count as u64)
+            .ok_or(StorageError::DocumentTooLarge)?;
+        if bytes > MAX_DOCUMENT_TRANSFER_BYTES {
+            return Err(StorageError::DocumentTooLarge);
+        }
+        destination.write_all(&buffer[..count])?;
+    }
+    Ok(bytes)
 }
 
 pub fn delete_document(root: &Path, document_id: &str) -> Result<(), StorageError> {
@@ -2363,6 +2385,26 @@ mod tests {
                 .next()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn copies_documents_between_descriptors_without_changing_ownership() {
+        let directory = TestDirectory::new();
+        let source_path = directory.0.join("source");
+        let destination_path = directory.0.join("destination");
+        let content = vec![0x5a; 96 * 1024 + 17];
+        fs::write(&source_path, &content).expect("source");
+        let source = File::open(&source_path).expect("open source");
+        let destination = File::create(&destination_path).expect("create destination");
+
+        let bytes =
+            copy_document_between_fds(source.as_raw_fd(), destination.as_raw_fd()).expect("copy");
+        assert_eq!(bytes, content.len() as u64);
+        assert_eq!(fs::read(&destination_path).expect("destination"), content);
+        assert!(source.metadata().is_ok());
+        assert!(destination.metadata().is_ok());
+        assert!(copy_document_between_fds(-1, destination.as_raw_fd()).is_err());
+        assert!(copy_document_between_fds(source.as_raw_fd(), -1).is_err());
     }
 
     #[test]

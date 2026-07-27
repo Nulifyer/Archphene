@@ -41,12 +41,14 @@ import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
+import android.webkit.MimeTypeMap
 import org.archphene.app.appearance.LinuxAppearanceSettingsView
 import org.archphene.app.runtime.ArchpheneRuntimeService
 import org.archphene.app.runtime.AvailablePackageSnapshot
 import org.archphene.app.runtime.InstalledPackageSnapshot
 import org.archphene.app.runtime.NativeRuntime
 import org.archphene.app.runtime.RuntimeSnapshot
+import java.util.Locale
 
 class MainActivity : Activity(), Choreographer.FrameCallback {
     private lateinit var statusView: TextView
@@ -101,6 +103,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private lateinit var ptyButton: Button
     private lateinit var importButton: Button
     private lateinit var openButton: Button
+    private lateinit var exportButton: Button
     private lateinit var shareButton: Button
     private lateinit var folderButton: Button
     private lateinit var folderMirrorButton: Button
@@ -138,6 +141,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private var launcherPermissionDeferred = false
     private var launcherReviewDeferredRevision = Int.MIN_VALUE
     private var pendingImportUri: Uri? = null
+    private var pendingExportSourceUri: Uri? = null
+    private var pendingExportTargetUri: Uri? = null
     private var pendingFolderUri: Uri? = null
     private var pendingFolderFlags = 0
     private var selectedManagerSection = MANAGER_SECTION_PACKAGES
@@ -156,6 +161,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 }
                 runtimeSurface.synchronizeTerminalSize(runtimeBinder)
                 dispatchPendingImport()
+                dispatchPendingExport()
                 dispatchPendingFolderGrant()
                 runtimeBinder?.resumeLauncherPublisher()
                 updateStatus()
@@ -183,6 +189,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 ptyButton.isEnabled = false
                 importButton.isEnabled = false
                 openButton.isEnabled = false
+                exportButton.isEnabled = false
                 shareButton.isEnabled = false
                 folderButton.isEnabled = false
                 folderMirrorButton.isEnabled = false
@@ -931,6 +938,11 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 setText(R.string.open_file)
                 setOnClickListener { openLinuxDocumentForViewing() }
             }
+        exportButton =
+            Button(this).apply {
+                setText(R.string.export_file)
+                setOnClickListener { openLinuxDocumentForExport() }
+            }
         shareButton =
             Button(this).apply {
                 setText(R.string.share_file)
@@ -960,6 +972,14 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                         )
                         addView(
                             openButton,
+                            LinearLayout.LayoutParams(
+                                0,
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                1f,
+                            ),
+                        )
+                        addView(
+                            exportButton,
                             LinearLayout.LayoutParams(
                                 0,
                                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1702,6 +1722,14 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         } else {
             queueIncomingImport(intent)
         }
+        pendingExportSourceUri =
+            savedInstanceState
+                ?.getString(PENDING_EXPORT_SOURCE_URI_STATE)
+                ?.let(Uri::parse)
+        pendingExportTargetUri =
+            savedInstanceState
+                ?.getString(PENDING_EXPORT_TARGET_URI_STATE)
+                ?.let(Uri::parse)
         val restoredFolder =
             savedInstanceState
                 ?.getString(PENDING_FOLDER_URI_STATE)
@@ -1874,6 +1902,12 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         pendingImportUri?.let { uri ->
             outState.putString(PENDING_IMPORT_URI_STATE, uri.toString())
         }
+        pendingExportSourceUri?.let { uri ->
+            outState.putString(PENDING_EXPORT_SOURCE_URI_STATE, uri.toString())
+        }
+        pendingExportTargetUri?.let { uri ->
+            outState.putString(PENDING_EXPORT_TARGET_URI_STATE, uri.toString())
+        }
         pendingFolderUri?.let { uri ->
             outState.putString(PENDING_FOLDER_URI_STATE, uri.toString())
             outState.putInt(PENDING_FOLDER_FLAGS_STATE, pendingFolderFlags)
@@ -1889,11 +1923,17 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     ) {
         super.onActivityResult(requestCode, resultCode, data)
         if (resultCode != RESULT_OK) {
+            if (requestCode == EXPORT_TARGET_DOCUMENT_REQUEST) {
+                pendingExportSourceUri = null
+                pendingExportTargetUri = null
+            }
             return
         }
         when (requestCode) {
             IMPORT_DOCUMENT_REQUEST -> data?.data?.let(::queueDocumentImport)
             OPEN_DOCUMENT_REQUEST -> data?.data?.let(::viewLinuxDocument)
+            EXPORT_SOURCE_DOCUMENT_REQUEST -> data?.data?.let(::createAndroidExportDocument)
+            EXPORT_TARGET_DOCUMENT_REQUEST -> data?.data?.let(::queueDocumentExport)
             SHARE_DOCUMENT_REQUEST -> data?.data?.let(::shareLinuxDocument)
             FOLDER_GRANT_REQUEST -> {
                 val uri = data?.data ?: return
@@ -1920,6 +1960,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
 
     private fun updateStatus() {
         dispatchPendingImport()
+        dispatchPendingExport()
         dispatchPendingFolderGrant()
         // Launcher APK publication can require Android-owned confirmation.
         // Drive it only from the visible Activity so modern Android versions
@@ -1951,7 +1992,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             )
             setTextIfChanged(
                 storageStatusView,
-                runtimeBinder?.documentImportStatus ?: getString(
+                runtimeBinder?.documentTransferStatus ?: getString(
                     R.string.document_import_unavailable,
                 ),
             )
@@ -1999,7 +2040,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         )
         setTextIfChanged(
             storageStatusView,
-            runtimeBinder?.documentImportStatus ?: getString(
+            runtimeBinder?.documentTransferStatus ?: getString(
                 R.string.document_import_unavailable,
             ),
         )
@@ -2899,9 +2940,13 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         commandButton.isEnabled = binder.linuxCommandAvailable
         setTextIfChanged(ptyButton, binder.sharedShellActionLabel)
         ptyButton.isEnabled = binder.sharedShellActionAvailable
-        importButton.isEnabled = binder.documentImportAvailable && pendingImportUri == null
-        openButton.isEnabled = binder.documentImportAvailable
-        shareButton.isEnabled = binder.documentImportAvailable
+        importButton.isEnabled = binder.documentTransferAvailable && pendingImportUri == null
+        openButton.isEnabled = binder.documentTransferAvailable
+        exportButton.isEnabled =
+            binder.documentTransferAvailable &&
+                pendingExportSourceUri == null &&
+                pendingExportTargetUri == null
+        shareButton.isEnabled = binder.documentTransferAvailable
         setTextIfChanged(folderButton, binder.folderGrantActionLabel)
         folderButton.isEnabled = binder.folderGrantAvailable && pendingFolderUri == null
         setTextIfChanged(folderMirrorButton, binder.folderMirrorActionLabel)
@@ -3218,6 +3263,12 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         openLinuxDocumentPicker(OPEN_DOCUMENT_REQUEST)
     }
 
+    private fun openLinuxDocumentForExport() {
+        pendingExportSourceUri = null
+        pendingExportTargetUri = null
+        openLinuxDocumentPicker(EXPORT_SOURCE_DOCUMENT_REQUEST)
+    }
+
     private fun openLinuxDocumentForShare() {
         openLinuxDocumentPicker(SHARE_DOCUMENT_REQUEST)
     }
@@ -3268,6 +3319,36 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             Toast.makeText(
                 this,
                 R.string.open_linux_file_unavailable,
+                Toast.LENGTH_LONG,
+            ).show()
+        }
+    }
+
+    private fun createAndroidExportDocument(uri: Uri) {
+        val mimeType =
+            validatedLinuxDocumentMimeType(
+                uri,
+                R.string.export_linux_file_only,
+                R.string.export_linux_file_unavailable,
+            ) ?: return
+        val displayName = linuxDocumentDisplayName(uri)
+        pendingExportSourceUri = uri
+        pendingExportTargetUri = null
+        val createDocument =
+            Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = mimeType
+                putExtra(Intent.EXTRA_TITLE, displayName)
+                addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            }
+        try {
+            @Suppress("DEPRECATION")
+            startActivityForResult(createDocument, EXPORT_TARGET_DOCUMENT_REQUEST)
+        } catch (_: android.content.ActivityNotFoundException) {
+            pendingExportSourceUri = null
+            Toast.makeText(
+                this,
+                R.string.export_linux_file_unavailable,
                 Toast.LENGTH_LONG,
             ).show()
         }
@@ -3326,13 +3407,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             ).show()
             return null
         }
-        val mimeType =
-            try {
-                contentResolver.getType(uri)
-            } catch (_: RuntimeException) {
-                null
-            }
-        if (mimeType.isNullOrBlank() || mimeType == DocumentsContract.Document.MIME_TYPE_DIR) {
+        val displayName = linuxDocumentDisplayNameOrNull(uri)
+        if (displayName == null) {
             Toast.makeText(
                 this,
                 unavailableMessage,
@@ -3340,8 +3416,53 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             ).show()
             return null
         }
-        return mimeType
+        if (displayName == ".bashrc" || displayName == ".bash_profile") {
+            return "text/plain"
+        }
+        val extension = displayName.substringAfterLast('.', "").lowercase(Locale.ROOT)
+        return MimeTypeMap
+            .getSingleton()
+            .getMimeTypeFromExtension(extension)
+            ?: "application/octet-stream"
     }
+
+    private fun linuxDocumentDisplayName(uri: Uri): String {
+        return linuxDocumentDisplayNameOrNull(uri)
+            ?: getString(R.string.export_linux_file_fallback_name)
+    }
+
+    private fun linuxDocumentDisplayNameOrNull(uri: Uri): String? {
+        val documentId =
+            runCatching {
+                DocumentsContract.getDocumentId(uri)
+            }.getOrNull() ?: return null
+        if (
+            documentId.toByteArray(Charsets.UTF_8).size !in 1..MAX_DOCUMENT_ID_BYTES ||
+            documentId == DOCUMENTS_HOME_ID ||
+            documentId == SHELL_STARTUP_DOCUMENT_ID
+        ) {
+            return null
+        }
+        val name =
+            when (documentId) {
+                BASHRC_DOCUMENT_ID -> ".bashrc"
+                BASH_PROFILE_DOCUMENT_ID -> ".bash_profile"
+                else -> documentId.substringAfterLast('/')
+            }
+        return name.takeIf { candidate ->
+            candidate.toByteArray(Charsets.UTF_8).size in 1..MAX_DOCUMENT_NAME_BYTES &&
+                candidate != "." &&
+                candidate != ".." &&
+                candidate.none { it.isISOControl() || it.isBidirectionalControl() }
+        }
+    }
+
+    private fun Char.isBidirectionalControl(): Boolean =
+        this == '\u061c' ||
+            this == '\u200e' ||
+            this == '\u200f' ||
+            this in '\u202a'..'\u202e' ||
+            this in '\u2066'..'\u2069'
 
     private fun queueFolderGrant(
         uri: Uri,
@@ -3441,6 +3562,32 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         }
     }
 
+    private fun queueDocumentExport(destinationUri: Uri) {
+        selectManagerSection(MANAGER_SECTION_FILES)
+        if (pendingExportSourceUri == null || destinationUri.scheme != "content") {
+            pendingExportSourceUri = null
+            pendingExportTargetUri = null
+            setTextIfChanged(
+                storageStatusView,
+                getString(R.string.export_linux_file_unavailable),
+            )
+            return
+        }
+        pendingExportTargetUri = destinationUri
+        setTextIfChanged(storageStatusView, getString(R.string.export_linux_file_queued))
+        dispatchPendingExport()
+    }
+
+    private fun dispatchPendingExport() {
+        val sourceUri = pendingExportSourceUri ?: return
+        val destinationUri = pendingExportTargetUri ?: return
+        val binder = runtimeBinder ?: return
+        if (binder.exportLinuxDocument(sourceUri, destinationUri)) {
+            pendingExportSourceUri = null
+            pendingExportTargetUri = null
+        }
+    }
+
     private fun requestSessionNotificationPermission() {
         if (
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
@@ -3502,7 +3649,11 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         private const val FOLDER_GRANT_REQUEST = 0x4154
         private const val SHARE_DOCUMENT_REQUEST = 0x4155
         private const val OPEN_DOCUMENT_REQUEST = 0x4156
+        private const val EXPORT_SOURCE_DOCUMENT_REQUEST = 0x4157
+        private const val EXPORT_TARGET_DOCUMENT_REQUEST = 0x4158
         private const val PENDING_IMPORT_URI_STATE = "pending_import_uri"
+        private const val PENDING_EXPORT_SOURCE_URI_STATE = "pending_export_source_uri"
+        private const val PENDING_EXPORT_TARGET_URI_STATE = "pending_export_target_uri"
         private const val PENDING_FOLDER_URI_STATE = "pending_folder_uri"
         private const val PENDING_FOLDER_FLAGS_STATE = "pending_folder_flags"
         private const val MANAGER_SECTION_STATE = "manager_section"
@@ -3520,7 +3671,14 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         private const val WIDE_FILE_CARD_HEIGHT_DP = 136
         private const val MAX_FOLDER_URI_BYTES = 4 * 1024
         private const val MAX_DOCUMENT_URI_BYTES = 4 * 1024
+        private const val MAX_DOCUMENT_ID_BYTES = 1024
+        private const val MAX_DOCUMENT_NAME_BYTES = 255
         private const val DOCUMENTS_ROOT_ID = "archphene-home"
+        private const val DOCUMENTS_HOME_ID = "home"
+        private const val SHELL_STARTUP_DOCUMENT_ID = "shell-startup"
+        private const val BASHRC_DOCUMENT_ID = "$SHELL_STARTUP_DOCUMENT_ID/bashrc"
+        private const val BASH_PROFILE_DOCUMENT_ID =
+            "$SHELL_STARTUP_DOCUMENT_ID/bash-profile"
         private const val EXTERNAL_STORAGE_DOCUMENTS_AUTHORITY =
             "com.android.externalstorage.documents"
         private const val PRIMARY_STORAGE_ROOT_ID = "primary"
