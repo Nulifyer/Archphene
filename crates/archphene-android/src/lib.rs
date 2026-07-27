@@ -106,14 +106,13 @@ mod android {
         ProcessError,
     };
     use archphene_storage::{
-        OpenMode, StorageError, SyncAction, SyncEntryKind, SyncFingerprint,
-        fingerprint_file_from_fd,
+        MirrorCancellation, OpenMode, StorageError, SyncAction, SyncEntryKind, SyncFingerprint,
     };
     use jni::JNIEnv;
     use jni::objects::{JByteBuffer, JClass, JIntArray, JString};
     use jni::sys::{JNI_FALSE, JNI_TRUE, jboolean, jint, jlong};
 
-    use super::RuntimeRegistry;
+    use super::{MAX_RUNTIME_HANDLES, RuntimeRegistry};
 
     const ERROR_INVALID_HANDLE: jint = -1;
     const ERROR_INVALID_ARGUMENT: jint = -2;
@@ -139,9 +138,66 @@ mod android {
     const PTY_EVENT_WOKEN: jint = 1 << 3;
 
     static REGISTRY: OnceLock<Mutex<RuntimeRegistry>> = OnceLock::new();
+    static PROJECT_SYNC_CANCELLATIONS: OnceLock<
+        Mutex<[Option<(u64, MirrorCancellation)>; MAX_RUNTIME_HANDLES]>,
+    > = OnceLock::new();
 
     fn registry() -> &'static Mutex<RuntimeRegistry> {
         REGISTRY.get_or_init(|| Mutex::new(RuntimeRegistry::new()))
+    }
+
+    fn project_sync_cancellations()
+    -> &'static Mutex<[Option<(u64, MirrorCancellation)>; MAX_RUNTIME_HANDLES]> {
+        PROJECT_SYNC_CANCELLATIONS.get_or_init(|| Mutex::new(std::array::from_fn(|_| None)))
+    }
+
+    fn set_project_sync_cancellation(
+        handle: u64,
+        cancellation: MirrorCancellation,
+    ) -> Result<(), ()> {
+        let (index, _) = super::decode_handle(handle).ok_or(())?;
+        let mut slots = project_sync_cancellations().lock().map_err(|_| ())?;
+        let slot = slots.get_mut(index).ok_or(())?;
+        if slot.is_some() {
+            return Err(());
+        }
+        *slot = Some((handle, cancellation));
+        Ok(())
+    }
+
+    fn remove_project_sync_cancellation(handle: u64) -> bool {
+        let Some((index, _)) = super::decode_handle(handle) else {
+            return false;
+        };
+        let Ok(mut slots) = project_sync_cancellations().lock() else {
+            return false;
+        };
+        let Some(slot) = slots.get_mut(index) else {
+            return false;
+        };
+        if slot.as_ref().is_some_and(|(active, _)| *active == handle) {
+            *slot = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn cancel_project_sync_without_runtime_lock(handle: u64) -> bool {
+        let Some((index, _)) = super::decode_handle(handle) else {
+            return false;
+        };
+        let Ok(slots) = project_sync_cancellations().lock() else {
+            return false;
+        };
+        slots
+            .get(index)
+            .and_then(Option::as_ref)
+            .filter(|(active, _)| *active == handle)
+            .is_some_and(|(_, cancellation)| {
+                cancellation.cancel();
+                true
+            })
     }
 
     fn java_string(environment: &mut JNIEnv, value: &JString) -> Result<String, jint> {
@@ -959,23 +1015,34 @@ mod android {
         let Ok(mut registry) = registry().lock() else {
             return ERROR_INTERNAL;
         };
-        registry
-            .runtime_mut(handle)
-            .map_or(ERROR_INVALID_HANDLE, |runtime| {
-                runtime
-                    .begin_project_sync(mapping_id)
-                    .map_or_else(|error| copy_storage_error(&error, output), |_| 0)
-            })
+        let Some(runtime) = registry.runtime_mut(handle) else {
+            return ERROR_INVALID_HANDLE;
+        };
+        let cancellation = MirrorCancellation::new();
+        if set_project_sync_cancellation(handle, cancellation.clone()).is_err() {
+            return ERROR_INTERNAL;
+        }
+        match runtime.begin_project_sync(mapping_id, cancellation) {
+            Ok(()) => 0,
+            Err(error) => {
+                remove_project_sync_cancellation(handle);
+                copy_storage_error(&error, output)
+            }
+        }
     }
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeFingerprintProjectSyncFile(
         environment: JNIEnv,
         _class: JClass,
+        handle: jlong,
         source_descriptor: jint,
         expected_bytes: jlong,
         output_buffer: JByteBuffer,
     ) -> jint {
+        let Ok(handle) = u64::try_from(handle) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
         let expected_bytes = if expected_bytes < 0 {
             None
         } else {
@@ -990,7 +1057,13 @@ mod android {
         let Ok(output) = storage_output(&environment, &output_buffer) else {
             return ERROR_INVALID_ARGUMENT;
         };
-        match fingerprint_file_from_fd(source_descriptor, expected_bytes) {
+        let Ok(mut registry) = registry().lock() else {
+            return ERROR_INTERNAL;
+        };
+        let Some(runtime) = registry.runtime_mut(handle) else {
+            return ERROR_INVALID_HANDLE;
+        };
+        match runtime.fingerprint_project_sync_file(source_descriptor, expected_bytes) {
             Ok(fingerprint) => copy_storage_value(&format_sync_fingerprint(fingerprint), output),
             Err(error) => copy_storage_error(&error, output),
         }
@@ -1056,10 +1129,6 @@ mod android {
         let Ok(request) = storage_request(&environment, &request_buffer, request_length, 1) else {
             return ERROR_INVALID_ARGUMENT;
         };
-        let fingerprint = match fingerprint_file_from_fd(source_descriptor, expected_bytes) {
-            Ok(fingerprint) => fingerprint,
-            Err(error) => return copy_storage_error(&error, output),
-        };
         let Ok(mut registry) = registry().lock() else {
             return ERROR_INTERNAL;
         };
@@ -1067,7 +1136,7 @@ mod android {
             .runtime_mut(handle)
             .map_or(ERROR_INVALID_HANDLE, |runtime| {
                 runtime
-                    .add_project_sync_android_fingerprint(&request[0], fingerprint)
+                    .add_project_sync_android_file(&request[0], source_descriptor, expected_bytes)
                     .map_or_else(|error| copy_storage_error(&error, output), |_| 0)
             })
     }
@@ -1277,13 +1346,16 @@ mod android {
         let Ok(mut registry) = registry().lock() else {
             return ERROR_INTERNAL;
         };
-        registry
-            .runtime_mut(handle)
-            .map_or(ERROR_INVALID_HANDLE, |runtime| {
-                runtime
-                    .commit_project_sync()
-                    .map_or_else(|error| copy_storage_error(&error, output), |_| 0)
-            })
+        let Some(runtime) = registry.runtime_mut(handle) else {
+            return ERROR_INVALID_HANDLE;
+        };
+        match runtime.commit_project_sync() {
+            Ok(()) => {
+                remove_project_sync_cancellation(handle);
+                0
+            }
+            Err(error) => copy_storage_error(&error, output),
+        }
     }
 
     #[unsafe(no_mangle)]
@@ -1298,10 +1370,23 @@ mod android {
         let Ok(mut registry) = registry().lock() else {
             return JNI_FALSE;
         };
-        if registry
+        let aborted = registry
             .runtime_mut(handle)
-            .is_some_and(|runtime| runtime.abort_project_sync())
-        {
+            .is_some_and(|runtime| runtime.abort_project_sync());
+        remove_project_sync_cancellation(handle);
+        if aborted { JNI_TRUE } else { JNI_FALSE }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeCancelProjectSync(
+        _environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+    ) -> jboolean {
+        let Ok(handle) = u64::try_from(handle) else {
+            return JNI_FALSE;
+        };
+        if cancel_project_sync_without_runtime_lock(handle) {
             JNI_TRUE
         } else {
             JNI_FALSE
@@ -1334,11 +1419,9 @@ mod android {
         let Ok(mut registry) = registry().lock() else {
             return JNI_FALSE;
         };
-        if registry.destroy(handle) {
-            JNI_TRUE
-        } else {
-            JNI_FALSE
-        }
+        let destroyed = registry.destroy(handle);
+        remove_project_sync_cancellation(handle);
+        if destroyed { JNI_TRUE } else { JNI_FALSE }
     }
 
     #[unsafe(no_mangle)]

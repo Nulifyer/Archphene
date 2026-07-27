@@ -346,7 +346,11 @@ internal class FolderGrantTestReceiver : BroadcastReceiver() {
     ) {
         val phase =
             intent.getStringExtra(EXTRA_PHASE)
-                ?.takeIf { it == SYNC_PHASE_BACKED_UP || it == SYNC_PHASE_COMMITTED }
+                ?.takeIf {
+                    it == SYNC_PHASE_BACKED_UP ||
+                        it == SYNC_PHASE_PUBLISHED ||
+                        it == SYNC_PHASE_COMMITTED
+                }
                 ?: error("project sync hold phase is invalid")
         val holdMillis = intent.getLongExtra(EXTRA_HOLD_MILLIS, 0)
         check(holdMillis in 5_000L..30_000L) { "project sync hold duration is invalid" }
@@ -466,6 +470,7 @@ internal class FolderGrantTestReceiver : BroadcastReceiver() {
         private const val SYNC_TEST_PHASE = "hold_phase"
         private const val SYNC_TEST_HOLD_MILLIS = "hold_ms"
         private const val SYNC_PHASE_BACKED_UP = "backed-up"
+        private const val SYNC_PHASE_PUBLISHED = "published"
         private const val SYNC_PHASE_COMMITTED = "committed"
         private const val SYNC_JOURNAL_FILE = "project-sync-journal-v1"
         private const val MAX_MANIFEST_BYTES = 4 * 1024 * 1024

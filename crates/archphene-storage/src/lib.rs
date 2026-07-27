@@ -278,12 +278,30 @@ pub struct MirrorImportReport {
 pub struct MirrorCancellation(Arc<AtomicBool>);
 
 impl MirrorCancellation {
+    pub fn new() -> Self {
+        Self(Arc::new(AtomicBool::new(false)))
+    }
+
     pub fn cancel(&self) {
         self.0.store(true, Ordering::Release);
     }
 
+    pub fn check(&self) -> Result<(), StorageError> {
+        if self.0.load(Ordering::Acquire) {
+            Err(StorageError::MirrorCancelled)
+        } else {
+            Ok(())
+        }
+    }
+
     fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::Acquire)
+    }
+}
+
+impl Default for MirrorCancellation {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -787,6 +805,15 @@ pub fn snapshot_linux_project(
     arch_root: &Path,
     mapping_id: [u8; 16],
 ) -> Result<SyncManifest, StorageError> {
+    snapshot_linux_project_cancellable(arch_root, mapping_id, &MirrorCancellation::new())
+}
+
+pub fn snapshot_linux_project_cancellable(
+    arch_root: &Path,
+    mapping_id: [u8; 16],
+    cancellation: &MirrorCancellation,
+) -> Result<SyncManifest, StorageError> {
+    cancellation.check()?;
     let baseline =
         load_sync_manifest(arch_root, mapping_id)?.ok_or(StorageError::InvalidManifest)?;
     let project = open_directory(
@@ -795,13 +822,33 @@ pub fn snapshot_linux_project(
     )?;
     let mut entries = Vec::with_capacity(baseline.entries().len().max(256));
     let mut total_bytes = 0_u64;
-    snapshot_linux_directory(&project, "", 0, &mut entries, &mut total_bytes)?;
+    snapshot_linux_directory(
+        &project,
+        "",
+        0,
+        &mut entries,
+        &mut total_bytes,
+        Some(cancellation),
+    )?;
+    cancellation.check()?;
     SyncManifest::new(mapping_id, baseline.project_name().to_owned(), entries)
 }
 
 pub fn fingerprint_file_from_fd(
     source_descriptor: RawFd,
     expected_bytes: Option<u64>,
+) -> Result<SyncFingerprint, StorageError> {
+    fingerprint_file_from_fd_cancellable(
+        source_descriptor,
+        expected_bytes,
+        &MirrorCancellation::new(),
+    )
+}
+
+pub fn fingerprint_file_from_fd_cancellable(
+    source_descriptor: RawFd,
+    expected_bytes: Option<u64>,
+    cancellation: &MirrorCancellation,
 ) -> Result<SyncFingerprint, StorageError> {
     if source_descriptor < 0 || expected_bytes.is_some_and(|size| size > MAX_MIRROR_FILE_BYTES) {
         return Err(StorageError::InvalidDocument);
@@ -811,10 +858,12 @@ pub fn fingerprint_file_from_fd(
     let mut digest = Sha256::new();
     let mut buffer = [0_u8; 32 * 1024];
     loop {
+        cancellation.check()?;
         let count = source.read(&mut buffer)?;
         if count == 0 {
             break;
         }
+        cancellation.check()?;
         bytes = bytes
             .checked_add(count as u64)
             .ok_or(StorageError::MirrorTooLarge)?;
@@ -826,6 +875,7 @@ pub fn fingerprint_file_from_fd(
     if expected_bytes.is_some_and(|expected| expected != bytes) {
         return Err(StorageError::InvalidDocument);
     }
+    cancellation.check()?;
     Ok(SyncFingerprint::file(bytes, digest.finalize().into()))
 }
 
@@ -835,6 +885,23 @@ pub fn open_linux_project_file(
     relative_path: &str,
     expected: SyncFingerprint,
 ) -> Result<File, StorageError> {
+    open_linux_project_file_cancellable(
+        arch_root,
+        mapping_id,
+        relative_path,
+        expected,
+        &MirrorCancellation::new(),
+    )
+}
+
+pub fn open_linux_project_file_cancellable(
+    arch_root: &Path,
+    mapping_id: [u8; 16],
+    relative_path: &str,
+    expected: SyncFingerprint,
+    cancellation: &MirrorCancellation,
+) -> Result<File, StorageError> {
+    cancellation.check()?;
     if expected.kind != SyncEntryKind::File {
         return Err(StorageError::InvalidDocument);
     }
@@ -855,10 +922,16 @@ pub fn open_linux_project_file(
         }
     })?;
     let metadata = file.metadata()?;
-    if !metadata.is_file() || fingerprint_open_linux_file(file.try_clone()?, &metadata)? != expected
+    if !metadata.is_file()
+        || fingerprint_open_linux_file_cancellable(
+            file.try_clone()?,
+            &metadata,
+            Some(cancellation),
+        )? != expected
     {
         return Err(StorageError::SyncChanged);
     }
+    cancellation.check()?;
     file.seek(SeekFrom::Start(0))?;
     Ok(file)
 }
@@ -871,6 +944,27 @@ pub fn pull_linux_project_file_from_fd(
     expected_android: SyncFingerprint,
     expected_linux: Option<SyncFingerprint>,
 ) -> Result<(), StorageError> {
+    pull_linux_project_file_from_fd_cancellable(
+        arch_root,
+        mapping_id,
+        relative_path,
+        source_descriptor,
+        expected_android,
+        expected_linux,
+        &MirrorCancellation::new(),
+    )
+}
+
+pub fn pull_linux_project_file_from_fd_cancellable(
+    arch_root: &Path,
+    mapping_id: [u8; 16],
+    relative_path: &str,
+    source_descriptor: RawFd,
+    expected_android: SyncFingerprint,
+    expected_linux: Option<SyncFingerprint>,
+    cancellation: &MirrorCancellation,
+) -> Result<(), StorageError> {
+    cancellation.check()?;
     if expected_android.kind != SyncEntryKind::File || source_descriptor < 0 {
         return Err(StorageError::InvalidDocument);
     }
@@ -898,10 +992,12 @@ pub fn pull_linux_project_file_from_fd(
         let mut digest = Sha256::new();
         let mut buffer = [0_u8; 32 * 1024];
         loop {
+            cancellation.check()?;
             let count = source.read(&mut buffer)?;
             if count == 0 {
                 break;
             }
+            cancellation.check()?;
             bytes = bytes
                 .checked_add(count as u64)
                 .ok_or(StorageError::MirrorTooLarge)?;
@@ -915,8 +1011,10 @@ pub fn pull_linux_project_file_from_fd(
         if observed != expected_android {
             return Err(StorageError::SyncChanged);
         }
+        cancellation.check()?;
         temporary.sync_all()?;
         validate_project_target(&parent, &leaf, expected_linux)?;
+        cancellation.check()?;
         if expected_linux.is_some() {
             sys::rename_replace_between(
                 state.as_raw_fd(),
@@ -1007,6 +1105,25 @@ pub fn preserve_android_conflict_from_fd(
     source_descriptor: RawFd,
     expected_android: SyncFingerprint,
 ) -> Result<String, StorageError> {
+    preserve_android_conflict_from_fd_cancellable(
+        arch_root,
+        mapping_id,
+        relative_path,
+        source_descriptor,
+        expected_android,
+        &MirrorCancellation::new(),
+    )
+}
+
+pub fn preserve_android_conflict_from_fd_cancellable(
+    arch_root: &Path,
+    mapping_id: [u8; 16],
+    relative_path: &str,
+    source_descriptor: RawFd,
+    expected_android: SyncFingerprint,
+    cancellation: &MirrorCancellation,
+) -> Result<String, StorageError> {
+    cancellation.check()?;
     if expected_android.kind != SyncEntryKind::File {
         return Err(StorageError::InvalidDocument);
     }
@@ -1016,6 +1133,7 @@ pub fn preserve_android_conflict_from_fd(
     validate_project_name(name)?;
     let digest = hex_digest_prefix(expected_android.sha256, 12);
     for collision in 0..=999 {
+        cancellation.check()?;
         let suffix = if collision == 0 {
             format!(".android-conflict-{digest}")
         } else {
@@ -1047,13 +1165,14 @@ pub fn preserve_android_conflict_from_fd(
             Some(fingerprint) if fingerprint == expected_android => return Ok(candidate),
             Some(_) => continue,
             None => {
-                pull_linux_project_file_from_fd(
+                pull_linux_project_file_from_fd_cancellable(
                     arch_root,
                     mapping_id,
                     &candidate,
                     source_descriptor,
                     expected_android,
                     None,
+                    cancellation,
                 )?;
                 return Ok(candidate);
             }
@@ -1167,13 +1286,20 @@ fn snapshot_linux_directory(
     depth: usize,
     entries: &mut Vec<SyncManifestEntry>,
     total_bytes: &mut u64,
+    cancellation: Option<&MirrorCancellation>,
 ) -> Result<(), StorageError> {
+    if let Some(cancellation) = cancellation {
+        cancellation.check()?;
+    }
     if depth > MAX_MIRROR_DEPTH {
         return Err(StorageError::MirrorTooLarge);
     }
     let before = directory.metadata()?;
     let descriptor_path = format!("/proc/self/fd/{}", directory.as_raw_fd());
     for child in fs::read_dir(descriptor_path)? {
+        if let Some(cancellation) = cancellation {
+            cancellation.check()?;
+        }
         if depth >= MAX_MIRROR_DEPTH {
             return Err(StorageError::MirrorTooLarge);
         }
@@ -1208,12 +1334,20 @@ fn snapshot_linux_directory(
                 path: relative_path.clone(),
                 fingerprint: SyncFingerprint::directory(),
             });
-            snapshot_linux_directory(&child, &relative_path, depth + 1, entries, total_bytes)?;
+            snapshot_linux_directory(
+                &child,
+                &relative_path,
+                depth + 1,
+                entries,
+                total_bytes,
+                cancellation,
+            )?;
         } else if metadata.is_file() {
             if metadata.len() > MAX_MIRROR_FILE_BYTES {
                 return Err(StorageError::MirrorTooLarge);
             }
-            let fingerprint = fingerprint_open_linux_file(child, &metadata)?;
+            let fingerprint =
+                fingerprint_open_linux_file_cancellable(child, &metadata, cancellation)?;
             *total_bytes = total_bytes
                 .checked_add(fingerprint.bytes)
                 .ok_or(StorageError::MirrorTooLarge)?;
@@ -1236,16 +1370,30 @@ fn snapshot_linux_directory(
 }
 
 fn fingerprint_open_linux_file(
+    file: File,
+    before: &fs::Metadata,
+) -> Result<SyncFingerprint, StorageError> {
+    fingerprint_open_linux_file_cancellable(file, before, None)
+}
+
+fn fingerprint_open_linux_file_cancellable(
     mut file: File,
     before: &fs::Metadata,
+    cancellation: Option<&MirrorCancellation>,
 ) -> Result<SyncFingerprint, StorageError> {
     let mut bytes = 0_u64;
     let mut digest = Sha256::new();
     let mut buffer = [0_u8; 32 * 1024];
     loop {
+        if let Some(cancellation) = cancellation {
+            cancellation.check()?;
+        }
         let count = file.read(&mut buffer)?;
         if count == 0 {
             break;
+        }
+        if let Some(cancellation) = cancellation {
+            cancellation.check()?;
         }
         bytes = bytes
             .checked_add(count as u64)
@@ -1258,6 +1406,9 @@ fn fingerprint_open_linux_file(
     let after = file.metadata()?;
     if bytes != before.len() || metadata_changed(before, &after) {
         return Err(StorageError::InvalidDocument);
+    }
+    if let Some(cancellation) = cancellation {
+        cancellation.check()?;
     }
     Ok(SyncFingerprint::file(bytes, digest.finalize().into()))
 }
@@ -2364,6 +2515,13 @@ mod tests {
         assert!(matches!(
             fingerprint_file_from_fd(file.as_raw_fd(), Some(12)),
             Err(StorageError::InvalidDocument),
+        ));
+
+        let cancelled = MirrorCancellation::new();
+        cancelled.cancel();
+        assert!(matches!(
+            fingerprint_file_from_fd_cancellable(file.as_raw_fd(), None, &cancelled),
+            Err(StorageError::MirrorCancelled),
         ));
     }
 

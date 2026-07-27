@@ -119,11 +119,11 @@ Semantic UI, picker-cancellation, no-repeat restart, scoped-log, and visually
 inspected full-device gates pass on the exact-ABI emulator and Samsung.
 
 The first import remains a snapshot rather than a live mount. Afterward the
-user invokes explicit Sync to reconcile regular-file changes in either
-direction; Linux applications continue to use the stable private POSIX path
-between syncs. Directory deletion, multi-delete batching, long-hash native
-cancellation, and provider deadlines remain before this becomes the completed
-folder bridge. Exact recursive content, empty files, nested dotfiles,
+user invokes explicit Sync to reconcile changes in either direction; Linux
+applications continue to use the stable private POSIX path between syncs.
+Provider-call deadlines and durable retry/conflict history remain before this
+becomes the completed folder bridge. Exact recursive content, empty files,
+nested dotfiles,
 stale-stage recovery, restart persistence, and grant removal pass on both
 exact-ABI targets; the new mutation and crash-recovery matrix currently passes
 on physical AArch64.
@@ -175,14 +175,20 @@ file edits retain the Android bytes in a deterministic hash-suffixed Linux
 conflict copy without overwriting either original. No-change, additions,
 edits, deletions, conflicts, and forced process death at both journal phases
 pass on physical AArch64 and the exact x86_64 emulator build with full-device
-captures. Directory deletion, batching multiple Android deletions in one pass,
-long-hash native cancellation, and provider deadlines remain.
+captures. Empty directory deletion now propagates in both directions, and
+multiple Android removals are serially journaled and checkpointed during one
+user-visible Sync. A separately locked fixed-size cancellation registry stops
+Android descriptor hashes, Linux snapshots, verified opens, pulls, and
+conflict copies without waiting for the main native runtime lock; exact
+256 MiB cancellation fixtures on both targets leave neither partial Linux nor
+Android files. Forced death before and after Android replacement publication
+also proves rollback/retry and published-version finalization. SAF provider
+call deadlines and durable retry/conflict history remain.
 
 The SAF capability itself is never presented as a POSIX mount; Linux sees the
 private POSIX mirror and changes cross the boundary only during explicit Sync.
-Exports, drag-and-drop, durable per-operation history, native cancellation
-during long hashes, provider timeouts, and richer `/mnt/android` mapping status
-are still planned.
+Exports, drag-and-drop, durable per-operation history, provider timeouts, and
+richer `/mnt/android` mapping status are still planned.
 
 ## Virtual Linux Layout
 

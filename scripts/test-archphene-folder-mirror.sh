@@ -179,18 +179,63 @@ restart_manager_files() {
 }
 
 local_project="files/arch-root/home/archphene/Projects/$folder"
+archphene_adb_run shell truncate -s 268435456 "$remote/sync-cancel.bin"
+archphene_wait_ui 'text="(?:SYNC|Sync)"[^>]*enabled="true"' \
+  "folder-sync-native-cancel-$serial" 20
+sync_cancel_ui="$ARCHPHENE_UI"
+archphene_tap_ui_pattern \
+  "$sync_cancel_ui" 'text="(?:SYNC|Sync)"[^>]*enabled="true"' "Start large sync"
+sleep 0.2
+archphene_tap_ui_pattern \
+  "$sync_cancel_ui" 'text="(?:SYNC|Sync)"[^>]*enabled="true"' "Cancel large sync"
+archphene_wait_ui_exact_text \
+  "Project synchronization cancelled" \
+  "folder-sync-native-cancelled-$serial" 20
+archphene_adb_run shell run-as "$package" test ! -e \
+  "$local_project/sync-cancel.bin" ||
+  archphene_die "cancelled synchronization published a partial Linux file"
+archphene_adb_run shell rm "$remote/sync-cancel.bin"
+sync_button
+archphene_wait_ui_unwrapped \
+  "Synced 0 change\\(s\\): 0 pulled, 0 pushed, 0 conflict\\(s\\), 0 deletion\\(s\\) deferred" \
+  "folder-sync-native-cancel-clean-$serial" 30
+
+archphene_adb_run shell run-as "$package" truncate -s 268435456 \
+  "$local_project/sync-cancel-linux.bin"
+archphene_wait_ui 'text="(?:SYNC|Sync)"[^>]*enabled="true"' \
+  "folder-sync-native-linux-cancel-$serial" 20
+sync_cancel_ui="$ARCHPHENE_UI"
+archphene_tap_ui_pattern \
+  "$sync_cancel_ui" 'text="(?:SYNC|Sync)"[^>]*enabled="true"' "Start large Linux sync"
+sleep 0.2
+archphene_tap_ui_pattern \
+  "$sync_cancel_ui" 'text="(?:SYNC|Sync)"[^>]*enabled="true"' "Cancel large Linux sync"
+archphene_wait_ui_exact_text \
+  "Project synchronization cancelled" \
+  "folder-sync-native-linux-cancelled-$serial" 20
+archphene_adb_run shell test ! -e "$remote/sync-cancel-linux.bin" ||
+  archphene_die "cancelled synchronization published a partial Android file"
+archphene_adb_run shell run-as "$package" rm "$local_project/sync-cancel-linux.bin"
+sync_button
+archphene_wait_ui_unwrapped \
+  "Synced 0 change\\(s\\): 0 pulled, 0 pushed, 0 conflict\\(s\\), 0 deletion\\(s\\) deferred" \
+  "folder-sync-native-linux-cancel-clean-$serial" 30
+archphene_note "  Native Android and Linux fingerprint loops cancel without partial publication"
+
 archphene_adb_run shell sh -c \
   "'printf android-edit-$token > $remote/main.txt; printf android-new-$token > $remote/android-new.txt'"
 archphene_adb_run shell run-as "$package" sh -c \
-  "'printf linux-edit-$token > $local_project/src/nested.txt; printf linux-new-$token > $local_project/linux-new.txt'"
+  "'printf linux-edit-$token > $local_project/src/nested.txt; printf linux-new-$token > $local_project/linux-new.txt; printf linux-new-two-$token > $local_project/linux-new-two.txt'"
 sync_button
 archphene_wait_ui_unwrapped \
-  "Synced 4 change\\(s\\): 2 pulled, 2 pushed, 0 conflict\\(s\\), 0 deletion\\(s\\) deferred" \
+  "Synced 5 change\\(s\\): 2 pulled, 3 pushed, 0 conflict\\(s\\), 0 deletion\\(s\\) deferred" \
   "folder-sync-bidirectional-$serial" 40
 [[ "$(archphene_adb_run shell cat "$remote/src/nested.txt" | tr -d '\r')" == \
   "linux-edit-$token" ]] || archphene_die "Linux edit was not pushed to Android"
 [[ "$(archphene_adb_run shell cat "$remote/linux-new.txt" | tr -d '\r')" == \
   "linux-new-$token" ]] || archphene_die "new Linux file was not pushed to Android"
+[[ "$(archphene_adb_run shell cat "$remote/linux-new-two.txt" | tr -d '\r')" == \
+  "linux-new-two-$token" ]] || archphene_die "second Linux file was not pushed to Android"
 [[ "$(archphene_adb_run shell run-as "$package" cat "$local_project/main.txt" | tr -d '\r')" == \
   "android-edit-$token" ]] || archphene_die "Android edit was not pulled to Linux"
 [[ "$(archphene_adb_run shell run-as "$package" cat "$local_project/android-new.txt" | tr -d '\r')" == \
@@ -206,7 +251,69 @@ archphene_adb_run shell run-as "$package" test ! -e "$local_project/android-new.
   archphene_die "Android deletion was not propagated to Linux"
 archphene_note "  Android deletion propagated after exact baseline revalidation"
 
-archphene_adb_run shell run-as "$package" rm "$local_project/linux-new.txt"
+archphene_adb_run shell mkdir "$remote/android-directory"
+archphene_adb_run shell sh -c \
+  "'printf android-directory-$token > $remote/android-directory/inside.txt'"
+sync_button
+archphene_wait_ui_unwrapped \
+  "Synced 2 change\\(s\\): 2 pulled, 0 pushed, 0 conflict\\(s\\), 0 deletion\\(s\\) deferred" \
+  "folder-sync-android-directory-pull-$serial" 30
+archphene_adb_run shell run-as "$package" test -f \
+  "$local_project/android-directory/inside.txt" ||
+  archphene_die "Android directory was not pulled into Linux"
+archphene_adb_run shell rm -r "$remote/android-directory"
+sync_button
+archphene_wait_ui_unwrapped \
+  "Synced 2 change\\(s\\): 2 pulled, 0 pushed, 0 conflict\\(s\\), 0 deletion\\(s\\) deferred" \
+  "folder-sync-android-directory-delete-$serial" 30
+archphene_adb_run shell run-as "$package" test ! -e \
+  "$local_project/android-directory" ||
+  archphene_die "Android directory deletion was not propagated to Linux"
+archphene_note "  Android directory additions and deletions propagated recursively"
+
+archphene_adb_run shell run-as "$package" rm \
+  "$local_project/linux-new.txt" "$local_project/linux-new-two.txt"
+set_sync_hold backed-up
+archphene_adb_run logcat -c
+sync_button
+archphene_wait_log \
+  'Project sync test holding phase=backed-up' \
+  25 'ArchpheneRuntime:I AndroidRuntime:E *:S' >/dev/null
+archphene_adb_run shell am force-stop "$package"
+restart_manager_files
+sync_button
+archphene_wait_ui_unwrapped \
+  "Synced 2 change\\(s\\): 0 pulled, 2 pushed, 0 conflict\\(s\\), 0 deletion\\(s\\) deferred" \
+  "folder-sync-linux-delete-recovered-$serial" 40
+archphene_adb_run shell test ! -e "$remote/linux-new.txt" ||
+  archphene_die "Linux deletion was not committed to Android"
+archphene_adb_run shell test ! -e "$remote/linux-new-two.txt" ||
+  archphene_die "second Linux deletion was not committed to Android"
+archphene_adb_run shell run-as "$package" test ! -e files/project-sync-journal-v1 ||
+  archphene_die "pre-commit synchronization journal remains"
+archphene_note "  Pre-commit process death restored then safely recommitted Android deletion"
+
+archphene_adb_run shell run-as "$package" rm -r "$local_project/src"
+set_sync_hold committed
+archphene_adb_run logcat -c
+sync_button
+archphene_wait_log \
+  'Project sync test holding phase=committed' \
+  25 'ArchpheneRuntime:I AndroidRuntime:E *:S' >/dev/null
+archphene_adb_run shell am force-stop "$package"
+restart_manager_files
+sync_button
+archphene_wait_ui_unwrapped \
+  "Synced 1 change\\(s\\): 0 pulled, 1 pushed, 0 conflict\\(s\\), 0 deletion\\(s\\) deferred" \
+  "folder-sync-postcommit-recovered-$serial" 40
+archphene_adb_run shell test ! -e "$remote/src" ||
+  archphene_die "committed file or enclosing directory was restored"
+archphene_adb_run shell run-as "$package" test ! -e files/project-sync-journal-v1 ||
+  archphene_die "post-commit synchronization journal remains"
+archphene_note "  Post-commit death finalized the file backup and enclosing directory deletion"
+
+archphene_adb_run shell run-as "$package" sh -c \
+  "'printf linux-push-recovery-$token > $local_project/main.txt'"
 set_sync_hold backed-up
 archphene_adb_run logcat -c
 sync_button
@@ -218,31 +325,32 @@ restart_manager_files
 sync_button
 archphene_wait_ui_unwrapped \
   "Synced 1 change\\(s\\): 0 pulled, 1 pushed, 0 conflict\\(s\\), 0 deletion\\(s\\) deferred" \
-  "folder-sync-linux-delete-recovered-$serial" 40
-archphene_adb_run shell test ! -e "$remote/linux-new.txt" ||
-  archphene_die "Linux deletion was not committed to Android"
-archphene_adb_run shell run-as "$package" test ! -e files/project-sync-journal-v1 ||
-  archphene_die "pre-commit synchronization journal remains"
-archphene_note "  Pre-commit process death restored then safely recommitted Android deletion"
+  "folder-sync-push-precommit-recovered-$serial" 40
+[[ "$(archphene_adb_run shell cat "$remote/main.txt" | tr -d '\r')" == \
+  "linux-push-recovery-$token" ]] ||
+  archphene_die "pre-publication file replacement recovery lost the Linux update"
+archphene_note "  Pre-publication process death restored and safely retried file replacement"
 
-archphene_adb_run shell run-as "$package" rm "$local_project/src/nested.txt"
-set_sync_hold committed
+archphene_adb_run shell run-as "$package" sh -c \
+  "'printf linux-published-$token > $local_project/main.txt'"
+set_sync_hold published
 archphene_adb_run logcat -c
 sync_button
 archphene_wait_log \
-  'Project sync test holding phase=committed' \
+  'Project sync test holding phase=published' \
   25 'ArchpheneRuntime:I AndroidRuntime:E *:S' >/dev/null
 archphene_adb_run shell am force-stop "$package"
 restart_manager_files
 sync_button
 archphene_wait_ui_unwrapped \
   "Synced 0 change\\(s\\): 0 pulled, 0 pushed, 0 conflict\\(s\\), 0 deletion\\(s\\) deferred" \
-  "folder-sync-postcommit-recovered-$serial" 40
-archphene_adb_run shell test ! -e "$remote/src/nested.txt" ||
-  archphene_die "committed Android deletion backup was restored"
+  "folder-sync-push-published-recovered-$serial" 40
+[[ "$(archphene_adb_run shell cat "$remote/main.txt" | tr -d '\r')" == \
+  "linux-published-$token" ]] ||
+  archphene_die "published Android file replacement was rolled back"
 archphene_adb_run shell run-as "$package" test ! -e files/project-sync-journal-v1 ||
-  archphene_die "post-commit synchronization journal remains"
-archphene_note "  Post-commit process death finalized backup deletion without resurrection"
+  archphene_die "published replacement synchronization journal remains"
+archphene_note "  Published replacement survived process death and its backup was finalized"
 
 archphene_adb_run shell sh -c "'printf android-conflict-$token > $remote/main.txt'"
 archphene_adb_run shell run-as "$package" sh -c \

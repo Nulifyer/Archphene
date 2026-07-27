@@ -139,6 +139,7 @@ internal object NativeRuntime {
         outputBuffer: ByteBuffer,
     ): Int
     external fun nativeFingerprintProjectSyncFile(
+        handle: Long,
         sourceDescriptor: Int,
         expectedBytes: Long,
         outputBuffer: ByteBuffer,
@@ -183,6 +184,7 @@ internal object NativeRuntime {
         outputBuffer: ByteBuffer,
     ): Int
     external fun nativeAbortProjectSync(handle: Long): Boolean
+    external fun nativeCancelProjectSync(handle: Long): Boolean
     external fun nativeCreate(): Long
     external fun nativeDestroy(handle: Long): Boolean
     external fun nativeTransition(handle: Long, lifecycle: Int): Int

@@ -28,9 +28,10 @@ use archphene_storage::{
     MAX_MIRROR_ENTRIES, MirrorCancellation, MirrorImport, MirrorImportReport, StorageError,
     SyncFingerprint, SyncManifest, SyncManifestEntry, SyncPlan, SyncPlanEntry, SyncPlanSummary,
     create_linux_project_directory, create_sync_plan, delete_linux_project_entry,
-    fingerprint_file_from_fd, load_sync_manifest, open_linux_project_file, persist_sync_manifest,
-    preserve_android_conflict_from_fd, pull_linux_project_file_from_fd, reconcile_sync_baseline,
-    snapshot_linux_project,
+    fingerprint_file_from_fd_cancellable, load_sync_manifest, open_linux_project_file_cancellable,
+    persist_sync_manifest, preserve_android_conflict_from_fd_cancellable,
+    pull_linux_project_file_from_fd_cancellable, reconcile_sync_baseline,
+    snapshot_linux_project_cancellable,
 };
 
 pub const STATUS_ARCH_ROOT_READY: u32 = 1 << 0;
@@ -66,6 +67,7 @@ pub struct RuntimeHost {
 }
 
 struct ProjectSyncSession {
+    cancellation: MirrorCancellation,
     baseline: SyncManifest,
     linux: SyncManifest,
     android_entries: Vec<SyncManifestEntry>,
@@ -366,10 +368,15 @@ impl RuntimeHost {
             })
     }
 
-    pub fn begin_project_sync(&mut self, mapping_id: [u8; 16]) -> Result<(), StorageError> {
+    pub fn begin_project_sync(
+        &mut self,
+        mapping_id: [u8; 16],
+        cancellation: MirrorCancellation,
+    ) -> Result<(), StorageError> {
         if self.project_sync.is_some() {
             return Err(StorageError::MirrorBusy);
         }
+        cancellation.check()?;
         let arch_root = self
             .arch_root
             .as_ref()
@@ -377,9 +384,10 @@ impl RuntimeHost {
             .path();
         let baseline =
             load_sync_manifest(arch_root, mapping_id)?.ok_or(StorageError::InvalidManifest)?;
-        let linux = snapshot_linux_project(arch_root, mapping_id)?;
+        let linux = snapshot_linux_project_cancellable(arch_root, mapping_id, &cancellation)?;
         let capacity = baseline.entries().len().max(linux.entries().len()).max(256);
         self.project_sync = Some(ProjectSyncSession {
+            cancellation,
             baseline,
             linux,
             android_entries: Vec::with_capacity(capacity),
@@ -394,6 +402,7 @@ impl RuntimeHost {
         relative_path: &str,
     ) -> Result<(), StorageError> {
         let session = self.project_sync.as_mut().ok_or(StorageError::MirrorBusy)?;
+        session.cancellation.check()?;
         if session.android.is_some() || session.android_entries.len() >= MAX_MIRROR_ENTRIES as usize
         {
             return Err(StorageError::MirrorTooLarge);
@@ -411,9 +420,29 @@ impl RuntimeHost {
         source_descriptor: RawFd,
         expected_bytes: Option<u64>,
     ) -> Result<SyncFingerprint, StorageError> {
-        let fingerprint = fingerprint_file_from_fd(source_descriptor, expected_bytes)?;
+        let cancellation = self
+            .project_sync
+            .as_ref()
+            .ok_or(StorageError::MirrorBusy)?
+            .cancellation
+            .clone();
+        let fingerprint =
+            fingerprint_file_from_fd_cancellable(source_descriptor, expected_bytes, &cancellation)?;
         self.add_project_sync_android_fingerprint(relative_path, fingerprint)?;
         Ok(fingerprint)
+    }
+
+    pub fn fingerprint_project_sync_file(
+        &self,
+        source_descriptor: RawFd,
+        expected_bytes: Option<u64>,
+    ) -> Result<SyncFingerprint, StorageError> {
+        let session = self.project_sync.as_ref().ok_or(StorageError::MirrorBusy)?;
+        fingerprint_file_from_fd_cancellable(
+            source_descriptor,
+            expected_bytes,
+            &session.cancellation,
+        )
     }
 
     pub fn add_project_sync_android_fingerprint(
@@ -422,6 +451,7 @@ impl RuntimeHost {
         fingerprint: SyncFingerprint,
     ) -> Result<(), StorageError> {
         let session = self.project_sync.as_mut().ok_or(StorageError::MirrorBusy)?;
+        session.cancellation.check()?;
         if session.android.is_some() || session.android_entries.len() >= MAX_MIRROR_ENTRIES as usize
         {
             return Err(StorageError::MirrorTooLarge);
@@ -435,6 +465,7 @@ impl RuntimeHost {
 
     pub fn finish_project_sync_scan(&mut self) -> Result<SyncPlanSummary, StorageError> {
         let session = self.project_sync.as_mut().ok_or(StorageError::MirrorBusy)?;
+        session.cancellation.check()?;
         if session.android.is_some() {
             return Err(StorageError::MirrorBusy);
         }
@@ -474,16 +505,18 @@ impl RuntimeHost {
         expected: SyncFingerprint,
     ) -> Result<File, StorageError> {
         let session = self.project_sync.as_ref().ok_or(StorageError::MirrorBusy)?;
+        session.cancellation.check()?;
         let arch_root = self
             .arch_root
             .as_ref()
             .ok_or(StorageError::InvalidRoot)?
             .path();
-        open_linux_project_file(
+        open_linux_project_file_cancellable(
             arch_root,
             session.baseline.mapping_id(),
             relative_path,
             expected,
+            &session.cancellation,
         )
     }
 
@@ -495,18 +528,20 @@ impl RuntimeHost {
         expected_linux: Option<SyncFingerprint>,
     ) -> Result<(), StorageError> {
         let session = self.project_sync.as_ref().ok_or(StorageError::MirrorBusy)?;
+        session.cancellation.check()?;
         let arch_root = self
             .arch_root
             .as_ref()
             .ok_or(StorageError::InvalidRoot)?
             .path();
-        pull_linux_project_file_from_fd(
+        pull_linux_project_file_from_fd_cancellable(
             arch_root,
             session.baseline.mapping_id(),
             relative_path,
             source_descriptor,
             expected_android,
             expected_linux,
+            &session.cancellation,
         )
     }
 
@@ -515,6 +550,7 @@ impl RuntimeHost {
         relative_path: &str,
     ) -> Result<(), StorageError> {
         let session = self.project_sync.as_ref().ok_or(StorageError::MirrorBusy)?;
+        session.cancellation.check()?;
         let arch_root = self
             .arch_root
             .as_ref()
@@ -529,6 +565,7 @@ impl RuntimeHost {
         expected: SyncFingerprint,
     ) -> Result<(), StorageError> {
         let session = self.project_sync.as_ref().ok_or(StorageError::MirrorBusy)?;
+        session.cancellation.check()?;
         let arch_root = self
             .arch_root
             .as_ref()
@@ -549,28 +586,35 @@ impl RuntimeHost {
         expected_android: SyncFingerprint,
     ) -> Result<String, StorageError> {
         let session = self.project_sync.as_ref().ok_or(StorageError::MirrorBusy)?;
+        session.cancellation.check()?;
         let arch_root = self
             .arch_root
             .as_ref()
             .ok_or(StorageError::InvalidRoot)?
             .path();
-        preserve_android_conflict_from_fd(
+        preserve_android_conflict_from_fd_cancellable(
             arch_root,
             session.baseline.mapping_id(),
             relative_path,
             source_descriptor,
             expected_android,
+            &session.cancellation,
         )
     }
 
     pub fn begin_project_sync_commit_scan(&mut self) -> Result<(), StorageError> {
         let session = self.project_sync.as_mut().ok_or(StorageError::MirrorBusy)?;
+        session.cancellation.check()?;
         let arch_root = self
             .arch_root
             .as_ref()
             .ok_or(StorageError::InvalidRoot)?
             .path();
-        session.linux = snapshot_linux_project(arch_root, session.baseline.mapping_id())?;
+        session.linux = snapshot_linux_project_cancellable(
+            arch_root,
+            session.baseline.mapping_id(),
+            &session.cancellation,
+        )?;
         session.android_entries.clear();
         session.android = None;
         session.plan = None;
@@ -579,6 +623,7 @@ impl RuntimeHost {
 
     pub fn commit_project_sync(&mut self) -> Result<(), StorageError> {
         let session = self.project_sync.as_mut().ok_or(StorageError::MirrorBusy)?;
+        session.cancellation.check()?;
         let android = SyncManifest::new(
             session.baseline.mapping_id(),
             session.baseline.project_name().to_owned(),
@@ -596,7 +641,17 @@ impl RuntimeHost {
     }
 
     pub fn abort_project_sync(&mut self) -> bool {
-        self.project_sync.take().is_some()
+        self.project_sync.take().is_some_and(|session| {
+            session.cancellation.cancel();
+            true
+        })
+    }
+
+    pub fn cancel_project_sync(&self) -> bool {
+        self.project_sync.as_ref().is_some_and(|session| {
+            session.cancellation.cancel();
+            true
+        })
     }
 
     pub fn prepare_package_runtime(
