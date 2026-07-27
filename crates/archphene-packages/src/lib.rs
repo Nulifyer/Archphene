@@ -52,6 +52,10 @@ const PACKAGE_MUTATION_INTENT_TEMP_FILE: &str = "run/package-mutation-v1.tmp";
 const PACKAGE_MUTATION_INTENT_HEADER: &str = "org.archphene.package-mutation.v1";
 const PACKAGE_MUTATION_INTENT_LIMIT: u64 = 384 * 1024;
 const PACKAGE_DATABASE_REPAIR_DIRECTORY: &str = "run/package-database-repair-v1";
+const PACKAGE_REMOVAL_REPAIR_DIRECTORY: &str = "run/package-removal-repair-v1";
+const PACKAGE_REMOVAL_REPAIR_TEMP_DIRECTORY: &str = "run/package-removal-repair-v1.tmp";
+const PACKAGE_REMOVAL_LOCAL_TEMP_DIRECTORY: &str =
+    "var/lib/pacman/local/.archphene-removal-repair.tmp";
 const PACMAN_CONFIG_FILE: &str = "etc/pacman.conf";
 const PACMAN_CONFIG_TEMP_FILE: &str = "etc/pacman.conf.tmp";
 const AUR_PACMAN_CONFIG_FILE: &str = "etc/pacman-aur.conf";
@@ -808,6 +812,7 @@ impl PackageRuntime {
             qt_plugin_root,
         };
         if runtime.read_pending_mutation()?.is_none() {
+            runtime.clear_orphaned_removal_repair()?;
             runtime.recover_pending_install_reasons()?;
         }
         Ok(runtime)
@@ -2115,7 +2120,13 @@ impl PackageRuntime {
             return Err(PackageRuntimeError::InvalidResolution);
         }
         let installed_version = self.installed_version(package)?;
-        self.publish_remove_mutation_intent(package, installed_version.as_str()?)?;
+        let removal_database_sha256 =
+            self.prepare_removal_repair(package, installed_version.as_str()?)?;
+        self.publish_remove_mutation_intent(
+            package,
+            installed_version.as_str()?,
+            Some(removal_database_sha256),
+        )?;
         let result = self.run_with_timeout(
             PackageTool::Pacman,
             &[
@@ -2141,6 +2152,7 @@ impl PackageRuntime {
         if !self.installed_version(package)?.as_bytes().is_empty() {
             return Err(PackageRuntimeError::InvalidResolution);
         }
+        self.clear_removal_repair()?;
         self.clear_pending_mutation()?;
         Ok(empty_tool_output())
     }
@@ -2166,6 +2178,7 @@ impl PackageRuntime {
             PackageMutationIntent::Remove {
                 package: target,
                 version,
+                ..
             } if target == package => {
                 output.push(b"remove\t")?;
                 output.push(version.as_bytes())?;
@@ -2215,18 +2228,45 @@ impl PackageRuntime {
             PackageMutationIntent::Remove {
                 package: target,
                 version,
+                database_sha256,
             } => {
                 if target != package {
                     return Err(PackageRuntimeError::Busy);
                 }
+                if let Some(expected_sha256) = database_sha256.as_deref() {
+                    if self.removal_repair_exists()? {
+                        self.restore_removal_repair(&target, &version, expected_sha256)?;
+                    } else {
+                        let installed = self.installed_version(&target)?;
+                        if installed.as_bytes().is_empty() {
+                            self.validate_local_database()?;
+                            self.clear_removal_repair()?;
+                            self.clear_pending_mutation()?;
+                            return Ok(empty_tool_output());
+                        }
+                        if installed.as_str()? != version {
+                            return Err(PackageRuntimeError::InvalidResolution);
+                        }
+                        let actual_sha256 = self.prepare_removal_repair(&target, &version)?;
+                        if actual_sha256 != expected_sha256 {
+                            return Err(PackageRuntimeError::InvalidResolution);
+                        }
+                    }
+                }
                 let installed = self.installed_version(&target)?;
                 if installed.as_bytes().is_empty() {
                     self.validate_local_database()?;
+                    self.clear_removal_repair()?;
                     self.clear_pending_mutation()?;
                     return Ok(empty_tool_output());
                 }
                 if installed.as_str()? != version {
                     return Err(PackageRuntimeError::InvalidResolution);
+                }
+                if database_sha256.is_none() {
+                    let sha256 = self.prepare_removal_repair(&target, &version)?;
+                    self.clear_pending_mutation()?;
+                    self.publish_remove_mutation_intent(&target, &version, Some(sha256))?;
                 }
                 self.remove(&target)
             }
@@ -2254,10 +2294,12 @@ impl PackageRuntime {
         &self,
         package: &str,
         version: &str,
+        database_sha256: Option<String>,
     ) -> Result<(), PackageRuntimeError> {
         self.publish_mutation_intent(&PackageMutationIntent::Remove {
             package: package.to_owned(),
             version: version.to_owned(),
+            database_sha256,
         })
     }
 
@@ -2603,6 +2645,98 @@ impl PackageRuntime {
         )?
         .sync_all()?;
         Ok(())
+    }
+
+    fn prepare_removal_repair(
+        &self,
+        package: &str,
+        version: &str,
+    ) -> Result<String, PackageRuntimeError> {
+        let snapshot = self.arch_root.join(PACKAGE_REMOVAL_REPAIR_DIRECTORY);
+        if self.removal_repair_exists()? {
+            return removal_repair_sha256(&snapshot, package, version);
+        }
+        let temporary = self.arch_root.join(PACKAGE_REMOVAL_REPAIR_TEMP_DIRECTORY);
+        remove_database_repair_entry_if_present(&temporary)?;
+        let source = self
+            .arch_root
+            .join("var/lib/pacman/local")
+            .join(format!("{package}-{version}"));
+        if !local_database_entry_matches(&source, package, version)? {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        copy_database_repair_entry(&source, &temporary)?;
+        let digest = removal_repair_sha256(&temporary, package, version)?;
+        fs::rename(&temporary, &snapshot)?;
+        File::open(snapshot.parent().ok_or(PackageRuntimeError::InvalidPath)?)?.sync_all()?;
+        Ok(digest)
+    }
+
+    fn restore_removal_repair(
+        &self,
+        package: &str,
+        version: &str,
+        expected_sha256: &str,
+    ) -> Result<(), PackageRuntimeError> {
+        if !valid_sha256_hex(expected_sha256) {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        let snapshot = self.arch_root.join(PACKAGE_REMOVAL_REPAIR_DIRECTORY);
+        let actual_sha256 = removal_repair_sha256(&snapshot, package, version)?;
+        if actual_sha256 != expected_sha256 {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        let local = self.arch_root.join("var/lib/pacman/local");
+        let destination = local.join(format!("{package}-{version}"));
+        if local_database_entry_matches(&destination, package, version)? {
+            return Ok(());
+        }
+        remove_database_repair_entry_if_present(&destination)?;
+        let temporary = self.arch_root.join(PACKAGE_REMOVAL_LOCAL_TEMP_DIRECTORY);
+        remove_database_repair_entry_if_present(&temporary)?;
+        copy_database_repair_entry(&snapshot, &temporary)?;
+        if removal_repair_sha256(&temporary, package, version)? != expected_sha256 {
+            return Err(PackageRuntimeError::InvalidResolution);
+        }
+        fs::rename(&temporary, &destination)?;
+        File::open(&local)?.sync_all()?;
+        Ok(())
+    }
+
+    fn removal_repair_exists(&self) -> Result<bool, PackageRuntimeError> {
+        let snapshot = self.arch_root.join(PACKAGE_REMOVAL_REPAIR_DIRECTORY);
+        match fs::symlink_metadata(&snapshot) {
+            Ok(_) => {
+                validate_database_repair_entry(&snapshot)?;
+                Ok(true)
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(PackageRuntimeError::Io(error)),
+        }
+    }
+
+    fn clear_removal_repair(&self) -> Result<(), PackageRuntimeError> {
+        let snapshot = self.arch_root.join(PACKAGE_REMOVAL_REPAIR_DIRECTORY);
+        let temporary = self.arch_root.join(PACKAGE_REMOVAL_REPAIR_TEMP_DIRECTORY);
+        remove_database_repair_entry_if_present(&temporary)?;
+        match fs::symlink_metadata(&snapshot) {
+            Ok(_) => {
+                validate_database_repair_entry(&snapshot)?;
+                fs::rename(&snapshot, &temporary)?;
+                File::open(snapshot.parent().ok_or(PackageRuntimeError::InvalidPath)?)?
+                    .sync_all()?;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(PackageRuntimeError::Io(error)),
+        }
+        remove_database_repair_entry_if_present(&temporary)?;
+        remove_database_repair_entry_if_present(
+            &self.arch_root.join(PACKAGE_REMOVAL_LOCAL_TEMP_DIRECTORY),
+        )
+    }
+
+    fn clear_orphaned_removal_repair(&self) -> Result<(), PackageRuntimeError> {
+        self.clear_removal_repair()
     }
 
     fn recover_database_lock(&self) -> Result<(), PackageRuntimeError> {
@@ -4414,6 +4548,119 @@ fn remove_database_repair_entry(path: &Path) -> Result<(), PackageRuntimeError> 
     Ok(())
 }
 
+fn copy_database_repair_entry(
+    source: &Path,
+    destination: &Path,
+) -> Result<(), PackageRuntimeError> {
+    validate_database_repair_entry(source)?;
+    match fs::symlink_metadata(destination) {
+        Ok(_) => return Err(PackageRuntimeError::Busy),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(PackageRuntimeError::Io(error)),
+    }
+    fs::create_dir(destination)?;
+    fs::set_permissions(destination, fs::Permissions::from_mode(0o700))?;
+    let result = (|| {
+        for name in ["changelog", "desc", "files", "install", "mtree"] {
+            let source_file = source.join(name);
+            let metadata = match fs::symlink_metadata(&source_file) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(PackageRuntimeError::Io(error)),
+            };
+            if metadata.file_type().is_symlink()
+                || !metadata.is_file()
+                || metadata.len() > LOCAL_DATABASE_PACKAGE_FILE_LIMIT
+            {
+                return Err(PackageRuntimeError::UnsafeEntry(source_file));
+            }
+            let mut input = OpenOptions::new()
+                .read(true)
+                .custom_flags(O_NOFOLLOW | O_CLOEXEC)
+                .open(&source_file)?;
+            if input.metadata()?.len() != metadata.len() {
+                return Err(PackageRuntimeError::SizeMismatch);
+            }
+            let destination_file = destination.join(name);
+            let mut output = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .mode(0o600)
+                .custom_flags(O_NOFOLLOW | O_CLOEXEC)
+                .open(&destination_file)?;
+            let copied = io::copy(&mut input, &mut output)?;
+            if copied != metadata.len() {
+                return Err(PackageRuntimeError::SizeMismatch);
+            }
+            output.sync_all()?;
+        }
+        File::open(destination)?.sync_all()?;
+        validate_database_repair_entry(destination)
+    })();
+    if result.is_err() {
+        let _ = remove_database_repair_entry_if_present(destination);
+    }
+    result
+}
+
+fn removal_repair_sha256(
+    path: &Path,
+    expected_name: &str,
+    expected_version: &str,
+) -> Result<String, PackageRuntimeError> {
+    validate_database_repair_entry(path)?;
+    if !local_database_entry_matches(path, expected_name, expected_version)? {
+        return Err(PackageRuntimeError::InvalidResolution);
+    }
+    let mut digest = Sha256::new();
+    digest.update(b"org.archphene.package-removal-repair.v1\0");
+    let mut buffer = [0_u8; 64 * 1024];
+    for name in ["changelog", "desc", "files", "install", "mtree"] {
+        let file_path = path.join(name);
+        let metadata = match fs::symlink_metadata(&file_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(PackageRuntimeError::Io(error)),
+        };
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || metadata.len() > LOCAL_DATABASE_PACKAGE_FILE_LIMIT
+        {
+            return Err(PackageRuntimeError::UnsafeEntry(file_path));
+        }
+        digest.update((name.len() as u64).to_le_bytes());
+        digest.update(name.as_bytes());
+        digest.update(metadata.len().to_le_bytes());
+        let mut file = OpenOptions::new()
+            .read(true)
+            .custom_flags(O_NOFOLLOW | O_CLOEXEC)
+            .open(&file_path)?;
+        let mut remaining = metadata.len();
+        while remaining != 0 {
+            let limit = usize::try_from(remaining.min(buffer.len() as u64))
+                .map_err(|_| PackageRuntimeError::OutputLimit)?;
+            let read = file.read(&mut buffer[..limit])?;
+            if read == 0 {
+                return Err(PackageRuntimeError::SizeMismatch);
+            }
+            digest.update(&buffer[..read]);
+            remaining -= read as u64;
+        }
+        if file.read(&mut buffer[..1])? != 0 {
+            return Err(PackageRuntimeError::SizeMismatch);
+        }
+    }
+    let digest: [u8; 32] = digest.finalize().into();
+    Ok(hex_sha256(&digest))
+}
+
+fn valid_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn local_description_field<'a>(
     input: &'a str,
     field: &str,
@@ -4588,6 +4835,7 @@ enum PackageMutationIntent {
     Remove {
         package: String,
         version: String,
+        database_sha256: Option<String>,
     },
 }
 
@@ -4618,11 +4866,19 @@ fn serialize_package_mutation_intent(
                 content.push('\n');
             }
         }
-        PackageMutationIntent::Remove { package, version } => {
+        PackageMutationIntent::Remove {
+            package,
+            version,
+            database_sha256,
+        } => {
             content.push_str("remove\t");
             content.push_str(package);
             content.push('\t');
             content.push_str(version);
+            if let Some(database_sha256) = database_sha256 {
+                content.push('\t');
+                content.push_str(database_sha256);
+            }
             content.push('\n');
         }
     }
@@ -4698,6 +4954,7 @@ fn parse_package_mutation_intent(
         let version = fields
             .next()
             .ok_or(PackageRuntimeError::InvalidResolution)?;
+        let database_sha256 = fields.next();
         if fields.next().is_some()
             || !safe_logical_name(package)
             || version.is_empty()
@@ -4705,12 +4962,14 @@ fn parse_package_mutation_intent(
             || version
                 .bytes()
                 .any(|byte| byte.is_ascii_whitespace() || byte == 0)
+            || database_sha256.is_some_and(|value| !valid_sha256_hex(value))
         {
             return Err(PackageRuntimeError::InvalidResolution);
         }
         Ok(PackageMutationIntent::Remove {
             package: package.to_owned(),
             version: version.to_owned(),
+            database_sha256: database_sha256.map(str::to_owned),
         })
     } else {
         Err(PackageRuntimeError::InvalidResolution)
@@ -6121,6 +6380,96 @@ https://geo.mirror.pkgbuild.com/extra/os/x86_64/{filename}\t{}\n",
     }
 
     #[test]
+    fn removal_repair_restores_the_exact_bounded_local_database_record() {
+        let tree = TestTree::new();
+        let runtime = tree.package_runtime();
+        tree.local_package("foot-1.0-1", "foot", b"%FILES%\nusr/bin/foot\n");
+        let local = tree.root.join("var/lib/pacman/local/foot-1.0-1");
+        fs::write(local.join("mtree"), b"#mtree\n").expect("mtree");
+        let digest = runtime
+            .prepare_removal_repair("foot", "1.0-1")
+            .expect("prepare removal repair");
+        assert!(valid_sha256_hex(&digest));
+        let snapshot = tree.root.join(PACKAGE_REMOVAL_REPAIR_DIRECTORY);
+        assert_eq!(
+            fs::metadata(&snapshot)
+                .expect("snapshot metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700,
+        );
+        assert_eq!(
+            fs::metadata(snapshot.join("desc"))
+                .expect("description metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+        );
+
+        fs::remove_file(local.join("desc")).expect("damage local record");
+        runtime
+            .restore_removal_repair("foot", "1.0-1", &digest)
+            .expect("restore local record");
+        assert!(
+            local_database_entry_matches(&local, "foot", "1.0-1")
+                .expect("validate restored record")
+        );
+        assert_eq!(
+            fs::read(local.join("files")).expect("restored file list"),
+            b"%FILES%\nusr/bin/foot\n",
+        );
+        assert_eq!(
+            fs::read(local.join("mtree")).expect("restored mtree"),
+            b"#mtree\n",
+        );
+
+        runtime
+            .clear_removal_repair()
+            .expect("clear removal repair");
+        assert!(!snapshot.exists());
+    }
+
+    #[test]
+    fn removal_repair_rejects_tampering_and_cleans_only_bounded_orphans() {
+        let tree = TestTree::new();
+        let runtime = tree.package_runtime();
+        tree.local_package("foot-1.0-1", "foot", b"%FILES%\nusr/bin/foot\n");
+        let digest = runtime
+            .prepare_removal_repair("foot", "1.0-1")
+            .expect("prepare removal repair");
+        let snapshot = tree.root.join(PACKAGE_REMOVAL_REPAIR_DIRECTORY);
+        fs::write(snapshot.join("files"), b"%FILES%\nusr/bin/other\n").expect("tamper snapshot");
+        assert!(matches!(
+            runtime.restore_removal_repair("foot", "1.0-1", &digest),
+            Err(PackageRuntimeError::InvalidResolution)
+        ));
+
+        fs::write(snapshot.join("files"), b"%FILES%\nusr/bin/foot\n")
+            .expect("restore snapshot fixture");
+        let cleanup = tree.root.join(PACKAGE_REMOVAL_REPAIR_TEMP_DIRECTORY);
+        fs::rename(&snapshot, &cleanup).expect("publish cleanup generation");
+        fs::remove_file(cleanup.join("desc")).expect("interrupt cleanup");
+        runtime
+            .clear_orphaned_removal_repair()
+            .expect("clear bounded interrupted cleanup");
+        assert!(!snapshot.exists());
+        assert!(!cleanup.exists());
+
+        fs::create_dir(&snapshot).expect("unsafe snapshot");
+        fs::write(snapshot.join("unexpected"), b"do not remove").expect("unsafe content");
+        assert!(matches!(
+            runtime.clear_orphaned_removal_repair(),
+            Err(PackageRuntimeError::UnsafeEntry(path)) if path == snapshot.join("unexpected")
+        ));
+        assert_eq!(
+            fs::read(snapshot.join("unexpected")).expect("unsafe content retained"),
+            b"do not remove",
+        );
+    }
+
+    #[test]
     fn repair_preserves_explicit_reasons_from_the_original_intent() {
         let tree = TestTree::new();
         let runtime = tree.package_runtime();
@@ -6168,6 +6517,7 @@ https://geo.mirror.pkgbuild.com/extra/os/x86_64/btop-1.4.7-1-x86_64.pkg.tar.zst\
         let removal = PackageMutationIntent::Remove {
             package: "btop".to_owned(),
             version: "1.4.7-1".to_owned(),
+            database_sha256: Some("a".repeat(64)),
         };
         let encoded = serialize_package_mutation_intent(&removal, RepositoryArchitecture::X86_64)
             .expect("serialize removal");
@@ -6176,11 +6526,24 @@ https://geo.mirror.pkgbuild.com/extra/os/x86_64/btop-1.4.7-1-x86_64.pkg.tar.zst\
                 .expect("parse removal"),
             removal,
         );
+        assert_eq!(
+            parse_package_mutation_intent(
+                "org.archphene.package-mutation.v1\nremove\tbtop\t1.4.7-1\n",
+                RepositoryArchitecture::X86_64,
+            )
+            .expect("parse legacy removal"),
+            PackageMutationIntent::Remove {
+                package: "btop".to_owned(),
+                version: "1.4.7-1".to_owned(),
+                database_sha256: None,
+            },
+        );
 
         for invalid in [
             "",
             "org.archphene.package-mutation.v1\nremove\tbtop\t1.4.7-1",
             "org.archphene.package-mutation.v1\nremove\t../btop\t1.4.7-1\n",
+            "org.archphene.package-mutation.v1\nremove\tbtop\t1.4.7-1\txyz\n",
             "org.archphene.package-mutation.v1\ninstall\tbtop\narchive\tbad\n",
             "org.archphene.package-mutation.v1\nremove\tbtop\t1.4.7-1\nextra\n",
         ] {

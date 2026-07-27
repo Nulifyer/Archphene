@@ -667,17 +667,22 @@ Official package mutation recovery is now explicit and forward-only. Rust
 atomically publishes a bounded mode-0600 intent immediately before pacman
 mutation. Install/update intents retain the exact signed resolution and
 explicit targets; removal intents retain the exact installed package/version
-baseline. Startup validates but does not silently execute the intent, leaves
+plus the SHA-256 of a private atomic copy of pacman's bounded local ownership
+record. Startup validates but does not silently execute the intent, leaves
 its verified package inputs unavailable to cache cleanup, and distinguishes an
 interrupted mutation from work that was safe to retry. The manager exposes one
 Repair action, removes a stale lock only inside that explicit path, re-verifies
 the retained transaction, validates pacman's local database, proves the final
-state, and only then clears the intent. A deterministic same-UID `SIGKILL` at
-the committed `strace` removal boundary passes on the x86_64 emulator and
-AArch64 Samsung: both show the failed mutation and Repair action in full-device
-screenshots, complete the removal, clear the intent, and restore `strace`
-through the normal signed package flow. A second exact-ABI gate leaves pacman's
-database at the current Foot version while removing its installed executable.
+state, and only then clears the intent. A deterministic same-UID `SIGKILL`
+gate deletes `strace`'s live database description while its installed files
+remain. On the x86_64 emulator and AArch64 Samsung, Repair verifies the
+retained record digest, atomically reconstructs pacman's ownership metadata,
+completes normal removal, clears every private temporary/snapshot/intent path,
+and restores `strace` as explicit through the normal signed package flow.
+Unknown snapshot entries and digest changes fail closed; orphaned bounded
+snapshots are cleaned only when no mutation exists. A second exact-ABI gate
+leaves pacman's database at the current Foot version while removing its
+installed executable.
 Repair deliberately omits pacman's normal `--needed` optimization, forcibly
 reinstalls the complete retained signed closure, restores the executable,
 preserves the exact version and explicit install reason, and clears the intent,
@@ -696,8 +701,8 @@ version/reason, database validation, quarantine cleanup, transaction cleanup,
 launcher inventory, and full-device presentation pass on the emulator and
 Samsung. The same gate also removes both `base` and Foot local descriptions in
 one retained transaction; batched database reconstruction and the complete
-postconditions pass on both devices. Removal-side database injection, exact
-rollback to older archives, and whole-operation AUR recovery remain open.
+postconditions pass on both devices. Exact rollback to older archives and
+whole-operation AUR recovery remain open.
 
 The generic compatibility layer maps Linux root ownership to the Android app
 UID, copies when SELinux rejects hard links, avoids Android app seccomp's
@@ -705,9 +710,9 @@ blocked `fchmodat2`, and maps generic root-relative mutation calls without
 package-specific changes. The current path validates pacman's local database
 and proves the requested package and version. A real AArch64 older-to-newer
 upgrade now passes; the x86_64 replay and replacement coverage remain open.
-Scriptlets/hooks remain disabled, and replacement, removal-side
-partial-database injection, exact rollback, whole-operation AUR recovery,
-orphan cleanup, and low-storage behavior remain open.
+Scriptlets/hooks remain disabled. Replacement handling, exact rollback,
+whole-operation AUR recovery, dependency-orphan cleanup, and low-storage
+recovery remain open.
 
 Package operations are now user-cancellable while queued, resolving,
 downloading, or verifying. The Activity enables a visible Cancel action

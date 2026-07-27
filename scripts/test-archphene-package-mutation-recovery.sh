@@ -24,15 +24,47 @@ activity="$package/org.archphene.app.MainActivity"
 receiver="$package/org.archphene.app.PackagePhaseTestReceiver"
 action=org.archphene.app.debug.action.START_INTERRUPTED_PACKAGE_REMOVAL
 target=strace
+local_entry=
 intent=files/arch-root/run/package-mutation-v1
+removal_repair=files/arch-root/run/package-removal-repair-v1
+removal_repair_temp=files/arch-root/run/package-removal-repair-v1.tmp
+local_repair_temp=files/arch-root/var/lib/pacman/local/.archphene-removal-repair.tmp
+target_file=files/arch-root/usr/bin/strace
 output_dir="$ARCHPHENE_ROOT/tooling/build/package-mutation-recovery"
 mkdir -p "$output_dir"
+digest_root="$(mktemp -d)"
 
 cleanup() {
   archphene_adb_run shell am force-stop "$package" >/dev/null 2>&1 || true
+  if [[ -n "$local_entry" ]] &&
+      archphene_adb_run shell run-as "$package" test -e "$target_file" 2>/dev/null &&
+      ! archphene_adb_run shell run-as "$package" test -f "$local_entry/desc" 2>/dev/null &&
+      archphene_adb_run shell run-as "$package" test -f "$removal_repair/desc" 2>/dev/null; then
+    archphene_adb_run shell run-as "$package" mkdir -p "$local_entry" \
+      >/dev/null 2>&1 || true
+    for database_file in changelog desc files install mtree; do
+      if archphene_adb_run shell run-as "$package" \
+        test -f "$removal_repair/$database_file" 2>/dev/null; then
+        archphene_adb_run shell run-as "$package" cp -p \
+          "$removal_repair/$database_file" "$local_entry/$database_file" \
+          >/dev/null 2>&1 || true
+      fi
+    done
+    archphene_adb_run shell run-as "$package" rm -f "$intent" >/dev/null 2>&1 || true
+    archphene_adb_run shell run-as "$package" rm -f \
+      "$removal_repair/changelog" "$removal_repair/desc" \
+      "$removal_repair/files" "$removal_repair/install" \
+      "$removal_repair/mtree" >/dev/null 2>&1 || true
+    archphene_adb_run shell run-as "$package" rmdir "$removal_repair" \
+      >/dev/null 2>&1 || true
+  fi
+  rm -f -- "$digest_root/changelog" "$digest_root/desc" "$digest_root/files" \
+    "$digest_root/install" "$digest_root/mtree"
+  rmdir -- "$digest_root"
 }
 trap cleanup EXIT
 
+archphene_require_command python3
 archphene_adb_run install -r "$apk" >/dev/null
 archphene_adb_run shell am force-stop "$package" >/dev/null
 archphene_adb_run logcat -c
@@ -45,6 +77,30 @@ local_entry="$(
     tr -d '\r' |
     head -n1
 )"
+if [[ -z "$local_entry" ]]; then
+  archphene_open_manager_section Packages "package-recovery-bootstrap-$serial"
+  archphene_wait_ui 'text="Package name"' "package-recovery-bootstrap-field-$serial" 15
+  archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Package name"' 'package name'
+  archphene_adb_run shell input keycombination 113 29 >/dev/null
+  archphene_adb_run shell input keyevent KEYCODE_DEL >/dev/null
+  archphene_adb_run shell input text "$target" >/dev/null
+  archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null
+  archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="(?:DETAILS|Details)"' 'package details'
+  archphene_wait_ui \
+    'text="[^"]*/strace [^"]+.*Dependency closure: [1-9][0-9]* packages' \
+    "package-recovery-bootstrap-resolution-$serial" 30
+  archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="(?:INSTALL|Install)"' 'install strace'
+  archphene_wait_ui 'text="Install · Complete · 100%"' \
+    "package-recovery-bootstrap-complete-$serial" 120
+  archphene_wait_ui 'text="Installed strace [^"]+"' \
+    "package-recovery-bootstrap-result-$serial" 15
+  local_entry="$(
+    archphene_adb_run exec-out run-as "$package" find \
+      files/arch-root/var/lib/pacman/local -maxdepth 1 -type d -name "$target-*" |
+      tr -d '\r' |
+      head -n1
+  )"
+fi
 [[ -n "$local_entry" ]] || archphene_die "$target must be installed before the recovery gate"
 version="$(
   archphene_adb_run exec-out run-as "$package" cat "$local_entry/desc" |
@@ -53,6 +109,55 @@ version="$(
 )"
 [[ "$version" =~ ^[^[:space:]]{1,128}$ ]] ||
   archphene_die "could not read the installed $target version"
+archphene_adb_run shell run-as "$package" test ! -e "$intent" ||
+  archphene_die "an existing package mutation must be repaired first"
+archphene_adb_run shell run-as "$package" test ! -e "$removal_repair" ||
+  archphene_die "an existing removal repair snapshot must be repaired first"
+
+for database_file in changelog desc files install mtree; do
+  if archphene_adb_run shell run-as "$package" \
+    test -f "$local_entry/$database_file"; then
+    archphene_adb_run exec-out run-as "$package" \
+      cat "$local_entry/$database_file" >"$digest_root/$database_file"
+  fi
+done
+database_sha256="$(
+  python3 - "$digest_root" <<'PY'
+import hashlib
+import pathlib
+import struct
+import sys
+
+root = pathlib.Path(sys.argv[1])
+digest = hashlib.sha256()
+digest.update(b"org.archphene.package-removal-repair.v1\0")
+for name in ("changelog", "desc", "files", "install", "mtree"):
+    path = root / name
+    if not path.exists():
+        continue
+    data = path.read_bytes()
+    encoded = name.encode()
+    digest.update(struct.pack("<Q", len(encoded)))
+    digest.update(encoded)
+    digest.update(struct.pack("<Q", len(data)))
+    digest.update(data)
+print(digest.hexdigest())
+PY
+)"
+[[ "$database_sha256" =~ ^[0-9a-f]{64}$ ]] ||
+  archphene_die "could not hash the exact removal database baseline"
+
+archphene_adb_run shell run-as "$package" mkdir "$removal_repair"
+archphene_adb_run shell run-as "$package" chmod 700 "$removal_repair"
+for database_file in changelog desc files install mtree; do
+  if archphene_adb_run shell run-as "$package" \
+    test -f "$local_entry/$database_file"; then
+    archphene_adb_run shell run-as "$package" cp -p \
+      "$local_entry/$database_file" "$removal_repair/$database_file"
+    archphene_adb_run shell run-as "$package" chmod 600 \
+      "$removal_repair/$database_file"
+  fi
+done
 
 archphene_adb_run shell am broadcast \
   -f 0x20 \
@@ -68,9 +173,12 @@ archphene_wait_log \
   'Debug interrupted removal fixture entered mutation' 15 >/dev/null
 
 archphene_adb_run shell run-as "$package" sh -c \
-  "'umask 077; printf \"org.archphene.package-mutation.v1\\nremove\\t$target\\t$version\\n\" > $intent.tmp && mv $intent.tmp $intent'"
+  "'umask 077; printf \"org.archphene.package-mutation.v1\\nremove\\t$target\\t$version\\t$database_sha256\\n\" > $intent.tmp && mv $intent.tmp $intent'"
 [[ "$(archphene_adb_run shell run-as "$package" stat -c %a "$intent" | tr -d '\r')" == 600 ]] ||
   archphene_die "package mutation intent mode is not private"
+archphene_adb_run shell run-as "$package" rm "$local_entry/desc"
+archphene_adb_run shell run-as "$package" test ! -e "$local_entry/desc" ||
+  archphene_die "could not establish the partial removal database"
 
 android_pid="$(archphene_android_pid "$package")"
 archphene_adb_run shell run-as "$package" kill -9 "$android_pid" >/dev/null
@@ -106,7 +214,12 @@ archphene_adb_run exec-out screencap -p >"$output_dir/$serial-repaired.png"
 if archphene_adb_run shell run-as "$package" test -e "$intent"; then
   archphene_die "successful repair retained the mutation intent"
 fi
-if archphene_adb_run shell run-as "$package" test -e files/arch-root/usr/bin/strace; then
+if archphene_adb_run shell run-as "$package" test -e "$removal_repair" ||
+    archphene_adb_run shell run-as "$package" test -e "$removal_repair_temp" ||
+    archphene_adb_run shell run-as "$package" test -e "$local_repair_temp"; then
+  archphene_die "successful repair retained a removal database snapshot"
+fi
+if archphene_adb_run shell run-as "$package" test -e "$target_file"; then
   archphene_die "repaired removal retained the strace executable"
 fi
 if archphene_adb_run shell run-as "$package" test -e "$local_entry"; then
@@ -122,8 +235,21 @@ archphene_wait_ui 'text="Install · Complete · 100%"' \
   "package-recovery-reinstall-$serial" 120
 archphene_wait_ui 'text="Installed strace [^"]+"' \
   "package-recovery-reinstalled-$serial" 15
-archphene_adb_run shell run-as "$package" test -x files/arch-root/usr/bin/strace ||
+archphene_adb_run shell run-as "$package" test -x "$target_file" ||
   archphene_die "strace was not restored after the recovery gate"
+reinstalled_entry="$(
+  archphene_adb_run exec-out run-as "$package" find \
+    files/arch-root/var/lib/pacman/local -maxdepth 1 -type d -name "$target-*" |
+    tr -d '\r' |
+    head -n1
+)"
+[[ -n "$reinstalled_entry" ]] || archphene_die "strace database record was not restored"
+reason="$(
+  archphene_adb_run exec-out run-as "$package" cat "$reinstalled_entry/desc" |
+    tr -d '\r' |
+    awk '/^%REASON%$/{getline; print; exit}'
+)"
+[[ -z "$reason" ]] || archphene_die "reinstalled strace was not retained as explicit"
 
 fatal_log="$(
   archphene_adb_run logcat -d -v brief \
@@ -135,6 +261,6 @@ fatal_log="$(
 trap - EXIT
 cleanup
 archphene_note "Interrupted package mutation repair passed on $serial"
-archphene_note "  SIGKILL recovery retained an exact removal baseline and required Repair"
-archphene_note "  Repair removed strace, cleared the intent, and normal reinstall restored it"
+archphene_note "  SIGKILL recovery restored a checksummed partial pacman record before removal"
+archphene_note "  Repair removed strace, cleared private state, and explicit reinstall restored it"
 archphene_note "  Full-device screenshots: $output_dir/$serial-{interrupted,repaired}.png"
