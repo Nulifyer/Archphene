@@ -40,6 +40,7 @@
 #include <unistd.h>
 
 static bool supervised_process_group;
+static _Thread_local bool pending_pty_session;
 
 static bool process_has_terminal(void) {
     typedef int (*isatty_type)(int);
@@ -48,6 +49,34 @@ static bool process_has_terminal(void) {
             && (real_isatty(STDIN_FILENO) != 0
                 || real_isatty(STDOUT_FILENO) != 0
                 || real_isatty(STDERR_FILENO) != 0);
+}
+
+/*
+ * Terminal emulators call setsid() before moving their slave PTY onto the
+ * standard descriptors. Keep ordinary background children in the supervised
+ * GUI process group, but permit that narrow PTY-session transition.
+ */
+static bool process_has_pty_descriptor(void) {
+    typedef ssize_t (*readlink_type)(const char *, char *, size_t);
+    readlink_type real_readlink =
+            (readlink_type)dlsym(RTLD_NEXT, "readlink");
+    if (real_readlink == NULL) return false;
+    for (int descriptor = 0; descriptor < 256; descriptor++) {
+        char path[64];
+        char target[PATH_MAX];
+        int written = snprintf(path, sizeof(path),
+                "/proc/self/fd/%d", descriptor);
+        if (written <= 0 || (size_t)written >= sizeof(path)) return false;
+        ssize_t length =
+                real_readlink(path, target, sizeof(target) - 1);
+        if (length <= 0 || (size_t)length >= sizeof(target)) continue;
+        target[length] = '\0';
+        if (strncmp(target, "/dev/pts/", 9) == 0
+                || strcmp(target, "/dev/ptmx") == 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 /*
@@ -112,6 +141,20 @@ static int open_pty_peer(int *master_output, int *slave_output, char *name,
     *master_output = master;
     *slave_output = slave;
     return 0;
+}
+
+char *ptsname(int descriptor) {
+    typedef char *(*function_type)(int);
+    function_type real = (function_type)dlsym(RTLD_NEXT, "ptsname");
+    if (real == NULL) {
+        errno = ENOSYS;
+        return NULL;
+    }
+    char *name = real(descriptor);
+    if (name != NULL && strncmp(name, "/dev/pts/", 9) == 0) {
+        pending_pty_session = true;
+    }
+    return name;
 }
 
 int openpty(int *master, int *slave, char *name,
@@ -1240,7 +1283,13 @@ int getresgid(gid_t *real, gid_t *effective, gid_t *saved) {
 }
 
 pid_t setsid(void) {
-    if (supervised_process_group && !process_has_terminal()) return getsid(0);
+    bool preparing_terminal =
+            pending_pty_session || process_has_pty_descriptor();
+    pending_pty_session = false;
+    if (supervised_process_group && !process_has_terminal()
+            && !preparing_terminal) {
+        return getsid(0);
+    }
     typedef pid_t (*function_type)(void);
     function_type real = (function_type)dlsym(RTLD_NEXT, "setsid");
     if (real == NULL) {
@@ -1251,7 +1300,10 @@ pid_t setsid(void) {
 }
 
 int setpgid(pid_t process, pid_t group) {
-    if (supervised_process_group && !process_has_terminal()) return 0;
+    if (supervised_process_group && !process_has_terminal()
+            && !process_has_pty_descriptor()) {
+        return 0;
+    }
     typedef int (*function_type)(pid_t, pid_t);
     function_type real = (function_type)dlsym(RTLD_NEXT, "setpgid");
     if (real == NULL) {

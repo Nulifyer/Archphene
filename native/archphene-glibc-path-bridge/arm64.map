@@ -67,6 +67,7 @@ GLIBC_2.17 {
         opendir;
         posix_spawn;
         posix_spawnp;
+        ptsname;
         remove;
         realpath;
         rename;

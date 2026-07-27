@@ -410,7 +410,7 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [ ] Qt 6/KDE
   - [ ] GTK 3
   - [ ] GTK 4/libadwaita
-  - [ ] native Wayland/Foot
+  - [x] native Wayland/Foot — Samsung proves both the 150% explicit geometry workspace (288×587 logical output) and the restored automatic phone workspace (432×881), with full-device visual inspection and real shell input. The generic supervised-process bridge now recognizes Foot's `ptsname` → close-master → `setsid` → reopen-slave controlling-terminal sequence without releasing ordinary GUI descendants from manager supervision; exact host PTY regressions and the sealed AArch64 runtime pass.
   - [ ] SDL
   - [ ] Electron/Chromium
   - [ ] XWayland

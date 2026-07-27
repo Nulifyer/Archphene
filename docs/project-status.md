@@ -1512,6 +1512,23 @@ app-only frame. The complete Rust workspace passes 212 tests, including the
 large-resolution, raw-signature-status, empty-files-record, loader-path, JNI,
 compositor, terminal, storage, AUR snapshot, and warmed-allocation regressions.
 
+The current Rust/Kotlin manager now also exposes separate persisted automatic
+or bounded controls for Linux workspace geometry, toolkit text, and visible
+control size. A manager-owned launcher snapshots them at process start, so a
+running app remains stable and a relaunch applies the new policy. Physical
+Samsung validation covers Foot at an explicit 150% geometry setting
+(288×587 logical output) and the restored automatic phone setting (432×881),
+using full-device screenshots and real shell input.
+
+That gate exposed a generic terminal-emulator regression in manager process
+supervision: Foot obtains a PTY name, closes the master inherited by its child,
+then calls `setsid` before reopening the slave and claiming the controlling
+terminal. The glibc bridge now recognizes that bounded PTY-session transition
+while continuing to suppress unrelated daemon escape from the supervised GUI
+process tree. Host regressions reproduce Foot's exact ordering plus `openpty`
+and `forkpty`; the sealed AArch64 bridge starts stock Foot and Bash without
+permission errors, accepts a command, and remains manager-owned.
+
 ## Validated
 
 | Area | Evidence |
