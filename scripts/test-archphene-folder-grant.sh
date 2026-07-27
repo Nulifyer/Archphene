@@ -62,9 +62,8 @@ select_folder() {
     if archphene_regex_contains "$ui" "text=\"$folder\""; then
       archphene_tap_text "$ui" "$folder"
     else
-      archphene_regex_contains "$ui" 'text="Download"' ||
-        archphene_die "folder picker did not expose Download or $folder"
-      archphene_tap_text "$ui" "Download"
+      archphene_open_documents_download_root \
+        "$ui" "folder-grant-root-$phase-$serial"
       archphene_wait_ui_exact_text "$folder" "folder-grant-download-$phase-$serial" 15
       archphene_tap_text "$ARCHPHENE_UI" "$folder"
     fi

@@ -1581,6 +1581,16 @@ temporary cross-UID read grant without sending the fixture. A non-destructive
 wide-layout gate also verifies side-by-side file cards and equal 68 dp Import
 and Share actions.
 
+The follow-up current-source storage audit passes on both devices. Connect now
+supplies Android's primary-storage root as its initial URI, so DocumentsUI does
+not inherit Archphene Home/Shared from the preceding Share flow. The test
+helper also selects device storage explicitly rather than depending on picker
+history. Both targets pass connect, replace, restart, revoke, reconnect,
+read-only, disconnect, cancellation cleanup/retry, exact recursive snapshot,
+stale-stage recovery, atomic publication, retained local project, scoped logs,
+and full-device frames. Live pull/push progress and conflict presentation remain
+paired with the still-pending two-way synchronizer.
+
 ## Validated
 
 | Area | Evidence |

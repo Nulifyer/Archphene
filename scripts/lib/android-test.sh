@@ -131,3 +131,36 @@ archphene_open_manager_section() {
     "text=\"$section\"[^>]*class=\"android\\.widget\\.Button\"[^>]*selected=\"true\"" \
     "$name-selected" 15
 }
+
+archphene_open_documents_download_root() {
+  local ui="$1"
+  local name="${2:-documents-download-root}"
+  local root_label
+  archphene_regex_contains \
+    "$ui" 'content-desc="Show roots"' ||
+    archphene_die "DocumentsUI does not expose its roots drawer"
+  archphene_tap_ui_pattern \
+    "$ui" 'content-desc="Show roots"' "DocumentsUI roots"
+  archphene_wait_ui 'text="Open from"' "$name-drawer" 15
+  ui="$ARCHPHENE_UI"
+  root_label="$(
+    python3 -c '
+import sys
+import xml.etree.ElementTree as ET
+root = ET.fromstring(sys.stdin.read())
+for node in root.iter("node"):
+    if (
+        node.attrib.get("resource-id") == "android:id/title"
+        and node.attrib.get("text")
+        and node.attrib.get("text") != "Archphene Home"
+    ):
+        print(node.attrib["text"])
+        break
+' <<<"$ui"
+  )"
+  [[ -n "$root_label" ]] ||
+    archphene_die "DocumentsUI does not expose device storage"
+  archphene_tap_text "$ui" "$root_label"
+  archphene_wait_ui_exact_text "Download" "$name-download" 15
+  archphene_tap_text "$ARCHPHENE_UI" "Download"
+}

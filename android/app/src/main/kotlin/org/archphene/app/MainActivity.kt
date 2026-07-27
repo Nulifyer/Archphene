@@ -3100,6 +3100,13 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         selectManagerSection(MANAGER_SECTION_FILES)
         val picker =
             Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+                putExtra(
+                    DocumentsContract.EXTRA_INITIAL_URI,
+                    DocumentsContract.buildRootUri(
+                        EXTERNAL_STORAGE_DOCUMENTS_AUTHORITY,
+                        PRIMARY_STORAGE_ROOT_ID,
+                    ),
+                )
                 addFlags(
                     Intent.FLAG_GRANT_READ_URI_PERMISSION or
                         Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
@@ -3363,6 +3370,9 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         private const val MAX_FOLDER_URI_BYTES = 4 * 1024
         private const val MAX_DOCUMENT_URI_BYTES = 4 * 1024
         private const val DOCUMENTS_ROOT_ID = "archphene-home"
+        private const val EXTERNAL_STORAGE_DOCUMENTS_AUTHORITY =
+            "com.android.externalstorage.documents"
+        private const val PRIMARY_STORAGE_ROOT_ID = "primary"
         private const val LAUNCHER_STATUS_NEEDS_REVIEW = 10
         private const val DEBUG_SHOW_AUR_REVIEW_ACTION =
             "org.archphene.app.debug.action.SHOW_AUR_REVIEW"
