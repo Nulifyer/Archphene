@@ -218,6 +218,7 @@ See [Current project status](docs/project-status.md) for validated evidence and 
 - [Architecture](docs/architecture.md)
 - [Security model](docs/security.md)
 - [Storage and documents](docs/storage.md)
+- [Arch Linux compatibility on Android](docs/platform-compatibility.md)
 - [Development](docs/development.md)
 - [Roadmap](docs/roadmap.md)
 - [Publishing APK releases](docs/releases.md)

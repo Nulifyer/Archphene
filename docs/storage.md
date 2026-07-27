@@ -1,6 +1,6 @@
 # Linux Home and Android Storage Policy
 
-Updated: 2026-07-25
+Updated: 2026-07-27
 
 Goal: give every Linux package one conventional shared Arch environment while
 crossing into Android storage only through Android-controlled capabilities.
@@ -118,14 +118,12 @@ restart. The normal Connect/Change action remains available afterward.
 Semantic UI, picker-cancellation, no-repeat restart, scoped-log, and visually
 inspected full-device gates pass on the exact-ABI emulator and Samsung.
 
-The first import remains a snapshot rather than a live mount. Afterward the
-user invokes explicit Sync to reconcile changes in either direction; Linux
+The first import creates the private mirror rather than a live mount. Afterward
+the user invokes explicit Sync to reconcile changes in either direction; Linux
 applications continue to use the stable private POSIX path between syncs.
-Durable retry/conflict history remains before this becomes the completed
-folder bridge. Exact recursive content, empty files, nested dotfiles,
-stale-stage recovery, restart persistence, and grant removal pass on both
-exact-ABI targets; the new mutation and crash-recovery matrix currently passes
-on physical AArch64.
+Exact recursive content, empty files, nested dotfiles, stale-stage recovery,
+restart persistence, grant removal, and the complete mutation/crash-recovery
+matrix pass on both exact-ABI targets.
 
 The initial snapshot itself is cancellable. The Service exposes the same folder
 action as Cancel while work is active, interrupts provider traversal, and
@@ -186,13 +184,14 @@ bridge now gives initial-mirror and synchronization listings, metadata queries,
 and descriptor opens Android cancellation signals plus 30-second deadlines.
 Document mutations have no Android cancellation API, so their deadline
 watchdog terminates the manager and lets the persisted journal or next
-three-way scan resolve the ambiguous result. Durable retry/conflict history
-remains.
+three-way scan resolve the ambiguous result. A checksum-protected bounded
+history retains the latest 16 synchronization results, exact conflict paths,
+and an explicit Retry route across manager restart.
 
 The SAF capability itself is never presented as a POSIX mount; Linux sees the
 private POSIX mirror and changes cross the boundary only during explicit Sync.
-Exports, drag-and-drop, durable per-operation history, and richer
-`/mnt/android` mapping status are still planned.
+Direct Save As/export, multi-file share, drag-and-drop import, live per-file
+progress, and richer `/mnt/android` mapping status are still planned.
 
 ## Virtual Linux Layout
 
@@ -225,19 +224,24 @@ Recommended layout:
 /home/archphene/Projects/<name>
   synchronized local mirror of a persisted Android tree grant
 
-/mnt/android/<category-or-grant>
-  stable bridge-managed paths; not currently exposed
+/mnt/android/documents
+/mnt/android/downloads
+/mnt/android/pictures
+/mnt/android/media
+/mnt/android/shared
+  fail-closed managed aliases to the matching private home directories
 ```
 
 Linux applications use normal paths. The bridge decides whether the backing
 storage is the private shared Arch root, a synchronized Android grant, or a
 brokered Android content URI.
 
-`~/Documents` and `~/Downloads` are created as conventional private
-directories today. Single-document imports land in `~/Downloads`. They do not
-yet masquerade as live Android shared-storage mounts. The manager-held folder
-capability likewise has no POSIX path until explicit mirror/link state is
-implemented.
+The familiar home directories are conventional private directories.
+Single-document imports land in `~/Downloads`; `/mnt/android/downloads` is an
+alias to that same directory, not Android's public Downloads collection. A
+connected Android folder is synchronized with its private
+`~/Projects/<folder>` mirror and is never represented as a mountable content
+URI.
 
 ## Permission Table
 
@@ -251,8 +255,8 @@ implemented.
 | Visible `/home/archphene` files in Android | Archphene `DocumentsProvider` | Android URI grant | Android DocumentsUI |
 | `Open File` | content URI from `ACTION_OPEN_DOCUMENT` | prompt per document unless persisted | Android DocumentsUI |
 | `Save As` or export | content URI from `ACTION_CREATE_DOCUMENT` | prompt per target | Android DocumentsUI |
-| Connected Android folder | one persisted tree URI from `ACTION_OPEN_DOCUMENT_TREE`; POSIX mirror pending | prompt once, again after removal/revocation | Android DocumentsUI |
-| Background project file read/write | planned `$HOME/Projects/<name>` local mirror | no repeat prompt after sync setup | Archphene sandbox; bridge sync will use persisted URI permission |
+| Connected Android folder | one persisted tree URI from `ACTION_OPEN_DOCUMENT_TREE` plus a private synchronized mirror | prompt once, again after removal/revocation | Android DocumentsUI |
+| Background project file read/write | `$HOME/Projects/<name>` private POSIX mirror | no repeat prompt after sync setup | Archphene sandbox; explicit Sync crosses the persisted URI grant |
 | Camera, mic, notifications, contacts | Android runtime permissions | prompt through Android permission APIs | Android PermissionController |
 
 ## Home Folder Rule
@@ -277,6 +281,37 @@ Background access is allowed when one of these is true:
 4. The operation uses an Android permission the app already holds.
 
 If none of those is true, the bridge should fail with a permission error or request a user-mediated grant. It should not silently widen access.
+
+## Backup, revocation, and uninstall
+
+Archphene's shared root is application-private state, not an Android shared
+folder. Android backup is deliberately disabled because a partial restore of
+the pacman database, package payloads, signing identity, and Linux home would
+not be a coherent Arch installation. Until a complete verified archive
+export/import workflow exists, users should:
+
+- synchronize important project trees to their connected Android folders;
+- use **Archphene Home** in Android Files to copy ordinary visible home files;
+- use the manager's Share action for an individual visible regular file.
+
+These routes do not include hidden configuration, package state, sockets,
+symlinks, or the rest of the Arch root. They are not a full-environment backup.
+
+Revoking or removing a connected-folder grant stops later synchronization but
+does not delete the private `~/Projects/<folder>` mirror. Reconnecting requires
+Android's system picker again. Removing a generated desktop launcher removes
+only that Android entry; it does not remove its pacman package or shared Linux
+data.
+
+Clearing Archphene's Android storage or uninstalling the manager deletes the
+shared Arch root, package database, package cache, Linux home, synchronization
+records, and manager-held launcher signing key. Android also revokes the
+manager's document grants. Thin launcher APKs are separate installed packages,
+so Android may leave them in the app drawer, but without the manager and its
+matching key/registry they fail closed and cannot start Linux applications.
+Users must synchronize or copy important files before clearing data or
+uninstalling. A future release needs an explicit whole-environment
+backup/export and stale-launcher cleanup workflow.
 
 ## Bridge Contract
 

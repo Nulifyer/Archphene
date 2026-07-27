@@ -6,6 +6,7 @@ This directory contains current documentation for using, building, and developin
 
 - [Project overview and installation](../README.md)
 - [Storage and document model](storage.md)
+- [Arch Linux compatibility on Android](platform-compatibility.md)
 - [Android capability broker](android-capabilities.md)
 - [Linux application appearance](appearance.md)
 - [Linux visual quality gate](linux-visual-quality.md)

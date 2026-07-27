@@ -463,8 +463,8 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
 ## P2 - Documentation and publication
 
 - [x] Update README, architecture, security, roadmap, and storage documentation to the approved shared-environment model; clearly mark older per-wrapper runtime-pack results as historical.
-- [ ] Document the Android/Linux filesystem boundary, `/mnt/android`, backup/export, permissions, revocation, and uninstall consequences.
-- [ ] Document normal-Arch compatibility limits imposed by Android's kernel, SELinux, seccomp, background execution, and lack of root/systemd assumptions.
+- [x] Document the Android/Linux filesystem boundary, `/mnt/android`, backup/export, permissions, revocation, and uninstall consequences.
+- [x] Document normal-Arch compatibility limits imposed by Android's kernel, SELinux, seccomp, background execution, and lack of root/systemd assumptions.
 - [ ] Update README, roadmap, project status, compatibility matrix, security model, changelog, and release notes after behavior is implemented.
 - [ ] Run the final public-repository, provenance, licensing, secret, reproducibility, CI, and release-artifact audit.
 
