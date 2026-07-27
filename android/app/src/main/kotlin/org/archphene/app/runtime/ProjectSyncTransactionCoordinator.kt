@@ -62,23 +62,49 @@ internal class ProjectSyncTransactionCoordinator(
     private val provider: ProjectSyncProvider,
     private val backend: ProjectSyncMutationBackend,
     private val checkCancellation: () -> Unit,
-    private val publishProgress: (index: Int, total: Int) -> Unit,
+    private val publishProgress:
+        (
+            index: Int,
+            total: Int,
+            action: Int,
+            pulled: Int,
+            pushed: Int,
+            conflicts: Int,
+        ) -> Unit,
 ) {
     fun execute(
         context: ProjectSyncTransactionContext,
         plan: List<ProjectSyncPlanEntry>,
     ): ProjectSyncResult {
         val result = ProjectSyncResult()
+        val actionTotal = plan.count { entry -> entry.action != SYNC_ACTION_CONVERGED }
+        var actionIndex = 0
         plan.forEach { entry ->
             checkCancellation()
             when {
                 entry.action == SYNC_ACTION_PUSH_ANDROID &&
                     entry.linux?.kind == SYNC_KIND_DIRECTORY -> {
+                    publishProgress(
+                        ++actionIndex,
+                        actionTotal,
+                        entry.action,
+                        result.pulled,
+                        result.pushed,
+                        result.conflictPaths.size,
+                    )
                     backend.createAndroidDirectory(context, entry)
                     result.pushed++
                 }
                 entry.action == SYNC_ACTION_PULL_LINUX &&
                     entry.android?.kind == SYNC_KIND_DIRECTORY -> {
+                    publishProgress(
+                        ++actionIndex,
+                        actionTotal,
+                        entry.action,
+                        result.pulled,
+                        result.pushed,
+                        result.conflictPaths.size,
+                    )
                     executeLocal(
                         context,
                         SYNC_LOCAL_CREATE_DIRECTORY,
@@ -90,23 +116,46 @@ internal class ProjectSyncTransactionCoordinator(
             }
         }
 
-        plan.forEachIndexed { index, entry ->
+        plan.forEach { entry ->
             checkCancellation()
-            publishProgress(index + 1, plan.size)
             when (entry.action) {
                 SYNC_ACTION_PUSH_ANDROID -> {
                     if (entry.linux?.kind == SYNC_KIND_FILE) {
+                        publishProgress(
+                            ++actionIndex,
+                            actionTotal,
+                            entry.action,
+                            result.pulled,
+                            result.pushed,
+                            result.conflictPaths.size,
+                        )
                         backend.pushAndroidFile(context, entry)
                         result.pushed++
                     }
                 }
                 SYNC_ACTION_PULL_LINUX -> {
                     if (entry.android?.kind == SYNC_KIND_FILE) {
+                        publishProgress(
+                            ++actionIndex,
+                            actionTotal,
+                            entry.action,
+                            result.pulled,
+                            result.pushed,
+                            result.conflictPaths.size,
+                        )
                         backend.pullLinuxFile(context, entry)
                         result.pulled++
                     }
                 }
                 SYNC_ACTION_CONFLICT -> {
+                    publishProgress(
+                        ++actionIndex,
+                        actionTotal,
+                        entry.action,
+                        result.pulled,
+                        result.pushed,
+                        result.conflictPaths.size,
+                    )
                     preserveConflict(context, entry)
                     result.conflictPaths.add(entry.path)
                 }
@@ -117,6 +166,14 @@ internal class ProjectSyncTransactionCoordinator(
             checkCancellation()
             when (entry.action) {
                 SYNC_ACTION_DELETE_LINUX -> {
+                    publishProgress(
+                        ++actionIndex,
+                        actionTotal,
+                        entry.action,
+                        result.pulled,
+                        result.pushed,
+                        result.conflictPaths.size,
+                    )
                     val expected =
                         entry.linux
                             ?: error("Linux deletion has no expected fingerprint")
@@ -130,6 +187,14 @@ internal class ProjectSyncTransactionCoordinator(
                     result.pulled++
                 }
                 SYNC_ACTION_DELETE_ANDROID -> {
+                    publishProgress(
+                        ++actionIndex,
+                        actionTotal,
+                        entry.action,
+                        result.pulled,
+                        result.pushed,
+                        result.conflictPaths.size,
+                    )
                     when {
                         result.deletedDocuments.isEmpty() &&
                             entry.android?.kind == SYNC_KIND_FILE -> {
@@ -146,6 +211,9 @@ internal class ProjectSyncTransactionCoordinator(
                     }
                 }
             }
+        }
+        check(actionIndex == actionTotal) {
+            "Project synchronization plan contains an incompatible action"
         }
         return result
     }

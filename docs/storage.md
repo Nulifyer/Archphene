@@ -187,11 +187,17 @@ watchdog terminates the manager and lets the persisted journal or next
 three-way scan resolve the ambiguous result. A checksum-protected bounded
 history retains the latest 16 synchronization results, exact conflict paths,
 and an explicit Retry route across manager restart.
+During a transaction, the Files page reports only actions that actually mutate
+or preserve data—not already-converged plan entries—and distinguishes pushes to
+Android, pulls into Archphene, deletions on either side, and conflict
+preservation. Running pull, push, and conflict counts remain visible beside the
+bounded Cancel action. The exact transaction/recovery matrix and full-device
+progress frames pass on both maintained ABIs.
 
 The SAF capability itself is never presented as a POSIX mount; Linux sees the
 private POSIX mirror and changes cross the boundary only during explicit Sync.
-Direct Save As/export, multi-file share, drag-and-drop import, live per-file
-progress, and richer `/mnt/android` mapping status are still planned.
+Direct Save As/export, multi-file share, drag-and-drop import, byte-level
+transfer progress, and richer `/mnt/android` mapping status are still planned.
 
 ## Virtual Linux Layout
 

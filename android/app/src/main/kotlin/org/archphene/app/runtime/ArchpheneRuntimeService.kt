@@ -797,8 +797,19 @@ class ArchpheneRuntimeService : Service() {
                     deleteProjectSyncAndroidDirectory(context.remote, entry.path)
             },
             ::checkFolderMirrorCancellation,
-        ) { index, total ->
-            folderStatus = "Synchronizing $index of $total…"
+        ) { index, total, action, pulled, pushed, conflicts ->
+            val phase =
+                when (action) {
+                    SYNC_ACTION_PUSH_ANDROID -> "Pushing to Android"
+                    SYNC_ACTION_PULL_LINUX -> "Pulling into Archphene"
+                    SYNC_ACTION_DELETE_ANDROID -> "Deleting from Android"
+                    SYNC_ACTION_DELETE_LINUX -> "Deleting from Archphene"
+                    SYNC_ACTION_CONFLICT -> "Preserving conflict"
+                    else -> "Synchronizing"
+                }
+            folderStatus =
+                "$phase $index of $total · " +
+                    "$pulled pulled · $pushed pushed · $conflicts conflict(s)"
         }
     }
     private val projectSyncHistoryStore by lazy {

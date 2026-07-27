@@ -239,7 +239,15 @@ archphene_adb_run shell sh -c \
   "'printf android-edit-$token > $remote/main.txt; printf android-new-$token > $remote/android-new.txt'"
 archphene_adb_run shell run-as "$package" sh -c \
   "'printf linux-edit-$token > $local_project/src/nested.txt; printf linux-new-$token > $local_project/linux-new.txt; printf linux-new-two-$token > $local_project/linux-new-two.txt'"
+set_sync_hold backed-up 5000
 sync_button
+archphene_wait_log \
+  'Project sync test holding phase=backed-up' \
+  20 'ArchpheneRuntime:I AndroidRuntime:E *:S' >/dev/null
+archphene_wait_ui_unwrapped \
+  "Pushing to Android [1-5] of 5 · [0-5] pulled · [0-5] pushed · 0 conflict\\(s\\)" \
+  "folder-sync-live-progress-$serial" 15
+archphene_adb_run exec-out screencap -p >"$output_dir/$serial-live-progress.png"
 archphene_wait_ui_unwrapped \
   "Synced 5 change\\(s\\): 2 pulled, 3 pushed, 0 conflict\\(s\\), 0 deletion\\(s\\) deferred" \
   "folder-sync-bidirectional-$serial" 40
@@ -462,5 +470,5 @@ fatal_log="$(archphene_adb_run logcat -d -v brief \
 trap - EXIT
 cleanup
 archphene_note "Archphene initial folder mirror passed on $serial"
-archphene_note "  Cancel/retry, recursive snapshot, stable baseline, bidirectional additions/edits/deletes, recoverable Android mutation, conflict preservation, restart, and retained local project passed"
-archphene_note "  Full-device screenshots: $output_dir/$serial-{connected,detached}.png"
+archphene_note "  Cancel/retry, recursive snapshot, live directional progress, stable baseline, bidirectional additions/edits/deletes, recoverable Android mutation, conflict preservation, restart, and retained local project passed"
+archphene_note "  Full-device screenshots: $output_dir/$serial-{connected,live-progress,detached}.png"
