@@ -1800,7 +1800,7 @@ mod android {
             return i64::from(ERROR_INVALID_ARGUMENT);
         }
         let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
-        let (package_runtime, filename, expected_sha256) = {
+        let (package_runtime, filename, expected_checksum) = {
             let Ok(mut registry) = registry().lock() else {
                 return i64::from(ERROR_INTERNAL);
             };
@@ -1814,7 +1814,7 @@ mod android {
         };
         match package_runtime.verified_aur_source_size(
             &filename,
-            expected_sha256,
+            expected_checksum,
             MAX_AUR_SOURCE_BYTES,
         ) {
             Ok(Some(length)) => i64::try_from(length).unwrap_or(i64::from(ERROR_INTERNAL)),

@@ -978,13 +978,13 @@ impl RuntimeHost {
             .as_ref()
             .ok_or(PackageRuntimeError::InvalidPayload)?
             .clone();
-        let expected_sha256 = source.sha256.ok_or(PackageRuntimeError::InvalidPayload)?;
+        let expected_checksum = source.checksum.ok_or(PackageRuntimeError::InvalidPayload)?;
         let filename = source.filename.clone();
         let download = self
             .package_runtime
             .as_ref()
             .ok_or(PackageRuntimeError::InvalidPath)?
-            .begin_aur_source_download(&filename, expected_sha256, maximum_size)?;
+            .begin_aur_source_download(&filename, expected_checksum, maximum_size)?;
         let file = download.duplicate_file()?;
         self.aur_source_download = Some(download);
         Ok((file, endpoint, filename))
@@ -993,7 +993,14 @@ impl RuntimeHost {
     pub fn aur_source_cache_candidate(
         &self,
         source_index: usize,
-    ) -> Result<(PackageRuntime, String, [u8; 32]), PackageRuntimeError> {
+    ) -> Result<
+        (
+            PackageRuntime,
+            String,
+            archphene_packages::aur::AurSourceChecksum,
+        ),
+        PackageRuntimeError,
+    > {
         let source = self
             .aur_review
             .as_ref()
@@ -1002,22 +1009,22 @@ impl RuntimeHost {
         if source.local || source.insecure_transport || source.remote_url.is_none() {
             return Err(PackageRuntimeError::InvalidPayload);
         }
-        let expected_sha256 = source.sha256.ok_or(PackageRuntimeError::InvalidPayload)?;
+        let expected_checksum = source.checksum.ok_or(PackageRuntimeError::InvalidPayload)?;
         let package_runtime = self
             .package_runtime
             .as_ref()
             .ok_or(PackageRuntimeError::InvalidPath)?
             .clone();
-        Ok((package_runtime, source.filename.clone(), expected_sha256))
+        Ok((package_runtime, source.filename.clone(), expected_checksum))
     }
 
     pub fn open_verified_aur_source(
         &self,
         source_index: usize,
     ) -> Result<File, PackageRuntimeError> {
-        let (package_runtime, filename, expected_sha256) =
+        let (package_runtime, filename, expected_checksum) =
             self.aur_source_cache_candidate(source_index)?;
-        package_runtime.open_verified_aur_source(&filename, expected_sha256)
+        package_runtime.open_verified_aur_source(&filename, expected_checksum)
     }
 
     pub fn open_reviewed_aur_snapshot(&self) -> Result<File, PackageRuntimeError> {

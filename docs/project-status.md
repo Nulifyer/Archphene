@@ -1098,9 +1098,24 @@ preserving all 36 local pacman-database entries. At that review stage, installed
 disk impact, an unprivileged build, and AUR result installation remained
 pending.
 
+The review boundary also supports real AUR split packages. RPC identity is
+validated against the requested split name, while the retained snapshot uses
+the canonical package base expected by the isolated Builder. The parser
+recognizes exact hyphenated split functions as well as normalized legacy names,
+preserves ordered duplicate checksum entries, and selects SHA-512 ahead of
+SHA-256 when both are declared. Review wire v3 identifies the checksum
+algorithm; Rust uses algorithm-qualified cache names and rehashes each source,
+while Kotlin derives a separate SHA-256 input digest for the Builder manifest.
+On the physical Samsung, current `dotnet-sdk-bin` `10.0.10.sdk302-1` reviewed
+from package base `dotnet-core-bin`, displayed both exact SHA-512 declarations,
+and verified the 225 MiB ARM64 SDK source. Build-environment resolution then
+exposed the next bounded gap: its four required sibling outputs must be built
+and installed together instead of queried from the official repositories.
+
 The next AUR boundary now resolves each architecture-selected declaration as a
 snapshot-local source, supported direct-HTTPS source, or unsupported transport.
-Supported remote sources require a bounded safe filename and SHA-256. Android
+Supported remote sources require a bounded safe filename and SHA-256 or
+SHA-512. Android
 follows at most five HTTPS-only redirects and streams into a Rust-owned private
 cache descriptor; Rust re-reads the complete file, hashes it, and atomically
 promotes only matching bytes. Verified cache entries are rehashed before reuse,

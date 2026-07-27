@@ -914,7 +914,8 @@ class ArchpheneRuntimeService : Service() {
         val filename: String,
         val remoteUrl: String?,
         val local: Boolean,
-        val sha256: String?,
+        val checksumAlgorithm: String?,
+        val checksum: String?,
         val insecureTransport: Boolean,
     )
 
@@ -923,6 +924,7 @@ class ArchpheneRuntimeService : Service() {
         val bytes: Long,
         val endpoint: String,
         val cached: Boolean,
+        val sha256: String,
     )
 
     private data class AurBuilderReport(
@@ -4959,12 +4961,12 @@ class ArchpheneRuntimeService : Service() {
             remoteSources.isEmpty() ||
             remoteSources.any { (_, source) ->
                 source.remoteUrl == null ||
-                    source.sha256 == null ||
+                    source.checksum == null ||
                     source.insecureTransport
             }
         ) {
             searchStatus =
-                "Source verification requires direct HTTPS sources with SHA-256 checksums"
+                "Source verification requires direct HTTPS sources with SHA-256 or SHA-512 checksums"
             return false
         }
         searchActive = true
@@ -5009,6 +5011,11 @@ class ArchpheneRuntimeService : Service() {
                                     cachedSize,
                                     initialEndpoint,
                                     true,
+                                    sha256VerifiedAurSource(
+                                        activeHandle,
+                                        sourceIndex,
+                                        cachedSize,
+                                    ),
                                 )
                             searchStatus =
                                 "Verified cached source ${remoteIndex + 1}/" +
@@ -5048,7 +5055,7 @@ class ArchpheneRuntimeService : Service() {
                                     "Not enough private storage for ${source.filename}",
                                 )
                             }
-                            val verified =
+                            val (verified, verifiedSha256) =
                                 downloadAndVerifyAurSource(
                                     activeHandle,
                                     sourceIndex,
@@ -5072,6 +5079,7 @@ class ArchpheneRuntimeService : Service() {
                                     verified,
                                     connection.url.toString(),
                                     false,
+                                    verifiedSha256,
                                 )
                         } finally {
                             if (activePackageConnection === connection) {
@@ -5591,7 +5599,7 @@ class ArchpheneRuntimeService : Service() {
         declaredLength: Long,
         ordinal: Int,
         totalSources: Int,
-    ): Long {
+    ): Pair<Long, String> {
         aurEndpointBuffer.clear()
         val descriptor =
             NativeRuntime.nativeBeginAurSourceDownload(
@@ -5624,6 +5632,7 @@ class ArchpheneRuntimeService : Service() {
             require(nativeEndpoint == source.remoteUrl && nativeFilename == source.filename)
             var total = 0L
             var nextProgress = 1024L * 1024
+            val sha256 = MessageDigest.getInstance("SHA-256")
             ParcelFileDescriptor.AutoCloseOutputStream(parcelDescriptor).use { output ->
                 connection.inputStream.use { input ->
                     while (true) {
@@ -5639,6 +5648,7 @@ class ArchpheneRuntimeService : Service() {
                             throw SecurityException("AUR source exceeds its size limit")
                         }
                         output.write(aurTransferBuffer, 0, count)
+                        sha256.update(aurTransferBuffer, 0, count)
                         if (total >= nextProgress) {
                             searchStatus =
                                 "Downloading source $ordinal/$totalSources: " +
@@ -5666,7 +5676,7 @@ class ArchpheneRuntimeService : Service() {
                 )
             }
             require(verified == total)
-            return verified
+            return verified to hexSha256(sha256.digest())
         } finally {
             try {
                 parcelDescriptor.close()
@@ -5681,6 +5691,42 @@ class ArchpheneRuntimeService : Service() {
                 )
             }
         }
+    }
+
+    private fun sha256VerifiedAurSource(
+        activeHandle: Long,
+        sourceIndex: Int,
+        expectedBytes: Long,
+    ): String {
+        aurEndpointBuffer.clear()
+        val descriptor =
+            NativeRuntime.nativeOpenVerifiedAurSource(
+                activeHandle,
+                sourceIndex,
+                aurEndpointBuffer,
+            )
+        if (descriptor < 0) {
+            throw SecurityException(readNativeMessage(aurEndpointBuffer, descriptor))
+        }
+        val digest = MessageDigest.getInstance("SHA-256")
+        var total = 0L
+        ParcelFileDescriptor.AutoCloseInputStream(
+            ParcelFileDescriptor.adoptFd(descriptor),
+        ).use { input ->
+            while (true) {
+                val count = input.read(aurTransferBuffer)
+                if (count < 0) {
+                    break
+                }
+                total = Math.addExact(total, count.toLong())
+                if (total > expectedBytes) {
+                    throw SecurityException("Verified AUR source changed while hashing")
+                }
+                digest.update(aurTransferBuffer, 0, count)
+            }
+        }
+        require(total == expectedBytes)
+        return hexSha256(digest.digest())
     }
 
     private fun probeAurBuilderCompanion(
@@ -5761,7 +5807,11 @@ class ArchpheneRuntimeService : Service() {
                 val evidence =
                     sourceEvidence.getOrNull(evidenceIndex++)
                         ?: throw IllegalStateException("Missing verified AUR source evidence")
-                require(evidence.filename == source.filename && source.sha256 != null)
+                require(
+                    evidence.filename == source.filename &&
+                        source.checksum != null &&
+                        evidence.sha256.matches(SHA256_HEX),
+                )
                 aurEndpointBuffer.clear()
                 val sourceFd =
                     NativeRuntime.nativeOpenVerifiedAurSource(
@@ -5776,7 +5826,7 @@ class ArchpheneRuntimeService : Service() {
                     AurBuilderInput(
                         AUR_BUILDER_INPUT_SOURCE,
                         source.filename,
-                        source.sha256,
+                        evidence.sha256,
                         evidence.bytes,
                         ParcelFileDescriptor.adoptFd(sourceFd),
                     )
@@ -6433,7 +6483,7 @@ class ArchpheneRuntimeService : Service() {
     ): AurReviewData {
         require(length in 1..NativeRuntime.AUR_REVIEW_SIZE)
         val reader = AurWireReader(source, length)
-        require(reader.bytes(8).contentEquals("ARVW0002".toByteArray(StandardCharsets.US_ASCII)))
+        require(reader.bytes(8).contentEquals("ARVW0003".toByteArray(StandardCharsets.US_ASCII)))
         reader.bytes(32)
         val snapshotSha256Bytes = reader.bytes(32)
         require(snapshotSha256Bytes.any { byte -> byte != 0.toByte() })
@@ -6509,13 +6559,19 @@ class ArchpheneRuntimeService : Service() {
                 if (remoteUrl.isNotEmpty()) {
                     validateAurSourceEndpoint(remoteUrl)
                 }
-                val hasSha256 = reader.byte()
-                require(hasSha256 in 0..1)
-                val sha256 =
-                    if (hasSha256 == 1) {
-                        hexSha256(reader.bytes(32))
-                    } else {
-                        null
+                val checksumKind = reader.byte()
+                require(checksumKind in 0..2)
+                val checksumAlgorithm =
+                    when (checksumKind) {
+                        1 -> "SHA-256"
+                        2 -> "SHA-512"
+                        else -> null
+                    }
+                val checksum =
+                    when (checksumKind) {
+                        1 -> hexSha256(reader.bytes(32))
+                        2 -> hexBytes(reader.bytes(64))
+                        else -> null
                     }
                 val insecure = reader.byte()
                 require(insecure in 0..1)
@@ -6525,7 +6581,8 @@ class ArchpheneRuntimeService : Service() {
                     filename,
                     remoteUrl.ifEmpty { null },
                     kind == 1,
-                    sha256,
+                    checksumAlgorithm,
+                    checksum,
                     insecure == 1,
                 )
             }
@@ -6544,7 +6601,7 @@ class ArchpheneRuntimeService : Service() {
                 }
             }
         require(reader.exhausted())
-        val unverifiedSources = sources.any { sourceReview -> sourceReview.sha256 == null }
+        val unverifiedSources = sources.any { sourceReview -> sourceReview.checksum == null }
         val insecureSources = sources.any { sourceReview -> sourceReview.insecureTransport }
         require((flags and (1 shl 3) != 0) == unverifiedSources)
         require((flags and (1 shl 4) != 0) == insecureSources)
@@ -6829,8 +6886,10 @@ class ArchpheneRuntimeService : Service() {
                 append("Snapshot SHA-256: ").append(review.snapshotSha256).append('\n')
                 review.sources.forEach { source ->
                     append(source.filename)
-                        .append(" SHA-256: ")
-                        .append(source.sha256 ?: "SKIP")
+                        .append(' ')
+                        .append(source.checksumAlgorithm ?: "checksum")
+                        .append(": ")
+                        .append(source.checksum ?: "SKIP")
                         .append('\n')
                 }
                 if (buildEnvironment?.verified == true) {
@@ -6925,7 +6984,11 @@ class ArchpheneRuntimeService : Service() {
 
     private fun hexSha256(bytes: ByteArray): String {
         require(bytes.size == 32)
-        val output = CharArray(64)
+        return hexBytes(bytes)
+    }
+
+    private fun hexBytes(bytes: ByteArray): String {
+        val output = CharArray(bytes.size * 2)
         bytes.forEachIndexed { index, byte ->
             val value = byte.toInt() and 0xff
             output[index * 2] = HEX_DIGITS[value ushr 4]
@@ -8643,7 +8706,8 @@ class ArchpheneRuntimeService : Service() {
                             filename = "$packageName-1.2.3.tar.gz",
                             remoteUrl = "https://example.invalid/source",
                             local = false,
-                            sha256 = sourceDigest,
+                            checksumAlgorithm = "SHA-256",
+                            checksum = sourceDigest,
                             insecureTransport = false,
                         ),
                     ),
@@ -8668,6 +8732,7 @@ class ArchpheneRuntimeService : Service() {
                     bytes = 2_097_152L,
                     endpoint = "https://example.invalid/source",
                     cached = true,
+                    sha256 = sourceDigest,
                 ),
             )
         val builder =

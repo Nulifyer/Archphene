@@ -2296,22 +2296,22 @@ impl PackageRuntime {
     pub fn begin_aur_source_download(
         &self,
         filename: &str,
-        expected_sha256: [u8; 32],
+        expected_checksum: aur::AurSourceChecksum,
         maximum_size: u64,
     ) -> Result<aur::AurSourceDownload, PackageRuntimeError> {
-        aur::AurSourceDownload::begin(&self.arch_root, filename, expected_sha256, maximum_size)
+        aur::AurSourceDownload::begin(&self.arch_root, filename, expected_checksum, maximum_size)
     }
 
     pub fn verified_aur_source_size(
         &self,
         filename: &str,
-        expected_sha256: [u8; 32],
+        expected_checksum: aur::AurSourceChecksum,
         maximum_size: u64,
     ) -> Result<Option<u64>, PackageRuntimeError> {
         aur::AurSourceDownload::verified_cache_size(
             &self.arch_root,
             filename,
-            expected_sha256,
+            expected_checksum,
             maximum_size,
         )
     }
@@ -2319,12 +2319,12 @@ impl PackageRuntime {
     pub fn open_verified_aur_source(
         &self,
         filename: &str,
-        expected_sha256: [u8; 32],
+        expected_checksum: aur::AurSourceChecksum,
     ) -> Result<File, PackageRuntimeError> {
         aur::AurSourceDownload::open_verified_cache(
             &self.arch_root,
             filename,
-            expected_sha256,
+            expected_checksum,
             aur::MAX_AUR_SOURCE_BYTES,
         )
     }

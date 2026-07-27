@@ -7,7 +7,7 @@ use std::path::{Component, Path};
 
 use flate2::read::GzDecoder;
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha512};
 use tar::{Archive, EntryType};
 
 use super::RepositoryArchitecture;
@@ -47,8 +47,39 @@ pub struct AurSource {
     pub filename: String,
     pub remote_url: Option<String>,
     pub local: bool,
-    pub sha256: Option<[u8; 32]>,
+    pub checksum: Option<AurSourceChecksum>,
     pub insecure_transport: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AurSourceChecksum {
+    Sha256([u8; 32]),
+    Sha512([u8; 64]),
+}
+
+impl AurSourceChecksum {
+    fn cache_key(self) -> String {
+        match self {
+            // Preserve the established SHA-256 cache path so an upgrade can
+            // reverify and reuse already downloaded AUR sources.
+            Self::Sha256(value) => hex_bytes(&value),
+            Self::Sha512(value) => format!("sha512-{}", hex_bytes(&value)),
+        }
+    }
+
+    fn is_zero(self) -> bool {
+        match self {
+            Self::Sha256(value) => value == [0; 32],
+            Self::Sha512(value) => value == [0; 64],
+        }
+    }
+
+    fn matches(self, bytes: &[u8]) -> bool {
+        match self {
+            Self::Sha256(expected) => <[u8; 32]>::from(Sha256::digest(bytes)) == expected,
+            Self::Sha512(expected) => <[u8; 64]>::from(Sha512::digest(bytes)) == expected,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -84,7 +115,7 @@ pub struct AurSourceDownload {
     file: File,
     temporary: std::path::PathBuf,
     destination: std::path::PathBuf,
-    expected_sha256: [u8; 32],
+    expected_checksum: AurSourceChecksum,
     maximum_size: u64,
     active: bool,
 }
@@ -134,11 +165,11 @@ impl AurSourceDownload {
     pub(super) fn begin(
         arch_root: &Path,
         filename: &str,
-        expected_sha256: [u8; 32],
+        expected_checksum: AurSourceChecksum,
         maximum_size: u64,
     ) -> Result<Self, super::PackageRuntimeError> {
         if !safe_source_filename(filename)
-            || expected_sha256 == [0; 32]
+            || expected_checksum.is_zero()
             || maximum_size == 0
             || maximum_size > MAX_AUR_SOURCE_BYTES
         {
@@ -150,7 +181,7 @@ impl AurSourceDownload {
         create_or_require_directory(&archphene_cache)?;
         let directory = arch_root.join(AUR_SOURCE_CACHE_DIRECTORY);
         create_or_require_directory(&directory)?;
-        let digest = hex_sha256(&expected_sha256);
+        let digest = expected_checksum.cache_key();
         let destination_name = format!("{digest}-{filename}");
         let temporary_name = format!("{destination_name}.part");
         let destination = directory.join(destination_name);
@@ -166,7 +197,7 @@ impl AurSourceDownload {
             file,
             temporary,
             destination,
-            expected_sha256,
+            expected_checksum,
             maximum_size,
             active: true,
         })
@@ -177,7 +208,7 @@ impl AurSourceDownload {
     }
 
     pub fn finish(mut self) -> Result<u64, super::PackageRuntimeError> {
-        let length = verify_source_file(&mut self.file, self.expected_sha256, self.maximum_size)?;
+        let length = verify_source_file(&mut self.file, self.expected_checksum, self.maximum_size)?;
         self.file.sync_all()?;
         match fs::symlink_metadata(&self.destination) {
             Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
@@ -203,11 +234,11 @@ impl AurSourceDownload {
     pub(super) fn verified_cache_size(
         arch_root: &Path,
         filename: &str,
-        expected_sha256: [u8; 32],
+        expected_checksum: AurSourceChecksum,
         maximum_size: u64,
     ) -> Result<Option<u64>, super::PackageRuntimeError> {
         if !safe_source_filename(filename)
-            || expected_sha256 == [0; 32]
+            || expected_checksum.is_zero()
             || maximum_size == 0
             || maximum_size > MAX_AUR_SOURCE_BYTES
         {
@@ -215,7 +246,7 @@ impl AurSourceDownload {
         }
         let destination = arch_root
             .join(AUR_SOURCE_CACHE_DIRECTORY)
-            .join(format!("{}-{filename}", hex_sha256(&expected_sha256)));
+            .join(format!("{}-{filename}", expected_checksum.cache_key()));
         let metadata = match fs::symlink_metadata(&destination) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -225,7 +256,7 @@ impl AurSourceDownload {
             return Err(super::PackageRuntimeError::UnsafeEntry(destination));
         }
         let mut file = File::open(&destination)?;
-        match verify_source_file(&mut file, expected_sha256, maximum_size) {
+        match verify_source_file(&mut file, expected_checksum, maximum_size) {
             Ok(length) => Ok(Some(length)),
             Err(super::PackageRuntimeError::InvalidPayload) => {
                 drop(file);
@@ -245,16 +276,17 @@ impl AurSourceDownload {
     pub(super) fn open_verified_cache(
         arch_root: &Path,
         filename: &str,
-        expected_sha256: [u8; 32],
+        expected_checksum: AurSourceChecksum,
         maximum_size: u64,
     ) -> Result<File, super::PackageRuntimeError> {
-        let length = Self::verified_cache_size(arch_root, filename, expected_sha256, maximum_size)?
-            .ok_or(super::PackageRuntimeError::InvalidPayload)?;
+        let length =
+            Self::verified_cache_size(arch_root, filename, expected_checksum, maximum_size)?
+                .ok_or(super::PackageRuntimeError::InvalidPayload)?;
         let path = arch_root
             .join(AUR_SOURCE_CACHE_DIRECTORY)
-            .join(format!("{}-{filename}", hex_sha256(&expected_sha256)));
+            .join(format!("{}-{filename}", expected_checksum.cache_key()));
         let mut file = File::open(path)?;
-        if verify_source_file(&mut file, expected_sha256, maximum_size)? != length {
+        if verify_source_file(&mut file, expected_checksum, maximum_size)? != length {
             return Err(super::PackageRuntimeError::InvalidPayload);
         }
         file.seek(SeekFrom::Start(0))?;
@@ -272,7 +304,7 @@ impl Drop for AurSourceDownload {
 
 fn verify_source_file(
     file: &mut File,
-    expected_sha256: [u8; 32],
+    expected_checksum: AurSourceChecksum,
     maximum_size: u64,
 ) -> Result<u64, super::PackageRuntimeError> {
     let metadata = file.metadata()?;
@@ -281,7 +313,8 @@ fn verify_source_file(
         return Err(super::PackageRuntimeError::InvalidPayload);
     }
     file.seek(SeekFrom::Start(0))?;
-    let mut digest = Sha256::new();
+    let mut sha256 = Sha256::new();
+    let mut sha512 = Sha512::new();
     let mut buffer = [0_u8; 64 * 1024];
     let mut total = 0_u64;
     loop {
@@ -295,9 +328,16 @@ fn verify_source_file(
         if total > maximum_size {
             return Err(super::PackageRuntimeError::InvalidPayload);
         }
-        digest.update(&buffer[..count]);
+        match expected_checksum {
+            AurSourceChecksum::Sha256(_) => sha256.update(&buffer[..count]),
+            AurSourceChecksum::Sha512(_) => sha512.update(&buffer[..count]),
+        }
     }
-    if total != length || <[u8; 32]>::from(digest.finalize()) != expected_sha256 {
+    let matches = match expected_checksum {
+        AurSourceChecksum::Sha256(expected) => <[u8; 32]>::from(sha256.finalize()) == expected,
+        AurSourceChecksum::Sha512(expected) => <[u8; 64]>::from(sha512.finalize()) == expected,
+    };
+    if total != length || !matches {
         return Err(super::PackageRuntimeError::InvalidPayload);
     }
     Ok(length)
@@ -372,18 +412,19 @@ pub(super) fn open_reviewed_snapshot(
     let mut file = File::open(path)?;
     verify_source_file(
         &mut file,
-        expected_sha256,
+        AurSourceChecksum::Sha256(expected_sha256),
         u64::try_from(MAX_AUR_SNAPSHOT_BYTES).unwrap_or(u64::MAX),
     )?;
     file.seek(SeekFrom::Start(0))?;
     Ok(file)
 }
 
-pub fn aur_snapshot_path<'a>(
-    rpc_bytes: &'a [u8],
+pub fn aur_snapshot_path(
+    rpc_bytes: &[u8],
     requested_package: &str,
-) -> Result<&'a str, AurReviewError> {
-    Ok(parse_rpc(rpc_bytes, requested_package)?.snapshot_path)
+) -> Result<String, AurReviewError> {
+    let rpc = parse_rpc(rpc_bytes, requested_package)?;
+    Ok(canonical_snapshot_path(rpc.package_base))
 }
 
 pub fn review_aur_snapshot(
@@ -468,9 +509,11 @@ struct SrcInfo {
     make_dependencies: Vec<String>,
     check_dependencies: Vec<String>,
     sources: Vec<String>,
-    source_hashes: Vec<String>,
+    source_sha256: Vec<String>,
+    source_sha512: Vec<String>,
     architecture_sources: Vec<String>,
-    architecture_hashes: Vec<String>,
+    architecture_sha256: Vec<String>,
+    architecture_sha512: Vec<String>,
     valid_pgp_keys: Vec<String>,
     install_script: Option<String>,
 }
@@ -514,11 +557,18 @@ pub fn review_aur_package(
             .len()
             .saturating_add(srcinfo.architecture_sources.len()),
     );
-    append_sources(&mut sources, &srcinfo.sources, &srcinfo.source_hashes, None)?;
+    append_sources(
+        &mut sources,
+        &srcinfo.sources,
+        &srcinfo.source_sha256,
+        &srcinfo.source_sha512,
+        None,
+    )?;
     append_sources(
         &mut sources,
         &srcinfo.architecture_sources,
-        &srcinfo.architecture_hashes,
+        &srcinfo.architecture_sha256,
+        &srcinfo.architecture_sha512,
         Some(architecture_name),
     )?;
     if sources.len() > MAX_AUR_SOURCES {
@@ -531,7 +581,7 @@ pub fn review_aur_package(
     }
     let unverified_source_count = sources
         .iter()
-        .filter(|source| source.sha256.is_none())
+        .filter(|source| source.checksum.is_none())
         .count();
     let insecure_source_count = sources
         .iter()
@@ -553,7 +603,7 @@ pub fn review_aur_package(
         description: rpc.description.unwrap_or_default().to_owned(),
         maintainer: rpc.maintainer.map(str::to_owned),
         project_url: rpc.project_url.map(str::to_owned),
-        snapshot_path: rpc.snapshot_path.to_owned(),
+        snapshot_path: canonical_snapshot_path(rpc.package_base),
         last_modified: rpc.last_modified,
         out_of_date: rpc.out_of_date.is_some(),
         licenses: srcinfo.licenses,
@@ -583,7 +633,7 @@ impl AurReview {
             destination,
             position: 0,
         };
-        writer.bytes(b"ARVW0002")?;
+        writer.bytes(b"ARVW0003")?;
         writer.bytes(&self.review_sha256)?;
         writer.bytes(&self.snapshot_sha256.unwrap_or([0; 32]))?;
         writer.u64(self.last_modified)?;
@@ -640,9 +690,16 @@ impl AurReview {
                 3
             })?;
             writer.string(source.remote_url.as_deref().unwrap_or(""))?;
-            writer.u8(u8::from(source.sha256.is_some()))?;
-            if let Some(sha256) = source.sha256 {
-                writer.bytes(&sha256)?;
+            match source.checksum {
+                None => writer.u8(0)?,
+                Some(AurSourceChecksum::Sha256(value)) => {
+                    writer.u8(1)?;
+                    writer.bytes(&value)?;
+                }
+                Some(AurSourceChecksum::Sha512(value)) => {
+                    writer.u8(2)?;
+                    writer.bytes(&value)?;
+                }
             }
             writer.u8(u8::from(source.insecure_transport))?;
         }
@@ -840,8 +897,8 @@ fn verify_snapshot_files(
         let bytes = files
             .get(path)
             .ok_or(AurReviewError::InvalidSnapshot("missing local source"))?;
-        if let Some(expected) = source.sha256
-            && <[u8; 32]>::from(Sha256::digest(bytes)) != expected
+        if let Some(expected) = source.checksum
+            && !expected.matches(bytes)
         {
             return Err(AurReviewError::InvalidSnapshot(
                 "local source checksum mismatch",
@@ -887,11 +944,19 @@ fn parse_rpc<'a>(
     validate_optional_value(package.maintainer, MAX_MAINTAINER_BYTES)?;
     validate_optional_value(package.project_url, MAX_FIELD_BYTES)?;
     validate_bounded_value(package.snapshot_path, MAX_FIELD_BYTES)?;
-    let expected_snapshot = format!("/cgit/aur.git/snapshot/{}.tar.gz", package.package_base);
+    // AUR's RPC URLPath follows the queried split-package name, while the
+    // canonical package-base endpoint expands with a package-base directory.
+    // Validate the server-provided identity here, then have the caller fetch
+    // the canonical package-base snapshot used by the isolated builder.
+    let expected_snapshot = format!("/cgit/aur.git/snapshot/{requested_package}.tar.gz");
     if package.name != requested_package || package.snapshot_path != expected_snapshot {
         return Err(AurReviewError::RpcMismatch);
     }
     Ok(package)
+}
+
+fn canonical_snapshot_path(package_base: &str) -> String {
+    format!("/cgit/aur.git/snapshot/{package_base}.tar.gz")
 }
 
 fn parse_srcinfo(
@@ -907,7 +972,8 @@ fn parse_srcinfo(
     let make_dependencies_architecture = format!("makedepends_{architecture}");
     let check_dependencies_architecture = format!("checkdepends_{architecture}");
     let sources_architecture = format!("source_{architecture}");
-    let source_hashes_architecture = format!("sha256sums_{architecture}");
+    let source_sha256_architecture = format!("sha256sums_{architecture}");
+    let source_sha512_architecture = format!("sha512sums_{architecture}");
 
     for raw_line in text.lines() {
         let line = raw_line.trim();
@@ -967,11 +1033,17 @@ fn parse_srcinfo(
                 "check dependencies",
             )?,
             "source" => push_limited(&mut info.sources, value, MAX_AUR_SOURCES, "sources")?,
-            "sha256sums" => push_limited(
-                &mut info.source_hashes,
+            "sha256sums" => push_ordered_limited(
+                &mut info.source_sha256,
                 value,
                 MAX_AUR_SOURCES,
-                "source hashes",
+                "source SHA-256 hashes",
+            )?,
+            "sha512sums" => push_ordered_limited(
+                &mut info.source_sha512,
+                value,
+                MAX_AUR_SOURCES,
+                "source SHA-512 hashes",
             )?,
             "validpgpkeys" => push_limited(&mut info.valid_pgp_keys, value, 32, "PGP keys")?,
             "install" => set_once(&mut info.install_script, value)?,
@@ -999,11 +1071,17 @@ fn parse_srcinfo(
                 MAX_AUR_SOURCES,
                 "architecture sources",
             )?,
-            _ if key == source_hashes_architecture => push_limited(
-                &mut info.architecture_hashes,
+            _ if key == source_sha256_architecture => push_ordered_limited(
+                &mut info.architecture_sha256,
                 value,
                 MAX_AUR_SOURCES,
-                "architecture source hashes",
+                "architecture source SHA-256 hashes",
+            )?,
+            _ if key == source_sha512_architecture => push_ordered_limited(
+                &mut info.architecture_sha512,
+                value,
+                MAX_AUR_SOURCES,
+                "architecture source SHA-512 hashes",
             )?,
             _ => {}
         }
@@ -1023,17 +1101,23 @@ fn parse_srcinfo(
 fn append_sources(
     output: &mut Vec<AurSource>,
     expressions: &[String],
-    hashes: &[String],
+    sha256_hashes: &[String],
+    sha512_hashes: &[String],
     architecture: Option<&str>,
 ) -> Result<(), AurReviewError> {
-    if expressions.len() != hashes.len() {
+    if !sha256_hashes.is_empty() && expressions.len() != sha256_hashes.len()
+        || !sha512_hashes.is_empty() && expressions.len() != sha512_hashes.len()
+        || !expressions.is_empty() && sha256_hashes.is_empty() && sha512_hashes.is_empty()
+    {
         return Err(AurReviewError::InvalidSrcInfo);
     }
-    for (expression, hash) in expressions.iter().zip(hashes) {
-        let sha256 = if hash == "SKIP" {
-            None
+    for (index, expression) in expressions.iter().enumerate() {
+        let checksum = if let Some(hash) = sha512_hashes.get(index).filter(|hash| *hash != "SKIP") {
+            Some(AurSourceChecksum::Sha512(parse_sha512(hash)?))
+        } else if let Some(hash) = sha256_hashes.get(index).filter(|hash| *hash != "SKIP") {
+            Some(AurSourceChecksum::Sha256(parse_sha256(hash)?))
         } else {
-            Some(parse_sha256(hash)?)
+            None
         };
         let (alias, location) = split_source_expression(expression)?;
         let local = !location.contains("://");
@@ -1045,7 +1129,7 @@ fn append_sources(
             filename,
             remote_url,
             local,
-            sha256,
+            checksum,
             insecure_transport: source_uses_insecure_transport(expression),
         });
     }
@@ -1173,8 +1257,12 @@ fn create_or_require_directory(path: &Path) -> Result<(), super::PackageRuntimeE
 }
 
 fn hex_sha256(value: &[u8; 32]) -> String {
+    hex_bytes(value)
+}
+
+fn hex_bytes(value: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(64);
+    let mut output = String::with_capacity(value.len() * 2);
     for byte in value {
         output.push(HEX[(byte >> 4) as usize] as char);
         output.push(HEX[(byte & 0x0f) as usize] as char);
@@ -1183,10 +1271,18 @@ fn hex_sha256(value: &[u8; 32]) -> String {
 }
 
 fn parse_sha256(value: &str) -> Result<[u8; 32], AurReviewError> {
-    if value.len() != 64 {
+    parse_hex(value)
+}
+
+fn parse_sha512(value: &str) -> Result<[u8; 64], AurReviewError> {
+    parse_hex(value)
+}
+
+fn parse_hex<const N: usize>(value: &str) -> Result<[u8; N], AurReviewError> {
+    if value.len() != N * 2 {
         return Err(AurReviewError::InvalidSrcInfo);
     }
-    let mut digest = [0_u8; 32];
+    let mut digest = [0_u8; N];
     for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
         digest[index] = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
     }
@@ -1203,7 +1299,8 @@ fn hex_nibble(value: u8) -> Result<u8, AurReviewError> {
 }
 
 fn scan_build_steps(pkgbuild: &str, package_name: &str) -> Vec<AurBuildStep> {
-    let package_function = format!("package_{}", package_name.replace('-', "_"));
+    let package_function = format!("package_{package_name}");
+    let normalized_package_function = format!("package_{}", package_name.replace('-', "_"));
     let mut steps = Vec::with_capacity(4);
     for raw_line in pkgbuild.lines() {
         let line = raw_line.trim_start();
@@ -1224,7 +1321,9 @@ fn scan_build_steps(pkgbuild: &str, package_name: &str) -> Vec<AurBuildStep> {
             Some("build") => Some(AurBuildStep::Build),
             Some("check") => Some(AurBuildStep::Check),
             Some("package") => Some(AurBuildStep::Package),
-            Some(name) if name == package_function => Some(AurBuildStep::Package),
+            Some(name) if name == package_function || name == normalized_package_function => {
+                Some(AurBuildStep::Package)
+            }
             _ => None,
         };
         if let Some(step) = step
@@ -1324,6 +1423,19 @@ fn push_limited(
     Ok(())
 }
 
+fn push_ordered_limited(
+    target: &mut Vec<String>,
+    value: &str,
+    limit: usize,
+    field: &'static str,
+) -> Result<(), AurReviewError> {
+    if target.len() >= limit {
+        return Err(AurReviewError::Limit(field));
+    }
+    target.push(value.to_owned());
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1383,6 +1495,50 @@ package() {
 }
 "#;
 
+    const SPLIT_RPC: &[u8] = br#"{
+      "resultcount": 1,
+      "results": [{
+        "Description": "The .NET SDK binary distribution",
+        "LastModified": 1784708152,
+        "Maintainer": "maintainer",
+        "Name": "dotnet-sdk-bin",
+        "OutOfDate": null,
+        "PackageBase": "dotnet-core-bin",
+        "URL": "https://dotnet.microsoft.com/",
+        "URLPath": "/cgit/aur.git/snapshot/dotnet-sdk-bin.tar.gz",
+        "Version": "10.0.10.sdk302-1"
+      }],
+      "type": "multiinfo",
+      "version": 5
+    }"#;
+
+    const SPLIT_SRCINFO: &[u8] = br#"pkgbase = dotnet-core-bin
+	pkgver = 10.0.10.sdk302
+	pkgrel = 1
+	arch = x86_64
+	arch = aarch64
+	license = MIT
+	source_x86_64 = dotnet.tar.gz::https://example.org/x86_64.tar.gz
+	sha512sums_x86_64 = aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+	source_aarch64 = dotnet.tar.gz::https://example.org/aarch64.tar.gz
+	sha512sums_aarch64 = bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+
+pkgname = dotnet-runtime-bin
+	depends = runtime-only-dependency
+
+pkgname = dotnet-sdk-bin
+	depends = dotnet-runtime-bin
+"#;
+
+    const SPLIT_PKGBUILD: &[u8] = br#"package_dotnet-runtime-bin() {
+  true
+}
+
+package_dotnet-sdk-bin() {
+  true
+}
+"#;
+
     fn snapshot(local_source: &[u8]) -> Vec<u8> {
         let srcinfo = String::from_utf8(SRCINFO.to_vec())
             .expect(".SRCINFO")
@@ -1420,6 +1576,37 @@ package() {
             archive
                 .append_data(&mut header, path, bytes)
                 .expect("append snapshot file");
+        }
+        archive
+            .into_inner()
+            .expect("finish tar")
+            .finish()
+            .expect("finish gzip")
+    }
+
+    fn split_snapshot() -> Vec<u8> {
+        let encoder = GzEncoder::new(Vec::new(), Compression::default());
+        let mut archive = Builder::new(encoder);
+        let provenance = b"52 comment=0123456789abcdef0123456789abcdef01234567\n";
+        let mut provenance_header = Header::new_gnu();
+        provenance_header.set_entry_type(EntryType::XGlobalHeader);
+        provenance_header.set_mode(0o644);
+        provenance_header.set_size(provenance.len() as u64);
+        provenance_header.set_cksum();
+        archive
+            .append_data(&mut provenance_header, "pax_global_header", &provenance[..])
+            .expect("append provenance");
+        for (path, bytes) in [
+            ("dotnet-core-bin/.SRCINFO", SPLIT_SRCINFO),
+            ("dotnet-core-bin/PKGBUILD", SPLIT_PKGBUILD),
+        ] {
+            let mut header = Header::new_gnu();
+            header.set_mode(0o644);
+            header.set_size(bytes.len() as u64);
+            header.set_cksum();
+            archive
+                .append_data(&mut header, path, bytes)
+                .expect("append split snapshot file");
         }
         archive
             .into_inner()
@@ -1479,6 +1666,44 @@ package() {
     }
 
     #[test]
+    fn reviews_a_split_package_from_the_canonical_package_base_snapshot() {
+        assert_eq!(
+            aur_snapshot_path(SPLIT_RPC, "dotnet-sdk-bin").expect("canonical snapshot path"),
+            "/cgit/aur.git/snapshot/dotnet-core-bin.tar.gz",
+        );
+        let review = review_aur_snapshot(
+            SPLIT_RPC,
+            &split_snapshot(),
+            "dotnet-sdk-bin",
+            RepositoryArchitecture::Aarch64,
+        )
+        .expect("split package review");
+        assert_eq!(review.package_base, "dotnet-core-bin");
+        assert_eq!(review.package_name, "dotnet-sdk-bin");
+        assert_eq!(review.version, "10.0.10.sdk302-1");
+        assert_eq!(
+            review.snapshot_path,
+            "/cgit/aur.git/snapshot/dotnet-core-bin.tar.gz"
+        );
+        assert_eq!(review.dependencies, vec!["dotnet-runtime-bin"]);
+        assert_eq!(review.sources.len(), 1);
+        assert_eq!(review.sources[0].architecture.as_deref(), Some("aarch64"));
+        assert!(matches!(
+            review.sources[0].checksum,
+            Some(AurSourceChecksum::Sha512(_))
+        ));
+        assert!(review.build_steps.contains(&AurBuildStep::Package));
+
+        let mismatched_path = String::from_utf8(SPLIT_RPC.to_vec())
+            .expect("split RPC")
+            .replace("snapshot/dotnet-sdk-bin", "snapshot/dotnet-core-bin");
+        assert_eq!(
+            aur_snapshot_path(mismatched_path.as_bytes(), "dotnet-sdk-bin"),
+            Err(AurReviewError::RpcMismatch)
+        );
+    }
+
+    #[test]
     fn reviews_one_pinned_snapshot_and_verifies_local_files() {
         let snapshot_bytes = snapshot(b"abc");
         let review = review_aur_snapshot(
@@ -1502,7 +1727,7 @@ package() {
         let mut wire = vec![0_u8; MAX_AUR_REVIEW_BYTES];
         let wire_length = review.write_wire(&mut wire).expect("review wire");
         assert!(wire_length < wire.len());
-        assert_eq!(&wire[..8], b"ARVW0002");
+        assert_eq!(&wire[..8], b"ARVW0003");
         assert!(
             wire[..wire_length]
                 .windows(PKGBUILD.len())
@@ -1527,13 +1752,14 @@ package() {
     fn stages_and_hashes_one_bounded_remote_source() {
         let root = temporary_root("source-download");
         let expected: [u8; 32] = Sha256::digest(b"verified source").into();
+        let checksum = AurSourceChecksum::Sha256(expected);
         let download =
-            AurSourceDownload::begin(&root, "code.deb", expected, 1024).expect("begin source");
+            AurSourceDownload::begin(&root, "code.deb", checksum, 1024).expect("begin source");
         let mut output = download.duplicate_file().expect("source descriptor");
         output.write_all(b"verified source").expect("write source");
         drop(output);
         assert_eq!(download.finish().expect("finish source"), 15);
-        let digest = hex_sha256(&expected);
+        let digest = checksum.cache_key();
         assert_eq!(
             fs::read(
                 root.join(AUR_SOURCE_CACHE_DIRECTORY)
@@ -1546,7 +1772,7 @@ package() {
             AurSourceDownload::verified_cache_size(
                 &root,
                 "code.deb",
-                expected,
+                checksum,
                 MAX_AUR_SOURCE_BYTES,
             )
             .expect("cached source"),
@@ -1555,7 +1781,7 @@ package() {
         let mut reopened = AurSourceDownload::open_verified_cache(
             &root,
             "code.deb",
-            expected,
+            checksum,
             MAX_AUR_SOURCE_BYTES,
         )
         .expect("open verified source");
@@ -1574,12 +1800,47 @@ package() {
             AurSourceDownload::verified_cache_size(
                 &root,
                 "code.deb",
-                expected,
+                checksum,
                 MAX_AUR_SOURCE_BYTES,
             )
             .expect("discard tampered source"),
             None,
         );
+        fs::remove_dir_all(root).expect("remove test root");
+    }
+
+    #[test]
+    fn stages_and_reopens_a_sha512_remote_source() {
+        let root = temporary_root("sha512-source-download");
+        let checksum = AurSourceChecksum::Sha512(Sha512::digest(b"verified SHA-512 source").into());
+        let download = AurSourceDownload::begin(&root, "source.tar.gz", checksum, 1024)
+            .expect("begin SHA-512 source");
+        let mut output = download.duplicate_file().expect("source descriptor");
+        output
+            .write_all(b"verified SHA-512 source")
+            .expect("write source");
+        drop(output);
+        assert_eq!(download.finish().expect("finish SHA-512 source"), 23);
+        assert_eq!(
+            AurSourceDownload::verified_cache_size(
+                &root,
+                "source.tar.gz",
+                checksum,
+                MAX_AUR_SOURCE_BYTES,
+            )
+            .expect("cached SHA-512 source"),
+            Some(23),
+        );
+        let mut reopened = AurSourceDownload::open_verified_cache(
+            &root,
+            "source.tar.gz",
+            checksum,
+            MAX_AUR_SOURCE_BYTES,
+        )
+        .expect("open verified SHA-512 source");
+        let mut bytes = Vec::new();
+        reopened.read_to_end(&mut bytes).expect("read source");
+        assert_eq!(bytes, b"verified SHA-512 source");
         fs::remove_dir_all(root).expect("remove test root");
     }
 
@@ -1611,7 +1872,8 @@ package() {
     fn rejects_tampered_or_unsafe_remote_source_staging() {
         let root = temporary_root("source-rejection");
         let expected: [u8; 32] = Sha256::digest(b"expected").into();
-        let download = AurSourceDownload::begin(&root, "source.tar.zst", expected, 1024)
+        let checksum = AurSourceChecksum::Sha256(expected);
+        let download = AurSourceDownload::begin(&root, "source.tar.zst", checksum, 1024)
             .expect("begin source");
         let mut output = download.duplicate_file().expect("source descriptor");
         output.write_all(b"tampered").expect("write source");
@@ -1621,13 +1883,13 @@ package() {
             Err(super::super::PackageRuntimeError::InvalidPayload)
         ));
         assert!(matches!(
-            AurSourceDownload::begin(&root, "../escape", expected, 1024),
+            AurSourceDownload::begin(&root, "../escape", checksum, 1024),
             Err(super::super::PackageRuntimeError::InvalidPayload)
         ));
         assert!(
             !root
                 .join(AUR_SOURCE_CACHE_DIRECTORY)
-                .join(format!("{}-source.tar.zst.part", hex_sha256(&expected)))
+                .join(format!("{}-source.tar.zst.part", checksum.cache_key()))
                 .exists()
         );
         fs::remove_dir_all(root).expect("remove test root");
