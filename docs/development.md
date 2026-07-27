@@ -79,6 +79,21 @@ device-specific lifecycle preference operations under the app's thread policy;
 the gate reports their count but does not misattribute those framework-only
 stacks.
 
+Run the graceful runtime teardown gate with the same exact-ABI APKs:
+
+```bash
+./scripts/test-archphene-runtime-shutdown.sh \
+  --serial emulator-5554 \
+  --apk tooling/build/apk/app-debug-x86_64.apk
+./scripts/test-archphene-runtime-shutdown.sh \
+  --serial <adb-serial> \
+  --apk tooling/build/apk/app-debug-arm64-v8a.apk
+```
+
+It verifies that Back removes the manager from the foreground promptly, native
+cancellation and worker draining complete on `ArchpheneShutdown`, and teardown
+emits neither an Archphene-owned StrictMode violation nor a fatal event.
+
 ## Build in Linux
 
 Use the Podman launcher:

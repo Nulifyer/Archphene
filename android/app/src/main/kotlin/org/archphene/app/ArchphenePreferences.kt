@@ -23,6 +23,10 @@ internal object ArchphenePreferences {
     private const val MANAGER_SECTION = "selected_section"
     private const val TERMINAL_PREFERENCES = "terminal_display"
     private const val TERMINAL_TEXT_SP = "text_sp"
+    private const val SHELL_PREFERENCES = "terminal_shell"
+    private const val SHELL_ID = "selected_shell_id"
+    private const val STORAGE_PREFERENCES = "storage"
+    private const val STORAGE_ONBOARDING_SEEN = "folder_onboarding_seen"
 
     private const val DIRTY_MANAGER = 1
     private const val DIRTY_TERMINAL = 1 shl 1
@@ -164,15 +168,45 @@ internal object ArchphenePreferences {
         writePreference(LinuxAppearancePreferences.PREFERENCES, key, value)
     }
 
+    fun setShellId(shellId: String) {
+        val context = initializedContext()
+        io.execute {
+            val saved =
+                context
+                    .getSharedPreferences(SHELL_PREFERENCES, Context.MODE_PRIVATE)
+                    .edit()
+                    .putString(SHELL_ID, shellId)
+                    .commit()
+            if (!saved) {
+                android.util.Log.e(TAG, "Could not persist $SHELL_PREFERENCES/$SHELL_ID")
+            }
+        }
+    }
+
+    fun setStorageOnboardingSeen() {
+        val context = initializedContext()
+        io.execute {
+            val saved =
+                context
+                    .getSharedPreferences(STORAGE_PREFERENCES, Context.MODE_PRIVATE)
+                    .edit()
+                    .putBoolean(STORAGE_ONBOARDING_SEEN, true)
+                    .commit()
+            if (!saved) {
+                android.util.Log.e(
+                    TAG,
+                    "Could not persist $STORAGE_PREFERENCES/$STORAGE_ONBOARDING_SEEN",
+                )
+            }
+        }
+    }
+
     private fun writePreference(
         preferences: String,
         key: String,
         value: Int,
     ) {
-        val context =
-            synchronized(lock) {
-                checkNotNull(applicationContext) { "Preferences are not initialized" }
-            }
+        val context = initializedContext()
         io.execute {
             val editor =
                 context
@@ -188,6 +222,11 @@ internal object ArchphenePreferences {
             }
         }
     }
+
+    private fun initializedContext(): Context =
+        synchronized(lock) {
+            checkNotNull(applicationContext) { "Preferences are not initialized" }
+        }
 
     private fun readInt(
         context: Context,

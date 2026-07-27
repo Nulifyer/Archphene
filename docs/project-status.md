@@ -53,8 +53,13 @@ Archphene-owned violations or fatal events on the x86_64 emulator and physical
 AArch64 Samsung and records visually inspected full-device screenshots.
 Samsung `IdsController` lifecycle events are retained with their count as
 explicitly reported framework-only evidence rather than hidden or attributed
-to Archphene. Native shutdown, compositor, and active-session thread assertions
-remain open.
+to Archphene. Preferred-shell and storage-onboarding writes now use the same
+preference worker. Service teardown invalidates public handles immediately and
+moves connection cancellation, tracked-worker draining, synchronization
+cleanup, lifecycle transitions, and native destruction onto a bounded
+`ArchpheneShutdown` worker. The repeatable gate leaves the foreground in 48 ms
+on the emulator and 99 ms on Samsung and observes no Archphene StrictMode or
+fatal event. Compositor and active-session thread assertions remain open.
 
 At 840 dp and wider, the same stateful controls are composed once into a
 persistent navigation rail, a two-column package workspace, side-by-side file

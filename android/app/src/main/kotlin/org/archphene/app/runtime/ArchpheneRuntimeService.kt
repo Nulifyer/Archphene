@@ -26,6 +26,7 @@ import android.os.ParcelFileDescriptor
 import android.os.Parcel
 import android.os.Process
 import android.os.StatFs
+import android.os.SystemClock
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import android.system.Os
@@ -47,6 +48,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.HttpsURLConnection
+import org.archphene.app.ArchphenePreferences
 import org.archphene.app.MainActivity
 import org.archphene.app.R
 import org.archphene.app.launcher.LauncherApkAssembler
@@ -624,10 +626,7 @@ class ArchpheneRuntimeService : Service() {
 
         fun completeStorageOnboarding() {
             folderOnboardingNeeded = false
-            getSharedPreferences(STORAGE_PREFERENCES, MODE_PRIVATE)
-                .edit()
-                .putBoolean(FOLDER_ONBOARDING_SEEN, true)
-                .apply()
+            ArchphenePreferences.setStorageOnboardingSeen()
         }
 
         fun submitLinuxInput(commandLine: String): Boolean =
@@ -1734,44 +1733,111 @@ class ArchpheneRuntimeService : Service() {
             }
             networkCallbackRegistered = false
         }
-        dnsThread?.interrupt()
-        dnsThread = null
-        stopSharedShell(waitForWorker = true)
-        removeSessionNotification()
         val activeHandle = handle
-        handle = 0L
-        readyHandle = 0L
-        bootstrapThread?.interrupt()
+        val activePty = shellHandle
+        val cancelFolderMirror = folderMirrorRunning
+        val cancelFolderSync = folderSyncRunning
+        val packageConnection = activePackageConnection
+        activePackageConnection = null
+        shellStopRequested = true
+        packageCancellationRequested = true
+        folderMirrorCancellationRequested = true
+        val workers =
+            arrayOf(
+                dnsThread,
+                bootstrapThread,
+                catalogThread,
+                packageThread,
+                commandThread,
+                shellThread,
+                storageThread,
+            )
+        workers.forEach { worker -> worker?.interrupt() }
+        dnsThread = null
         bootstrapThread = null
         bootstrapActive = false
         launcherPublisherActive.set(false)
-        catalogThread?.interrupt()
         catalogThread = null
-        packageCancellationRequested = true
-        activePackageConnection?.disconnect()
-        packageThread?.interrupt()
         packageThread = null
-        commandThread?.interrupt()
         commandThread = null
-        if (folderMirrorRunning && activeHandle != 0L) {
-            if (folderSyncRunning) {
+        shellThread = null
+        storageThread = null
+        handle = 0L
+        readyHandle = 0L
+        removeSessionNotification()
+        Thread(
+            {
+                shutdownNativeRuntime(
+                    activeHandle,
+                    activePty,
+                    cancelFolderMirror,
+                    cancelFolderSync,
+                    packageConnection,
+                    workers,
+                )
+            },
+            "ArchpheneShutdown",
+        ).start()
+        super.onDestroy()
+    }
+
+    private fun shutdownNativeRuntime(
+        activeHandle: Long,
+        activePty: Long,
+        cancelFolderMirror: Boolean,
+        cancelFolderSync: Boolean,
+        packageConnection: HttpsURLConnection?,
+        workers: Array<Thread?>,
+    ) {
+        check(Looper.myLooper() != Looper.getMainLooper()) {
+            "Native runtime shutdown must not run on Android's main thread"
+        }
+        packageConnection?.disconnect()
+        if (activeHandle != 0L && activePty != 0L) {
+            NativeRuntime.nativeWakePty(activeHandle, activePty)
+        }
+        if (activeHandle != 0L && cancelFolderMirror) {
+            if (cancelFolderSync) {
                 NativeRuntime.nativeCancelProjectSync(activeHandle)
-                NativeRuntime.nativeAbortProjectSync(activeHandle)
             } else {
                 NativeRuntime.nativeCancelProjectMirror(activeHandle)
             }
         }
-        storageThread?.interrupt()
-        storageThread = null
+        val deadline = SystemClock.uptimeMillis() + RUNTIME_SHUTDOWN_WORKER_WAIT_MILLIS
+        workers
+            .asSequence()
+            .filterNotNull()
+            .distinct()
+            .filter { worker -> worker !== Thread.currentThread() }
+            .forEach { worker ->
+                val remaining = deadline - SystemClock.uptimeMillis()
+                if (remaining <= 0L) {
+                    return@forEach
+                }
+                try {
+                    worker.join(remaining)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return@forEach
+                }
+            }
         if (activeHandle != 0L) {
+            if (cancelFolderSync) {
+                NativeRuntime.nativeAbortProjectSync(activeHandle)
+            }
             NativeRuntime.nativeTransition(activeHandle, NativeRuntime.LIFECYCLE_STOPPING)
             NativeRuntime.nativeTransition(activeHandle, NativeRuntime.LIFECYCLE_STOPPED)
             if (!NativeRuntime.nativeDestroy(activeHandle)) {
                 Log.e(TAG, "Native runtime handle was already closed")
             }
+            Log.i(TAG, "Shared Rust runtime stopped on ${Thread.currentThread().name}")
+        } else {
+            Log.i(
+                TAG,
+                "Shared Rust runtime stopped before native creation on " +
+                    Thread.currentThread().name,
+            )
         }
-        Log.i(TAG, "Shared Rust runtime stopped")
-        super.onDestroy()
     }
 
     companion object {
@@ -1788,6 +1854,7 @@ class ArchpheneRuntimeService : Service() {
         private const val MAX_SHELL_ROWS = 200
         private const val MIN_SHELL_COLUMNS = 2
         private const val MAX_SHELL_COLUMNS = 400
+        private const val RUNTIME_SHUTDOWN_WORKER_WAIT_MILLIS = 3_000L
         private const val SHELL_CHOICE_LIMIT = 8
         private const val SHELL_FIELD_LIMIT = 64
         private const val AVAILABLE_PACKAGE_LIMIT = 100
@@ -10941,15 +11008,8 @@ class ArchpheneRuntimeService : Service() {
         if (selectedShellIndex == index) {
             return true
         }
-        val saved =
-            getSharedPreferences(SHELL_PREFERENCES, MODE_PRIVATE)
-                .edit()
-                .putString(SHELL_PREFERENCE_ID, shellChoices[index].id)
-                .commit()
-        if (!saved) {
-            return false
-        }
         selectedShellIndex = index
+        ArchphenePreferences.setShellId(shellChoices[index].id)
         return true
     }
 
