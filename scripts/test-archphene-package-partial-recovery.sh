@@ -231,6 +231,10 @@ archphene_wait_ui 'text="Install · Complete · 100%"' \
   "partial-recovery-complete-$serial" 20
 archphene_wait_ui "text=\"Repaired package transaction for $target\"" \
   "partial-recovery-result-$serial" 15
+# Accessibility text can publish one frame before TextView layout/draw catches
+# up. Give the device a bounded render interval so the visual artifact records
+# the settled phase label rather than the preceding horizontal position.
+sleep 0.5
 archphene_adb_run exec-out screencap -p >"$output_dir/$serial-repaired.png"
 
 archphene_adb_run shell run-as "$manager" test -x "$target_file" ||
