@@ -84,6 +84,7 @@ internal class LauncherReviewSnapshot(
     val statuses: IntArray,
     val needsReviewCount: Int,
     val dismissedCount: Int,
+    val failedCount: Int,
     val revision: Int,
 )
 
@@ -940,6 +941,7 @@ class ArchpheneRuntimeService : Service() {
             emptyArray(),
             emptyArray(),
             IntArray(0),
+            0,
             0,
             0,
             0,
@@ -1985,9 +1987,11 @@ class ArchpheneRuntimeService : Service() {
         private val LAUNCHER_PACKAGE =
             Regex("org\\.archphene\\.linux\\.p[0-9a-f]{32}")
         private val LAUNCHER_DESCRIPTOR = Regex("[0-9a-f]{64}")
+        private const val LAUNCHER_STATUS_NEEDS_PUBLISH = 1
         private const val LAUNCHER_STATUS_AWAITING_INSTALL = 3
         private const val LAUNCHER_STATUS_NEEDS_REMOVAL = 5
         private const val LAUNCHER_STATUS_AWAITING_REMOVAL = 6
+        private const val LAUNCHER_STATUS_FAILED = 7
         private const val LAUNCHER_STATUS_CANCELLED = 8
         private const val LAUNCHER_STATUS_DISMISSED = 9
         private const val LAUNCHER_STATUS_NEEDS_REVIEW = 10
@@ -4648,7 +4652,11 @@ class ArchpheneRuntimeService : Service() {
             val launcherRows =
                 if (
                     launcherSummary != null &&
-                    (launcherSummary.needsReview > 0 || launcherSummary.dismissed > 0)
+                    (
+                        launcherSummary.needsReview > 0 ||
+                            launcherSummary.dismissed > 0 ||
+                            launcherSummary.failed > 0
+                    )
                 ) {
                     readLauncherRegistryRows(activeHandle)
                 } else {
@@ -4849,6 +4857,31 @@ class ArchpheneRuntimeService : Service() {
                         launcherPublisherActive.set(false)
                         return@Thread
                     }
+                    val untrustedReplacement =
+                        readLauncherRegistryRows(activeHandle).firstOrNull { row ->
+                            row.status == LAUNCHER_STATUS_NEEDS_PUBLISH &&
+                                installedLauncherHasDifferentSigner(row.androidPackage)
+                        }
+                    if (untrustedReplacement != null) {
+                        check(
+                            launcherTransition(
+                                activeHandle,
+                                "replace-untrusted",
+                                untrustedReplacement.androidPackage,
+                                untrustedReplacement.desiredGeneration,
+                            ),
+                        ) {
+                            "Could not stage untrusted launcher replacement"
+                        }
+                        launcherPublisherActive.set(false)
+                        refreshDesktopEntries(activeHandle)
+                        mainHandler.post {
+                            if (readyHandle == activeHandle) {
+                                startLauncherPublisher(activeHandle)
+                            }
+                        }
+                        return@Thread
+                    }
                     if (!packageManager.canRequestPackageInstalls()) {
                         launcherPermissionRequired = true
                         launcherPublisherActive.set(false)
@@ -4952,6 +4985,28 @@ class ArchpheneRuntimeService : Service() {
             },
             "ArchpheneLauncherPublisher",
         ).start()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun installedLauncherHasDifferentSigner(androidPackage: String): Boolean {
+        val info =
+            try {
+                packageManager.getPackageInfo(
+                    androidPackage,
+                    PackageManager.GET_SIGNING_CERTIFICATES,
+                )
+            } catch (_: PackageManager.NameNotFoundException) {
+                return false
+            }
+        val certificates = info.signingInfo?.apkContentsSigners
+        if (certificates?.size != 1) {
+            return true
+        }
+        val actual =
+            MessageDigest
+                .getInstance("SHA-256")
+                .digest(certificates.single().toByteArray())
+        return !MessageDigest.isEqual(actual, LauncherApkSigner.signerSha256())
     }
 
     private fun loadLauncherIcon(
@@ -5104,6 +5159,7 @@ class ArchpheneRuntimeService : Service() {
                 emptyList()
             }
         for (row in rows) {
+            var staleInstalledGeneration = 0L
             val generation =
                 try {
                     val flags =
@@ -5123,13 +5179,13 @@ class ArchpheneRuntimeService : Service() {
                                     value.drop(2).all(Char::isDigit)
                             }?.drop(2)
                             ?.toLongOrNull()
+                            ?.takeIf { value -> value in 1..Int.MAX_VALUE.toLong() }
                         ?: error("launcher generation metadata is invalid")
                     val certificates =
                         info.signingInfo?.apkContentsSigners
                             ?: error("launcher signer is missing")
                     check(
                         info.packageName == row.androidPackage &&
-                            generationValue <= row.desiredGeneration &&
                             info.longVersionCode == generationValue &&
                             metadata.getString("org.archphene.launcher.DESCRIPTOR_ID") ==
                             "d:${row.descriptorIdHex}" &&
@@ -5145,17 +5201,26 @@ class ArchpheneRuntimeService : Service() {
                     ) {
                         "launcher identity or signer changed"
                     }
-                    if (
-                        generationValue == row.desiredGeneration &&
-                        row.status != LAUNCHER_STATUS_NEEDS_REMOVAL &&
-                        row.status != LAUNCHER_STATUS_AWAITING_REMOVAL &&
-                        (
-                            metadata.getString("org.archphene.launcher.TEMPLATE_SHA256") !=
-                                "h:$templateDigest" ||
-                                metadata.getString("org.archphene.launcher.CAPABILITIES") !=
-                                "c:${LauncherApkAssembler.CAPABILITIES_V1}"
-                        )
-                    ) {
+                    val removalPending =
+                        row.status == LAUNCHER_STATUS_NEEDS_REMOVAL ||
+                            row.status == LAUNCHER_STATUS_AWAITING_REMOVAL
+                    val installedContentIsStale =
+                        generationValue > row.desiredGeneration ||
+                            (
+                                generationValue == row.desiredGeneration &&
+                                    !removalPending &&
+                                    (
+                                        metadata.getString(
+                                            "org.archphene.launcher.TEMPLATE_SHA256",
+                                        ) != "h:$templateDigest" ||
+                                            metadata.getString(
+                                                "org.archphene.launcher.CAPABILITIES",
+                                            ) !=
+                                            "c:${LauncherApkAssembler.CAPABILITIES_V1}"
+                                    )
+                            )
+                    if (installedContentIsStale) {
+                        staleInstalledGeneration = generationValue
                         -2L
                     } else {
                         generationValue
@@ -5163,12 +5228,24 @@ class ArchpheneRuntimeService : Service() {
                 } catch (_: PackageManager.NameNotFoundException) {
                     -1L
                 } catch (error: Exception) {
-                    Log.e(
-                        TAG,
-                        "Refusing untrusted launcher package=${row.androidPackage}",
-                        error,
-                    )
-                    0L
+                    if (
+                        row.status == LAUNCHER_STATUS_NEEDS_REMOVAL ||
+                        row.status == LAUNCHER_STATUS_AWAITING_REMOVAL
+                    ) {
+                        Log.w(
+                            TAG,
+                            "Retaining untrusted launcher removal package=${row.androidPackage}",
+                            error,
+                        )
+                        -3L
+                    } else {
+                        Log.e(
+                            TAG,
+                            "Refusing untrusted launcher package=${row.androidPackage}",
+                            error,
+                        )
+                        0L
+                    }
                 }
             val transitioned =
                 when {
@@ -5194,7 +5271,7 @@ class ArchpheneRuntimeService : Service() {
                             activeHandle,
                             "template-stale",
                             row.androidPackage,
-                            row.desiredGeneration,
+                            staleInstalledGeneration,
                         )
                     }
                     generation > 0 ->
@@ -5227,6 +5304,7 @@ class ArchpheneRuntimeService : Service() {
                     }
                     generation == -1L ->
                         launcherTransition(activeHandle, "absent", row.androidPackage, 0)
+                    generation == -3L -> true
                     else ->
                         launcherTransition(activeHandle, "quarantined", row.androidPackage, 0)
                 }
@@ -5325,7 +5403,8 @@ class ArchpheneRuntimeService : Service() {
     private fun updateLauncherReviewSnapshot(rows: List<LauncherRegistryRow>) {
         val relevant =
             rows.filter { row ->
-                row.status == LAUNCHER_STATUS_DISMISSED ||
+                row.status == LAUNCHER_STATUS_FAILED ||
+                    row.status == LAUNCHER_STATUS_DISMISSED ||
                     row.status == LAUNCHER_STATUS_NEEDS_REVIEW
             }
         val packages = Array(relevant.size) { index -> relevant[index].androidPackage }
@@ -5352,6 +5431,7 @@ class ArchpheneRuntimeService : Service() {
                 statuses,
                 statuses.count { status -> status == LAUNCHER_STATUS_NEEDS_REVIEW },
                 statuses.count { status -> status == LAUNCHER_STATUS_DISMISSED },
+                statuses.count { status -> status == LAUNCHER_STATUS_FAILED },
                 previous.revision + 1,
             )
     }

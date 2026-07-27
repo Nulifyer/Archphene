@@ -271,7 +271,12 @@ impl LauncherRegistry {
                             == descriptor.desired_generation
                             && descriptor.published_generation != 0
                         {
-                            WrapperStatus::Current
+                            match descriptor.status {
+                                WrapperStatus::Failed
+                                | WrapperStatus::NeedsRemoval
+                                | WrapperStatus::AwaitingRemoval => descriptor.status,
+                                _ => WrapperStatus::Current,
+                            }
                         } else {
                             match descriptor.status {
                                 WrapperStatus::AwaitingInstall => descriptor.status,
@@ -307,6 +312,9 @@ impl LauncherRegistry {
                             WrapperStatus::AwaitingInstall => {
                                 replacement.pending_generation = old.pending_generation;
                                 replacement.status = WrapperStatus::AwaitingInstall;
+                            }
+                            WrapperStatus::NeedsRemoval | WrapperStatus::AwaitingRemoval => {
+                                replacement.status = old.status;
                             }
                             WrapperStatus::Failed
                             | WrapperStatus::Cancelled
@@ -585,29 +593,38 @@ impl LauncherRegistry {
         android_package: &str,
         installed_generation: u64,
     ) -> Result<(), LauncherRegistryError> {
-        let replacement_generation = self
-            .generation
-            .checked_add(1)
-            .filter(|generation| *generation <= i32::MAX as u64)
-            .ok_or(LauncherRegistryError::LimitExceeded)?;
-        let descriptor = self
+        if installed_generation == 0 || installed_generation > i32::MAX as u64 {
+            return Err(LauncherRegistryError::InvalidTransition);
+        }
+        let index = self
             .descriptors
-            .iter_mut()
-            .find(|descriptor| descriptor.android_package == android_package)
+            .iter()
+            .position(|descriptor| descriptor.android_package == android_package)
             .ok_or(LauncherRegistryError::InvalidTransition)?;
-        if !descriptor.desired_present
-            || descriptor.desired_generation != installed_generation
-            || descriptor.published_generation != installed_generation
-            || matches!(
-                descriptor.status,
+        if self.descriptors[index].desired_present
+            && matches!(
+                self.descriptors[index].status,
                 WrapperStatus::NeedsRemoval | WrapperStatus::AwaitingRemoval
             )
         {
             return Err(LauncherRegistryError::InvalidTransition);
         }
-        descriptor.desired_generation = replacement_generation;
+        let recovered_generation = self.generation.max(installed_generation);
+        let replacement_generation = recovered_generation
+            .checked_add(1)
+            .filter(|generation| *generation <= i32::MAX as u64)
+            .ok_or(LauncherRegistryError::LimitExceeded)?;
+        let descriptor = &mut self.descriptors[index];
+        descriptor.published_generation = installed_generation;
         descriptor.pending_generation = 0;
-        descriptor.status = WrapperStatus::NeedsPublish;
+        if descriptor.desired_present {
+            descriptor.desired_generation = replacement_generation;
+            descriptor.status = WrapperStatus::NeedsPublish;
+        } else {
+            descriptor.desired_generation = recovered_generation;
+            descriptor.status = WrapperStatus::NeedsRemoval;
+        }
+        self.generation = recovered_generation;
         self.advance_and_store(arch_root)
     }
 
@@ -637,6 +654,30 @@ impl LauncherRegistry {
         } else {
             return Err(LauncherRegistryError::InvalidTransition);
         };
+        self.advance_and_store(arch_root)
+    }
+
+    pub fn mark_untrusted_replacement_removal(
+        &mut self,
+        arch_root: &Path,
+        android_package: &str,
+        desired_generation: u64,
+    ) -> Result<(), LauncherRegistryError> {
+        let descriptor = self
+            .descriptors
+            .iter_mut()
+            .find(|descriptor| descriptor.android_package == android_package)
+            .ok_or(LauncherRegistryError::InvalidTransition)?;
+        if !descriptor.desired_present
+            || descriptor.desired_generation != desired_generation
+            || descriptor.published_generation != 0
+            || descriptor.pending_generation != 0
+            || descriptor.status != WrapperStatus::NeedsPublish
+        {
+            return Err(LauncherRegistryError::InvalidTransition);
+        }
+        descriptor.published_generation = desired_generation;
+        descriptor.status = WrapperStatus::NeedsRemoval;
         self.advance_and_store(arch_root)
     }
 
@@ -701,20 +742,28 @@ impl LauncherRegistry {
                 .iter_mut()
                 .find(|descriptor| descriptor.android_package == decision.android_package)
                 .ok_or(LauncherRegistryError::InvalidTransition)?;
+            let previous_status = descriptor.status;
             if descriptor.desired_generation != decision.desired_generation
                 || !descriptor.desired_present
                 || descriptor.pending_generation != 0
                 || !matches!(
                     descriptor.status,
-                    WrapperStatus::NeedsReview | WrapperStatus::Dismissed
+                    WrapperStatus::Failed | WrapperStatus::NeedsReview | WrapperStatus::Dismissed
                 )
             {
                 return Err(LauncherRegistryError::InvalidTransition);
             }
             descriptor.status = if decision.publish {
-                WrapperStatus::NeedsPublish
-            } else {
+                if previous_status == WrapperStatus::Failed && descriptor.published_generation != 0
+                {
+                    WrapperStatus::NeedsRemoval
+                } else {
+                    WrapperStatus::NeedsPublish
+                }
+            } else if previous_status == WrapperStatus::NeedsReview {
                 WrapperStatus::Dismissed
+            } else {
+                previous_status
             };
         }
         next.advance_and_store(arch_root)?;
@@ -1447,7 +1496,9 @@ fn validate_registry(registry: &LauncherRegistry) -> Result<(), LauncherRegistry
                 WrapperStatus::NeedsReview => {
                     descriptor.published_generation == 0 && descriptor.pending_generation == 0
                 }
-                WrapperStatus::NeedsRemoval | WrapperStatus::AwaitingRemoval => false,
+                WrapperStatus::NeedsRemoval | WrapperStatus::AwaitingRemoval => {
+                    descriptor.published_generation != 0 && descriptor.pending_generation == 0
+                }
             }
         } else {
             match descriptor.status {
@@ -2173,6 +2224,45 @@ mod tests {
     }
 
     #[test]
+    fn trusted_wrapper_from_a_reset_registry_is_republished_without_a_downgrade() {
+        let root = TestRoot::new();
+        let source = catalog(vec![entry("org.kde.kate.desktop", "Kate")]);
+        let (mut registry, _) =
+            LauncherRegistry::reconcile(&root.path, &source).expect("reset registry");
+        let package = registry.descriptors[0].android_package.clone();
+        let descriptor_id = registry.descriptors[0].descriptor_id_hex();
+        let descriptor_id = std::str::from_utf8(&descriptor_id).expect("descriptor hex");
+
+        registry
+            .mark_template_stale(&root.path, &package, 18)
+            .expect("adopt trusted stale wrapper");
+        let replacement_generation = registry.descriptors[0].desired_generation;
+        assert!(replacement_generation > 18);
+        assert_eq!(registry.descriptors[0].published_generation, 18);
+        assert_eq!(registry.descriptors[0].status, WrapperStatus::NeedsPublish);
+        assert!(
+            registry
+                .authorize_published(&package, descriptor_id, 18)
+                .is_none()
+        );
+
+        registry
+            .mark_building(&root.path, &package, replacement_generation)
+            .expect("replacement build");
+        registry
+            .mark_awaiting_install(&root.path, &package, replacement_generation)
+            .expect("replacement install");
+        registry
+            .confirm_installed(&root.path, &package, replacement_generation)
+            .expect("replacement current");
+        assert!(
+            registry
+                .authorize_published(&package, descriptor_id, replacement_generation)
+                .is_some()
+        );
+    }
+
+    #[test]
     fn catalog_changes_cannot_orphan_an_awaiting_android_install() {
         let root = TestRoot::new();
         let initial = catalog(vec![entry("org.kde.kate.desktop", "Kate")]);
@@ -2442,6 +2532,88 @@ mod tests {
                 .is_ok()
         );
         assert_eq!(registry.descriptors[0].status, WrapperStatus::Current);
+        registry
+            .quarantine_android_package(&root.path, &package)
+            .expect("quarantine installed blocker");
+        let (mut registry, _) =
+            LauncherRegistry::reconcile(&root.path, &source).expect("catalog refresh");
+        assert_eq!(registry.descriptors[0].status, WrapperStatus::Failed);
+        registry
+            .review_batch(
+                &root.path,
+                &[LauncherReviewDecision {
+                    android_package: package,
+                    desired_generation: 1,
+                    publish: true,
+                }],
+            )
+            .expect("replace quarantined blocker");
+        assert_eq!(registry.descriptors[0].status, WrapperStatus::NeedsRemoval);
+    }
+
+    #[test]
+    fn failed_launcher_can_be_explicitly_retried_from_review() {
+        let root = TestRoot::new();
+        let source = catalog(vec![entry("org.kde.kate.desktop", "Kate")]);
+        let (mut registry, _) =
+            LauncherRegistry::reconcile(&root.path, &source).expect("initial reconcile");
+        let package = registry.descriptors[0].android_package.clone();
+        registry
+            .quarantine_android_package(&root.path, &package)
+            .expect("quarantine");
+
+        registry
+            .review_batch(
+                &root.path,
+                &[LauncherReviewDecision {
+                    android_package: package,
+                    desired_generation: 1,
+                    publish: true,
+                }],
+            )
+            .expect("explicit retry");
+        assert_eq!(registry.descriptors[0].status, WrapperStatus::NeedsPublish);
+    }
+
+    #[test]
+    fn untrusted_retry_removes_the_blocker_before_republishing() {
+        let root = TestRoot::new();
+        let source = catalog(vec![entry("org.kde.kate.desktop", "Kate")]);
+        let (mut registry, _) =
+            LauncherRegistry::reconcile(&root.path, &source).expect("initial reconcile");
+        let package = registry.descriptors[0].android_package.clone();
+        registry
+            .quarantine_android_package(&root.path, &package)
+            .expect("quarantine");
+        registry
+            .review_batch(
+                &root.path,
+                &[LauncherReviewDecision {
+                    android_package: package.clone(),
+                    desired_generation: 1,
+                    publish: true,
+                }],
+            )
+            .expect("retry");
+
+        registry
+            .mark_untrusted_replacement_removal(&root.path, &package, 1)
+            .expect("stage blocker removal");
+        assert_eq!(registry.descriptors[0].status, WrapperStatus::NeedsRemoval);
+        let updated = catalog(vec![entry("org.kde.kate.desktop", "Updated Kate")]);
+        let (mut registry, _) =
+            LauncherRegistry::reconcile(&root.path, &updated).expect("changed catalog refresh");
+        assert_eq!(registry.descriptors[0].status, WrapperStatus::NeedsRemoval);
+        assert_eq!(registry.descriptors[0].desired_generation, 2);
+        registry
+            .mark_awaiting_removal(&root.path, &package)
+            .expect("await removal");
+        registry
+            .confirm_removed(&root.path, &package)
+            .expect("remove blocker");
+        assert_eq!(registry.descriptors[0].status, WrapperStatus::NeedsPublish);
+        assert_eq!(registry.descriptors[0].published_generation, 0);
+        assert_eq!(registry.descriptors[0].desired_generation, 2);
     }
 
     #[test]

@@ -934,8 +934,8 @@ class LauncherSessionService : Service() {
     @Synchronized
     internal fun debugInjectIme(
         androidPackage: String,
-        composing: String,
-        committed: String,
+        composing: String?,
+        committed: String?,
         submit: Boolean,
     ): LauncherSessionDebugResult {
         if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0) {
@@ -953,16 +953,20 @@ class LauncherSessionService : Service() {
                 return LauncherSessionDebugResult(false, 0, "invalid-package")
             }
         }
+        val plan = launcherSessionDebugImePlan(composing, committed, submit)
+        if (plan.commandCount == 0) {
+            return LauncherSessionDebugResult(false, 0, "missing-operation")
+        }
         if (
-            composing.length > MAX_IME_UTF16 ||
-            committed.length > MAX_IME_UTF16 ||
-            !hasWellFormedUtf16(composing) ||
-            !hasWellFormedUtf16(committed)
+            (composing != null &&
+                (composing.length > MAX_IME_UTF16 || !hasWellFormedUtf16(composing))) ||
+            (committed != null &&
+                (committed.length > MAX_IME_UTF16 || !hasWellFormedUtf16(committed)))
         ) {
             return LauncherSessionDebugResult(false, 0, "invalid-text")
         }
-        val composingBytes = utf8Length(composing)
-        val committedBytes = utf8Length(committed)
+        val composingBytes = composing?.let(::utf8Length) ?: 0
+        val committedBytes = committed?.let(::utf8Length) ?: 0
         if (
             composingBytes !in 0..MAX_IME_BYTES ||
             committedBytes !in 0..MAX_IME_BYTES
@@ -984,15 +988,11 @@ class LauncherSessionService : Service() {
         if (activeSession.surface == null || activeSession.compositor == null) {
             return LauncherSessionDebugResult(false, activeSession.id, "surface-not-ready")
         }
-        val commandCount =
-            (if (composing.isNotEmpty()) 1 else 0) +
-                1 +
-                (if (submit) 1 else 0)
         synchronized(activeSession) {
-            if (commandCount > MAX_IME_COMMANDS - activeSession.imeSize) {
+            if (plan.commandCount > MAX_IME_COMMANDS - activeSession.imeSize) {
                 return LauncherSessionDebugResult(false, activeSession.id, "queue-busy")
             }
-            if (composing.isNotEmpty()) {
+            if (composing != null) {
                 appendImeCommand(
                     activeSession,
                     IME_PREEDIT,
@@ -1001,7 +1001,9 @@ class LauncherSessionService : Service() {
                     composingBytes,
                 )
             }
-            appendImeCommand(activeSession, IME_COMMIT, committed, 0, 0)
+            if (committed != null) {
+                appendImeCommand(activeSession, IME_COMMIT, committed, 0, 0)
+            }
             if (submit) {
                 appendImeCommand(
                     activeSession,

@@ -23,8 +23,8 @@ internal object LauncherSessionDebugBridge {
 
     fun injectIme(
         androidPackage: String,
-        composing: String,
-        committed: String,
+        composing: String?,
+        committed: String?,
         submit: Boolean,
     ): LauncherSessionDebugResult =
         service?.debugInjectIme(androidPackage, composing, committed, submit)

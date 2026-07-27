@@ -113,6 +113,7 @@
     <string name="launcher_cancelled_dismiss">Dismiss</string>
     <string name="launcher_review_title">Choose Android launchers</string>
     <string name="launcher_manage_title">Manage Android launchers</string>
+    <string name="launcher_review_failed">retry failed launcher</string>
     <string name="launcher_review_apply">Add selected</string>
     <string name="launcher_review_later">Not now</string>
     <string name="launcher_review_skip">Skip all</string>

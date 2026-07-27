@@ -3682,6 +3682,9 @@ mod android {
                 "template-stale" if generation != 0 => {
                     runtime.launcher_template_stale(android_package, generation)
                 }
+                "replace-untrusted" if generation != 0 => {
+                    runtime.launcher_untrusted_replacement_removal(android_package, generation)
+                }
                 "removed" => runtime.launcher_confirm_removed(android_package),
                 "quarantined" if generation == 0 => runtime.launcher_quarantine(android_package),
                 "absent" if generation == 0 => {

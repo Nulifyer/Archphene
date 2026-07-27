@@ -2304,10 +2304,16 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         val labels =
             Array<CharSequence>(review.labels.size) { index ->
                 val source = review.sourcePackages[index]
-                if (source.isEmpty()) {
-                    review.labels[index]
+                val label =
+                    if (source.isEmpty()) {
+                        review.labels[index]
+                    } else {
+                        "${review.labels[index]} · $source"
+                    }
+                if (review.statuses[index] == LAUNCHER_STATUS_FAILED) {
+                    "$label · ${getString(R.string.launcher_review_failed)}"
                 } else {
-                    "${review.labels[index]} · $source"
+                    label
                 }
             }
         val hasPendingReview = review.needsReviewCount > 0
@@ -2421,7 +2427,9 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         setTextIfChanged(installedPackageStatusView, packages.status)
         setTextIfChanged(desktopEntryStatusView, desktopEntries.status)
         desktopEntryStatusView.isEnabled =
-            launcherReview.needsReviewCount > 0 || launcherReview.dismissedCount > 0
+            launcherReview.needsReviewCount > 0 ||
+                launcherReview.dismissedCount > 0 ||
+                launcherReview.failedCount > 0
         desktopEntryStatusView.isClickable = desktopEntryStatusView.isEnabled
         if (packages.revision == installedPackageRevision) {
             return
@@ -3442,6 +3450,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         private const val EXTERNAL_STORAGE_DOCUMENTS_AUTHORITY =
             "com.android.externalstorage.documents"
         private const val PRIMARY_STORAGE_ROOT_ID = "primary"
+        private const val LAUNCHER_STATUS_FAILED = 7
         private const val LAUNCHER_STATUS_NEEDS_REVIEW = 10
         private const val DEBUG_SHOW_AUR_REVIEW_ACTION =
             "org.archphene.app.debug.action.SHOW_AUR_REVIEW"

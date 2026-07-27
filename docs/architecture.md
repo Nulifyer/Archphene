@@ -198,6 +198,12 @@ per-launcher install and uninstall confirmations. Interrupted installer
 sessions are abandoned and requeued on manager restart; installed packages are
 adopted only after signer and embedded metadata verification. A conflicting or
 untrusted package is quarantined rather than replaced or silently removed.
+The manager exposes that failure for explicit review. Retry first persists a
+removal state, asks Android for uninstall confirmation, and publishes the
+trusted replacement only after Android confirms that the deterministic package
+identity is vacant. If registry state is lost but the installed wrapper still
+has the trusted signer and a higher Android version, reconciliation advances
+the desired generation above it rather than attempting a downgrade.
 
 The wrapper signing certificate is intentionally different from the manager's
 release certificate. The exported launcher Service therefore cannot rely on a

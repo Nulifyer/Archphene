@@ -35,6 +35,7 @@ artifact_dir="${artifact_dir:-$ARCHPHENE_ROOT/tooling/build/foot-workflows/$safe
 mkdir -p "$artifact_dir"
 
 ime_file=foot-ime-workflow.txt
+composition_file=foot-ime-composition-workflow.txt
 clipboard_file=foot-clipboard-workflow.txt
 selection_file=foot-selection-workflow.txt
 selection_render_file=foot-selection-render-ready.txt
@@ -63,6 +64,7 @@ cleanup() {
   archphene_adb_run shell am force-stop "$package" >/dev/null 2>&1 || true
   archphene_adb_run shell run-as "$manager" rm -f \
     "$manager_home/$ime_file" \
+    "$manager_home/$composition_file" \
     "$manager_home/$clipboard_file" \
     "$manager_home/$selection_file" \
     "$manager_home/$selection_render_file" \
@@ -92,14 +94,18 @@ process_tree() {
 }
 
 foot_pid() {
-  process_tree | awk '/--argv0 foot / { print $1; exit }'
+  process_tree |
+    awk '/--argv0 foot / && !found { print $1; found = 1 }'
 }
 
 current_pids() {
   local wrapper linux
   wrapper="$(archphene_android_pid "$package")"
   linux="$(foot_pid)"
-  [[ "$wrapper" =~ ^[1-9][0-9]*$ && "$linux" =~ ^[1-9][0-9]*$ ]] || return 1
+  [[ "$wrapper" =~ ^[1-9][0-9]*$ ]] ||
+    archphene_die "Foot Android wrapper PID is unavailable: $(printf %q "$wrapper")"
+  [[ "$linux" =~ ^[1-9][0-9]*$ ]] ||
+    archphene_die "Foot Linux PID is unavailable: $(printf %q "$linux")"
   printf '%s %s\n' "$wrapper" "$linux"
 }
 
@@ -128,7 +134,11 @@ inject_text() {
   local value="$1" submit="${2:-false}" composing="${3:-}"
   local value_base64 composing_base64 log
   local -a composing_extra=()
-  value_base64="$(printf %s "$value" | base64 -w0)"
+  local -a committed_extra=()
+  if [[ -n "$value" ]]; then
+    value_base64="$(printf %s "$value" | base64 -w0)"
+    committed_extra=(--es committed_base64 "$value_base64")
+  fi
   if [[ -n "$composing" ]]; then
     composing_base64="$(printf %s "$composing" | base64 -w0)"
     composing_extra=(--es composing_base64 "$composing_base64")
@@ -140,7 +150,7 @@ inject_text() {
     --es token launcher-session-gate \
     --es package "$package" \
     "${composing_extra[@]}" \
-    --es committed_base64 "$value_base64" \
+    "${committed_extra[@]}" \
     --ez submit "$submit" >/dev/null
   log="$(
     archphene_wait_log \
@@ -212,6 +222,7 @@ archphene_wait_log \
 
 archphene_adb_run shell run-as "$manager" rm -f \
   "$manager_home/$ime_file" \
+  "$manager_home/$composition_file" \
   "$manager_home/$clipboard_file" \
   "$manager_home/$selection_file" \
   "$manager_home/$selection_render_file" \
@@ -236,6 +247,18 @@ inject_text \
   'Archphene-preedit-雪'
 wait_file "$ime_file" "$ime_value"
 capture_png ime
+
+# Replace an active Japanese candidate several times. Only the final committed
+# command may enter the Linux PTY; leaking any intermediate preedit would prefix
+# the command and prevent the exact result file from being created.
+composition_value='日本語-雪-👍🏽-👩‍💻'
+inject_text "" false 'に'
+inject_text "" false '日本'
+inject_text "" false '日本語変換'
+capture_png ime-preedit-replacement
+inject_text "printf '%s' '$composition_value' > ~/$composition_file" true
+wait_file "$composition_file" "$composition_value"
+capture_png ime-complex-commit
 
 # Put the manager in front before its debug receiver seeds Android's real
 # ClipboardManager. Returning to the singleTask launcher makes its normal focus
@@ -446,6 +469,6 @@ fatal_log="$(
 trap - EXIT
 cleanup
 archphene_note "Foot manager-session workflows passed on $serial"
-archphene_note "  UTF-8 IME, real Android/Linux clipboard, pointer selection, and scrollback passed"
+archphene_note "  Japanese candidate replacement, exact complex UTF-8 commit, clipboard, selection, and scrollback passed"
 archphene_note "  Live resize, graceful close, force-stop cleanup, and cold relaunch passed"
 archphene_note "  Full-device screenshots and raw comparison frames: $artifact_dir"

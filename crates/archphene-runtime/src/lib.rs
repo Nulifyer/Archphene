@@ -1151,6 +1151,21 @@ impl RuntimeHost {
             .mark_template_stale(arch_root.path(), android_package, generation)
     }
 
+    pub fn launcher_untrusted_replacement_removal(
+        &mut self,
+        android_package: &str,
+        generation: u64,
+    ) -> Result<(), LauncherRegistryError> {
+        let arch_root = self
+            .arch_root
+            .as_ref()
+            .ok_or(LauncherRegistryError::InvalidRoot)?;
+        self.launcher_registry
+            .as_mut()
+            .ok_or(LauncherRegistryError::InvalidTransition)?
+            .mark_untrusted_replacement_removal(arch_root.path(), android_package, generation)
+    }
+
     pub fn launcher_confirm_removed(
         &mut self,
         android_package: &str,

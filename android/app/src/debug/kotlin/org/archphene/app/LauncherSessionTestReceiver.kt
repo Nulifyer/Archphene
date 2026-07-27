@@ -74,19 +74,22 @@ internal class LauncherSessionTestReceiver : BroadcastReceiver() {
 
     private fun injectIme(intent: Intent) {
         val androidPackage = intent.getStringExtra(EXTRA_PACKAGE).orEmpty()
+        val hasComposing = intent.hasExtra(EXTRA_COMPOSING_BASE64)
         val encodedComposing = intent.getStringExtra(EXTRA_COMPOSING_BASE64)
         val composing =
-            if (encodedComposing == null) {
-                ""
+            if (!hasComposing) {
+                null
             } else {
-                decodeUtf8(encodedComposing) ?: return
+                decodeUtf8(encodedComposing ?: return) ?: return
             }
+        val hasCommitted = intent.hasExtra(EXTRA_COMMITTED_BASE64)
+        val encodedCommitted = intent.getStringExtra(EXTRA_COMMITTED_BASE64)
         val committed =
-            intent.getStringExtra(EXTRA_COMMITTED_BASE64)?.let(::decodeUtf8)
-                ?: run {
-                    Log.e(TAG, "Rejected missing launcher-session IME commit")
-                    return
-                }
+            if (!hasCommitted) {
+                null
+            } else {
+                decodeUtf8(encodedCommitted ?: return) ?: return
+            }
         val submit = intent.getBooleanExtra(EXTRA_SUBMIT, false)
         val result =
             LauncherSessionDebugBridge.injectIme(
@@ -97,8 +100,10 @@ internal class LauncherSessionTestReceiver : BroadcastReceiver() {
             )
         val message =
             "Manager session IME package=$androidPackage session=${result.sessionId} " +
-                "preeditBytes=${composing.toByteArray(StandardCharsets.UTF_8).size} " +
-                "commitBytes=${committed.toByteArray(StandardCharsets.UTF_8).size} " +
+                "preedit=${composing != null} " +
+                "preeditBytes=${composing?.toByteArray(StandardCharsets.UTF_8)?.size ?: 0} " +
+                "commit=${committed != null} " +
+                "commitBytes=${committed?.toByteArray(StandardCharsets.UTF_8)?.size ?: 0} " +
                 "submit=$submit result=${result.reason}"
         if (result.accepted) {
             Log.i(TAG, message)

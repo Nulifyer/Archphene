@@ -123,12 +123,14 @@ the installed manager-generated Foot package:
 
 The gate updates the manager without clearing its private Arch root and requires
 a current generated launcher. Unicode IME control enters through a debug-only
-manager-session boundary; the launcher itself has no test intent. Selection
-uses real wrapper mouse input, clipboard transfer uses the authenticated Binder
-and clipboard-worker paths, and lifecycle checks retain the same manager-owned
-Linux process through resize before testing close, force-stop cleanup, and a
-cold relaunch. Full-device PNGs and raw comparison frames are written under
-`tooling/build/foot-workflows/`.
+manager-session boundary; the launcher itself has no test intent. The sequence
+replaces three successive Japanese preedit candidates without committing them,
+then requires an exact Japanese/CJK/emoji-modifier/ZWJ value in the shared
+Linux home. Selection uses real wrapper mouse input, clipboard transfer uses
+the authenticated Binder and clipboard-worker paths, and lifecycle checks
+retain the same manager-owned Linux process through resize before testing
+close, force-stop cleanup, and a cold relaunch. Full-device PNGs and raw
+comparison frames are written under `tooling/build/foot-workflows/`.
 
 ## Main-thread I/O diagnostics
 
