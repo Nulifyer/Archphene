@@ -10,6 +10,7 @@ import java.net.UnknownHostException
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 import org.archphene.app.runtime.NativeRuntime
+import org.archphene.app.runtime.InsufficientPackageStorageException
 import org.archphene.app.runtime.PackageFailureDiagnostics
 
 internal class PackageJobTestReceiver : BroadcastReceiver() {
@@ -107,6 +108,15 @@ internal class PackageJobTestReceiver : BroadcastReceiver() {
                             ) {
                                 "could not save package-cache completion gate"
                             }
+                        }
+                        check(
+                            context
+                                .getSharedPreferences(TEST_PREFERENCES, Context.MODE_PRIVATE)
+                                .edit()
+                                .putBoolean(TEST_CACHE_PRESERVE_EXISTING, true)
+                                .commit(),
+                        ) {
+                            "could not save package-cache preservation gate"
                         }
                     }
                     if (catalogRecoveryFixture) {
@@ -370,7 +380,11 @@ internal class PackageJobTestReceiver : BroadcastReceiver() {
         val error =
             when (failure) {
                 "network" -> UnknownHostException("fixture.invalid")
-                "storage" -> IOException("No space left on device")
+                "storage" ->
+                    InsufficientPackageStorageException(
+                        requiredBytes = 757L * 1024 * 1024,
+                        availableBytes = 454L * 1024 * 1024,
+                    )
                 "trust" -> SecurityException("invalid package signature")
                 "changed" -> SecurityException("Target version changed; open Details again")
                 "catalog" -> IllegalStateException("invalid package repository catalog")
@@ -414,6 +428,7 @@ internal class PackageJobTestReceiver : BroadcastReceiver() {
         private const val MAX_CACHE_HOLD_MILLIS = 5_000
         private const val TEST_PREFERENCES = "package_job_test"
         private const val TEST_CACHE_HOLD_MILLIS = "cache_hold_ms"
+        private const val TEST_CACHE_PRESERVE_EXISTING = "cache_preserve_existing"
         private const val TEST_CATALOG_RECOVERY_FIXTURE = "catalog_recovery_fixture"
         private val TOKEN = Regex("[a-z0-9-]{1,48}")
         private val PACKAGE = Regex("[a-z0-9@._+\\-]{1,96}")

@@ -1963,6 +1963,7 @@ class ArchpheneRuntimeService : Service() {
         private const val PACKAGE_RECOVERY_RESULT = "result"
         private const val PACKAGE_JOB_TEST_PREFERENCES = "package_job_test"
         private const val PACKAGE_JOB_TEST_CACHE_HOLD_MILLIS = "cache_hold_ms"
+        private const val PACKAGE_JOB_TEST_CACHE_PRESERVE_EXISTING = "cache_preserve_existing"
         private const val PACKAGE_JOB_TEST_CATALOG_RECOVERY = "catalog_recovery_fixture"
         private const val PACKAGE_JOB_TEST_WORKER_HOLD_MILLIS = "worker_hold_ms"
         private const val MAX_PACKAGE_JOB_TEST_HOLD_MILLIS = 30_000L
@@ -9111,10 +9112,9 @@ class ArchpheneRuntimeService : Service() {
                             )
                         val requiredBytes = Math.addExact(installedBytes, reserveBytes)
                         if (availableBytes < requiredBytes) {
-                            throw IllegalStateException(
-                                "Not enough storage: ${formatStorageBytes(requiredBytes)} free " +
-                                    "is required to install; " +
-                                    "${formatStorageBytes(availableBytes)} is available",
+                            throw InsufficientPackageStorageException(
+                                requiredBytes,
+                                availableBytes,
                             )
                         }
                         if (!enterPackageCommit()) {
@@ -10042,6 +10042,43 @@ class ArchpheneRuntimeService : Service() {
         )
     }
 
+    private fun clearSelectedPackageCache(
+        activeHandle: Long,
+        packages: List<String>,
+    ): Long {
+        require(packages.isNotEmpty() && packages.size <= MAX_PACKAGE_CACHE_SELECTION)
+        val selected = packages.sorted()
+        require(
+            selected.zipWithNext().none { (left, right) -> left >= right } &&
+                selected.all { packageName ->
+                    packageName.isNotEmpty() &&
+                        packageName.length <= 128 &&
+                        packageName.none(Char::isWhitespace)
+                },
+        )
+        val requestBytes =
+            selected
+                .joinToString("\n")
+                .toByteArray(StandardCharsets.UTF_8)
+        require(requestBytes.isNotEmpty() && requestBytes.size <= PACKAGE_CACHE_SELECTION_BYTES)
+        val requestBuffer = ByteBuffer.allocateDirect(requestBytes.size)
+        requestBuffer.put(requestBytes)
+        val outputBuffer = ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
+        val reclaimedBytes =
+            NativeRuntime.nativeClearSelectedPackageCache(
+                activeHandle,
+                requestBuffer,
+                requestBytes.size,
+                outputBuffer,
+            )
+        if (reclaimedBytes < 0L) {
+            throw IllegalStateException(
+                readNativeMessage(outputBuffer, reclaimedBytes.toInt()),
+            )
+        }
+        return reclaimedBytes
+    }
+
     private fun readUtf8(
         buffer: ByteBuffer,
         length: Int,
@@ -10078,38 +10115,50 @@ class ArchpheneRuntimeService : Service() {
                     requireRuntimeWorker("Package recovery cache cleanup")
                     try {
                         holdDebugPackageCacheCleanup()
-                        val outputBuffer =
-                            ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
-                        val reclaimedBytes =
-                            NativeRuntime.nativeClearPackageCache(activeHandle, outputBuffer)
-                        if (reclaimedBytes < 0L) {
-                            throw IllegalStateException(
-                                readNativeMessage(outputBuffer, reclaimedBytes.toInt()),
-                            )
+                        val cache = loadPackageCacheSnapshot(activeHandle)
+                        val protectedPackages =
+                            try {
+                                resolvePayloads(activeHandle, recoveryPackage)
+                                    .mapTo(HashSet()) { payload -> payload.name }
+                            } catch (error: Exception) {
+                                Log.w(
+                                    TAG,
+                                    "Could not resolve the failed closure during cache recovery; " +
+                                        "retaining all cached packages",
+                                    error,
+                                )
+                                cache.names.toHashSet()
+                            }
+                        if (consumeDebugPackageCachePreservationFixture()) {
+                            cache.names
+                                .filterTo(protectedPackages) { packageName ->
+                                    !isDebugPackageCacheFixture(packageName)
+                                }
+                            protectedPackages.removeAll(::isDebugPackageCacheFixture)
                         }
-                        packageCacheSnapshot =
-                            PackageCacheSnapshot(
-                                emptyArray(),
-                                emptyArray(),
-                                LongArray(0),
-                                IntArray(0),
-                                0L,
-                                if (reclaimedBytes == 0L) {
-                                    "No downloaded packages are cached"
-                                } else {
-                                    "Freed ${formatStorageBytes(reclaimedBytes)} of " +
-                                        "downloaded packages"
-                                },
-                                packageCacheSnapshot.revision + 1,
+                        val reclaimable =
+                            PackageCacheRecoveryPolicy.reclaimablePackages(
+                                cache.names,
+                                protectedPackages,
                             )
+                        var reclaimedBytes = 0L
+                        for (chunk in reclaimable.chunked(MAX_PACKAGE_CACHE_SELECTION)) {
+                            reclaimedBytes =
+                                Math.addExact(
+                                    reclaimedBytes,
+                                    clearSelectedPackageCache(activeHandle, chunk),
+                                )
+                        }
+                        packageCacheSnapshot = loadPackageCacheSnapshot(activeHandle)
                         if (jobRevision == recoveryRevision) {
                             val recoveryResult =
                                 if (reclaimedBytes == 0L) {
-                                    "No cached downloads could be freed. " +
+                                    "No unrelated cached downloads could be freed. " +
                                         "Free Android storage, then Review."
                                 } else {
-                                    "Freed ${formatStorageBytes(reclaimedBytes)} of downloaded " +
-                                        "packages. Review before retrying."
+                                    "Freed ${formatStorageBytes(reclaimedBytes)} of unrelated " +
+                                        "downloads and retained this package's verified closure. " +
+                                        "Review before retrying."
                                 }
                             require(
                                 persistPackageRecovery(
@@ -10126,7 +10175,11 @@ class ArchpheneRuntimeService : Service() {
                             packageRecoveryHandledJobRevision = recoveryRevision
                             packageRecoveryMessage = recoveryResult
                         }
-                        Log.i(TAG, "Cleared $reclaimedBytes bytes from the package cache")
+                        Log.i(
+                            TAG,
+                            "Cleared $reclaimedBytes unrelated package-cache bytes while " +
+                                "retaining ${protectedPackages.size} closure package(s)",
+                        )
                     } catch (error: Exception) {
                         if (jobRevision == recoveryRevision) {
                             val recoveryResult =
@@ -10169,6 +10222,35 @@ class ArchpheneRuntimeService : Service() {
 
     private fun holdDebugPackageCacheCleanup() {
         holdDebugPackageWork(PACKAGE_JOB_TEST_CACHE_HOLD_MILLIS)
+    }
+
+    private fun consumeDebugPackageCachePreservationFixture(): Boolean {
+        if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0) {
+            return false
+        }
+        val preferences = getSharedPreferences(PACKAGE_JOB_TEST_PREFERENCES, MODE_PRIVATE)
+        if (!preferences.getBoolean(PACKAGE_JOB_TEST_CACHE_PRESERVE_EXISTING, false)) {
+            return false
+        }
+        return preferences
+            .edit()
+            .remove(PACKAGE_JOB_TEST_CACHE_PRESERVE_EXISTING)
+            .commit()
+    }
+
+    private fun isDebugPackageCacheFixture(packageName: String): Boolean {
+        if (packageName == "fixture" || packageName == "dependency") {
+            return true
+        }
+        if (!packageName.startsWith("fixture-") || packageName.length == 8) {
+            return false
+        }
+        for (index in 8 until packageName.length) {
+            if (!packageName[index].isDigit()) {
+                return false
+            }
+        }
+        return true
     }
 
     private fun holdDebugPackageWorker() {
@@ -10859,7 +10941,7 @@ class ArchpheneRuntimeService : Service() {
             packageRecoveryHandledJobRevision != jobRevision
 
     private fun packageJobNeedsStorageRecovery(): Boolean =
-        jobMessage.startsWith("Not enough Linux storage.")
+        jobMessage.startsWith("Not enough Linux storage")
 
     private fun packageJobNeedsCatalogRecovery(): Boolean =
         jobMessage.startsWith("Package catalog is unavailable or invalid.") ||

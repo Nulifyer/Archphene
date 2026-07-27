@@ -30,6 +30,17 @@ serial_slug="${serial,,}"
 serial_slug="${serial_slug//[^a-z0-9]/-}"
 token="background-$serial_slug"
 
+filter_package_name() {
+  local name="$1" fixture="$2"
+  archphene_wait_ui 'class="android.widget.EditText"' "$fixture-field" 15
+  archphene_tap_ui_pattern "$ARCHPHENE_UI" \
+    'class="android.widget.EditText"' 'package name'
+  archphene_adb_run shell input keycombination 113 29 >/dev/null
+  archphene_adb_run shell input keyevent KEYCODE_DEL >/dev/null
+  archphene_adb_run shell input text "$name" >/dev/null
+  archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null
+}
+
 cleanup() {
   archphene_adb_run shell am force-stop "$package" >/dev/null 2>&1 || true
 }
@@ -58,6 +69,7 @@ archphene_wait_log \
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
 archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 30 >/dev/null
 archphene_skip_storage_onboarding "package-background-onboarding-$serial"
+filter_package_name background-cache "package-background-$serial"
 archphene_wait_ui_exact_text \
   "background-cache" "package-background-name-$serial" 20
 archphene_wait_ui_exact_text \
@@ -82,7 +94,8 @@ fi
 archphene_wait_log \
   'Task removed; keeping active runtime work' 20 >/dev/null
 archphene_wait_log \
-  'Cleared 4193792 bytes from the package cache' 60 >/dev/null
+  'Cleared 4193792 unrelated package-cache bytes while retaining 0 closure package\(s\)' \
+  60 >/dev/null
 archphene_wait_log \
   'Shared Rust runtime stopped' 30 >/dev/null
 
@@ -94,8 +107,13 @@ foreground_line="$(grep -nF 'Foreground runtime notification active' <<<"$runtim
   head -n1 | cut -d: -f1)"
 keep_line="$(grep -nF 'Task removed; keeping active runtime work' <<<"$runtime_log" |
   head -n1 | cut -d: -f1)"
-clear_line="$(grep -nF 'Cleared 4193792 bytes from the package cache' <<<"$runtime_log" |
-  head -n1 | cut -d: -f1)"
+clear_line="$(
+  grep -nF \
+    'Cleared 4193792 unrelated package-cache bytes while retaining 0 closure package(s)' \
+    <<<"$runtime_log" |
+    head -n1 |
+    cut -d: -f1
+)"
 stop_line="$(grep -nF 'Shared Rust runtime stopped' <<<"$runtime_log" |
   tail -n1 | cut -d: -f1)"
 [[ -n "$foreground_line" && -n "$keep_line" && -n "$clear_line" && -n "$stop_line" ]] ||
@@ -113,8 +131,9 @@ remaining="$(
 
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
 archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 30 >/dev/null
+filter_package_name background-cache "package-background-restored-$serial"
 archphene_wait_ui_exact_text \
-  "Freed 4 MiB of downloaded packages. Review before retrying." \
+  "Freed 4 MiB of unrelated downloads and retained this package's verified closure. Review before retrying." \
   "package-background-restored-$serial" 30
 archphene_wait_ui_exact_text \
   "Review" "package-background-review-$serial" 20
@@ -137,11 +156,12 @@ archphene_wait_log \
   "Seeded package job state=failed token=$next_token" 30 \
   "ArchphenePackageJobProbe:V *:S" >/dev/null
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
+filter_package_name background-cache "package-background-next-$serial"
 archphene_wait_ui_exact_text \
   "Clear cache" "package-background-new-job-$serial" 30
 archphene_tap_text "$ARCHPHENE_UI" "Clear cache"
 archphene_wait_ui_exact_text \
-  "Freed 4 KiB of downloaded packages. Review before retrying." \
+  "Freed 4 KiB of unrelated downloads and retained this package's verified closure. Review before retrying." \
   "package-background-new-job-cleaned-$serial" 30
 remaining="$(
   archphene_adb_run shell run-as "$package" \

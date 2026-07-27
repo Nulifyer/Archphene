@@ -6,6 +6,19 @@ import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import javax.net.ssl.SSLException
 
+internal class InsufficientPackageStorageException(
+    val requiredBytes: Long,
+    val availableBytes: Long,
+) : IllegalStateException(
+        "package install requires $requiredBytes bytes with $availableBytes bytes available",
+    ) {
+    init {
+        require(requiredBytes > 0L)
+        require(availableBytes >= 0L)
+        require(availableBytes < requiredBytes)
+    }
+}
+
 internal object PackageFailureDiagnostics {
     fun install(
         error: Exception,
@@ -53,6 +66,11 @@ internal object PackageFailureDiagnostics {
                 .replace('\n', ' ')
         val normalized = detail.lowercase()
         return when {
+            error is InsufficientPackageStorageException ->
+                "Not enough Linux storage: " +
+                    "${formatStorageBytes(error.requiredBytes)} is required and " +
+                    "${formatStorageBytes(error.availableBytes)} is available. " +
+                    "Clear unrelated downloads or free Android storage, then Review."
             normalized.contains("no space left") ||
                 normalized.contains("enospc") ||
                 normalized.contains("disk quota") ->
@@ -76,4 +94,14 @@ internal object PackageFailureDiagnostics {
             else -> "$action failed before package mutation: $detail. Review before retrying."
         }
     }
+
+    private fun formatStorageBytes(bytes: Long): String =
+        when {
+            bytes < 1024 -> "$bytes B"
+            bytes < 1024 * 1024 -> "${(bytes + 1023) / 1024} KiB"
+            bytes < 1024L * 1024 * 1024 ->
+                "${(bytes + 1024 * 1024 - 1) / (1024 * 1024)} MiB"
+            else ->
+                "${(bytes + 1024L * 1024 * 1024 - 1) / (1024L * 1024 * 1024)} GiB"
+        }
 }

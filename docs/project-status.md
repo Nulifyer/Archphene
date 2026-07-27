@@ -441,27 +441,30 @@ Forward Repair is implemented and tested for interrupted removal and a
 partially committed install filesystem. Exact rollback to older archives and
 the removal-side database-corruption matrix remain pending.
 
-Linux-storage failures now expose Clear cache before Review. The operation runs
-off the Activity thread through a dedicated Rust/JNI boundary and is limited to
-the manager-owned `var/cache/pacman/pkg` directory. Rust first validates the
-directory and every bounded entry, rejects symlinks, directories, non-Unicode
-or unknown names before deleting anything, then removes only recognized package
-archives, detached signatures, and partial downloads and syncs the directory.
-Installed package state, Linux home files, catalogs, and project data are
-outside the cleanup boundary. The card reports reclaimed bytes (or an empty
-cache), then advances only that durable job to Review; a cleanup error also
-becomes a handled attempt with restart guidance rather than inviting a
-misleading loop. Kotlin persists the bounded result against the Rust journal's
-durable job ID plus its exact terminal identity, so a cold Service restart
-restores the result while a later identical failure cannot inherit stale
-recovery.
+Linux-storage preflight failures now retain typed required/available byte
+counts and render those exact capacities with Clear cache before Review. The
+operation runs off the Activity thread, resolves the failed package's current
+verified closure again, inventories the manager-owned
+`var/cache/pacman/pkg`, and sends only package names outside that closure
+through the bounded selected-cleanup Rust/JNI boundary. If exact closure
+resolution is no longer possible, cleanup retains every cached package rather
+than guessing which dependencies are disposable. Rust validates the directory
+and every bounded entry, rejects symlinks, directories, non-Unicode or unknown
+names before deleting anything, removes only recognized package archives,
+detached signatures, and partial downloads, then syncs the directory.
+Installed state, Linux home files, catalogs, project data, and the failed
+transaction's verified downloads remain outside the deletion set.
 
-The exact APK's debug fixture creates a 4 KiB rounded archive/signature/partial
-set, invokes Clear cache from the full Android UI, verifies the directory is
-empty through the app sandbox, cold-restarts the manager, and captures the
-restored post-cleanup Review state on both the emulator and Samsung.
-Network-disabled Rust tests also prove fail-closed behavior when an unknown
-cache entry is present and verify that an empty cache is idempotent.
+The card reports reclaimed unrelated bytes (or that none can safely be freed),
+then advances only that durable job to Review. Kotlin persists the bounded
+result against the Rust journal's durable job ID plus exact terminal identity,
+so a cold Service restart restores it while a later identical failure cannot
+inherit stale recovery. The state-preserving exact-ABI gates create a 4 KiB
+synthetic unrelated set and exercise the full UI on both targets. The empty
+x86_64 emulator cache and the Samsung's populated cache pass; all 548
+pre-existing Samsung archive/signature files remain byte-identical, synthetic
+files are removed, and inspected full-device screenshots show the exact
+capacity evidence and persistent Review state.
 
 The Packages workspace also exposes Downloads independently of a failure.
 Rust scans at most 4,096 cache artifacts once, groups archives, detached
@@ -711,8 +714,8 @@ package-specific changes. The current path validates pacman's local database
 and proves the requested package and version. A real AArch64 older-to-newer
 upgrade now passes; the x86_64 replay and replacement coverage remain open.
 Scriptlets/hooks remain disabled. Replacement handling, exact rollback,
-whole-operation AUR recovery, dependency-orphan cleanup, and low-storage
-recovery remain open.
+whole-operation AUR recovery, dependency-orphan cleanup, and retry-to-completion
+under real storage pressure remain open.
 
 Package operations are now user-cancellable while queued, resolving,
 downloading, or verifying. The Activity enables a visible Cancel action
@@ -754,8 +757,8 @@ and prove the durable Complete result survives manager process death. Full-
 device screenshots also verify the responsive closure view and state-driven
 actions. The physical AArch64 older-to-newer update now passes; x86_64 replay,
 replacement handling, hooks/scriptlets, closure-wide rollback, orphan cleanup,
-and low-storage recovery remain open, so this is not yet a complete production
-transaction engine.
+and a real-storage-pressure retry-to-completion gate remain open, so this is
+not yet a complete production transaction engine.
 
 A first shared-command slice is also connected. A separate Rust process crate
 resolves one exact installed command under `/usr/bin`, follows at most 16
