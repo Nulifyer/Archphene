@@ -98,6 +98,9 @@ class LauncherActivity :
                 ) {
                     return super.onTransact(code, data, reply, flags)
                 }
+                check(Looper.myLooper() != Looper.getMainLooper()) {
+                    "Manager callbacks must not run on Android's main thread"
+                }
                 return runCatching {
                     data.enforceInterface(CALLBACK_INTERFACE)
                     val version = data.readInt()

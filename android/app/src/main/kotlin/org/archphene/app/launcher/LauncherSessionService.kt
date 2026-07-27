@@ -13,6 +13,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
+import android.os.Looper
 import android.os.Parcel
 import android.os.RemoteException
 import android.os.SystemClock
@@ -249,6 +250,9 @@ class LauncherSessionService : Service() {
             }
             if (reply == null || flags and FLAG_ONEWAY != 0) {
                 return false
+            }
+            check(Looper.myLooper() != Looper.getMainLooper()) {
+                "Launcher Binder requests must not run on Android's main thread"
             }
             return when (code) {
                 TRANSACTION_OPEN -> {
