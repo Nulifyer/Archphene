@@ -114,6 +114,12 @@ Then use ADB for installation and result collection:
 ./scripts/test-native-compositor-probe.sh --android-abi arm64-v8a --serial <adb-serial>
 ```
 
+The probe includes real Wayland keymap, clipboard, drag-and-drop, and SHM
+descriptor transfer. Those operations pass through the compositor's reviewed
+Unix syscall boundary, where new descriptors are wrapped in Rust ownership
+immediately; client adoption takes an `OwnedFd` after JNI receives the sole
+descriptor returned by `ParcelFileDescriptor.detachFd()`.
+
 ### Secrets desktop-client fixture
 
 Rebuild the KWallet compatibility daemon and official Arch desktop-client

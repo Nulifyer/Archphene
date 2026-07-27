@@ -3,12 +3,14 @@
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{self, Write};
-use std::mem::{size_of, zeroed};
+#[cfg(target_os = "android")]
+use std::mem::zeroed;
 use std::ops::Range;
-use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::FileExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "android")]
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -76,6 +78,277 @@ const MAX_ACTIVE_TOUCHES: usize = 32;
 const MAX_PENDING_CLIPBOARD_TRANSFERS: usize = 4;
 #[cfg(target_os = "android")]
 const MAX_CLIPBOARD_BYTES: usize = 65_536;
+
+/// Reviewed Unix descriptor and ancillary-data boundary.
+///
+/// The compositor core deals in owned `File`/`OwnedFd` values and byte slices;
+/// raw pointers, libc message layouts, and raw-descriptor construction remain
+/// confined here. Every received descriptor is immediately wrapped in `File`
+/// so error paths close it deterministically.
+#[allow(unsafe_code)]
+mod syscall_ffi {
+    use std::ffi::CStr;
+    use std::fs::File;
+    use std::io;
+    use std::mem::{size_of, zeroed};
+    use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+    use std::ptr;
+
+    pub(super) fn poll_one(
+        descriptor: RawFd,
+        events: i16,
+        timeout_millis: i32,
+    ) -> io::Result<Option<i16>> {
+        let mut poll_descriptor = libc::pollfd {
+            fd: descriptor,
+            events,
+            revents: 0,
+        };
+        // SAFETY: `poll_descriptor` is a valid writable element for the
+        // declared count of one and remains alive for the call.
+        let result = unsafe { libc::poll(&mut poll_descriptor, 1, timeout_millis) };
+        if result > 0 {
+            Ok(Some(poll_descriptor.revents))
+        } else if result == 0 {
+            Ok(None)
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    pub(super) fn set_nonblocking(descriptor: RawFd) -> io::Result<()> {
+        // SAFETY: `F_GETFL` does not dereference a variadic argument. Callers
+        // pass a live descriptor owned by their `File`.
+        let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
+        if flags < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if flags & libc::O_NONBLOCK == 0 {
+            // SAFETY: `F_SETFL` expects the integer flags argument supplied
+            // here; the descriptor remains owned by the caller.
+            if unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn read(descriptor: RawFd, destination: &mut [u8]) -> io::Result<usize> {
+        // SAFETY: the mutable slice provides a valid writable region for
+        // exactly `destination.len()` bytes for the duration of the call.
+        let result = unsafe {
+            libc::read(
+                descriptor,
+                destination.as_mut_ptr().cast(),
+                destination.len(),
+            )
+        };
+        if result < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(result as usize)
+        }
+    }
+
+    pub(super) fn write(descriptor: RawFd, source: &[u8]) -> io::Result<usize> {
+        // SAFETY: the immutable slice provides a valid readable region for
+        // exactly `source.len()` bytes for the duration of the call.
+        let result = unsafe { libc::write(descriptor, source.as_ptr().cast(), source.len()) };
+        if result < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(result as usize)
+        }
+    }
+
+    pub(super) fn memfd(name: &CStr, flags: libc::c_uint) -> io::Result<File> {
+        // SAFETY: `name` is NUL-terminated and live for the syscall. A
+        // successful return transfers ownership of a new descriptor.
+        let descriptor =
+            unsafe { libc::syscall(libc::SYS_memfd_create, name.as_ptr(), flags) as RawFd };
+        if descriptor < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: successful `memfd_create` returned a new owned descriptor.
+        Ok(unsafe { File::from_raw_fd(descriptor) })
+    }
+
+    pub(super) fn add_seals(file: &File, seals: libc::c_int) -> io::Result<()> {
+        // SAFETY: `F_ADD_SEALS` expects the integer bit mask supplied here,
+        // and `file` keeps the descriptor live for the call.
+        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, seals) } < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(super) fn cloexec_pipe() -> io::Result<(File, File)> {
+        let mut descriptors = [-1; 2];
+        // SAFETY: the two-element output array is writable for the call.
+        if unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: successful `pipe2` returned two distinct owned descriptors.
+        Ok(unsafe {
+            (
+                File::from_raw_fd(descriptors[0]),
+                File::from_raw_fd(descriptors[1]),
+            )
+        })
+    }
+
+    pub(super) fn send_with_fd(
+        socket_fd: RawFd,
+        bytes: &[u8],
+        transferred_fd: RawFd,
+    ) -> io::Result<usize> {
+        let mut io_vector = libc::iovec {
+            iov_base: bytes.as_ptr().cast_mut().cast(),
+            iov_len: bytes.len(),
+        };
+        // SAFETY: the libc CMSG helpers are evaluated with the size of one
+        // descriptor, and the aligned word buffer below is at least that size.
+        let control_size = unsafe { libc::CMSG_SPACE(size_of::<RawFd>() as u32) } as usize;
+        let control_words = control_size.div_ceil(size_of::<usize>());
+        let mut control = vec![0usize; control_words];
+        // SAFETY: an all-zero `msghdr` is its documented empty state.
+        let mut message: libc::msghdr = unsafe { zeroed() };
+        message.msg_iov = &mut io_vector;
+        message.msg_iovlen = 1;
+        message.msg_control = control.as_mut_ptr().cast();
+        message.msg_controllen = control_size;
+
+        // SAFETY: `message` describes the live, aligned control allocation.
+        let header = unsafe { libc::CMSG_FIRSTHDR(&message) };
+        if header.is_null() {
+            return Err(io::Error::other("could not allocate SCM_RIGHTS header"));
+        }
+        // SAFETY: the control allocation has `CMSG_SPACE` bytes for exactly
+        // one RawFd, and the header/data locations came from libc.
+        unsafe {
+            (*header).cmsg_level = libc::SOL_SOCKET;
+            (*header).cmsg_type = libc::SCM_RIGHTS;
+            (*header).cmsg_len = libc::CMSG_LEN(size_of::<RawFd>() as u32) as usize;
+            ptr::write(libc::CMSG_DATA(header).cast::<RawFd>(), transferred_fd);
+        }
+
+        // SAFETY: the iovec and ancillary buffers remain live and immutable
+        // for this synchronous call.
+        let sent = unsafe { libc::sendmsg(socket_fd, &message, libc::MSG_NOSIGNAL) };
+        if sent < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(sent as usize)
+        }
+    }
+
+    pub(super) struct ReceivedMessage {
+        pub(super) length: usize,
+        pub(super) flags: libc::c_int,
+        pub(super) descriptor: Option<File>,
+    }
+
+    pub(super) fn receive_with_optional_fd(
+        socket_fd: RawFd,
+        destination: &mut [u8],
+        flags: libc::c_int,
+    ) -> io::Result<ReceivedMessage> {
+        let mut io_vector = libc::iovec {
+            iov_base: destination.as_mut_ptr().cast(),
+            iov_len: destination.len(),
+        };
+        // SAFETY: see `send_with_fd`; this buffer holds exactly one descriptor.
+        let control_size = unsafe { libc::CMSG_SPACE(size_of::<RawFd>() as u32) } as usize;
+        let control_words = control_size.div_ceil(size_of::<usize>());
+        let mut control = vec![0usize; control_words];
+        // SAFETY: an all-zero `msghdr` is its documented empty state.
+        let mut message: libc::msghdr = unsafe { zeroed() };
+        message.msg_iov = &mut io_vector;
+        message.msg_iovlen = 1;
+        message.msg_control = control.as_mut_ptr().cast();
+        message.msg_controllen = control_size;
+
+        let length = loop {
+            // SAFETY: all message-owned buffers remain live and writable for
+            // this synchronous call.
+            let result = unsafe { libc::recvmsg(socket_fd, &mut message, flags) };
+            if result >= 0 {
+                break result as usize;
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        };
+        let message_flags = message.msg_flags;
+        if message_flags & libc::MSG_CTRUNC != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "truncated descriptor control message",
+            ));
+        }
+
+        // SAFETY: `message` still points at the live aligned control buffer.
+        let header = unsafe { libc::CMSG_FIRSTHDR(&message) };
+        let descriptor = if header.is_null() {
+            None
+        } else {
+            // SAFETY: `header` points inside the live control buffer.
+            let valid = unsafe {
+                (*header).cmsg_level == libc::SOL_SOCKET
+                    && (*header).cmsg_type == libc::SCM_RIGHTS
+                    && (*header).cmsg_len == libc::CMSG_LEN(size_of::<RawFd>() as u32) as usize
+            };
+            if !valid {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid descriptor control message",
+                ));
+            }
+            // SAFETY: exact CMSG length validation above proves one RawFd is
+            // present at the libc-provided data address.
+            let received_fd =
+                unsafe { ptr::read_unaligned(libc::CMSG_DATA(header).cast::<RawFd>()) };
+            if received_fd < 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "received descriptor was invalid",
+                ));
+            }
+            // SAFETY: SCM_RIGHTS installs a new descriptor owned by this
+            // process; wrapping it immediately gives every error path RAII.
+            Some(unsafe { File::from_raw_fd(received_fd) })
+        };
+        Ok(ReceivedMessage {
+            length,
+            flags: message_flags,
+            descriptor,
+        })
+    }
+
+    pub(super) fn receive(socket_fd: RawFd, destination: &mut [u8]) -> io::Result<usize> {
+        loop {
+            // SAFETY: the mutable slice is a valid writable region for the
+            // duration of the synchronous call.
+            let result = unsafe {
+                libc::recv(
+                    socket_fd,
+                    destination.as_mut_ptr().cast(),
+                    destination.len(),
+                    libc::MSG_WAITALL,
+                )
+            };
+            if result >= 0 {
+                return Ok(result as usize);
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+    }
+}
 
 fn pointer_button_bit(button: u32) -> Option<u8> {
     (272..=276)
@@ -1307,40 +1580,25 @@ fn wait_for_clipboard_descriptor(
             return Ok(false);
         }
         let timeout = remaining.as_millis().clamp(1, i32::MAX as u128) as i32;
-        let mut poll_descriptor = libc::pollfd {
-            fd: descriptor,
-            events,
-            revents: 0,
-        };
-        let result = unsafe { libc::poll(&mut poll_descriptor, 1, timeout) };
-        if result > 0 {
-            if poll_descriptor.revents & libc::POLLNVAL != 0 {
-                return Err(io::Error::from_raw_os_error(libc::EBADF));
+        match syscall_ffi::poll_one(descriptor, events, timeout) {
+            Ok(Some(revents)) => {
+                if revents & libc::POLLNVAL != 0 {
+                    return Err(io::Error::from_raw_os_error(libc::EBADF));
+                }
+                return Ok(true);
             }
-            return Ok(true);
-        }
-        if result == 0 {
-            return Ok(false);
-        }
-        let error = io::Error::last_os_error();
-        if error.raw_os_error() != Some(libc::EINTR) {
-            return Err(error);
+            Ok(None) => return Ok(false),
+            Err(error) if error.raw_os_error() == Some(libc::EINTR) => {}
+            Err(error) => {
+                return Err(error);
+            }
         }
     }
 }
 
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 fn set_clipboard_descriptor_nonblocking(descriptor: RawFd) -> io::Result<()> {
-    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
-    if flags < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    if flags & libc::O_NONBLOCK == 0
-        && unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
+    syscall_ffi::set_nonblocking(descriptor)
 }
 
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
@@ -1362,27 +1620,22 @@ fn read_clipboard_descriptor(descriptor: File, output: &mut [u8], timeout_millis
         } else {
             &mut overflow_probe
         };
-        let read = unsafe {
-            libc::read(
-                descriptor.as_raw_fd(),
-                destination.as_mut_ptr().cast(),
-                destination.len(),
-            )
+        let read = match syscall_ffi::read(descriptor.as_raw_fd(), destination) {
+            Ok(read) => read,
+            Err(error)
+                if matches!(error.raw_os_error(), Some(libc::EINTR) | Some(libc::EAGAIN)) =>
+            {
+                continue;
+            }
+            Err(_) => return -1,
         };
         if read == 0 {
             return i32::try_from(length).unwrap_or(-1);
         }
-        if read > 0 {
-            if length == output.len() {
-                return -3;
-            }
-            length += read as usize;
-            continue;
+        if length == output.len() {
+            return -3;
         }
-        let error = io::Error::last_os_error();
-        if !matches!(error.raw_os_error(), Some(libc::EINTR) | Some(libc::EAGAIN)) {
-            return -1;
-        }
+        length += read;
     }
 }
 
@@ -1399,24 +1652,19 @@ fn write_clipboard_descriptor(descriptor: File, input: &[u8], timeout_millis: u6
             Ok(false) => return -2,
             Err(_) => return -1,
         }
-        let written = unsafe {
-            libc::write(
-                descriptor.as_raw_fd(),
-                input[offset..].as_ptr().cast(),
-                input.len() - offset,
-            )
+        let written = match syscall_ffi::write(descriptor.as_raw_fd(), &input[offset..]) {
+            Ok(written) => written,
+            Err(error)
+                if matches!(error.raw_os_error(), Some(libc::EINTR) | Some(libc::EAGAIN)) =>
+            {
+                continue;
+            }
+            Err(_) => return -1,
         };
-        if written > 0 {
-            offset += written as usize;
-            continue;
-        }
         if written == 0 {
             return -1;
         }
-        let error = io::Error::last_os_error();
-        if !matches!(error.raw_os_error(), Some(libc::EINTR) | Some(libc::EAGAIN)) {
-            return -1;
-        }
+        offset += written;
     }
     i32::try_from(offset).unwrap_or(-1)
 }
@@ -2990,24 +3238,14 @@ fn invalid_toplevel_parent(resource: &XdgToplevel, parent: &Option<XdgToplevel>)
 }
 
 fn create_keymap_file() -> io::Result<File> {
-    let name = b"archphene-keymap\0";
-    let raw_fd = unsafe {
-        libc::syscall(
-            libc::SYS_memfd_create,
-            name.as_ptr().cast::<libc::c_char>(),
-            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
-        ) as RawFd
-    };
-    if raw_fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let file = unsafe { File::from_raw_fd(raw_fd) };
+    let file = syscall_ffi::memfd(
+        c"archphene-keymap",
+        libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+    )?;
     file.set_len(XKB_KEYMAP.len() as u64)?;
     file.write_all_at(XKB_KEYMAP, 0)?;
     let seals = libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE | libc::F_SEAL_SEAL;
-    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, seals) } < 0 {
-        return Err(io::Error::last_os_error());
-    }
+    syscall_ffi::add_seals(&file, seals)?;
     Ok(file)
 }
 
@@ -3096,16 +3334,7 @@ const ANDROID_DRAG_MIME_TYPES: [&str; 3] =
     [TEXT_MIME_TYPES[0], TEXT_MIME_TYPES[1], URI_LIST_MIME_TYPE];
 
 fn create_cloexec_pipe() -> io::Result<(File, File)> {
-    let mut descriptors = [-1; 2];
-    if unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(unsafe {
-        (
-            File::from_raw_fd(descriptors[0]),
-            File::from_raw_fd(descriptors[1]),
-        )
-    })
+    syscall_ffi::cloexec_pipe()
 }
 
 fn publish_offer_to_device(
@@ -7457,9 +7686,8 @@ impl CompositorCore {
         self.accepted_client_count
     }
 
-    pub fn adopt_client(&mut self, fd: RawFd) -> std::io::Result<()> {
-        // Ownership crosses the JNI boundary only after ParcelFileDescriptor.detachFd().
-        let stream = unsafe { UnixStream::from_raw_fd(fd) };
+    pub fn adopt_client(&mut self, fd: OwnedFd) -> std::io::Result<()> {
+        let stream = UnixStream::from(fd);
         stream.set_nonblocking(true)?;
         let mut handle = self.display.handle();
         handle
@@ -9484,35 +9712,8 @@ fn append_wayland_header(bytes: &mut Vec<u8>, object_id: u32, opcode: u16, size:
 }
 
 fn send_fd(socket_fd: RawFd, bytes: &[u8], transferred_fd: RawFd) -> io::Result<()> {
-    let mut io_vector = libc::iovec {
-        iov_base: bytes.as_ptr().cast_mut().cast(),
-        iov_len: bytes.len(),
-    };
-    let control_size = unsafe { libc::CMSG_SPACE(size_of::<RawFd>() as u32) } as usize;
-    let control_words = control_size.div_ceil(size_of::<usize>());
-    let mut control = vec![0usize; control_words];
-    let mut message: libc::msghdr = unsafe { zeroed() };
-    message.msg_iov = &mut io_vector;
-    message.msg_iovlen = 1;
-    message.msg_control = control.as_mut_ptr().cast();
-    message.msg_controllen = control_size;
-
-    let header = unsafe { libc::CMSG_FIRSTHDR(&message) };
-    if header.is_null() {
-        return Err(io::Error::other("could not allocate SCM_RIGHTS header"));
-    }
-    unsafe {
-        (*header).cmsg_level = libc::SOL_SOCKET;
-        (*header).cmsg_type = libc::SCM_RIGHTS;
-        (*header).cmsg_len = libc::CMSG_LEN(size_of::<RawFd>() as u32) as usize;
-        ptr::write(libc::CMSG_DATA(header).cast::<RawFd>(), transferred_fd);
-    }
-
-    let sent = unsafe { libc::sendmsg(socket_fd, &message, libc::MSG_NOSIGNAL) };
-    if sent < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    if sent as usize != bytes.len() {
+    let sent = syscall_ffi::send_with_fd(socket_fd, bytes, transferred_fd)?;
+    if sent != bytes.len() {
         return Err(io::Error::new(
             io::ErrorKind::WriteZero,
             "partial Wayland sendmsg",
@@ -9523,36 +9724,14 @@ fn send_fd(socket_fd: RawFd, bytes: &[u8], transferred_fd: RawFd) -> io::Result<
 
 fn receive_probe_keymap(socket_fd: RawFd, keyboard_id: u32) -> io::Result<usize> {
     let mut bytes = [0u8; 16];
-    let mut io_vector = libc::iovec {
-        iov_base: bytes.as_mut_ptr().cast(),
-        iov_len: bytes.len(),
-    };
-    let control_size = unsafe { libc::CMSG_SPACE(size_of::<RawFd>() as u32) } as usize;
-    let control_words = control_size.div_ceil(size_of::<usize>());
-    let mut control = vec![0usize; control_words];
-    let mut message: libc::msghdr = unsafe { zeroed() };
-    message.msg_iov = &mut io_vector;
-    message.msg_iovlen = 1;
-    message.msg_control = control.as_mut_ptr().cast();
-    message.msg_controllen = control_size;
-
-    let received = loop {
-        let result = unsafe { libc::recvmsg(socket_fd, &mut message, libc::MSG_WAITALL) };
-        if result >= 0 {
-            break result as usize;
-        }
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::Interrupted {
-            return Err(error);
-        }
-    };
-    if received != bytes.len() {
+    let received = syscall_ffi::receive_with_optional_fd(socket_fd, &mut bytes, libc::MSG_WAITALL)?;
+    if received.length != bytes.len() {
         return Err(io::Error::new(
             io::ErrorKind::UnexpectedEof,
             "incomplete wl_keyboard.keymap event",
         ));
     }
-    if message.msg_flags & (libc::MSG_CTRUNC | libc::MSG_TRUNC) != 0 {
+    if received.flags & libc::MSG_TRUNC != 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "truncated wl_keyboard.keymap event",
@@ -9576,28 +9755,12 @@ fn receive_probe_keymap(socket_fd: RawFd, keyboard_id: u32) -> io::Result<usize>
         ));
     }
 
-    let control_message = unsafe { libc::CMSG_FIRSTHDR(&message) };
-    if control_message.is_null()
-        || unsafe { (*control_message).cmsg_level } != libc::SOL_SOCKET
-        || unsafe { (*control_message).cmsg_type } != libc::SCM_RIGHTS
-        || unsafe { (*control_message).cmsg_len }
-            < unsafe { libc::CMSG_LEN(size_of::<RawFd>() as u32) } as usize
-    {
-        return Err(io::Error::new(
+    let file = received.descriptor.ok_or_else(|| {
+        io::Error::new(
             io::ErrorKind::InvalidData,
             "wl_keyboard.keymap event did not include an FD",
-        ));
-    }
-
-    let received_fd =
-        unsafe { ptr::read_unaligned(libc::CMSG_DATA(control_message).cast::<RawFd>()) };
-    if received_fd < 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "wl_keyboard.keymap FD was invalid",
-        ));
-    }
-    let file = unsafe { File::from_raw_fd(received_fd) };
+        )
+    })?;
     let mut keymap = vec![0u8; XKB_KEYMAP.len()];
     file.read_exact_at(&mut keymap, 0)?;
     if keymap != XKB_KEYMAP {
@@ -9616,30 +9779,9 @@ fn receive_probe_data_source_send(
     payload: &[u8],
 ) -> io::Result<usize> {
     let mut header_bytes = [0u8; 8];
-    let mut io_vector = libc::iovec {
-        iov_base: header_bytes.as_mut_ptr().cast(),
-        iov_len: header_bytes.len(),
-    };
-    let control_size = unsafe { libc::CMSG_SPACE(size_of::<RawFd>() as u32) } as usize;
-    let control_words = control_size.div_ceil(size_of::<usize>());
-    let mut control = vec![0usize; control_words];
-    let mut message: libc::msghdr = unsafe { zeroed() };
-    message.msg_iov = &mut io_vector;
-    message.msg_iovlen = 1;
-    message.msg_control = control.as_mut_ptr().cast();
-    message.msg_controllen = control_size;
-
-    let received = loop {
-        let result = unsafe { libc::recvmsg(socket_fd, &mut message, libc::MSG_WAITALL) };
-        if result >= 0 {
-            break result as usize;
-        }
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::Interrupted {
-            return Err(error);
-        }
-    };
-    if received != header_bytes.len() {
+    let received =
+        syscall_ffi::receive_with_optional_fd(socket_fd, &mut header_bytes, libc::MSG_WAITALL)?;
+    if received.length != header_bytes.len() {
         return Err(io::Error::new(
             io::ErrorKind::UnexpectedEof,
             "incomplete wl_data_source.send header",
@@ -9655,48 +9797,24 @@ fn receive_probe_data_source_send(
         ));
     }
 
-    let control_message = unsafe { libc::CMSG_FIRSTHDR(&message) };
-    if control_message.is_null()
-        || unsafe { (*control_message).cmsg_level } != libc::SOL_SOCKET
-        || unsafe { (*control_message).cmsg_type } != libc::SCM_RIGHTS
-    {
-        return Err(io::Error::new(
+    let mut destination = received.descriptor.ok_or_else(|| {
+        io::Error::new(
             io::ErrorKind::InvalidData,
             "wl_data_source.send did not include an FD",
-        ));
-    }
-    let received_fd =
-        unsafe { ptr::read_unaligned(libc::CMSG_DATA(control_message).cast::<RawFd>()) };
-    if received_fd < 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "wl_data_source.send FD was invalid",
-        ));
-    }
-    let mut destination = unsafe { File::from_raw_fd(received_fd) };
+        )
+    })?;
 
     let mut body = vec![0u8; size - 8];
     let mut offset = 0usize;
     while offset < body.len() {
-        let count = unsafe {
-            libc::recv(
-                socket_fd,
-                body[offset..].as_mut_ptr().cast(),
-                body.len() - offset,
-                libc::MSG_WAITALL,
-            )
-        };
-        if count <= 0 {
-            return Err(if count == 0 {
-                io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "incomplete wl_data_source.send body",
-                )
-            } else {
-                io::Error::last_os_error()
-            });
+        let count = syscall_ffi::receive(socket_fd, &mut body[offset..])?;
+        if count == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "incomplete wl_data_source.send body",
+            ));
         }
-        offset += count as usize;
+        offset += count;
     }
     let length = u32::from_ne_bytes(body[0..4].try_into().expect("fixed string length")) as usize;
     if length == 0 || length > body.len() - 4 || body[4 + length - 1] != 0 {
@@ -9731,53 +9849,23 @@ fn receive_probe_drag_source_send(
     let mut synced = false;
     for _ in 0..16 {
         let mut bytes = [0u8; 4096];
-        let mut io_vector = libc::iovec {
-            iov_base: bytes.as_mut_ptr().cast(),
-            iov_len: bytes.len(),
-        };
-        let control_size = unsafe { libc::CMSG_SPACE(size_of::<RawFd>() as u32) } as usize;
-        let control_words = control_size.div_ceil(size_of::<usize>());
-        let mut control = vec![0usize; control_words];
-        let mut message: libc::msghdr = unsafe { zeroed() };
-        message.msg_iov = &mut io_vector;
-        message.msg_iovlen = 1;
-        message.msg_control = control.as_mut_ptr().cast();
-        message.msg_controllen = control_size;
-        let received = loop {
-            let result = unsafe { libc::recvmsg(socket_fd, &mut message, 0) };
-            if result >= 0 {
-                break result as usize;
-            }
-            let error = io::Error::last_os_error();
-            if error.kind() != io::ErrorKind::Interrupted {
-                return Err(error);
-            }
-        };
-        if received == 0 {
+        let received = syscall_ffi::receive_with_optional_fd(socket_fd, &mut bytes, 0)?;
+        if received.length == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "drag source event stream closed",
             ));
         }
-        let control_message = unsafe { libc::CMSG_FIRSTHDR(&message) };
-        if !control_message.is_null()
-            && unsafe { (*control_message).cmsg_level } == libc::SOL_SOCKET
-            && unsafe { (*control_message).cmsg_type } == libc::SCM_RIGHTS
-        {
-            let received_fd =
-                unsafe { ptr::read_unaligned(libc::CMSG_DATA(control_message).cast::<RawFd>()) };
-            if received_fd >= 0 {
-                if destination.is_some() {
-                    unsafe { libc::close(received_fd) };
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "multiple drag source FDs",
-                    ));
-                }
-                destination = Some(unsafe { File::from_raw_fd(received_fd) });
+        if let Some(received_descriptor) = received.descriptor {
+            if destination.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "multiple drag source FDs",
+                ));
             }
+            destination = Some(received_descriptor);
         }
-        pending.extend_from_slice(&bytes[..received]);
+        pending.extend_from_slice(&bytes[..received.length]);
         loop {
             if pending.len() < 8 {
                 break;
@@ -9871,18 +9959,7 @@ fn send_probe_shm_pool_request(
             "invalid probe pool size",
         ));
     }
-    let name = b"archphene-probe\0";
-    let raw_fd = unsafe {
-        libc::syscall(
-            libc::SYS_memfd_create,
-            name.as_ptr().cast::<libc::c_char>(),
-            libc::MFD_CLOEXEC,
-        ) as RawFd
-    };
-    if raw_fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let file = unsafe { File::from_raw_fd(raw_fd) };
+    let file = syscall_ffi::memfd(c"archphene-probe", libc::MFD_CLOEXEC)?;
     file.set_len(pool_size as u64)?;
     let pixels: Vec<u8> = (0..pool_size)
         .map(|index| (index % 251 + 1) as u8)
@@ -10103,6 +10180,13 @@ pub unsafe extern "system" fn Java_org_archphene_compositorprobe_MainActivity_na
     let Some(mut core) = core_compositor(handle) else {
         return -1;
     };
+    if fd < 0 {
+        return -2;
+    }
+    // SAFETY: Java calls this only with the result of
+    // ParcelFileDescriptor.detachFd(), which transfers sole ownership to this
+    // JNI invocation. `OwnedFd` closes it on every subsequent error path.
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
     match core.adopt_client(fd) {
         Ok(()) => 0,
         Err(_) => -2,
