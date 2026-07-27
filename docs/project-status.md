@@ -1,6 +1,6 @@
 # Project status
 
-Updated: 2026-07-26
+Updated: 2026-07-27
 
 This page separates validated behavior from planned platform work. Package search does not imply package compatibility.
 
@@ -40,6 +40,21 @@ does not stop a running shared shell; storage pickers return to Files; and short
 landscape windows omit nonessential terminal explanation so every control stays
 on screen. Exact-ABI full-device portrait/landscape navigation, onboarding,
 clean lifecycle, and persisted-folder gates pass on the emulator and Samsung.
+
+Debug builds now install StrictMode main-thread I/O and closeable-leak
+diagnostics after OEM application initialization. Navigation, Terminal text,
+and Linux appearance settings read and commit through one serialized preference
+worker while UI and launcher paths consume immutable in-memory snapshots.
+Native library loading, runtime creation, and stale AUR artifact cleanup run on
+the existing bootstrap worker. A state-preserving gate cold-starts the manager,
+changes and restores App scale, verifies the restored value after process
+death, and resolves a real pacman package on each architecture. It reports zero
+Archphene-owned violations or fatal events on the x86_64 emulator and physical
+AArch64 Samsung and records visually inspected full-device screenshots.
+Samsung `IdsController` lifecycle events are retained with their count as
+explicitly reported framework-only evidence rather than hidden or attributed
+to Archphene. Native shutdown, compositor, and active-session thread assertions
+remain open.
 
 At 840 dp and wider, the same stateful controls are composed once into a
 persistent navigation rail, a two-column package workspace, side-by-side file

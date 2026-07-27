@@ -31,17 +31,15 @@ import org.archphene.app.runtime.ArchpheneRuntimeService
 import org.archphene.app.runtime.InputBatch
 import org.archphene.app.runtime.NativeRuntime
 
-internal class RuntimeSurfaceView(context: Context) : View(context) {
+internal class RuntimeSurfaceView(
+    context: Context,
+    persistedTextSp: Int,
+) : View(context) {
     private val inputBatch = InputBatch()
     private val terminalInputBytes = ByteArray(TERMINAL_INPUT_LIMIT)
-    private val displayPreferences =
-        context.getSharedPreferences(DISPLAY_PREFERENCES, Context.MODE_PRIVATE)
-    private var automaticTextSize =
-        displayPreferences.getInt(TERMINAL_TEXT_SP_KEY, AUTOMATIC_TEXT_SIZE) ==
-            AUTOMATIC_TEXT_SIZE
+    private var automaticTextSize = persistedTextSp == AUTOMATIC_TEXT_SIZE
     private var terminalTextSp =
-        displayPreferences
-            .getInt(TERMINAL_TEXT_SP_KEY, AUTOMATIC_TEXT_SIZE)
+        persistedTextSp
             .takeUnless { it == AUTOMATIC_TEXT_SIZE }
             ?.coerceIn(MIN_TERMINAL_TEXT_SP, MAX_TERMINAL_TEXT_SP)
             ?: AUTOMATIC_TERMINAL_TEXT_SP
@@ -1259,6 +1257,7 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
     private fun setTerminalTextSize(
         requestedSp: Int,
         automatic: Boolean,
+        persist: Boolean = true,
     ): Boolean {
         clearSelection()
         val nextSp = requestedSp.coerceIn(MIN_TERMINAL_TEXT_SP, MAX_TERMINAL_TEXT_SP)
@@ -1268,10 +1267,10 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         }
         terminalTextSp = nextSp
         automaticTextSize = automatic
-        if (automatic) {
-            displayPreferences.edit().remove(TERMINAL_TEXT_SP_KEY).apply()
-        } else {
-            displayPreferences.edit().putInt(TERMINAL_TEXT_SP_KEY, nextSp).apply()
+        if (persist) {
+            ArchphenePreferences.setTerminalTextSp(
+                if (automatic) AUTOMATIC_TEXT_SIZE else nextSp,
+            )
         }
         textPaint.textSize =
             TypedValue.applyDimension(
@@ -1292,6 +1291,17 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
         invalidate()
         sendAccessibilityEvent(android.view.accessibility.AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED)
         return true
+    }
+
+    internal fun applyPersistedTextSize(persistedTextSp: Int) {
+        setTerminalTextSize(
+            persistedTextSp
+                .takeUnless { it == AUTOMATIC_TEXT_SIZE }
+                ?.coerceIn(MIN_TERMINAL_TEXT_SP, MAX_TERMINAL_TEXT_SP)
+                ?: AUTOMATIC_TERMINAL_TEXT_SP,
+            persistedTextSp == AUTOMATIC_TEXT_SIZE,
+            persist = false,
+        )
     }
 
     private fun sendClipboardText(text: CharSequence): Boolean {
@@ -1953,8 +1963,6 @@ internal class RuntimeSurfaceView(context: Context) : View(context) {
 
     companion object {
         private const val NANOS_PER_MILLISECOND = 1_000_000L
-        private const val DISPLAY_PREFERENCES = "terminal_display"
-        private const val TERMINAL_TEXT_SP_KEY = "text_sp"
         private const val AUTOMATIC_TEXT_SIZE = 0
         private const val AUTOMATIC_TERMINAL_TEXT_SP = 16
         private const val MIN_TERMINAL_TEXT_SP = 10

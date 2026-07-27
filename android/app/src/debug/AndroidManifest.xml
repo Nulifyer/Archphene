@@ -1,5 +1,9 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <application>
+<manifest
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <application
+        android:name=".ArchpheneDebugApplication"
+        tools:replace="android:name">
         <receiver
             android:name=".ClipboardTestReceiver"
             android:exported="true" />

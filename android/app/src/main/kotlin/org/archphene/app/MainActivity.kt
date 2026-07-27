@@ -85,7 +85,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private lateinit var managerPanel: FrameLayout
     private lateinit var packagePanel: LinearLayout
     private lateinit var filesPanel: ScrollView
-    private lateinit var settingsPanel: ScrollView
+    private lateinit var settingsPanel: LinuxAppearanceSettingsView
     private lateinit var terminalEmptyPanel: LinearLayout
     private lateinit var terminalControls: LinearLayout
     private lateinit var runtimePanel: FrameLayout
@@ -140,6 +140,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private var pendingFolderUri: Uri? = null
     private var pendingFolderFlags = 0
     private var selectedManagerSection = MANAGER_SECTION_PACKAGES
+    private var managerSectionChangedByUser = false
     private var wideManagerLayout = false
     private var showingInstalledPackages = true
     private var showingPackageDetails = false
@@ -192,19 +193,14 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         activityGeneration++
+        val initialPreferences = ArchphenePreferences.snapshot()
         selectedManagerSection =
             (
                 savedInstanceState?.getInt(
                     MANAGER_SECTION_STATE,
                     MANAGER_SECTION_PACKAGES,
                 )
-                    ?: getSharedPreferences(
-                        MANAGER_PREFERENCES,
-                        MODE_PRIVATE,
-                    ).getInt(
-                        MANAGER_SECTION_PREFERENCE,
-                        MANAGER_SECTION_PACKAGES,
-                    )
+                    ?: initialPreferences.managerSection
             ).coerceIn(MANAGER_SECTION_PACKAGES, MANAGER_SECTION_SETTINGS)
         showingInstalledPackages =
             savedInstanceState?.getBoolean(PACKAGE_RESULT_MODE_STATE, true) ?: true
@@ -227,7 +223,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 setBackgroundColor(getColor(R.color.archphene_primary))
                 maxLines = 1
             }
-        runtimeSurface = RuntimeSurfaceView(this)
+        runtimeSurface = RuntimeSurfaceView(this, initialPreferences.terminalTextSp)
         runtimeSurface.onTerminalSizeChanged = { rows, columns ->
             runtimeBinder?.resizeSharedShell(rows, columns)
         }
@@ -1416,7 +1412,11 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     ),
                 )
             }
-        settingsPanel = LinuxAppearanceSettingsView(this)
+        settingsPanel =
+            LinuxAppearanceSettingsView(
+                this,
+                initialPreferences.appearance,
+            )
         terminalEmptyPanel =
             LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
@@ -1659,6 +1659,22 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         applySystemBarInsets(layout)
         setContentView(layout)
         updateShellPresentation(false)
+        ArchphenePreferences.whenReady { preferences ->
+            if (isDestroyed) {
+                return@whenReady
+            }
+            if (savedInstanceState == null && !managerSectionChangedByUser) {
+                selectManagerSection(
+                    preferences.managerSection.coerceIn(
+                        MANAGER_SECTION_PACKAGES,
+                        MANAGER_SECTION_SETTINGS,
+                    ),
+                    persist = false,
+                )
+            }
+            runtimeSurface.applyPersistedTextSize(preferences.terminalTextSp)
+            settingsPanel.applyPreferences(preferences.appearance)
+        }
         showDebugAurReview(intent)
         showDebugTerminalIme(intent)
         startService(Intent(this, ArchpheneRuntimeService::class.java))
@@ -3114,15 +3130,18 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             }
         }
 
-    private fun selectManagerSection(section: Int) {
+    private fun selectManagerSection(
+        section: Int,
+        persist: Boolean = true,
+    ) {
+        if (persist) {
+            managerSectionChangedByUser = true
+            ArchphenePreferences.setManagerSection(section)
+        }
         if (selectedManagerSection == section) {
             return
         }
         selectedManagerSection = section
-        getSharedPreferences(MANAGER_PREFERENCES, MODE_PRIVATE)
-            .edit()
-            .putInt(MANAGER_SECTION_PREFERENCE, section)
-            .apply()
         if (::packagePanel.isInitialized) {
             updateShellPresentation(runtimeBinder?.sharedShellRunning == true)
         }
@@ -3404,8 +3423,6 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         private const val PENDING_IMPORT_URI_STATE = "pending_import_uri"
         private const val PENDING_FOLDER_URI_STATE = "pending_folder_uri"
         private const val PENDING_FOLDER_FLAGS_STATE = "pending_folder_flags"
-        private const val MANAGER_PREFERENCES = "manager_navigation"
-        private const val MANAGER_SECTION_PREFERENCE = "selected_section"
         private const val MANAGER_SECTION_STATE = "manager_section"
         private const val PACKAGE_RESULT_MODE_STATE = "package_result_mode"
         private const val PACKAGE_DETAILS_MODE_STATE = "package_details_mode"

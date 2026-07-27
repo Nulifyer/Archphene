@@ -56,6 +56,29 @@ profiles. Defaults reject cold launch over 1.5 seconds, retained launch over
 more than 64 threads or 256 descriptors, any idle child process, frame p95 over
 250 ms, or more than 50% jank in the short navigation sample.
 
+## Main-thread I/O diagnostics
+
+Debug APKs enable StrictMode after framework application initialization. Run
+the state-preserving device gate with the matching exact-ABI APK:
+
+```bash
+./scripts/test-archphene-main-thread-io.sh \
+  --serial emulator-5554 \
+  --apk tooling/build/apk/app-debug-x86_64.apk
+./scripts/test-archphene-main-thread-io.sh \
+  --serial <adb-serial> \
+  --apk tooling/build/apk/app-debug-arm64-v8a.apk
+```
+
+The gate cold-starts the manager, changes and restores the App scale preference,
+proves the restored value after process death, runs a real pacman-backed search
+and dependency resolution, and rejects every StrictMode stack that enters
+Archphene code. It archives the raw scoped log and a full-device screenshot
+under `tooling/build/main-thread-io/`. Samsung's framework performs
+device-specific lifecycle preference operations under the app's thread policy;
+the gate reports their count but does not misattribute those framework-only
+stacks.
+
 ## Build in Linux
 
 Use the Podman launcher:

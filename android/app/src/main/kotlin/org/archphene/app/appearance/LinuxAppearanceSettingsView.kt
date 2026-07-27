@@ -10,13 +10,16 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
+import org.archphene.app.ArchphenePreferences
 import org.archphene.app.R
 
 internal class LinuxAppearanceSettingsView(
     context: Context,
+    initialOverrides: LinuxAppearanceOverrides,
 ) : ScrollView(context) {
+    private val preferenceControls = arrayOfNulls<SeekBar>(3)
+
     init {
-        val overrides = LinuxAppearancePreferences.read(context)
         isFillViewport = true
         setBackgroundColor(context.getColor(R.color.archphene_background))
         addView(
@@ -43,7 +46,7 @@ internal class LinuxAppearanceSettingsView(
                     R.string.linux_geometry_scale_description,
                     LinuxAppearancePreferences.GEOMETRY_PERCENT,
                     LinuxAppearancePreferences.geometryValues,
-                    overrides.geometryPercent,
+                    initialOverrides.geometryPercent,
                 ) { value ->
                     if (value == LinuxAppearancePreferences.AUTO) {
                         context.getString(R.string.appearance_automatic)
@@ -56,7 +59,7 @@ internal class LinuxAppearanceSettingsView(
                     R.string.linux_text_scale_description,
                     LinuxAppearancePreferences.FONT_PERCENT,
                     LinuxAppearancePreferences.fontValues,
-                    overrides.fontPercent,
+                    initialOverrides.fontPercent,
                 ) { value ->
                     if (value == LinuxAppearancePreferences.AUTO) {
                         context.getString(R.string.appearance_automatic)
@@ -69,7 +72,7 @@ internal class LinuxAppearanceSettingsView(
                     R.string.linux_control_size_description,
                     LinuxAppearancePreferences.CONTROL_VISUAL_DP,
                     LinuxAppearancePreferences.controlValues,
-                    overrides.controlVisualDp,
+                    initialOverrides.controlVisualDp,
                 ) { value ->
                     if (value == LinuxAppearancePreferences.AUTO) {
                         context.getString(R.string.appearance_automatic_phone_controls)
@@ -137,6 +140,7 @@ internal class LinuxAppearanceSettingsView(
                     }
                 setPadding(dp(8), 0, dp(8), 0)
             }
+        preferenceControls[preferenceIndex(preferenceKey)] = seekBar
         fun updateValue(progress: Int) {
             val value = values[progress.coerceIn(0, values.lastIndex)]
             val formatted = formatValue(value)
@@ -157,13 +161,7 @@ internal class LinuxAppearanceSettingsView(
                 ) {
                     updateValue(progress)
                     if (fromUser) {
-                        context
-                            .getSharedPreferences(
-                                LinuxAppearancePreferences.PREFERENCES,
-                                Context.MODE_PRIVATE,
-                            ).edit()
-                            .putInt(preferenceKey, values[progress])
-                            .apply()
+                        ArchphenePreferences.setAppearance(preferenceKey, values[progress])
                     }
                 }
 
@@ -255,6 +253,43 @@ internal class LinuxAppearanceSettingsView(
             },
         )
     }
+
+    internal fun applyPreferences(overrides: LinuxAppearanceOverrides) {
+        updateControl(
+            preferenceControls[0],
+            LinuxAppearancePreferences.geometryValues,
+            overrides.geometryPercent,
+        )
+        updateControl(
+            preferenceControls[1],
+            LinuxAppearancePreferences.fontValues,
+            overrides.fontPercent,
+        )
+        updateControl(
+            preferenceControls[2],
+            LinuxAppearancePreferences.controlValues,
+            overrides.controlVisualDp,
+        )
+    }
+
+    private fun updateControl(
+        control: SeekBar?,
+        values: IntArray,
+        value: Int,
+    ) {
+        val progress = values.indexOf(value).coerceAtLeast(0)
+        if (control != null && control.progress != progress) {
+            control.progress = progress
+        }
+    }
+
+    private fun preferenceIndex(key: String): Int =
+        when (key) {
+            LinuxAppearancePreferences.GEOMETRY_PERCENT -> 0
+            LinuxAppearancePreferences.FONT_PERCENT -> 1
+            LinuxAppearancePreferences.CONTROL_VISUAL_DP -> 2
+            else -> throw IllegalArgumentException("Unknown appearance preference")
+        }
 
     private fun dp(value: Int): Int =
         (value * resources.displayMetrics.density + 0.5f).toInt()

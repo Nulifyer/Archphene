@@ -27,6 +27,7 @@ import java.nio.CharBuffer
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.atomic.AtomicInteger
+import org.archphene.app.ArchphenePreferences
 import org.archphene.app.runtime.ArchpheneRuntimeService
 import org.archphene.app.runtime.LauncherAuthorization
 
@@ -577,6 +578,9 @@ class LauncherSessionService : Service() {
         if (runtime.runtimeHandle == 0L) {
             return OpenResult(RESULT_NOT_READY, 0, null)
         }
+        if (!ArchphenePreferences.isReady()) {
+            return OpenResult(RESULT_NOT_READY, 0, null)
+        }
         val authorization =
             runtime.authorizeLauncher(
                 identity.androidPackage,
@@ -611,7 +615,7 @@ class LauncherSessionService : Service() {
                 identity,
                 clientToken,
                 authorization,
-                LinuxAppearancePreferences.read(this),
+                ArchphenePreferences.snapshot().appearance,
             )
         session.inputDrain = Runnable { drainInput(session) }
         session.imeDrain = Runnable { drainIme(session) }

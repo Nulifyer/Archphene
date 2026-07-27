@@ -1446,19 +1446,7 @@ class ArchpheneRuntimeService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        removeStaleAurBuildOutputs()
         createSessionNotificationChannel()
-        if (NativeRuntime.nativeProtocolVersion() != NativeRuntime.PROTOCOL_VERSION) {
-            Log.e(TAG, "Native protocol version mismatch")
-            stopSelf()
-            return
-        }
-        handle = NativeRuntime.nativeCreate()
-        if (handle == 0L) {
-            Log.e(TAG, "Native runtime creation failed")
-            stopSelf()
-            return
-        }
         connectivityManager = getSystemService(ConnectivityManager::class.java)
         try {
             connectivityManager?.registerDefaultNetworkCallback(networkCallback)
@@ -1466,7 +1454,7 @@ class ArchpheneRuntimeService : Service() {
         } catch (error: RuntimeException) {
             Log.w(TAG, "Could not observe Android network changes", error)
         }
-        startBootstrap(handle)
+        startBootstrap()
     }
 
     private fun removeStaleAurBuildOutputs() {
@@ -4032,12 +4020,32 @@ class ArchpheneRuntimeService : Service() {
         return true
     }
 
-    private fun startBootstrap(activeHandle: Long) {
+    private fun startBootstrap() {
         bootstrapActive = true
-        bootstrapThread =
+        val worker =
             Thread(
                 {
+                    var activeHandle = 0L
                     try {
+                        removeStaleAurBuildOutputs()
+                        if (
+                            NativeRuntime.nativeProtocolVersion() !=
+                            NativeRuntime.PROTOCOL_VERSION
+                        ) {
+                            throw IllegalStateException("Native protocol version mismatch")
+                        }
+                        activeHandle = NativeRuntime.nativeCreate()
+                        if (activeHandle == 0L) {
+                            throw IllegalStateException("Native runtime creation failed")
+                        }
+                        if (
+                            Thread.currentThread().isInterrupted ||
+                            bootstrapThread !== Thread.currentThread()
+                        ) {
+                            NativeRuntime.nativeDestroy(activeHandle)
+                            return@Thread
+                        }
+                        handle = activeHandle
                         restoreStorageStatus()
                         val pathBytes =
                             File(filesDir, "arch-root")
@@ -4091,7 +4099,7 @@ class ArchpheneRuntimeService : Service() {
                         }
                     } catch (error: Exception) {
                         mainHandler.post {
-                            if (handle == activeHandle) {
+                            if (activeHandle == 0L || handle == activeHandle) {
                                 Log.e(TAG, "Runtime bootstrap failed", error)
                                 stopSelf()
                             }
@@ -4105,7 +4113,9 @@ class ArchpheneRuntimeService : Service() {
                     }
                 },
                 "ArchpheneBootstrap",
-            ).also(Thread::start)
+            )
+        bootstrapThread = worker
+        worker.start()
     }
 
     private fun preparePackageRuntime(activeHandle: Long): String {

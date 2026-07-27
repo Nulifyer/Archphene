@@ -213,7 +213,7 @@ frame_p95_ms="$(sed -n 's/^95th percentile: \([0-9]*\)ms/\1/p' <<<"$gfxinfo" | h
 ((hot_max <= max_hot_ms)) ||
   archphene_die "hot launch exceeded ${max_hot_ms}ms: $hot_1/$hot_2/$hot_3"
 ((response_ms <= max_response_ms)) ||
-  archphene_die "Settings response exceeded ${max_response_ms}ms: ${response_ms}ms"
+  archphene_die "$response_section response exceeded ${max_response_ms}ms: ${response_ms}ms"
 ((total_pss_kb <= max_pss_kb)) ||
   archphene_die "idle PSS exceeded ${max_pss_kb}KiB: ${total_pss_kb}KiB"
 ((total_rss_kb <= max_rss_kb)) ||
@@ -251,7 +251,7 @@ import sys
 keys = (
     "serial", "cold_1_ms", "cold_2_ms", "cold_3_ms", "cold_median_ms",
     "hot_1_ms", "hot_2_ms", "hot_3_ms", "hot_median_ms",
-    "settings_response_ms", "total_pss_kb", "total_rss_kb",
+    "interaction_response_ms", "total_pss_kb", "total_rss_kb",
     "java_heap_pss_kb", "native_heap_pss_kb", "native_allocations",
     "threads", "file_descriptors", "idle_children", "views",
     "frames", "janky_frames", "jank_percent", "frame_p95_ms",
@@ -269,7 +269,7 @@ PY
 
 archphene_note "Archphene performance gate passed on $serial"
 archphene_note "  Cold median/max: ${cold_median}/${cold_max} ms; hot median/max: ${hot_median}/${hot_max} ms"
-archphene_note "  Settings response: ${response_ms} ms; frame p95/jank: ${frame_p95_ms} ms/${jank_percent}%"
+archphene_note "  Automation response ($response_section): ${response_ms} ms; frame p95/jank: ${frame_p95_ms} ms/${jank_percent}%"
 archphene_note "  PSS/RSS: ${total_pss_kb}/${total_rss_kb} KiB; Java/native: ${java_heap_kb}/${native_heap_kb} KiB"
 archphene_note "  Threads/FDs/idle children: $threads/$fds/$idle_children; native allocations: $native_allocations"
 archphene_note "  Report: $report"
