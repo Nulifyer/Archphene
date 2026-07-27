@@ -88,8 +88,23 @@ diagnostics use one 128-byte direct-buffer snapshot instead of 32 scalar JNI
 queries, while dispatch flags avoid unchanged clipboard and IME polling. The
 budgeted one-second Terminal and Foot gate passes on the exact x86_64 emulator
 and AArch64 Samsung with zero GC, bounded memory/process resources, rendered
-frame differences, and inspected full-device captures. Multi-minute warmed
-soak, thermal, and battery evidence remains a release task.
+frame differences, and inspected full-device captures. A repeated-window gate
+now adds two active and two idle minutes for each surface with independent ART,
+JNI/copy, latency, resource, battery, and thermal samples. Both exact ABIs pass
+all 16 windows with zero GC and zero peak descriptor/thread growth. Samsung
+Terminal/Foot allocation maxima are 196,608/1,268,272 bytes with 30/154 ms
+active-window latency p95; emulator maxima are 98,304/1,334,912 bytes with
+18/84 ms p95. Maximum thermal status remains zero at 37.7 C/30.2 C.
+
+That sustained gate exposed an emulator-only graphics-fence leak: the legacy
+CPU `ANativeWindow_lock`/post path retained one `sync_file` descriptor per
+presented key frame, growing Foot from 160 to 250 descriptors in four windows
+while Samsung's mapper stayed flat. Generated-launcher presentation now uses
+three preallocated `AHardwareBuffer`s submitted through `ASurfaceTransaction`.
+Acquire fences transfer to Android, previous-buffer release fences are polled
+without blocking the compositor and explicitly closed, and resize generations
+remain bounded. Exact reruns hold Foot flat at 157 Samsung and 133 emulator
+descriptors while preserving visually inspected output.
 
 At 840 dp and wider, the same stateful controls are composed once into a
 persistent navigation rail, a two-column package workspace, side-by-side file

@@ -1320,14 +1320,21 @@ fn copy_wayland_pixels_to_android(
 #[cfg(target_os = "android")]
 #[allow(unsafe_code)]
 mod android_graphics_ffi {
-    use std::ffi::c_void;
+    use std::ffi::{c_char, c_void};
     use std::marker::PhantomData;
     use std::mem::zeroed;
     use std::ptr::{self, NonNull};
+    use std::sync::{Arc, Mutex};
 
     const ANDROID_RGBA_8888: i32 = 1;
     const MAX_DIMENSION: usize = 8192;
     const MAX_PIXEL_BYTES: usize = 33_554_432 * 4;
+    const HARDWARE_BUFFER_SLOTS: usize = 3;
+    const MAX_HARDWARE_BUFFER_SLOTS: usize = 15;
+    const HARDWARE_BUFFER_CPU_WRITE_OFTEN: u64 = 3 << 4;
+    const HARDWARE_BUFFER_GPU_SAMPLED_IMAGE: u64 = 1 << 8;
+    const SURFACE_VISIBILITY_SHOW: i8 = 1;
+    const SURFACE_TRANSPARENCY_OPAQUE: i8 = 2;
 
     #[repr(C)]
     struct AndroidBitmapInfo {
@@ -1339,16 +1346,30 @@ mod android_graphics_ffi {
     }
 
     #[repr(C)]
-    struct AndroidNativeWindowBuffer {
-        width: i32,
-        height: i32,
-        stride: i32,
-        format: i32,
-        bits: *mut c_void,
-        reserved: [u32; 6],
+    struct HardwareBufferDescription {
+        width: u32,
+        height: u32,
+        layers: u32,
+        format: u32,
+        usage: u64,
+        stride: u32,
+        reserved_zero: u32,
+        reserved_one: u64,
     }
 
     enum AndroidNativeWindow {}
+    enum AndroidHardwareBuffer {}
+    enum AndroidSurfaceControl {}
+    enum AndroidSurfaceTransaction {}
+    enum AndroidSurfaceTransactionStats {}
+
+    #[repr(C)]
+    struct AndroidRect {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
 
     #[link(name = "jnigraphics")]
     unsafe extern "C" {
@@ -1377,31 +1398,150 @@ mod android_graphics_ffi {
         ) -> *mut AndroidNativeWindow;
         #[link_name = "ANativeWindow_release"]
         fn android_native_window_release(window: *mut AndroidNativeWindow);
-        #[link_name = "ANativeWindow_setBuffersGeometry"]
-        fn android_native_window_set_buffers_geometry(
-            window: *mut AndroidNativeWindow,
-            width: i32,
-            height: i32,
-            format: i32,
+        #[link_name = "AHardwareBuffer_allocate"]
+        fn android_hardware_buffer_allocate(
+            description: *const HardwareBufferDescription,
+            output: *mut *mut AndroidHardwareBuffer,
         ) -> i32;
-        #[link_name = "ANativeWindow_lock"]
-        fn android_native_window_lock(
-            window: *mut AndroidNativeWindow,
-            buffer: *mut AndroidNativeWindowBuffer,
-            dirty_bounds: *mut c_void,
+        #[link_name = "AHardwareBuffer_release"]
+        fn android_hardware_buffer_release(buffer: *mut AndroidHardwareBuffer);
+        #[link_name = "AHardwareBuffer_describe"]
+        fn android_hardware_buffer_describe(
+            buffer: *const AndroidHardwareBuffer,
+            description: *mut HardwareBufferDescription,
+        );
+        #[link_name = "AHardwareBuffer_lock"]
+        fn android_hardware_buffer_lock(
+            buffer: *mut AndroidHardwareBuffer,
+            usage: u64,
+            fence: i32,
+            rectangle: *const AndroidRect,
+            address: *mut *mut c_void,
         ) -> i32;
-        #[link_name = "ANativeWindow_unlockAndPost"]
-        fn android_native_window_unlock_and_post(window: *mut AndroidNativeWindow) -> i32;
+        #[link_name = "AHardwareBuffer_unlock"]
+        fn android_hardware_buffer_unlock(
+            buffer: *mut AndroidHardwareBuffer,
+            fence: *mut i32,
+        ) -> i32;
+        #[link_name = "ASurfaceControl_createFromWindow"]
+        fn android_surface_control_create_from_window(
+            parent: *mut AndroidNativeWindow,
+            debug_name: *const c_char,
+        ) -> *mut AndroidSurfaceControl;
+        #[link_name = "ASurfaceControl_release"]
+        fn android_surface_control_release(control: *mut AndroidSurfaceControl);
+        #[link_name = "ASurfaceTransaction_create"]
+        fn android_surface_transaction_create() -> *mut AndroidSurfaceTransaction;
+        #[link_name = "ASurfaceTransaction_delete"]
+        fn android_surface_transaction_delete(transaction: *mut AndroidSurfaceTransaction);
+        #[link_name = "ASurfaceTransaction_apply"]
+        fn android_surface_transaction_apply(transaction: *mut AndroidSurfaceTransaction);
+        #[link_name = "ASurfaceTransaction_setBuffer"]
+        fn android_surface_transaction_set_buffer(
+            transaction: *mut AndroidSurfaceTransaction,
+            control: *mut AndroidSurfaceControl,
+            buffer: *mut AndroidHardwareBuffer,
+            acquire_fence: i32,
+        );
+        #[link_name = "ASurfaceTransaction_setGeometry"]
+        fn android_surface_transaction_set_geometry(
+            transaction: *mut AndroidSurfaceTransaction,
+            control: *mut AndroidSurfaceControl,
+            source: *const AndroidRect,
+            destination: *const AndroidRect,
+            transform: i32,
+        );
+        #[link_name = "ASurfaceTransaction_setDamageRegion"]
+        fn android_surface_transaction_set_damage_region(
+            transaction: *mut AndroidSurfaceTransaction,
+            control: *mut AndroidSurfaceControl,
+            rectangles: *const AndroidRect,
+            count: u32,
+        );
+        #[link_name = "ASurfaceTransaction_setVisibility"]
+        fn android_surface_transaction_set_visibility(
+            transaction: *mut AndroidSurfaceTransaction,
+            control: *mut AndroidSurfaceControl,
+            visibility: i8,
+        );
+        #[link_name = "ASurfaceTransaction_setBufferTransparency"]
+        fn android_surface_transaction_set_buffer_transparency(
+            transaction: *mut AndroidSurfaceTransaction,
+            control: *mut AndroidSurfaceControl,
+            transparency: i8,
+        );
+        #[link_name = "ASurfaceTransaction_setOnComplete"]
+        fn android_surface_transaction_set_on_complete(
+            transaction: *mut AndroidSurfaceTransaction,
+            context: *mut c_void,
+            callback: unsafe extern "C" fn(*mut c_void, *mut AndroidSurfaceTransactionStats),
+        );
+        #[link_name = "ASurfaceTransactionStats_getPreviousReleaseFenceFd"]
+        fn android_surface_transaction_previous_release_fence(
+            stats: *mut AndroidSurfaceTransactionStats,
+            control: *mut AndroidSurfaceControl,
+        ) -> i32;
     }
 
     pub(super) struct NativeWindow {
-        raw: NonNull<AndroidNativeWindow>,
+        presentation: Arc<PresentationState>,
     }
 
-    // SAFETY: Android specifies that an acquired ANativeWindow may be used
-    // across threads. Archphene additionally serializes all access through the
-    // launcher registry's mutex.
+    // SAFETY: presentation calls remain serialized on the launcher surface
+    // thread. Android may invoke completion callbacks on arbitrary threads;
+    // those callbacks touch only the mutex-protected bounded slot state.
     unsafe impl Send for NativeWindow {}
+
+    struct PresentationState {
+        control: NonNull<AndroidSurfaceControl>,
+        buffers: Mutex<PresentationBuffers>,
+    }
+
+    // SAFETY: the opaque control is used only by Android transaction functions
+    // and the slot collection is protected by its mutex.
+    unsafe impl Send for PresentationState {}
+    // SAFETY: see the Send rationale; no unprotected Rust state is shared.
+    unsafe impl Sync for PresentationState {}
+
+    struct PresentationBuffers {
+        slots: Vec<Box<HardwareBufferSlot>>,
+        generation: u32,
+        width: usize,
+        height: usize,
+        destination_width: i32,
+        destination_height: i32,
+        current: Option<u64>,
+        next_id: u64,
+    }
+
+    struct HardwareBufferSlot {
+        id: u64,
+        generation: u32,
+        buffer: NonNull<AndroidHardwareBuffer>,
+        stride_bytes: usize,
+        state: HardwareBufferState,
+        release_context: ReleaseContext,
+    }
+
+    enum HardwareBufferState {
+        Available(i32),
+        Writing,
+        Current,
+        PendingRelease,
+    }
+
+    struct SlotReservation {
+        id: u64,
+        buffer: NonNull<AndroidHardwareBuffer>,
+        width: usize,
+        height: usize,
+        stride_bytes: usize,
+    }
+
+    struct ReleaseContext {
+        slot_id: u64,
+        presentation: Mutex<Option<Arc<PresentationState>>>,
+    }
 
     impl NativeWindow {
         /// Acquires a native-window reference from valid JNI references.
@@ -1419,13 +1559,46 @@ mod android_graphics_ffi {
             }
             // SAFETY: the caller guarantees both JNI references are valid for
             // this invocation; Android returns an acquired window reference.
-            let raw = unsafe { android_native_window_from_surface(environment, surface) };
-            NonNull::new(raw).map(|raw| Self { raw })
+            let window =
+                NonNull::new(unsafe { android_native_window_from_surface(environment, surface) })?;
+            let control = NonNull::new(unsafe {
+                android_surface_control_create_from_window(
+                    window.as_ptr(),
+                    c"Archphene Linux frame".as_ptr(),
+                )
+            });
+            // SAFETY: fromSurface returned one acquired reference; the child
+            // SurfaceControl retains the parent relationship independently.
+            unsafe { android_native_window_release(window.as_ptr()) };
+            let control = control?;
+            Some(Self {
+                presentation: Arc::new(PresentationState {
+                    control,
+                    buffers: Mutex::new(PresentationBuffers {
+                        slots: Vec::with_capacity(MAX_HARDWARE_BUFFER_SLOTS),
+                        generation: 0,
+                        width: 0,
+                        height: 0,
+                        destination_width: 0,
+                        destination_height: 0,
+                        current: None,
+                        next_id: 1,
+                    }),
+                }),
+            })
         }
 
-        pub(super) fn set_rgba_geometry(&mut self, width: i32, height: i32) -> Result<(), ()> {
+        pub(super) fn set_rgba_geometry(
+            &mut self,
+            width: i32,
+            height: i32,
+            destination_width: i32,
+            destination_height: i32,
+        ) -> Result<(), ()> {
             if width <= 0
                 || height <= 0
+                || destination_width <= 0
+                || destination_height <= 0
                 || width as usize > MAX_DIMENSION
                 || height as usize > MAX_DIMENSION
                 || (width as usize)
@@ -1434,52 +1607,116 @@ mod android_graphics_ffi {
             {
                 return Err(());
             }
-            // SAFETY: `self.raw` owns a live acquired window and the validated
-            // dimensions/format match the buffer contract used below.
-            if unsafe {
-                android_native_window_set_buffers_geometry(
-                    self.raw.as_ptr(),
-                    width,
-                    height,
-                    ANDROID_RGBA_8888,
-                )
-            } == 0
+            let (width, height) = (width as usize, height as usize);
             {
-                Ok(())
-            } else {
-                Err(())
+                let buffers = self
+                    .presentation
+                    .buffers
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                if buffers.width == width
+                    && buffers.height == height
+                    && buffers.destination_width == destination_width
+                    && buffers.destination_height == destination_height
+                {
+                    return Ok(());
+                }
             }
+            let mut new_slots = allocate_hardware_buffers(width, height)?;
+            let mut buffers = self
+                .presentation
+                .buffers
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            collect_retired_buffers(&mut buffers);
+            if buffers.slots.len() + new_slots.len() > MAX_HARDWARE_BUFFER_SLOTS {
+                release_hardware_slots(&mut new_slots);
+                return Err(());
+            }
+            buffers.generation = buffers.generation.wrapping_add(1).max(1);
+            for slot in &mut new_slots {
+                slot.id = buffers.next_id;
+                slot.release_context.slot_id = slot.id;
+                slot.generation = buffers.generation;
+                buffers.next_id = buffers.next_id.wrapping_add(1).max(1);
+            }
+            buffers.width = width;
+            buffers.height = height;
+            buffers.destination_width = destination_width;
+            buffers.destination_height = destination_height;
+            buffers.slots.extend(new_slots);
+            Ok(())
         }
 
         pub(super) fn with_locked_rgba<R>(
             &mut self,
             operation: impl FnOnce(WindowBuffer<'_>) -> R,
         ) -> Result<(R, i32), i32> {
-            // SAFETY: all-zero is the documented input state; Android fills
-            // the complete buffer record after a successful lock.
-            let mut buffer: AndroidNativeWindowBuffer = unsafe { zeroed() };
-            // SAFETY: `self.raw` remains live and exclusively serialized;
-            // `buffer` is writable and no dirty rectangle is requested.
+            let reservation = reserve_hardware_slot(&self.presentation).ok_or(-8)?;
+            let Some(byte_count) = reservation
+                .stride_bytes
+                .checked_mul(reservation.height)
+                .filter(|count| *count <= MAX_PIXEL_BYTES)
+            else {
+                return_hardware_slot(&self.presentation, reservation.id, -1);
+                return Err(-3);
+            };
+            let mut address = ptr::null_mut();
+            // SAFETY: the reserved slot is exclusively owned by this call and
+            // was allocated with matching CPU-write usage.
             if unsafe {
-                android_native_window_lock(self.raw.as_ptr(), &mut buffer, ptr::null_mut())
+                android_hardware_buffer_lock(
+                    reservation.buffer.as_ptr(),
+                    HARDWARE_BUFFER_CPU_WRITE_OFTEN,
+                    -1,
+                    ptr::null(),
+                    &mut address,
+                )
             } != 0
             {
+                return_hardware_slot(&self.presentation, reservation.id, -1);
                 return Err(-2);
             }
-
-            let prepared = prepare_window_buffer(&mut buffer);
-            let result = prepared.map(operation);
-            // SAFETY: every successful lock is paired exactly once with this
-            // unlock/post, including validation and operation error paths.
-            let posted = unsafe { android_native_window_unlock_and_post(self.raw.as_ptr()) };
-            result.map(|value| (value, posted))
+            let Some(address) = NonNull::new(address.cast::<u8>()) else {
+                let _ = unsafe {
+                    android_hardware_buffer_unlock(reservation.buffer.as_ptr(), ptr::null_mut())
+                };
+                return_hardware_slot(&self.presentation, reservation.id, -1);
+                return Err(-3);
+            };
+            // SAFETY: AHardwareBuffer_describe supplied this bounded stride and
+            // height, and the buffer remains locked for this borrow.
+            let pixels = unsafe { std::slice::from_raw_parts_mut(address.as_ptr(), byte_count) };
+            let result = operation(WindowBuffer {
+                width: reservation.width,
+                height: reservation.height,
+                stride_bytes: reservation.stride_bytes,
+                pixels,
+            });
+            let mut acquire_fence = -1;
+            // SAFETY: exactly balances the successful exclusive lock.
+            let unlocked = unsafe {
+                android_hardware_buffer_unlock(reservation.buffer.as_ptr(), &mut acquire_fence)
+            };
+            if unlocked != 0 {
+                close_descriptor(acquire_fence);
+                return_hardware_slot(&self.presentation, reservation.id, -1);
+                return Err(-4);
+            }
+            let posted = present_hardware_slot(&self.presentation, reservation, acquire_fence);
+            Ok((result, posted))
         }
     }
 
-    impl Drop for NativeWindow {
+    impl Drop for PresentationState {
         fn drop(&mut self) {
-            // SAFETY: this object owns exactly one acquired reference.
-            unsafe { android_native_window_release(self.raw.as_ptr()) };
+            let mut buffers = self
+                .buffers
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            release_hardware_slots(&mut buffers.slots);
+            // SAFETY: createFromWindow returned this one owned reference.
+            unsafe { android_surface_control_release(self.control.as_ptr()) };
         }
     }
 
@@ -1490,41 +1727,308 @@ mod android_graphics_ffi {
         pub(super) pixels: &'a mut [u8],
     }
 
-    fn prepare_window_buffer(
-        buffer: &mut AndroidNativeWindowBuffer,
-    ) -> Result<WindowBuffer<'_>, i32> {
-        if buffer.bits.is_null()
-            || buffer.format != ANDROID_RGBA_8888
-            || buffer.width <= 0
-            || buffer.height <= 0
-            || buffer.stride < buffer.width
-        {
-            return Err(-3);
+    fn allocate_hardware_buffers(
+        width: usize,
+        height: usize,
+    ) -> Result<Vec<Box<HardwareBufferSlot>>, ()> {
+        let mut slots = Vec::with_capacity(HARDWARE_BUFFER_SLOTS);
+        let description = HardwareBufferDescription {
+            width: width as u32,
+            height: height as u32,
+            layers: 1,
+            format: ANDROID_RGBA_8888 as u32,
+            usage: HARDWARE_BUFFER_CPU_WRITE_OFTEN | HARDWARE_BUFFER_GPU_SAMPLED_IMAGE,
+            stride: 0,
+            reserved_zero: 0,
+            reserved_one: 0,
+        };
+        for _ in 0..HARDWARE_BUFFER_SLOTS {
+            let mut raw = ptr::null_mut();
+            if unsafe { android_hardware_buffer_allocate(&description, &mut raw) } != 0 {
+                release_hardware_slots(&mut slots);
+                return Err(());
+            }
+            let Some(buffer) = NonNull::new(raw) else {
+                release_hardware_slots(&mut slots);
+                return Err(());
+            };
+            let mut actual: HardwareBufferDescription = unsafe { zeroed() };
+            unsafe { android_hardware_buffer_describe(buffer.as_ptr(), &mut actual) };
+            let Some(stride_bytes) = (actual.stride as usize).checked_mul(4) else {
+                unsafe { android_hardware_buffer_release(buffer.as_ptr()) };
+                release_hardware_slots(&mut slots);
+                return Err(());
+            };
+            if actual.width as usize != width
+                || actual.height as usize != height
+                || actual.layers != 1
+                || actual.format != ANDROID_RGBA_8888 as u32
+                || stride_bytes < width * 4
+                || stride_bytes
+                    .checked_mul(height)
+                    .is_none_or(|count| count > MAX_PIXEL_BYTES)
+            {
+                unsafe { android_hardware_buffer_release(buffer.as_ptr()) };
+                release_hardware_slots(&mut slots);
+                return Err(());
+            }
+            slots.push(Box::new(HardwareBufferSlot {
+                id: 0,
+                generation: 0,
+                buffer,
+                stride_bytes,
+                state: HardwareBufferState::Available(-1),
+                release_context: ReleaseContext {
+                    slot_id: 0,
+                    presentation: Mutex::new(None),
+                },
+            }));
         }
-        let (width, height, stride) = (
-            usize::try_from(buffer.width).map_err(|_| -3)?,
-            usize::try_from(buffer.height).map_err(|_| -3)?,
-            usize::try_from(buffer.stride).map_err(|_| -3)?,
-        );
-        if width > MAX_DIMENSION || height > MAX_DIMENSION {
-            return Err(-4);
+        Ok(slots)
+    }
+
+    fn reserve_hardware_slot(presentation: &PresentationState) -> Option<SlotReservation> {
+        let mut buffers = presentation
+            .buffers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        collect_retired_buffers(&mut buffers);
+        let generation = buffers.generation;
+        let width = buffers.width;
+        let height = buffers.height;
+        let mut selected = None;
+        for index in 0..buffers.slots.len() {
+            if buffers.slots[index].generation == generation
+                && available_fence_signaled(&mut buffers.slots[index].state)
+            {
+                selected = Some(index);
+                break;
+            }
         }
-        let stride_bytes = stride.checked_mul(4).ok_or(-4)?;
-        let byte_count = stride_bytes.checked_mul(height).ok_or(-4)?;
-        if byte_count > MAX_PIXEL_BYTES {
-            return Err(-4);
-        }
-        // SAFETY: the successful lock supplies `bits` for at least
-        // stride*height pixels. The checks above bound and validate that exact
-        // byte count, and the borrow cannot outlive the locked operation.
-        let pixels =
-            unsafe { std::slice::from_raw_parts_mut(buffer.bits.cast::<u8>(), byte_count) };
-        Ok(WindowBuffer {
+        let index = selected?;
+        let slot = &mut buffers.slots[index];
+        slot.state = HardwareBufferState::Writing;
+        Some(SlotReservation {
+            id: slot.id,
+            buffer: slot.buffer,
             width,
             height,
-            stride_bytes,
-            pixels,
+            stride_bytes: slot.stride_bytes,
         })
+    }
+
+    fn return_hardware_slot(presentation: &PresentationState, slot_id: u64, fence: i32) {
+        let mut buffers = presentation
+            .buffers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(slot) = buffers.slots.iter_mut().find(|slot| slot.id == slot_id) {
+            slot.state = HardwareBufferState::Available(fence);
+        } else {
+            close_descriptor(fence);
+        }
+    }
+
+    fn present_hardware_slot(
+        presentation: &Arc<PresentationState>,
+        reservation: SlotReservation,
+        acquire_fence: i32,
+    ) -> i32 {
+        let Some(transaction) = NonNull::new(unsafe { android_surface_transaction_create() })
+        else {
+            close_descriptor(acquire_fence);
+            return_hardware_slot(presentation, reservation.id, -1);
+            return -5;
+        };
+        let (completion_context, source, destination) = {
+            let mut buffers = presentation
+                .buffers
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let Some(index) = buffers
+                .slots
+                .iter()
+                .position(|slot| slot.id == reservation.id)
+            else {
+                close_descriptor(acquire_fence);
+                unsafe { android_surface_transaction_delete(transaction.as_ptr()) };
+                return -6;
+            };
+            if !matches!(buffers.slots[index].state, HardwareBufferState::Writing) {
+                close_descriptor(acquire_fence);
+                unsafe { android_surface_transaction_delete(transaction.as_ptr()) };
+                return -6;
+            }
+            let completion_context = buffers.current.and_then(|previous| {
+                let slot = buffers.slots.iter_mut().find(|slot| slot.id == previous)?;
+                slot.state = HardwareBufferState::PendingRelease;
+                let mut callback_presentation = slot
+                    .release_context
+                    .presentation
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                debug_assert!(callback_presentation.is_none());
+                *callback_presentation = Some(Arc::clone(presentation));
+                Some(
+                    std::ptr::from_ref(&slot.release_context)
+                        .cast_mut()
+                        .cast::<c_void>(),
+                )
+            });
+            buffers.slots[index].state = HardwareBufferState::Current;
+            buffers.current = Some(reservation.id);
+            (
+                completion_context,
+                AndroidRect {
+                    left: 0,
+                    top: 0,
+                    right: reservation.width as i32,
+                    bottom: reservation.height as i32,
+                },
+                AndroidRect {
+                    left: 0,
+                    top: 0,
+                    right: buffers.destination_width,
+                    bottom: buffers.destination_height,
+                },
+            )
+        };
+        unsafe {
+            android_surface_transaction_set_buffer(
+                transaction.as_ptr(),
+                presentation.control.as_ptr(),
+                reservation.buffer.as_ptr(),
+                acquire_fence,
+            );
+            android_surface_transaction_set_geometry(
+                transaction.as_ptr(),
+                presentation.control.as_ptr(),
+                &source,
+                &destination,
+                0,
+            );
+            android_surface_transaction_set_damage_region(
+                transaction.as_ptr(),
+                presentation.control.as_ptr(),
+                &source,
+                1,
+            );
+            android_surface_transaction_set_buffer_transparency(
+                transaction.as_ptr(),
+                presentation.control.as_ptr(),
+                SURFACE_TRANSPARENCY_OPAQUE,
+            );
+            android_surface_transaction_set_visibility(
+                transaction.as_ptr(),
+                presentation.control.as_ptr(),
+                SURFACE_VISIBILITY_SHOW,
+            );
+        }
+        if let Some(context) = completion_context {
+            unsafe {
+                android_surface_transaction_set_on_complete(
+                    transaction.as_ptr(),
+                    context,
+                    surface_transaction_complete,
+                );
+            }
+        }
+        unsafe {
+            android_surface_transaction_apply(transaction.as_ptr());
+            android_surface_transaction_delete(transaction.as_ptr());
+        }
+        0
+    }
+
+    unsafe extern "C" fn surface_transaction_complete(
+        context: *mut c_void,
+        stats: *mut AndroidSurfaceTransactionStats,
+    ) {
+        if context.is_null() {
+            return;
+        }
+        let context = unsafe { &*context.cast::<ReleaseContext>() };
+        let Some(presentation) = context
+            .presentation
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+        else {
+            return;
+        };
+        let fence = if stats.is_null() {
+            -1
+        } else {
+            unsafe {
+                android_surface_transaction_previous_release_fence(
+                    stats,
+                    presentation.control.as_ptr(),
+                )
+            }
+        };
+        let mut buffers = presentation
+            .buffers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(slot) = buffers
+            .slots
+            .iter_mut()
+            .find(|slot| slot.id == context.slot_id)
+        {
+            slot.state = HardwareBufferState::Available(fence);
+        } else {
+            close_descriptor(fence);
+        }
+    }
+
+    fn available_fence_signaled(state: &mut HardwareBufferState) -> bool {
+        let HardwareBufferState::Available(fence) = state else {
+            return false;
+        };
+        if *fence < 0 {
+            return true;
+        }
+        let mut descriptor = libc::pollfd {
+            fd: *fence,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ready = unsafe { libc::poll(&mut descriptor, 1, 0) } > 0;
+        if ready {
+            close_descriptor(*fence);
+            *fence = -1;
+        }
+        ready
+    }
+
+    fn collect_retired_buffers(buffers: &mut PresentationBuffers) {
+        let generation = buffers.generation;
+        let mut index = 0;
+        while index < buffers.slots.len() {
+            let retired = buffers.slots[index].generation != generation
+                && available_fence_signaled(&mut buffers.slots[index].state);
+            if retired {
+                let slot = buffers.slots.swap_remove(index);
+                unsafe { android_hardware_buffer_release(slot.buffer.as_ptr()) };
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    fn release_hardware_slots(slots: &mut Vec<Box<HardwareBufferSlot>>) {
+        for slot in slots.drain(..) {
+            if let HardwareBufferState::Available(fence) = slot.state {
+                close_descriptor(fence);
+            }
+            unsafe { android_hardware_buffer_release(slot.buffer.as_ptr()) };
+        }
+    }
+
+    fn close_descriptor(descriptor: i32) {
+        if descriptor >= 0 {
+            let _ = unsafe { libc::close(descriptor) };
+        }
     }
 
     pub(super) struct BitmapPixels<'a> {
@@ -1634,7 +2138,7 @@ impl LauncherSurfaceCompositor {
         let logical_width = launcher_logical_extent(width, density_dpi);
         let logical_height = launcher_logical_extent(height, density_dpi);
         if window
-            .set_rgba_geometry(logical_width, logical_height)
+            .set_rgba_geometry(logical_width, logical_height, width, height)
             .is_err()
         {
             return -4;
@@ -1665,6 +2169,8 @@ impl LauncherSurfaceCompositor {
                 window,
                 &mut self.buffer_width,
                 &mut self.buffer_height,
+                self.surface_width,
+                self.surface_height,
             ) == 0
         {
             self.last_presented_commit = commit;
@@ -2101,6 +2607,8 @@ fn copy_last_frame_to_native_window(
     window: &mut android_graphics_ffi::NativeWindow,
     buffer_width: &mut i32,
     buffer_height: &mut i32,
+    surface_width: i32,
+    surface_height: i32,
 ) -> i32 {
     let Some(frame) = launcher_presentation_frame(&core.state) else {
         return -1;
@@ -2109,7 +2617,10 @@ fn copy_last_frame_to_native_window(
         return -2;
     };
     if width != *buffer_width || height != *buffer_height {
-        if window.set_rgba_geometry(width, height).is_err() {
+        if window
+            .set_rgba_geometry(width, height, surface_width, surface_height)
+            .is_err()
+        {
             return -2;
         }
         *buffer_width = width;

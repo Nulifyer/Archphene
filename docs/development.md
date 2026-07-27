@@ -80,6 +80,31 @@ It compares full-device frames and writes JSON plus Terminal and Foot PNGs under
 `tooling/build/active-performance/<serial>/`. Counters are dormant outside an
 explicit debug reset and the receiver is absent from release builds.
 
+Run the repeated-window sustained gate with the same exact-ABI inputs:
+
+```bash
+./scripts/test-archphene-performance-soak.sh \
+  --serial emulator-5554 \
+  --apk tooling/build/apk/app-debug-x86_64.apk \
+  --launcher-package <generated-foot-package>
+./scripts/test-archphene-performance-soak.sh \
+  --serial <adb-serial> \
+  --apk tooling/build/apk/app-debug-arm64-v8a.apk \
+  --launcher-package <generated-foot-package>
+```
+
+The default is four 30-second hardware-key windows followed by four 30-second
+idle windows for each of Terminal and Foot: two active and two idle minutes per
+surface. Every window has independent allocation, GC, JNI/copy, latency,
+memory, frame, thread, descriptor, UID-process, battery, and thermal evidence.
+The gate rejects any GC, JNI Java-array copy, resource ceiling violation,
+thermal status above severe, temperature above 55 C, PSS/RSS drift, or peak
+thread/descriptor growth. JSON, raw `dumpsys battery`/`thermalservice` samples,
+and visually reviewable full-device PNGs are written under
+`tooling/build/performance-soak/<serial>/`. Short diagnostic protocols can
+override `--window-seconds`, `--active-windows`, and `--idle-windows`; those
+are smoke tests and do not replace the default sustained gate.
+
 ## Foot manager-session workflow
 
 Run the complete current-architecture Foot workflow with the matching APK and
