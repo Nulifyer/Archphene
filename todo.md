@@ -237,7 +237,8 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   ```
 
   - [x] Use Android's Storage Access Framework for user-selected folders and persist grants across restarts.
-  - [ ] Add familiar home links such as `~/Downloads` and `~/Documents`.
+  - [x] Keep familiar private home directories such as `~/Downloads`, `~/Documents`, `~/Pictures`, `~/Media`, and `~/Shared`, and publish fail-closed managed aliases for them under `/mnt/android`.
+  - [x] Explain in the Files UI that Archphene Home is the Android-visible side of these directories and that a connected Android folder is copied into `~/Projects` as a snapshot, not exposed as a live mount. Exact root-link tests, both-device DocumentsProvider security/CRUD gates, and a full-device Samsung Foot/Bash read through `/mnt/android/shared` pass.
   - [ ] Clearly show unavailable, revoked, read-only, syncing, conflict, and error states instead of silently failing.
   - [x] Keep working project trees in private `~/Projects` POSIX storage and treat each selected SAF tree as an explicitly synchronized Android endpoint, never as a mount.
   - [ ] Keep package databases, builds, symlinks, executables, sockets, and other POSIX-dependent data in private Arch storage.

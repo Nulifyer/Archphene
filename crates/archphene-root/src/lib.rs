@@ -4,7 +4,7 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::net::IpAddr;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Component, Path, PathBuf};
 
 use rustix::fd::OwnedFd;
@@ -77,11 +77,22 @@ const DIRECTORIES: &[(&str, u32)] = &[
     ("home/archphene/.local/bin", 0o700),
     ("home/archphene/Documents", 0o700),
     ("home/archphene/Downloads", 0o700),
+    ("home/archphene/Media", 0o700),
+    ("home/archphene/Pictures", 0o700),
     ("home/archphene/Projects", 0o700),
+    ("home/archphene/Shared", 0o700),
     ("tmp", 0o1777),
     ("run", 0o700),
     ("mnt", 0o755),
     ("mnt/android", 0o755),
+];
+
+const ANDROID_STORAGE_LINKS: &[(&str, &str)] = &[
+    ("mnt/android/documents", "/home/archphene/Documents"),
+    ("mnt/android/downloads", "/home/archphene/Downloads"),
+    ("mnt/android/media", "/home/archphene/Media"),
+    ("mnt/android/pictures", "/home/archphene/Pictures"),
+    ("mnt/android/shared", "/home/archphene/Shared"),
 ];
 
 #[derive(Debug)]
@@ -148,6 +159,9 @@ impl ArchRoot {
         ensure_directory(path, 0o700, &mut created_directories)?;
         for (relative, mode) in DIRECTORIES {
             ensure_directory(&path.join(relative), *mode, &mut created_directories)?;
+        }
+        for (relative, target) in ANDROID_STORAGE_LINKS {
+            ensure_managed_link(&path.join(relative), Path::new(target))?;
         }
         ensure_user_file(&path.join("home/archphene/.bashrc"), DEFAULT_BASHRC)?;
         ensure_user_file(
@@ -395,6 +409,22 @@ fn ensure_directory(
     }
 }
 
+fn ensure_managed_link(path: &Path, target: &Path) -> Result<(), RootError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_symlink() || fs::read_link(path)? != target {
+                return Err(RootError::InvalidEntry(path.to_path_buf()));
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            symlink(target, path)?;
+            Ok(())
+        }
+        Err(error) => Err(RootError::Io(error)),
+    }
+}
+
 fn ensure_version(root: &Path) -> Result<(), RootError> {
     let version_path = root.join(VERSION_FILE);
     match fs::symlink_metadata(&version_path) {
@@ -543,8 +573,17 @@ mod tests {
         assert!(temporary.0.join("home/archphene").is_dir());
         assert!(temporary.0.join("home/archphene/Documents").is_dir());
         assert!(temporary.0.join("home/archphene/Downloads").is_dir());
+        assert!(temporary.0.join("home/archphene/Media").is_dir());
+        assert!(temporary.0.join("home/archphene/Pictures").is_dir());
         assert!(temporary.0.join("home/archphene/Projects").is_dir());
+        assert!(temporary.0.join("home/archphene/Shared").is_dir());
         assert!(temporary.0.join("mnt/android").is_dir());
+        for (relative, target) in ANDROID_STORAGE_LINKS {
+            assert_eq!(
+                fs::read_link(temporary.0.join(relative)).expect("Android storage link"),
+                Path::new(target),
+            );
+        }
         assert_eq!(
             fs::read(temporary.0.join("home/archphene/.bashrc")).expect("default bashrc"),
             DEFAULT_BASHRC,
@@ -617,6 +656,26 @@ mod tests {
         assert!(matches!(
             ArchRoot::bootstrap(&temporary.0),
             Err(RootError::InvalidEntry(_))
+        ));
+    }
+
+    #[test]
+    fn bootstrap_rejects_replaced_android_storage_links() {
+        let temporary = TestDirectory::new();
+        ArchRoot::bootstrap(&temporary.0).expect("initial bootstrap");
+        let link = temporary.0.join("mnt/android/downloads");
+        fs::remove_file(&link).expect("remove managed link");
+        fs::create_dir(&link).expect("replace link with directory");
+        assert!(matches!(
+            ArchRoot::bootstrap(&temporary.0),
+            Err(RootError::InvalidEntry(path)) if path == link
+        ));
+
+        fs::remove_dir(&link).expect("remove substituted directory");
+        symlink("/tmp", &link).expect("replace link target");
+        assert!(matches!(
+            ArchRoot::bootstrap(&temporary.0),
+            Err(RootError::InvalidEntry(path)) if path == link
         ));
     }
 

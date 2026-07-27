@@ -465,7 +465,18 @@ complete cleanup and retry, process-restart persistence, grant removal with
 retained Linux content, scoped logs, cleanup, and full-device visuals pass on
 both exact-ABI targets. It is not yet a live or conflict-safe synchronizer:
 subsequent pull/push, change manifests, conflict copies, deletion policy,
-sync-plan cancellation, `/mnt/android`, and export/share remain open.
+sync-plan cancellation, and export/share remain open.
+
+The private Linux home now includes Documents, Downloads, Media, Pictures, and
+Shared. Root bootstrap publishes only exact managed aliases for those
+directories under `/mnt/android`; a replaced link, substituted directory, or
+wrong target fails closed instead of being silently adopted. Archphene Home is
+the Android-visible side through the existing `DocumentsProvider`, while
+selected external Android folders remain explicit `~/Projects` snapshots
+rather than pretend live mounts. Exact root tests and provider CRUD/security
+gates pass on both ABIs. On the physical Samsung, an unmodified Foot/Bash
+session also reads an Android-provider-owned Shared fixture through
+`/mnt/android/shared`, with the complete device frame retained.
 
 On first clean launch, the manager now explains that the conventional Linux
 environment stays in private app storage and that choosing an Android folder
@@ -1508,7 +1519,7 @@ retains an explicit terminal message across every later Surface attachment;
 two consecutive physical-device runs prove no process exists before the
 wrapper is explicitly closed and reopened.
 The visually inspected evidence is a full-device screenshot rather than an
-app-only frame. The complete Rust workspace passes 247 tests, including the
+app-only frame. The complete Rust workspace passes 248 tests, including the
 large-resolution, raw-signature-status, empty-files-record, loader-path, JNI,
 compositor, terminal, storage, AUR snapshot, and warmed-allocation regressions.
 
@@ -1539,6 +1550,14 @@ The physical Samsung manager was updated in place and shows the real current
 Foot package as Installed while preserving its 255-package shared root.
 Verified package-file classification and version-order-safe update labels
 remain pending.
+
+The shared-file namespace is now concrete on both devices: root bootstrap
+creates exact fail-closed `/mnt/android/{documents,downloads,media,pictures,shared}`
+aliases to the corresponding private home directories. The Files page explains
+the Archphene Home and snapshot boundary, DocumentsProvider CRUD/security gates
+pass on x86_64 and AArch64, and a full-device Samsung Foot/Bash run reads an
+Android-side Shared fixture through the Linux alias. The complete Rust workspace
+passes 248 tests; Android debug lint and the minified release build pass.
 
 ## Validated
 
