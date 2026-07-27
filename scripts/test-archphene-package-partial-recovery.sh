@@ -11,7 +11,7 @@ while (($#)); do
     --apk) apk="${2:?missing value for --apk}"; shift 2 ;;
     --damage) damage="${2:?missing value for --damage}"; shift 2 ;;
     -h|--help)
-      echo "usage: $0 --serial SERIAL --apk PATH [--damage filesystem|database]"
+      echo "usage: $0 --serial SERIAL --apk PATH [--damage filesystem|database|database-multi]"
       exit 0
       ;;
     *) archphene_die "unknown argument: $1" ;;
@@ -19,8 +19,8 @@ while (($#)); do
 done
 [[ -n "$serial" ]] || archphene_die "--serial is required"
 [[ -n "$apk" ]] || archphene_die "--apk is required"
-[[ "$damage" == filesystem || "$damage" == database ]] ||
-  archphene_die "--damage must be filesystem or database"
+[[ "$damage" == filesystem || "$damage" == database || "$damage" == database-multi ]] ||
+  archphene_die "--damage must be filesystem, database, or database-multi"
 
 archphene_test_init "$serial"
 archphene_require_file "$apk"
@@ -38,7 +38,9 @@ target_file="$root/usr/bin/foot"
 backup_root="files/test-fixtures/foot-partial-recovery-$serial"
 file_backup="$backup_root/executable"
 database_backup="$backup_root/database"
+base_database_backup="$backup_root/base-database"
 target_entry=
+base_entry=
 output_dir="$ARCHPHENE_ROOT/tooling/build/package-$damage-recovery"
 mkdir -p "$output_dir"
 
@@ -63,13 +65,30 @@ cleanup() {
       fi
     done
   fi
+  if [[ -n "$base_entry" ]] &&
+      ! archphene_adb_run shell run-as "$manager" test -f "$base_entry/desc" 2>/dev/null &&
+      archphene_adb_run shell run-as "$manager" test -f "$base_database_backup/desc" 2>/dev/null; then
+    archphene_adb_run shell run-as "$manager" mkdir -p "$base_entry" \
+      >/dev/null 2>&1 || true
+    for database_file in desc files mtree; do
+      if archphene_adb_run shell run-as "$manager" \
+        test -f "$base_database_backup/$database_file" 2>/dev/null; then
+        archphene_adb_run shell run-as "$manager" cp -p \
+          "$base_database_backup/$database_file" "$base_entry/$database_file" \
+          >/dev/null 2>&1 || true
+      fi
+    done
+  fi
   archphene_adb_run shell run-as "$manager" rm -f \
     "$file_backup" \
     "$database_backup/desc" \
     "$database_backup/files" \
-    "$database_backup/mtree" >/dev/null 2>&1 || true
+    "$database_backup/mtree" \
+    "$base_database_backup/desc" \
+    "$base_database_backup/files" \
+    "$base_database_backup/mtree" >/dev/null 2>&1 || true
   archphene_adb_run shell run-as "$manager" rmdir \
-    "$database_backup" "$backup_root" >/dev/null 2>&1 || true
+    "$database_backup" "$base_database_backup" "$backup_root" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -145,7 +164,9 @@ package_record() {
 
 base_record="$(package_record base core "$core_prefix")"
 target_record="$(package_record "$target" extra "$extra_prefix")"
+base_version="$(cut -f3 <<<"$base_record")"
 target_version="$(cut -f3 <<<"$target_record")"
+base_entry="$local_database/base-$base_version"
 target_entry="$local_database/$target-$target_version"
 intent_content="$(
   printf 'org.archphene.package-mutation.v1\n'
@@ -164,13 +185,19 @@ reason_content="$(
 reason_content+=$'\n'
 
 archphene_adb_run shell am force-stop "$manager" >/dev/null
-archphene_adb_run shell run-as "$manager" mkdir -p "$database_backup"
+archphene_adb_run shell run-as "$manager" mkdir -p \
+  "$database_backup" "$base_database_backup"
 archphene_adb_run shell run-as "$manager" cp -p "$target_file" "$file_backup"
 for database_file in desc files mtree; do
   if archphene_adb_run shell run-as "$manager" \
     test -f "$target_entry/$database_file"; then
     archphene_adb_run shell run-as "$manager" cp -p \
       "$target_entry/$database_file" "$database_backup/$database_file"
+  fi
+  if archphene_adb_run shell run-as "$manager" \
+    test -f "$base_entry/$database_file"; then
+    archphene_adb_run shell run-as "$manager" cp -p \
+      "$base_entry/$database_file" "$base_database_backup/$database_file"
   fi
 done
 printf '%s' "$intent_content" |
@@ -182,14 +209,21 @@ printf '%s' "$reason_content" |
 archphene_adb_run shell run-as "$manager" chmod 600 "$reason_intent.tmp"
 archphene_adb_run shell run-as "$manager" mv "$reason_intent.tmp" "$reason_intent"
 archphene_adb_run shell run-as "$manager" rm "$target_file"
-if [[ "$damage" == database ]]; then
+if [[ "$damage" == database || "$damage" == database-multi ]]; then
   archphene_adb_run shell run-as "$manager" rm "$target_entry/desc"
+fi
+if [[ "$damage" == database-multi ]]; then
+  archphene_adb_run shell run-as "$manager" rm "$base_entry/desc"
 fi
 archphene_adb_run shell run-as "$manager" test ! -e "$target_file" ||
   archphene_die "could not establish the partial package filesystem"
-if [[ "$damage" == database ]]; then
+if [[ "$damage" == database || "$damage" == database-multi ]]; then
   archphene_adb_run shell run-as "$manager" test ! -e "$target_entry/desc" ||
     archphene_die "could not establish the partial package database"
+fi
+if [[ "$damage" == database-multi ]]; then
+  archphene_adb_run shell run-as "$manager" test ! -e "$base_entry/desc" ||
+    archphene_die "could not establish the multi-entry partial package database"
 fi
 
 archphene_adb_run logcat -c
@@ -242,6 +276,10 @@ archphene_adb_run shell run-as "$manager" test -x "$target_file" ||
 for database_file in desc files mtree; do
   archphene_adb_run shell run-as "$manager" test -f "$target_entry/$database_file" ||
     archphene_die "Repair did not restore $target database file: $database_file"
+  if [[ "$damage" == database-multi ]]; then
+    archphene_adb_run shell run-as "$manager" test -f "$base_entry/$database_file" ||
+      archphene_die "Repair did not restore base database file: $database_file"
+  fi
 done
 local_entry="$(
   archphene_adb_run exec-out run-as "$manager" find "$local_database" \
