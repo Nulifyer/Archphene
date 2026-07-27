@@ -956,6 +956,7 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var folderUri = ""
     @Volatile private var folderLabel = ""
     @Volatile private var folderMirrorPath = ""
+    @Volatile private var folderMappingId = ""
     @Volatile private var folderMirrorRunning = false
     @Volatile private var folderSyncRunning = false
     @Volatile private var folderMirrorCancellationRequested = false
@@ -1127,14 +1128,35 @@ class ArchpheneRuntimeService : Service() {
         val logs: String,
     )
 
-    private fun clearRetainedAurBuiltPackages() {
-        if (retainedAurBuiltPackages.isEmpty()) {
-            retainedAurBuiltPackage?.file?.delete()
-        } else {
-            retainedAurBuiltPackages.forEach { built -> built.file.delete() }
-        }
+    private fun detachRetainedAurBuiltPackageFiles(): Array<File> {
+        val files =
+            if (retainedAurBuiltPackages.isEmpty()) {
+                retainedAurBuiltPackage?.file?.let { file -> arrayOf(file) } ?: emptyArray()
+            } else {
+                retainedAurBuiltPackages.map(AurBuiltPackage::file).toTypedArray()
+            }
         retainedAurBuiltPackages = emptyArray()
         retainedAurBuiltPackage = null
+        return files
+    }
+
+    private fun deleteRetainedAurBuiltPackageFiles(files: Array<File>) {
+        requireRuntimeWorker("AUR build-output cleanup")
+        files.forEach { file -> file.delete() }
+    }
+
+    private fun clearRetainedAurBuiltPackages() {
+        deleteRetainedAurBuiltPackageFiles(detachRetainedAurBuiltPackageFiles())
+    }
+
+    private fun deleteRetainedAurBuiltPackageFilesAsync(files: Array<File>) {
+        if (files.isEmpty()) {
+            return
+        }
+        Thread(
+            { deleteRetainedAurBuiltPackageFiles(files) },
+            "ArchpheneAurCleanup",
+        ).start()
     }
 
     private data class AurBuildEnvironment(
@@ -1457,6 +1479,7 @@ class ArchpheneRuntimeService : Service() {
     }
 
     private fun removeStaleAurBuildOutputs() {
+        requireRuntimeWorker("Stale AUR build-output cleanup")
         var removed = 0
         try {
             Files.newDirectoryStream(cacheDir.toPath(), AUR_BUILD_OUTPUT_GLOB).use { entries ->
@@ -1840,6 +1863,12 @@ class ArchpheneRuntimeService : Service() {
         }
     }
 
+    private fun requireRuntimeWorker(operation: String) {
+        check(Looper.myLooper() != Looper.getMainLooper()) {
+            "$operation must not run on Android's main thread"
+        }
+    }
+
     companion object {
         private const val TAG = "ArchpheneRuntime"
         private const val SHELL_SCROLLBACK_BYTES = 16 * 1024
@@ -1989,6 +2018,7 @@ class ArchpheneRuntimeService : Service() {
     }
 
     private fun restoreStorageStatus() {
+        requireRuntimeWorker("Storage state restoration")
         val preferences = getSharedPreferences(STORAGE_PREFERENCES, MODE_PRIVATE)
         val state = preferences.getString(STORAGE_STATE, STORAGE_IDLE) ?: STORAGE_IDLE
         val message =
@@ -2013,16 +2043,13 @@ class ArchpheneRuntimeService : Service() {
             folderStatus = "Could not validate Android folder access. Connect it again."
             Log.e(TAG, "Could not restore Android folder state", error)
         } finally {
-            restoreProjectSyncHistory(preferences)
+            restoreProjectSyncHistory()
             folderStateReady = true
         }
     }
 
-    private fun restoreProjectSyncHistory(preferences: SharedPreferences) {
-        val mappingId =
-            preferences
-                .getString(FOLDER_MAPPING_ID, null)
-                ?.takeIf(FOLDER_MAPPING_ID_PATTERN::matches)
+    private fun restoreProjectSyncHistory() {
+        val mappingId = folderMappingId.takeIf(FOLDER_MAPPING_ID_PATTERN::matches)
         try {
             publishProjectSyncHistory(projectSyncHistoryStore.load(), mappingId)
         } catch (error: Exception) {
@@ -2184,6 +2211,7 @@ class ArchpheneRuntimeService : Service() {
             folderUri = ""
             folderLabel = savedLabel
             folderMirrorPath = ""
+            folderMappingId = ""
             folderStatus =
                 if (state == FOLDER_REVOKED) {
                     "Access to $savedLabel was revoked. Connect it again."
@@ -2203,6 +2231,15 @@ class ArchpheneRuntimeService : Service() {
             folderUri = savedUri
             folderLabel = savedLabel
             folderMirrorPath = restoredMirrorPath(preferences, savedUri)
+            folderMappingId =
+                if (folderMirrorPath.isNotEmpty()) {
+                    preferences
+                        .getString(FOLDER_MAPPING_ID, null)
+                        ?.takeIf(FOLDER_MAPPING_ID_PATTERN::matches)
+                        .orEmpty()
+                } else {
+                    ""
+                }
             folderStatus =
                 connectedFolderStatus(savedLabel, permission.second, folderMirrorPath)
             return
@@ -2212,6 +2249,7 @@ class ArchpheneRuntimeService : Service() {
         folderUri = ""
         folderLabel = savedLabel
         folderMirrorPath = ""
+        folderMappingId = ""
         folderStatus = "Access to $savedLabel was revoked. Connect it again."
         if (
             !preferences
@@ -2304,6 +2342,7 @@ class ArchpheneRuntimeService : Service() {
         uri: Uri,
         requestedFlags: Int,
     ) {
+        requireRuntimeWorker("Android folder connection")
         val preferences = getSharedPreferences(STORAGE_PREFERENCES, MODE_PRIVATE)
         val previousUri =
             preferences
@@ -2327,7 +2366,9 @@ class ArchpheneRuntimeService : Service() {
                     .putString(FOLDER_LABEL, label)
                     .putString(FOLDER_STATE, FOLDER_CONNECTED)
                     .putBoolean(FOLDER_ONBOARDING_SEEN, true)
-            if (preferences.getString(FOLDER_MIRROR_URI, null) != encodedUri) {
+            val replacesMirror =
+                preferences.getString(FOLDER_MIRROR_URI, null) != encodedUri
+            if (replacesMirror) {
                 editor
                     .remove(FOLDER_MIRROR_URI)
                     .remove(FOLDER_MIRROR_NAME)
@@ -2335,6 +2376,9 @@ class ArchpheneRuntimeService : Service() {
             }
             if (!editor.commit()) {
                 throw IllegalStateException("Could not save the Android folder grant")
+            }
+            if (replacesMirror) {
+                folderMappingId = ""
             }
             if (previousUri != null && previousUri != uri) {
                 runCatching { releaseFolderPermission(previousUri) }
@@ -2348,6 +2392,15 @@ class ArchpheneRuntimeService : Service() {
             folderUri = encodedUri
             folderLabel = label
             folderMirrorPath = restoredMirrorPath(preferences, encodedUri)
+            folderMappingId =
+                if (folderMirrorPath.isNotEmpty()) {
+                    preferences
+                        .getString(FOLDER_MAPPING_ID, null)
+                        ?.takeIf(FOLDER_MAPPING_ID_PATTERN::matches)
+                        .orEmpty()
+                } else {
+                    ""
+                }
             folderStatus =
                 connectedFolderStatus(label, permission.second, folderMirrorPath)
             Log.i(
@@ -2393,6 +2446,7 @@ class ArchpheneRuntimeService : Service() {
         val worker =
             Thread(
                 {
+                    requireRuntimeWorker("Android folder mirror")
                     var nativeStarted = false
                     val preferences = getSharedPreferences(STORAGE_PREFERENCES, MODE_PRIVATE)
                     try {
@@ -2417,7 +2471,8 @@ class ArchpheneRuntimeService : Service() {
                         ) {
                             throw IllegalStateException("Could not save the project mirror intent")
                         }
-                        restoreProjectSyncHistory(preferences)
+                        folderMappingId = mappingId
+                        restoreProjectSyncHistory()
                         checkFolderMirrorCancellation()
                         val request = ByteBuffer.allocateDirect(MAX_MIRROR_PATH_BYTES)
                         val output = ByteBuffer.allocateDirect(NativeRuntime.STORAGE_OUTPUT_SIZE)
@@ -2495,6 +2550,7 @@ class ArchpheneRuntimeService : Service() {
                             .remove(FOLDER_MAPPING_ID)
                             .commit()
                         folderMirrorPath = ""
+                        folderMappingId = ""
                         if (folderMirrorCancellationRequested) {
                             folderStatus = "Project mirror cancelled"
                             Log.i(TAG, "Android folder mirror cancelled name=$projectName")
@@ -2535,11 +2591,7 @@ class ArchpheneRuntimeService : Service() {
                 .takeIf(String::isNotEmpty)
                 ?.let { encoded -> runCatching { Uri.parse(encoded) }.getOrNull() }
                 ?.takeIf(::safeTreeUri)
-        val preferences = getSharedPreferences(STORAGE_PREFERENCES, MODE_PRIVATE)
-        val mappingId =
-            preferences
-                .getString(FOLDER_MAPPING_ID, null)
-                ?.takeIf(FOLDER_MAPPING_ID_PATTERN::matches)
+        val mappingId = folderMappingId.takeIf(FOLDER_MAPPING_ID_PATTERN::matches)
         val projectName = folderLabel.takeIf(::safeFolderLabel)
         if (
             activeHandle == 0L ||
@@ -2562,6 +2614,7 @@ class ArchpheneRuntimeService : Service() {
         val worker =
             Thread(
                 {
+                    requireRuntimeWorker("Android folder synchronization")
                     var nativeStarted = false
                     val aggregate = ProjectSyncResult()
                     try {
@@ -3548,6 +3601,7 @@ class ArchpheneRuntimeService : Service() {
         val worker =
             Thread(
                 {
+                    requireRuntimeWorker("Android folder disconnection")
                     try {
                         val preferences = getSharedPreferences(STORAGE_PREFERENCES, MODE_PRIVATE)
                         val uri =
@@ -3572,6 +3626,7 @@ class ArchpheneRuntimeService : Service() {
                         folderUri = ""
                         folderLabel = ""
                         folderMirrorPath = ""
+                        folderMappingId = ""
                         folderStatus = "No Android folder connected"
                         Log.i(TAG, "Android folder disconnected")
                     } catch (error: Exception) {
@@ -3718,6 +3773,7 @@ class ArchpheneRuntimeService : Service() {
         val worker =
             Thread(
                 {
+                    requireRuntimeWorker("Android document import")
                     try {
                         val displayName = safeImportDisplayName(uri)
                         persistStorageStatus(
@@ -4045,6 +4101,7 @@ class ArchpheneRuntimeService : Service() {
     }
 
     private fun publishAndroidDns(activeHandle: Long): Boolean {
+        requireRuntimeWorker("Android DNS publication")
         val manager = connectivityManager ?: return false
         val linkProperties =
             try {
@@ -4092,6 +4149,7 @@ class ArchpheneRuntimeService : Service() {
         val worker =
             Thread(
                 {
+                    requireRuntimeWorker("Runtime bootstrap")
                     var activeHandle = 0L
                     try {
                         removeStaleAurBuildOutputs()
@@ -4715,6 +4773,7 @@ class ArchpheneRuntimeService : Service() {
         }
         Thread(
             {
+                requireRuntimeWorker("Launcher publication")
                 var claimedPackage = ""
                 var claimedGeneration = 0L
                 try {
@@ -4973,6 +5032,7 @@ class ArchpheneRuntimeService : Service() {
         pendingLauncherResultAction = ""
         Thread(
             {
+                requireRuntimeWorker("Launcher result persistence")
                 val transition =
                     when (action) {
                         ACTION_LAUNCHER_INSTALLED -> "installed"
@@ -5283,6 +5343,7 @@ class ArchpheneRuntimeService : Service() {
         }
         Thread(
             {
+                requireRuntimeWorker("Launcher decision persistence")
                 try {
                     val row =
                         readLauncherRegistryRows(activeHandle)
@@ -5335,6 +5396,7 @@ class ArchpheneRuntimeService : Service() {
         val choices = publish.copyOf()
         Thread(
             {
+                requireRuntimeWorker("Launcher review persistence")
                 try {
                     val request =
                         buildString {
@@ -5487,8 +5549,6 @@ class ArchpheneRuntimeService : Service() {
             return false
         }
         catalogRefreshActive = true
-        val debugRecoveryFixture =
-            recoverPackageJob && consumeDebugCatalogRecoveryFixture()
         if (recoverPackageJob) {
             packageRecoveryMessageRevision = recoveryRevision
             packageRecoveryMessage = "Refreshing signed package catalogs…"
@@ -5497,6 +5557,9 @@ class ArchpheneRuntimeService : Service() {
             Thread(
                 {
                     try {
+                        requireRuntimeWorker("Package catalog refresh")
+                        val debugRecoveryFixture =
+                            recoverPackageJob && consumeDebugCatalogRecoveryFixture()
                         if (!debugRecoveryFixture) {
                             catalogStatus = "Refreshing core package catalog"
                             downloadCatalog(activeHandle, NativeRuntime.CATALOG_CORE)
@@ -5699,13 +5762,15 @@ class ArchpheneRuntimeService : Service() {
         retainedAurVerifiedBytes = 0L
         retainedAurSourceEvidence = emptyArray()
         retainedAurBuilderReport = null
-        clearRetainedAurBuiltPackages()
+        val staleAurBuildOutputs = detachRetainedAurBuiltPackageFiles()
         clearAurReviewPresentation()
         searchStatus = "Searching for $normalized"
         publishAvailablePackageStatus(searchStatus)
         Thread(
             {
+                requireRuntimeWorker("Package search")
                 try {
+                    deleteRetainedAurBuiltPackageFiles(staleAurBuildOutputs)
                     val queryBytes = normalized.toByteArray(StandardCharsets.UTF_8)
                     val queryBuffer = ByteBuffer.allocateDirect(queryBytes.size)
                     queryBuffer.put(queryBytes)
@@ -5870,6 +5935,7 @@ class ArchpheneRuntimeService : Service() {
         searchStatus = "Resolving $normalized and its dependencies"
         Thread(
             {
+                requireRuntimeWorker("Package resolution")
                 try {
                     val packages = resolvePayloads(activeHandle, normalized)
                     var totalBytes = 0L
@@ -6034,7 +6100,7 @@ class ArchpheneRuntimeService : Service() {
         retainedAurVerifiedBytes = 0L
         retainedAurSourceEvidence = emptyArray()
         retainedAurBuilderReport = null
-        clearRetainedAurBuiltPackages()
+        val staleAurBuildOutputs = detachRetainedAurBuiltPackageFiles()
         clearAurReviewPresentation()
         lastResolvedPackage = ""
         lastResolvedRepository = ""
@@ -6044,7 +6110,9 @@ class ArchpheneRuntimeService : Service() {
         searchStatus = "Downloading the AUR review for $normalized"
         Thread(
             {
+                requireRuntimeWorker("AUR review")
                 try {
+                    deleteRetainedAurBuiltPackageFiles(staleAurBuildOutputs)
                     val packageBytes = normalized.toByteArray(StandardCharsets.US_ASCII)
                     aurPackageBuffer.clear()
                     aurPackageBuffer.put(packageBytes)
@@ -6244,11 +6312,13 @@ class ArchpheneRuntimeService : Service() {
         retainedAurVerifiedBytes = 0L
         retainedAurSourceEvidence = emptyArray()
         retainedAurBuilderReport = null
-        clearRetainedAurBuiltPackages()
+        val staleAurBuildOutputs = detachRetainedAurBuiltPackageFiles()
         searchStatus = "Preparing ${remoteSources.size} reviewed AUR source download(s)"
         Thread(
             {
+                requireRuntimeWorker("AUR source verification")
                 try {
+                    deleteRetainedAurBuiltPackageFiles(staleAurBuildOutputs)
                     var totalVerified = 0L
                     val evidence = ArrayList<AurSourceEvidence>(remoteSources.size)
                     remoteSources.forEachIndexed { remoteIndex, (sourceIndex, source) ->
@@ -6458,11 +6528,13 @@ class ArchpheneRuntimeService : Service() {
         aurBuildCancelable = true
         aurBuildCancellationRequested = false
         publishAurBuildLogs("")
-        clearRetainedAurBuiltPackages()
+        val staleAurBuildOutputs = detachRetainedAurBuiltPackageFiles()
         searchStatus = "Starting isolated offline build for ${review.packageName}"
         Thread(
             {
+                requireRuntimeWorker("AUR build")
                 try {
+                    deleteRetainedAurBuiltPackageFiles(staleAurBuildOutputs)
                     val result = runAurBuilderBuild(review, builder)
                     clearRetainedAurBuiltPackages()
                     retainedAurBuiltPackages = result
@@ -6534,6 +6606,7 @@ class ArchpheneRuntimeService : Service() {
         review: AurReviewData,
         builder: AurBuilderReport,
     ): Array<AurBuiltPackage> {
+        requireRuntimeWorker("AUR builder execution")
         check(builder.inputManifestSha256.matches(SHA256_HEX))
         check(builder.closureManifestSha256.matches(SHA256_HEX))
         val activeHandle = readyHandle
@@ -8547,6 +8620,37 @@ class ArchpheneRuntimeService : Service() {
         }
     }
 
+    private fun queuePackageJob(
+        activeHandle: Long,
+        operation: Int,
+        repository: String,
+        packageName: String,
+    ): Long {
+        requireRuntimeWorker("Package transaction journal")
+        val outputBuffer = ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
+        val requestBytes =
+            "$repository\t$packageName".toByteArray(StandardCharsets.UTF_8)
+        val requestBuffer = ByteBuffer.allocateDirect(requestBytes.size)
+        requestBuffer.put(requestBytes)
+        val jobId =
+            NativeRuntime.nativeQueuePackageJob(
+                activeHandle,
+                operation,
+                requestBuffer,
+                requestBytes.size,
+                System.currentTimeMillis(),
+                outputBuffer,
+            )
+        if (jobId <= 0L) {
+            throw IllegalStateException(readNativeMessage(outputBuffer, jobId))
+        }
+        Log.i(
+            TAG,
+            "Durable package job queued on ${Thread.currentThread().name}",
+        )
+        return jobId
+    }
+
     @Synchronized
     private fun requestAurPackageInstall(packageName: String): Boolean {
         val normalized = packageName.trim()
@@ -8566,11 +8670,6 @@ class ArchpheneRuntimeService : Service() {
                 .map(AurBuiltPackage::packageName)
                 .toTypedArray()
                 .contentEquals(review.requiredPackages) ||
-            builtPackages.any { output ->
-                !output.file.isFile || output.file.length() != output.archiveBytes
-            } ||
-            !built.file.isFile ||
-            built.file.length() != built.archiveBytes ||
             catalogRefreshActive ||
             packageCacheActive ||
             searchActive ||
@@ -8595,24 +8694,7 @@ class ArchpheneRuntimeService : Service() {
             } else {
                 NativeRuntime.JOB_OPERATION_UPDATE
             }
-        val outputBuffer = ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
-        val requestBytes = "aur\t$normalized".toByteArray(StandardCharsets.UTF_8)
-        val requestBuffer = ByteBuffer.allocateDirect(requestBytes.size).put(requestBytes)
-        val jobId =
-            NativeRuntime.nativeQueuePackageJob(
-                activeHandle,
-                operation,
-                requestBuffer,
-                requestBytes.size,
-                System.currentTimeMillis(),
-                outputBuffer,
-            )
-        if (jobId <= 0) {
-            jobStatus = "Could not queue AUR install: ${readNativeMessage(outputBuffer, jobId)}"
-            return false
-        }
-        jobPersistentId = jobId
-        jobRepository = "aur"
+        jobPersistentId = 0L
         packageCancellationRequested = false
         packageOperationCancelable = true
         packageOperationActive = true
@@ -8621,12 +8703,14 @@ class ArchpheneRuntimeService : Service() {
             operation,
             NativeRuntime.JOB_QUEUED,
             0,
-            "Queued verified AUR package",
+            "Preparing durable AUR package transaction",
         )
         val worker =
             Thread(
                 {
+                    requireRuntimeWorker("AUR package installation")
                     val scratch = PackageIoScratch()
+                    var jobId = 0L
                     var recordedPhase = 0
                     var recordedProgress = 0
                     fun record(
@@ -8649,6 +8733,26 @@ class ArchpheneRuntimeService : Service() {
                         recordedProgress = progress
                     }
                     try {
+                        check(
+                            builtPackages.all { output ->
+                                output.file.isFile &&
+                                    output.file.length() == output.archiveBytes
+                            } &&
+                                built.file.isFile &&
+                                built.file.length() == built.archiveBytes,
+                        ) {
+                            "Reviewed AUR build outputs changed before installation"
+                        }
+                        jobId = queuePackageJob(activeHandle, operation, "aur", normalized)
+                        jobPersistentId = jobId
+                        jobRepository = "aur"
+                        publishPackageJob(
+                            normalized,
+                            operation,
+                            NativeRuntime.JOB_QUEUED,
+                            0,
+                            "Queued verified AUR package",
+                        )
                         throwIfPackageCancelled()
                         record(
                             NativeRuntime.JOB_RESOLVING,
@@ -8756,30 +8860,38 @@ class ArchpheneRuntimeService : Service() {
                                     )
                                 },
                             )
+                        val terminalState =
+                            if (cancelled) {
+                                NativeRuntime.JOB_CANCELLED
+                            } else {
+                                NativeRuntime.JOB_FAILED
+                            }
                         try {
-                            updatePackageJob(
-                                activeHandle,
-                                jobId,
-                                if (cancelled) {
-                                    NativeRuntime.JOB_CANCELLED
-                                } else {
-                                    NativeRuntime.JOB_FAILED
-                                },
-                                recordedPhase,
-                                recordedProgress,
-                                failureMessage,
-                                normalized,
-                                scratch,
-                            )
+                            if (jobId > 0L) {
+                                updatePackageJob(
+                                    activeHandle,
+                                    jobId,
+                                    terminalState,
+                                    recordedPhase,
+                                    recordedProgress,
+                                    failureMessage,
+                                    normalized,
+                                    scratch,
+                                )
+                            } else {
+                                publishPackageJob(
+                                    normalized,
+                                    operation,
+                                    terminalState,
+                                    recordedProgress,
+                                    failureMessage,
+                                )
+                            }
                         } catch (updateError: Exception) {
                             publishPackageJob(
                                 normalized,
                                 operation,
-                                if (cancelled) {
-                                    NativeRuntime.JOB_CANCELLED
-                                } else {
-                                    NativeRuntime.JOB_FAILED
-                                },
+                                terminalState,
                                 recordedProgress,
                                 boundedJobMessage(
                                     "$failureMessage Activity journal update failed; " +
@@ -8855,47 +8967,29 @@ class ArchpheneRuntimeService : Service() {
             jobStatus = "Open Details for one exact package before installing it"
             return false
         }
-        val outputBuffer = ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
-        val requestBytes = "$repository\t$normalized".toByteArray(StandardCharsets.UTF_8)
-        val requestBuffer = ByteBuffer.allocateDirect(requestBytes.size)
-        requestBuffer.put(requestBytes)
-        val jobId =
-            NativeRuntime.nativeQueuePackageJob(
-                activeHandle,
-                if (installedVersion.isEmpty()) {
-                    NativeRuntime.JOB_OPERATION_INSTALL
-                } else {
-                    NativeRuntime.JOB_OPERATION_UPDATE
-                },
-                requestBuffer,
-                requestBytes.size,
-                System.currentTimeMillis(),
-                outputBuffer,
-            )
-        if (jobId <= 0) {
-            jobStatus = "Could not queue install: ${readNativeMessage(outputBuffer, jobId)}"
-            return false
-        }
-        jobPersistentId = jobId
-        jobRepository = repository
+        val operation =
+            if (installedVersion.isEmpty()) {
+                NativeRuntime.JOB_OPERATION_INSTALL
+            } else {
+                NativeRuntime.JOB_OPERATION_UPDATE
+            }
+        jobPersistentId = 0L
         packageCancellationRequested = false
         packageOperationCancelable = true
         packageOperationActive = true
         publishPackageJob(
             normalized,
-            if (installedVersion.isEmpty()) {
-                NativeRuntime.JOB_OPERATION_INSTALL
-            } else {
-                NativeRuntime.JOB_OPERATION_UPDATE
-            },
+            operation,
             NativeRuntime.JOB_QUEUED,
             0,
-            "Queued",
+            "Preparing durable package transaction",
         )
         val worker =
             Thread(
                 {
+                    requireRuntimeWorker("Package installation")
                     val scratch = PackageIoScratch()
+                    var jobId = 0L
                     var recordedPhase = 0
                     var recordedProgress = 0
                     fun record(
@@ -8918,6 +9012,22 @@ class ArchpheneRuntimeService : Service() {
                         recordedProgress = progress
                     }
                     try {
+                        jobId =
+                            queuePackageJob(
+                                activeHandle,
+                                operation,
+                                repository,
+                                normalized,
+                            )
+                        jobPersistentId = jobId
+                        jobRepository = repository
+                        publishPackageJob(
+                            normalized,
+                            operation,
+                            NativeRuntime.JOB_QUEUED,
+                            0,
+                            "Queued",
+                        )
                         holdDebugPackageWorker()
                         throwIfPackageCancelled()
                         record(
@@ -9060,20 +9170,30 @@ class ArchpheneRuntimeService : Service() {
                                 },
                             )
                         try {
-                            updatePackageJob(
-                                activeHandle,
-                                jobId,
-                                terminalState,
-                                recordedPhase,
-                                recordedProgress,
-                                failureMessage,
-                                normalized,
-                                scratch,
-                            )
+                            if (jobId > 0L) {
+                                updatePackageJob(
+                                    activeHandle,
+                                    jobId,
+                                    terminalState,
+                                    recordedPhase,
+                                    recordedProgress,
+                                    failureMessage,
+                                    normalized,
+                                    scratch,
+                                )
+                            } else {
+                                publishPackageJob(
+                                    normalized,
+                                    operation,
+                                    terminalState,
+                                    recordedProgress,
+                                    failureMessage,
+                                )
+                            }
                         } catch (updateError: Exception) {
                             publishPackageJob(
                                 normalized,
-                                jobOperation,
+                                operation,
                                 terminalState,
                                 recordedProgress,
                                 boundedJobMessage(
@@ -9189,25 +9309,8 @@ class ArchpheneRuntimeService : Service() {
         ) {
             return false
         }
-        val outputBuffer = ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
         val repository = jobRepository.ifEmpty { "recovery" }
-        val requestBytes = "$repository\t$packageName".toByteArray(StandardCharsets.UTF_8)
-        val requestBuffer = ByteBuffer.allocateDirect(requestBytes.size).put(requestBytes)
-        val jobId =
-            NativeRuntime.nativeQueuePackageJob(
-                activeHandle,
-                operation,
-                requestBuffer,
-                requestBytes.size,
-                System.currentTimeMillis(),
-                outputBuffer,
-            )
-        if (jobId <= 0L) {
-            jobStatus = "Could not queue package repair: ${readNativeMessage(outputBuffer, jobId)}"
-            return false
-        }
-        jobPersistentId = jobId
-        jobRepository = repository
+        jobPersistentId = 0L
         packageOperationCancelable = false
         packageOperationActive = true
         publishPackageJob(
@@ -9215,12 +9318,14 @@ class ArchpheneRuntimeService : Service() {
             operation,
             NativeRuntime.JOB_QUEUED,
             0,
-            "Queued interrupted package repair",
+            "Preparing durable package repair",
         )
         val worker =
             Thread(
                 {
+                    requireRuntimeWorker("Package mutation repair")
                     val scratch = PackageIoScratch()
+                    var jobId = 0L
                     var phase = 0
                     var progress = 0
                     fun record(
@@ -9243,6 +9348,22 @@ class ArchpheneRuntimeService : Service() {
                         progress = nextProgress
                     }
                     try {
+                        jobId =
+                            queuePackageJob(
+                                activeHandle,
+                                operation,
+                                repository,
+                                packageName,
+                            )
+                        jobPersistentId = jobId
+                        jobRepository = repository
+                        publishPackageJob(
+                            packageName,
+                            operation,
+                            NativeRuntime.JOB_QUEUED,
+                            0,
+                            "Queued interrupted package repair",
+                        )
                         record(
                             NativeRuntime.JOB_RESOLVING,
                             1,
@@ -9286,16 +9407,26 @@ class ArchpheneRuntimeService : Service() {
                                 "Package repair did not finish: " +
                                     (error.message ?: error.javaClass.simpleName),
                             )
-                        runCatching {
-                            updatePackageJob(
-                                activeHandle,
-                                jobId,
+                        if (jobId > 0L) {
+                            runCatching {
+                                updatePackageJob(
+                                    activeHandle,
+                                    jobId,
+                                    NativeRuntime.JOB_FAILED,
+                                    phase,
+                                    progress,
+                                    message,
+                                    packageName,
+                                    scratch,
+                                )
+                            }
+                        } else {
+                            publishPackageJob(
+                                packageName,
+                                operation,
                                 NativeRuntime.JOB_FAILED,
-                                phase,
                                 progress,
                                 message,
-                                packageName,
-                                scratch,
                             )
                         }
                         Log.e(TAG, "Package mutation repair failed", error)
@@ -9307,8 +9438,7 @@ class ArchpheneRuntimeService : Service() {
                 },
                 "ArchphenePackageRepair",
             )
-        packageThread = worker
-        worker.start()
+        schedulePackageWorker(worker, activeHandle)
         promoteWorkToForeground()
         return true
     }
@@ -9333,25 +9463,7 @@ class ArchpheneRuntimeService : Service() {
             jobStatus = "Open Details for an installed package before removing it"
             return false
         }
-        val outputBuffer = ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
-        val requestBytes = "$repository\t$normalized".toByteArray(StandardCharsets.UTF_8)
-        val requestBuffer = ByteBuffer.allocateDirect(requestBytes.size)
-        requestBuffer.put(requestBytes)
-        val jobId =
-            NativeRuntime.nativeQueuePackageJob(
-                activeHandle,
-                NativeRuntime.JOB_OPERATION_REMOVE,
-                requestBuffer,
-                requestBytes.size,
-                System.currentTimeMillis(),
-                outputBuffer,
-            )
-        if (jobId <= 0) {
-            jobStatus = "Could not queue removal: ${readNativeMessage(outputBuffer, jobId)}"
-            return false
-        }
-        jobPersistentId = jobId
-        jobRepository = repository
+        jobPersistentId = 0L
         packageCancellationRequested = false
         packageOperationCancelable = true
         packageOperationActive = true
@@ -9360,12 +9472,14 @@ class ArchpheneRuntimeService : Service() {
             NativeRuntime.JOB_OPERATION_REMOVE,
             NativeRuntime.JOB_QUEUED,
             0,
-            "Queued",
+            "Preparing durable package transaction",
         )
         val worker =
             Thread(
                 {
+                    requireRuntimeWorker("Package removal")
                     val scratch = PackageIoScratch()
+                    var jobId = 0L
                     var recordedPhase = 0
                     var recordedProgress = 0
                     fun record(
@@ -9388,6 +9502,22 @@ class ArchpheneRuntimeService : Service() {
                         recordedProgress = progress
                     }
                     try {
+                        jobId =
+                            queuePackageJob(
+                                activeHandle,
+                                NativeRuntime.JOB_OPERATION_REMOVE,
+                                repository,
+                                normalized,
+                            )
+                        jobPersistentId = jobId
+                        jobRepository = repository
+                        publishPackageJob(
+                            normalized,
+                            NativeRuntime.JOB_OPERATION_REMOVE,
+                            NativeRuntime.JOB_QUEUED,
+                            0,
+                            "Queued",
+                        )
                         throwIfPackageCancelled()
                         record(
                             NativeRuntime.JOB_RESOLVING,
@@ -9469,20 +9599,30 @@ class ArchpheneRuntimeService : Service() {
                                 },
                             )
                         try {
-                            updatePackageJob(
-                                activeHandle,
-                                jobId,
-                                terminalState,
-                                recordedPhase,
-                                recordedProgress,
-                                failureMessage,
-                                normalized,
-                                scratch,
-                            )
+                            if (jobId > 0L) {
+                                updatePackageJob(
+                                    activeHandle,
+                                    jobId,
+                                    terminalState,
+                                    recordedPhase,
+                                    recordedProgress,
+                                    failureMessage,
+                                    normalized,
+                                    scratch,
+                                )
+                            } else {
+                                publishPackageJob(
+                                    normalized,
+                                    NativeRuntime.JOB_OPERATION_REMOVE,
+                                    terminalState,
+                                    recordedProgress,
+                                    failureMessage,
+                                )
+                            }
                         } catch (updateError: Exception) {
                             publishPackageJob(
                                 normalized,
-                                jobOperation,
+                                NativeRuntime.JOB_OPERATION_REMOVE,
                                 terminalState,
                                 recordedProgress,
                                 boundedJobMessage(
@@ -9520,7 +9660,8 @@ class ArchpheneRuntimeService : Service() {
     ) {
         packageThread = worker
         // Local Binder calls run on the Activity thread. One Looper turn gives that caller a
-        // deterministic chance to render the already-durable Queued record before work advances.
+        // deterministic chance to render the accepted request before the worker durably journals
+        // and advances it.
         mainHandler.post {
             synchronized(this) {
                 if (
@@ -9552,6 +9693,7 @@ class ArchpheneRuntimeService : Service() {
             copyPackageCacheSnapshot("Inspecting downloaded package storage…")
         Thread(
             {
+                requireRuntimeWorker("Package cache inventory")
                 try {
                     packageCacheSnapshot = loadPackageCacheSnapshot(activeHandle)
                 } catch (error: Exception) {
@@ -9613,6 +9755,7 @@ class ArchpheneRuntimeService : Service() {
             copyPackageCacheSnapshot("Clearing selected downloaded packages…")
         Thread(
             {
+                requireRuntimeWorker("Selected package cache cleanup")
                 try {
                     val requestBuffer = ByteBuffer.allocateDirect(requestBytes.size)
                     requestBuffer.put(requestBytes)
@@ -9680,6 +9823,7 @@ class ArchpheneRuntimeService : Service() {
             copyPackageCacheSnapshot("Clearing all downloaded packages…")
         Thread(
             {
+                requireRuntimeWorker("Package cache cleanup")
                 try {
                     val outputBuffer =
                         ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
@@ -9884,6 +10028,7 @@ class ArchpheneRuntimeService : Service() {
         val worker =
             Thread(
                 {
+                    requireRuntimeWorker("Package recovery cache cleanup")
                     try {
                         holdDebugPackageCacheCleanup()
                         val outputBuffer =
@@ -10126,7 +10271,7 @@ class ArchpheneRuntimeService : Service() {
         retainedAurVerifiedBytes = evidence.sumOf(AurSourceEvidence::bytes)
         retainedAurSourceEvidence = evidence
         retainedAurBuilderReport = builder
-        clearRetainedAurBuiltPackages()
+        deleteRetainedAurBuiltPackageFilesAsync(detachRetainedAurBuiltPackageFiles())
         publishAurReviewPresentation(
             review,
             retainedAurVerifiedBytes,
@@ -10156,7 +10301,7 @@ class ArchpheneRuntimeService : Service() {
         retainedAurVerifiedBytes = 0L
         retainedAurSourceEvidence = emptyArray()
         retainedAurBuilderReport = null
-        clearRetainedAurBuiltPackages()
+        deleteRetainedAurBuiltPackageFilesAsync(detachRetainedAurBuiltPackageFiles())
         clearAurReviewPresentation()
         searchStatus = "Search the official Arch repositories"
         return true
@@ -10189,22 +10334,7 @@ class ArchpheneRuntimeService : Service() {
         ) {
             return false
         }
-        val outputBuffer = ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
-        val requestBytes = "extra\t$normalized".toByteArray(StandardCharsets.UTF_8)
-        val requestBuffer = ByteBuffer.allocateDirect(requestBytes.size).put(requestBytes)
-        val jobId =
-            NativeRuntime.nativeQueuePackageJob(
-                activeHandle,
-                NativeRuntime.JOB_OPERATION_INSTALL,
-                requestBuffer,
-                requestBytes.size,
-                System.currentTimeMillis(),
-                outputBuffer,
-            )
-        if (jobId <= 0L) {
-            return false
-        }
-        jobPersistentId = jobId
+        jobPersistentId = 0L
         packageCancellationRequested = false
         packageOperationCancelable = true
         packageOperationActive = true
@@ -10213,15 +10343,33 @@ class ArchpheneRuntimeService : Service() {
             NativeRuntime.JOB_OPERATION_INSTALL,
             NativeRuntime.JOB_QUEUED,
             0,
-            "Queued",
+            "Preparing durable phase fixture",
         )
         val worker =
             Thread(
                 {
+                    requireRuntimeWorker("Debug package phase fixture")
                     val scratch = PackageIoScratch()
+                    var jobId = 0L
                     var recordedPhase = 0
                     var recordedProgress = 0
                     try {
+                        jobId =
+                            queuePackageJob(
+                                activeHandle,
+                                NativeRuntime.JOB_OPERATION_INSTALL,
+                                "extra",
+                                normalized,
+                            )
+                        jobPersistentId = jobId
+                        jobRepository = "extra"
+                        publishPackageJob(
+                            normalized,
+                            NativeRuntime.JOB_OPERATION_INSTALL,
+                            NativeRuntime.JOB_QUEUED,
+                            0,
+                            "Queued",
+                        )
                         Thread.sleep(holdMillis)
                         val states =
                             intArrayOf(
@@ -10273,6 +10421,7 @@ class ArchpheneRuntimeService : Service() {
                             error is InterruptedException || packageCancellationRequested
                         if (cancelled) {
                             try {
+                                check(jobId > 0L)
                                 updatePackageJob(
                                     activeHandle,
                                     jobId,
@@ -10288,16 +10437,26 @@ class ArchpheneRuntimeService : Service() {
                             }
                         } else {
                             try {
-                                updatePackageJob(
-                                    activeHandle,
-                                    jobId,
-                                    NativeRuntime.JOB_FAILED,
-                                    recordedPhase,
-                                    recordedProgress,
-                                    "Phase presentation fixture failed",
-                                    normalized,
-                                    scratch,
-                                )
+                                if (jobId > 0L) {
+                                    updatePackageJob(
+                                        activeHandle,
+                                        jobId,
+                                        NativeRuntime.JOB_FAILED,
+                                        recordedPhase,
+                                        recordedProgress,
+                                        "Phase presentation fixture failed",
+                                        normalized,
+                                        scratch,
+                                    )
+                                } else {
+                                    publishPackageJob(
+                                        normalized,
+                                        NativeRuntime.JOB_OPERATION_INSTALL,
+                                        NativeRuntime.JOB_FAILED,
+                                        recordedProgress,
+                                        "Phase presentation fixture failed",
+                                    )
+                                }
                             } catch (updateError: Exception) {
                                 Log.e(TAG, "Debug package phase journal failed", updateError)
                             }
@@ -10344,22 +10503,7 @@ class ArchpheneRuntimeService : Service() {
         ) {
             return false
         }
-        val outputBuffer = ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
-        val requestBytes = "extra\t$normalized".toByteArray(StandardCharsets.UTF_8)
-        val requestBuffer = ByteBuffer.allocateDirect(requestBytes.size).put(requestBytes)
-        val jobId =
-            NativeRuntime.nativeQueuePackageJob(
-                activeHandle,
-                NativeRuntime.JOB_OPERATION_REMOVE,
-                requestBuffer,
-                requestBytes.size,
-                System.currentTimeMillis(),
-                outputBuffer,
-            )
-        if (jobId <= 0L) {
-            return false
-        }
-        jobPersistentId = jobId
+        jobPersistentId = 0L
         packageOperationCancelable = false
         packageOperationActive = true
         publishPackageJob(
@@ -10367,13 +10511,30 @@ class ArchpheneRuntimeService : Service() {
             NativeRuntime.JOB_OPERATION_REMOVE,
             NativeRuntime.JOB_QUEUED,
             0,
-            "Queued interruption recovery fixture",
+            "Preparing durable interruption recovery fixture",
         )
         val worker =
             Thread(
                 {
+                    requireRuntimeWorker("Debug interrupted-removal fixture")
                     val scratch = PackageIoScratch()
                     try {
+                        val jobId =
+                            queuePackageJob(
+                                activeHandle,
+                                NativeRuntime.JOB_OPERATION_REMOVE,
+                                "extra",
+                                normalized,
+                            )
+                        jobPersistentId = jobId
+                        jobRepository = "extra"
+                        publishPackageJob(
+                            normalized,
+                            NativeRuntime.JOB_OPERATION_REMOVE,
+                            NativeRuntime.JOB_QUEUED,
+                            0,
+                            "Queued interruption recovery fixture",
+                        )
                         updatePackageJob(
                             activeHandle,
                             jobId,
@@ -10418,6 +10579,15 @@ class ArchpheneRuntimeService : Service() {
                         )
                     } catch (_: InterruptedException) {
                         Thread.currentThread().interrupt()
+                    } catch (error: Exception) {
+                        publishPackageJob(
+                            normalized,
+                            NativeRuntime.JOB_OPERATION_REMOVE,
+                            NativeRuntime.JOB_FAILED,
+                            0,
+                            "Could not start interruption recovery fixture",
+                        )
+                        Log.e(TAG, "Debug interrupted removal fixture failed", error)
                     } finally {
                         packageOperationActive = false
                         packageThread = null
@@ -10426,8 +10596,7 @@ class ArchpheneRuntimeService : Service() {
                 },
                 "ArchpheneInterruptedRemovalFixture",
             )
-        packageThread = worker
-        worker.start()
+        schedulePackageWorker(worker, activeHandle)
         promoteWorkToForeground()
         return true
     }
@@ -10441,7 +10610,15 @@ class ArchpheneRuntimeService : Service() {
         packageOperationCancelable = false
         jobStatus = "Cancellation requested\nFinishing the current safe step"
         jobMessage = "Finishing the current safe step"
-        activePackageConnection?.disconnect()
+        activePackageConnection?.let { connection ->
+            Thread(
+                {
+                    requireRuntimeWorker("Package network cancellation")
+                    connection.disconnect()
+                },
+                "ArchphenePackageCancel",
+            ).start()
+        }
         packageThread?.interrupt()
         return true
     }
@@ -10872,6 +11049,7 @@ class ArchpheneRuntimeService : Service() {
         commandThread =
             Thread(
                 {
+                    requireRuntimeWorker("Linux command")
                     try {
                         val outputBuffer =
                             ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
@@ -11137,6 +11315,7 @@ class ArchpheneRuntimeService : Service() {
         activeHandle: Long,
         selectedShell: ShellChoice,
     ) {
+        requireRuntimeWorker("Shared shell")
         var ptyHandle = 0L
         var exitStatus: Int? = null
         var failure: Exception? = null

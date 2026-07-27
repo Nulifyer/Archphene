@@ -79,6 +79,25 @@ device-specific lifecycle preference operations under the app's thread policy;
 the gate reports their count but does not misattribute those framework-only
 stacks.
 
+Exercise the native package-journal boundary without clearing app data or
+mutating the Linux package database:
+
+```bash
+./scripts/test-archphene-package-worker-boundary.sh \
+  --serial emulator-5554 \
+  --apk tooling/build/apk/app-debug-x86_64.apk
+./scripts/test-archphene-package-worker-boundary.sh \
+  --serial <adb-serial> \
+  --apk tooling/build/apk/app-debug-arm64-v8a.apk
+```
+
+The debug fixture must render an accepted Queued job with an enabled Cancel
+action, durably journal it on `ArchphenePackagePhases`, and reach the durable
+Cancelled state without an Archphene StrictMode or fatal event. The gate keeps
+existing manager data and packages, while the fixture becomes the latest
+package-activity record. It archives a scoped log and full-device screenshot
+under `tooling/build/package-worker-boundary/`.
+
 Run the graceful runtime teardown gate with the same exact-ABI APKs:
 
 ```bash
