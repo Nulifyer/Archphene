@@ -16,6 +16,7 @@ internal object LauncherIdentityVerifier {
     private const val GENERATION = "org.archphene.launcher.GENERATION"
     private const val MANAGER_PACKAGE = "org.archphene.launcher.MANAGER_PACKAGE"
     private const val TEMPLATE_SHA256 = "org.archphene.launcher.TEMPLATE_SHA256"
+    private const val CAPABILITIES = "org.archphene.launcher.CAPABILITIES"
 
     @Suppress("DEPRECATION")
     fun verify(
@@ -77,6 +78,8 @@ internal object LauncherIdentityVerifier {
             metadata.getString(MANAGER_PACKAGE) != context.packageName ||
             metadata.getString(TEMPLATE_SHA256) !=
             "h:${LauncherApkAssembler.templateDigestHex(context)}" ||
+            metadata.getString(CAPABILITIES) !=
+            "c:${LauncherApkAssembler.CAPABILITIES_V1}" ||
             signers.size != 1
         ) {
             return null

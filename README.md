@@ -51,9 +51,10 @@ physical Samsung coverage for:
   verified package-owned nested executables under paths such as
   `/usr/lib/<app>`, with real ELF and physical Samsung coverage.
 
-Capability derivation, x86_64 repetition of the real-client gate,
-zero-copy/dmabuf presentation, broader toolkit coverage, and the remaining
-production launcher capabilities are still open.
+Optional capability derivation, zero-copy/dmabuf presentation, broader toolkit
+coverage, and the remaining production launcher capabilities are still open.
+The base Wayland/input/IME/clipboard contract and the complete real Foot
+lifecycle/crash matrix now pass on both x86_64 and AArch64.
 
 ## Historical bridge evidence
 

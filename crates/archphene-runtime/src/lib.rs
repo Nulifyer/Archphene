@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 use archphene_core::{Lifecycle, Runtime, RuntimeError};
 use archphene_jobs::{JobError, JobOperation, JobState, PackageJob, PackageJobStore};
 use archphene_launcher::{
-    LauncherRegistry, LauncherRegistryError, LauncherReviewDecision, ReconcileReport, WrapperStatus,
+    LAUNCHER_CAPABILITIES_V1, LauncherRegistry, LauncherRegistryError, LauncherReviewDecision,
+    ReconcileReport, WrapperStatus,
 };
 use archphene_packages::{
     CatalogDownload, InstalledPackageCatalog, PackageCacheCatalog, PackagePayloadDownload,
@@ -101,6 +102,7 @@ pub struct LauncherPublishWork {
     pub descriptor_id_hex: [u8; 64],
     pub generation: u64,
     pub label: String,
+    pub capabilities: &'static str,
     pub icon_path: Option<String>,
     pub icon_sha256: Option<[u8; 32]>,
 }
@@ -992,6 +994,7 @@ impl RuntimeHost {
             descriptor_id_hex: descriptor.descriptor_id_hex(),
             generation: descriptor.desired_generation,
             label: descriptor.name.clone(),
+            capabilities: LAUNCHER_CAPABILITIES_V1,
             icon_path,
             icon_sha256,
         };

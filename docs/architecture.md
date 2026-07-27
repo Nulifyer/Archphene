@@ -1,6 +1,6 @@
 # Architecture
 
-Updated: 2026-07-26
+Updated: 2026-07-27
 
 Archphene is one user-owned Arch Linux environment inside one ordinary Android
 application. Pacman and AUR packages intentionally share one filesystem, home,
@@ -33,6 +33,17 @@ private Arch root used by Terminal and every other Linux application. Removing
 a launcher must not remove a pacman package or Linux user data. Removing a
 package must reconcile every launcher whose desktop entry or executable it
 owned.
+
+Every generated launcher also carries a versioned capability declaration.
+Rust supplies the exact bounded contract to deterministic APK assembly; Kotlin
+embeds and independently verifies it, and both the wrapper and manager require
+the same value before opening an authenticated Binder session. The initial
+production contract contains only the implemented Wayland, input, IME, and
+plain-text clipboard paths. A correctly signed wrapper with an older contract
+is stale and can be updated through Android confirmation; a wrapper with
+untrusted identity or signer remains quarantined. Optional or dangerous
+capabilities must not be advertised until their complete broker, evidence
+derivation, and user-review path exist.
 
 This deliberately does not provide package isolation inside Arch. Installing
 an Arch or AUR package grants it the same Linux trust level it has in a normal

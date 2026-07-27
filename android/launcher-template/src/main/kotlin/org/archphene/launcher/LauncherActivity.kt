@@ -337,7 +337,13 @@ class LauncherActivity :
         if (binding || remote != null || isFinishing || isDestroyed) {
             return
         }
-        val manager = applicationMetadata().getString(MANAGER_PACKAGE).orEmpty()
+        val metadata = applicationMetadata()
+        if (metadata.getString(CAPABILITIES) != CAPABILITIES_V1) {
+            status.setText(R.string.launcher_capabilities_invalid)
+            status.visibility = View.VISIBLE
+            return
+        }
+        val manager = metadata.getString(MANAGER_PACKAGE).orEmpty()
         if (!SAFE_PACKAGE.matches(manager)) {
             status.setText(R.string.launcher_invalid)
             status.visibility = View.VISIBLE
@@ -1440,6 +1446,8 @@ class LauncherActivity :
     private companion object {
         private const val TAG = "ArchpheneLauncher"
         private const val MANAGER_PACKAGE = "org.archphene.launcher.MANAGER_PACKAGE"
+        private const val CAPABILITIES = "org.archphene.launcher.CAPABILITIES"
+        private const val CAPABILITIES_V1 = "c:wayland,input,ime,clipboard"
         private const val BIND_ACTION = "org.archphene.action.BIND_LAUNCHER"
         private const val INTERFACE = "org.archphene.launcher.ISessionV1"
         private const val PROTOCOL_VERSION = 1

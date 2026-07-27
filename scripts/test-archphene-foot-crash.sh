@@ -50,10 +50,12 @@ archphene_adb_run install -r "$apk" >/dev/null
 archphene_adb_run logcat -c
 archphene_adb_run shell am force-stop "$wrapper" >/dev/null
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
-archphene_wait_log 'Presented first Linux frame session=' 20 \
+archphene_wait_log 'Presented Linux frame session=.*attachmentFrame=1' 20 \
   'ArchpheneLauncherSession:V *:S' >/dev/null
 
 tree="$(process_tree)"
+manager_pid="$(archphene_android_pid "$manager")"
+wrapper_pid="$(archphene_android_pid "$wrapper")"
 foot_pid="$(awk '/--argv0 foot / {print $1; exit}' <<<"$tree")"
 [[ "$foot_pid" =~ ^[1-9][0-9]*$ ]] ||
   archphene_die "could not identify the manager-owned Foot leader"
@@ -67,6 +69,28 @@ bash_pgid="$(awk -v pid="$bash_pid" '$1 == pid {print $3; exit}' <<<"$tree")"
    "$bash_pgid" =~ ^[1-9][0-9]*$ &&
    "$foot_pgid" != "$bash_pgid" ]] ||
   archphene_die "Foot's Bash descendant did not own a separate process group"
+[[ "$manager_pid" =~ ^[1-9][0-9]*$ && "$wrapper_pid" =~ ^[1-9][0-9]*$ ]] ||
+  archphene_die "could not identify the Android manager and Foot wrapper"
+
+archphene_adb_run logcat -c
+archphene_adb_run shell input keyevent KEYCODE_HOME >/dev/null
+archphene_wait_log 'Detached launcher Surface session=' 15 \
+  'ArchpheneLauncherSession:V *:S' >/dev/null
+archphene_adb_run exec-out screencap -p >"$output_dir/$serial-home.png"
+archphene_adb_run shell am start -W -n "$activity" >/dev/null
+archphene_wait_log 'Attached launcher Surface session=' 15 \
+  'ArchpheneLauncherSession:V *:S' >/dev/null
+archphene_wait_log 'Presented Linux frame session=.*attachmentFrame=1' 20 \
+  'ArchpheneLauncherSession:V *:S' >/dev/null
+[[ "$(archphene_android_pid "$manager")" == "$manager_pid" &&
+   "$(archphene_android_pid "$wrapper")" == "$wrapper_pid" ]] ||
+  archphene_die "Android manager or wrapper restarted across Home/resume"
+resumed_tree="$(process_tree)"
+for pid in "$foot_pid" "$bash_pid"; do
+  awk -v pid="$pid" '$1 == pid { found = 1 } END { exit !found }' <<<"$resumed_tree" ||
+    archphene_die "Linux process $pid restarted across Home/resume"
+done
+archphene_adb_run exec-out screencap -p >"$output_dir/$serial-resumed.png"
 
 archphene_adb_run shell run-as "$manager" kill -9 "$foot_pid"
 archphene_wait_log 'Linux process exited session=.*status=-9' 15 \
@@ -89,7 +113,7 @@ archphene_adb_run shell rm /sdcard/archphene-foot-crash.png
 archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null
 archphene_adb_run logcat -c
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
-archphene_wait_log 'Presented first Linux frame session=' 20 \
+archphene_wait_log 'Presented Linux frame session=.*attachmentFrame=1' 20 \
   'ArchpheneLauncherSession:V *:S' >/dev/null
 restarted_tree="$(process_tree)"
 grep -q -- '--argv0 foot ' <<<"$restarted_tree" ||
@@ -103,6 +127,7 @@ fatal_log="$(archphene_adb_run logcat -d -v brief \
   archphene_die "Foot crash regression emitted a fatal Android error: $fatal_log"
 
 archphene_note "Archphene Foot crash regression passed on $serial"
+archphene_note "  Manager, wrapper, Foot, and Bash survived Home/resume unchanged"
 archphene_note "  Exit -9 was visible and the separate Bash descendant was reaped"
 archphene_note "  Foot relaunched and presented a fresh real Wayland frame"
-archphene_note "  Full-device screenshot: $output_dir/$serial.png"
+archphene_note "  Full-device screenshots: $output_dir/$serial-{home,resumed}.png and $output_dir/$serial.png"

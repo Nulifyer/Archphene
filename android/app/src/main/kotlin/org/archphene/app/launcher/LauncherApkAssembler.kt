@@ -22,6 +22,7 @@ internal data class LauncherApkRequest(
     val descriptorIdHex: String,
     val generation: Long,
     val label: String,
+    val capabilities: String,
     val iconPng: ByteArray? = null,
     val iconSha256: ByteArray? = null,
 )
@@ -44,6 +45,8 @@ internal object LauncherApkAssembler {
     private const val TEMPLATE_LABEL = "Archphene Linux App"
     private const val TEMPLATE_SHA256 =
         "h:0000000000000000000000000000000000000000000000000000000000000000"
+    private const val TEMPLATE_CAPABILITIES = "c:launcher-capabilities-placeholder"
+    internal const val CAPABILITIES_V1 = "wayland,input,ime,clipboard"
     private const val TEMPLATE_ICON_SHA256 =
         "2babc12a8af9fa0f7018a7d20110f4436e128ddac876d6276b519daefeea0a56"
     private const val MANIFEST = "AndroidManifest.xml"
@@ -151,6 +154,9 @@ internal object LauncherApkAssembler {
         require(validLabel(request.label)) {
             "Invalid launcher label"
         }
+        require(request.capabilities == CAPABILITIES_V1) {
+            "Unsupported launcher capability contract"
+        }
         require(
             (request.iconPng == null && request.iconSha256 == null) ||
                 (
@@ -226,6 +232,10 @@ internal object LauncherApkAssembler {
                                     ).replaceString(TEMPLATE_MANAGER, context.packageName)
                                     .replaceString(TEMPLATE_LABEL, request.label)
                                     .replaceString(TEMPLATE_SHA256, "h:$templateDigest")
+                                    .replaceString(
+                                        TEMPLATE_CAPABILITIES,
+                                        "c:${request.capabilities}",
+                                    )
                                     .setVersionCode(request.generation.toInt())
                                     .bytes
                             manifestFound = true
@@ -392,7 +402,9 @@ internal object LauncherApkAssembler {
                 metadata.getString("org.archphene.launcher.MANAGER_PACKAGE") ==
                 context.packageName &&
                 metadata.getString("org.archphene.launcher.TEMPLATE_SHA256") ==
-                "h:${templateDigestHex(context)}",
+                "h:${templateDigestHex(context)}" &&
+                metadata.getString("org.archphene.launcher.CAPABILITIES") ==
+                "c:${request.capabilities}",
         ) {
             "Generated launcher metadata changed"
         }

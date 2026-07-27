@@ -1531,8 +1531,35 @@ relaunched a stopped client in the same authenticated session. The Service now
 retains an explicit terminal message across every later Surface attachment;
 two consecutive physical-device runs prove no process exists before the
 wrapper is explicitly closed and reopened.
+
+The exact x86_64 production path now passes the same lifecycle and crash
+contract with current Foot 1.27.0-2. The emulator refreshed real repository
+catalogs, installed the complete 150-package signed closure through the normal
+manager transaction, approved only the primary Foot desktop entry, and
+installed its generated thin APK through Android confirmation. Home detaches
+only the Android Surface: the manager, wrapper, Foot leader, and separate-group
+Bash child retain their exact PIDs, and resume reattaches the same session with
+a readable full-device frame. Deliberate Foot `SIGKILL` renders
+`Foot stopped (exit -9).`, removes both Linux processes, and a subsequent
+explicit reopen presents a fresh Wayland frame without a fatal Android log.
+The repeatable gate was updated from an obsolete log phrase to the current
+first-attachment frame contract instead of weakening the runtime assertion.
+
+Generated wrappers now bind those production paths to an explicit capability
+contract. Rust publishes `wayland,input,ime,clipboard` with each claimed
+launcher generation; the assembler places the exact value in signed manifest
+metadata and verifies the completed APK, while the wrapper and manager both
+reject a mismatch before session authorization. The migration gate found and
+fixed a policy error that initially quarantined a correctly signed older
+template: immutable package/signer/descriptor identity is now checked
+separately from the upgradeable template/capability version. The emulator
+updated Foot through Android confirmation, and Samsung updated btop++, VS Code,
+Foot Server, Foot, and Foot Client through five confirmations. Direct APK
+inspection and complete post-update Foot lifecycle/crash runs pass on both
+ABIs with full-device evidence.
+
 The visually inspected evidence is a full-device screenshot rather than an
-app-only frame. The complete Rust workspace passes 248 tests, including the
+app-only frame. The complete Rust workspace passes 255 tests, including the
 large-resolution, raw-signature-status, empty-files-record, loader-path, JNI,
 compositor, terminal, storage, AUR snapshot, and warmed-allocation regressions.
 
@@ -1570,7 +1597,7 @@ aliases to the corresponding private home directories. The Files page explains
 the Archphene Home and snapshot boundary, DocumentsProvider CRUD/security gates
 pass on x86_64 and AArch64, and a full-device Samsung Foot/Bash run reads an
 Android-side Shared fixture through the Linux alias. The complete Rust workspace
-passes 248 tests; Android debug lint and the minified release build pass.
+passes 255 tests; Android debug lint and the minified release build pass.
 
 The manager's new Share action opens at Archphene Home, selects only its own
 bounded regular provider documents, excludes Archphene as a circular target,

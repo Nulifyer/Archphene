@@ -6,5 +6,6 @@
     <string name="launcher_rejected">This Linux launcher is no longer trusted. Open Archphene to repair it.</string>
     <string name="launcher_disconnected">Archphene stopped the Linux session.</string>
     <string name="launcher_invalid">This launcher has invalid Archphene metadata.</string>
+    <string name="launcher_capabilities_invalid">This Linux launcher uses an incompatible Archphene capability contract. Open Archphene to update it.</string>
     <string name="launcher_unavailable">Open Archphene, then try this Linux app again.</string>
 </resources>

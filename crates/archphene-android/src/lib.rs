@@ -3544,11 +3544,12 @@ mod android {
             encoded
         });
         let encoded = format!(
-            "W2\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            "W3\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             work.android_package,
             descriptor_id,
             work.generation,
             work.label,
+            work.capabilities,
             work.icon_path.as_deref().unwrap_or(""),
             icon_sha256.as_deref().unwrap_or(""),
         );

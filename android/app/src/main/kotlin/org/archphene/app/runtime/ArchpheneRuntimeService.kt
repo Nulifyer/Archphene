@@ -4702,12 +4702,13 @@ class ArchpheneRuntimeService : Service() {
                     val fields =
                         String(bytes, 0, length, StandardCharsets.UTF_8)
                             .trimEnd('\n')
-                            .split('\t', limit = 7)
+                            .split('\t', limit = 8)
                     check(
-                        fields.size == 7 &&
-                            fields[0] == "W2" &&
+                        fields.size == 8 &&
+                            fields[0] == "W3" &&
                             LAUNCHER_PACKAGE.matches(fields[1]) &&
-                            LAUNCHER_DESCRIPTOR.matches(fields[2]),
+                            LAUNCHER_DESCRIPTOR.matches(fields[2]) &&
+                            fields[5] == LauncherApkAssembler.CAPABILITIES_V1,
                     ) {
                         "Invalid native launcher publication"
                     }
@@ -4717,12 +4718,12 @@ class ArchpheneRuntimeService : Service() {
                     }
                     claimedPackage = fields[1]
                     claimedGeneration = generation
-                    val iconDigest = decodeSha256(fields[6])
+                    val iconDigest = decodeSha256(fields[7])
                     check(
-                        (fields[5].isEmpty() && fields[6].isEmpty()) ||
+                        (fields[6].isEmpty() && fields[7].isEmpty()) ||
                             (
-                                fields[5].startsWith('/') &&
-                                    fields[5].length <= 240 &&
+                                fields[6].startsWith('/') &&
+                                    fields[6].length <= 240 &&
                                     iconDigest != null
                             ),
                     ) {
@@ -4732,7 +4733,7 @@ class ArchpheneRuntimeService : Service() {
                         if (iconDigest == null) {
                             null
                         } else {
-                            loadLauncherIcon(fields[5], iconDigest)
+                            loadLauncherIcon(fields[6], iconDigest)
                                 ?: error("Package launcher icon changed or is unsupported")
                         }
                     val generated =
@@ -4743,6 +4744,7 @@ class ArchpheneRuntimeService : Service() {
                                 fields[2],
                                 claimedGeneration,
                                 fields[4],
+                                fields[5],
                                 iconPng,
                                 iconDigest,
                             ),
@@ -4974,8 +4976,12 @@ class ArchpheneRuntimeService : Service() {
                         generationValue == row.desiredGeneration &&
                         row.status != LAUNCHER_STATUS_NEEDS_REMOVAL &&
                         row.status != LAUNCHER_STATUS_AWAITING_REMOVAL &&
-                        metadata.getString("org.archphene.launcher.TEMPLATE_SHA256") !=
-                        "h:$templateDigest"
+                        (
+                            metadata.getString("org.archphene.launcher.TEMPLATE_SHA256") !=
+                                "h:$templateDigest" ||
+                                metadata.getString("org.archphene.launcher.CAPABILITIES") !=
+                                "c:${LauncherApkAssembler.CAPABILITIES_V1}"
+                        )
                     ) {
                         -2L
                     } else {

@@ -20,6 +20,9 @@
         <meta-data
             android:name="org.archphene.launcher.TEMPLATE_SHA256"
             android:value="h:0000000000000000000000000000000000000000000000000000000000000000" />
+        <meta-data
+            android:name="org.archphene.launcher.CAPABILITIES"
+            android:value="c:launcher-capabilities-placeholder" />
 
         <activity
             android:name="org.archphene.launcher.LauncherActivity"

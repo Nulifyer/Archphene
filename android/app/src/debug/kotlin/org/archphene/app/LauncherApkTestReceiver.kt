@@ -31,6 +31,7 @@ internal class LauncherApkTestReceiver : BroadcastReceiver() {
                                 "2222222222222222222222222222222222222222222222222222222222222222",
                                 7,
                                 "Archphene Fixture",
+                                LauncherApkAssembler.CAPABILITIES_V1,
                                 icon,
                                 MessageDigest.getInstance("SHA-256").digest(icon),
                             ),
