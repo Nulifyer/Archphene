@@ -208,6 +208,7 @@ pub enum StorageError {
     HiddenDocument,
     RootMutation,
     DocumentTooLarge,
+    TransferCancelled,
     ImportCollision,
     MirrorBusy,
     MirrorExists,
@@ -228,6 +229,7 @@ impl fmt::Display for StorageError {
             Self::HiddenDocument => formatter.write_str("private Archphene document"),
             Self::RootMutation => formatter.write_str("cannot mutate Archphene home"),
             Self::DocumentTooLarge => formatter.write_str("document exceeds 16 GiB"),
+            Self::TransferCancelled => formatter.write_str("document transfer was cancelled"),
             Self::ImportCollision => {
                 formatter.write_str("too many documents use this imported name")
             }
@@ -1964,12 +1966,27 @@ pub fn copy_document_between_fds(
     source_descriptor: RawFd,
     destination_descriptor: RawFd,
 ) -> Result<u64, StorageError> {
+    copy_document_between_fds_with_progress(source_descriptor, destination_descriptor, |_| true)
+}
+
+pub fn copy_document_between_fds_with_progress<F>(
+    source_descriptor: RawFd,
+    destination_descriptor: RawFd,
+    mut continue_after_chunk: F,
+) -> Result<u64, StorageError>
+where
+    F: FnMut(u64) -> bool,
+{
     if source_descriptor < 0 || destination_descriptor < 0 {
         return Err(StorageError::InvalidDocument);
     }
     let mut source = sys::duplicate(source_descriptor)?;
     let mut destination = sys::duplicate(destination_descriptor)?;
-    let bytes = copy_bounded_document(&mut source, &mut destination)?;
+    let bytes = copy_bounded_document_with_progress(
+        &mut source,
+        &mut destination,
+        &mut continue_after_chunk,
+    )?;
     destination.flush()?;
     Ok(bytes)
 }
@@ -1977,6 +1994,14 @@ pub fn copy_document_between_fds(
 fn copy_bounded_document<R: Read, W: Write>(
     source: &mut R,
     destination: &mut W,
+) -> Result<u64, StorageError> {
+    copy_bounded_document_with_progress(source, destination, &mut |_| true)
+}
+
+fn copy_bounded_document_with_progress<R: Read, W: Write, F: FnMut(u64) -> bool>(
+    source: &mut R,
+    destination: &mut W,
+    continue_after_chunk: &mut F,
 ) -> Result<u64, StorageError> {
     let mut bytes = 0_u64;
     let mut buffer = [0_u8; 32 * 1024];
@@ -1992,6 +2017,9 @@ fn copy_bounded_document<R: Read, W: Write>(
             return Err(StorageError::DocumentTooLarge);
         }
         destination.write_all(&buffer[..count])?;
+        if !continue_after_chunk(bytes) {
+            return Err(StorageError::TransferCancelled);
+        }
     }
     Ok(bytes)
 }
@@ -2405,6 +2433,35 @@ mod tests {
         assert!(destination.metadata().is_ok());
         assert!(copy_document_between_fds(-1, destination.as_raw_fd()).is_err());
         assert!(copy_document_between_fds(source.as_raw_fd(), -1).is_err());
+    }
+
+    #[test]
+    fn descriptor_copy_reports_progress_and_stops_at_a_chunk_boundary() {
+        let directory = TestDirectory::new();
+        let source_path = directory.0.join("source-large.txt");
+        let destination_path = directory.0.join("destination-partial.txt");
+        fs::write(&source_path, vec![0x5a; 96 * 1024]).expect("write source");
+        let source = File::open(&source_path).expect("open source");
+        let destination = File::create(&destination_path).expect("create destination");
+        let mut progress = Vec::new();
+
+        let result = copy_document_between_fds_with_progress(
+            source.as_raw_fd(),
+            destination.as_raw_fd(),
+            |bytes| {
+                progress.push(bytes);
+                bytes < 32 * 1024
+            },
+        );
+
+        assert!(matches!(result, Err(StorageError::TransferCancelled)));
+        assert_eq!(progress, vec![32 * 1024]);
+        assert_eq!(
+            fs::metadata(destination_path)
+                .expect("partial metadata")
+                .len(),
+            32 * 1024,
+        );
     }
 
     #[test]

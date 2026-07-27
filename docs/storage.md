@@ -102,10 +102,20 @@ on the x86_64 emulator and physical AArch64 Samsung.
 an `ACTION_CREATE_DOCUMENT` destination and filename. Android owns both URI
 grants and opens the source and destination descriptors. Rust duplicates those
 descriptors and copies at most 16 GiB through one fixed 32 KiB buffer; file
-bytes never enter Kotlin or JNI buffers. Cancelling the destination picker
-creates no target. Exact destination bytes, unchanged Linux source, durable
-completion status after manager restart, cleanup, fatal logs, and visually
-inspected full-device phone/wide layouts pass on both maintained targets.
+bytes never enter Kotlin or JNI buffers. Each completed chunk publishes coarse
+byte/percent progress and observes cancellation. The Files page temporarily
+replaces Export with **Cancel export**; cancellation closes both descriptors
+and removes the incomplete destination after provider close-time work settles.
+Cancelling the destination picker creates no target.
+
+Before writing, the manager retains the destination's persistable write grant
+and a durable running record. If the process dies after writing begins,
+startup removes the uncommitted destination before releasing the grant;
+providers without recovery-safe access are rejected before mutation. Exact
+destination bytes, unchanged Linux source, picker cancellation/retry, live
+transfer cancellation, nonempty process-death recovery, durable completion,
+cleanup, fatal logs, and visually inspected full-device phone/wide layouts pass
+on both maintained targets.
 Source name and MIME metadata come from the already bounded Archphene document
 ID, so picker handoff does not make the Activity thread stat the Linux file;
 the exact-device export gate rejects any Archphene-owned StrictMode violation.
@@ -219,9 +229,8 @@ progress frames pass on both maintained ABIs.
 
 The SAF capability itself is never presented as a POSIX mount; Linux sees the
 private POSIX mirror and changes cross the boundary only during explicit Sync.
-Multi-file share, drag-and-drop import, byte-level transfer progress/cancel,
-process-death partial-export recovery, and richer `/mnt/android` mapping status
-are still planned.
+Drag-and-drop import and richer `/mnt/android` mapping status are still
+planned.
 
 ## Virtual Linux Layout
 

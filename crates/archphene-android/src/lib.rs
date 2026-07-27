@@ -86,7 +86,9 @@ mod android {
     use std::os::fd::{BorrowedFd, IntoRawFd};
     use std::path::Path;
     use std::slice;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{Mutex, OnceLock};
+    use std::time::Duration;
     use std::{io::Write as _, str};
 
     use archphene_core::{Lifecycle, PROTOCOL_VERSION, RuntimeError, SNAPSHOT_SIZE};
@@ -143,6 +145,17 @@ mod android {
     static PROJECT_SYNC_CANCELLATIONS: OnceLock<
         Mutex<[Option<(u64, MirrorCancellation)>; MAX_RUNTIME_HANDLES]>,
     > = OnceLock::new();
+    static DOCUMENT_EXPORT_ACTIVE: AtomicBool = AtomicBool::new(false);
+    static DOCUMENT_EXPORT_CANCELLED: AtomicBool = AtomicBool::new(false);
+    static DOCUMENT_EXPORT_BYTES: AtomicU64 = AtomicU64::new(0);
+
+    struct DocumentExportGuard;
+
+    impl Drop for DocumentExportGuard {
+        fn drop(&mut self) {
+            DOCUMENT_EXPORT_ACTIVE.store(false, Ordering::Release);
+        }
+    }
 
     fn registry() -> &'static Mutex<RuntimeRegistry> {
         REGISTRY.get_or_init(|| Mutex::new(RuntimeRegistry::new()))
@@ -807,21 +820,63 @@ mod android {
         _class: JClass,
         source_descriptor: jint,
         destination_descriptor: jint,
+        debug_chunk_delay_millis: jint,
         output_buffer: JByteBuffer,
     ) -> jint {
-        if source_descriptor < 0 || destination_descriptor < 0 {
+        if source_descriptor < 0
+            || destination_descriptor < 0
+            || !(0..=100).contains(&debug_chunk_delay_millis)
+        {
             return ERROR_INVALID_ARGUMENT;
         }
         let Ok(output) = storage_output(&environment, &output_buffer) else {
             return ERROR_INVALID_ARGUMENT;
         };
-        match archphene_storage::copy_document_between_fds(
+        if DOCUMENT_EXPORT_ACTIVE
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return ERROR_INVALID_STATE;
+        }
+        let _guard = DocumentExportGuard;
+        DOCUMENT_EXPORT_CANCELLED.store(false, Ordering::Release);
+        DOCUMENT_EXPORT_BYTES.store(0, Ordering::Release);
+        let delay = Duration::from_millis(debug_chunk_delay_millis as u64);
+        match archphene_storage::copy_document_between_fds_with_progress(
             source_descriptor,
             destination_descriptor,
+            |bytes| {
+                DOCUMENT_EXPORT_BYTES.store(bytes, Ordering::Release);
+                if !delay.is_zero() {
+                    std::thread::sleep(delay);
+                }
+                !DOCUMENT_EXPORT_CANCELLED.load(Ordering::Acquire)
+            },
         ) {
             Ok(bytes) => copy_storage_value(&bytes.to_string(), output),
             Err(error) => copy_storage_error(&error, output),
         }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeDocumentExportProgress(
+        _environment: JNIEnv,
+        _class: JClass,
+    ) -> jlong {
+        let bytes = DOCUMENT_EXPORT_BYTES.load(Ordering::Acquire);
+        jlong::try_from(bytes).unwrap_or(jlong::MAX)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeCancelDocumentExport(
+        _environment: JNIEnv,
+        _class: JClass,
+    ) -> jboolean {
+        if !DOCUMENT_EXPORT_ACTIVE.load(Ordering::Acquire) {
+            return JNI_FALSE;
+        }
+        DOCUMENT_EXPORT_CANCELLED.store(true, Ordering::Release);
+        JNI_TRUE
     }
 
     #[unsafe(no_mangle)]

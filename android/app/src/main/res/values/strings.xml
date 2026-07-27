@@ -81,6 +81,7 @@
     <string name="open_linux_file_only">Choose a file from Archphene Home</string>
     <string name="open_linux_file_unavailable">This Linux file cannot be opened in Android</string>
     <string name="export_file">Export</string>
+    <string name="cancel_export">Cancel export</string>
     <string name="export_linux_file_only">Choose a file from Archphene Home</string>
     <string name="export_linux_file_unavailable">This Linux file cannot be exported to Android</string>
     <string name="export_linux_file_fallback_name">Archphene file</string>

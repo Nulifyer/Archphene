@@ -144,6 +144,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private var pendingImportUri: Uri? = null
     private var pendingExportSourceUri: Uri? = null
     private var pendingExportTargetUri: Uri? = null
+    private var pendingExportGrantFlags = 0
     private var pendingFolderUri: Uri? = null
     private var pendingFolderFlags = 0
     private var selectedManagerSection = MANAGER_SECTION_PACKAGES
@@ -942,7 +943,13 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         exportButton =
             Button(this).apply {
                 setText(R.string.export_file)
-                setOnClickListener { openLinuxDocumentForExport() }
+                setOnClickListener {
+                    if (runtimeBinder?.documentExportCancellationAvailable == true) {
+                        runtimeBinder?.cancelDocumentExport()
+                    } else {
+                        openLinuxDocumentForExport()
+                    }
+                }
             }
         shareButton =
             Button(this).apply {
@@ -1713,6 +1720,13 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         }
         showDebugAurReview(intent)
         showDebugTerminalIme(intent)
+        ArchpheneRuntimeService.setDebugDocumentExportChunkDelay(
+            applicationInfo.flags,
+            intent.getIntExtra(
+                ArchpheneRuntimeService.EXTRA_DEBUG_DOCUMENT_EXPORT_CHUNK_DELAY_MILLIS,
+                0,
+            ),
+        )
         startService(Intent(this, ArchpheneRuntimeService::class.java))
         val restoredImport =
             savedInstanceState
@@ -1731,6 +1745,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             savedInstanceState
                 ?.getString(PENDING_EXPORT_TARGET_URI_STATE)
                 ?.let(Uri::parse)
+        pendingExportGrantFlags =
+            savedInstanceState?.getInt(PENDING_EXPORT_GRANT_FLAGS_STATE, 0) ?: 0
         val restoredFolder =
             savedInstanceState
                 ?.getString(PENDING_FOLDER_URI_STATE)
@@ -1908,6 +1924,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         }
         pendingExportTargetUri?.let { uri ->
             outState.putString(PENDING_EXPORT_TARGET_URI_STATE, uri.toString())
+            outState.putInt(PENDING_EXPORT_GRANT_FLAGS_STATE, pendingExportGrantFlags)
         }
         pendingFolderUri?.let { uri ->
             outState.putString(PENDING_FOLDER_URI_STATE, uri.toString())
@@ -1927,6 +1944,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             if (requestCode == EXPORT_TARGET_DOCUMENT_REQUEST) {
                 pendingExportSourceUri = null
                 pendingExportTargetUri = null
+                pendingExportGrantFlags = 0
             }
             return
         }
@@ -1934,7 +1952,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             IMPORT_DOCUMENT_REQUEST -> data?.data?.let(::queueDocumentImport)
             OPEN_DOCUMENT_REQUEST -> data?.data?.let(::viewLinuxDocument)
             EXPORT_SOURCE_DOCUMENT_REQUEST -> data?.data?.let(::createAndroidExportDocument)
-            EXPORT_TARGET_DOCUMENT_REQUEST -> data?.data?.let(::queueDocumentExport)
+            EXPORT_TARGET_DOCUMENT_REQUEST ->
+                data?.data?.let { uri -> queueDocumentExport(uri, data.flags) }
             SHARE_DOCUMENT_REQUEST -> data?.let(::shareLinuxDocuments)
             FOLDER_GRANT_REQUEST -> {
                 val uri = data?.data ?: return
@@ -2944,9 +2963,22 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         importButton.isEnabled = binder.documentTransferAvailable && pendingImportUri == null
         openButton.isEnabled = binder.documentTransferAvailable
         exportButton.isEnabled =
-            binder.documentTransferAvailable &&
-                pendingExportSourceUri == null &&
-                pendingExportTargetUri == null
+            binder.documentExportCancellationAvailable ||
+                (
+                    binder.documentTransferAvailable &&
+                        pendingExportSourceUri == null &&
+                        pendingExportTargetUri == null
+                )
+        setTextIfChanged(
+            exportButton,
+            getString(
+                if (binder.documentExportCancellationAvailable) {
+                    R.string.cancel_export
+                } else {
+                    R.string.export_file
+                },
+            ),
+        )
         shareButton.isEnabled = binder.documentTransferAvailable
         setTextIfChanged(folderButton, binder.folderGrantActionLabel)
         folderButton.isEnabled = binder.folderGrantAvailable && pendingFolderUri == null
@@ -3267,6 +3299,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private fun openLinuxDocumentForExport() {
         pendingExportSourceUri = null
         pendingExportTargetUri = null
+        pendingExportGrantFlags = 0
         openLinuxDocumentPicker(EXPORT_SOURCE_DOCUMENT_REQUEST)
     }
 
@@ -3339,6 +3372,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         val displayName = linuxDocumentDisplayName(uri)
         pendingExportSourceUri = uri
         pendingExportTargetUri = null
+        pendingExportGrantFlags = 0
         val createDocument =
             Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
                 addCategory(Intent.CATEGORY_OPENABLE)
@@ -3351,6 +3385,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             startActivityForResult(createDocument, EXPORT_TARGET_DOCUMENT_REQUEST)
         } catch (_: android.content.ActivityNotFoundException) {
             pendingExportSourceUri = null
+            pendingExportTargetUri = null
+            pendingExportGrantFlags = 0
             Toast.makeText(
                 this,
                 R.string.export_linux_file_unavailable,
@@ -3634,11 +3670,15 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         }
     }
 
-    private fun queueDocumentExport(destinationUri: Uri) {
+    private fun queueDocumentExport(
+        destinationUri: Uri,
+        grantFlags: Int,
+    ) {
         selectManagerSection(MANAGER_SECTION_FILES)
         if (pendingExportSourceUri == null || destinationUri.scheme != "content") {
             pendingExportSourceUri = null
             pendingExportTargetUri = null
+            pendingExportGrantFlags = 0
             setTextIfChanged(
                 storageStatusView,
                 getString(R.string.export_linux_file_unavailable),
@@ -3646,6 +3686,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             return
         }
         pendingExportTargetUri = destinationUri
+        pendingExportGrantFlags = grantFlags
         setTextIfChanged(storageStatusView, getString(R.string.export_linux_file_queued))
         dispatchPendingExport()
     }
@@ -3654,9 +3695,16 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         val sourceUri = pendingExportSourceUri ?: return
         val destinationUri = pendingExportTargetUri ?: return
         val binder = runtimeBinder ?: return
-        if (binder.exportLinuxDocument(sourceUri, destinationUri)) {
+        if (
+            binder.exportLinuxDocument(
+                sourceUri,
+                destinationUri,
+                pendingExportGrantFlags,
+            )
+        ) {
             pendingExportSourceUri = null
             pendingExportTargetUri = null
+            pendingExportGrantFlags = 0
         }
     }
 
@@ -3726,6 +3774,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         private const val PENDING_IMPORT_URI_STATE = "pending_import_uri"
         private const val PENDING_EXPORT_SOURCE_URI_STATE = "pending_export_source_uri"
         private const val PENDING_EXPORT_TARGET_URI_STATE = "pending_export_target_uri"
+        private const val PENDING_EXPORT_GRANT_FLAGS_STATE = "pending_export_grant_flags"
         private const val PENDING_FOLDER_URI_STATE = "pending_folder_uri"
         private const val PENDING_FOLDER_FLAGS_STATE = "pending_folder_flags"
         private const val MANAGER_SECTION_STATE = "manager_section"

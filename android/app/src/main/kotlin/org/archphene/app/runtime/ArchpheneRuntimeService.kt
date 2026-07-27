@@ -426,13 +426,16 @@ class ArchpheneRuntimeService : Service() {
                 }
 
         val documentTransferStatus: String
-            get() = storageStatus
+            get() = currentDocumentTransferStatus()
 
         val documentTransferAvailable: Boolean
             get() = readyHandle != 0L && !PROCESS_STORAGE_ACTIVE.get()
 
         val documentTransferRunning: Boolean
             get() = storageDocumentActive
+
+        val documentExportCancellationAvailable: Boolean
+            get() = storageDocumentExportActive
 
         val folderGrantStatus: String
             get() = folderStatus
@@ -617,7 +620,21 @@ class ArchpheneRuntimeService : Service() {
         fun exportLinuxDocument(
             sourceUri: Uri,
             destinationUri: Uri,
-        ): Boolean = requestDocumentExport(sourceUri, destinationUri)
+            grantFlags: Int,
+        ): Boolean = requestDocumentExport(sourceUri, destinationUri, grantFlags)
+
+        fun cancelDocumentExport(): Boolean {
+            if (!storageDocumentExportActive) {
+                return false
+            }
+            storageDocumentExportCancellationRequested = true
+            if (!NativeRuntime.nativeCancelDocumentExport()) {
+                storageDocumentExportCancellationRequested = false
+                return false
+            }
+            storageStatus = "Cancelling export…"
+            return true
+        }
 
         fun connectAndroidFolder(
             uri: Uri,
@@ -969,6 +986,10 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var activePackageConnection: HttpsURLConnection? = null
     @Volatile private var commandActive = false
     @Volatile private var storageDocumentActive = false
+    @Volatile private var storageDocumentExportActive = false
+    @Volatile private var storageDocumentExportCancellationRequested = false
+    @Volatile private var storageDocumentExportName = ""
+    @Volatile private var storageDocumentExportTotalBytes = -1L
     @Volatile private var storageStatus = "Import from Android, or open/export Linux files"
     @Volatile private var folderOperationActive = false
     @Volatile private var folderStateReady = false
@@ -1892,6 +1913,26 @@ class ArchpheneRuntimeService : Service() {
     }
 
     companion object {
+        internal const val EXTRA_DEBUG_DOCUMENT_EXPORT_CHUNK_DELAY_MILLIS =
+            "org.archphene.app.extra.DEBUG_DOCUMENT_EXPORT_CHUNK_DELAY_MILLIS"
+        private val DEBUG_DOCUMENT_EXPORT_CHUNK_DELAY_MILLIS = AtomicLong()
+
+        internal fun setDebugDocumentExportChunkDelay(
+            applicationFlags: Int,
+            delayMillis: Int,
+        ) {
+            if (
+                applicationFlags and ApplicationInfo.FLAG_DEBUGGABLE == 0 ||
+                delayMillis <= 0
+            ) {
+                return
+            }
+            DEBUG_DOCUMENT_EXPORT_CHUNK_DELAY_MILLIS.set(
+                delayMillis.coerceIn(0, MAX_DOCUMENT_EXPORT_TEST_CHUNK_DELAY_MILLIS).toLong(),
+            )
+            Log.i(TAG, "Debug document export chunk delay configured")
+        }
+
         private const val TAG = "ArchpheneRuntime"
         private const val SHELL_SCROLLBACK_BYTES = 16 * 1024
         private const val SHELL_DISPLAY_BYTES = 4 * 1024
@@ -2006,6 +2047,8 @@ class ArchpheneRuntimeService : Service() {
         private const val STORAGE_PREFERENCES = "storage"
         private const val STORAGE_STATE = "import_state"
         private const val STORAGE_MESSAGE = "import_message"
+        private const val STORAGE_EXPORT_DESTINATION_URI = "export_destination_uri"
+        private const val STORAGE_EXPORT_GRANT_FLAGS = "export_grant_flags"
         private const val STORAGE_IDLE = "idle"
         private const val STORAGE_RUNNING = "running"
         private const val STORAGE_COMPLETE = "complete"
@@ -2037,6 +2080,8 @@ class ArchpheneRuntimeService : Service() {
         private const val MAX_STORAGE_NAME_BYTES = 255
         private const val MAX_FOLDER_LABEL_BYTES = 128
         private const val MAX_STORAGE_TRANSFER_BYTES = 16L * 1024 * 1024 * 1024
+        private const val MAX_DOCUMENT_EXPORT_TEST_CHUNK_DELAY_MILLIS = 100
+        private const val DOCUMENT_EXPORT_DELETE_SETTLE_MILLIS = 1_000L
         private val PROCESS_STORAGE_ACTIVE = AtomicBoolean()
         private val FOLDER_MAPPING_ID_PATTERN = Regex("[0-9a-f]{32}")
         private val FOLDER_MAPPING_RANDOM = SecureRandom()
@@ -2052,11 +2097,15 @@ class ArchpheneRuntimeService : Service() {
                 "Import from Android, or open/export Linux files",
             ) ?: "Import from Android, or open/export Linux files"
         if (state == STORAGE_RUNNING) {
-            storageStatus = "The previous document transfer was interrupted. Choose it again."
+            storageStatus =
+                recoverInterruptedDocumentExport(preferences)
+                    ?: "The previous document transfer was interrupted. Choose it again."
             preferences
                 .edit()
                 .putString(STORAGE_STATE, STORAGE_FAILED)
                 .putString(STORAGE_MESSAGE, storageStatus)
+                .remove(STORAGE_EXPORT_DESTINATION_URI)
+                .remove(STORAGE_EXPORT_GRANT_FLAGS)
                 .commit()
         } else {
             storageStatus = message
@@ -2070,6 +2119,40 @@ class ArchpheneRuntimeService : Service() {
         } finally {
             restoreProjectSyncHistory()
             folderStateReady = true
+        }
+    }
+
+    private fun recoverInterruptedDocumentExport(preferences: SharedPreferences): String? {
+        val encodedUri = preferences.getString(STORAGE_EXPORT_DESTINATION_URI, null) ?: return null
+        val encodedBytes = encodedUri.toByteArray(StandardCharsets.UTF_8)
+        val grantFlags =
+            preferences.getInt(STORAGE_EXPORT_GRANT_FLAGS, 0) and
+                (Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        val uri =
+            encodedUri
+                .takeIf {
+                    encodedBytes.size in 1..MAX_STORAGE_URI_BYTES &&
+                        grantFlags and Intent.FLAG_GRANT_WRITE_URI_PERMISSION != 0
+                }
+                ?.let(Uri::parse)
+                ?.takeIf { it.scheme == "content" }
+                ?: return "The previous export was interrupted; its Android destination " +
+                    "could not be validated for cleanup."
+        val removed =
+            runCatching {
+                DocumentsContract.deleteDocument(contentResolver, uri)
+            }.onFailure { error ->
+                Log.w(TAG, "Could not remove interrupted Android export", error)
+            }.getOrDefault(false)
+        if (!removed) {
+            releaseDocumentExportGrant(uri, grantFlags)
+        }
+        return if (removed) {
+            "Removed an incomplete Android export after the previous transfer was interrupted."
+        } else {
+            "The previous export was interrupted. The Android provider may have kept an " +
+                "incomplete file."
         }
     }
 
@@ -2216,6 +2299,23 @@ class ArchpheneRuntimeService : Service() {
             .edit()
             .putString(STORAGE_STATE, state)
             .putString(STORAGE_MESSAGE, message)
+            .remove(STORAGE_EXPORT_DESTINATION_URI)
+            .remove(STORAGE_EXPORT_GRANT_FLAGS)
+            .commit()
+    }
+
+    private fun persistDocumentExportRunning(
+        message: String,
+        destinationUri: Uri,
+        grantFlags: Int,
+    ) {
+        storageStatus = message
+        getSharedPreferences(STORAGE_PREFERENCES, MODE_PRIVATE)
+            .edit()
+            .putString(STORAGE_STATE, STORAGE_RUNNING)
+            .putString(STORAGE_MESSAGE, message)
+            .putString(STORAGE_EXPORT_DESTINATION_URI, destinationUri.toString())
+            .putInt(STORAGE_EXPORT_GRANT_FLAGS, grantFlags)
             .commit()
     }
 
@@ -3894,9 +3994,17 @@ class ArchpheneRuntimeService : Service() {
     private fun requestDocumentExport(
         sourceUri: Uri,
         destinationUri: Uri,
+        resultGrantFlags: Int,
     ): Boolean {
         val sourceBytes = sourceUri.toString().toByteArray(StandardCharsets.UTF_8)
         val destinationBytes = destinationUri.toString().toByteArray(StandardCharsets.UTF_8)
+        val retainedGrantFlags =
+            resultGrantFlags and
+                (Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        val recoverySafeGrant =
+            resultGrantFlags and Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION != 0 &&
+                retainedGrantFlags and Intent.FLAG_GRANT_WRITE_URI_PERMISSION != 0
         if (
             readyHandle == 0L ||
             storageDocumentActive ||
@@ -3906,16 +4014,23 @@ class ArchpheneRuntimeService : Service() {
             sourceBytes.isEmpty() ||
             sourceBytes.size > MAX_STORAGE_URI_BYTES ||
             destinationBytes.isEmpty() ||
-            destinationBytes.size > MAX_STORAGE_URI_BYTES
+            destinationBytes.size > MAX_STORAGE_URI_BYTES ||
+            !recoverySafeGrant
         ) {
             if (
                 sourceUri.scheme != "content" ||
                 sourceUri.authority != "$packageName.documents" ||
                 destinationUri.scheme != "content" ||
                 sourceBytes.size > MAX_STORAGE_URI_BYTES ||
-                destinationBytes.size > MAX_STORAGE_URI_BYTES
+                destinationBytes.size > MAX_STORAGE_URI_BYTES ||
+                !recoverySafeGrant
             ) {
-                storageStatus = "Choose a Linux file and an Android destination"
+                storageStatus =
+                    if (!recoverySafeGrant) {
+                        "The Android destination does not support recovery-safe export access"
+                    } else {
+                        "Choose a Linux file and an Android destination"
+                    }
             }
             return false
         }
@@ -3929,11 +4044,18 @@ class ArchpheneRuntimeService : Service() {
                 {
                     requireRuntimeWorker("Linux document export")
                     var deleteIncompleteDestination = true
+                    var retainedGrant = false
                     try {
                         val displayName = safeImportDisplayName(sourceUri)
-                        persistStorageStatus(
-                            STORAGE_RUNNING,
+                        contentResolver.takePersistableUriPermission(
+                            destinationUri,
+                            retainedGrantFlags,
+                        )
+                        retainedGrant = true
+                        persistDocumentExportRunning(
                             "Saving a copy of $displayName to Android…",
+                            destinationUri,
+                            retainedGrantFlags,
                         )
                         val output = ByteBuffer.allocateDirect(NativeRuntime.STORAGE_OUTPUT_SIZE)
                         val source =
@@ -3946,15 +4068,25 @@ class ArchpheneRuntimeService : Service() {
                                 ?: throw IllegalStateException(
                                     "Android provider returned no destination file descriptor",
                                 )
+                        storageDocumentExportName = displayName
+                        storageDocumentExportTotalBytes =
+                            source.statSize.takeIf { it in 0..MAX_STORAGE_TRANSFER_BYTES } ?: -1L
+                        storageDocumentExportCancellationRequested = false
+                        storageDocumentExportActive = true
                         val result =
-                            source.use { sourceDescriptor ->
-                                destination.use { destinationDescriptor ->
-                                    NativeRuntime.nativeExportHomeDocument(
-                                        sourceDescriptor.fd,
-                                        destinationDescriptor.fd,
-                                        output,
-                                    )
+                            try {
+                                source.use { sourceDescriptor ->
+                                    destination.use { destinationDescriptor ->
+                                        NativeRuntime.nativeExportHomeDocument(
+                                            sourceDescriptor.fd,
+                                            destinationDescriptor.fd,
+                                            debugDocumentExportChunkDelayMillis(),
+                                            output,
+                                        )
+                                    }
                                 }
+                            } finally {
+                                storageDocumentExportActive = false
                             }
                         val response = readCString(output)
                         if (
@@ -3983,6 +4115,11 @@ class ArchpheneRuntimeService : Service() {
                     } catch (error: Exception) {
                         var cleanupFailed = false
                         if (deleteIncompleteDestination) {
+                            // Some DocumentsProviders finish publication/indexing
+                            // asynchronously after their writable descriptor closes.
+                            // Deleting in that close callback's race window crashes the
+                            // AOSP Downloads provider on current API 36.
+                            SystemClock.sleep(DOCUMENT_EXPORT_DELETE_SETTLE_MILLIS)
                             val removed =
                                 runCatching {
                                     DocumentsContract.deleteDocument(
@@ -3997,20 +4134,44 @@ class ArchpheneRuntimeService : Service() {
                                     )
                                 }.getOrDefault(false)
                             cleanupFailed = !removed
+                            if (removed) {
+                                retainedGrant = false
+                            }
                             if (cleanupFailed) {
                                 Log.w(TAG, "Android provider kept an incomplete export")
                             }
                         }
+                        val cancelled = storageDocumentExportCancellationRequested
                         val status =
-                            "Export failed: ${error.message ?: error.javaClass.simpleName}" +
+                            if (cancelled) {
                                 if (cleanupFailed) {
-                                    ". The Android provider may have kept an incomplete file."
+                                    "Export cancelled. The Android provider may have kept an " +
+                                        "incomplete file."
                                 } else {
-                                    ""
+                                    "Export cancelled; the incomplete Android file was removed."
                                 }
+                            } else {
+                                "Export failed: ${error.message ?: error.javaClass.simpleName}" +
+                                    if (cleanupFailed) {
+                                        ". The Android provider may have kept an incomplete file."
+                                    } else {
+                                        ""
+                                    }
+                            }
                         persistStorageStatus(STORAGE_FAILED, status)
-                        Log.e(TAG, "Linux document export failed", error)
+                        if (cancelled) {
+                            Log.i(TAG, "Linux document export cancelled")
+                        } else {
+                            Log.e(TAG, "Linux document export failed", error)
+                        }
                     } finally {
+                        storageDocumentExportActive = false
+                        storageDocumentExportCancellationRequested = false
+                        storageDocumentExportName = ""
+                        storageDocumentExportTotalBytes = -1L
+                        if (retainedGrant) {
+                            releaseDocumentExportGrant(destinationUri, retainedGrantFlags)
+                        }
                         storageDocumentActive = false
                         PROCESS_STORAGE_ACTIVE.set(false)
                         storageThread = null
@@ -4071,6 +4232,46 @@ class ArchpheneRuntimeService : Service() {
                     character in '\u202a'..'\u202e' ||
                     character in '\u2066'..'\u2069'
             }
+
+    private fun currentDocumentTransferStatus(): String {
+        if (!storageDocumentExportActive) {
+            return storageStatus
+        }
+        val copiedBytes =
+            NativeRuntime.nativeDocumentExportProgress()
+                .coerceIn(0L, MAX_STORAGE_TRANSFER_BYTES)
+        val totalBytes = storageDocumentExportTotalBytes
+        val name = storageDocumentExportName.ifEmpty { "Linux file" }
+        return if (totalBytes > 0L) {
+            val percent = ((copiedBytes.coerceAtMost(totalBytes) * 100L) / totalBytes).toInt()
+            "Saving $name: ${formatStorageBytes(copiedBytes)} of " +
+                "${formatStorageBytes(totalBytes)} ($percent%)"
+        } else {
+            "Saving $name: ${formatStorageBytes(copiedBytes)} copied"
+        }
+    }
+
+    private fun debugDocumentExportChunkDelayMillis(): Int {
+        if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0) {
+            return 0
+        }
+        val delay = DEBUG_DOCUMENT_EXPORT_CHUNK_DELAY_MILLIS.getAndSet(0L).toInt()
+        if (delay != 0) {
+            Log.i(TAG, "Debug document export chunk delay active")
+        }
+        return delay
+    }
+
+    private fun releaseDocumentExportGrant(
+        uri: Uri,
+        grantFlags: Int,
+    ) {
+        runCatching {
+            contentResolver.releasePersistableUriPermission(uri, grantFlags)
+        }.onFailure { error ->
+            Log.w(TAG, "Could not release Android export URI permission", error)
+        }
+    }
 
     private fun formatStorageBytes(bytes: Long): String =
         when {

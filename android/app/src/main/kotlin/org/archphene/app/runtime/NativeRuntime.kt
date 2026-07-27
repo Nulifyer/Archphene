@@ -110,8 +110,11 @@ internal object NativeRuntime {
     external fun nativeExportHomeDocument(
         sourceDescriptor: Int,
         destinationDescriptor: Int,
+        debugChunkDelayMillis: Int,
         outputBuffer: ByteBuffer,
     ): Int
+    external fun nativeDocumentExportProgress(): Long
+    external fun nativeCancelDocumentExport(): Boolean
     external fun nativeBeginProjectMirror(
         handle: Long,
         requestBuffer: ByteBuffer,
