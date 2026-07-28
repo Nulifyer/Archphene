@@ -328,6 +328,23 @@ internal object NativeRuntime {
         closureSha256: String,
         outputBuffer: ByteBuffer,
     ): Int
+    external fun nativePersistAurGraphBuiltPackages(
+        handle: Long,
+        descriptors: IntArray,
+        graphManifest: ByteBuffer,
+        graphManifestLength: Int,
+        selectedPackage: String,
+        architecture: String,
+        closureSha256: String,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeRestoreAurGraphBuiltPackages(
+        handle: Long,
+        selectedPackage: String,
+        architecture: String,
+        closureSha256: String,
+        outputBuffer: ByteBuffer,
+    ): Int
     external fun nativeClearAurBuiltCapability(handle: Long): Int
     external fun nativeInstallAurBuiltPackage(
         handle: Long,

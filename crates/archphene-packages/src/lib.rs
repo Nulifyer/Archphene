@@ -77,7 +77,12 @@ const PACKAGE_CACHE_DIRECTORY: &str = "var/cache/pacman/pkg";
 const AUR_PACKAGE_CACHE_DIRECTORY: &str = "var/cache/archphene/aur-packages";
 const AUR_BUILT_CAPABILITY_FILE: &str = ".built-capability-v1.json";
 const AUR_BUILT_CAPABILITY_TEMP_FILE: &str = ".built-capability-v1.tmp";
+const AUR_GRAPH_BUILT_CAPABILITY_FILE: &str = ".built-graph-capability-v1.json";
+const AUR_GRAPH_BUILT_CAPABILITY_TEMP_FILE: &str = ".built-graph-capability-v1.tmp";
 const AUR_BUILT_CAPABILITY_LIMIT: u64 = 256 * 1024;
+// Builder provenance may include the complete 512-package signed official
+// closure plus as many as 256 separately verified AUR dependency outputs.
+const MAX_AUR_BUILD_PACKAGE_COUNT: usize = 768;
 const AUR_LIFECYCLE_CAPABILITY_FILE: &str = "aur-lifecycle-capabilities-v1";
 const AUR_LIFECYCLE_CAPABILITY_TEMP_FILE: &str = "aur-lifecycle-capabilities-v1.tmp";
 const AUR_LIFECYCLE_CAPABILITY_HEADER: &str = "org.archphene.aur-lifecycle-capabilities.v1";
@@ -489,6 +494,35 @@ pub struct PersistedAurCapabilityArchive {
     pub path: PathBuf,
 }
 
+pub struct VerifiedAurGraphCapabilityArchive<'a> {
+    pub source: &'a mut File,
+    pub package_base: &'a str,
+    pub base_package_name: &'a str,
+    pub version: &'a str,
+    pub review_sha256: [u8; 32],
+    pub filename: &'a str,
+    pub package: &'a str,
+    pub archive_bytes: u64,
+    pub installed_bytes: u64,
+    pub build_package_count: usize,
+    pub sha256: [u8; 32],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PersistedAurGraphCapabilityArchive {
+    pub package_base: String,
+    pub base_package_name: String,
+    pub version: String,
+    pub review_sha256: [u8; 32],
+    pub package: String,
+    pub filename: String,
+    pub archive_bytes: u64,
+    pub installed_bytes: u64,
+    pub build_package_count: usize,
+    pub sha256: [u8; 32],
+    pub path: PathBuf,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct AurBuiltCapabilityRecord {
@@ -505,6 +539,32 @@ struct AurBuiltCapabilityRecord {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct AurBuiltCapabilityOutputRecord {
+    package: String,
+    filename: String,
+    archive_bytes: u64,
+    installed_bytes: u64,
+    build_package_count: usize,
+    sha256: [u8; 32],
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AurGraphBuiltCapabilityRecord {
+    format: u32,
+    selected_package: String,
+    architecture: String,
+    graph_sha256: [u8; 32],
+    closure_sha256: [u8; 32],
+    outputs: Vec<AurGraphBuiltCapabilityOutputRecord>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AurGraphBuiltCapabilityOutputRecord {
+    package_base: String,
+    base_package_name: String,
+    version: String,
+    review_sha256: [u8; 32],
     package: String,
     filename: String,
     archive_bytes: u64,
@@ -2397,7 +2457,7 @@ impl PackageRuntime {
                 || output.archive_bytes > PACKAGE_ARCHIVE_LIMIT
                 || output.installed_bytes == 0
                 || output.build_package_count == 0
-                || output.build_package_count > 256
+                || output.build_package_count > MAX_AUR_BUILD_PACKAGE_COUNT
                 || output.sha256 == [0; 32]
             {
                 return Err(PackageRuntimeError::InvalidPayload);
@@ -2494,7 +2554,7 @@ impl PackageRuntime {
                 || output.archive_bytes > PACKAGE_ARCHIVE_LIMIT
                 || output.installed_bytes == 0
                 || output.build_package_count == 0
-                || output.build_package_count > 256
+                || output.build_package_count > MAX_AUR_BUILD_PACKAGE_COUNT
                 || output.sha256 == [0; 32]
             {
                 return Err(PackageRuntimeError::InvalidManifest);
@@ -2518,6 +2578,144 @@ impl PackageRuntime {
         Ok(Some(restored))
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn persist_aur_graph_built_capability(
+        &self,
+        selected_package: &str,
+        architecture: &str,
+        graph_sha256: [u8; 32],
+        closure_sha256: [u8; 32],
+        outputs: &mut [VerifiedAurGraphCapabilityArchive<'_>],
+    ) -> Result<Vec<PersistedAurGraphCapabilityArchive>, PackageRuntimeError> {
+        if !safe_logical_name(selected_package)
+            || !matches!(architecture, "x86_64" | "aarch64")
+            || graph_sha256 == [0; 32]
+            || closure_sha256 == [0; 32]
+            || outputs.is_empty()
+            || outputs.len() > 256
+        {
+            return Err(PackageRuntimeError::InvalidPayload);
+        }
+        let directory = self.arch_root.join(AUR_PACKAGE_CACHE_DIRECTORY);
+        prepare_private_directory(&directory)?;
+        let mut records = Vec::with_capacity(outputs.len());
+        let mut persisted = Vec::with_capacity(outputs.len());
+        for output in outputs {
+            validate_aur_graph_capability_output(output)?;
+            let path = stage_verified_aur_file(
+                &directory,
+                output.source,
+                output.filename,
+                output.archive_bytes,
+                output.sha256,
+            )?;
+            records.push(AurGraphBuiltCapabilityOutputRecord {
+                package_base: output.package_base.to_owned(),
+                base_package_name: output.base_package_name.to_owned(),
+                version: output.version.to_owned(),
+                review_sha256: output.review_sha256,
+                package: output.package.to_owned(),
+                filename: output.filename.to_owned(),
+                archive_bytes: output.archive_bytes,
+                installed_bytes: output.installed_bytes,
+                build_package_count: output.build_package_count,
+                sha256: output.sha256,
+            });
+            persisted.push(PersistedAurGraphCapabilityArchive {
+                package_base: output.package_base.to_owned(),
+                base_package_name: output.base_package_name.to_owned(),
+                version: output.version.to_owned(),
+                review_sha256: output.review_sha256,
+                package: output.package.to_owned(),
+                filename: output.filename.to_owned(),
+                archive_bytes: output.archive_bytes,
+                installed_bytes: output.installed_bytes,
+                build_package_count: output.build_package_count,
+                sha256: output.sha256,
+                path,
+            });
+        }
+        let record = AurGraphBuiltCapabilityRecord {
+            format: 1,
+            selected_package: selected_package.to_owned(),
+            architecture: architecture.to_owned(),
+            graph_sha256,
+            closure_sha256,
+            outputs: records,
+        };
+        let bytes =
+            serde_json::to_vec(&record).map_err(|_| PackageRuntimeError::InvalidManifest)?;
+        if bytes.is_empty()
+            || u64::try_from(bytes.len()).map_err(|_| PackageRuntimeError::OutputLimit)?
+                > AUR_BUILT_CAPABILITY_LIMIT
+        {
+            return Err(PackageRuntimeError::OutputLimit);
+        }
+        publish_aur_capability(
+            &directory,
+            AUR_GRAPH_BUILT_CAPABILITY_FILE,
+            AUR_GRAPH_BUILT_CAPABILITY_TEMP_FILE,
+            &bytes,
+        )?;
+        Ok(persisted)
+    }
+
+    pub fn restore_aur_graph_built_capability(
+        &self,
+        selected_package: &str,
+        architecture: &str,
+        graph_sha256: [u8; 32],
+        closure_sha256: [u8; 32],
+    ) -> Result<Option<Vec<PersistedAurGraphCapabilityArchive>>, PackageRuntimeError> {
+        if !safe_logical_name(selected_package)
+            || !matches!(architecture, "x86_64" | "aarch64")
+            || graph_sha256 == [0; 32]
+            || closure_sha256 == [0; 32]
+        {
+            return Err(PackageRuntimeError::InvalidPayload);
+        }
+        let directory = self.arch_root.join(AUR_PACKAGE_CACHE_DIRECTORY);
+        let Some(bytes) = read_aur_capability(&directory, AUR_GRAPH_BUILT_CAPABILITY_FILE)? else {
+            return Ok(None);
+        };
+        let record: AurGraphBuiltCapabilityRecord =
+            serde_json::from_slice(&bytes).map_err(|_| PackageRuntimeError::InvalidManifest)?;
+        if record.format != 1
+            || record.selected_package != selected_package
+            || record.architecture != architecture
+            || record.graph_sha256 != graph_sha256
+            || record.closure_sha256 != closure_sha256
+            || record.outputs.is_empty()
+            || record.outputs.len() > 256
+        {
+            return Ok(None);
+        }
+        let mut restored = Vec::with_capacity(record.outputs.len());
+        for output in record.outputs {
+            validate_aur_graph_capability_record(&output)?;
+            let path = directory.join(format!(
+                "{}-{}",
+                hex_sha256(&output.sha256),
+                output.filename
+            ));
+            verify_persisted_aur_file(&path, output.archive_bytes, output.sha256)?;
+            restored.push(PersistedAurGraphCapabilityArchive {
+                package_base: output.package_base,
+                base_package_name: output.base_package_name,
+                version: output.version,
+                review_sha256: output.review_sha256,
+                package: output.package,
+                filename: output.filename,
+                archive_bytes: output.archive_bytes,
+                installed_bytes: output.installed_bytes,
+                build_package_count: output.build_package_count,
+                sha256: output.sha256,
+                path,
+            });
+        }
+        Ok(Some(restored))
+    }
+
     pub fn clear_aur_built_capability(&self) -> Result<(), PackageRuntimeError> {
         let directory = self.arch_root.join(AUR_PACKAGE_CACHE_DIRECTORY);
         let metadata = match fs::symlink_metadata(&directory) {
@@ -2528,16 +2726,24 @@ impl PackageRuntime {
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
             return Err(PackageRuntimeError::UnsafeEntry(directory));
         }
-        let path = directory.join(AUR_BUILT_CAPABILITY_FILE);
-        match fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-                return Err(PackageRuntimeError::UnsafeEntry(path));
+        let mut changed = false;
+        for name in [AUR_BUILT_CAPABILITY_FILE, AUR_GRAPH_BUILT_CAPABILITY_FILE] {
+            let path = directory.join(name);
+            match fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                    return Err(PackageRuntimeError::UnsafeEntry(path));
+                }
+                Ok(_) => {
+                    fs::remove_file(path)?;
+                    changed = true;
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(PackageRuntimeError::Io(error)),
             }
-            Ok(_) => fs::remove_file(path)?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(PackageRuntimeError::Io(error)),
         }
-        File::open(directory)?.sync_all()?;
+        if changed {
+            File::open(directory)?.sync_all()?;
+        }
         Ok(())
     }
 
@@ -5249,6 +5455,78 @@ fn validate_aur_capability_identity(
     Ok(())
 }
 
+struct AurGraphOutputFields<'a> {
+    package_base: &'a str,
+    base_package_name: &'a str,
+    version: &'a str,
+    review_sha256: [u8; 32],
+    package: &'a str,
+    filename: &'a str,
+    archive_bytes: u64,
+    installed_bytes: u64,
+    build_package_count: usize,
+    sha256: [u8; 32],
+}
+
+fn valid_aur_graph_output_fields(fields: &AurGraphOutputFields<'_>) -> bool {
+    safe_logical_name(fields.package_base)
+        && safe_logical_name(fields.base_package_name)
+        && safe_logical_name(fields.package)
+        && !fields.version.is_empty()
+        && fields.version.len() <= 128
+        && !fields
+            .version
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || byte == 0)
+        && fields.review_sha256 != [0; 32]
+        && safe_package_filename(fields.filename)
+        && fields.archive_bytes > 0
+        && fields.archive_bytes <= PACKAGE_ARCHIVE_LIMIT
+        && fields.installed_bytes > 0
+        && (1..=MAX_AUR_BUILD_PACKAGE_COUNT).contains(&fields.build_package_count)
+        && fields.sha256 != [0; 32]
+}
+
+fn validate_aur_graph_capability_output(
+    output: &VerifiedAurGraphCapabilityArchive<'_>,
+) -> Result<(), PackageRuntimeError> {
+    if !valid_aur_graph_output_fields(&AurGraphOutputFields {
+        package_base: output.package_base,
+        base_package_name: output.base_package_name,
+        version: output.version,
+        review_sha256: output.review_sha256,
+        package: output.package,
+        filename: output.filename,
+        archive_bytes: output.archive_bytes,
+        installed_bytes: output.installed_bytes,
+        build_package_count: output.build_package_count,
+        sha256: output.sha256,
+    }) {
+        return Err(PackageRuntimeError::InvalidPayload);
+    }
+    Ok(())
+}
+
+fn validate_aur_graph_capability_record(
+    output: &AurGraphBuiltCapabilityOutputRecord,
+) -> Result<(), PackageRuntimeError> {
+    if !valid_aur_graph_output_fields(&AurGraphOutputFields {
+        package_base: &output.package_base,
+        base_package_name: &output.base_package_name,
+        version: &output.version,
+        review_sha256: output.review_sha256,
+        package: &output.package,
+        filename: &output.filename,
+        archive_bytes: output.archive_bytes,
+        installed_bytes: output.installed_bytes,
+        build_package_count: output.build_package_count,
+        sha256: output.sha256,
+    }) {
+        return Err(PackageRuntimeError::InvalidManifest);
+    }
+    Ok(())
+}
+
 fn stage_verified_aur_file(
     directory: &Path,
     source: &mut File,
@@ -5312,8 +5590,22 @@ fn stage_verified_aur_file(
 }
 
 fn publish_aur_built_capability(directory: &Path, bytes: &[u8]) -> Result<(), PackageRuntimeError> {
-    let destination = directory.join(AUR_BUILT_CAPABILITY_FILE);
-    let temporary = directory.join(AUR_BUILT_CAPABILITY_TEMP_FILE);
+    publish_aur_capability(
+        directory,
+        AUR_BUILT_CAPABILITY_FILE,
+        AUR_BUILT_CAPABILITY_TEMP_FILE,
+        bytes,
+    )
+}
+
+fn publish_aur_capability(
+    directory: &Path,
+    destination_name: &str,
+    temporary_name: &str,
+    bytes: &[u8],
+) -> Result<(), PackageRuntimeError> {
+    let destination = directory.join(destination_name);
+    let temporary = directory.join(temporary_name);
     prepare_output_path(&temporary)?;
     match fs::symlink_metadata(&destination) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
@@ -5343,6 +5635,13 @@ fn publish_aur_built_capability(directory: &Path, bytes: &[u8]) -> Result<(), Pa
 }
 
 fn read_aur_built_capability(directory: &Path) -> Result<Option<Vec<u8>>, PackageRuntimeError> {
+    read_aur_capability(directory, AUR_BUILT_CAPABILITY_FILE)
+}
+
+fn read_aur_capability(
+    directory: &Path,
+    capability_name: &str,
+) -> Result<Option<Vec<u8>>, PackageRuntimeError> {
     let directory_metadata = match fs::symlink_metadata(directory) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -5351,7 +5650,7 @@ fn read_aur_built_capability(directory: &Path) -> Result<Option<Vec<u8>>, Packag
     if directory_metadata.file_type().is_symlink() || !directory_metadata.is_dir() {
         return Err(PackageRuntimeError::UnsafeEntry(directory.to_path_buf()));
     }
-    let path = directory.join(AUR_BUILT_CAPABILITY_FILE);
+    let path = directory.join(capability_name);
     let metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -10429,6 +10728,91 @@ library\tlibarchphene_path_bridge.so\tlibarchphene_pkg_555555555555555555555555.
                     &required,
                 )
                 .expect("cleared capability")
+                .is_none(),
+        );
+    }
+
+    #[test]
+    fn aur_graph_built_capability_binds_every_review_and_output() {
+        let tree = TestTree::new();
+        let runtime = tree.package_runtime();
+        let dependency_archive = b"verified dependency AUR package";
+        let root_archive = b"verified root AUR package";
+        let dependency_path = tree.root.join("verified-aur-dependency-output");
+        let root_path = tree.root.join("verified-aur-root-output");
+        fs::write(&dependency_path, dependency_archive).expect("dependency output");
+        fs::write(&root_path, root_archive).expect("root output");
+        let dependency_digest = <[u8; 32]>::from(Sha256::digest(dependency_archive));
+        let root_digest = <[u8; 32]>::from(Sha256::digest(root_archive));
+        let mut dependency_source = File::open(&dependency_path).expect("open dependency output");
+        let mut root_source = File::open(&root_path).expect("open root output");
+        let mut outputs = [
+            VerifiedAurGraphCapabilityArchive {
+                source: &mut dependency_source,
+                package_base: "dependency-base",
+                base_package_name: "dependency-bin",
+                version: "1.0-1",
+                review_sha256: [3_u8; 32],
+                filename: "dependency-bin-1.0-1-x86_64.pkg.tar.zst",
+                package: "dependency-bin",
+                archive_bytes: dependency_archive.len() as u64,
+                installed_bytes: 4096,
+                build_package_count: 339,
+                sha256: dependency_digest,
+            },
+            VerifiedAurGraphCapabilityArchive {
+                source: &mut root_source,
+                package_base: "root-base",
+                base_package_name: "root-bin",
+                version: "2.0-1",
+                review_sha256: [4_u8; 32],
+                filename: "root-bin-2.0-1-x86_64.pkg.tar.zst",
+                package: "root-bin",
+                archive_bytes: root_archive.len() as u64,
+                installed_bytes: 8192,
+                build_package_count: 340,
+                sha256: root_digest,
+            },
+        ];
+        let persisted = runtime
+            .persist_aur_graph_built_capability(
+                "root-bin",
+                "x86_64",
+                [5_u8; 32],
+                [6_u8; 32],
+                &mut outputs,
+            )
+            .expect("persist graph capability");
+        assert_eq!(persisted.len(), 2);
+        drop(runtime);
+
+        let restored_runtime = tree.package_runtime();
+        assert!(
+            restored_runtime
+                .restore_aur_graph_built_capability("root-bin", "x86_64", [7_u8; 32], [6_u8; 32],)
+                .expect("mismatched graph")
+                .is_none(),
+        );
+        assert_eq!(
+            restored_runtime
+                .restore_aur_graph_built_capability("root-bin", "x86_64", [5_u8; 32], [6_u8; 32],)
+                .expect("restore graph capability")
+                .expect("matching graph capability"),
+            persisted,
+        );
+        fs::write(&persisted[0].path, b"tampered graph output").expect("tamper graph output");
+        assert!(
+            restored_runtime
+                .restore_aur_graph_built_capability("root-bin", "x86_64", [5_u8; 32], [6_u8; 32],)
+                .is_err()
+        );
+        restored_runtime
+            .clear_aur_built_capability()
+            .expect("clear graph capability");
+        assert!(
+            restored_runtime
+                .restore_aur_graph_built_capability("root-bin", "x86_64", [5_u8; 32], [6_u8; 32],)
+                .expect("cleared graph capability")
                 .is_none(),
         );
     }

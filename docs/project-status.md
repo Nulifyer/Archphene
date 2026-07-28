@@ -1871,8 +1871,17 @@ manager-authorized sealed command symlinks to their immutable APK targets
 before explicit-loader execution, avoiding a symlink loop while leaving
 package executables under normal root containment checks. A signed `libnotify`
 pacman preflight passes through the packaged bridge after restart. Durable
-restoration of every completed graph-base output, prepared-root reuse, clearer
-per-stage graph progress, and adaptive safe build concurrency remain open.
+graph restoration now stores one mode-0600 capability bound to the canonical
+Rust graph, every exact review, the signed closure, and every
+content-addressed output. On Samsung, the same two-base graph retained a
+1,318-byte capability, survived Manager replacement/restart, independently
+revalidated both archives and their dependency provenance after the reviews
+and 339-package closure were reconstructed, and returned directly to
+**Built**/**Update** without running either recipe again. The physical gate
+also found a stale 256-package persisted-provenance bound; it now matches the
+bounded 512-official-plus-256-AUR Builder model and has a 339/340-package
+regression. Prepared-root reuse, clearer per-stage graph progress, and adaptive
+safe build concurrency remain open.
 
 Current AArch64 Code now reaches and retains its Ozone/Wayland workbench without
 a package patch. The generic bridge passes Chromium's kernel `/proc`
@@ -2395,7 +2404,7 @@ promote any topology into a compatibility claim.
 | Drag-and-drop | Generated GUI wrappers declare a `drag-drop` capability. Bounded plain text and `text/uri-list` map bidirectionally between Android `DragEvent` and standard Wayland data devices. Android files import through the conflict-safe document session; Linux exports are restricted to visible-home files and use exact Android URI grants. Copy negotiation, transfer, import/writeback, denied and granted provider access, completion, cancellation, and cleanup pass on x86_64 emulator and physical AArch64. |
 | GUI application documents | One manager-owned **Archphene Apps** DocumentsProvider exposes each generated GUI wrapper's visible Linux home while dotfiles and runtime state remain private. Per-wrapper endpoints require the manager signature permission and verify the calling package. `ACTION_VIEW` and `ACTION_EDIT` support up to 32 URI grants, collision-safe same-name imports, hash-based writeback, and concurrent Android-edit conflict copies. A document sent to an active `singleTask` wrapper presents a native warning before a generic safe restart; Cancel preserves the running app. Manager CRUD, direct-provider denial, active-app restart, same-name import, conflict preservation, writeback, and DocumentsUI browse pass on the x86_64 emulator and physical AArch64. |
 | Package discovery | Official Arch name/description candidates use deterministic exact, executable, prefix, token, and description ranking; executable ownership is merged from repository file databases, glmark2-es2-wayland resolves to glmark2, and installed-app multi-term search shares the same matching rules |
-| Recursive AUR package graphs | Rust-authorized dependency-first reviews, exact official/AUR provider partitioning, separate isolated Builder roots, digest-bound dependency manifests, independent output verification, and one final pacman transaction pass on physical AArch64 with current `libpamac-aur` → `pamac-aur`. The exact 339-package signed closure, both installed pacman records, generated launcher handoff, packaged GPGME runtime-command path, and Manager-restart persistence pass. |
+| Recursive AUR package graphs | Rust-authorized dependency-first reviews, exact official/AUR provider partitioning, separate isolated Builder roots, digest-bound dependency manifests, independent output verification, one final pacman transaction, and durable graph-output restoration pass on physical AArch64 with current `libpamac-aur` → `pamac-aur`. The exact 339-package signed closure, both installed pacman records, generated launcher handoff, packaged GPGME runtime-command path, 1,318-byte mode-0600 graph capability, Manager replacement/restart, no-rebuild restore, and full-device Built/Update presentation pass. |
 | OpenGL ES bridge | Manager-generated GLMark2 wrappers start a same-UID Android virglrenderer helper. Mesa reports virgl over the emulator NVIDIA OpenGL ES translator and completes the 1080x2205 suite with score 12. On the Samsung Galaxy S22 Ultra, virgl uses Qualcomm Adreno 730 / OpenGL ES 3.2 and completes every 1080x2202 scene with score 15 and exit code 0. Both devices pass sustained distinct-frame gates and same-UID fault injection that replaces the helper and Linux process once with rendered virpipe recovery while retaining the Android host |
 | 16 KB x86_64 loader | Patched glibc 2.43 is reproducibly linked with 64 KB PT_LOAD alignment and a 16 KB common page size. Every emitted loader/runtime ELF passes an independent alignment audit, and a similarly aligned dynamic executable runs through it inside the manager UID on the API 36 16 KB x86_64 emulator. Official Arch x86_64 package closures remain 4 KB-only and stay blocked. |
 | Release display matrix | Fail-closed KCalc, Mousepad, and Foot gates combine raw/PNG frames, contrast, semantic trees, toolkit config, actual content geometry, scoped logs, and manifests across phone/tablet/docked emulator density profiles. Current-source Samsung repeats the core KCalc, Mousepad, and Foot phone cases. Kate separately passes stable-process tablet rotation plus an actual temporary 1920x1080 emulator display, task placement, mapping, and targeted input; sustained physical external-display coverage remains. |
@@ -2422,10 +2431,9 @@ Local debug builds can remain multi-ABI. Release builds emit independently signe
 - Build a separately signed 16 KB x86_64 package universe. The Archphene-owned glibc loader now passes real 16 KB Android execution, but official Arch executables and shared objects remain 4 KB-aligned. The manager continues to block Add/install on 16 KB x86_64 until an entire no-mixing closure, including late-loaded modules, is rebuilt and validated.
 - Pin the missing KConfig development sysroot needed for a completely self-contained AArch64 Qt bridge rebuild. The GTK settings bridge now has a clean checksum-pinned AArch64 GLib link sysroot.
 - Broaden the validated Qt/GTK theme, density, focus, menu, and dialog behavior beyond KCalc, Kate, Mousepad, and GNOME Text Editor and across the remaining release representatives.
-- Persist completed recursive-AUR graph outputs across Manager death/retry,
-  reuse unchanged content-addressed closures and prepared roots where safe,
-  clarify each graph stage in the UI, and make the conservative build
-  concurrency limit adaptive/configurable.
+- Reuse unchanged content-addressed recursive-AUR closures and prepared roots
+  where safe, clarify each graph stage in the UI, and make the conservative
+  build concurrency limit adaptive/configurable.
 
 ## Package-manager efficiency rules
 

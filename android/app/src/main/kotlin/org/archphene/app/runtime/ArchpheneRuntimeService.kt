@@ -7885,8 +7885,33 @@ class ArchpheneRuntimeService : Service() {
                         builder,
                         buildEnvironment,
                     )
+                    val restoredGraph =
+                        if (builder == null || orderedReviews.size == 1) {
+                            emptyArray()
+                        } else {
+                            runCatching {
+                                searchStatus = "Checking retained verified graph outputs"
+                                restorePersistedAurGraphBuiltPackages(
+                                    activeHandle,
+                                    graph,
+                                    review,
+                                    builder,
+                                )
+                            }.onFailure { error ->
+                                Log.w(
+                                    TAG,
+                                    "Retained AUR graph outputs could not be restored",
+                                    error,
+                                )
+                            }.getOrDefault(emptyArray())
+                        }
                     val restored =
-                        if (builder == null || orderedReviews.size > 1) {
+                        if (restoredGraph.isNotEmpty()) {
+                            restoredGraph
+                                .filter { output -> output.packageBase == review.packageBase }
+                                .map(AurGraphBuiltPackage::built)
+                                .toTypedArray()
+                        } else if (builder == null || orderedReviews.size > 1) {
                             emptyArray()
                         } else {
                             runCatching {
@@ -7906,6 +7931,7 @@ class ArchpheneRuntimeService : Service() {
                         }
                     if (restored.isNotEmpty()) {
                         clearRetainedAurBuiltPackages()
+                        retainedAurGraphBuiltPackages = restoredGraph
                         retainedAurBuiltPackages = restored
                         val selected =
                             restored.singleOrNull { output ->
@@ -8059,8 +8085,27 @@ class ArchpheneRuntimeService : Service() {
                                 environment,
                                 retainedAurSourceEvidenceByBase,
                             )
+                        searchStatus = "Persisting independently verified graph outputs"
+                        val persistedGraph =
+                            try {
+                                persistAurGraphBuiltPackages(
+                                    activeHandle,
+                                    graph,
+                                    review,
+                                    graphBuild.builder,
+                                    graphBuild.packages,
+                                )
+                            } finally {
+                                deleteRetainedAurBuiltPackageFiles(
+                                    graphBuild.packages
+                                        .map(AurGraphBuiltPackage::built)
+                                        .filterNot(AurBuiltPackage::persistent)
+                                        .map(AurBuiltPackage::file)
+                                        .toTypedArray(),
+                                )
+                            }
                         val rootPackages =
-                            graphBuild.packages
+                            persistedGraph
                                 .filter { value -> value.packageBase == review.packageBase }
                                 .map(AurGraphBuiltPackage::built)
                                 .toTypedArray()
@@ -8071,8 +8116,9 @@ class ArchpheneRuntimeService : Service() {
                         ) {
                             "Dependency-first build omitted the selected package-base outputs"
                         }
+                        clearRetainedAurBuiltPackages()
                         retainedAurBuilderReport = graphBuild.builder
-                        retainedAurGraphBuiltPackages = graphBuild.packages
+                        retainedAurGraphBuiltPackages = persistedGraph
                         retainedAurBuiltPackages = rootPackages
                         val selected =
                             rootPackages.singleOrNull { output ->
@@ -11922,7 +11968,7 @@ class ArchpheneRuntimeService : Service() {
                         installedBytes != null &&
                         installedBytes > 0L &&
                         buildPackageCount != null &&
-                        buildPackageCount in 1..256,
+                        buildPackageCount in 1..768,
                 ) {
                     "Invalid persisted AUR output metrics"
                 }
@@ -11949,6 +11995,188 @@ class ArchpheneRuntimeService : Service() {
                         logs[fields[0]]
                             ?: "Restored independently verified build output after restart",
                     persistent = true,
+                )
+            }.toTypedArray()
+    }
+
+    private fun persistAurGraphBuiltPackages(
+        activeHandle: Long,
+        graph: AurBuildGraph,
+        rootReview: AurReviewData,
+        builder: AurBuilderReport,
+        packages: Array<AurGraphBuiltPackage>,
+    ): Array<AurGraphBuiltPackage> {
+        val descriptors =
+            packages.map { output ->
+                ParcelFileDescriptor.open(
+                    output.built.file,
+                    ParcelFileDescriptor.MODE_READ_ONLY,
+                )
+            }
+        return try {
+            val manifest = aurGraphInstallManifest(graph, rootReview, packages)
+            aurBuildClosureOutputBuffer.clear()
+            val length =
+                NativeRuntime.nativePersistAurGraphBuiltPackages(
+                    activeHandle,
+                    descriptors.map(ParcelFileDescriptor::getFd).toIntArray(),
+                    manifest,
+                    manifest.capacity(),
+                    rootReview.packageName,
+                    currentLinuxArchitecture(),
+                    builder.closureManifestSha256,
+                    aurBuildClosureOutputBuffer,
+                )
+            check(length in 1..NativeRuntime.AUR_BUILD_CLOSURE_OUTPUT_SIZE) {
+                "Could not retain verified AUR graph outputs: " +
+                    readNativeMessage(aurBuildClosureOutputBuffer, length)
+            }
+            parsePersistedAurGraphBuiltPackages(
+                length,
+                graph,
+                rootReview,
+                packages.associate { output ->
+                    graphOutputLogKey(output.packageBase, output.built.packageName) to
+                        output.built.logs
+                },
+            )
+        } finally {
+            descriptors.forEach(ParcelFileDescriptor::close)
+        }
+    }
+
+    private fun restorePersistedAurGraphBuiltPackages(
+        activeHandle: Long,
+        graph: AurBuildGraph,
+        rootReview: AurReviewData,
+        builder: AurBuilderReport,
+    ): Array<AurGraphBuiltPackage> {
+        aurBuildClosureOutputBuffer.clear()
+        val length =
+            NativeRuntime.nativeRestoreAurGraphBuiltPackages(
+                activeHandle,
+                rootReview.packageName,
+                currentLinuxArchitecture(),
+                builder.closureManifestSha256,
+                aurBuildClosureOutputBuffer,
+            )
+        if (length == 0) {
+            return emptyArray()
+        }
+        check(length in 1..NativeRuntime.AUR_BUILD_CLOSURE_OUTPUT_SIZE) {
+            "Could not restore verified AUR graph outputs: " +
+                readNativeMessage(aurBuildClosureOutputBuffer, length)
+        }
+        return parsePersistedAurGraphBuiltPackages(
+            length,
+            graph,
+            rootReview,
+            emptyMap(),
+        )
+    }
+
+    private fun graphOutputLogKey(packageBase: String, packageName: String): String =
+        "$packageBase\u0000$packageName"
+
+    private fun parsePersistedAurGraphBuiltPackages(
+        length: Int,
+        graph: AurBuildGraph,
+        rootReview: AurReviewData,
+        logs: Map<String, String>,
+    ): Array<AurGraphBuiltPackage> {
+        val reviewsByBase =
+            (retainedAurDependencyReviews.asList() + rootReview)
+                .associateBy(AurReviewData::packageBase)
+        check(
+            graph.packageBases.size in 2..32 &&
+                graph.packageBases.last() == rootReview.packageBase &&
+                reviewsByBase.size == graph.packageBases.size,
+        )
+        val expected =
+            graph.packageBases.flatMap { packageBase ->
+                val review =
+                    reviewsByBase[packageBase]
+                        ?: throw IllegalStateException(
+                            "Missing reviewed AUR graph base $packageBase",
+                        )
+                review.requiredPackages.map { packageName ->
+                    Triple(packageBase, packageName, review.version)
+                }
+            }
+        val bytes = ByteArray(length)
+        aurBuildClosureOutputBuffer.position(0)
+        aurBuildClosureOutputBuffer.get(bytes)
+        val lines =
+            String(bytes, StandardCharsets.UTF_8)
+                .trimEnd('\n')
+                .split('\n')
+        val header = lines.firstOrNull()?.split('\t').orEmpty()
+        check(
+            header.size == 2 &&
+                header[0] == "ABGY0001" &&
+                header[1].toIntOrNull() == expected.size &&
+                lines.size == expected.size + 1,
+        ) {
+            "Invalid persisted AUR graph output header"
+        }
+        val cacheRoot =
+            File(filesDir, "arch-root/var/cache/archphene/aur-packages").canonicalFile
+        return lines
+            .drop(1)
+            .mapIndexed { index, line ->
+                val fields = line.split('\t')
+                val (expectedBase, expectedPackage, expectedVersion) = expected[index]
+                check(
+                    fields.size == 8 &&
+                        fields[0] == expectedBase &&
+                        fields[1] == expectedPackage &&
+                        AUR_BUILT_PACKAGE_FILENAME.matches(fields[2]) &&
+                        fields[6].matches(SHA256_HEX),
+                ) {
+                    "Invalid persisted AUR graph output identity"
+                }
+                val archiveBytes = fields[3].toLongOrNull()
+                val installedBytes = fields[4].toLongOrNull()
+                val buildPackageCount = fields[5].toIntOrNull()
+                check(
+                    archiveBytes != null &&
+                        archiveBytes > 0L &&
+                        installedBytes != null &&
+                        installedBytes > 0L &&
+                        buildPackageCount != null &&
+                        buildPackageCount in 1..768,
+                ) {
+                    "Invalid persisted AUR graph output metrics"
+                }
+                val file = File(fields[7]).canonicalFile
+                val expectedFile =
+                    File(cacheRoot, "${fields[6]}-${fields[2]}").canonicalFile
+                check(
+                    file == expectedFile &&
+                        file.parentFile == cacheRoot &&
+                        file.isFile &&
+                        file.length() == archiveBytes,
+                ) {
+                    "Persisted AUR graph output path changed"
+                }
+                AurGraphBuiltPackage(
+                    packageBase = expectedBase,
+                    version = expectedVersion,
+                    architecture = currentLinuxArchitecture(),
+                    built =
+                        AurBuiltPackage(
+                            packageName = fields[1],
+                            filename = fields[2],
+                            archiveBytes = archiveBytes,
+                            installedBytes = installedBytes,
+                            buildPackageCount = buildPackageCount,
+                            sha256 = fields[6],
+                            file = file,
+                            logs =
+                                logs[graphOutputLogKey(expectedBase, expectedPackage)]
+                                    ?: "Restored independently verified graph output after restart",
+                            persistent = true,
+                        ),
                 )
             }.toTypedArray()
     }
