@@ -79,6 +79,10 @@ formats. Blockers identify the exact closure package. A passing result is only
 **Bridge eligible**: package-specific runtime and launcher workflows still
 determine Validated, Partial, or Blocked status. When the signed closure is not
 cached, the manager says **Not analyzed** rather than guessing.
+Unchanged results are cached only under a bounded content address covering the
+exact resolution, device ABI/page size, immutable verification trust identity,
+and all archive/signature bytes; any changed input forces a miss. Package
+mutation continues to reverify signatures.
 
 One package failure must produce a package-scoped diagnostic and must not cancel unrelated resolve/download jobs. Wrapper signing and Android PackageInstaller confirmation remain serialized; bounded preparation work may run concurrently.
 

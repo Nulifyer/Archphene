@@ -72,6 +72,10 @@ const PACKAGE_ARCHIVE_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
 const PACKAGE_SIGNATURE_LIMIT: u64 = 1024 * 1024;
 const PACKAGE_CACHE_DIRECTORY: &str = "var/cache/pacman/pkg";
 const AUR_PACKAGE_CACHE_DIRECTORY: &str = "var/cache/archphene/aur-packages";
+const PACKAGE_COMPATIBILITY_CACHE_DIRECTORY: &str = "var/cache/archphene/package-compatibility-v1";
+const PACKAGE_COMPATIBILITY_CACHE_DOMAIN: &[u8] = b"org.archphene.package-compatibility-cache.v1\0";
+const PACKAGE_COMPATIBILITY_CACHE_RECORD_LIMIT: u64 = 1024;
+const PACKAGE_COMPATIBILITY_CACHE_ENTRY_LIMIT: usize = 1024;
 const PACKAGE_TRUST_DIRECTORY: &str = "run/package-trust-v1";
 const PACKAGE_TRUST_STATE: &str = "source-v1";
 const PACKAGE_TRUST_STATE_LIMIT: u64 = 512;
@@ -363,6 +367,7 @@ pub struct PackageRuntime {
     loader: PathBuf,
     keyring: PathBuf,
     ownertrust: PathBuf,
+    verification_source_state: String,
     path_bridge: PathBuf,
     tools: [Option<PathBuf>; 5],
     library_path: OsString,
@@ -370,6 +375,7 @@ pub struct PackageRuntime {
     gdk_pixbuf_module_file: Option<PathBuf>,
     gtk_settings_module: Option<PathBuf>,
     qt_plugin_root: Option<PathBuf>,
+    compatibility_analysis: Arc<Mutex<()>>,
     compatibility_review: Arc<Mutex<Option<PackageCompatibilityReview>>>,
 }
 
@@ -781,6 +787,8 @@ impl PackageRuntime {
         let loader = loader.ok_or(PackageRuntimeError::MissingEntry("@loader"))?;
         let keyring = keyring.ok_or(PackageRuntimeError::MissingEntry("@keyring"))?;
         let ownertrust = ownertrust.ok_or(PackageRuntimeError::MissingEntry("@ownertrust"))?;
+        let verification_source_state =
+            verification_source_state(&native_root, &keyring, &ownertrust)?;
         if !has_path_bridge {
             return Err(PackageRuntimeError::MissingEntry(PATH_BRIDGE_NAME));
         }
@@ -874,6 +882,7 @@ impl PackageRuntime {
             loader,
             keyring,
             ownertrust,
+            verification_source_state,
             path_bridge,
             tools,
             library_path,
@@ -881,6 +890,7 @@ impl PackageRuntime {
             gdk_pixbuf_module_file,
             gtk_settings_module,
             qt_plugin_root,
+            compatibility_analysis: Arc::new(Mutex::new(())),
             compatibility_review: Arc::new(Mutex::new(None)),
         };
         if runtime.read_pending_mutation()?.is_none() {
@@ -1153,6 +1163,10 @@ impl PackageRuntime {
         if !safe_logical_name(package) {
             return Err(PackageRuntimeError::InvalidQuery);
         }
+        let _analysis = self
+            .compatibility_analysis
+            .lock()
+            .map_err(|_| PackageRuntimeError::InvalidPayload)?;
         self.clear_package_compatibility_review()?;
         let resolution = self.resolve(package)?;
         let package_count = resolution.as_str()?.lines().count();
@@ -1172,6 +1186,14 @@ impl PackageRuntime {
                     None,
                 );
             }
+        }
+        let page_size = rustix::param::page_size();
+        let content_digest = self.package_compatibility_content_digest(&resolution, page_size)?;
+        if let Some(output) = self.load_package_compatibility_cache(&content_digest)? {
+            if cached_compatibility_allows_mutation(&output)? {
+                self.publish_package_compatibility_review(package, &resolution)?;
+            }
+            return Ok(output);
         }
 
         let mut target_found = false;
@@ -1206,7 +1228,7 @@ impl PackageRuntime {
                     &mut file,
                     payload.filename,
                     self.architecture,
-                    rustix::param::page_size(),
+                    page_size,
                     target,
                 )
             })()
@@ -1253,6 +1275,7 @@ impl PackageRuntime {
             diagnostic.unwrap_or(PackageCompatibilityDiagnostic::None),
             diagnostic_package,
         )?;
+        self.publish_package_compatibility_cache(&content_digest, &output)?;
         if matches!(
             status,
             PackageCompatibilityStatus::BridgeEligible | PackageCompatibilityStatus::ManagedOnly
@@ -1260,6 +1283,119 @@ impl PackageRuntime {
             self.publish_package_compatibility_review(package, &resolution)?;
         }
         Ok(output)
+    }
+
+    fn package_compatibility_content_digest(
+        &self,
+        resolution: &PackageResolution,
+        page_size: usize,
+    ) -> Result<[u8; 32], PackageRuntimeError> {
+        if !page_size.is_power_of_two() || !(4096..=64 * 1024).contains(&page_size) {
+            return Err(PackageRuntimeError::InvalidPayload);
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(PACKAGE_COMPATIBILITY_CACHE_DOMAIN);
+        hasher.update(self.architecture.package_architecture().as_bytes());
+        hasher.update([0]);
+        hasher.update((self.verification_source_state.len() as u64).to_le_bytes());
+        hasher.update(self.verification_source_state.as_bytes());
+        hasher.update((page_size as u64).to_le_bytes());
+        hasher.update((resolution.as_bytes().len() as u64).to_le_bytes());
+        hasher.update(resolution.as_bytes());
+        for line in resolution.as_str()?.lines() {
+            let payload = parse_resolved_payload(line)?;
+            let package = self
+                .arch_root
+                .join(PACKAGE_CACHE_DIRECTORY)
+                .join(payload.filename);
+            hash_package_compatibility_file(
+                &package,
+                payload.size,
+                PACKAGE_ARCHIVE_LIMIT,
+                b'P',
+                &mut hasher,
+            )?;
+            let signature = self
+                .arch_root
+                .join(PACKAGE_CACHE_DIRECTORY)
+                .join(format!("{}.sig", payload.filename));
+            hash_package_compatibility_file(
+                &signature,
+                0,
+                PACKAGE_SIGNATURE_LIMIT,
+                b'S',
+                &mut hasher,
+            )?;
+        }
+        Ok(hasher.finalize().into())
+    }
+
+    fn load_package_compatibility_cache(
+        &self,
+        content_digest: &[u8; 32],
+    ) -> Result<Option<ToolOutput>, PackageRuntimeError> {
+        let directory = self.arch_root.join(PACKAGE_COMPATIBILITY_CACHE_DIRECTORY);
+        let metadata = match fs::symlink_metadata(&directory) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(PackageRuntimeError::Io(error)),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(PackageRuntimeError::UnsafeEntry(directory));
+        }
+        let path = directory.join(hex_sha256(content_digest));
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(PackageRuntimeError::Io(error)),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(PackageRuntimeError::UnsafeEntry(path));
+        }
+        if metadata.len() == 0 || metadata.len() > PACKAGE_COMPATIBILITY_CACHE_RECORD_LIMIT {
+            fs::remove_file(path)?;
+            return Ok(None);
+        }
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(O_NOFOLLOW | O_CLOEXEC)
+            .open(&path)?;
+        let opened = file.metadata()?;
+        if !opened.is_file() || opened.len() != metadata.len() {
+            return Err(PackageRuntimeError::SizeMismatch);
+        }
+        file.take(PACKAGE_COMPATIBILITY_CACHE_RECORD_LIMIT + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 != metadata.len() {
+            return Err(PackageRuntimeError::SizeMismatch);
+        }
+        match decode_package_compatibility_cache_record(content_digest, &bytes) {
+            Ok(output) => Ok(Some(output)),
+            Err(PackageRuntimeError::InvalidPayload) => {
+                fs::remove_file(path)?;
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn publish_package_compatibility_cache(
+        &self,
+        content_digest: &[u8; 32],
+        output: &ToolOutput,
+    ) -> Result<(), PackageRuntimeError> {
+        canonical_cached_compatibility(output.as_bytes())?;
+        let directory = self.arch_root.join(PACKAGE_COMPATIBILITY_CACHE_DIRECTORY);
+        prepare_private_directory(&directory)?;
+        prune_package_compatibility_cache(&directory, content_digest)?;
+        let name = hex_sha256(content_digest);
+        let destination = directory.join(&name);
+        let temporary = directory.join(format!(".{name}.tmp"));
+        let record = encode_package_compatibility_cache_record(content_digest, output)?;
+        publish_regular_file(&destination, &temporary, &record)?;
+        File::open(directory)?.sync_all()?;
+        Ok(())
     }
 
     pub fn resolve_targets(
@@ -3686,11 +3822,7 @@ impl PackageRuntime {
     }
 
     fn verification_keyring_source_state(&self) -> Result<String, PackageRuntimeError> {
-        let keyring = immutable_source_identity(&self.native_root, &self.keyring)?;
-        let ownertrust = immutable_source_identity(&self.native_root, &self.ownertrust)?;
-        Ok(format!(
-            "org.archphene.package-trust.v1\n{keyring}\n{ownertrust}\n"
-        ))
+        Ok(self.verification_source_state.clone())
     }
 
     fn reuse_verification_keyring(
@@ -4321,6 +4453,18 @@ fn immutable_source_identity(
         return Err(PackageRuntimeError::InvalidManifest);
     }
     Ok(format!("{name}\t{}", metadata.len()))
+}
+
+fn verification_source_state(
+    native_root: &Path,
+    keyring: &Path,
+    ownertrust: &Path,
+) -> Result<String, PackageRuntimeError> {
+    let keyring = immutable_source_identity(native_root, keyring)?;
+    let ownertrust = immutable_source_identity(native_root, ownertrust)?;
+    Ok(format!(
+        "org.archphene.package-trust.v1\n{keyring}\n{ownertrust}\n"
+    ))
 }
 
 fn read_bounded_regular_file(
@@ -5014,6 +5158,236 @@ fn package_compatibility_output(
     )
     .map_err(|_| PackageRuntimeError::OutputLimit)?;
     Ok(output)
+}
+
+fn canonical_cached_compatibility(
+    bytes: &[u8],
+) -> Result<PackageCompatibilityStatus, PackageRuntimeError> {
+    let text = std::str::from_utf8(bytes).map_err(|_| PackageRuntimeError::InvalidPayload)?;
+    if !text.ends_with('\n') || text.bytes().filter(|byte| *byte == b'\n').count() != 1 {
+        return Err(PackageRuntimeError::InvalidPayload);
+    }
+    let mut fields = text[..text.len() - 1].split('\t');
+    let status = match fields.next() {
+        Some("bridge-eligible") => PackageCompatibilityStatus::BridgeEligible,
+        Some("managed-only") => PackageCompatibilityStatus::ManagedOnly,
+        Some("unsupported") => PackageCompatibilityStatus::Unsupported,
+        _ => return Err(PackageRuntimeError::InvalidPayload),
+    };
+    let capabilities = fields
+        .next()
+        .filter(|value| value.len() == 1)
+        .and_then(|value| char::from(value.as_bytes()[0]).to_digit(16))
+        .and_then(|value| u8::try_from(value).ok())
+        .filter(|value| *value <= 0x0f)
+        .ok_or(PackageRuntimeError::InvalidPayload)?;
+    let package_count = canonical_compatibility_number(fields.next(), 1, 512)? as usize;
+    let elf_count = canonical_compatibility_number(fields.next(), 0, 1_000_000)?;
+    let command_count = canonical_compatibility_number(fields.next(), 0, 262_144)?;
+    let diagnostic = match fields.next() {
+        Some("none") => PackageCompatibilityDiagnostic::None,
+        Some("foreign-elf") => PackageCompatibilityDiagnostic::ForeignElf,
+        Some("native-in-any-package") => PackageCompatibilityDiagnostic::NativeInAnyPackage,
+        Some("malformed-elf") => PackageCompatibilityDiagnostic::MalformedElf,
+        Some("incompatible-page-size") => PackageCompatibilityDiagnostic::IncompatiblePageSize,
+        Some("unsupported-command") => PackageCompatibilityDiagnostic::UnsupportedCommand,
+        _ => return Err(PackageRuntimeError::InvalidPayload),
+    };
+    let diagnostic_package = match fields.next() {
+        Some("-") => None,
+        Some(package) if safe_logical_name(package) => Some(package),
+        _ => return Err(PackageRuntimeError::InvalidPayload),
+    };
+    if fields.next().is_some()
+        || matches!(status, PackageCompatibilityStatus::Unsupported)
+            != !matches!(diagnostic, PackageCompatibilityDiagnostic::None)
+        || matches!(status, PackageCompatibilityStatus::Unsupported) != diagnostic_package.is_some()
+    {
+        return Err(PackageRuntimeError::InvalidPayload);
+    }
+    let canonical = package_compatibility_output(
+        status,
+        capabilities,
+        package_count,
+        elf_count,
+        command_count,
+        diagnostic,
+        diagnostic_package,
+    )?;
+    if canonical.as_bytes() != bytes {
+        return Err(PackageRuntimeError::InvalidPayload);
+    }
+    Ok(status)
+}
+
+fn canonical_compatibility_number(
+    value: Option<&str>,
+    minimum: u32,
+    maximum: u32,
+) -> Result<u32, PackageRuntimeError> {
+    let value = value.ok_or(PackageRuntimeError::InvalidPayload)?;
+    let parsed = value
+        .parse::<u32>()
+        .map_err(|_| PackageRuntimeError::InvalidPayload)?;
+    if !(minimum..=maximum).contains(&parsed) || parsed.to_string() != value {
+        return Err(PackageRuntimeError::InvalidPayload);
+    }
+    Ok(parsed)
+}
+
+fn cached_compatibility_allows_mutation(output: &ToolOutput) -> Result<bool, PackageRuntimeError> {
+    Ok(matches!(
+        canonical_cached_compatibility(output.as_bytes())?,
+        PackageCompatibilityStatus::BridgeEligible | PackageCompatibilityStatus::ManagedOnly
+    ))
+}
+
+fn encode_package_compatibility_cache_record(
+    content_digest: &[u8; 32],
+    output: &ToolOutput,
+) -> Result<Vec<u8>, PackageRuntimeError> {
+    canonical_cached_compatibility(output.as_bytes())?;
+    let mut checksum = Sha256::new();
+    checksum.update(PACKAGE_COMPATIBILITY_CACHE_DOMAIN);
+    checksum.update(content_digest);
+    checksum.update(output.as_bytes());
+    let checksum: [u8; 32] = checksum.finalize().into();
+    let mut record = Vec::with_capacity(output.as_bytes().len() + 65);
+    record.extend_from_slice(output.as_bytes());
+    record.extend_from_slice(hex_sha256(&checksum).as_bytes());
+    record.push(b'\n');
+    if record.len() as u64 > PACKAGE_COMPATIBILITY_CACHE_RECORD_LIMIT {
+        return Err(PackageRuntimeError::OutputLimit);
+    }
+    Ok(record)
+}
+
+fn decode_package_compatibility_cache_record(
+    content_digest: &[u8; 32],
+    record: &[u8],
+) -> Result<ToolOutput, PackageRuntimeError> {
+    if !record.ends_with(b"\n") || record.iter().filter(|byte| **byte == b'\n').count() != 2 {
+        return Err(PackageRuntimeError::InvalidPayload);
+    }
+    let output_end = record
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .ok_or(PackageRuntimeError::InvalidPayload)?
+        + 1;
+    let checksum = &record[output_end..record.len() - 1];
+    if checksum.len() != 64
+        || checksum
+            .iter()
+            .any(|byte| !matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err(PackageRuntimeError::InvalidPayload);
+    }
+    let mut expected = Sha256::new();
+    expected.update(PACKAGE_COMPATIBILITY_CACHE_DOMAIN);
+    expected.update(content_digest);
+    expected.update(&record[..output_end]);
+    let expected: [u8; 32] = expected.finalize().into();
+    if checksum != hex_sha256(&expected).as_bytes() {
+        return Err(PackageRuntimeError::InvalidPayload);
+    }
+    canonical_cached_compatibility(&record[..output_end])?;
+    let mut output = empty_tool_output();
+    output.push(&record[..output_end])?;
+    Ok(output)
+}
+
+fn hash_package_compatibility_file(
+    path: &Path,
+    exact_size: u64,
+    maximum_size: u64,
+    role: u8,
+    digest: &mut Sha256,
+) -> Result<(), PackageRuntimeError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > maximum_size
+        || exact_size != 0 && metadata.len() != exact_size
+    {
+        return Err(PackageRuntimeError::InvalidPayload);
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW | O_CLOEXEC)
+        .open(path)?;
+    let opened = file.metadata()?;
+    if !opened.is_file() || opened.len() != metadata.len() {
+        return Err(PackageRuntimeError::SizeMismatch);
+    }
+    digest.update([role]);
+    digest.update(metadata.len().to_le_bytes());
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut total = 0_u64;
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        total = total
+            .checked_add(count as u64)
+            .filter(|total| *total <= metadata.len())
+            .ok_or(PackageRuntimeError::SizeMismatch)?;
+        digest.update(&buffer[..count]);
+    }
+    if total != metadata.len() {
+        return Err(PackageRuntimeError::SizeMismatch);
+    }
+    Ok(())
+}
+
+fn prune_package_compatibility_cache(
+    directory: &Path,
+    retained_digest: &[u8; 32],
+) -> Result<(), PackageRuntimeError> {
+    let retained = hex_sha256(retained_digest);
+    let mut records = Vec::new();
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(PackageRuntimeError::UnsafeEntry(path));
+        }
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| PackageRuntimeError::InvalidPayload)?;
+        if name.starts_with('.') && name.ends_with(".tmp") {
+            fs::remove_file(path)?;
+            continue;
+        }
+        if !is_lower_hex_sha256(&name) {
+            return Err(PackageRuntimeError::UnsafeEntry(path));
+        }
+        records.push(name);
+        if records.len() > PACKAGE_COMPATIBILITY_CACHE_ENTRY_LIMIT {
+            return Err(PackageRuntimeError::OutputLimit);
+        }
+    }
+    if records.len() >= PACKAGE_COMPATIBILITY_CACHE_ENTRY_LIMIT
+        && !records.iter().any(|name| name == &retained)
+    {
+        records.sort_unstable();
+        let victim = records
+            .into_iter()
+            .find(|name| name != &retained)
+            .ok_or(PackageRuntimeError::OutputLimit)?;
+        fs::remove_file(directory.join(victim))?;
+    }
+    Ok(())
+}
+
+fn is_lower_hex_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 fn inspect_package_archive(
@@ -7523,6 +7897,174 @@ unknown-metadata\t1.0-1\t1\t0\t0\n",
             .command_count,
             1,
         );
+    }
+
+    #[test]
+    fn compatibility_cache_is_content_addressed_canonical_and_corruption_safe() {
+        let tree = TestTree::new();
+        let runtime = tree.package_runtime();
+        let digest = [0x5a; 32];
+        let output = package_compatibility_output(
+            PackageCompatibilityStatus::BridgeEligible,
+            PACKAGE_CAPABILITY_COMMAND_LINE,
+            3,
+            12,
+            1,
+            PackageCompatibilityDiagnostic::None,
+            None,
+        )
+        .expect("compatibility output");
+        runtime
+            .publish_package_compatibility_cache(&digest, &output)
+            .expect("publish compatibility cache");
+        assert_eq!(
+            runtime
+                .load_package_compatibility_cache(&digest)
+                .expect("load compatibility cache")
+                .expect("cached compatibility")
+                .as_bytes(),
+            output.as_bytes(),
+        );
+
+        let cache = tree
+            .root
+            .join(PACKAGE_COMPATIBILITY_CACHE_DIRECTORY)
+            .join(hex_sha256(&digest));
+        fs::write(&cache, b"bridge-eligible\t2\t3\t12\t1\tnone\t-\ninvalid\n")
+            .expect("corrupt cache");
+        assert!(
+            runtime
+                .load_package_compatibility_cache(&digest)
+                .expect("discard corrupt cache")
+                .is_none()
+        );
+        assert!(!cache.exists());
+
+        let unsupported = package_compatibility_output(
+            PackageCompatibilityStatus::Unsupported,
+            0,
+            2,
+            1,
+            0,
+            PackageCompatibilityDiagnostic::ForeignElf,
+            Some("foreign-runtime"),
+        )
+        .expect("unsupported output");
+        runtime
+            .publish_package_compatibility_cache(&digest, &unsupported)
+            .expect("publish unsupported cache");
+        let cached = runtime
+            .load_package_compatibility_cache(&digest)
+            .expect("load unsupported cache")
+            .expect("unsupported cache");
+        assert_eq!(cached.as_bytes(), unsupported.as_bytes());
+        assert!(!cached_compatibility_allows_mutation(&cached).expect("cached status"));
+
+        assert!(matches!(
+            canonical_cached_compatibility(b"unsupported\t0\t2\t1\t0\tforeign-elf\t-\n"),
+            Err(PackageRuntimeError::InvalidPayload)
+        ));
+    }
+
+    #[test]
+    fn compatibility_cache_digest_changes_with_every_review_input() {
+        let tree = TestTree::new();
+        let runtime = tree.package_runtime();
+        let filename = "tool-1.0-1-x86_64.pkg.tar.zst";
+        let package_path = tree.root.join(PACKAGE_CACHE_DIRECTORY).join(filename);
+        let signature_path = tree
+            .root
+            .join(PACKAGE_CACHE_DIRECTORY)
+            .join(format!("{filename}.sig"));
+        fs::write(&package_path, b"package").expect("package payload");
+        fs::write(&signature_path, b"signature").expect("package signature");
+        let resolution = PackageResolution {
+            bytes: format!(
+                "core\ttool\t1.0-1\t{filename}\t\
+https://geo.mirror.pkgbuild.com/core/os/x86_64/{filename}\t7\n"
+            )
+            .into_bytes(),
+        };
+        let original = runtime
+            .package_compatibility_content_digest(&resolution, 4096)
+            .expect("original digest");
+        assert_eq!(
+            original,
+            runtime
+                .package_compatibility_content_digest(&resolution, 4096)
+                .expect("stable digest"),
+        );
+        assert_ne!(
+            original,
+            runtime
+                .package_compatibility_content_digest(&resolution, 16 * 1024)
+                .expect("page-size digest"),
+        );
+        let mut changed_trust = runtime.clone();
+        changed_trust
+            .verification_source_state
+            .push_str("replacement\n");
+        assert_ne!(
+            original,
+            changed_trust
+                .package_compatibility_content_digest(&resolution, 4096)
+                .expect("verification-source digest"),
+        );
+        fs::write(&signature_path, b"Signature").expect("changed signature");
+        assert_ne!(
+            original,
+            runtime
+                .package_compatibility_content_digest(&resolution, 4096)
+                .expect("signature digest"),
+        );
+        fs::write(&signature_path, b"signature").expect("restore signature");
+        fs::write(&package_path, b"Package").expect("changed package");
+        assert_ne!(
+            original,
+            runtime
+                .package_compatibility_content_digest(&resolution, 4096)
+                .expect("package digest"),
+        );
+    }
+
+    #[test]
+    fn compatibility_cache_prunes_deterministically_and_rejects_unknown_entries() {
+        let tree = TestTree::new();
+        let runtime = tree.package_runtime();
+        let directory = tree.root.join(PACKAGE_COMPATIBILITY_CACHE_DIRECTORY);
+        prepare_private_directory(&directory).expect("compatibility cache directory");
+        for index in 0..PACKAGE_COMPATIBILITY_CACHE_ENTRY_LIMIT {
+            fs::write(directory.join(format!("{index:064x}")), b"derived")
+                .expect("compatibility cache fixture");
+        }
+        let digest = [0x5a; 32];
+        let output = package_compatibility_output(
+            PackageCompatibilityStatus::ManagedOnly,
+            PACKAGE_CAPABILITY_LIBRARY,
+            1,
+            1,
+            0,
+            PackageCompatibilityDiagnostic::None,
+            None,
+        )
+        .expect("compatibility output");
+        runtime
+            .publish_package_compatibility_cache(&digest, &output)
+            .expect("bounded cache publication");
+        assert_eq!(
+            fs::read_dir(&directory)
+                .expect("compatibility cache")
+                .count(),
+            PACKAGE_COMPATIBILITY_CACHE_ENTRY_LIMIT,
+        );
+        assert!(directory.join(hex_sha256(&digest)).is_file());
+        assert!(!directory.join(format!("{:064x}", 0)).exists());
+
+        fs::write(directory.join("unknown"), b"hostile").expect("unknown cache entry");
+        assert!(matches!(
+            runtime.publish_package_compatibility_cache(&[0x6b; 32], &output),
+            Err(PackageRuntimeError::UnsafeEntry(_))
+        ));
     }
 
     #[test]

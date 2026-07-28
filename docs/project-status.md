@@ -214,8 +214,17 @@ process restart over real signed 139-package x86_64 and 138-package AArch64
 closures. Full-device light/dark captures were inspected. The first uncached
 Samsung run took 4m22s end to end, making reuse of unchanged review results a
 measured product requirement.
-Content-addressed analysis-result caching, granular cancellation, and the
-post-install launcher/toolkit/broker capability result remain pending.
+Unchanged reviews are now reusable without trusting timestamps or
+descriptions. A bounded content address covers the exact resolution, target
+ABI, actual page size, immutable packaged keyring/owner-trust identity, and
+every archive and signature byte. Rust atomically publishes a canonical
+checksummed mode-0600 result, discards corrupt derived records, invalidates any
+changed payload/signature/trust input, and caps the cache at 1,024 entries. A
+cache hit recreates only the same single-use in-memory
+capability; pacman mutation still reverifies the closure. Cache-hit
+install/tamper/remove/reinstall gates pass on both exact ABIs. Granular
+first-pass cancellation and the post-install launcher/toolkit/broker capability
+result remain pending.
 The local Binder path makes the Queued boundary deterministic in code: after
 the journal commit, the Service posts worker start to the next main-Looper turn
 and the Activity synchronously consumes the new job revision before its Install

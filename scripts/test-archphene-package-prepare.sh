@@ -183,6 +183,27 @@ while IFS= read -r file; do
   [[ "$mode" == 600 ]] || archphene_die "unexpected package cache mode: $file $mode"
 done <<<"$cache_listing"
 
+compatibility_cache=files/arch-root/var/cache/archphene/package-compatibility-v1
+compatibility_listing="$(
+  archphene_adb_run exec-out run-as "$package" find "$compatibility_cache" \
+    -maxdepth 1 -type f | tr -d '\r'
+)"
+compatibility_count="$(grep -c . <<<"$compatibility_listing")"
+((compatibility_count >= 1 && compatibility_count <= 1024)) ||
+  archphene_die "compatibility review cache is not bounded: $compatibility_count"
+[[ "$compatibility_listing" != *".tmp"* ]] ||
+  archphene_die "temporary compatibility review survived publication"
+while IFS= read -r file; do
+  [[ -n "$file" ]] || continue
+  name="${file##*/}"
+  [[ "$name" =~ ^[0-9a-f]{64}$ ]] ||
+    archphene_die "invalid compatibility cache identity: $name"
+  mode="$(archphene_adb_run exec-out run-as "$package" stat -c %a "$file" | tr -d '\r')"
+  bytes="$(archphene_adb_run exec-out run-as "$package" stat -c %s "$file" | tr -d '\r')"
+  [[ "$mode" == 600 && "$bytes" -gt 0 && "$bytes" -le 1024 ]] ||
+    archphene_die "invalid compatibility cache record: $file $mode $bytes"
+done <<<"$compatibility_listing"
+
 tampered_package="$(grep '/btop-[^/]*\.pkg\.tar\.' <<<"$cache_listing" |
   grep -v '\.sig$' | head -n1)"
 [[ -n "$tampered_package" ]] || archphene_die "verified package cache has no archive"
