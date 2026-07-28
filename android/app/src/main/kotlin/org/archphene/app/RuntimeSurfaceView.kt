@@ -147,6 +147,8 @@ internal class RuntimeSurfaceView(
     private var cursorColumn = 0
     private var cursorVisible = false
     private var terminalFlags = 0
+    private var cursorBlinkPhaseVisible = true
+    private var cursorBlinkPosted = false
     private var terminalRevision = Long.MIN_VALUE
     private var sourceRevision = Long.MIN_VALUE
     private var historyRows = 0
@@ -214,6 +216,12 @@ internal class RuntimeSurfaceView(
         ceil((textPaint.fontMetrics.descent - textPaint.fontMetrics.ascent).toDouble())
             .toFloat()
             .coerceAtLeast(1f)
+    private val cursorStrokeWidth =
+        TypedValue.applyDimension(
+            TypedValue.COMPLEX_UNIT_DIP,
+            CURSOR_STROKE_WIDTH_DP,
+            resources.displayMetrics,
+        )
     private val selectionHandleRadius =
         TypedValue.applyDimension(
             TypedValue.COMPLEX_UNIT_DIP,
@@ -227,6 +235,20 @@ internal class RuntimeSurfaceView(
             resources.displayMetrics,
         )
     private val selectionAutoScrollRunnable = Runnable { runSelectionAutoScroll() }
+    private val cursorBlinkRunnable =
+        object : Runnable {
+            override fun run() {
+                cursorBlinkPosted = false
+                if (!shouldBlinkCursor()) {
+                    stopCursorBlink(revealCursor = true)
+                    return
+                }
+                cursorBlinkPhaseVisible = !cursorBlinkPhaseVisible
+                recordRow(cursorRow)
+                invalidate()
+                scheduleCursorBlink()
+            }
+        }
 
     var onTerminalSizeChanged: ((rows: Int, columns: Int) -> Unit)? = null
 
@@ -290,6 +312,29 @@ internal class RuntimeSurfaceView(
             }
         }
         publishTerminalSize(width, height)
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        updateCursorBlinkScheduling()
+    }
+
+    override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
+        super.onWindowFocusChanged(hasWindowFocus)
+        if (hasWindowFocus) {
+            restartCursorBlink()
+        } else {
+            stopCursorBlink(revealCursor = true)
+        }
+    }
+
+    override fun onWindowVisibilityChanged(visibility: Int) {
+        super.onWindowVisibilityChanged(visibility)
+        if (visibility == VISIBLE) {
+            restartCursorBlink()
+        } else {
+            stopCursorBlink(revealCursor = true)
+        }
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -422,6 +467,7 @@ internal class RuntimeSurfaceView(
 
     override fun onDetachedFromWindow() {
         stopSelectionAutoScroll()
+        stopCursorBlink(revealCursor = false)
         removeCallbacks(accessibilityEventRunnable)
         accessibilityEventPosted = false
         accessibilityTextChanged = false
@@ -639,6 +685,7 @@ internal class RuntimeSurfaceView(
         val nextCursorColumn = damageBuffer.getShort(14).toInt() and 0xffff
         val dirtyStart = damageBuffer.getShort(16).toInt() and 0xffff
         val dirtyEnd = damageBuffer.getShort(18).toInt() and 0xffff
+        val nextTerminalFlags = damageBuffer.getInt(20)
         val nextHistoryRows = damageBuffer.getInt(32)
         val nextViewportOffset = damageBuffer.getInt(36)
         if (
@@ -697,6 +744,12 @@ internal class RuntimeSurfaceView(
                 return true
             }
         }
+        val previousCursorRow = cursorRow
+        val cursorPresentationChanged =
+            nextCursorRow != cursorRow ||
+                nextCursorColumn != cursorColumn ||
+                (nextTerminalFlags and CURSOR_PRESENTATION_FLAGS) !=
+                (terminalFlags and CURSOR_PRESENTATION_FLAGS)
         if (nextRows != rows || nextColumns != columns) {
             rows = nextRows
             columns = nextColumns
@@ -719,7 +772,7 @@ internal class RuntimeSurfaceView(
         }
         cursorRow = nextCursorRow
         cursorColumn = nextCursorColumn
-        terminalFlags = damageBuffer.getInt(20)
+        terminalFlags = nextTerminalFlags
         cursorVisible = terminalFlags and CURSOR_VISIBLE_FLAG != 0
         terminalRevision = nextTerminalRevision
         historyRows = nextHistoryRows
@@ -761,12 +814,28 @@ internal class RuntimeSurfaceView(
                 offset += DAMAGE_CELL_SIZE
             }
         }
+        val cursorContentChanged =
+            cursorRow in dirtyStart until dirtyEnd
+        if (cursorPresentationChanged || cursorContentChanged) {
+            cancelCursorBlink()
+            cursorBlinkPhaseVisible = true
+        }
         if (dirtyStart < dirtyEnd) {
             for (row in dirtyStart until dirtyEnd) {
                 recordRow(row)
             }
             invalidate()
         }
+        if (cursorPresentationChanged) {
+            if (previousCursorRow !in dirtyStart until dirtyEnd) {
+                recordRow(previousCursorRow)
+            }
+            if (cursorRow !in dirtyStart until dirtyEnd) {
+                recordRow(cursorRow)
+            }
+            invalidate()
+        }
+        updateCursorBlinkScheduling()
         if (contentChanged) {
             scheduleTerminalAccessibilityEvent(textChanged = true)
         }
@@ -877,18 +946,94 @@ internal class RuntimeSurfaceView(
                 )
             }
         }
-        if (cursorVisible && row == cursorRow && cursorColumn in 0 until columns) {
-            backgroundPaint.color = CURSOR_COLOR
+        if (
+            cursorVisible &&
+            (terminalFlags and CURSOR_BLINK_FLAG == 0 || cursorBlinkPhaseVisible) &&
+            row == cursorRow &&
+            cursorColumn in 0 until columns
+        ) {
             val left = CONTENT_PADDING + cursorColumn * cellWidth
-            canvas.drawRect(
-                left,
-                cellHeight - CURSOR_HEIGHT,
-                left + cellWidth,
-                cellHeight,
-                backgroundPaint,
-            )
+            when (
+                (terminalFlags and CURSOR_STYLE_MASK) ushr
+                    CURSOR_STYLE_SHIFT
+            ) {
+                CURSOR_STYLE_BLOCK -> {
+                    backgroundPaint.color = CURSOR_BLOCK_COLOR
+                    canvas.drawRect(
+                        left,
+                        0f,
+                        left + cellWidth,
+                        cellHeight,
+                        backgroundPaint,
+                    )
+                }
+                CURSOR_STYLE_BAR -> {
+                    backgroundPaint.color = CURSOR_COLOR
+                    canvas.drawRect(
+                        left,
+                        0f,
+                        left + cursorStrokeWidth.coerceAtMost(cellWidth),
+                        cellHeight,
+                        backgroundPaint,
+                    )
+                }
+                else -> {
+                    backgroundPaint.color = CURSOR_COLOR
+                    canvas.drawRect(
+                        left,
+                        (cellHeight - cursorStrokeWidth).coerceAtLeast(0f),
+                        left + cellWidth,
+                        cellHeight,
+                        backgroundPaint,
+                    )
+                }
+            }
         }
         rowNodes[row].endRecording()
+    }
+
+    private fun shouldBlinkCursor(): Boolean =
+        isAttachedToWindow &&
+            hasWindowFocus() &&
+            windowVisibility == VISIBLE &&
+            isShown &&
+            cursorVisible &&
+            terminalFlags and CURSOR_BLINK_FLAG != 0
+
+    private fun scheduleCursorBlink() {
+        if (!cursorBlinkPosted && shouldBlinkCursor()) {
+            cursorBlinkPosted = true
+            postDelayed(cursorBlinkRunnable, CURSOR_BLINK_INTERVAL_MILLIS)
+        }
+    }
+
+    private fun cancelCursorBlink() {
+        if (cursorBlinkPosted) {
+            removeCallbacks(cursorBlinkRunnable)
+            cursorBlinkPosted = false
+        }
+    }
+
+    private fun stopCursorBlink(revealCursor: Boolean) {
+        cancelCursorBlink()
+        if (revealCursor && !cursorBlinkPhaseVisible) {
+            cursorBlinkPhaseVisible = true
+            recordRow(cursorRow)
+            invalidate()
+        }
+    }
+
+    private fun restartCursorBlink() {
+        stopCursorBlink(revealCursor = true)
+        scheduleCursorBlink()
+    }
+
+    private fun updateCursorBlinkScheduling() {
+        if (shouldBlinkCursor()) {
+            scheduleCursorBlink()
+        } else {
+            stopCursorBlink(revealCursor = true)
+        }
     }
 
     private fun packGlyphRun(
@@ -1910,6 +2055,8 @@ internal class RuntimeSurfaceView(
         ((width - CONTENT_PADDING * 2) / cellWidth).toInt().coerceIn(MIN_COLUMNS, MAX_COLUMNS)
 
     private fun clearTerminal() {
+        stopCursorBlink(revealCursor = false)
+        cursorBlinkPhaseVisible = true
         rows = 0
         columns = 0
         cursorVisible = false
@@ -2262,7 +2409,7 @@ internal class RuntimeSurfaceView(
         private const val MENU_TEXT_RESET = 0x415202
         private const val MENU_TEXT_LARGER = 0x415203
         private const val CONTENT_PADDING = 8f
-        private const val CURSOR_HEIGHT = 2f
+        private const val CURSOR_STROKE_WIDTH_DP = 2f
         private const val UNDERLINE_HEIGHT = 1f
         private const val ITALIC_TEXT_SKEW = -0.2f
         private const val FAINT_FOREGROUND_WEIGHT = 3
@@ -2283,6 +2430,7 @@ internal class RuntimeSurfaceView(
         private const val MAX_COLUMNS = 400
         private const val ACCESSIBILITY_CHARACTER_LIMIT = 8 * 1024
         private const val ACCESSIBILITY_EVENT_DELAY_MILLIS = 100L
+        private const val CURSOR_BLINK_INTERVAL_MILLIS = 500L
         private const val TERMINAL_INPUT_LIMIT = 8 * 1024
         private const val MAX_COMPOSING_CHARACTERS = 2 * 1024
         private const val MAX_CLIPBOARD_CHARACTERS = 2 * 1024
@@ -2295,6 +2443,13 @@ internal class RuntimeSurfaceView(
         private const val NEW_LINE_MODE_FLAG = 1 shl 4
         private const val BACKARROW_KEY_FLAG = 1 shl 5
         private const val REVERSE_SCREEN_FLAG = 1 shl 6
+        private const val CURSOR_BLINK_FLAG = 1 shl 7
+        private const val CURSOR_STYLE_SHIFT = 8
+        private const val CURSOR_STYLE_MASK = 0x3 shl CURSOR_STYLE_SHIFT
+        private const val CURSOR_STYLE_BLOCK = 1
+        private const val CURSOR_STYLE_BAR = 2
+        private const val CURSOR_PRESENTATION_FLAGS =
+            CURSOR_VISIBLE_FLAG or CURSOR_BLINK_FLAG or CURSOR_STYLE_MASK
         private const val DIRECT_COLOR_FLAG = 1 shl 24
         private const val RGB_MASK = 0x00ffffff
         private const val COLOR_VALUE_MASK = 0x01ffffff
@@ -2308,6 +2463,7 @@ internal class RuntimeSurfaceView(
         private const val ATTRIBUTE_HIDDEN = 1 shl 6
         private const val TERMINAL_BACKGROUND = 0xff1f2326.toInt()
         private const val CURSOR_COLOR = 0xff7dd3fc.toInt()
+        private const val CURSOR_BLOCK_COLOR = 0x997dd3fc.toInt()
         private const val COMPOSING_BACKGROUND = 0xff31363b.toInt()
         private const val SELECTION_OVERLAY = 0x667dd3fc
         private const val SELECTION_HANDLE_COLOR = 0xff7dd3fc.toInt()

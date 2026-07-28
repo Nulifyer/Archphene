@@ -1,6 +1,6 @@
 # Project status
 
-Updated: 2026-07-27
+Updated: 2026-07-28
 
 This page separates validated behavior from planned platform work. Package search does not imply package compatibility.
 
@@ -1259,8 +1259,19 @@ mislabels a rectangle as full-width scrollback. Resize, soft/hard reset, mode
 queries, and alternate-screen transitions restore bounded defaults. Focused
 unit, warmed zero-allocation, clippy, Android lint/unit, exact x86_64/AArch64
 build, and APK-install gates pass; the exact Bash PTY probe is prepared but
-awaits restoration of the clean-data device roots. Terminal mouse/focus
-reporting, cursor style/blink, and synchronized output remain open.
+awaits restoration of the clean-data device roots.
+
+The terminal now consumes bounded DECSCUSR cursor requests and publishes
+block, underline, or bar shape plus steady/blinking behavior in reserved damage
+flags. Android renders those shapes without another terminal-grid allocation,
+resets the 500 ms phase when cursor content or presentation changes, and stops
+the callback while the surface is detached, hidden, or unfocused. Rust unit,
+warmed zero-allocation, and clippy gates plus Android lint/unit and exact
+x86_64/AArch64 builds pass. Both APKs are installed and cold-launch without
+scoped fatal errors, and their current no-shell manager states pass
+full-device inspection. The real PTY cursor visual remains explicitly pending
+until a package-installed shell is restored. Terminal mouse/focus reporting
+and synchronized output remain open.
 
 The temporary command field and Run/Send controls are no longer present in the
 production manager. Active sessions reserve only the measured terminal plus a

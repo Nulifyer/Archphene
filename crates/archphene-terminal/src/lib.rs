@@ -32,6 +32,13 @@ const FLAG_BRACKETED_PASTE: u32 = 1 << 3;
 const FLAG_NEW_LINE_MODE: u32 = 1 << 4;
 const FLAG_BACKARROW_KEY: u32 = 1 << 5;
 const FLAG_REVERSE_SCREEN: u32 = 1 << 6;
+const FLAG_CURSOR_BLINK: u32 = 1 << 7;
+const FLAG_CURSOR_STYLE_SHIFT: u32 = 8;
+const FLAG_CURSOR_STYLE_MASK: u32 = 0x3 << FLAG_CURSOR_STYLE_SHIFT;
+const CURSOR_STYLE_UNDERLINE: u8 = 0;
+const CURSOR_STYLE_BLOCK: u8 = 1;
+const CURSOR_STYLE_BAR: u8 = 2;
+const DEFAULT_CURSOR_STYLE: u8 = CURSOR_STYLE_UNDERLINE;
 const ATTRIBUTE_BOLD: u8 = 1;
 const ATTRIBUTE_UNDERLINE: u8 = 1 << 1;
 const ATTRIBUTE_INVERSE: u8 = 1 << 2;
@@ -491,6 +498,8 @@ pub struct Terminal {
     view_row_scratch: Vec<Cell>,
     alternate_active: bool,
     cursor_visible: bool,
+    cursor_style: u8,
+    cursor_blink: bool,
     application_cursor: bool,
     application_keypad: bool,
     bracketed_paste: bool,
@@ -571,6 +580,8 @@ impl Terminal {
             view_row_scratch: vec![Cell::blank(); usize::from(MAX_COLUMNS)],
             alternate_active: false,
             cursor_visible: true,
+            cursor_style: DEFAULT_CURSOR_STYLE,
+            cursor_blink: false,
             application_cursor: false,
             application_keypad: false,
             bracketed_paste: false,
@@ -905,7 +916,12 @@ impl Terminal {
             FLAG_REVERSE_SCREEN
         } else {
             0
-        };
+        } | if self.cursor_blink {
+            FLAG_CURSOR_BLINK
+        } else {
+            0
+        } | ((u32::from(self.cursor_style) << FLAG_CURSOR_STYLE_SHIFT)
+            & FLAG_CURSOR_STYLE_MASK);
         output[20..24].copy_from_slice(&flags.to_le_bytes());
         output[24..32].copy_from_slice(&self.revision.to_le_bytes());
         output[32..36].copy_from_slice(&history_rows.to_le_bytes());
@@ -1564,6 +1580,10 @@ impl Terminal {
             }
             return;
         }
+        if self.csi_intermediate == b' ' && final_byte == b'q' {
+            self.set_cursor_style();
+            return;
+        }
         if self.csi_intermediate != 0 {
             return;
         }
@@ -1890,6 +1910,27 @@ impl Terminal {
         if self.reverse_screen != enabled {
             self.reverse_screen = enabled;
             self.mark_dirty_range(0, self.rows);
+        }
+    }
+
+    fn set_cursor_style(&mut self) {
+        if self.csi_count != 1 {
+            return;
+        }
+        let (style, blink) = match self.csi_parameters[0] {
+            0 => (DEFAULT_CURSOR_STYLE, false),
+            1 => (CURSOR_STYLE_BLOCK, true),
+            2 => (CURSOR_STYLE_BLOCK, false),
+            3 => (CURSOR_STYLE_UNDERLINE, true),
+            4 => (CURSOR_STYLE_UNDERLINE, false),
+            5 => (CURSOR_STYLE_BAR, true),
+            6 => (CURSOR_STYLE_BAR, false),
+            _ => return,
+        };
+        if self.cursor_style != style || self.cursor_blink != blink {
+            self.cursor_style = style;
+            self.cursor_blink = blink;
+            self.mark_dirty(self.cursor_row);
         }
     }
 
@@ -2580,6 +2621,8 @@ impl Terminal {
         self.row_soft_wrapped.fill(false);
         self.inactive_row_soft_wrapped.fill(false);
         self.cursor_visible = true;
+        self.cursor_style = DEFAULT_CURSOR_STYLE;
+        self.cursor_blink = false;
         self.application_cursor = false;
         self.application_keypad = false;
         self.bracketed_paste = false;
@@ -2607,6 +2650,8 @@ impl Terminal {
 
     fn soft_reset(&mut self) {
         self.cursor_visible = true;
+        self.cursor_style = DEFAULT_CURSOR_STYLE;
+        self.cursor_blink = false;
         self.application_cursor = false;
         self.application_keypad = false;
         self.bracketed_paste = false;
@@ -3706,6 +3751,38 @@ mod tests {
             u32::from_le_bytes(output[20..24].try_into().unwrap()),
             FLAG_CURSOR_VISIBLE
         );
+    }
+
+    #[test]
+    fn cursor_style_is_bounded_and_published_without_extra_damage_state() {
+        let mut terminal = Terminal::new(2, 5).unwrap();
+        let mut output = [0_u8; 2048];
+
+        terminal.feed(b"\x1b[1 q");
+        terminal.write_damage(&mut output).unwrap();
+        assert_eq!(
+            u32::from_le_bytes(output[20..24].try_into().unwrap()),
+            FLAG_CURSOR_VISIBLE
+                | FLAG_CURSOR_BLINK
+                | (u32::from(CURSOR_STYLE_BLOCK) << FLAG_CURSOR_STYLE_SHIFT)
+        );
+
+        terminal.feed(b"\x1b[6 q");
+        terminal.write_damage(&mut output).unwrap();
+        assert_eq!(
+            u32::from_le_bytes(output[20..24].try_into().unwrap()),
+            FLAG_CURSOR_VISIBLE | (u32::from(CURSOR_STYLE_BAR) << FLAG_CURSOR_STYLE_SHIFT)
+        );
+
+        terminal.feed(b"\x1b[3 q\x1b[0 q");
+        terminal.write_damage(&mut output).unwrap();
+        assert_eq!(
+            u32::from_le_bytes(output[20..24].try_into().unwrap()),
+            FLAG_CURSOR_VISIBLE
+        );
+        terminal.feed(b"\x1b[99 q");
+        assert_eq!(terminal.cursor_style, DEFAULT_CURSOR_STYLE);
+        assert!(!terminal.cursor_blink);
     }
 
     #[test]

@@ -40,7 +40,8 @@ fn warmed_parser_grid_and_damage_path_does_not_allocate() {
         \x1b[c\x1b[>c\x1b[18t\x1b[5n\x1b[6n\x1b[?6n\
         \x1b[?5$p\x1b[?2004$p\x1b[4$p\x1b[9999$p\
         \x1b]4;25;rgb:12/34/56\x07\x1b]4;25;?\x1b\\\x1b]104;25\x07\
-        \x1b[?69h\x1b[3;70s\x1b[?6hmargin-wrap-data\x1b[?69$p\x1b[?69l";
+        \x1b[?69h\x1b[3;70s\x1b[?6hmargin-wrap-data\x1b[?69$p\x1b[?69l\
+        \x1b[1 q\x1b[6 q\x1b[0 q";
     terminal.feed(output);
     terminal.consume_reply(usize::MAX);
     terminal
