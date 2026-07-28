@@ -935,7 +935,13 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         importButton =
             Button(this).apply {
                 setText(R.string.import_file)
-                setOnClickListener { openAndroidDocument() }
+                setOnClickListener {
+                    if (runtimeBinder?.documentImportCancellationAvailable == true) {
+                        runtimeBinder?.cancelDocumentImport()
+                    } else {
+                        openAndroidDocument()
+                    }
+                }
             }
         openButton =
             Button(this).apply {
@@ -1729,6 +1735,13 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 0,
             ),
         )
+        ArchpheneRuntimeService.setDebugDocumentImportChunkDelay(
+            applicationInfo.flags,
+            intent.getIntExtra(
+                ArchpheneRuntimeService.EXTRA_DEBUG_DOCUMENT_IMPORT_CHUNK_DELAY_MILLIS,
+                0,
+            ),
+        )
         configureDebugDocumentHandoff(intent)
         startService(Intent(this, ArchpheneRuntimeService::class.java))
         val restoredImports =
@@ -1833,6 +1846,13 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        ArchpheneRuntimeService.setDebugDocumentImportChunkDelay(
+            applicationInfo.flags,
+            intent.getIntExtra(
+                ArchpheneRuntimeService.EXTRA_DEBUG_DOCUMENT_IMPORT_CHUNK_DELAY_MILLIS,
+                0,
+            ),
+        )
         queueIncomingImport(intent)
         showDebugAurReview(intent)
         showDebugTerminalIme(intent)
@@ -2995,7 +3015,19 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         commandButton.isEnabled = binder.linuxCommandAvailable
         setTextIfChanged(ptyButton, binder.sharedShellActionLabel)
         ptyButton.isEnabled = binder.sharedShellActionAvailable
-        importButton.isEnabled = binder.documentTransferAvailable && pendingImportUris == null
+        importButton.isEnabled =
+            binder.documentImportCancellationAvailable ||
+                (binder.documentTransferAvailable && pendingImportUris == null)
+        setTextIfChanged(
+            importButton,
+            getString(
+                if (binder.documentImportCancellationAvailable) {
+                    R.string.cancel_import
+                } else {
+                    R.string.import_file
+                },
+            ),
+        )
         openButton.isEnabled = binder.documentTransferAvailable
         exportButton.isEnabled =
             binder.documentExportCancellationAvailable ||

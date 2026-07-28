@@ -385,6 +385,7 @@ internal class DocumentsProviderTestReceiver : BroadcastReceiver() {
                 importName(token),
                 importCollisionName(token),
                 importThirdName(token),
+                importFourthName(token),
                 secondImportName(token),
             )
         ) {
@@ -441,6 +442,10 @@ internal class DocumentsProviderTestReceiver : BroadcastReceiver() {
             }
             check(!File(downloads, secondImportName(token)).exists()) {
                 "multiple import ran before it was requested"
+            }
+        } else {
+            check(!File(downloads, importFourthName(token)).exists()) {
+                "cancelled import was published"
             }
         }
     }
@@ -530,7 +535,7 @@ internal class DocumentsProviderTestReceiver : BroadcastReceiver() {
         private const val SYMLINK_NAME = "private-link"
         private const val VISUAL_NAME = "Welcome.txt"
         private const val IMPORT_SOURCE_PREFIX = "Archphene-Import-Source-"
-        private const val IMPORT_MARKER_REPETITIONS = 2048
+        private const val IMPORT_MARKER_REPETITIONS = 131_072
         private val TOKEN = Regex("[a-f0-9]{8}")
         private val MARKER = "Archphene provider exact read/write\n".toByteArray(StandardCharsets.UTF_8)
         private val COLLISION_MARKER =
@@ -545,6 +550,8 @@ internal class DocumentsProviderTestReceiver : BroadcastReceiver() {
         private fun importCollisionName(token: String): String = "Android-$token (2).txt"
 
         private fun importThirdName(token: String): String = "Android-$token (3).txt"
+
+        private fun importFourthName(token: String): String = "Android-$token (4).txt"
 
         private fun secondImportName(token: String): String = "Android-$token-second.txt"
     }

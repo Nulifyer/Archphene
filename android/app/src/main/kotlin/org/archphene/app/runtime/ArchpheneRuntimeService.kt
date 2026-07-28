@@ -436,6 +436,9 @@ class ArchpheneRuntimeService : Service() {
         val documentTransferRunning: Boolean
             get() = storageDocumentActive
 
+        val documentImportCancellationAvailable: Boolean
+            get() = storageDocumentImportActive
+
         val documentExportCancellationAvailable: Boolean
             get() = storageDocumentExportActive
 
@@ -618,6 +621,16 @@ class ArchpheneRuntimeService : Service() {
         }
 
         fun importAndroidDocuments(uris: List<Uri>): Boolean = requestDocumentImports(uris)
+
+        fun cancelDocumentImport(): Boolean {
+            if (!storageDocumentImportActive) {
+                return false
+            }
+            storageDocumentImportCancellationRequested = true
+            NativeRuntime.nativeCancelDocumentImport()
+            storageStatus = "Cancelling import…"
+            return true
+        }
 
         fun importPortalFolder(
             displayName: String,
@@ -1000,6 +1013,12 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var activePackageConnection: HttpsURLConnection? = null
     @Volatile private var commandActive = false
     @Volatile private var storageDocumentActive = false
+    @Volatile private var storageDocumentImportActive = false
+    @Volatile private var storageDocumentImportCopyActive = false
+    @Volatile private var storageDocumentImportCancellationRequested = false
+    @Volatile private var storageDocumentImportName = ""
+    @Volatile private var storageDocumentImportIndex = 0
+    @Volatile private var storageDocumentImportCount = 0
     @Volatile private var storageDocumentExportActive = false
     @Volatile private var storageDocumentExportCancellationRequested = false
     @Volatile private var storageDocumentExportName = ""
@@ -1940,9 +1959,12 @@ class ArchpheneRuntimeService : Service() {
     companion object {
         internal const val EXTRA_DEBUG_DOCUMENT_EXPORT_CHUNK_DELAY_MILLIS =
             "org.archphene.app.extra.DEBUG_DOCUMENT_EXPORT_CHUNK_DELAY_MILLIS"
+        internal const val EXTRA_DEBUG_DOCUMENT_IMPORT_CHUNK_DELAY_MILLIS =
+            "org.archphene.app.extra.DEBUG_DOCUMENT_IMPORT_CHUNK_DELAY_MILLIS"
         internal const val EXTRA_DEBUG_DOCUMENT_HANDOFF_FAILURE =
             "org.archphene.app.extra.DEBUG_DOCUMENT_HANDOFF_FAILURE"
         private val DEBUG_DOCUMENT_EXPORT_CHUNK_DELAY_MILLIS = AtomicLong()
+        private val DEBUG_DOCUMENT_IMPORT_CHUNK_DELAY_MILLIS = AtomicLong()
         private val DEBUG_DOCUMENT_HANDOFF_FAILURE = AtomicBoolean()
 
         internal fun setDebugDocumentExportChunkDelay(
@@ -1959,6 +1981,22 @@ class ArchpheneRuntimeService : Service() {
                 delayMillis.coerceIn(0, MAX_DOCUMENT_EXPORT_TEST_CHUNK_DELAY_MILLIS).toLong(),
             )
             Log.i(TAG, "Debug document export chunk delay configured")
+        }
+
+        internal fun setDebugDocumentImportChunkDelay(
+            applicationFlags: Int,
+            delayMillis: Int,
+        ) {
+            if (
+                applicationFlags and ApplicationInfo.FLAG_DEBUGGABLE == 0 ||
+                delayMillis <= 0
+            ) {
+                return
+            }
+            DEBUG_DOCUMENT_IMPORT_CHUNK_DELAY_MILLIS.set(
+                delayMillis.coerceIn(0, MAX_DOCUMENT_EXPORT_TEST_CHUNK_DELAY_MILLIS).toLong(),
+            )
+            Log.i(TAG, "Debug document import chunk delay configured")
         }
 
         internal fun setDebugDocumentHandoffFailure(
@@ -4018,7 +4056,17 @@ class ArchpheneRuntimeService : Service() {
         if (!PROCESS_STORAGE_ACTIVE.compareAndSet(false, true)) {
             return false
         }
+        if (!NativeRuntime.nativePrepareDocumentImport()) {
+            PROCESS_STORAGE_ACTIVE.set(false)
+            return false
+        }
         storageDocumentActive = true
+        storageDocumentImportActive = true
+        storageDocumentImportCopyActive = false
+        storageDocumentImportCancellationRequested = false
+        storageDocumentImportName = ""
+        storageDocumentImportIndex = 0
+        storageDocumentImportCount = normalized.size
         storageStatus = "Opening the selected Android document…"
         val worker =
             Thread(
@@ -4034,9 +4082,16 @@ class ArchpheneRuntimeService : Service() {
                         var failedCount = 0
                         var lastFailure = ""
                         var lastImportedName = ""
-                        normalized.values.forEachIndexed { index, uri ->
+                        var cancelled = false
+                        for ((index, uri) in normalized.values.withIndex()) {
+                            if (storageDocumentImportCancellationRequested) {
+                                cancelled = true
+                                break
+                            }
                             try {
                                 val displayName = safeImportDisplayName(uri)
+                                storageDocumentImportName = displayName
+                                storageDocumentImportIndex = index + 1
                                 persistStorageStatus(
                                     STORAGE_RUNNING,
                                     "Importing ${index + 1} of ${normalized.size}: " +
@@ -4063,12 +4118,23 @@ class ArchpheneRuntimeService : Service() {
                                         )
                                 val result =
                                     descriptor.use {
-                                        NativeRuntime.nativeImportHomeDocument(
-                                            request,
-                                            requestBytes.size,
-                                            it.fd,
-                                            output,
-                                        )
+                                        if (storageDocumentImportCancellationRequested) {
+                                            throw IllegalStateException(
+                                                "Document import cancelled",
+                                            )
+                                        }
+                                        storageDocumentImportCopyActive = true
+                                        try {
+                                            NativeRuntime.nativeImportHomeDocument(
+                                                request,
+                                                requestBytes.size,
+                                                it.fd,
+                                                debugDocumentImportChunkDelayMillis(),
+                                                output,
+                                            )
+                                        } finally {
+                                            storageDocumentImportCopyActive = false
+                                        }
                                     }
                                 val response = readCString(output)
                                 if (
@@ -4109,6 +4175,15 @@ class ArchpheneRuntimeService : Service() {
                                         "bytes=$importedBytes item=${index + 1}/${normalized.size}",
                                 )
                             } catch (error: Exception) {
+                                if (storageDocumentImportCancellationRequested) {
+                                    cancelled = true
+                                    Log.i(
+                                        TAG,
+                                        "Android document import cancelled " +
+                                            "item=${index + 1}/${normalized.size}",
+                                    )
+                                    break
+                                }
                                 failedCount++
                                 lastFailure = error.message ?: error.javaClass.simpleName
                                 Log.e(
@@ -4120,7 +4195,11 @@ class ArchpheneRuntimeService : Service() {
                             }
                         }
                         val status =
-                            if (failedCount == 0) {
+                            if (cancelled) {
+                                "Import cancelled after $importedCount of " +
+                                    "${normalized.size} documents " +
+                                    "(${formatStorageBytes(importedBytesTotal)} kept)"
+                            } else if (failedCount == 0) {
                                 if (importedCount == 1) {
                                     "Imported $lastImportedName " +
                                         "(${formatStorageBytes(importedBytesTotal)}) " +
@@ -4135,7 +4214,11 @@ class ArchpheneRuntimeService : Service() {
                                     "$failedCount failed: $lastFailure"
                             }
                         persistStorageStatus(
-                            if (failedCount == 0) STORAGE_COMPLETE else STORAGE_FAILED,
+                            if (!cancelled && failedCount == 0) {
+                                STORAGE_COMPLETE
+                            } else {
+                                STORAGE_FAILED
+                            },
                             status,
                         )
                     } catch (error: Exception) {
@@ -4144,6 +4227,12 @@ class ArchpheneRuntimeService : Service() {
                         persistStorageStatus(STORAGE_FAILED, status)
                         Log.e(TAG, "Android document import failed", error)
                     } finally {
+                        storageDocumentImportActive = false
+                        storageDocumentImportCopyActive = false
+                        storageDocumentImportCancellationRequested = false
+                        storageDocumentImportName = ""
+                        storageDocumentImportIndex = 0
+                        storageDocumentImportCount = 0
                         storageDocumentActive = false
                         PROCESS_STORAGE_ACTIVE.set(false)
                         storageThread = null
@@ -4159,6 +4248,12 @@ class ArchpheneRuntimeService : Service() {
             true
         } catch (error: Exception) {
             storageThread = null
+            storageDocumentImportActive = false
+            storageDocumentImportCopyActive = false
+            storageDocumentImportCancellationRequested = false
+            storageDocumentImportName = ""
+            storageDocumentImportIndex = 0
+            storageDocumentImportCount = 0
             storageDocumentActive = false
             PROCESS_STORAGE_ACTIVE.set(false)
             storageStatus = "Import failed: ${error.message ?: error.javaClass.simpleName}"
@@ -4469,6 +4564,22 @@ class ArchpheneRuntimeService : Service() {
             }
 
     private fun currentDocumentTransferStatus(): String {
+        if (storageDocumentImportActive) {
+            if (storageDocumentImportCancellationRequested) {
+                return "Cancelling import…"
+            }
+            val copiedBytes =
+                NativeRuntime.nativeDocumentImportProgress()
+                    .coerceIn(0L, MAX_STORAGE_TRANSFER_BYTES)
+            val name = storageDocumentImportName.ifEmpty { "Android document" }
+            val index = storageDocumentImportIndex.coerceAtLeast(1)
+            val count = storageDocumentImportCount.coerceAtLeast(index)
+            if (!storageDocumentImportCopyActive) {
+                return "Opening $index of $count: $name…"
+            }
+            return "Importing $index of $count: $name · " +
+                "${formatStorageBytes(copiedBytes)} copied"
+        }
         if (!storageDocumentExportActive) {
             return storageStatus
         }
@@ -4493,6 +4604,17 @@ class ArchpheneRuntimeService : Service() {
         val delay = DEBUG_DOCUMENT_EXPORT_CHUNK_DELAY_MILLIS.getAndSet(0L).toInt()
         if (delay != 0) {
             Log.i(TAG, "Debug document export chunk delay active")
+        }
+        return delay
+    }
+
+    private fun debugDocumentImportChunkDelayMillis(): Int {
+        if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0) {
+            return 0
+        }
+        val delay = DEBUG_DOCUMENT_IMPORT_CHUNK_DELAY_MILLIS.getAndSet(0L).toInt()
+        if (delay != 0) {
+            Log.i(TAG, "Debug document import chunk delay active")
         }
         return delay
     }

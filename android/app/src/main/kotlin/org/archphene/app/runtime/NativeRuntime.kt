@@ -105,8 +105,12 @@ internal object NativeRuntime {
         requestBuffer: ByteBuffer,
         requestLength: Int,
         sourceDescriptor: Int,
+        debugChunkDelayMillis: Int,
         outputBuffer: ByteBuffer,
     ): Int
+    external fun nativeDocumentImportProgress(): Long
+    external fun nativePrepareDocumentImport(): Boolean
+    external fun nativeCancelDocumentImport(): Boolean
     external fun nativeExportHomeDocument(
         sourceDescriptor: Int,
         destinationDescriptor: Int,

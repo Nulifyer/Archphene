@@ -97,7 +97,12 @@ destination. Duplicate names receive numbered variants and interrupted
 staging is discarded explicitly on the next attempt. One failed provider
 document does not discard later selections; durable status reports the exact
 successful and failed counts. Exact content, collision, duplicate-stream,
-restart-status, and system-picker gates pass on both targets.
+restart-status, and system-picker gates pass on both targets. While a
+descriptor is copying, the Files page shows the current item and live byte
+count and replaces Import with a cancellation action. Cancellation is checked
+at each fixed-size Rust copy chunk, removes the private staging file, and
+never publishes a partial destination. Exact slow-copy progress, cancellation,
+cleanup, logs, and full-device states pass on both exact ABIs.
 
 Linux desktop applications use a separate XDG FileChooser contract. Open
 creates a durable non-replacing snapshot under

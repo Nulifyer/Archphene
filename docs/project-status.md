@@ -1877,6 +1877,18 @@ return to a clean Mousepad frame, and emit no fatal logs. The pre-existing
 single-open, multi-open, Save As, and folder suites also pass unchanged on
 both devices after the shared parser change.
 
+Manager document imports now expose the current document and live copied-byte
+count without routing file bytes through Kotlin or JNI. The Files-page Import
+action becomes Cancel import while Rust is streaming, and a separate native
+cancellation token is checked at every fixed-size copy chunk. Cancellation
+removes staging and never publishes the destination; completed documents from
+an earlier item in the same batch remain honestly counted. The exact-APK gate
+repeats single, collision, ordered multi-document, process-restart, picker
+cancellation, slow-copy progress, and mid-copy cancellation on Android 16
+x86_64 and Samsung Android 15 AArch64. Both exact ABIs preserve prior files,
+leave no cancelled destination or staging residue, emit the scoped cancellation
+log, and pass inspected full-device progress and terminal-state frames.
+
 The initial mirror now records a real synchronization ancestor while it copies:
 a stable random 128-bit mapping identity, sorted directory entries, exact byte
 counts, and streaming SHA-256 fingerprints are atomically retained in private

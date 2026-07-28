@@ -2082,11 +2082,32 @@ pub fn import_document_from_fd(
     display_name: &str,
     source_descriptor: RawFd,
 ) -> Result<ImportReport, StorageError> {
+    import_document_from_fd_with_progress(root, parent_id, display_name, source_descriptor, |_| {
+        true
+    })
+}
+
+pub fn import_document_from_fd_with_progress<F>(
+    root: &Path,
+    parent_id: &str,
+    display_name: &str,
+    source_descriptor: RawFd,
+    mut continue_after_chunk: F,
+) -> Result<ImportReport, StorageError>
+where
+    F: FnMut(u64) -> bool,
+{
     if source_descriptor < 0 {
         return Err(StorageError::InvalidDocument);
     }
     let mut source = sys::duplicate(source_descriptor)?;
-    import_document(root, parent_id, display_name, &mut source)
+    import_document_with_progress(
+        root,
+        parent_id,
+        display_name,
+        &mut source,
+        &mut continue_after_chunk,
+    )
 }
 
 pub fn import_document<R: Read>(
@@ -2094,6 +2115,16 @@ pub fn import_document<R: Read>(
     parent_id: &str,
     display_name: &str,
     source: &mut R,
+) -> Result<ImportReport, StorageError> {
+    import_document_with_progress(root, parent_id, display_name, source, &mut |_| true)
+}
+
+fn import_document_with_progress<R: Read, F: FnMut(u64) -> bool>(
+    root: &Path,
+    parent_id: &str,
+    display_name: &str,
+    source: &mut R,
+    continue_after_chunk: &mut F,
 ) -> Result<ImportReport, StorageError> {
     validate_visible_name(display_name)?;
     let root_directory = open_directory(root, &[])?;
@@ -2119,7 +2150,8 @@ pub fn import_document<R: Read>(
         0o600,
     )?;
     let result = (|| {
-        let bytes = copy_bounded_document(source, &mut pending)?;
+        let bytes =
+            copy_bounded_document_with_progress(source, &mut pending, continue_after_chunk)?;
         pending.sync_all()?;
         drop(pending);
 
@@ -2181,13 +2213,6 @@ where
     )?;
     destination.flush()?;
     Ok(bytes)
-}
-
-fn copy_bounded_document<R: Read, W: Write>(
-    source: &mut R,
-    destination: &mut W,
-) -> Result<u64, StorageError> {
-    copy_bounded_document_with_progress(source, destination, &mut |_| true)
 }
 
 fn copy_bounded_document_with_progress<R: Read, W: Write, F: FnMut(u64) -> bool>(
@@ -2616,6 +2641,35 @@ mod tests {
             fs::read(home.0.join("Downloads/project (2).txt")).expect("second"),
             b"second"
         );
+        assert!(
+            home.0
+                .join(IMPORT_STAGING_DIRECTORY)
+                .read_dir()
+                .expect("staging")
+                .next()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn document_import_reports_progress_and_cancels_without_publication() {
+        let home = TestDirectory::new();
+        create_document(&home.0, HOME_DOCUMENT_ID, "Downloads", true).expect("downloads");
+        let content = vec![0x5a; 96 * 1024];
+        let mut progress = Vec::new();
+        let result = import_document_with_progress(
+            &home.0,
+            "home/Downloads",
+            "cancelled.bin",
+            &mut content.as_slice(),
+            &mut |bytes| {
+                progress.push(bytes);
+                bytes < 64 * 1024
+            },
+        );
+        assert!(matches!(result, Err(StorageError::TransferCancelled)));
+        assert_eq!(progress, [32 * 1024, 64 * 1024]);
+        assert!(!home.0.join("Downloads/cancelled.bin").exists());
         assert!(
             home.0
                 .join(IMPORT_STAGING_DIRECTORY)

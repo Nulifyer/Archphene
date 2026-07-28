@@ -76,6 +76,7 @@
     <string name="documents_home_name">Home</string>
     <string name="shell_startup_files">Shell startup files</string>
     <string name="import_file">Import</string>
+    <string name="cancel_import">Cancel import</string>
     <string name="open_file">Open</string>
     <string name="open_linux_file_chooser">Open Linux file with</string>
     <string name="open_linux_file_only">Choose a file from Archphene Home</string>

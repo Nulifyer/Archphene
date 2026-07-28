@@ -34,6 +34,7 @@ action_verify=org.archphene.app.debug.action.VERIFY_DOCUMENT_IMPORTS
 action_send_multiple=org.archphene.app.debug.action.SEND_MULTIPLE_DOCUMENT_IMPORT
 action_clean=org.archphene.app.debug.action.CLEAN_DOCUMENT_IMPORT_SOURCE
 output_dir="$ARCHPHENE_ROOT/tooling/build/document-import"
+debug_import_delay_extra=org.archphene.app.extra.DEBUG_DOCUMENT_IMPORT_CHUNK_DELAY_MILLIS
 mkdir -p "$output_dir"
 
 cleanup() {
@@ -132,6 +133,33 @@ archphene_wait_ui_unwrapped \
   "document-import-multiple-$serial" 25
 archphene_adb_run exec-out screencap -p >"$output_dir/$serial-multiple.png"
 
+archphene_adb_run logcat -c
+archphene_adb_run shell am start -W -n "$activity" \
+  -a android.intent.action.VIEW -c android.intent.category.DEFAULT \
+  -t text/plain -d "$source_uri" -f 1 \
+  --ei "$debug_import_delay_extra" 50 >/dev/null
+archphene_wait_ui_unwrapped \
+  "Importing 1 of 1: $source_name .* copied" \
+  "document-import-progress-$serial" 20
+archphene_adb_run exec-out screencap -p >"$output_dir/$serial-progress.png"
+archphene_tap_text "$ARCHPHENE_UI" "Cancel import"
+archphene_wait_ui_unwrapped \
+  "Import cancelled after 0 of 1 documents .* kept" \
+  "document-import-cancelled-$serial" 20
+archphene_adb_run exec-out screencap -p >"$output_dir/$serial-cancelled.png"
+cancel_log="$(
+  archphene_adb_run logcat -d -v brief \
+    -s ArchpheneRuntime:V AndroidRuntime:E '*:S' 2>/dev/null || true
+)"
+[[ "$cancel_log" == *"Android document import cancelled item=1/1"* &&
+   "$cancel_log" != *"Android document import failed"* ]] ||
+  archphene_die "document import cancellation did not finish cleanly: $cancel_log"
+archphene_adb_run logcat -c
+archphene_adb_run shell am broadcast -n "$receiver" -a "$action_verify" \
+  --es token "$token" --ez expect_multiple true >/dev/null
+archphene_wait_log "Document imports verified token=$token" \
+  15 'ArchpheneDocumentsTest:V AndroidRuntime:E *:S' >/dev/null
+
 manager_ui="$ARCHPHENE_UI"
 archphene_tap_text "$manager_ui" "Import"
 archphene_wait_ui 'package="com\.(google\.)?android\.documentsui"' \
@@ -162,7 +190,10 @@ cleanup
 archphene_note "Archphene document import passed on $serial"
 archphene_note "  ACTION_VIEW and ACTION_SEND streamed exact bytes into ~/Downloads"
 archphene_note "  ACTION_SEND_MULTIPLE imported two ordered, deduplicated documents"
+archphene_note "  Live byte progress and chunk-boundary cancellation left no file"
 archphene_note "  Collision-safe naming and process-restart status passed"
 archphene_note "  Android system picker launched from the manager"
 archphene_note "  Full-device screenshot: $output_dir/$serial.png"
 archphene_note "  Multiple-import screenshot: $output_dir/$serial-multiple.png"
+archphene_note "  Progress screenshot: $output_dir/$serial-progress.png"
+archphene_note "  Cancellation screenshot: $output_dir/$serial-cancelled.png"

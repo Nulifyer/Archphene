@@ -148,12 +148,22 @@ mod android {
     static DOCUMENT_EXPORT_ACTIVE: AtomicBool = AtomicBool::new(false);
     static DOCUMENT_EXPORT_CANCELLED: AtomicBool = AtomicBool::new(false);
     static DOCUMENT_EXPORT_BYTES: AtomicU64 = AtomicU64::new(0);
+    static DOCUMENT_IMPORT_ACTIVE: AtomicBool = AtomicBool::new(false);
+    static DOCUMENT_IMPORT_CANCELLED: AtomicBool = AtomicBool::new(false);
+    static DOCUMENT_IMPORT_BYTES: AtomicU64 = AtomicU64::new(0);
 
     struct DocumentExportGuard;
+    struct DocumentImportGuard;
 
     impl Drop for DocumentExportGuard {
         fn drop(&mut self) {
             DOCUMENT_EXPORT_ACTIVE.store(false, Ordering::Release);
+        }
+    }
+
+    impl Drop for DocumentImportGuard {
+        fn drop(&mut self) {
+            DOCUMENT_IMPORT_ACTIVE.store(false, Ordering::Release);
         }
     }
 
@@ -789,9 +799,10 @@ mod android {
         request_buffer: JByteBuffer,
         request_length: jint,
         source_descriptor: jint,
+        debug_chunk_delay_millis: jint,
         output_buffer: JByteBuffer,
     ) -> jint {
-        if source_descriptor < 0 {
+        if source_descriptor < 0 || !(0..=100).contains(&debug_chunk_delay_millis) {
             return ERROR_INVALID_ARGUMENT;
         }
         let Ok(output) = storage_output(&environment, &output_buffer) else {
@@ -800,17 +811,67 @@ mod android {
         let Ok(request) = storage_request(&environment, &request_buffer, request_length, 3) else {
             return ERROR_INVALID_ARGUMENT;
         };
-        match archphene_storage::import_document_from_fd(
+        if DOCUMENT_IMPORT_ACTIVE
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return ERROR_INVALID_STATE;
+        }
+        let _guard = DocumentImportGuard;
+        let delay = Duration::from_millis(debug_chunk_delay_millis as u64);
+        match archphene_storage::import_document_from_fd_with_progress(
             Path::new(&request[0]),
             &request[1],
             &request[2],
             source_descriptor,
+            |bytes| {
+                DOCUMENT_IMPORT_BYTES.store(bytes, Ordering::Release);
+                if !delay.is_zero() {
+                    std::thread::sleep(delay);
+                }
+                !DOCUMENT_IMPORT_CANCELLED.load(Ordering::Acquire)
+            },
         ) {
             Ok(report) => copy_storage_value(
                 &format!("{}\t{}", report.display_name, report.bytes),
                 output,
             ),
             Err(error) => copy_storage_error(&error, output),
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativePrepareDocumentImport(
+        _environment: JNIEnv,
+        _class: JClass,
+    ) -> jboolean {
+        if DOCUMENT_IMPORT_ACTIVE.load(Ordering::Acquire) {
+            return JNI_FALSE;
+        }
+        DOCUMENT_IMPORT_CANCELLED.store(false, Ordering::Release);
+        DOCUMENT_IMPORT_BYTES.store(0, Ordering::Release);
+        JNI_TRUE
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeDocumentImportProgress(
+        _environment: JNIEnv,
+        _class: JClass,
+    ) -> jlong {
+        let bytes = DOCUMENT_IMPORT_BYTES.load(Ordering::Acquire);
+        jlong::try_from(bytes).unwrap_or(jlong::MAX)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeCancelDocumentImport(
+        _environment: JNIEnv,
+        _class: JClass,
+    ) -> jboolean {
+        DOCUMENT_IMPORT_CANCELLED.store(true, Ordering::Release);
+        if DOCUMENT_IMPORT_ACTIVE.load(Ordering::Acquire) {
+            JNI_TRUE
+        } else {
+            JNI_FALSE
         }
     }
 
