@@ -76,6 +76,12 @@ int main(int argc, char **argv) {
         fputs("contained parent path was not normalized\n", stderr);
         return 13;
     }
+    errno = 0;
+    if (lstat("/usr/share/archphene-test/../missing-archphene-probe",
+                &metadata) != -1 || errno != ENOENT) {
+        fputs("contained missing parent path did not report ENOENT\n", stderr);
+        return 14;
+    }
     int proc = open("/proc", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (proc < 0 || fstatat(proc, "self/task/", &metadata, 0) != 0
             || !S_ISDIR(metadata.st_mode)) {

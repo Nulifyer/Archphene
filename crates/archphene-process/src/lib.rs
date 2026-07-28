@@ -6,7 +6,7 @@ pub mod integration;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
@@ -45,6 +45,12 @@ pub const MAX_WAYLAND_DISPLAY_BYTES: usize = 64;
 const MAX_SYMLINKS: usize = 16;
 const MAX_SHEBANG_BYTES: usize = 256;
 const MAX_GUI_LOG_DRAIN_BYTES: usize = 64 * 1024;
+const MAX_BATCH_DIAGNOSTIC_BYTES: usize = 16 * 1024;
+const MAX_BATCH_DIAGNOSTIC_LINE_BYTES: usize = 4 * 1024;
+const BATCH_DIAGNOSTIC_SEPARATOR: &[u8] = b"\n--- recent output ---\n";
+const MAX_FINISHED_BATCH_LOG_DRAIN_BYTES: usize = 256 * 1024 * 1024;
+const FINISHED_BATCH_LOG_DRAIN_GRACE: Duration = Duration::from_secs(2);
+const FINISHED_BATCH_LOG_DRAIN_RETRY: Duration = Duration::from_millis(5);
 const GUI_CLOSE_GRACE: Duration = Duration::from_millis(750);
 const GUI_TERMINATE_GRACE: Duration = Duration::from_millis(750);
 const GUI_INTEGRATION_WARM_OBSERVATION_INTERVAL: Duration = Duration::from_secs(2);
@@ -52,6 +58,8 @@ const GUI_INTEGRATION_STEADY_OBSERVATION_INTERVAL: Duration = Duration::from_sec
 const GUI_INTEGRATION_WARM_OBSERVATIONS: u8 = 15;
 const TERMINAL_SYNCHRONIZED_OUTPUT_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_GDK_PIXBUF_MODULE_FILE_BYTES: u64 = 16 * 1024;
+const MAX_ELF_PROGRAM_HEADERS: usize = 128;
+const MAX_ELF_RUNPATH_BYTES: usize = 2048;
 const GTK_SETTINGS_LOGICAL_PATH: &str = "/home/archphene/.config/gtk-3.0/settings.ini";
 static OUTPUT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -324,6 +332,40 @@ impl CommandEnvironment {
         self.run_with_identity(command, arguments, true)
     }
 
+    pub fn run_as_root_quiet(
+        &self,
+        command: &str,
+        arguments: &[&str],
+    ) -> Result<i32, ProcessError> {
+        validate_request(command, arguments)?;
+        let command_path = resolve_installed_command(&self.arch_root, command)?;
+        let launch = prepare_launch(&self.arch_root, command, command_path)?;
+        let mut child = self
+            .build_command(&launch, arguments, "dumb")
+            .current_dir(&self.arch_root)
+            .env("ARCHPHENE_ROOT_IDENTITY", "1")
+            .env("HOME", "/root")
+            .env("USER", "root")
+            .env("LOGNAME", "root")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()?;
+        let deadline = Instant::now() + COMMAND_TIMEOUT;
+        loop {
+            if let Some(status) = child.try_wait()? {
+                return Ok(exit_code(status));
+            }
+            if Instant::now() >= deadline {
+                terminate_process_group(&mut child);
+                let _ = child.wait();
+                return Err(ProcessError::Timeout);
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     fn run_with_identity(
         &self,
         command: &str,
@@ -477,6 +519,11 @@ impl CommandEnvironment {
             log_bytes: [0; MAX_BATCH_LOG_BYTES],
             log_start: 0,
             log_length: 0,
+            diagnostic_bytes: [0; MAX_BATCH_DIAGNOSTIC_BYTES],
+            diagnostic_start: 0,
+            diagnostic_length: 0,
+            diagnostic_line: [0; MAX_BATCH_DIAGNOSTIC_LINE_BYTES],
+            diagnostic_line_length: 0,
             deadline: Instant::now() + BATCH_TIMEOUT,
         }))
     }
@@ -498,10 +545,15 @@ impl CommandEnvironment {
     }
 
     fn build_command(&self, launch: &LaunchPlan, arguments: &[&str], terminal: &str) -> Command {
+        let mut library_path = self.library_path.clone();
+        for path in &launch.library_paths {
+            library_path.push(":");
+            library_path.push(path);
+        }
         let mut command = Command::new(&self.loader);
         command
             .arg("--library-path")
-            .arg(&self.library_path)
+            .arg(&library_path)
             .arg("--argv0")
             .arg(&launch.argv0)
             .arg(&launch.program);
@@ -516,10 +568,7 @@ impl CommandEnvironment {
             .current_dir(self.arch_root.join("home/archphene"))
             .env_clear()
             .env("HOME", "/home/archphene")
-            // Chromium/Electron issue some temporary-file syscalls inline instead
-            // of through libc, so those paths cannot be translated by the bridge.
-            // Keep the directory private while publishing its physical path.
-            .env("TMPDIR", self.arch_root.join("tmp"))
+            .env("TMPDIR", "/tmp")
             .env(
                 "PATH",
                 "/home/archphene/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/bin",
@@ -543,6 +592,12 @@ impl CommandEnvironment {
             .env("XDG_CACHE_HOME", "/home/archphene/.cache")
             .env("XDG_DATA_HOME", "/home/archphene/.local/share")
             .env("XDG_RUNTIME_DIR", "/run")
+            // Bound common build frontends for phone/tablet memory pressure.
+            // The isolated Builder also publishes a verified Ninja wrapper
+            // because Ninja has no direct environment job-count override.
+            .env("MAKEFLAGS", "-j2")
+            .env("CARGO_BUILD_JOBS", "2")
+            .env("CMAKE_BUILD_PARALLEL_LEVEL", "2")
             .env("GLIBC_TUNABLES", "glibc.pthread.rseq=0")
             .env("ARCHPHENE_RUNTIME_LOADER", &self.loader)
             .env("ARCHPHENE_RUNTIME_LIB", &self.library_path)
@@ -568,6 +623,13 @@ impl CommandEnvironment {
     ) -> Command {
         let mut command = self.build_command(launch, arguments, "xterm-256color");
         command
+            /*
+             * Chromium/Electron issue some temporary-file syscalls inline
+             * instead of through libc, so GUI clients receive the private
+             * physical directory. CLI and build processes retain logical
+             * /tmp above for ordinary Linux and GLib temporary-file semantics.
+             */
+            .env("TMPDIR", self.arch_root.join("tmp"))
             .env("WAYLAND_DISPLAY", wayland_display)
             .env("XDG_SESSION_TYPE", "wayland")
             .env("XDG_CURRENT_DESKTOP", "Archphene")
@@ -690,6 +752,11 @@ pub struct BatchProcess {
     log_bytes: [u8; MAX_BATCH_LOG_BYTES],
     log_start: usize,
     log_length: usize,
+    diagnostic_bytes: [u8; MAX_BATCH_DIAGNOSTIC_BYTES],
+    diagnostic_start: usize,
+    diagnostic_length: usize,
+    diagnostic_line: [u8; MAX_BATCH_DIAGNOSTIC_LINE_BYTES],
+    diagnostic_line_length: usize,
     deadline: Instant,
 }
 
@@ -709,19 +776,52 @@ impl BatchProcess {
             let _ = system::kill_process_group(self.process_group);
             self.exit_status = Some(exit_code(status));
             self.child = None;
-            self.drain_logs()?;
+            /*
+             * A warning-heavy compiler can leave megabytes queued when it
+             * exits. The process group has been stopped, so drain through EOF
+             * (with fixed byte/time bounds) to retain the true actionable tail
+             * in the fixed ring instead of an earlier warning block.
+             */
+            self.drain_finished_logs()?;
         }
         Ok(self.exit_status)
     }
 
     pub fn read_logs(&mut self, output: &mut [u8]) -> Result<usize, ProcessError> {
         self.drain_logs()?;
-        let length = self.log_length.min(output.len());
-        let skipped = self.log_length - length;
-        for (index, destination) in output[..length].iter_mut().enumerate() {
-            *destination = self.log_bytes[(self.log_start + skipped + index) % MAX_BATCH_LOG_BYTES];
+        if self.diagnostic_length == 0 {
+            let length = self.log_length.min(output.len());
+            let skipped = self.log_length - length;
+            for (index, destination) in output[..length].iter_mut().enumerate() {
+                *destination =
+                    self.log_bytes[(self.log_start + skipped + index) % MAX_BATCH_LOG_BYTES];
+            }
+            return Ok(length);
         }
-        Ok(length)
+        let diagnostic_length = self.diagnostic_length.min(output.len());
+        let diagnostic_skipped = self.diagnostic_length - diagnostic_length;
+        for (index, destination) in output[..diagnostic_length].iter_mut().enumerate() {
+            *destination = self.diagnostic_bytes
+                [(self.diagnostic_start + diagnostic_skipped + index) % MAX_BATCH_DIAGNOSTIC_BYTES];
+        }
+        let separator_length = BATCH_DIAGNOSTIC_SEPARATOR
+            .len()
+            .min(output.len().saturating_sub(diagnostic_length));
+        output[diagnostic_length..diagnostic_length + separator_length]
+            .copy_from_slice(&BATCH_DIAGNOSTIC_SEPARATOR[..separator_length]);
+        let prefix_length = diagnostic_length + separator_length;
+        let tail_length = self
+            .log_length
+            .min(output.len().saturating_sub(prefix_length));
+        let tail_skipped = self.log_length - tail_length;
+        for (index, destination) in output[prefix_length..prefix_length + tail_length]
+            .iter_mut()
+            .enumerate()
+        {
+            *destination =
+                self.log_bytes[(self.log_start + tail_skipped + index) % MAX_BATCH_LOG_BYTES];
+        }
+        Ok(prefix_length + tail_length)
     }
 
     pub fn close(&mut self) {
@@ -734,31 +834,113 @@ impl BatchProcess {
     }
 
     fn drain_logs(&mut self) -> Result<(), ProcessError> {
-        let mut chunk = [0_u8; 4096];
-        let mut drained = 0_usize;
-        while drained < MAX_GUI_LOG_DRAIN_BYTES {
-            let remaining = MAX_GUI_LOG_DRAIN_BYTES - drained;
-            let read_length = remaining.min(chunk.len());
-            match self.log_reader.read(&mut chunk[..read_length]) {
-                Ok(0) => return Ok(()),
-                Ok(length) => {
-                    for byte in &chunk[..length] {
-                        if self.log_length < MAX_BATCH_LOG_BYTES {
-                            let index = (self.log_start + self.log_length) % MAX_BATCH_LOG_BYTES;
-                            self.log_bytes[index] = *byte;
-                            self.log_length += 1;
-                        } else {
-                            self.log_bytes[self.log_start] = *byte;
-                            self.log_start = (self.log_start + 1) % MAX_BATCH_LOG_BYTES;
-                        }
-                    }
-                    drained += length;
+        self.drain_logs_bounded(MAX_GUI_LOG_DRAIN_BYTES).map(|_| ())
+    }
+
+    fn drain_finished_logs(&mut self) -> Result<(), ProcessError> {
+        let deadline = Instant::now() + FINISHED_BATCH_LOG_DRAIN_GRACE;
+        let mut remaining = MAX_FINISHED_BATCH_LOG_DRAIN_BYTES;
+        while remaining > 0 {
+            let (drained, eof) = self.drain_logs_bounded(remaining)?;
+            remaining -= drained;
+            if eof {
+                break;
+            }
+            if drained == 0 {
+                if Instant::now() >= deadline {
+                    break;
                 }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(()),
-                Err(error) => return Err(ProcessError::Io(error)),
+                thread::sleep(FINISHED_BATCH_LOG_DRAIN_RETRY);
             }
         }
         Ok(())
+    }
+
+    fn drain_logs_bounded(&mut self, maximum: usize) -> Result<(usize, bool), ProcessError> {
+        let mut chunk = [0_u8; 4096];
+        let mut drained = 0_usize;
+        while drained < maximum {
+            let remaining = maximum - drained;
+            let read_length = remaining.min(chunk.len());
+            match self.log_reader.read(&mut chunk[..read_length]) {
+                Ok(0) => {
+                    self.finish_diagnostic_line();
+                    return Ok((drained, true));
+                }
+                Ok(length) => {
+                    for byte in &chunk[..length] {
+                        self.append_log_byte(*byte);
+                    }
+                    drained += length;
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    return Ok((drained, false));
+                }
+                Err(error) => return Err(ProcessError::Io(error)),
+            }
+        }
+        Ok((drained, false))
+    }
+
+    fn append_log_byte(&mut self, byte: u8) {
+        if self.log_length < MAX_BATCH_LOG_BYTES {
+            let index = (self.log_start + self.log_length) % MAX_BATCH_LOG_BYTES;
+            self.log_bytes[index] = byte;
+            self.log_length += 1;
+        } else {
+            self.log_bytes[self.log_start] = byte;
+            self.log_start = (self.log_start + 1) % MAX_BATCH_LOG_BYTES;
+        }
+        if self.diagnostic_line_length == MAX_BATCH_DIAGNOSTIC_LINE_BYTES {
+            self.finish_diagnostic_line();
+        }
+        self.diagnostic_line[self.diagnostic_line_length] = byte;
+        self.diagnostic_line_length += 1;
+        if byte == b'\n' {
+            self.finish_diagnostic_line();
+        }
+    }
+
+    fn finish_diagnostic_line(&mut self) {
+        let length = self.diagnostic_line_length;
+        if length == 0 {
+            return;
+        }
+        const PATTERNS: &[&[u8]] = &[
+            b"FAILED:",
+            b"error:",
+            b"fatal:",
+            b"No such file",
+            b"not found",
+            b"Killed",
+            b"ninja: build stopped",
+            b"collect2:",
+            b"undefined reference",
+            b"Traceback",
+            b"Exception",
+        ];
+        let retain = {
+            let line = &self.diagnostic_line[..length];
+            PATTERNS
+                .iter()
+                .any(|pattern| line.windows(pattern.len()).any(|value| value == *pattern))
+        };
+        if retain {
+            for index in 0..length {
+                let byte = self.diagnostic_line[index];
+                if self.diagnostic_length < MAX_BATCH_DIAGNOSTIC_BYTES {
+                    let index = (self.diagnostic_start + self.diagnostic_length)
+                        % MAX_BATCH_DIAGNOSTIC_BYTES;
+                    self.diagnostic_bytes[index] = byte;
+                    self.diagnostic_length += 1;
+                } else {
+                    self.diagnostic_bytes[self.diagnostic_start] = byte;
+                    self.diagnostic_start =
+                        (self.diagnostic_start + 1) % MAX_BATCH_DIAGNOSTIC_BYTES;
+                }
+            }
+        }
+        self.diagnostic_line_length = 0;
     }
 }
 
@@ -1558,6 +1740,7 @@ struct LaunchPlan {
     argv0: String,
     interpreter_argument: Option<String>,
     script: Option<PathBuf>,
+    library_paths: Vec<PathBuf>,
 }
 
 fn prepare_launch(
@@ -1569,11 +1752,13 @@ fn prepare_launch(
     let mut header = [0_u8; MAX_SHEBANG_BYTES];
     let length = file.read(&mut header)?;
     if header[..length].starts_with(b"\x7fELF") {
+        let library_paths = elf_absolute_library_paths(root, &command_path)?;
         return Ok(LaunchPlan {
             program: command_path,
             argv0: command.to_owned(),
             interpreter_argument: None,
             script: None,
+            library_paths,
         });
     }
     if !header[..length].starts_with(b"#!") {
@@ -1612,11 +1797,170 @@ fn prepare_launch(
         return Err(ProcessError::InvalidInterpreter);
     }
     Ok(LaunchPlan {
+        library_paths: elf_absolute_library_paths(root, &interpreter)?,
         program: interpreter,
         argv0: interpreter_name.to_owned(),
         interpreter_argument,
-        script: Some(command_path),
+        /*
+         * Resolution above proved the installed script and interpreter are
+         * safe. Present the script through the logical Linux namespace so
+         * Bash, Python, diagnostics, and `$0` never depend on an
+         * Android-private /data pathname or one of its equivalent aliases.
+         */
+        script: Some(Path::new("/usr/bin").join(command)),
     })
+}
+
+fn elf_absolute_library_paths(root: &Path, program: &Path) -> Result<Vec<PathBuf>, ProcessError> {
+    let mut file = File::open(program)?;
+    let file_bytes = file.metadata()?.len();
+    let mut header = [0_u8; 64];
+    let header_bytes = file.read(&mut header)?;
+    if header_bytes < header.len() {
+        return Ok(Vec::new());
+    }
+    if &header[..4] != b"\x7fELF" || header[4] != 2 || header[5] != 1 {
+        return Err(ProcessError::UnsupportedProgram);
+    }
+    let program_offset = little_u64(&header[32..40]);
+    let entry_bytes = usize::from(little_u16(&header[54..56]));
+    let entry_count = usize::from(little_u16(&header[56..58]));
+    if entry_bytes != 56
+        || entry_count == 0
+        || entry_count > MAX_ELF_PROGRAM_HEADERS
+        || program_offset > file_bytes
+        || (entry_count as u64)
+            .checked_mul(entry_bytes as u64)
+            .is_none_or(|bytes| bytes > file_bytes - program_offset)
+    {
+        return Err(ProcessError::UnsupportedProgram);
+    }
+    let mut loads = [(0_u64, 0_u64, 0_u64); MAX_ELF_PROGRAM_HEADERS];
+    let mut load_count = 0_usize;
+    let mut dynamic = None;
+    file.seek(SeekFrom::Start(program_offset))?;
+    for _ in 0..entry_count {
+        let mut entry = [0_u8; 56];
+        file.read_exact(&mut entry)?;
+        let kind = little_u32(&entry[..4]);
+        let offset = little_u64(&entry[8..16]);
+        let address = little_u64(&entry[16..24]);
+        let bytes = little_u64(&entry[32..40]);
+        if kind == 1 {
+            loads[load_count] = (address, offset, bytes);
+            load_count += 1;
+        } else if kind == 2 && dynamic.is_none() {
+            dynamic = Some((offset, bytes));
+        }
+    }
+    let Some((dynamic_offset, dynamic_bytes)) = dynamic else {
+        return Ok(Vec::new());
+    };
+    if dynamic_offset > file_bytes
+        || dynamic_bytes > file_bytes - dynamic_offset
+        || dynamic_bytes / 16 > 4096
+    {
+        return Err(ProcessError::UnsupportedProgram);
+    }
+    let mut string_address = None;
+    let mut string_bytes = None;
+    let mut runpath_index = None;
+    let mut has_runpath = false;
+    file.seek(SeekFrom::Start(dynamic_offset))?;
+    for _ in 0..dynamic_bytes / 16 {
+        let mut entry = [0_u8; 16];
+        file.read_exact(&mut entry)?;
+        let tag = little_i64(&entry[..8]);
+        let value = little_u64(&entry[8..]);
+        match tag {
+            0 => break,
+            5 => string_address = Some(value),
+            10 => string_bytes = Some(value),
+            29 => {
+                runpath_index = Some(value);
+                has_runpath = true;
+            }
+            15 if !has_runpath => runpath_index = Some(value),
+            _ => {}
+        }
+    }
+    let (Some(string_address), Some(string_bytes), Some(runpath_index)) =
+        (string_address, string_bytes, runpath_index)
+    else {
+        return Ok(Vec::new());
+    };
+    if runpath_index >= string_bytes {
+        return Err(ProcessError::UnsupportedProgram);
+    }
+    let string_offset = loads[..load_count]
+        .iter()
+        .find_map(|(address, offset, bytes)| {
+            (string_address >= *address && string_address - *address < *bytes)
+                .then_some(offset + (string_address - address))
+        })
+        .ok_or(ProcessError::UnsupportedProgram)?;
+    let maximum = (string_bytes - runpath_index)
+        .min(MAX_ELF_RUNPATH_BYTES as u64)
+        .min(file_bytes.saturating_sub(string_offset + runpath_index));
+    if maximum == 0 {
+        return Err(ProcessError::UnsupportedProgram);
+    }
+    let mut runpath = [0_u8; MAX_ELF_RUNPATH_BYTES];
+    file.seek(SeekFrom::Start(string_offset + runpath_index))?;
+    file.read_exact(&mut runpath[..maximum as usize])?;
+    let end = runpath[..maximum as usize]
+        .iter()
+        .position(|byte| *byte == 0)
+        .ok_or(ProcessError::UnsupportedProgram)?;
+    let runpath =
+        std::str::from_utf8(&runpath[..end]).map_err(|_| ProcessError::UnsupportedProgram)?;
+    let canonical_root = root.canonicalize()?;
+    let mut paths = Vec::new();
+    for value in runpath.split(':').filter(|value| value.starts_with('/')) {
+        let logical = Path::new(value);
+        if logical.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::Prefix(_) | Component::CurDir
+            )
+        }) {
+            return Err(ProcessError::UnsafeCommand(program.to_path_buf()));
+        }
+        let physical = root.join(
+            logical
+                .strip_prefix("/")
+                .map_err(|_| ProcessError::UnsafeCommand(program.to_path_buf()))?,
+        );
+        let resolved = physical.canonicalize()?;
+        let metadata = fs::symlink_metadata(&resolved)?;
+        if !metadata.is_dir()
+            || metadata.mode() & 0o002 != 0
+            || resolved == canonical_root
+            || !resolved.starts_with(&canonical_root)
+        {
+            return Err(ProcessError::UnsafeCommand(program.to_path_buf()));
+        }
+        if !paths.contains(&resolved) {
+            paths.push(resolved);
+        }
+    }
+    Ok(paths)
+}
+
+fn little_u16(bytes: &[u8]) -> u16 {
+    u16::from_le_bytes(bytes.try_into().expect("fixed-width ELF field"))
+}
+
+fn little_u32(bytes: &[u8]) -> u32 {
+    u32::from_le_bytes(bytes.try_into().expect("fixed-width ELF field"))
+}
+
+fn little_u64(bytes: &[u8]) -> u64 {
+    u64::from_le_bytes(bytes.try_into().expect("fixed-width ELF field"))
+}
+
+fn little_i64(bytes: &[u8]) -> i64 {
+    i64::from_le_bytes(bytes.try_into().expect("fixed-width ELF field"))
 }
 
 fn conventional_command_name(path: &str) -> Option<&str> {
@@ -2333,6 +2677,41 @@ mod tests {
             file.set_permissions(fs::Permissions::from_mode(0o755))
                 .expect("program mode");
         }
+
+        fn elf_program(&self, name: &str) {
+            let mut content = vec![0_u8; 120];
+            content[..6].copy_from_slice(b"\x7fELF\x02\x01");
+            content[32..40].copy_from_slice(&64_u64.to_le_bytes());
+            content[54..56].copy_from_slice(&56_u16.to_le_bytes());
+            content[56..58].copy_from_slice(&1_u16.to_le_bytes());
+            content[64..68].copy_from_slice(&1_u32.to_le_bytes());
+            content[96..104].copy_from_slice(&120_u64.to_le_bytes());
+            self.program(name, &content);
+        }
+
+        fn elf_runpath_program(&self, name: &str, runpath: &str) {
+            let string_offset = 240_usize;
+            let mut content = vec![0_u8; string_offset + runpath.len() + 1];
+            let content_bytes = content.len() as u64;
+            content[..6].copy_from_slice(b"\x7fELF\x02\x01");
+            content[32..40].copy_from_slice(&64_u64.to_le_bytes());
+            content[54..56].copy_from_slice(&56_u16.to_le_bytes());
+            content[56..58].copy_from_slice(&2_u16.to_le_bytes());
+            content[64..68].copy_from_slice(&1_u32.to_le_bytes());
+            content[96..104].copy_from_slice(&content_bytes.to_le_bytes());
+            content[120..124].copy_from_slice(&2_u32.to_le_bytes());
+            content[128..136].copy_from_slice(&176_u64.to_le_bytes());
+            content[136..144].copy_from_slice(&176_u64.to_le_bytes());
+            content[152..160].copy_from_slice(&64_u64.to_le_bytes());
+            content[176..184].copy_from_slice(&5_i64.to_le_bytes());
+            content[184..192].copy_from_slice(&(string_offset as u64).to_le_bytes());
+            content[192..200].copy_from_slice(&10_i64.to_le_bytes());
+            content[200..208].copy_from_slice(&((runpath.len() + 1) as u64).to_le_bytes());
+            content[208..216].copy_from_slice(&29_i64.to_le_bytes());
+            content[string_offset..string_offset + runpath.len()]
+                .copy_from_slice(runpath.as_bytes());
+            self.program(name, &content);
+        }
     }
 
     impl Drop for TestRoot {
@@ -2463,6 +2842,7 @@ mod tests {
             argv0: "loader".to_owned(),
             interpreter_argument: None,
             script: None,
+            library_paths: Vec::new(),
         };
         let command = environment.build_command(&launch, &[], "xterm-256color");
         let value = |name: &str| {
@@ -2471,8 +2851,7 @@ mod tests {
                 .find_map(|(key, value)| (key == name).then_some(value).flatten())
         };
         assert_eq!(value("HOME"), Some(OsStr::new("/home/archphene")));
-        let expected_tmpdir = root.0.join("tmp");
-        assert_eq!(value("TMPDIR"), Some(expected_tmpdir.as_os_str()));
+        assert_eq!(value("TMPDIR"), Some(OsStr::new("/tmp")));
         assert_eq!(
             value("PATH"),
             Some(OsStr::new(
@@ -2481,6 +2860,9 @@ mod tests {
         );
         assert_eq!(value("LANG"), Some(OsStr::new("C.UTF-8")));
         assert_eq!(value("LC_ALL"), Some(OsStr::new("C.UTF-8")));
+        assert_eq!(value("MAKEFLAGS"), Some(OsStr::new("-j2")));
+        assert_eq!(value("CARGO_BUILD_JOBS"), Some(OsStr::new("2")));
+        assert_eq!(value("CMAKE_BUILD_PARALLEL_LEVEL"), Some(OsStr::new("2")),);
         let expected_locale_path = root.0.join("usr/lib/locale");
         assert_eq!(value("LOCPATH"), Some(expected_locale_path.as_os_str()),);
         assert_eq!(
@@ -2496,6 +2878,12 @@ mod tests {
             value("LD_PRELOAD"),
             Some(environment.path_bridge.as_os_str())
         );
+        let gui_command = environment.build_gui_command(&launch, &[], "archphene-wayland-1");
+        let gui_tmpdir = gui_command
+            .get_envs()
+            .find_map(|(key, value)| (key == "TMPDIR").then_some(value).flatten());
+        let expected_gui_tmpdir = root.0.join("tmp");
+        assert_eq!(gui_tmpdir, Some(expected_gui_tmpdir.as_os_str()));
         assert_eq!(
             value("GDK_PIXBUF_MODULE_FILE"),
             Some(pixbuf_modules.as_os_str()),
@@ -2588,6 +2976,7 @@ mod tests {
             argv0: "loader".to_owned(),
             interpreter_argument: None,
             script: None,
+            library_paths: Vec::new(),
         };
         let command = environment.build_gui_command(&launch, &[], "launcher.sock");
         let value = |name: &str| {
@@ -2667,9 +3056,9 @@ mod tests {
     #[test]
     fn launch_plans_use_only_installed_elf_interpreters() {
         let root = TestRoot::new();
-        root.program("bash", b"\x7fELF interpreter");
-        root.program("env", b"\x7fELF env");
-        root.program("direct", b"\x7fELF direct");
+        root.elf_program("bash");
+        root.elf_program("env");
+        root.elf_program("direct");
         root.program("script", b"#!/usr/bin/bash -e\nprintf ok\n");
         root.program("env-script", b"#!/usr/bin/env bash\nprintf ok\n");
 
@@ -2680,6 +3069,7 @@ mod tests {
                 argv0: "direct".to_owned(),
                 interpreter_argument: None,
                 script: None,
+                library_paths: Vec::new(),
             }
         );
         assert_eq!(
@@ -2688,7 +3078,8 @@ mod tests {
                 program: root.0.join("usr/bin/bash"),
                 argv0: "bash".to_owned(),
                 interpreter_argument: Some("-e".to_owned()),
-                script: Some(root.0.join("usr/bin/script")),
+                script: Some(PathBuf::from("/usr/bin/script")),
+                library_paths: Vec::new(),
             }
         );
         assert_eq!(
@@ -2696,6 +3087,24 @@ mod tests {
                 .expect("env script plan")
                 .program,
             root.0.join("usr/bin/env")
+        );
+    }
+
+    #[test]
+    fn launch_plan_maps_absolute_elf_runpath_below_the_arch_root() {
+        let root = TestRoot::new();
+        fs::create_dir_all(root.0.join("usr/lib/private")).expect("runpath");
+        root.elf_runpath_program("runpath", "/usr/lib/private");
+        let plan =
+            prepare_launch(&root.0, "runpath", root.0.join("usr/bin/runpath")).expect("launch");
+        assert_eq!(
+            plan.library_paths,
+            vec![
+                root.0
+                    .join("usr/lib/private")
+                    .canonicalize()
+                    .expect("canonical runpath")
+            ]
         );
     }
 
@@ -2826,6 +3235,50 @@ mod tests {
             MAX_GUI_LOG_BYTES
         );
         assert!(output.iter().all(|byte| *byte == b'b'));
+    }
+
+    #[test]
+    fn finished_batch_drain_retains_the_tail_after_warning_heavy_output() {
+        const MARKER: &[u8] = b"archphene-final-actionable-error\n";
+        let (reader, mut writer) = UnixStream::pair().expect("log pair");
+        reader.set_nonblocking(true).expect("nonblocking reader");
+        let writer_thread = thread::spawn(move || {
+            writer
+                .write_all(b"FAILED: decisive failure\n")
+                .expect("decisive failure");
+            let warning = [b'w'; 4096];
+            for _ in 0..5120 {
+                writer.write_all(&warning).expect("warning output");
+            }
+            writer.write_all(MARKER).expect("final error");
+        });
+        let mut process = BatchProcess {
+            process_group: 0,
+            child: None,
+            exit_status: Some(1),
+            log_reader: reader,
+            log_bytes: [0; MAX_BATCH_LOG_BYTES],
+            log_start: 0,
+            log_length: 0,
+            diagnostic_bytes: [0; MAX_BATCH_DIAGNOSTIC_BYTES],
+            diagnostic_start: 0,
+            diagnostic_length: 0,
+            diagnostic_line: [0; MAX_BATCH_DIAGNOSTIC_LINE_BYTES],
+            diagnostic_line_length: 0,
+            deadline: Instant::now() + Duration::from_secs(1),
+        };
+
+        process.drain_finished_logs().expect("completed log drain");
+        writer_thread.join().expect("log writer");
+        let mut output = [0_u8; MAX_BATCH_LOG_BYTES];
+        let length = process.read_logs(&mut output).expect("bounded log");
+
+        assert!(
+            output[..length]
+                .windows(b"FAILED: decisive failure".len())
+                .any(|value| value == b"FAILED: decisive failure")
+        );
+        assert!(output[..length].ends_with(MARKER));
     }
 
     #[test]

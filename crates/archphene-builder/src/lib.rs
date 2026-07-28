@@ -42,9 +42,12 @@ const CLOSURE_NAME: &str = "package-closure";
 const ARCHIVES_NAME: &str = "archives";
 const BUILD_ROOT_NAME: &str = "build-root";
 const BUILD_ROOT_MANIFEST_NAME: &str = "build-root-manifest";
+const OFFICIAL_SCRIPTLETS_MARKER_NAME: &str = "archphene-official-scriptlets-v1";
 const BUILDER_RUNTIME_ALIAS_NAME: &str = "builder-runtime-v1";
 const BUILDER_RUNTIME_HEADER: &str = "# org.archphene.builder-runtime.v1";
 const BUILDER_RUNTIME_PATH_BRIDGE: &str = "libarchphene_path_bridge.so";
+const BUILDER_NINJA_WRAPPER_NAME: &str = "ninja";
+const BUILDER_NINJA_WRAPPER: &[u8] = b"#!/usr/bin/sh\nexec /usr/bin/ninja -j2 \"$@\"\n";
 const PACMAN_LOCAL_DATABASE_VERSION: &[u8] = b"9\n";
 const MAX_BUILDER_RUNTIME_MANIFEST_BYTES: usize = 32 * 1024;
 const MAX_BUILDER_RUNTIME_ENTRIES: usize = 32;
@@ -80,6 +83,15 @@ pub enum BuilderError {
     OutputLimit,
     InvalidArchive,
     InvalidRuntime,
+    RuntimeProbe {
+        exit_code: i32,
+        output: String,
+    },
+    OfficialScriptlet {
+        package: String,
+        exit_code: i32,
+        output: String,
+    },
     Io(std::io::Error),
     Syscall(Errno),
     Root(RootError),
@@ -99,6 +111,27 @@ impl fmt::Display for BuilderError {
             Self::OutputLimit => formatter.write_str("builder limit exceeded"),
             Self::InvalidArchive => formatter.write_str("invalid package archive"),
             Self::InvalidRuntime => formatter.write_str("invalid Builder execution runtime"),
+            Self::RuntimeProbe { exit_code, output } => {
+                write!(formatter, "Builder makepkg probe exited {exit_code}")?;
+                if !output.is_empty() {
+                    write!(formatter, ": {output}")?;
+                }
+                Ok(())
+            }
+            Self::OfficialScriptlet {
+                package,
+                exit_code,
+                output,
+            } => {
+                write!(
+                    formatter,
+                    "official package {package} post-install script exited {exit_code}",
+                )?;
+                if !output.is_empty() {
+                    write!(formatter, ": {output}")?;
+                }
+                Ok(())
+            }
             Self::Io(error) => error.fmt(formatter),
             Self::Syscall(error) => error.fmt(formatter),
             Self::Root(error) => error.fmt(formatter),
@@ -186,6 +219,7 @@ pub struct ProvisionSession {
     expected: ExtractionReport,
     extracted: ExtractionReport,
     package_info_buffer: Vec<u8>,
+    install_script_buffer: Vec<u8>,
 }
 
 pub struct BuilderRuntime {
@@ -266,6 +300,20 @@ pub struct AurDependencyArchiveReport {
     pub archive_bytes: u64,
     pub installed_bytes: u64,
     pub manifest_sha256: [u8; 32],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AurDependencyProvenance {
+    pub package_base: String,
+    pub package_name: String,
+    pub version: String,
+    pub architecture: String,
+    pub filename: String,
+    pub staging_index: usize,
+    pub archive_bytes: u64,
+    pub archive_sha256: [u8; 32],
+    pub installed_bytes: u64,
+    pub build_package_count: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -815,10 +863,10 @@ HookDir = /run/archphene-aur-dependencies-v1/hooks\n";
         )
     }));
     let install_arguments: Vec<&str> = install_arguments.iter().map(String::as_str).collect();
-    let output = runtime
+    let exit_code = runtime
         .environment
-        .run_as_root("pacman", &install_arguments)?;
-    if output.exit_code() != 0 {
+        .run_as_root_quiet("pacman", &install_arguments)?;
+    if exit_code != 0 {
         return Err(BuilderError::InvalidInput);
     }
 
@@ -1044,6 +1092,7 @@ impl ProvisionSession {
             expected: ExtractionReport::default(),
             extracted: ExtractionReport::default(),
             package_info_buffer: Vec::with_capacity(MAX_PACKAGE_INFO_BYTES),
+            install_script_buffer: Vec::new(),
         })
     }
 
@@ -1161,10 +1210,12 @@ impl ProvisionSession {
             )?;
             let metadata_archive = open_regular_file(&self.archives, &archive_name)?;
             self.package_info_buffer.clear();
-            read_package_info(
+            self.install_script_buffer.clear();
+            let has_install_script = read_package_metadata(
                 metadata_archive,
                 &package.filename,
                 &mut self.package_info_buffer,
+                &mut self.install_script_buffer,
             )?;
             let architecture =
                 validate_package_info(package, &self.package_info_buffer)?.to_owned();
@@ -1176,6 +1227,7 @@ impl ProvisionSession {
                     .ok_or(BuilderError::InvalidArgument)?,
                 package,
                 &architecture,
+                has_install_script.then_some(self.install_script_buffer.as_slice()),
             )?;
             self.extracted.package_count = self
                 .extracted
@@ -1226,6 +1278,78 @@ impl ProvisionSession {
     }
 }
 
+fn run_official_install_scriptlets(
+    environment: &CommandEnvironment,
+    root: &OwnedFd,
+    packages: &[ExpectedPackage],
+    closure_sha256: [u8; 32],
+) -> Result<(), BuilderError> {
+    let var = open_directory(root, "var")?;
+    let lib = open_directory(&var, "lib")?;
+    let pacman = open_directory(&lib, "pacman")?;
+    let local = open_directory(&pacman, "local")?;
+    let marker = format!(
+        "ABSI0001\nclosure={}\npackages={}\n",
+        hex_sha256(&closure_sha256),
+        packages.len(),
+    );
+    match statat(
+        &pacman,
+        OFFICIAL_SCRIPTLETS_MARKER_NAME,
+        AtFlags::SYMLINK_NOFOLLOW,
+    ) {
+        Ok(metadata)
+            if FileType::from_raw_mode(metadata.st_mode) == FileType::RegularFile
+                && read_bounded_regular_file(&pacman, OFFICIAL_SCRIPTLETS_MARKER_NAME, 1024)?
+                    == marker.as_bytes() =>
+        {
+            return Ok(());
+        }
+        Ok(_) => return Err(BuilderError::UnsafeWorkspace),
+        Err(Errno::NOENT) => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    const SCRIPTLET_COMMAND: &str = "if . \"$1\"; then \
+if type post_install >/dev/null 2>&1; then post_install \"$2\"; fi; \
+fi";
+    for package in packages {
+        let directory_name = format!("{}-{}", package.name, package.version);
+        let directory = open_directory(&local, &directory_name)?;
+        match statat(&directory, "install", AtFlags::SYMLINK_NOFOLLOW) {
+            Err(Errno::NOENT) => continue,
+            Err(error) => return Err(error.into()),
+            Ok(metadata) if FileType::from_raw_mode(metadata.st_mode) == FileType::RegularFile => {}
+            Ok(_) => return Err(BuilderError::UnsafeWorkspace),
+        }
+        // Revalidate the bounded signed-package script immediately before the
+        // root-identity shell sources the corresponding logical path.
+        read_bounded_regular_file(&directory, "install", MAX_INSTALL_SCRIPT_BYTES)?;
+        let install_path = format!("/var/lib/pacman/local/{directory_name}/install");
+        let output = environment.run_as_root(
+            "sh",
+            &[
+                "-c",
+                SCRIPTLET_COMMAND,
+                "archphene-official-scriptlet",
+                &install_path,
+                &package.version,
+            ],
+        )?;
+        if output.exit_code() != 0 {
+            return Err(BuilderError::OfficialScriptlet {
+                package: package.name.clone(),
+                exit_code: output.exit_code(),
+                output: String::from_utf8_lossy(output.as_bytes()).into_owned(),
+            });
+        }
+    }
+    write_atomic(&pacman, OFFICIAL_SCRIPTLETS_MARKER_NAME, marker.as_bytes())?;
+    fsync(&local)?;
+    fsync(&pacman)?;
+    Ok(())
+}
+
 impl BuilderRuntime {
     pub fn prepare(
         files_directory: &Path,
@@ -1243,6 +1367,16 @@ impl BuilderRuntime {
         let root_report_bytes =
             read_bounded_regular_file(&workspace, BUILD_ROOT_MANIFEST_NAME, 1024)?;
         let (closure_sha256, root_report) = parse_build_root_manifest(&root_report_bytes)?;
+        let closure = open_directory(&workspace, CLOSURE_NAME)?;
+        let closure_manifest = read_bounded_regular_file(
+            &closure,
+            PUBLISHED_MANIFEST_NAME,
+            MAX_CLOSURE_MANIFEST_BYTES,
+        )?;
+        if sha256_bytes(&closure_manifest) != closure_sha256 {
+            return Err(BuilderError::InvalidInput);
+        }
+        let official_packages = parse_manifest(&closure_manifest)?;
         let root = files_directory.join(WORKSPACE_NAME).join(BUILD_ROOT_NAME);
         let root_descriptor = openat(
             CWD,
@@ -1250,6 +1384,7 @@ impl BuilderRuntime {
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         )?;
+        publish_builder_ninja_wrapper(&root_descriptor)?;
         let run = open_directory(&root_descriptor, "run")?;
         let mut visited = 0;
         remove_entry_if_present(&run, BUILDER_RUNTIME_ALIAS_NAME, 0, &mut visited)?;
@@ -1301,6 +1436,12 @@ impl BuilderRuntime {
             &alias_path,
             None,
         )?;
+        run_official_install_scriptlets(
+            &environment,
+            &root_descriptor,
+            &official_packages,
+            closure_sha256,
+        )?;
         Ok(Self {
             environment,
             root_report,
@@ -1317,7 +1458,10 @@ impl BuilderRuntime {
                 .windows(b"makepkg".len())
                 .any(|value| value.eq_ignore_ascii_case(b"makepkg"))
         {
-            return Err(BuilderError::InvalidRuntime);
+            return Err(BuilderError::RuntimeProbe {
+                exit_code: output.exit_code(),
+                output: String::from_utf8_lossy(output.as_bytes()).trim().to_owned(),
+            });
         }
         Ok(output.as_bytes().to_vec())
     }
@@ -1329,6 +1473,41 @@ impl BuilderRuntime {
     pub fn closure_sha256(&self) -> [u8; 32] {
         self.closure_sha256
     }
+}
+
+fn publish_builder_ninja_wrapper(root: &OwnedFd) -> Result<(), BuilderError> {
+    let usr = open_directory(root, "usr")?;
+    let local = open_or_create_directory(&usr, "local")?;
+    let bin = open_or_create_directory(&local, "bin")?;
+    match statat(&bin, BUILDER_NINJA_WRAPPER_NAME, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(metadata)
+            if FileType::from_raw_mode(metadata.st_mode) == FileType::RegularFile
+                && metadata.st_mode & 0o777 == 0o700
+                && metadata.st_size == BUILDER_NINJA_WRAPPER.len() as i64 =>
+        {
+            let existing = read_bounded_regular_file(
+                &bin,
+                BUILDER_NINJA_WRAPPER_NAME,
+                BUILDER_NINJA_WRAPPER.len(),
+            )?;
+            if existing == BUILDER_NINJA_WRAPPER {
+                return Ok(());
+            }
+            return Err(BuilderError::InvalidRuntime);
+        }
+        Ok(_) => return Err(BuilderError::InvalidRuntime),
+        Err(Errno::NOENT) => {}
+        Err(error) => return Err(error.into()),
+    }
+    write_atomic(&bin, BUILDER_NINJA_WRAPPER_NAME, BUILDER_NINJA_WRAPPER)?;
+    chmodat(
+        &bin,
+        BUILDER_NINJA_WRAPPER_NAME,
+        Mode::from_raw_mode(0o700),
+        AtFlags::empty(),
+    )?;
+    fsync(&bin)?;
+    Ok(())
 }
 
 impl AurBuildSession {
@@ -2672,44 +2851,67 @@ fn inspect_package_archive(
     }
 }
 
-fn read_package_info(
+fn read_package_metadata(
     archive: File,
     filename: &str,
-    output: &mut Vec<u8>,
-) -> Result<(), BuilderError> {
+    package_info: &mut Vec<u8>,
+    install_script: &mut Vec<u8>,
+) -> Result<bool, BuilderError> {
     if filename.ends_with(".pkg.tar.xz") {
-        read_package_info_tar(XzDecoder::new(archive), output)
+        read_package_metadata_tar(XzDecoder::new(archive), package_info, install_script)
     } else if filename.ends_with(".pkg.tar.zst") {
         let decoder = zstd::stream::read::Decoder::new(archive)?;
-        read_package_info_tar(decoder, output)
+        read_package_metadata_tar(decoder, package_info, install_script)
     } else {
         Err(BuilderError::InvalidArchive)
     }
 }
 
-fn read_package_info_tar(reader: impl Read, output: &mut Vec<u8>) -> Result<(), BuilderError> {
+fn read_package_metadata_tar(
+    reader: impl Read,
+    package_info: &mut Vec<u8>,
+    install_script: &mut Vec<u8>,
+) -> Result<bool, BuilderError> {
     let mut archive = Archive::new(reader);
+    let mut found_package_info = false;
+    let mut found_install_script = false;
     for entry in archive.entries()? {
         let entry = entry?;
-        if entry.path()?.as_os_str().as_bytes() != b".PKGINFO" {
-            continue;
-        }
-        if !entry.header().entry_type().is_file()
+        let (output, maximum, found) = match entry.path()?.as_os_str().as_bytes() {
+            b".PKGINFO" => (
+                &mut *package_info,
+                MAX_PACKAGE_INFO_BYTES,
+                &mut found_package_info,
+            ),
+            b".INSTALL" => (
+                &mut *install_script,
+                MAX_INSTALL_SCRIPT_BYTES,
+                &mut found_install_script,
+            ),
+            _ => continue,
+        };
+        if *found
+            || !entry.header().entry_type().is_file()
             || entry.header().size()? == 0
-            || entry.header().size()? > MAX_PACKAGE_INFO_BYTES as u64
+            || entry.header().size()? > maximum as u64
         {
             return Err(BuilderError::InvalidArchive);
         }
+        *found = true;
         output.clear();
-        entry
-            .take((MAX_PACKAGE_INFO_BYTES + 1) as u64)
-            .read_to_end(output)?;
-        if output.is_empty() || output.len() > MAX_PACKAGE_INFO_BYTES {
+        entry.take((maximum + 1) as u64).read_to_end(output)?;
+        if output.is_empty()
+            || output.len() > maximum
+            || (maximum == MAX_INSTALL_SCRIPT_BYTES
+                && (output.contains(&0) || std::str::from_utf8(output).is_err()))
+        {
             return Err(BuilderError::InvalidArchive);
         }
-        return Ok(());
     }
-    Err(BuilderError::InvalidArchive)
+    if !found_package_info {
+        return Err(BuilderError::InvalidArchive);
+    }
+    Ok(found_install_script)
 }
 
 fn validate_package_info<'a>(
@@ -2749,6 +2951,7 @@ fn publish_local_package_database(
     local_database: &OwnedFd,
     package: &ExpectedPackage,
     architecture: &str,
+    install_script: Option<&[u8]>,
 ) -> Result<(), BuilderError> {
     let directory_name = format!("{}-{}", package.name, package.version);
     if directory_name.len() > 240
@@ -2768,6 +2971,9 @@ fn publish_local_package_database(
         package.name, package.version, architecture,
     );
     write_atomic(&directory, "desc", description.as_bytes())?;
+    if let Some(install_script) = install_script {
+        write_atomic(&directory, "install", install_script)?;
+    }
     fsync(&directory)?;
     Ok(())
 }
@@ -3158,6 +3364,88 @@ fn parse_expected_aur_dependency_manifest(
         }
         _ => Err(BuilderError::InvalidInput),
     }
+}
+
+pub fn aur_dependency_provenance_manifest(
+    packages: &[AurDependencyProvenance],
+) -> Result<(Vec<u8>, [u8; 32]), BuilderError> {
+    if packages.is_empty()
+        || packages.len() > MAX_AUR_DEPENDENCY_PACKAGES
+        || !packages.windows(2).all(|pair| {
+            (&pair[0].package_name, &pair[0].filename) < (&pair[1].package_name, &pair[1].filename)
+        })
+    {
+        return Err(BuilderError::InvalidInput);
+    }
+    let mut seen_indices = Vec::with_capacity(packages.len());
+    let mut archive_bytes = 0_u64;
+    let mut installed_bytes = 0_u64;
+    let mut manifest = String::with_capacity(256 + packages.len() * 512);
+    manifest.push_str("ABDI0001\n");
+    for package in packages {
+        if !safe_name(&package.package_base)
+            || !safe_name(&package.package_name)
+            || package.version.is_empty()
+            || package.version.len() > 128
+            || package
+                .version
+                .bytes()
+                .any(|byte| !(0x21..=0x7e).contains(&byte))
+            || !matches!(package.architecture.as_str(), "aarch64" | "x86_64")
+            || !safe_filename(&package.filename)
+            || package.staging_index >= MAX_AUR_DEPENDENCY_PACKAGES
+            || seen_indices.contains(&package.staging_index)
+            || package.archive_bytes == 0
+            || package.archive_bytes > MAX_ARCHIVE_BYTES
+            || package.archive_sha256 == [0; 32]
+            || package.installed_bytes == 0
+            || package.installed_bytes > MAX_EXPANDED_BYTES
+            || package.build_package_count == 0
+            || package.build_package_count > MAX_CLOSURE_PACKAGES + MAX_AUR_DEPENDENCY_PACKAGES
+        {
+            return Err(BuilderError::InvalidInput);
+        }
+        seen_indices.push(package.staging_index);
+        archive_bytes = archive_bytes
+            .checked_add(package.archive_bytes)
+            .ok_or(BuilderError::OutputLimit)?;
+        installed_bytes = installed_bytes
+            .checked_add(package.installed_bytes)
+            .ok_or(BuilderError::OutputLimit)?;
+        manifest.push_str("package\t");
+        for field in [
+            package.package_base.as_str(),
+            package.package_name.as_str(),
+            package.version.as_str(),
+            package.architecture.as_str(),
+            package.filename.as_str(),
+        ] {
+            manifest.push_str(field);
+            manifest.push('\t');
+        }
+        manifest.push_str(&format!(
+            "{:03}-{}\t{}\t{}\t{}\t{}\n",
+            package.staging_index,
+            package.filename,
+            package.archive_bytes,
+            hex_sha256(&package.archive_sha256),
+            package.installed_bytes,
+            package.build_package_count,
+        ));
+    }
+    if archive_bytes > MAX_CLOSURE_ARCHIVE_BYTES || installed_bytes > MAX_EXPANDED_BYTES {
+        return Err(BuilderError::OutputLimit);
+    }
+    manifest.push_str(&format!(
+        "summary\t{}\t{archive_bytes}\t{installed_bytes}\n",
+        packages.len(),
+    ));
+    if manifest.len() > MAX_AUR_DEPENDENCY_MANIFEST_BYTES {
+        return Err(BuilderError::OutputLimit);
+    }
+    let manifest = manifest.into_bytes();
+    let sha256 = sha256_bytes(&manifest);
+    Ok((manifest, sha256))
 }
 
 fn verified_staged_aur_dependencies(
@@ -5327,7 +5615,29 @@ summary\t1\t{}\n",
         fs::create_dir(&workspace).expect("runtime workspace");
         let root = workspace.join(BUILD_ROOT_NAME);
         ArchRoot::bootstrap(&root).expect("runtime root");
-        let closure = [7_u8; 32];
+        let package_archive = b"fixture runtime archive";
+        let package_signature = b"fixture runtime signature";
+        let closure_manifest = fixture_manifest(package_archive, package_signature);
+        let closure = sha256_bytes(&closure_manifest);
+        let closure_directory = workspace.join(CLOSURE_NAME);
+        fs::create_dir(&closure_directory).expect("runtime closure");
+        fs::write(
+            closure_directory.join(PUBLISHED_MANIFEST_NAME),
+            closure_manifest,
+        )
+        .expect("runtime closure manifest");
+        let local_database = root.join("var/lib/pacman/local");
+        fs::create_dir_all(local_database.join("base-devel-1-1")).expect("runtime local database");
+        fs::write(
+            local_database.join("ALPM_DB_VERSION"),
+            PACMAN_LOCAL_DATABASE_VERSION,
+        )
+        .expect("runtime database version");
+        fs::write(
+            local_database.join("base-devel-1-1/desc"),
+            b"%NAME%\nbase-devel\n\n%VERSION%\n1-1\n\n",
+        )
+        .expect("runtime package description");
         fs::write(
             workspace.join(BUILD_ROOT_MANIFEST_NAME),
             format!(
@@ -5492,6 +5802,39 @@ summary\t1\t{}\n",
                 .file_type()
                 .is_symlink(),
         );
+        let ninja = directory
+            .join(WORKSPACE_NAME)
+            .join(BUILD_ROOT_NAME)
+            .join("usr/local/bin")
+            .join(BUILDER_NINJA_WRAPPER_NAME);
+        assert_eq!(
+            fs::read(&ninja).expect("Ninja wrapper"),
+            BUILDER_NINJA_WRAPPER,
+        );
+        assert_eq!(
+            fs::metadata(&ninja)
+                .expect("Ninja wrapper metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700,
+        );
+        let scriptlet_marker = directory
+            .join(WORKSPACE_NAME)
+            .join(BUILD_ROOT_NAME)
+            .join("var/lib/pacman")
+            .join(OFFICIAL_SCRIPTLETS_MARKER_NAME);
+        assert!(
+            fs::read_to_string(&scriptlet_marker)
+                .expect("official scriptlet marker")
+                .contains(&format!("closure={}", hex_sha256(&closure))),
+        );
+        BuilderRuntime::prepare(&directory, &native, &manifest)
+            .expect("idempotent verified Builder runtime");
+        fs::write(&ninja, b"#!/usr/bin/sh\nexit 0\n").expect("tamper Ninja wrapper");
+        fs::set_permissions(&ninja, fs::Permissions::from_mode(0o700))
+            .expect("tampered wrapper mode");
+        assert!(BuilderRuntime::prepare(&directory, &native, &manifest).is_err());
         fs::remove_dir_all(directory).expect("cleanup");
     }
 
@@ -5766,7 +6109,9 @@ summary\t1\t{}\n",
     #[test]
     fn provisions_a_fresh_root_from_an_xz_package() {
         let directory = test_directory();
+        let install_script = b"post_install() { :; }\n";
         let archive = package_archive(|builder| {
+            append_file(builder, ".INSTALL", 0o644, install_script);
             append_file(builder, "usr/bin/build-tool", 0o755, b"tool\n");
             append_symlink(builder, "usr/bin/build-tool-link", Path::new("build-tool"));
         });
@@ -5810,6 +6155,11 @@ summary\t1\t{}\n",
                 .expect("local package description");
         assert!(local_description.contains("%NAME%\nbase-devel\n"));
         assert!(local_description.contains("%VERSION%\n1-1\n"));
+        assert_eq!(
+            fs::read(root.join("var/lib/pacman/local/base-devel-1-1/install"))
+                .expect("local install script"),
+            install_script,
+        );
         let root_manifest = fs::read_to_string(
             directory
                 .join(WORKSPACE_NAME)
@@ -5968,6 +6318,29 @@ summary\t1\t{}\n",
         assert_eq!(packages[0].package_name, "example-bin");
         assert_eq!(archive_bytes, archive.len() as u64);
         assert_eq!(installed_bytes, 7);
+        let provenance: Vec<AurDependencyProvenance> = packages
+            .iter()
+            .map(|package| AurDependencyProvenance {
+                package_base: package.package_base.clone(),
+                package_name: package.package_name.clone(),
+                version: package.version.clone(),
+                architecture: package.architecture.clone(),
+                filename: package.filename.clone(),
+                staging_index: package
+                    .staged_filename
+                    .split_once('-')
+                    .and_then(|(index, _)| index.parse().ok())
+                    .expect("staging index"),
+                archive_bytes: package.archive_bytes,
+                archive_sha256: package.archive_sha256,
+                installed_bytes: package.installed_bytes,
+                build_package_count: package.build_package_count,
+            })
+            .collect();
+        let (encoded, encoded_sha256) =
+            aur_dependency_provenance_manifest(&provenance).expect("canonical provenance");
+        assert_eq!(encoded, manifest);
+        assert_eq!(encoded_sha256, report.manifest_sha256);
         assert!(safe_aur_requirement("example-bin>=1:1.2.3-1"));
         assert!(!safe_aur_requirement("example-bin||substituted"));
         fs::remove_dir_all(directory).expect("cleanup");

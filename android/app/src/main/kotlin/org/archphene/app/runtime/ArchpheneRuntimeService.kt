@@ -1043,9 +1043,13 @@ class ArchpheneRuntimeService : Service() {
     private var retainedAurSourceEvidenceByBase:
         Map<String, Array<AurSourceEvidence>> = emptyMap()
     @Volatile private var retainedAurBuildGraph: AurBuildGraph? = null
+    @Volatile private var retainedAurBuildEnvironment: AurBuildEnvironment? = null
     @Volatile private var retainedAurBuilderReport: AurBuilderReport? = null
     @Volatile private var retainedAurBuiltPackage: AurBuiltPackage? = null
     @Volatile private var retainedAurBuiltPackages: Array<AurBuiltPackage> = emptyArray()
+    @Volatile
+    private var retainedAurGraphBuiltPackages:
+        Array<AurGraphBuiltPackage> = emptyArray()
     @Volatile private var retainedAurBuildLogs = ""
     @Volatile
     private var aurReviewSnapshot =
@@ -1299,6 +1303,7 @@ class ArchpheneRuntimeService : Service() {
 
     private data class AurBuilderReport(
         val packageName: String,
+        val preparedPackageBase: String,
         val uid: Int,
         val selinuxContext: String,
         val stagedBytes: Long,
@@ -1313,6 +1318,9 @@ class ArchpheneRuntimeService : Service() {
         val recipeEntries: Long,
         val recipeBytes: Long,
         val recipeSourceBytes: Long,
+        val dependencyPackageCount: Int,
+        val dependencyManifest: ByteArray?,
+        val dependencyManifestSha256: String,
     )
 
     private data class AurRecipeWorkspace(
@@ -1338,8 +1346,29 @@ class ArchpheneRuntimeService : Service() {
         val persistent: Boolean = false,
     )
 
+    private data class AurGraphBuiltPackage(
+        val packageBase: String,
+        val version: String,
+        val architecture: String,
+        val built: AurBuiltPackage,
+    )
+
+    private data class AurBuilderDependencyReport(
+        val packageCount: Int,
+        val requirementCount: Int,
+        val archiveBytes: Long,
+        val installedBytes: Long,
+        val manifestSha256: String,
+        val manifest: ByteArray,
+    )
+
+    private data class AurGraphBuildResult(
+        val builder: AurBuilderReport,
+        val packages: Array<AurGraphBuiltPackage>,
+    )
+
     private fun detachRetainedAurBuiltPackageFiles(): Array<File> {
-        val files =
+        val currentFiles =
             if (retainedAurBuiltPackages.isEmpty()) {
                 retainedAurBuiltPackage
                     ?.takeUnless(AurBuiltPackage::persistent)
@@ -1352,8 +1381,18 @@ class ArchpheneRuntimeService : Service() {
                     .map(AurBuiltPackage::file)
                     .toTypedArray()
             }
+        val files =
+            (
+                currentFiles.asList() +
+                    retainedAurGraphBuiltPackages
+                        .map(AurGraphBuiltPackage::built)
+                        .filterNot(AurBuiltPackage::persistent)
+                        .map(AurBuiltPackage::file)
+            ).distinctBy(File::getAbsolutePath)
+                .toTypedArray()
         retainedAurBuiltPackages = emptyArray()
         retainedAurBuiltPackage = null
+        retainedAurGraphBuiltPackages = emptyArray()
         return files
     }
 
@@ -2253,9 +2292,20 @@ class ArchpheneRuntimeService : Service() {
             IBinder.FIRST_CALL_TRANSACTION + 17
         private const val AUR_BUILDER_TRANSACTION_PREPARE_PROVISION_ROOT =
             IBinder.FIRST_CALL_TRANSACTION + 18
+        private const val AUR_BUILDER_TRANSACTION_BEGIN_AUR_DEPENDENCIES =
+            IBinder.FIRST_CALL_TRANSACTION + 19
+        private const val AUR_BUILDER_TRANSACTION_STAGE_AUR_DEPENDENCY_BATCH =
+            IBinder.FIRST_CALL_TRANSACTION + 20
+        private const val AUR_BUILDER_TRANSACTION_FINISH_AUR_DEPENDENCIES =
+            IBinder.FIRST_CALL_TRANSACTION + 21
+        private const val AUR_BUILDER_TRANSACTION_ABORT_AUR_DEPENDENCIES =
+            IBinder.FIRST_CALL_TRANSACTION + 22
+        private const val AUR_BUILDER_TRANSACTION_INSTALL_AUR_DEPENDENCIES =
+            IBinder.FIRST_CALL_TRANSACTION + 23
         private const val AUR_BUILDER_PACKAGE_BATCH = 8
         private const val AUR_BUILD_POLL_MILLIS = 100L
         private const val AUR_BUILD_VISIBLE_LOG_CHARACTERS = 8 * 1024
+        private const val AUR_BUILD_DIAGNOSTIC_SEPARATOR = "\n--- recent output ---\n"
         private const val AUR_BUILD_OUTPUT_GLOB = ".aur-*.pkg"
         private const val MAX_STALE_AUR_BUILD_OUTPUTS = 64
         private const val AUR_REDIRECT_LIMIT = 5
@@ -6888,6 +6938,7 @@ class ArchpheneRuntimeService : Service() {
         retainedAurSourceEvidence = emptyArray()
         retainedAurSourceEvidenceByBase = emptyMap()
         retainedAurBuildGraph = null
+        retainedAurBuildEnvironment = null
         retainedAurBuilderReport = null
         val staleAurBuildOutputs = detachRetainedAurBuiltPackageFiles()
         clearAurReviewPresentation()
@@ -7311,6 +7362,7 @@ class ArchpheneRuntimeService : Service() {
         retainedAurSourceEvidence = emptyArray()
         retainedAurSourceEvidenceByBase = emptyMap()
         retainedAurBuildGraph = null
+        retainedAurBuildEnvironment = null
         retainedAurBuilderReport = null
         val staleAurBuildOutputs = detachRetainedAurBuiltPackageFiles()
         clearAurReviewPresentation()
@@ -7724,6 +7776,7 @@ class ArchpheneRuntimeService : Service() {
         retainedAurSourceEvidence = emptyArray()
         retainedAurSourceEvidenceByBase = emptyMap()
         retainedAurBuildGraph = null
+        retainedAurBuildEnvironment = null
         retainedAurBuilderReport = null
         val staleAurBuildOutputs = detachRetainedAurBuiltPackageFiles()
         searchStatus = "Resolving the reviewed AUR build graph"
@@ -7816,17 +7869,14 @@ class ArchpheneRuntimeService : Service() {
                             activeHandle,
                             buildTargets.environment,
                         )
+                    retainedAurBuildEnvironment = buildEnvironment
                     val builder =
-                        if (orderedReviews.size == 1) {
-                            probeAurBuilderCompanion(
-                                activeHandle,
-                                review,
-                                retainedAurSourceEvidence,
-                                buildEnvironment,
-                            )
-                        } else {
-                            null
-                        }
+                        probeAurBuilderCompanion(
+                            activeHandle,
+                            orderedReviews.first(),
+                            evidenceByBase.getValue(orderedReviews.first().packageBase),
+                            buildEnvironment,
+                        )
                     retainedAurBuilderReport = builder
                     publishAurReviewPresentation(
                         review,
@@ -7836,7 +7886,7 @@ class ArchpheneRuntimeService : Service() {
                         buildEnvironment,
                     )
                     val restored =
-                        if (builder == null) {
+                        if (builder == null || orderedReviews.size > 1) {
                             emptyArray()
                         } else {
                             runCatching {
@@ -7885,8 +7935,6 @@ class ArchpheneRuntimeService : Service() {
                             when {
                                 restored.isNotEmpty() ->
                                     "restored verified build · ready to install"
-                                builder == null && orderedReviews.size > 1 ->
-                                    "dependency graph reviewed; sequential build pending"
                                 builder == null ->
                                     "builder companion unavailable"
                                 else ->
@@ -7991,6 +8039,72 @@ class ArchpheneRuntimeService : Service() {
                 requireRuntimeWorker("AUR build")
                 try {
                     deleteRetainedAurBuiltPackageFiles(staleAurBuildOutputs)
+                    val graph =
+                        retainedAurBuildGraph
+                            ?: throw IllegalStateException(
+                                "The verified AUR build graph was not retained",
+                            )
+                    if (graph.packageBases.size > 1) {
+                        val environment =
+                            retainedAurBuildEnvironment
+                                ?: throw IllegalStateException(
+                                    "The verified AUR build environment was not retained",
+                                )
+                        val graphBuild =
+                            runAurBuilderGraphBuild(
+                                activeHandle,
+                                review,
+                                builder,
+                                graph,
+                                environment,
+                                retainedAurSourceEvidenceByBase,
+                            )
+                        val rootPackages =
+                            graphBuild.packages
+                                .filter { value -> value.packageBase == review.packageBase }
+                                .map(AurGraphBuiltPackage::built)
+                                .toTypedArray()
+                        check(
+                            rootPackages.map(AurBuiltPackage::packageName)
+                                .toTypedArray()
+                                .contentEquals(review.requiredPackages),
+                        ) {
+                            "Dependency-first build omitted the selected package-base outputs"
+                        }
+                        retainedAurBuilderReport = graphBuild.builder
+                        retainedAurGraphBuiltPackages = graphBuild.packages
+                        retainedAurBuiltPackages = rootPackages
+                        val selected =
+                            rootPackages.singleOrNull { output ->
+                                output.packageName == review.packageName
+                            } ?: throw IllegalStateException(
+                                "Dependency-first build omitted the selected output",
+                            )
+                        retainedAurBuiltPackage = selected
+                        publishAurBuiltPresentation(review, selected)
+                        lastResolvedPackage = review.packageName
+                        lastResolvedRepository = "aur"
+                        lastResolvedInstalledVersion =
+                            installedPackageVersion(activeHandle, review.packageName)
+                        lastResolvedAvailableVersion = review.version
+                        primaryActionLabel =
+                            if (lastResolvedInstalledVersion.isEmpty()) {
+                                "Install"
+                            } else {
+                                "Update"
+                            }
+                        primaryActionPermitted = true
+                        removeAvailable = lastResolvedInstalledVersion.isNotEmpty()
+                        searchStatus =
+                            "Built and independently verified ${graph.packageBases.size} " +
+                                "AUR package bases · ready for one final install transaction"
+                        Log.i(
+                            TAG,
+                            "AUR dependency-first graph completed for ${review.packageName}: " +
+                                "${graphBuild.packages.size} verified output(s)",
+                        )
+                        return@Thread
+                    }
                     val transient = runAurBuilderBuild(review, builder)
                     searchStatus = "Persisting independently verified build output"
                     val result =
@@ -8040,14 +8154,26 @@ class ArchpheneRuntimeService : Service() {
                             },
                     )
                 } catch (error: Exception) {
+                    /*
+                     * Starting a build consumes the Builder's prepared private
+                     * root even when makepkg, staging, or cancellation fails.
+                     * Never offer that stale capability for a retry. The
+                     * reviewed graph and source evidence remain available, so
+                     * verification can prepare a fresh root without making
+                     * the user repeat the package review.
+                     */
+                    retainedAurBuilderReport = null
+                    clearRetainedAurBuiltPackages()
                     searchStatus =
                         if (
                             error is InterruptedException ||
                             aurBuildCancellationRequested
                         ) {
-                            "AUR build cancelled"
+                            "AUR build cancelled · verify again to prepare a fresh builder"
                         } else {
-                            "AUR build failed: ${error.message ?: error.javaClass.simpleName}"
+                            "AUR build failed: " +
+                                (error.message ?: error.javaClass.simpleName) +
+                                " · verify again to retry"
                         }
                     Log.e(TAG, "AUR build failed", error)
                 } finally {
@@ -8094,6 +8220,133 @@ class ArchpheneRuntimeService : Service() {
         }
     }
 
+    private fun runAurBuilderGraphBuild(
+        activeHandle: Long,
+        rootReview: AurReviewData,
+        initialBuilder: AurBuilderReport,
+        graph: AurBuildGraph,
+        environment: AurBuildEnvironment,
+        sourceEvidenceByBase: Map<String, Array<AurSourceEvidence>>,
+    ): AurGraphBuildResult {
+        requireRuntimeWorker("AUR dependency-first build")
+        check(
+            graph.packageBases.size in 2..32 &&
+                graph.packageBases.last() == rootReview.packageBase &&
+                environment.verified,
+        )
+        val reviewsByBase = LinkedHashMap<String, AurReviewData>()
+        (retainedAurDependencyReviews.asList() + rootReview).forEach { review ->
+            check(reviewsByBase.put(review.packageBase, review) == null) {
+                "Duplicate retained review for ${review.packageBase}"
+            }
+        }
+        val reviews =
+            graph.packageBases.map { packageBase ->
+                reviewsByBase[packageBase]
+                    ?: throw IllegalStateException(
+                        "Missing retained review for graph base $packageBase",
+                    )
+            }
+        check(
+            reviewsByBase.size == reviews.size &&
+                initialBuilder.preparedPackageBase == reviews.first().packageBase,
+        )
+        val outputsByBase =
+            LinkedHashMap<String, List<AurGraphBuiltPackage>>(reviews.size)
+        val allOutputs = ArrayList<AurGraphBuiltPackage>()
+        var builder = initialBuilder
+        try {
+            reviews.forEachIndexed { index, review ->
+                throwIfAurBuildCancelled()
+                if (index > 0) {
+                    val ancestorBases = aurGraphAncestorBases(graph, review.packageBase)
+                    val dependencyOutputs =
+                        graph.packageBases
+                            .filter(ancestorBases::contains)
+                            .flatMap { packageBase ->
+                                outputsByBase[packageBase]
+                                    ?: throw IllegalStateException(
+                                        "AUR graph dependency $packageBase was not built",
+                                    )
+                            }
+                    val requirements =
+                        graph.edges
+                            .filter { edge -> edge.packageBase == review.packageBase }
+                            .map(AurBuildGraphEdge::requirement)
+                            .distinct()
+                            .sorted()
+                    check(
+                        dependencyOutputs.isEmpty() == requirements.isEmpty(),
+                    ) {
+                        "AUR graph dependency evidence is incomplete for ${review.packageBase}"
+                    }
+                    searchStatus =
+                        "Preparing isolated AUR base ${index + 1}/${reviews.size}: " +
+                            review.packageBase
+                    builder =
+                        probeAurBuilderCompanion(
+                            activeHandle,
+                            review,
+                            sourceEvidenceByBase[review.packageBase]
+                                ?: throw IllegalStateException(
+                                    "Missing verified sources for ${review.packageBase}",
+                                ),
+                            environment,
+                            dependencyOutputs,
+                            requirements,
+                        ) ?: throw IllegalStateException(
+                            "The signed AUR builder companion is unavailable",
+                        )
+                }
+                searchStatus =
+                    "Building isolated AUR base ${index + 1}/${reviews.size}: " +
+                        review.packageBase
+                val built = runAurBuilderBuild(review, builder)
+                val wrapped =
+                    built.map { output ->
+                        AurGraphBuiltPackage(
+                            review.packageBase,
+                            review.version,
+                            currentLinuxArchitecture(),
+                            output,
+                        )
+                    }
+                outputsByBase[review.packageBase] = wrapped
+                allOutputs += wrapped
+            }
+            return AurGraphBuildResult(builder, allOutputs.toTypedArray())
+        } catch (error: Exception) {
+            deleteRetainedAurBuiltPackageFiles(
+                allOutputs
+                    .map(AurGraphBuiltPackage::built)
+                    .filterNot(AurBuiltPackage::persistent)
+                    .map(AurBuiltPackage::file)
+                    .toTypedArray(),
+            )
+            throw error
+        }
+    }
+
+    private fun aurGraphAncestorBases(
+        graph: AurBuildGraph,
+        packageBase: String,
+    ): Set<String> {
+        require(packageBase in graph.packageBases)
+        val ancestors = LinkedHashSet<String>()
+        fun collect(value: String) {
+            graph.edges
+                .asSequence()
+                .filter { edge -> edge.packageBase == value }
+                .forEach { edge ->
+                    if (ancestors.add(edge.dependencyBase)) {
+                        collect(edge.dependencyBase)
+                    }
+                }
+        }
+        collect(packageBase)
+        return ancestors
+    }
+
     private fun runAurBuilderBuild(
         review: AurReviewData,
         builder: AurBuilderReport,
@@ -8101,6 +8354,23 @@ class ArchpheneRuntimeService : Service() {
         requireRuntimeWorker("AUR builder execution")
         check(builder.inputManifestSha256.matches(SHA256_HEX))
         check(builder.closureManifestSha256.matches(SHA256_HEX))
+        check(builder.preparedPackageBase == review.packageBase)
+        check(
+            builder.dependencyPackageCount == 0 &&
+                builder.dependencyManifest == null &&
+                builder.dependencyManifestSha256.isEmpty() ||
+                (
+                    builder.dependencyPackageCount in 1..256 &&
+                        builder.dependencyManifest != null &&
+                        builder.dependencyManifest.isNotEmpty() &&
+                        builder.dependencyManifest.size <= 256 * 1024 &&
+                        builder.dependencyManifestSha256.matches(SHA256_HEX) &&
+                        hexSha256(
+                            MessageDigest.getInstance("SHA-256")
+                                .digest(builder.dependencyManifest),
+                        ) == builder.dependencyManifestSha256
+                ),
+        )
         val activeHandle = readyHandle
         check(activeHandle != 0L)
         val architecture =
@@ -8156,7 +8426,7 @@ class ArchpheneRuntimeService : Service() {
                     request.writeString(review.version)
                     request.writeString(builder.inputManifestSha256)
                     request.writeString(builder.closureManifestSha256)
-                    request.writeString("")
+                    request.writeString(builder.dependencyManifestSha256)
                 },
             ) {}
             buildStarted = true
@@ -8184,10 +8454,26 @@ class ArchpheneRuntimeService : Service() {
                         val logBytes = reply.createByteArray() ?: ByteArray(0)
                         check(logBytes.size <= 64 * 1024)
                         val raw = String(logBytes, StandardCharsets.UTF_8)
+                        val diagnosticSeparator =
+                            if (exitStatus > 0) {
+                                raw.indexOf(AUR_BUILD_DIAGNOSTIC_SEPARATOR)
+                            } else {
+                                -1
+                            }
+                        /*
+                         * A completed Builder failure carries a fixed-size
+                         * diagnostic prefix followed by the ordinary output
+                         * tail. Preserve that prefix; taking only the tail
+                         * would discard the error beneath compiler warnings.
+                         */
+                        val selected =
+                            if (diagnosticSeparator >= 0) {
+                                raw.take(diagnosticSeparator)
+                            } else {
+                                raw.takeLast(AUR_BUILD_VISIBLE_LOG_CHARACTERS)
+                            }
                         val visible =
-                            sanitizeCommandOutput(
-                                raw.takeLast(AUR_BUILD_VISIBLE_LOG_CHARACTERS),
-                            ).trim()
+                            sanitizeCommandOutput(selected).trim()
                         AurBuildPoll(exitStatus, visible)
                     }
                 if (poll.logs.isNotEmpty()) {
@@ -8245,7 +8531,7 @@ class ArchpheneRuntimeService : Service() {
                                         request.writeString(review.version)
                                         request.writeString(architecture)
                                         request.writeString(builder.closureManifestSha256)
-                                        request.writeString("")
+                                        request.writeString(builder.dependencyManifestSha256)
                                         request.writeFileDescriptor(destination.fileDescriptor)
                                     },
                                 ) { reply ->
@@ -8265,7 +8551,9 @@ class ArchpheneRuntimeService : Service() {
                                         report.filename.matches(AUR_BUILT_PACKAGE_FILENAME) &&
                                             report.archiveBytes > 0L &&
                                             report.installedBytes > 0L &&
-                                            report.buildPackageCount == builder.closurePackageCount &&
+                                            report.buildPackageCount ==
+                                            builder.closurePackageCount +
+                                            builder.dependencyPackageCount &&
                                             report.sha256.matches(SHA256_HEX) &&
                                             outputFile.length() == report.archiveBytes,
                                     ) {
@@ -8281,6 +8569,8 @@ class ArchpheneRuntimeService : Service() {
                                         packageName,
                                         architecture,
                                         builder.closureManifestSha256,
+                                        builder.dependencyManifest,
+                                        builder.dependencyManifestSha256,
                                         destination,
                                         report,
                                     )
@@ -8328,9 +8618,24 @@ class ArchpheneRuntimeService : Service() {
         packageName: String,
         architecture: String,
         closureSha256: String,
+        dependencyManifest: ByteArray?,
+        dependencyManifestSha256: String,
         descriptor: ParcelFileDescriptor,
         builderReport: AurBuiltPackage,
     ) {
+        require(
+            dependencyManifest == null && dependencyManifestSha256.isEmpty() ||
+                (
+                    dependencyManifest != null &&
+                        dependencyManifest.isNotEmpty() &&
+                        dependencyManifest.size <= 256 * 1024 &&
+                        dependencyManifestSha256.matches(SHA256_HEX)
+                ),
+        )
+        val dependencyManifestBuffer =
+            ByteBuffer.allocateDirect(maxOf(1, dependencyManifest?.size ?: 0)).apply {
+                dependencyManifest?.let(::put)
+            }
         val output =
             ByteBuffer
                 .allocateDirect(NativeRuntime.BUILT_PACKAGE_REPORT_SIZE)
@@ -8345,6 +8650,9 @@ class ArchpheneRuntimeService : Service() {
                 review.version,
                 architecture,
                 closureSha256,
+                dependencyManifestBuffer,
+                dependencyManifest?.size ?: 0,
+                dependencyManifestSha256,
                 output,
             )
         check(result == NativeRuntime.BUILT_PACKAGE_REPORT_SIZE) {
@@ -8731,6 +9039,8 @@ class ArchpheneRuntimeService : Service() {
         review: AurReviewData,
         sourceEvidence: Array<AurSourceEvidence>,
         buildEnvironment: AurBuildEnvironment,
+        dependencyPackages: List<AurGraphBuiltPackage> = emptyList(),
+        dependencyRequirements: List<String> = emptyList(),
     ): AurBuilderReport? {
         val builderPackage =
             if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) {
@@ -8941,6 +9251,17 @@ class ArchpheneRuntimeService : Service() {
                         review,
                         buildEnvironment,
                     )
+                val dependencies =
+                    if (dependencyPackages.isEmpty()) {
+                        check(dependencyRequirements.isEmpty())
+                        null
+                    } else {
+                        stageAndInstallAurBuilderDependencies(
+                            endpoint,
+                            dependencyPackages,
+                            dependencyRequirements,
+                        )
+                    }
                 searchStatus = "Validating the isolated Builder runtime"
                 val runtimeVersion = probeAurBuilderRuntime(endpoint)
                 searchStatus = "Preparing the exact reviewed build recipe"
@@ -8953,6 +9274,7 @@ class ArchpheneRuntimeService : Service() {
                     )
                 return AurBuilderReport(
                     builderPackage,
+                    review.packageBase,
                     reportedUid,
                     selinuxContext,
                     stagedBytes,
@@ -8967,6 +9289,9 @@ class ArchpheneRuntimeService : Service() {
                     recipe.entryCount,
                     recipe.recipeBytes,
                     recipe.sourceBytes,
+                    dependencies?.packageCount ?: 0,
+                    dependencies?.manifest,
+                    dependencies?.manifestSha256.orEmpty(),
                 )
             } finally {
                 request.recycle()
@@ -8997,6 +9322,213 @@ class ArchpheneRuntimeService : Service() {
         val entryCount: Long,
         val expandedBytes: Long,
     )
+
+    private fun stageAndInstallAurBuilderDependencies(
+        endpoint: IBinder,
+        packages: List<AurGraphBuiltPackage>,
+        requirements: List<String>,
+    ): AurBuilderDependencyReport {
+        require(packages.isNotEmpty() && packages.size <= 256)
+        val ordered =
+            packages.sortedWith(
+                compareBy<AurGraphBuiltPackage>(
+                    { value -> value.built.packageName },
+                    { value -> value.built.filename },
+                ),
+            )
+        require(
+            ordered.map { value -> value.built.packageName }.toSet().size == ordered.size &&
+                ordered.map { value -> value.built.filename }.toSet().size == ordered.size &&
+                ordered.all { value ->
+                    value.packageBase.matches(AUR_PACKAGE_NAME) &&
+                        value.version.length in 1..128 &&
+                        value.architecture in arrayOf("aarch64", "x86_64") &&
+                        value.built.filename.matches(AUR_BUILT_PACKAGE_FILENAME) &&
+                        value.built.archiveBytes > 0L &&
+                        value.built.installedBytes > 0L &&
+                        value.built.buildPackageCount > 0 &&
+                        value.built.sha256.matches(SHA256_HEX) &&
+                        value.built.file.isFile &&
+                        value.built.file.length() == value.built.archiveBytes
+                },
+        )
+        val exactRequirements = requirements.distinct().sorted()
+        require(
+            exactRequirements.isNotEmpty() &&
+                exactRequirements.size == requirements.size &&
+                exactRequirements.size <= 256,
+        )
+        var began = false
+        try {
+            transactAurBuilder(
+                endpoint,
+                AUR_BUILDER_TRANSACTION_BEGIN_AUR_DEPENDENCIES,
+                { request -> request.writeInt(ordered.size) },
+            ) {}
+            began = true
+            ordered.indices.chunked(AUR_BUILDER_PACKAGE_BATCH).forEachIndexed {
+                    batchIndex,
+                    indices,
+                ->
+                throwIfAurBuildCancelled()
+                val descriptors =
+                    indices.map { index ->
+                        ParcelFileDescriptor.open(
+                            ordered[index].built.file,
+                            ParcelFileDescriptor.MODE_READ_ONLY,
+                        )
+                    }
+                try {
+                    transactAurBuilder(
+                        endpoint,
+                        AUR_BUILDER_TRANSACTION_STAGE_AUR_DEPENDENCY_BATCH,
+                        { request ->
+                            request.writeInt(indices.size)
+                            indices.forEachIndexed { offset, index ->
+                                val value = ordered[index]
+                                request.writeString(value.packageBase)
+                                request.writeString(value.built.packageName)
+                                request.writeString(value.version)
+                                request.writeString(value.architecture)
+                                request.writeString(value.built.filename)
+                                request.writeLong(value.built.archiveBytes)
+                                request.writeString(value.built.sha256)
+                                request.writeFileDescriptor(
+                                    descriptors[offset].fileDescriptor,
+                                )
+                            }
+                        },
+                    ) { reply ->
+                        check(reply.readInt() == indices.size) {
+                            "Builder did not stage the complete AUR dependency batch"
+                        }
+                    }
+                } finally {
+                    descriptors.forEach(ParcelFileDescriptor::close)
+                }
+                searchStatus =
+                    "Staging verified AUR build output " +
+                        "${minOf(ordered.size, (batchIndex + 1) * AUR_BUILDER_PACKAGE_BATCH)}/" +
+                        "${ordered.size}"
+            }
+            val staged =
+                transactAurBuilder(
+                    endpoint,
+                    AUR_BUILDER_TRANSACTION_FINISH_AUR_DEPENDENCIES,
+                    {},
+                    ::readAurBuilderDependencyReport,
+                )
+            began = false
+            val manifest = aurBuilderDependencyManifest(ordered)
+            val manifestSha256 =
+                hexSha256(MessageDigest.getInstance("SHA-256").digest(manifest))
+            check(
+                staged.packageCount == ordered.size &&
+                    staged.requirementCount == 0 &&
+                    staged.archiveBytes ==
+                    ordered.fold(0L) { total, value ->
+                        Math.addExact(total, value.built.archiveBytes)
+                    } &&
+                    staged.installedBytes ==
+                    ordered.fold(0L) { total, value ->
+                        Math.addExact(total, value.built.installedBytes)
+                    } &&
+                    staged.manifestSha256 == manifestSha256
+            ) {
+                "Builder AUR dependency manifest disagrees with manager evidence"
+            }
+            searchStatus =
+                "Installing ${ordered.size} verified AUR dependency output(s) " +
+                    "into the disposable root"
+            val installed =
+                transactAurBuilder(
+                    endpoint,
+                    AUR_BUILDER_TRANSACTION_INSTALL_AUR_DEPENDENCIES,
+                    { request ->
+                        request.writeString(manifestSha256)
+                        request.writeInt(exactRequirements.size)
+                        exactRequirements.forEach(request::writeString)
+                    },
+                    ::readAurBuilderDependencyReport,
+                )
+            check(
+                installed.packageCount == staged.packageCount &&
+                    installed.requirementCount == exactRequirements.size &&
+                    installed.archiveBytes == staged.archiveBytes &&
+                    installed.installedBytes == staged.installedBytes &&
+                    installed.manifestSha256 == staged.manifestSha256
+            ) {
+                "Builder installed dependency report changed after exact validation"
+            }
+            return installed.copy(manifest = manifest)
+        } finally {
+            if (began) {
+                runCatching {
+                    transactAurBuilder(
+                        endpoint,
+                        AUR_BUILDER_TRANSACTION_ABORT_AUR_DEPENDENCIES,
+                        {},
+                    ) { Unit }
+                }
+            }
+        }
+    }
+
+    private fun readAurBuilderDependencyReport(reply: Parcel): AurBuilderDependencyReport {
+        val report =
+            AurBuilderDependencyReport(
+                reply.readInt(),
+                reply.readInt(),
+                reply.readLong(),
+                reply.readLong(),
+                reply.readString().orEmpty(),
+                ByteArray(0),
+            )
+        check(
+            report.packageCount in 1..256 &&
+                report.requirementCount in 0..256 &&
+                report.archiveBytes > 0L &&
+                report.installedBytes > 0L &&
+                report.manifestSha256.matches(SHA256_HEX),
+        )
+        return report
+    }
+
+    private fun aurBuilderDependencyManifest(
+        packages: List<AurGraphBuiltPackage>,
+    ): ByteArray {
+        require(packages.isNotEmpty() && packages.size <= 256)
+        var archiveBytes = 0L
+        var installedBytes = 0L
+        val text =
+            buildString(256 + packages.size * 512) {
+                append("ABDI0001\n")
+                packages.forEachIndexed { index, value ->
+                    val built = value.built
+                    archiveBytes = Math.addExact(archiveBytes, built.archiveBytes)
+                    installedBytes = Math.addExact(installedBytes, built.installedBytes)
+                    append("package\t")
+                        .append(value.packageBase).append('\t')
+                        .append(built.packageName).append('\t')
+                        .append(value.version).append('\t')
+                        .append(value.architecture).append('\t')
+                        .append(built.filename).append('\t')
+                        .append(index.toString().padStart(3, '0'))
+                        .append('-').append(built.filename).append('\t')
+                        .append(built.archiveBytes).append('\t')
+                        .append(built.sha256).append('\t')
+                        .append(built.installedBytes).append('\t')
+                        .append(built.buildPackageCount).append('\n')
+                }
+                append("summary\t")
+                    .append(packages.size).append('\t')
+                    .append(archiveBytes).append('\t')
+                    .append(installedBytes).append('\n')
+            }
+        val manifest = text.toByteArray(StandardCharsets.US_ASCII)
+        require(manifest.size <= 256 * 1024)
+        return manifest
+    }
 
     private fun stageAurBuildClosure(
         endpoint: IBinder,
@@ -10871,8 +11403,11 @@ class ArchpheneRuntimeService : Service() {
         val review = retainedAurReview
         val built = retainedAurBuiltPackage
         val builtPackages = retainedAurBuiltPackages
+        val graphBuiltPackages = retainedAurGraphBuiltPackages
+        val graph = retainedAurBuildGraph
         val builder = retainedAurBuilderReport
         val activeHandle = readyHandle
+        val graphInstall = graph != null && graph.packageBases.size > 1
         if (
             activeHandle == 0L ||
             review == null ||
@@ -10880,6 +11415,7 @@ class ArchpheneRuntimeService : Service() {
             builder == null ||
             normalized != review.packageName ||
             builtPackages.isEmpty() ||
+            graphInstall != graphBuiltPackages.isNotEmpty() ||
             !builtPackages
                 .map(AurBuiltPackage::packageName)
                 .toTypedArray()
@@ -10948,7 +11484,13 @@ class ArchpheneRuntimeService : Service() {
                     }
                     try {
                         check(
-                            builtPackages.all { output ->
+                            (
+                                if (graphInstall) {
+                                    graphBuiltPackages.map(AurGraphBuiltPackage::built)
+                                } else {
+                                    builtPackages.asList()
+                                }
+                            ).all { output ->
                                 output.file.isFile &&
                                     output.file.length() == output.archiveBytes
                             } &&
@@ -10992,9 +11534,14 @@ class ArchpheneRuntimeService : Service() {
                         )
                         val nativeOutput =
                             ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
-                        val filenameManifest = aurInstallFilenameManifest(builtPackages)
+                        val installOutputs =
+                            if (graphInstall) {
+                                graphBuiltPackages.map(AurGraphBuiltPackage::built)
+                            } else {
+                                builtPackages.asList()
+                            }
                         val descriptors =
-                            builtPackages.map { output ->
+                            installOutputs.map { output ->
                                 ParcelFileDescriptor.open(
                                     output.file,
                                     ParcelFileDescriptor.MODE_READ_ONLY,
@@ -11002,19 +11549,41 @@ class ArchpheneRuntimeService : Service() {
                             }
                         val installedVersion =
                             try {
+                                val descriptorValues =
+                                    descriptors.map { descriptor -> descriptor.fd }.toIntArray()
                                 val length =
-                                    NativeRuntime.nativeInstallAurBuiltPackages(
-                                        activeHandle,
-                                        descriptors.map { descriptor -> descriptor.fd }.toIntArray(),
-                                        filenameManifest,
-                                        filenameManifest.capacity(),
-                                        review.packageBase,
-                                        review.packageName,
-                                        review.version,
-                                        architecture,
-                                        builder.closureManifestSha256,
-                                        nativeOutput,
-                                    )
+                                    if (graphInstall) {
+                                        val graphManifest =
+                                            aurGraphInstallManifest(
+                                                checkNotNull(graph),
+                                                review,
+                                                graphBuiltPackages,
+                                            )
+                                        NativeRuntime.nativeInstallAurGraphBuiltPackages(
+                                            activeHandle,
+                                            descriptorValues,
+                                            graphManifest,
+                                            graphManifest.capacity(),
+                                            review.packageName,
+                                            builder.closureManifestSha256,
+                                            nativeOutput,
+                                        )
+                                    } else {
+                                        val filenameManifest =
+                                            aurInstallFilenameManifest(builtPackages)
+                                        NativeRuntime.nativeInstallAurBuiltPackages(
+                                            activeHandle,
+                                            descriptorValues,
+                                            filenameManifest,
+                                            filenameManifest.capacity(),
+                                            review.packageBase,
+                                            review.packageName,
+                                            review.version,
+                                            architecture,
+                                            builder.closureManifestSha256,
+                                            nativeOutput,
+                                        )
+                                    }
                                 if (length <= 0 || length > NativeRuntime.PACKAGE_OUTPUT_SIZE) {
                                     throw IllegalStateException(
                                         readNativeMessage(nativeOutput, length),
@@ -11162,6 +11731,76 @@ class ArchpheneRuntimeService : Service() {
                 filenames.forEach { filename ->
                     putInt(filename.size)
                     put(filename)
+                }
+            }
+    }
+
+    private fun aurGraphInstallManifest(
+        graph: AurBuildGraph,
+        rootReview: AurReviewData,
+        packages: Array<AurGraphBuiltPackage>,
+    ): ByteBuffer {
+        require(graph.packageBases.size in 2..32 && graph.packageBases.last() == rootReview.packageBase)
+        val reviewsByBase =
+            (retainedAurDependencyReviews.asList() + rootReview)
+                .associateBy(AurReviewData::packageBase)
+        require(reviewsByBase.size == graph.packageBases.size)
+        val expected =
+            graph.packageBases.flatMap { packageBase ->
+                val review =
+                    reviewsByBase[packageBase]
+                        ?: throw IllegalStateException(
+                            "Missing reviewed AUR graph base $packageBase",
+                        )
+                review.requiredPackages.map { packageName ->
+                    packageBase to packageName
+                }
+            }
+        require(
+            packages.size == expected.size &&
+                packages.size in 1..256 &&
+                packages.indices.all { index ->
+                    val value = packages[index]
+                    val (expectedBase, expectedPackage) = expected[index]
+                    value.packageBase == expectedBase &&
+                        value.built.packageName == expectedPackage &&
+                        value.version == reviewsByBase.getValue(expectedBase).version &&
+                        value.architecture == currentLinuxArchitecture() &&
+                        value.built.filename.matches(AUR_BUILT_PACKAGE_FILENAME)
+                },
+        )
+        val entries =
+            packages.map { value ->
+                arrayOf(
+                    value.packageBase,
+                    value.built.packageName,
+                    value.version,
+                    value.architecture,
+                    value.built.filename,
+                ).map { field ->
+                    field.toByteArray(StandardCharsets.US_ASCII).also { bytes ->
+                        require(bytes.isNotEmpty())
+                    }
+                }
+            }
+        val length =
+            entries.fold(12) { total, fields ->
+                fields.fold(total) { fieldTotal, field ->
+                    Math.addExact(fieldTotal, Math.addExact(4, field.size))
+                }
+            }
+        require(length <= 256 * 1024)
+        return ByteBuffer
+            .allocateDirect(length)
+            .order(ByteOrder.LITTLE_ENDIAN)
+            .apply {
+                put("AIGR0001".toByteArray(StandardCharsets.US_ASCII))
+                putInt(entries.size)
+                entries.forEach { fields ->
+                    fields.forEach { field ->
+                        putInt(field.size)
+                        put(field)
+                    }
                 }
             }
     }
@@ -12513,6 +13152,7 @@ class ArchpheneRuntimeService : Service() {
                     retainedAurSourceEvidence = emptyArray()
                     retainedAurSourceEvidenceByBase = emptyMap()
                     retainedAurBuildGraph = null
+                    retainedAurBuildEnvironment = null
                     retainedAurBuilderReport = null
                     retainedAurBuildLogs = ""
                     aurReviewSnapshot =
@@ -13065,6 +13705,7 @@ class ArchpheneRuntimeService : Service() {
         val builder =
             AurBuilderReport(
                 packageName = "org.archphene.builder.debug",
+                preparedPackageBase = packageName,
                 uid = 12_345,
                 selinuxContext = "u:r:untrusted_app:s0",
                 stagedBytes = 2_097_152L,
@@ -13079,6 +13720,9 @@ class ArchpheneRuntimeService : Service() {
                 recipeEntries = 3L,
                 recipeBytes = 1_024L,
                 recipeSourceBytes = 2_097_152L,
+                dependencyPackageCount = 0,
+                dependencyManifest = null,
+                dependencyManifestSha256 = "",
             )
         val buildEnvironment =
             AurBuildEnvironment(
@@ -13165,6 +13809,7 @@ class ArchpheneRuntimeService : Service() {
         retainedAurSourceEvidence = emptyArray()
         retainedAurSourceEvidenceByBase = emptyMap()
         retainedAurBuildGraph = null
+        retainedAurBuildEnvironment = null
         retainedAurBuilderReport = null
         deleteRetainedAurBuiltPackageFilesAsync(detachRetainedAurBuiltPackageFiles())
         lastResolvedPackage = ""

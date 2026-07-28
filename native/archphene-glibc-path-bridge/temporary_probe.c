@@ -39,6 +39,24 @@ int main(void) {
         perror("creat cleanup");
         return 1;
     }
+    const char *root = getenv("ARCHPHENE_RUNTIME_ROOT");
+    char physical_file[4096];
+    if (root == NULL
+            || snprintf(physical_file, sizeof(physical_file),
+                    "%s/tmp/.archphene-physical", root)
+                    >= (int)sizeof(physical_file)) {
+        fprintf(stderr, "invalid physical temporary root\n");
+        return 1;
+    }
+    descriptor = creat(physical_file, 0600);
+    if (descriptor < 0) {
+        perror("physical creat");
+        return 1;
+    }
+    if (close(descriptor) != 0 || unlink(physical_file) != 0) {
+        perror("physical creat cleanup");
+        return 1;
+    }
     char file[] = "/tmp/.archphene-file.XXXXXX";
     descriptor = mkstemp64(file);
     if (descriptor < 0) {

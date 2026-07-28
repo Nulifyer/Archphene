@@ -141,8 +141,10 @@ mod android {
     const BUILT_PACKAGE_REPORT_BYTES: usize = 64;
     const BUILT_PACKAGE_REPORT_MAGIC: &[u8; 8] = b"ABMV0001";
     const AUR_INSTALL_FILENAME_MAGIC: &[u8; 8] = b"AIFN0001";
+    const AUR_GRAPH_INSTALL_MAGIC: &[u8; 8] = b"AIGR0001";
     const AUR_BUILD_PARTITION_MAGIC: &[u8; 8] = b"AUBP0001";
     const MAX_AUR_INSTALL_FILENAME_BYTES: usize = 64 * 1024;
+    const MAX_AUR_GRAPH_INSTALL_BYTES: usize = 256 * 1024;
     const MAX_AUR_BUILT_CAPABILITY_OUTPUT_BYTES: usize = 256 * 1024;
     const PTY_EVENT_READABLE: jint = 1;
     const PTY_EVENT_WRITABLE: jint = 1 << 1;
@@ -404,6 +406,118 @@ mod android {
             return Err(ERROR_INVALID_ARGUMENT);
         }
         Ok(filenames)
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct AurGraphInstallEntry {
+        package_base: String,
+        package_name: String,
+        version: String,
+        architecture: String,
+        filename: String,
+    }
+
+    struct VerifiedAurGraphOutput {
+        package_base: String,
+        package_name: String,
+        version: String,
+        architecture: String,
+        archive: File,
+        report: archphene_builder::BuiltPackageReport,
+        install_script_sha256: Option<[u8; 32]>,
+    }
+
+    fn parse_aur_graph_install_manifest(bytes: &[u8]) -> Result<Vec<AurGraphInstallEntry>, jint> {
+        if bytes.len() < 12
+            || bytes.len() > MAX_AUR_GRAPH_INSTALL_BYTES
+            || &bytes[..8] != AUR_GRAPH_INSTALL_MAGIC
+        {
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+        let count = u32::from_le_bytes(
+            bytes[8..12]
+                .try_into()
+                .map_err(|_| ERROR_INVALID_ARGUMENT)?,
+        ) as usize;
+        if count == 0 || count > 256 {
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+        let mut offset = 12_usize;
+        let mut entries = Vec::with_capacity(count);
+        for _ in 0..count {
+            let mut fields = Vec::with_capacity(5);
+            for maximum in [128_usize, 128, 128, 16, 240] {
+                let length_end = offset.checked_add(4).ok_or(ERROR_INVALID_ARGUMENT)?;
+                let length = u32::from_le_bytes(
+                    bytes
+                        .get(offset..length_end)
+                        .ok_or(ERROR_INVALID_ARGUMENT)?
+                        .try_into()
+                        .map_err(|_| ERROR_INVALID_ARGUMENT)?,
+                ) as usize;
+                offset = length_end;
+                if length == 0 || length > maximum {
+                    return Err(ERROR_INVALID_ARGUMENT);
+                }
+                let end = offset.checked_add(length).ok_or(ERROR_INVALID_ARGUMENT)?;
+                let value = str::from_utf8(bytes.get(offset..end).ok_or(ERROR_INVALID_ARGUMENT)?)
+                    .map_err(|_| ERROR_INVALID_ARGUMENT)?;
+                if value.bytes().any(|byte| !(0x21..=0x7e).contains(&byte)) {
+                    return Err(ERROR_INVALID_ARGUMENT);
+                }
+                fields.push(value.to_owned());
+                offset = end;
+            }
+            let mut fields = fields.into_iter();
+            entries.push(AurGraphInstallEntry {
+                package_base: fields.next().ok_or(ERROR_INVALID_ARGUMENT)?,
+                package_name: fields.next().ok_or(ERROR_INVALID_ARGUMENT)?,
+                version: fields.next().ok_or(ERROR_INVALID_ARGUMENT)?,
+                architecture: fields.next().ok_or(ERROR_INVALID_ARGUMENT)?,
+                filename: fields.next().ok_or(ERROR_INVALID_ARGUMENT)?,
+            });
+        }
+        if offset != bytes.len() {
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+        Ok(entries)
+    }
+
+    fn aur_graph_ancestor_bases(
+        graph: &archphene_packages::aur::AurBuildGraph,
+        package_base: &str,
+    ) -> Result<Vec<String>, jint> {
+        if !graph
+            .package_bases
+            .iter()
+            .any(|candidate| candidate == package_base)
+        {
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+        let mut ancestors = Vec::new();
+        loop {
+            let mut changed = false;
+            for edge in &graph.edges {
+                if (edge.package_base == package_base
+                    || ancestors
+                        .iter()
+                        .any(|ancestor| ancestor == &edge.package_base))
+                    && !ancestors
+                        .iter()
+                        .any(|ancestor| ancestor == &edge.dependency_base)
+                {
+                    ancestors.push(edge.dependency_base.clone());
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+            if ancestors.len() >= graph.package_bases.len() {
+                return Err(ERROR_INVALID_ARGUMENT);
+            }
+        }
+        Ok(ancestors)
     }
 
     fn encode_persisted_aur_outputs(
@@ -2513,9 +2627,15 @@ mod android {
         version: JString,
         architecture: JString,
         closure_sha256: JString,
+        dependency_manifest_buffer: JByteBuffer,
+        dependency_manifest_length: jint,
+        dependency_manifest_sha256: JString,
         output_buffer: JByteBuffer,
     ) -> jint {
-        let Ok(handle) = u64::try_from(handle) else {
+        let (Ok(handle), Ok(dependency_manifest_length)) = (
+            u64::try_from(handle),
+            usize::try_from(dependency_manifest_length),
+        ) else {
             return ERROR_INVALID_ARGUMENT;
         };
         if descriptor < 0 {
@@ -2528,6 +2648,7 @@ mod android {
             Ok(version),
             Ok(architecture),
             Ok(closure_sha256),
+            Ok(dependency_manifest_sha256),
         ) = (
             java_string(&mut environment, &filename),
             java_string(&mut environment, &package_base),
@@ -2535,12 +2656,42 @@ mod android {
             java_string(&mut environment, &version),
             java_string(&mut environment, &architecture),
             java_string(&mut environment, &closure_sha256),
+            java_string(&mut environment, &dependency_manifest_sha256),
         )
         else {
             return ERROR_INVALID_ARGUMENT;
         };
         let Ok(closure_sha256) = parse_sha256(&closure_sha256) else {
             return ERROR_INVALID_ARGUMENT;
+        };
+        let dependency_manifest_sha256 = if dependency_manifest_length == 0 {
+            if !dependency_manifest_sha256.is_empty() {
+                return ERROR_INVALID_ARGUMENT;
+            }
+            None
+        } else {
+            let Ok(value) = parse_sha256(&dependency_manifest_sha256) else {
+                return ERROR_INVALID_ARGUMENT;
+            };
+            Some(value)
+        };
+        let dependency_manifest = if dependency_manifest_length == 0 {
+            None
+        } else {
+            let (Ok(capacity), Ok(address)) = (
+                environment.get_direct_buffer_capacity(&dependency_manifest_buffer),
+                environment.get_direct_buffer_address(&dependency_manifest_buffer),
+            ) else {
+                return ERROR_INVALID_ARGUMENT;
+            };
+            if dependency_manifest_length > capacity
+                || dependency_manifest_length > 256 * 1024
+                || address.is_null()
+            {
+                return ERROR_INVALID_ARGUMENT;
+            }
+            // SAFETY: JNI verified this direct buffer contains the declared bounded manifest.
+            Some(unsafe { slice::from_raw_parts(address.cast_const(), dependency_manifest_length) })
         };
         let (Ok(output_capacity), Ok(output_address)) = (
             environment.get_direct_buffer_capacity(&output_buffer),
@@ -2590,8 +2741,8 @@ mod android {
             &architecture,
             closure.as_bytes(),
             closure_sha256,
-            None,
-            None,
+            dependency_manifest,
+            dependency_manifest_sha256,
             expected_install_script.map(|script| script.contents),
         ) {
             Ok(report) => report,
@@ -3203,6 +3354,251 @@ mod android {
             .collect();
         copy_tool_result(
             package_runtime.install_verified_aur_archives(&mut install_inputs, &package_name),
+            output,
+        )
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeInstallAurGraphBuiltPackages(
+        mut environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        descriptors: JIntArray,
+        graph_manifest: JByteBuffer,
+        graph_manifest_length: jint,
+        selected_package: JString,
+        closure_sha256: JString,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let (Ok(handle), Ok(graph_manifest_length)) = (
+            u64::try_from(handle),
+            usize::try_from(graph_manifest_length),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let (Ok(selected_package), Ok(closure_sha256)) = (
+            java_string(&mut environment, &selected_package),
+            java_string(&mut environment, &closure_sha256),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(closure_sha256) = parse_sha256(&closure_sha256) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let (Ok(manifest_capacity), Ok(manifest_address), Ok(output_capacity), Ok(output_address)) = (
+            environment.get_direct_buffer_capacity(&graph_manifest),
+            environment.get_direct_buffer_address(&graph_manifest),
+            environment.get_direct_buffer_capacity(&output_buffer),
+            environment.get_direct_buffer_address(&output_buffer),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if graph_manifest_length == 0
+            || graph_manifest_length > manifest_capacity
+            || graph_manifest_length > MAX_AUR_GRAPH_INSTALL_BYTES
+            || manifest_address.is_null()
+            || output_capacity < MAX_TOOL_OUTPUT_BYTES
+            || output_address.is_null()
+        {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        // SAFETY: JNI verified the complete bounded direct input/output buffers.
+        let manifest =
+            unsafe { slice::from_raw_parts(manifest_address.cast_const(), graph_manifest_length) };
+        let output = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
+        output.fill(0);
+        let entries = match parse_aur_graph_install_manifest(manifest) {
+            Ok(entries) => entries,
+            Err(error) => return error,
+        };
+        let Ok(descriptor_count) = environment.get_array_length(&descriptors) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(descriptor_count) = usize::try_from(descriptor_count) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if descriptor_count != entries.len() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let mut descriptor_values = vec![0_i32; descriptor_count];
+        if environment
+            .get_int_array_region(&descriptors, 0, &mut descriptor_values)
+            .is_err()
+            || descriptor_values.iter().any(|descriptor| *descriptor < 0)
+        {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let (graph, reviews, closure, package_runtime, runtime_dependencies) = {
+            let Ok(mut registry) = registry().lock() else {
+                return ERROR_INTERNAL;
+            };
+            let Some(runtime) = registry.runtime_mut(handle) else {
+                return ERROR_INVALID_HANDLE;
+            };
+            let (graph, reviews, closure, package_runtime) =
+                match runtime.verified_aur_graph_capability_context() {
+                    Ok(context) => context,
+                    Err(error) => return copy_package_error(&error, output),
+                };
+            let (Some(root_review), Some(root_base)) = (reviews.last(), graph.package_bases.last())
+            else {
+                return ERROR_INVALID_ARGUMENT;
+            };
+            if graph.package_bases.len() < 2
+                || reviews.len() != graph.package_bases.len()
+                || root_review.package_base != *root_base
+                || root_review.package_name != selected_package
+            {
+                return ERROR_INVALID_ARGUMENT;
+            }
+            let mut dependencies = Vec::new();
+            for review in &reviews {
+                let values = match runtime
+                    .verified_aur_runtime_dependencies(&review.package_name, &review.version)
+                {
+                    Ok(values) => values,
+                    Err(error) => return copy_package_error(&error, output),
+                };
+                dependencies.extend(values);
+            }
+            dependencies.sort();
+            dependencies.dedup();
+            (graph, reviews, closure, package_runtime, dependencies)
+        };
+        let expected_count = reviews.iter().try_fold(0_usize, |total, review| {
+            total.checked_add(review.required_packages.len())
+        });
+        if expected_count != Some(entries.len()) {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let mut entry_index = 0_usize;
+        for review in &reviews {
+            for required_package in &review.required_packages {
+                let Some(entry) = entries.get(entry_index) else {
+                    return ERROR_INVALID_ARGUMENT;
+                };
+                if entry.package_base != review.package_base
+                    || entry.package_name != *required_package
+                    || entry.version != review.version
+                    || !matches!(entry.architecture.as_str(), "aarch64" | "x86_64")
+                {
+                    return ERROR_INVALID_ARGUMENT;
+                }
+                entry_index += 1;
+            }
+        }
+
+        let mut verified = Vec::<VerifiedAurGraphOutput>::with_capacity(entries.len());
+        for ((entry, descriptor), index) in entries.iter().zip(&descriptor_values).zip(0_usize..) {
+            if index >= 256 {
+                return ERROR_INVALID_ARGUMENT;
+            }
+            let Some(review) = reviews
+                .iter()
+                .find(|review| review.package_base == entry.package_base)
+            else {
+                return ERROR_INVALID_ARGUMENT;
+            };
+            let ancestors = match aur_graph_ancestor_bases(&graph, &entry.package_base) {
+                Ok(ancestors) => ancestors,
+                Err(error) => return error,
+            };
+            let mut prior: Vec<&VerifiedAurGraphOutput> = verified
+                .iter()
+                .filter(|output| {
+                    ancestors
+                        .iter()
+                        .any(|ancestor| ancestor == &output.package_base)
+                })
+                .collect();
+            prior.sort_unstable_by(|left, right| {
+                (&left.package_name, &left.report.filename)
+                    .cmp(&(&right.package_name, &right.report.filename))
+            });
+            let provenance: Vec<archphene_builder::AurDependencyProvenance> = prior
+                .iter()
+                .enumerate()
+                .map(
+                    |(staging_index, output)| archphene_builder::AurDependencyProvenance {
+                        package_base: output.package_base.clone(),
+                        package_name: output.package_name.clone(),
+                        version: output.version.clone(),
+                        architecture: output.architecture.clone(),
+                        filename: output.report.filename.clone(),
+                        staging_index,
+                        archive_bytes: output.report.archive_bytes,
+                        archive_sha256: output.report.sha256,
+                        installed_bytes: output.report.installed_bytes,
+                        build_package_count: output.report.build_package_count,
+                    },
+                )
+                .collect();
+            let dependency_manifest = if provenance.is_empty() {
+                None
+            } else {
+                match archphene_builder::aur_dependency_provenance_manifest(&provenance) {
+                    Ok(value) => Some(value),
+                    Err(error) => return copy_package_error(&error, output),
+                }
+            };
+            // SAFETY: Each descriptor is borrowed only for dup. Kotlin retains all originals
+            // for the duration of this complete graph verification and install call.
+            let borrowed = unsafe { BorrowedFd::borrow_raw(*descriptor) };
+            let Ok(owned) = rustix::io::dup(borrowed) else {
+                return ERROR_INVALID_ARGUMENT;
+            };
+            let mut archive = File::from(owned);
+            let expected_install_script = match reviewed_install_script(review, &entry.package_name)
+            {
+                Ok(script) => script,
+                Err(error) => return error,
+            };
+            let report = match archphene_builder::verify_copied_built_package(
+                &mut archive,
+                &entry.filename,
+                &entry.package_base,
+                &entry.package_name,
+                &entry.version,
+                &entry.architecture,
+                closure.as_bytes(),
+                closure_sha256,
+                dependency_manifest
+                    .as_ref()
+                    .map(|(manifest, _)| manifest.as_slice()),
+                dependency_manifest.as_ref().map(|(_, sha256)| *sha256),
+                expected_install_script.map(|script| script.contents),
+            ) {
+                Ok(report) => report,
+                Err(error) => return copy_package_error(&error, output),
+            };
+            verified.push(VerifiedAurGraphOutput {
+                package_base: entry.package_base.clone(),
+                package_name: entry.package_name.clone(),
+                version: entry.version.clone(),
+                architecture: entry.architecture.clone(),
+                archive,
+                report,
+                install_script_sha256: expected_install_script.map(|script| script.sha256),
+            });
+        }
+        let dependency_names: Vec<&str> = runtime_dependencies.iter().map(String::as_str).collect();
+        if let Err(error) = package_runtime.install_dependencies(&dependency_names) {
+            return copy_package_error(&error, output);
+        }
+        let mut install_inputs: Vec<VerifiedAurArchive<'_>> = verified
+            .iter_mut()
+            .map(|verified| VerifiedAurArchive {
+                source: &mut verified.archive,
+                filename: &verified.report.filename,
+                package: &verified.package_name,
+                version: &verified.version,
+                expected_bytes: verified.report.archive_bytes,
+                expected_sha256: verified.report.sha256,
+                install_script_sha256: verified.install_script_sha256,
+            })
+            .collect();
+        copy_tool_result(
+            package_runtime.install_verified_aur_archives(&mut install_inputs, &selected_package),
             output,
         )
     }

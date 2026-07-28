@@ -38,6 +38,11 @@ gcc -shared -fPIC -O2 -Wall -Wextra -Werror \
   -o "$root/usr/lib/archphene-example/libdlopen-fixture.so" \
   native/archphene-glibc-path-bridge/dlopen_fixture.c
 gcc -O2 -Wall -Wextra -Werror \
+  -o "$root/usr/lib/archphene-example/runpath-probe" \
+  native/archphene-glibc-path-bridge/runpath_probe.c \
+  -L"$root/usr/lib/archphene-example" -ldlopen-fixture \
+  -Wl,-rpath,/usr/lib/archphene-example
+gcc -O2 -Wall -Wextra -Werror \
   -o "$root/dlopen-probe" \
   native/archphene-glibc-path-bridge/dlopen_probe.c -ldl
 gcc -O2 -Wall -Wextra -Werror \
@@ -69,6 +74,9 @@ gcc -O2 -Wall -Wextra -Werror \
 gcc -O2 -Wall -Wextra -Werror \
   -o "$root/sendmsg-probe" \
   native/archphene-glibc-path-bridge/sendmsg_probe.c
+gcc -O2 -Wall -Wextra -Werror \
+  -o "$root/xattr-probe" \
+  native/archphene-glibc-path-bridge/xattr_probe.c
 export LD_PRELOAD="$output"
 export ARCHPHENE_RUNTIME_ROOT="$root"
 export XDG_RUNTIME_DIR="$root/runtime"
@@ -114,12 +122,26 @@ test "$(
   ARCHPHENE_FAKE_CHROOT=1 "$root/kernel-view-probe"
 )" = kernel-view-ok
 test "$("$root/sendmsg-probe")" = sendmsg-credentials-ok
+test "$(ARCHPHENE_FAKE_CHROOT=1 "$root/xattr-probe")" = xattr-bridge-ok
+test "$(
+  ARCHPHENE_FAKE_CHROOT=1 ARCHPHENE_ROOT_IDENTITY=1 \
+    "$root/xattr-probe" --capability
+)" = xattr-bridge-ok
 test "$(
   ARCHPHENE_FAKE_CHROOT=1 ARCHPHENE_SUPERVISED_PROCESS_GROUP=1 \
     "$root/pty-probe"
 )" = pty-apis-ok
 ARCHPHENE_FAKE_CHROOT=1 /bin/mkdir /home/archphene/legacy-mkdir
 test -d "$root/home/archphene/legacy-mkdir"
+mkdir -p "$root/usr/lib/gcc/archphene/1/include"
+test "$(
+  ARCHPHENE_FAKE_CHROOT=1 \
+    /usr/bin/readlink -f /usr/lib/gcc/archphene/1/../../..
+)" = /usr/lib
+ARCHPHENE_FAKE_CHROOT=1 \
+  /usr/bin/stat -L /usr/lib/gcc/archphene/1/../../.. >/dev/null
+ARCHPHENE_FAKE_CHROOT=1 \
+  /usr/bin/stat /usr/lib/gcc/archphene/1/../../.. >/dev/null
 printf 'before\n' >"$root/home/archphene/in-place-edit"
 ARCHPHENE_FAKE_CHROOT=1 /bin/sed -i 's/before/after/' \
   /home/archphene/in-place-edit
@@ -217,6 +239,14 @@ spawn_path_output="$(
   "$root/exec-probe" --spawn-path cat
 )"
 test "$spawn_path_output" = "--library-path /lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu --argv0 cat $root/commands/cat bridge-arg"
+ln -s "$loader_path" "$root/commands/linked-cat"
+linked_command_output="$(
+  ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+  ARCHPHENE_RUNTIME_LOADER="$loader_path" \
+  ARCHPHENE_RUNTIME_LIB=/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu \
+  "$root/exec-probe" --direct "$root/commands/linked-cat"
+)"
+test "$linked_command_output" = "--library-path /lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu --argv0 linked-cat $loader_path bridge-arg"
 nested_access_output="$(
   ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
   "$root/exec-probe" --access /usr/lib/archphene-example/example
@@ -229,6 +259,22 @@ nested_exec_output="$(
   "$root/exec-probe" --direct /usr/lib/archphene-example/example
 )"
 test "$nested_exec_output" = "--library-path /lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu --argv0 example $root/usr/lib/archphene-example/example bridge-arg"
+relative_exec_output="$(
+  cd "$root"
+  ARCHPHENE_FAKE_CHROOT=1 \
+  ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+  ARCHPHENE_RUNTIME_LOADER="$loader_path" \
+  ARCHPHENE_RUNTIME_LIB=/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu \
+    "$root/exec-probe" --direct usr/lib/archphene-example/example
+)"
+test "$relative_exec_output" = "--library-path /lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu --argv0 example $root/usr/lib/archphene-example/example bridge-arg"
+runpath_output="$(
+  ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
+  ARCHPHENE_RUNTIME_LOADER="$host_loader" \
+  ARCHPHENE_RUNTIME_LIB="$(dirname "$host_libc")" \
+  "$root/exec-probe" --direct /usr/lib/archphene-example/runpath-probe
+)"
+test "$runpath_output" = absolute-runpath-ok
 nested_spawn_output="$(
   ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
   ARCHPHENE_RUNTIME_LOADER="$loader_path" \
@@ -417,7 +463,7 @@ translated_argument_output="$(
     /usr/share/archphene-test/value
 )"
 test "$translated_argument_output" = \
-  "$root/usr/share/archphene-test/value"
+  /usr/share/archphene-test/value
 set +e
 ARCHPHENE_RUNTIME_COMMAND_DIR="$root/commands" \
 ARCHPHENE_RUNTIME_LOADER="$loader_path" \

@@ -1834,6 +1834,40 @@ impl RuntimeHost {
         Ok((review, closure, package_runtime))
     }
 
+    pub fn verified_aur_graph_capability_context(
+        &self,
+    ) -> Result<
+        (
+            archphene_packages::aur::AurBuildGraph,
+            Vec<AurReview>,
+            VerifiedPackageClosure,
+            PackageRuntime,
+        ),
+        PackageRuntimeError,
+    > {
+        let graph = self
+            .aur_build_graph
+            .clone()
+            .ok_or(PackageRuntimeError::InvalidPayload)?;
+        let mut reviews = Vec::with_capacity(graph.package_bases.len());
+        for package_base in &graph.package_bases {
+            reviews.push(
+                self.aur_review_by_base(package_base)
+                    .cloned()
+                    .ok_or(PackageRuntimeError::InvalidPayload)?,
+            );
+        }
+        let closure = self
+            .aur_build_closure
+            .clone()
+            .ok_or(PackageRuntimeError::InvalidPayload)?;
+        let package_runtime = self
+            .package_runtime
+            .clone()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        Ok((graph, reviews, closure, package_runtime))
+    }
+
     pub fn verified_aur_runtime_dependencies(
         &self,
         package_name: &str,
@@ -1843,9 +1877,7 @@ impl RuntimeHost {
             return Err(PackageRuntimeError::InvalidPayload);
         }
         let review = self
-            .aur_review
-            .as_ref()
-            .filter(|review| review.package_name == package_name && review.version == version)
+            .aur_review_by_package(package_name, version)
             .ok_or(PackageRuntimeError::InvalidPayload)?;
         let mut dependencies = Vec::with_capacity(review.dependencies.len());
         for dependency in &review.dependencies {
@@ -1854,6 +1886,11 @@ impl RuntimeHost {
                 .required_packages
                 .iter()
                 .any(|package| package == name)
+                || self.aur_build_graph.as_ref().is_some_and(|graph| {
+                    graph.edges.iter().any(|edge| {
+                        edge.package_base == review.package_base && edge.dependency == name
+                    })
+                })
             {
                 continue;
             }

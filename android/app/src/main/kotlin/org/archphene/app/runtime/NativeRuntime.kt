@@ -302,6 +302,9 @@ internal object NativeRuntime {
         version: String,
         architecture: String,
         closureSha256: String,
+        dependencyManifestBuffer: ByteBuffer,
+        dependencyManifestLength: Int,
+        dependencyManifestSha256: String,
         outputBuffer: ByteBuffer,
     ): Int
     external fun nativePersistAurBuiltPackages(
@@ -346,6 +349,15 @@ internal object NativeRuntime {
         packageName: String,
         version: String,
         architecture: String,
+        closureSha256: String,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeInstallAurGraphBuiltPackages(
+        handle: Long,
+        descriptors: IntArray,
+        graphManifest: ByteBuffer,
+        graphManifestLength: Int,
+        selectedPackage: String,
         closureSha256: String,
         outputBuffer: ByteBuffer,
     ): Int

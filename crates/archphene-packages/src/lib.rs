@@ -2346,7 +2346,13 @@ impl PackageRuntime {
                 targets.push(*package);
             }
         }
-        let resolution = self.resolve_targets(&targets)?;
+        // Reviewed AUR dependencies may name a repository-provided capability
+        // such as `libalpm.so`. Pacman is the authority that resolves those
+        // targets to their concrete signed packages; requiring every emitted
+        // package name to equal its requested target rejects valid providers.
+        let database_path = self.arch_root.join("var/lib/pacman");
+        let resolution =
+            self.resolve_targets_with_database_allowing_providers(&targets, &database_path)?;
         let recovery_target = packages.first().copied().unwrap_or(BASE_PACKAGE);
         self.install_resolution(
             &resolution,
@@ -9582,6 +9588,28 @@ https://geo.mirror.pkgbuild.com/extra/os/x86_64/provider-impl-1.0-1-x86_64.pkg.t
             .expect("UTF-8"),
             provider,
         );
+    }
+
+    #[test]
+    fn aur_dependency_resolution_accepts_pacman_validated_soname_providers() {
+        let provider = "core\tpacman\t7.1.0-2\tpacman-7.1.0-2-x86_64.pkg.tar.zst\t\
+https://geo.mirror.pkgbuild.com/core/os/x86_64/pacman-7.1.0-2-x86_64.pkg.tar.zst\t1024\n";
+        assert_eq!(
+            parse_resolution_output_mode(
+                provider,
+                &["libalpm.so"],
+                RepositoryArchitecture::X86_64,
+                false,
+            )
+            .expect("pacman-validated soname provider")
+            .as_str()
+            .expect("UTF-8"),
+            provider,
+        );
+        assert!(matches!(
+            parse_resolution_output(provider, &["libalpm.so"], RepositoryArchitecture::X86_64,),
+            Err(PackageRuntimeError::MissingTarget)
+        ));
     }
 
     #[test]
