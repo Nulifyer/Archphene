@@ -61,6 +61,14 @@ grant until the user revokes it. SAF is not a mountable POSIX filesystem, so
 selected Android trees will require explicit, conflict-safe synchronization
 into a private POSIX mirror.
 
+Archphene does not request `MANAGE_EXTERNAL_STORAGE`, legacy
+`READ_EXTERNAL_STORAGE`, or legacy `WRITE_EXTERNAL_STORAGE`. There is no
+advanced broad-storage mode: the supported file boundary uses system pickers,
+scoped URI grants, Archphene's DocumentsProvider, and explicit synchronized
+mirrors. A source contract runs in CI, and the same gate inspects packaged APK
+permissions and installed manager, Builder, and generated-launcher packages
+when given artifacts or device serials.
+
 The first production bridge is now active: visible regular files and
 directories under shared `/home/archphene` appear as
 **Archphene Home** through one manager-owned `DocumentsProvider`. Dotfiles

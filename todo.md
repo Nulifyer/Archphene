@@ -271,7 +271,7 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
 
 ## P0 - Android and Linux file integration
 
-- [ ] Present Android-accessible storage inside Linux under:
+- [x] Present Android-accessible storage inside Linux under:
 
   ```text
   /mnt/android/downloads
@@ -297,7 +297,7 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [x] Keep the Service-owned operation/status through Activity recreation, consume incoming intents once, persist completed/failed/interrupted status, and bound the pending Activity queue to one URI.
   - [x] Pass exact ACTION_VIEW/ACTION_SEND content, duplicate-name, process-restart status, system-picker launch, fatal-log, cleanup, and visually inspected full-device gates on the emulator and Samsung.
   - [ ] Add multi-document, directory-tree, drag-and-drop, progress/cancel, provider-timeout, and conflict-aware synchronized import.
-- [ ] Support Archphene-to-Android open, save, export, and share flows.
+- [x] Support Archphene-to-Android open, save, export, and share flows.
   - [x] Add a manager Share action that opens Android's picker at Archphene Home, accepts only a bounded regular document from Archphene's own provider, excludes the manager self-import loop, and sends one MIME-typed content URI with read permission and no write permission through the system chooser. Exact-URI, scoped-log, cleanup, and visually inspected full-device gates pass on the emulator and Samsung; an independent Messages target receives the temporary cross-UID read grant without sending the fixture.
   - [x] Add a manager Open action that starts at Archphene Home, accepts only a bounded regular document from Archphene's own provider, excludes the manager self-import loop, and offers the MIME-typed document to Android viewers through `ACTION_VIEW` with read permission and no write permission. Exact-URI, MIME, grant, cleanup, fatal-log, phone/tablet layout, and visually inspected full-device gates pass on the emulator and Samsung.
   - [x] Add single-file Export: select a bounded regular file from Archphene Home, choose an Android `ACTION_CREATE_DOCUMENT` destination, and stream the exact source and destination descriptors through Rust's fixed 32 KiB buffer without Kotlin/JNI file bytes. Cancellation creates no target; exact bytes, unchanged source, durable completion status, cleanup, StrictMode/fatal logs, and visually inspected phone/wide full-device gates pass on the emulator and Samsung.
@@ -305,7 +305,7 @@ The first daily-use acceptance target is VS Code with `dotnet-sdk`: create an MV
   - [x] Add Export byte/percent progress, chunk-boundary cancellation, recovery-safe persistent destination grants, and process-death cleanup of nonempty partial Android outputs. Cancellation and restart delete the incomplete destination, providers without persistable write access fail before mutation, and full-device progress/cancel/recovery plus normal completion/restart gates pass on both exact ABIs.
   - [x] Persist honest Open/Share chooser-handoff and chooser-launch-failure status without claiming an external app completed the action. Single Open success, forced failure, single Share, and two-file Share survive manager process restart on both exact ABIs; exact URI/grant checks, fatal-log checks, and inspected full-device frames pass.
   - [x] Add Linux desktop-portal Save As integration so unmodified GTK 3 desktop applications can request Android's `ACTION_CREATE_DOCUMENT` flow through the shared bridge. A private per-launcher D-Bus portal, authenticated versioned Binder descriptor handoff, checksum-pinned GTK compatibility module, and generic credential bridge keep Android URIs/grants outside Linux while mirroring stable saves through a bounded app-private file. Cancellation, exact bytes, untrusted-caller rejection, rapid relaunch, crash-staging recovery, fatal logs, and full-device stock Mousepad gates pass on the x86_64 emulator and AArch64 Samsung.
-- [ ] Avoid `MANAGE_EXTERNAL_STORAGE` as the default; evaluate an optional advanced/sideloaded mode only if SAF cannot satisfy a demonstrated workflow.
+- [x] Keep broad Android storage permissions out of every production component. Archphene currently has no demonstrated workflow that requires an advanced `MANAGE_EXTERNAL_STORAGE` mode: SAF, scoped URI grants, the DocumentsProvider, explicit import/export, and synchronized project mirrors cover the supported boundary. A CI source contract rejects `MANAGE_EXTERNAL_STORAGE`, `READ_EXTERNAL_STORAGE`, and `WRITE_EXTERNAL_STORAGE`; packaged manager/Builder/launcher artifacts and every installed Archphene manager/generated launcher on the emulator and Samsung pass the same permission audit.
 - [ ] Test grant creation, persistence, revocation, rename, deletion, conflicts, large trees, offline providers, uninstall behavior, and malicious paths.
 
 ## P0 - Package system and shared Arch behavior

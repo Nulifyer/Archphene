@@ -423,6 +423,19 @@ nonempty transfer and proves restart removes the partial Android output through
 its persisted write grant. Picker, chooser, manager, and destination evidence
 is always captured as full-device screenshots.
 
+The scoped-storage contract checks every source manifest by default. Pass
+current artifacts and device serials to extend the same audit to packaged and
+installed permissions:
+
+```bash
+python3 scripts/test-storage-permission-contract.py \
+  --apk android/app/build/outputs/apk/debug/app-debug.apk \
+  --apk android/builder/build/outputs/apk/debug/builder-debug.apk \
+  --apk android/launcher-template/build/outputs/apk/release/launcher-template-release-unsigned.apk \
+  --serial emulator-5554 \
+  --serial RFCT90AEEFA
+```
+
 The AArch64 native readiness gate uses the configured host NDK when available
 and otherwise runs in the pinned Android-native Podman image, so it does not
 require a second host-side SDK installation:
