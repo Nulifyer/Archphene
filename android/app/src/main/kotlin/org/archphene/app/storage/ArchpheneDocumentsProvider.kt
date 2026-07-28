@@ -14,7 +14,9 @@ import android.provider.DocumentsProvider
 import android.util.Log
 import android.webkit.MimeTypeMap
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileNotFoundException
+import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
@@ -170,6 +172,9 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
             throw missing("Document is not a regular file: $documentId")
         }
         val nativeMode = nativeMode(mode)
+        debugSlowLauncherRead(document, nativeMode)?.let { descriptor ->
+            return descriptor
+        }
         val descriptor =
             if (document.kind == DocumentKind.SHELL_STARTUP_FILE) {
                 nativeOperation(
@@ -582,6 +587,69 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
         throw missing("Debug provider failure while attempting to $operation")
     }
 
+    private fun debugSlowLauncherRead(
+        document: ResolvedDocument,
+        nativeMode: Int,
+    ): ParcelFileDescriptor? {
+        val context = providerContext()
+        if (
+            nativeMode != NativeRuntime.STORAGE_MODE_READ ||
+            context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0
+        ) {
+            return null
+        }
+        val delay =
+            runCatching {
+                File(context.cacheDir, PORTAL_FOLDER_PROVIDER_READ_DELAY_FILE)
+                    .readText()
+                    .trim()
+                    .toLong()
+            }.getOrNull()
+                ?.takeIf { milliseconds ->
+                    milliseconds in 1..MAX_TEST_PROVIDER_READ_DELAY_MILLIS
+                }
+                ?: return null
+        val caller = debugLauncherCaller(context) ?: return null
+        val source = document.file ?: return null
+        val pipe = ParcelFileDescriptor.createPipe()
+        val reader = pipe[0]
+        val writer = pipe[1]
+        Log.i(TAG, "Portal folder slow read requested delay=$delay caller=$caller")
+        val producer =
+            Thread(
+                {
+                    try {
+                        ParcelFileDescriptor.AutoCloseOutputStream(writer).use { output ->
+                            FileInputStream(source).use { input ->
+                                val buffer = ByteArray(TEST_PROVIDER_READ_CHUNK_BYTES)
+                                var count = input.read(buffer)
+                                while (count >= 0) {
+                                    output.write(buffer, 0, count)
+                                    count = input.read(buffer)
+                                    if (count >= 0) {
+                                        SystemClock.sleep(delay)
+                                    }
+                                }
+                            }
+                        }
+                    } catch (error: IOException) {
+                        Log.i(TAG, "Portal folder slow read ended early", error)
+                    }
+                },
+                "ArchpheneProviderSlowRead",
+            ).apply {
+                isDaemon = true
+            }
+        try {
+            producer.start()
+        } catch (error: RuntimeException) {
+            reader.close()
+            writer.close()
+            throw missing("Could not start debug provider stream", error)
+        }
+        return reader
+    }
+
     private fun debugLauncherCaller(context: Context): String? {
         val callingUid = Binder.getCallingUid()
         return context.packageManager
@@ -650,9 +718,13 @@ class ArchpheneDocumentsProvider : DocumentsProvider() {
             "portal-folder-provider-delay-ms"
         private const val PORTAL_FOLDER_PROVIDER_FAILURE_FILE =
             "portal-folder-provider-failure"
+        private const val PORTAL_FOLDER_PROVIDER_READ_DELAY_FILE =
+            "portal-folder-provider-read-delay-ms"
         private const val DEBUG_PROVIDER_QUERY = "query"
         private const val DEBUG_PROVIDER_OPEN = "open"
         private const val MAX_TEST_PROVIDER_DELAY_MILLIS = 60_000L
+        private const val MAX_TEST_PROVIDER_READ_DELAY_MILLIS = 25_000L
+        private const val TEST_PROVIDER_READ_CHUNK_BYTES = 16
         private val SHELL_STARTUP_FILES =
             mapOf(
                 BASHRC_DOCUMENT_ID to

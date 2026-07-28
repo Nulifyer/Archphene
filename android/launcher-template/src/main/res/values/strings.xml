@@ -8,5 +8,6 @@
     <string name="launcher_invalid">This launcher has invalid Archphene metadata.</string>
     <string name="launcher_capabilities_invalid">This Linux launcher uses an incompatible Archphene capability contract. Open Archphene to update it.</string>
     <string name="launcher_unavailable">Open Archphene, then try this Linux app again.</string>
+    <string name="directory_import_in_progress">Importing selected folder…\nLarge folders may take a moment.</string>
     <string name="directory_import_failed">Couldn’t import that folder. Try again or choose another folder.</string>
 </resources>

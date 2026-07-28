@@ -45,11 +45,13 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
 import android.widget.FrameLayout
+import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
 import java.io.BufferedOutputStream
 import java.io.DataOutputStream
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.roundToInt
 
@@ -72,6 +74,7 @@ class LauncherActivity :
     )
 
     private lateinit var status: TextView
+    private lateinit var directoryProgress: ProgressBar
     private lateinit var surfaceView: LauncherSurfaceView
     private lateinit var content: FrameLayout
     private val handler = Handler(Looper.getMainLooper())
@@ -104,6 +107,22 @@ class LauncherActivity :
     private var pendingDocumentOperation = 0
     private val activeDirectoryWatchdog =
         AtomicReference<DirectoryProviderWatchdog?>()
+    private val directoryStreamActive = AtomicBoolean(false)
+    private var directoryProgressVisible = false
+    private val showDirectoryProgress =
+        Runnable {
+            if (
+                directoryStreamActive.get() &&
+                remoteStatus == STATUS_RUNNING &&
+                !isFinishing &&
+                !isDestroyed
+            ) {
+                directoryProgressVisible = true
+                status.setText(R.string.directory_import_in_progress)
+                status.visibility = View.VISIBLE
+                directoryProgress.visibility = View.VISIBLE
+            }
+        }
     private val clipboardManager by lazy {
         getSystemService(ClipboardManager::class.java)
     }
@@ -317,6 +336,11 @@ class LauncherActivity :
                 setBackgroundColor(getColor(R.color.launcher_background))
                 text = getString(R.string.launcher_opening, appLabel())
             }
+        directoryProgress =
+            ProgressBar(this).apply {
+                isIndeterminate = true
+                visibility = View.GONE
+            }
         content =
             FrameLayout(this).apply {
                 addView(
@@ -332,6 +356,13 @@ class LauncherActivity :
                         FrameLayout.LayoutParams.MATCH_PARENT,
                         FrameLayout.LayoutParams.MATCH_PARENT,
                     ),
+                )
+                addView(
+                    directoryProgress,
+                    FrameLayout.LayoutParams(dp(48), dp(48)).apply {
+                        gravity = Gravity.CENTER
+                        bottomMargin = dp(112)
+                    },
                 )
                 setOnApplyWindowInsetsListener { view, insets ->
                     val safe =
@@ -1956,18 +1987,30 @@ class LauncherActivity :
         val producer =
             Thread(
                 {
-                    runCatching {
-                        ParcelFileDescriptor.AutoCloseOutputStream(writer).use { stream ->
-                            DataOutputStream(BufferedOutputStream(stream, DIRECTORY_BUFFER_BYTES))
-                                .use { output ->
+                    var progressStarted = false
+                    try {
+                        beginDirectoryStreamProgress()
+                        progressStarted = true
+                        runCatching {
+                            ParcelFileDescriptor.AutoCloseOutputStream(writer).use { stream ->
+                                DataOutputStream(
+                                    BufferedOutputStream(stream, DIRECTORY_BUFFER_BYTES),
+                                ).use { output ->
                                     writeDirectoryStream(treeUri, output)
                                 }
+                            }
+                        }.onFailure { error ->
+                            if (error !is IOException || error.message != "Broken pipe") {
+                                Log.w(TAG, "Android directory stream failed", error)
+                            }
+                            reportDirectoryStreamFailure()
                         }
-                    }.onFailure { error ->
-                        if (error !is IOException || error.message != "Broken pipe") {
-                            Log.w(TAG, "Android directory stream failed", error)
+                    } finally {
+                        if (progressStarted) {
+                            endDirectoryStreamProgress()
+                        } else {
+                            runCatching { writer.close() }
                         }
-                        reportDirectoryStreamFailure()
                     }
                 },
                 "ArchpheneDirectoryStream",
@@ -2046,6 +2089,27 @@ class LauncherActivity :
         } finally {
             activeDirectoryWatchdog.compareAndSet(watchdog, null)
             watchdog.close()
+        }
+    }
+
+    private fun beginDirectoryStreamProgress() {
+        check(directoryStreamActive.compareAndSet(false, true)) {
+            "Another Android directory stream is active"
+        }
+        handler.postDelayed(showDirectoryProgress, DIRECTORY_PROGRESS_DELAY_MILLIS)
+    }
+
+    private fun endDirectoryStreamProgress() {
+        directoryStreamActive.set(false)
+        handler.post {
+            handler.removeCallbacks(showDirectoryProgress)
+            if (directoryProgressVisible) {
+                directoryProgressVisible = false
+                directoryProgress.visibility = View.GONE
+                if (remoteStatus == STATUS_RUNNING) {
+                    status.visibility = View.GONE
+                }
+            }
         }
     }
 
@@ -2464,6 +2528,7 @@ class LauncherActivity :
         private const val DIRECTORY_BUFFER_BYTES = 64 * 1024
         private const val DIRECTORY_PROVIDER_DEADLINE_MILLIS = 30_000L
         private const val DIRECTORY_PROVIDER_FATAL_GRACE_MILLIS = 2_000L
+        private const val DIRECTORY_PROGRESS_DELAY_MILLIS = 500L
         private const val DIRECTORY_RECORD_END = 0
         private const val DIRECTORY_RECORD_DIRECTORY = 1
         private const val DIRECTORY_RECORD_FILE = 2

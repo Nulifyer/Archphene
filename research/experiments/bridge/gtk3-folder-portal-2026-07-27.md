@@ -91,12 +91,29 @@ files. The emulator completed the import in 13 seconds and Samsung in 49
 seconds. Exact counts, sampled hashes, empty content, process survival, fatal
 logs, and full-device picker/completion frames pass on both.
 
+The slow-progress gate is:
+
+```bash
+./scripts/test-folder-portal-slow-provider.sh \
+  --serial SERIAL \
+  --package org.archphene.linux.p510d0cdd00e00000605a7743b9909630
+```
+
+A pipe-backed DocumentsProvider yields three 16-byte chunks with two 20-second
+gaps. The 40-second total exceeds the watchdog interval, but each individual
+read makes progress before its sliding deadline. Both devices import exact
+bytes without process loss or a false timeout. After a 500-millisecond delay,
+the wrapper shows a native indeterminate indicator with explanatory text and
+clears it when Mousepad returns; the full-device progress and completion
+frames are inspected on both.
+
 Full-device evidence is retained under:
 
 - `tooling/build/folder-portal/emulator-5554/`
 - `tooling/build/folder-portal/RFCT90AEEFA/`
 - `tooling/build/folder-portal-provider-failure/`
 - `tooling/build/folder-portal-large-tree/`
+- `tooling/build/folder-portal-slow-provider/`
 
 The picker and returned Mousepad surfaces were visually inspected with the
 complete Android status and navigation areas visible.
@@ -107,4 +124,3 @@ complete Android status and navigation areas visible.
   a folder-selection workflow.
 - Validate Qt 6/KDE, GTK 4/libadwaita, and Electron callers.
 - Add MIME/name filters where the Android picker contract can preserve them.
-- Test providers that make slow forward progress.

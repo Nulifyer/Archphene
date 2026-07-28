@@ -1669,6 +1669,16 @@ emulator and 49 seconds on Samsung. Counts, sampled hashes, empty content,
 launcher/manager survival, fatal logs, and complete picker/returned-app frames
 are independently checked on both devices.
 
+Slow but healthy provider streams are distinguished from stalls. A debuggable
+DocumentsProvider returns three 16-byte pipe chunks 20 seconds apart, so the
+whole transfer takes 40 seconds while every read remains within the sliding
+30-second deadline. Both exact ABIs complete without a false timeout and
+preserve exact content and both processes. Folder transfers lasting over 500
+milliseconds now cover the Linux surface with a native indeterminate progress
+indicator and “Large folders may take a moment” explanation, then restore the
+application on completion. Complete progress and returned-app frames were
+inspected on Samsung and the emulator.
+
 The same private frontend implements XDG Settings portal v2 for the standard
 appearance color scheme, accent, contrast, and reduced-motion keys, including
 the intentionally nested legacy `Read` result. It honors D-Bus no-reply calls,
