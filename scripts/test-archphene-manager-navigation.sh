@@ -75,8 +75,8 @@ archphene_open_manager_section Terminal "manager-navigation-terminal-$serial"
 archphene_wait_ui_exact_text \
   "Shared Linux terminal" "manager-navigation-terminal-title-$serial" 15
 archphene_wait_ui_exact_text \
-  "Command, e.g. btop" \
-  "manager-navigation-terminal-command-$serial" 15
+  "Start shell" \
+  "manager-navigation-terminal-start-$serial" 15
 archphene_adb_run exec-out screencap -p >"$output_dir/$serial-terminal.png"
 
 if [[ "$initial_user_rotation" == 0 || "$initial_user_rotation" == 2 ]]; then

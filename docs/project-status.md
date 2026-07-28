@@ -1983,6 +1983,13 @@ full-device captures also verify the production session layout: the obsolete
 command-entry and Run/Send row is gone, the shell selector disappears while a
 session is active, and only a compact status/Stop row remains below the
 full-height terminal.
+Every affected terminal regression now enters fixture commands through the
+actual focus, Android text-editor, and hardware-Enter path rather than the
+removed textbox. Noninteractive backend-command coverage uses a bounded
+debug-manifest-only receiver, so release builds do not regain a second command
+surface. The inactive footer reports either the selected shell's readiness or
+the need to install a supported shell instead of advertising the removed
+action.
 
 ## Validated
 

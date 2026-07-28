@@ -41,6 +41,9 @@
             android:name=".TerminalQueryTestReceiver"
             android:exported="true" />
         <receiver
+            android:name=".LinuxCommandTestReceiver"
+            android:exported="true" />
+        <receiver
             android:name=".PerformanceTestReceiver"
             android:exported="true" />
         <provider

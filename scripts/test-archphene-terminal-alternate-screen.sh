@@ -43,15 +43,7 @@ archphene_adb_run shell run-as "$package" test -x files/arch-root/usr/bin/tput |
   archphene_die "alternate-screen regression requires installed tput"
 
 enter_shell_line() {
-  local line="$1" ui_name="$2"
-  archphene_wait_ui 'text="Command, e.g. btop"' \
-    "$ui_name-field" 15
-  archphene_tap_ui_pattern "$ARCHPHENE_UI" \
-    'text="Command, e.g. btop"' 'Linux shell input'
-  archphene_adb_run shell input text "${line// /%s}" >/dev/null
-  archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null
-  archphene_wait_ui 'text="Send"' "$ui_name-send" 10
-  archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Send"' 'send shell input'
+  archphene_enter_terminal_line "$1" "$2"
 }
 
 capture_without() {

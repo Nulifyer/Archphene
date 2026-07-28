@@ -188,6 +188,38 @@ archphene_open_manager_section() {
     "$name-selected" 15
 }
 
+archphene_enter_terminal_line() {
+  local line="$1"
+  local name="${2:-terminal-line}"
+  archphene_wait_ui \
+    'content-desc="Linux terminal, [0-9]+ columns by [0-9]+ rows"' \
+    "$name-surface" 15
+  archphene_tap_ui_pattern \
+    "$ARCHPHENE_UI" \
+    'content-desc="Linux terminal, [0-9]+ columns by [0-9]+ rows"' \
+    'terminal surface'
+  sleep 0.5
+  archphene_adb_run shell input text "${line// /%s}" >/dev/null
+  # The terminal is a real Android text editor. Dismiss the IME without
+  # changing focus, then submit through its hardware-key input path.
+  archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null
+  archphene_adb_run shell input keyevent KEYCODE_ENTER >/dev/null
+}
+
+archphene_run_debug_linux_command() {
+  local package="$1"
+  local command="$2"
+  local encoded
+  encoded="$(printf '%s' "$command" | base64 -w0)"
+  archphene_adb_run shell am broadcast \
+    -a org.archphene.app.debug.action.RUN_LINUX_COMMAND \
+    --es command_base64 "$encoded" \
+    -n "$package/org.archphene.app.LinuxCommandTestReceiver" >/dev/null
+  archphene_wait_log \
+    'Submitted Linux command probe' 15 'ArchpheneLinuxCommandProbe:I *:S' \
+    >/dev/null
+}
+
 archphene_open_documents_download_root() {
   local ui="$1"
   local name="${2:-documents-download-root}"

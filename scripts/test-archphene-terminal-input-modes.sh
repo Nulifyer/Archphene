@@ -89,15 +89,9 @@ archphene_wait_ui \
   'content-desc="Linux terminal, [0-9]+ columns by [0-9]+ rows".*text="Shared shell ready"' \
   "input-mode-prompt-$serial" 20
 
-archphene_wait_ui 'text="Command, e.g. btop"' \
-  "input-mode-fixture-field-$serial" 15
-archphene_tap_ui_pattern "$ARCHPHENE_UI" \
-  'text="Command, e.g. btop"' 'Linux shell input'
-archphene_adb_run shell input text \
-  'bash%s/usr/bin/archphene-terminal-input-mode-test' >/dev/null
-archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null
-archphene_wait_ui 'text="Send"' "input-mode-fixture-send-$serial" 10
-archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Send"' 'send shell input'
+archphene_enter_terminal_line \
+  "bash /usr/bin/archphene-terminal-input-mode-test" \
+  "input-mode-fixture-$serial"
 
 archphene_wait_ui 'NORMAL-WAIT' "input-mode-normal-wait-$serial" 15
 send_hardware_up "input-mode-normal-up-$serial"

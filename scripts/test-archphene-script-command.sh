@@ -80,18 +80,7 @@ archphene_adb_run shell am force-stop "$package" >/dev/null
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
 archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 15 >/dev/null
 archphene_open_manager_section Terminal "archphene-script-terminal-$serial"
-archphene_wait_ui 'text="Command, e.g. btop"' \
-  "archphene-script-command-field-$serial" 15
-archphene_tap_ui_pattern "$ARCHPHENE_UI" \
-  'text="Command, e.g. btop"' 'Linux command'
-archphene_adb_run shell input text 'archphene-command-test%sverified' >/dev/null
-archphene_wait_ui 'text="archphene-command-test verified"' \
-  "archphene-script-command-entered-$serial" 10
-archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null
-archphene_wait_ui 'text="(?:RUN|Run)"' \
-  "archphene-script-keyboard-dismissed-$serial" 10
-archphene_tap_ui_pattern "$ARCHPHENE_UI" \
-  'text="(?:RUN|Run)"' 'run Linux script'
+archphene_run_debug_linux_command "$package" "archphene-command-test verified"
 archphene_wait_ui 'text="Exited 0[^"]*archphene-script-ok:verified' \
   "archphene-script-complete-$serial" 45
 archphene_wait_ui \

@@ -54,26 +54,7 @@ archphene_adb_run shell run-as "$package" cp "$device_temporary" "$installed_fix
 archphene_adb_run shell run-as "$package" chmod 755 "$installed_fixture"
 
 enter_shell_line() {
-  local line="$1" ui_name="$2" deadline ui
-  archphene_wait_ui 'text="Command, e.g. btop"' \
-    "$ui_name-field" 15
-  deadline=$((SECONDS + 10))
-  while ((SECONDS < deadline)); do
-    ui="$(archphene_capture_ui "$ui_name-field-focused")"
-    if archphene_regex_contains \
-      "$ui" 'class="android\.widget\.EditText"[^>]*focused="true"'; then
-      break
-    fi
-    archphene_tap_ui_pattern \
-      "$ui" 'text="Command, e.g. btop"' 'Linux shell input'
-    sleep 0.3
-  done
-  ((SECONDS < deadline)) ||
-    archphene_die "Linux shell input did not retain focus"
-  archphene_adb_run shell input text "${line// /%s}" >/dev/null
-  archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null
-  archphene_wait_ui 'text="Send"' "$ui_name-send" 10
-  archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Send"' 'send shell input'
+  archphene_enter_terminal_line "$1" "$2"
 }
 
 enter_terminal_line() {

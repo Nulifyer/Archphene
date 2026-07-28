@@ -64,15 +64,9 @@ archphene_wait_ui \
   'content-desc="Linux terminal, [0-9]+ columns by [0-9]+ rows".*text="Shared shell ready"' \
   "terminal-color-prompt-$serial" 20
 
-archphene_wait_ui 'text="Command, e.g. btop"' \
-  "terminal-color-field-$serial" 15
-archphene_tap_ui_pattern "$ARCHPHENE_UI" \
-  'text="Command, e.g. btop"' 'Linux shell input'
-archphene_adb_run shell input text \
-  'bash%s/usr/bin/archphene-terminal-color-test' >/dev/null
-archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null
-archphene_wait_ui 'text="Send"' "terminal-color-send-$serial" 10
-archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Send"' 'send shell input'
+archphene_enter_terminal_line \
+  "bash /usr/bin/archphene-terminal-color-test" \
+  "terminal-color-fixture-$serial"
 
 archphene_wait_ui 'terminal-color-ready' "terminal-color-ready-$serial" 20
 for marker in RED196 GREEN46 BLUE21 MAGENTA201 YELLOW226 CYAN51 GRAY244 \

@@ -62,15 +62,9 @@ archphene_wait_ui 'text="Start shell"' "terminal-editing-start-$serial" 15
 archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Start shell"' 'start shell'
 archphene_wait_ui 'archphene:~\$' "terminal-editing-prompt-$serial" 20
 
-archphene_wait_ui 'text="Command, e.g. btop"' \
-  "terminal-editing-field-$serial" 15
-archphene_tap_ui_pattern "$ARCHPHENE_UI" \
-  'text="Command, e.g. btop"' 'Linux shell input'
-archphene_adb_run shell input text \
-  'bash%s/usr/bin/archphene-terminal-editing-test' >/dev/null
-archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null
-archphene_wait_ui 'text="Send"' "terminal-editing-send-$serial" 10
-archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Send"' 'send shell input'
+archphene_enter_terminal_line \
+  "bash /usr/bin/archphene-terminal-editing-test" \
+  "terminal-editing-fixture-$serial"
 
 archphene_wait_ui 'terminal-editing-ready' "terminal-editing-ready-$serial" 20
 archphene_regex_contains "$ARCHPHENE_UI" 'OUTSIDE-TOP' ||

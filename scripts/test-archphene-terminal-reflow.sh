@@ -65,15 +65,9 @@ archphene_wait_ui 'text="Start shell"' "terminal-reflow-start-$serial" 15
 archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Start shell"' 'start shell'
 archphene_wait_ui '(?:archphene:~|sh-[0-9.]+)\$' \
   "terminal-reflow-prompt-$serial" 20
-archphene_wait_ui 'text="Command, e.g. btop"' \
-  "terminal-reflow-field-$serial" 15
-archphene_tap_ui_pattern "$ARCHPHENE_UI" \
-  'text="Command, e.g. btop"' 'Linux shell input'
-archphene_adb_run shell input text \
-  'bash%s/usr/bin/archphene-terminal-reflow-test' >/dev/null
-archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null
-archphene_wait_ui 'text="Send"' "terminal-reflow-send-$serial" 10
-archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Send"' 'send shell input'
+archphene_enter_terminal_line \
+  "bash /usr/bin/archphene-terminal-reflow-test" \
+  "terminal-reflow-fixture-$serial"
 archphene_wait_ui 'REFLOW-END' "terminal-reflow-live-tail-$serial" 40
 
 manager_pid="$(

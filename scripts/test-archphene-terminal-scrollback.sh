@@ -63,15 +63,9 @@ archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Start shell"' 'start shell'
 archphene_wait_ui '(?:archphene:~|sh-[0-9.]+)\$' \
   "terminal-scrollback-prompt-$serial" 20
 
-archphene_wait_ui 'text="Command, e.g. btop"' \
-  "terminal-scrollback-field-$serial" 15
-archphene_tap_ui_pattern "$ARCHPHENE_UI" \
-  'text="Command, e.g. btop"' 'Linux shell input'
-archphene_adb_run shell input text \
-  'bash%s/usr/bin/archphene-terminal-scrollback-test' >/dev/null
-archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null
-archphene_wait_ui 'text="Send"' "terminal-scrollback-send-$serial" 10
-archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Send"' 'send shell input'
+archphene_enter_terminal_line \
+  "bash /usr/bin/archphene-terminal-scrollback-test" \
+  "terminal-scrollback-fixture-$serial"
 
 archphene_wait_ui 'SCROLL-LIVE-READY' "terminal-scrollback-live-$serial" 40
 archphene_adb_run exec-out screencap -p >"$output_dir/$serial-live.png"

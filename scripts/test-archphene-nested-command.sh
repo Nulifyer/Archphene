@@ -80,20 +80,7 @@ archphene_adb_run shell am force-stop "$package" >/dev/null
 archphene_adb_run shell am start -W -n "$activity" >/dev/null
 archphene_wait_log 'Package runtime ready:.*Pacman v[0-9]' 15 >/dev/null
 archphene_open_manager_section Terminal "archphene-nested-command-terminal-$serial"
-archphene_wait_ui 'text="Command, e.g. btop"' \
-  "archphene-nested-command-field-$serial" 15
-archphene_tap_ui_pattern "$ARCHPHENE_UI" \
-  'text="Command, e.g. btop"' 'Linux command'
-archphene_adb_run shell input text archphene-nested-command-test >/dev/null
-archphene_wait_ui 'text="archphene-nested-command-test"' \
-  "archphene-nested-command-entered-$serial" 10
-entered_ui="$ARCHPHENE_UI"
-if ! archphene_regex_contains "$entered_ui" 'text="Run"'; then
-  archphene_adb_run shell input keyevent KEYCODE_BACK >/dev/null
-fi
-archphene_wait_ui 'text="Run"' \
-  "archphene-nested-command-keyboard-dismissed-$serial" 10
-archphene_tap_ui_pattern "$ARCHPHENE_UI" 'text="Run"' 'run nested Linux command'
+archphene_run_debug_linux_command "$package" "archphene-nested-command-test"
 archphene_wait_ui 'text="Exited 0[^"]*GNU bash, version' \
   "archphene-nested-command-complete-$serial" 45
 archphene_wait_log 'Linux command archphene-nested-command-test exited 0' \

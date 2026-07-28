@@ -499,33 +499,26 @@ class ArchpheneRuntimeService : Service() {
             get() = folderStateReady && folderOnboardingNeeded
 
         val linuxCommandStatus: String
-            get() =
+            get() {
                 if (shellActive) {
-                    shellPhase
-                } else if (shellWasStarted) {
-                    sharedShellDisplayStatus()
-                } else {
-                    commandStatus
+                    return shellPhase
                 }
+                if (shellWasStarted) {
+                    return sharedShellDisplayStatus()
+                }
+                if (directCommandStarted) {
+                    return commandStatus
+                }
+                val selectedShell = shellChoices.getOrNull(selectedShellIndex)
+                return if (selectedShell == null) {
+                    "Install Bash or another supported shell to use Terminal"
+                } else {
+                    "Ready to start ${selectedShell.label}"
+                }
+            }
 
         val linuxCommandStarted: Boolean
             get() = directCommandStarted
-
-        val linuxCommandAvailable: Boolean
-            get() =
-                if (shellActive) {
-                    shellHandle != 0L && !shellStopRequested
-                } else {
-                    readyHandle != 0L &&
-                        !catalogRefreshActive &&
-                        !packageCacheActive &&
-                        !searchActive &&
-                        !packageOperationActive &&
-                        !commandActive
-                }
-
-        val linuxInputActionLabel: String
-            get() = if (shellActive) "Send" else "Run"
 
         val sharedShellActionLabel: String
             get() = if (shellActive) "Stop shell" else "Start shell"
@@ -1102,7 +1095,7 @@ class ArchpheneRuntimeService : Service() {
             "Open Downloads to inspect the package cache",
             0,
         )
-    @Volatile private var commandStatus = "Run an installed Linux command"
+    @Volatile private var commandStatus = "Linux command has not run"
     private val shellOutput = BoundedByteRing(SHELL_SCROLLBACK_BYTES)
     private val shellInput = FixedByteQueue(SHELL_INPUT_BYTES)
     private val installedPackageOutputBuffer =
