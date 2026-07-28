@@ -1228,6 +1228,19 @@ x86_64/AArch64 builds. The signed-manager device fixture now includes a real
 is pending restoration of a package-installed shell after the intentional
 clean-data navigation regression cleared both test roots.
 
+Auditing the terminal against the locally installed `xterm-256color` terminfo
+also exposed two terminfo-used controls that had been silently ignored. DEC
+soft reset now preserves visible content while restoring scrolling margins,
+saved cursor, character sets, rendition, and update-affecting modes. DEC
+reverse-screen mode is queryable through the fixed reply ring and published in
+one reserved damage-flag bit; Android applies it as an XOR with per-cell
+inverse video and re-records every row only when the mode changes. Rust unit,
+warmed zero-allocation, and clippy gates plus Android lint/unit and exact
+x86_64/AArch64 build gates pass.
+Dynamic palette changes, horizontal margins, terminal mouse/focus reporting,
+cursor style/blink, and synchronized output remain open parts of the advertised
+contract.
+
 The temporary command field and Run/Send controls are no longer present in the
 production manager. Active sessions reserve only the measured terminal plus a
 52 dp status/Stop row; normal regression input goes through the focused

@@ -29,6 +29,7 @@ const FLAG_APPLICATION_KEYPAD: u32 = 1 << 2;
 const FLAG_BRACKETED_PASTE: u32 = 1 << 3;
 const FLAG_NEW_LINE_MODE: u32 = 1 << 4;
 const FLAG_BACKARROW_KEY: u32 = 1 << 5;
+const FLAG_REVERSE_SCREEN: u32 = 1 << 6;
 const ATTRIBUTE_BOLD: u8 = 1;
 const ATTRIBUTE_UNDERLINE: u8 = 1 << 1;
 const ATTRIBUTE_INVERSE: u8 = 1 << 2;
@@ -489,6 +490,7 @@ pub struct Terminal {
     bracketed_paste: bool,
     new_line_mode: bool,
     backarrow_key: bool,
+    reverse_screen: bool,
     insert_mode: bool,
     origin_mode: bool,
     auto_wrap: bool,
@@ -557,6 +559,7 @@ impl Terminal {
             bracketed_paste: false,
             new_line_mode: false,
             backarrow_key: false,
+            reverse_screen: false,
             insert_mode: false,
             origin_mode: false,
             auto_wrap: true,
@@ -854,6 +857,10 @@ impl Terminal {
             0
         } | if self.backarrow_key {
             FLAG_BACKARROW_KEY
+        } else {
+            0
+        } | if self.reverse_screen {
+            FLAG_REVERSE_SCREEN
         } else {
             0
         };
@@ -1343,8 +1350,12 @@ impl Terminal {
         if self.csi_prefix != 0 {
             return;
         }
-        if self.csi_intermediate == b'$' && final_byte == b'p' {
-            self.report_mode(false);
+        if final_byte == b'p' {
+            match self.csi_intermediate {
+                b'$' => self.report_mode(false),
+                b'!' if self.csi_count == 1 && self.csi_parameters[0] == 0 => self.soft_reset(),
+                _ => {}
+            }
             return;
         }
         if self.csi_intermediate != 0 {
@@ -1472,6 +1483,7 @@ impl Terminal {
         for index in 0..self.csi_count {
             match self.csi_parameters[index] {
                 1 => self.set_application_cursor(enabled),
+                5 => self.set_reverse_screen(enabled),
                 6 => self.set_origin_mode(enabled),
                 7 => self.set_auto_wrap(enabled),
                 25 => {
@@ -1557,6 +1569,7 @@ impl Terminal {
         let status = if private {
             match mode {
                 1 => mode_status(self.application_cursor),
+                5 => mode_status(self.reverse_screen),
                 6 => mode_status(self.origin_mode),
                 7 => mode_status(self.auto_wrap),
                 25 => mode_status(self.cursor_visible),
@@ -1642,6 +1655,13 @@ impl Terminal {
         if self.backarrow_key != enabled {
             self.backarrow_key = enabled;
             self.mark_dirty(self.cursor_row);
+        }
+    }
+
+    fn set_reverse_screen(&mut self, enabled: bool) {
+        if self.reverse_screen != enabled {
+            self.reverse_screen = enabled;
+            self.mark_dirty_range(0, self.rows);
         }
     }
 
@@ -2167,6 +2187,7 @@ impl Terminal {
         self.bracketed_paste = false;
         self.new_line_mode = false;
         self.backarrow_key = false;
+        self.reverse_screen = false;
         self.insert_mode = false;
         self.origin_mode = false;
         self.auto_wrap = true;
@@ -2182,6 +2203,35 @@ impl Terminal {
         self.background = DEFAULT_BACKGROUND;
         self.attributes = 0;
         self.utf8_remaining = 0;
+        self.mark_dirty_range(0, self.rows);
+    }
+
+    fn soft_reset(&mut self) {
+        self.cursor_visible = true;
+        self.application_cursor = false;
+        self.application_keypad = false;
+        self.bracketed_paste = false;
+        self.new_line_mode = false;
+        self.backarrow_key = false;
+        self.reverse_screen = false;
+        self.insert_mode = false;
+        self.origin_mode = false;
+        self.auto_wrap = true;
+        self.scroll_top = 0;
+        self.scroll_bottom = self.rows - 1;
+        self.wrap_pending = false;
+        self.saved_row = 0;
+        self.saved_column = 0;
+        self.last_printed = None;
+        self.g0_charset = Charset::Ascii;
+        self.g1_charset = Charset::Ascii;
+        self.use_g1 = false;
+        self.foreground = DEFAULT_FOREGROUND;
+        self.background = DEFAULT_BACKGROUND;
+        self.attributes = 0;
+        self.utf8_remaining = 0;
+        self.cursor_row = self.cursor_row.min(self.rows - 1);
+        self.cursor_column = self.cursor_column.min(self.columns - 1);
         self.mark_dirty_range(0, self.rows);
     }
 
@@ -2995,6 +3045,57 @@ mod tests {
         );
 
         terminal.feed(b"\x1b[?1;66;67;2004l\x1b>\x1b[20l");
+        terminal.write_damage(&mut output).unwrap();
+        assert_eq!(
+            u32::from_le_bytes(output[20..24].try_into().unwrap()),
+            FLAG_CURSOR_VISIBLE
+        );
+    }
+
+    #[test]
+    fn reverse_screen_and_soft_reset_follow_the_advertised_xterm_contract() {
+        let mut terminal = Terminal::new(4, 8).unwrap();
+        let mut output = [0_u8; 4096];
+        terminal.feed(b"keep");
+        terminal.write_damage(&mut output).unwrap();
+
+        terminal.feed(
+            b"\x1b[2;3r\x1b[?1;5;6;67;2004h\x1b[2;4H\x1b=\x1b[4;20h\
+              \x1b[31;44;1m\x1b(0\x1b[?25l\x1b[?5$p",
+        );
+        assert_eq!(terminal.pending_reply(), b"\x1b[?5;1$y");
+        terminal.consume_reply(usize::MAX);
+        let length = terminal.write_damage(&mut output).unwrap();
+        assert_eq!(length, DAMAGE_HEADER_SIZE + 4 * 8 * DAMAGE_CELL_SIZE);
+        assert_eq!(
+            u32::from_le_bytes(output[20..24].try_into().unwrap()),
+            FLAG_APPLICATION_CURSOR
+                | FLAG_APPLICATION_KEYPAD
+                | FLAG_BRACKETED_PASTE
+                | FLAG_NEW_LINE_MODE
+                | FLAG_BACKARROW_KEY
+                | FLAG_REVERSE_SCREEN
+        );
+
+        terminal.feed(b"\x1b[!p\x1b[?5$p");
+        assert_eq!(text(&terminal, 0), "keep    ");
+        assert_eq!(terminal.cursor(), (2, 3));
+        assert_eq!(terminal.scroll_top, 0);
+        assert_eq!(terminal.scroll_bottom, 3);
+        assert_eq!(terminal.saved_row, 0);
+        assert_eq!(terminal.saved_column, 0);
+        assert!(terminal.cursor_visible);
+        assert!(!terminal.application_cursor);
+        assert!(!terminal.application_keypad);
+        assert!(!terminal.bracketed_paste);
+        assert!(!terminal.new_line_mode);
+        assert!(!terminal.backarrow_key);
+        assert!(!terminal.reverse_screen);
+        assert!(!terminal.insert_mode);
+        assert!(!terminal.origin_mode);
+        assert!(terminal.auto_wrap);
+        assert_eq!(terminal.g0_charset, Charset::Ascii);
+        assert_eq!(terminal.pending_reply(), b"\x1b[?5;2$y");
         terminal.write_damage(&mut output).unwrap();
         assert_eq!(
             u32::from_le_bytes(output[20..24].try_into().unwrap()),

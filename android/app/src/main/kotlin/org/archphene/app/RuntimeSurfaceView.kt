@@ -796,14 +796,17 @@ internal class RuntimeSurfaceView(
                 runEnd++
             }
             val foregroundColor = styledForeground and COLOR_VALUE_MASK
+            val inverse =
+                (attributes and ATTRIBUTE_INVERSE != 0) xor
+                    (terminalFlags and REVERSE_SCREEN_FLAG != 0)
             val baseForeground =
-                if (attributes and ATTRIBUTE_INVERSE != 0) {
+                if (inverse) {
                     resolveTerminalColor(backgroundColor)
                 } else {
                     resolveTerminalColor(foregroundColor)
                 }
             val background =
-                if (attributes and ATTRIBUTE_INVERSE != 0) {
+                if (inverse) {
                     resolveTerminalColor(foregroundColor)
                 } else {
                     resolveTerminalColor(backgroundColor)
@@ -2291,6 +2294,7 @@ internal class RuntimeSurfaceView(
         private const val BRACKETED_PASTE_FLAG = 1 shl 3
         private const val NEW_LINE_MODE_FLAG = 1 shl 4
         private const val BACKARROW_KEY_FLAG = 1 shl 5
+        private const val REVERSE_SCREEN_FLAG = 1 shl 6
         private const val DIRECT_COLOR_FLAG = 1 shl 24
         private const val RGB_MASK = 0x00ffffff
         private const val COLOR_VALUE_MASK = 0x01ffffff

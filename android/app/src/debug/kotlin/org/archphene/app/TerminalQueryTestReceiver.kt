@@ -85,11 +85,19 @@ internal class TerminalQueryTestReceiver : BroadcastReceiver() {
                 "printf \$'\\e[?2004h'; " +
                 "read -rsn11 -p \$'\\e[?2004\$p' paste_on; " +
                 "printf \$'\\e[?2004l'; " +
+                "printf \$'\\e[?1;5h'; " +
+                "read -rsn8 -p \$'\\e[?5\$p' reverse_on; " +
+                "printf \$'\\e[!p'; " +
+                "read -rsn8 -p \$'\\e[?5\$p' reverse_reset; " +
+                "read -rsn8 -p \$'\\e[?1\$p' cursor_reset; " +
                 "if [[ \$da == \$'\\e[?1;2c' && \$dsr == \$'\\e[0n' " +
                 "&& \$cpr == \$'\\e[3;5R' && \$da2 == \$'\\e[>0;1;0c' " +
                 "&& \$size == \"\$expected_size\" " +
                 "&& \$paste_off == \$'\\e[?2004;2\$y' " +
-                "&& \$paste_on == \$'\\e[?2004;1\$y' ]]; then " +
+                "&& \$paste_on == \$'\\e[?2004;1\$y' " +
+                "&& \$reverse_on == \$'\\e[?5;1\$y' " +
+                "&& \$reverse_reset == \$'\\e[?5;2\$y' " +
+                "&& \$cursor_reset == \$'\\e[?1;2\$y' ]]; then " +
                 "printf \$'\\e[2J\\e[Hterminal-query-pass\\n'; else " +
                 "printf \$'\\e[2J\\e[Hterminal-query-fail\\n'; fi"
     }
