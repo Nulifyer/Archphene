@@ -1323,14 +1323,22 @@ class ArchpheneRuntimeService : Service() {
         val sha256: String,
         val file: File,
         val logs: String,
+        val persistent: Boolean = false,
     )
 
     private fun detachRetainedAurBuiltPackageFiles(): Array<File> {
         val files =
             if (retainedAurBuiltPackages.isEmpty()) {
-                retainedAurBuiltPackage?.file?.let { file -> arrayOf(file) } ?: emptyArray()
+                retainedAurBuiltPackage
+                    ?.takeUnless(AurBuiltPackage::persistent)
+                    ?.file
+                    ?.let { file -> arrayOf(file) }
+                    ?: emptyArray()
             } else {
-                retainedAurBuiltPackages.map(AurBuiltPackage::file).toTypedArray()
+                retainedAurBuiltPackages
+                    .filterNot(AurBuiltPackage::persistent)
+                    .map(AurBuiltPackage::file)
+                    .toTypedArray()
             }
         retainedAurBuiltPackages = emptyArray()
         retainedAurBuiltPackage = null
@@ -7619,13 +7627,60 @@ class ArchpheneRuntimeService : Service() {
                         builder,
                         buildEnvironment,
                     )
+                    val restored =
+                        if (builder == null) {
+                            emptyArray()
+                        } else {
+                            runCatching {
+                                searchStatus = "Checking retained verified build output"
+                                restorePersistedAurBuiltPackages(
+                                    activeHandle,
+                                    review,
+                                    builder,
+                                )
+                            }.onFailure { error ->
+                                Log.w(
+                                    TAG,
+                                    "Retained AUR output could not be restored",
+                                    error,
+                                )
+                            }.getOrDefault(emptyArray())
+                        }
+                    if (restored.isNotEmpty()) {
+                        clearRetainedAurBuiltPackages()
+                        retainedAurBuiltPackages = restored
+                        val selected =
+                            restored.singleOrNull { output ->
+                                output.packageName == review.packageName
+                            } ?: throw IllegalStateException(
+                                "Retained AUR output omitted the selected package",
+                            )
+                        retainedAurBuiltPackage = selected
+                        publishAurBuiltPresentation(review, selected)
+                        lastResolvedPackage = review.packageName
+                        lastResolvedRepository = "aur"
+                        lastResolvedInstalledVersion =
+                            installedPackageVersion(activeHandle, review.packageName)
+                        lastResolvedAvailableVersion = review.version
+                        primaryActionLabel =
+                            if (lastResolvedInstalledVersion.isEmpty()) {
+                                "Install"
+                            } else {
+                                "Update"
+                            }
+                        removeAvailable = lastResolvedInstalledVersion.isNotEmpty()
+                        publishAurBuildLogs(selected.logs)
+                    }
                     searchStatus =
                         "Verified ${remoteSources.size} source(s) · " +
                             "${formatStorageBytes(totalVerified)} · " +
-                            if (builder == null) {
-                                "builder companion unavailable"
-                            } else {
-                                "ready to build"
+                            when {
+                                restored.isNotEmpty() ->
+                                    "restored verified build · ready to install"
+                                builder == null ->
+                                    "builder companion unavailable"
+                                else ->
+                                    "ready to build"
                             }
                     Log.i(
                         TAG,
@@ -7654,6 +7709,13 @@ class ArchpheneRuntimeService : Service() {
                                 "recipe=${builder.recipeEntries}/" +
                                 "${builder.recipeBytes}+${builder.recipeSourceBytes}",
                         )
+                        if (restored.isNotEmpty()) {
+                            Log.i(
+                                TAG,
+                                "Restored ${restored.size} durable verified AUR output(s) " +
+                                    "for ${review.packageName} ${review.version}",
+                            )
+                        }
                     } else {
                         Log.i(TAG, "AUR builder companion is not installed")
                     }
@@ -7692,11 +7754,12 @@ class ArchpheneRuntimeService : Service() {
         val normalized = packageName.trim()
         val review = retainedAurReview
         val builder = retainedAurBuilderReport
+        val activeHandle = readyHandle
         if (
             review == null ||
             builder == null ||
             normalized != review.packageName ||
-            readyHandle == 0L ||
+            activeHandle == 0L ||
             catalogRefreshActive ||
             packageCacheActive ||
             searchActive ||
@@ -7718,7 +7781,24 @@ class ArchpheneRuntimeService : Service() {
                 requireRuntimeWorker("AUR build")
                 try {
                     deleteRetainedAurBuiltPackageFiles(staleAurBuildOutputs)
-                    val result = runAurBuilderBuild(review, builder)
+                    val transient = runAurBuilderBuild(review, builder)
+                    searchStatus = "Persisting independently verified build output"
+                    val result =
+                        try {
+                            persistAurBuiltPackages(
+                                activeHandle,
+                                review,
+                                builder,
+                                transient,
+                            )
+                        } finally {
+                            deleteRetainedAurBuiltPackageFiles(
+                                transient
+                                    .filterNot(AurBuiltPackage::persistent)
+                                    .map(AurBuiltPackage::file)
+                                    .toTypedArray(),
+                            )
+                        }
                     clearRetainedAurBuiltPackages()
                     retainedAurBuiltPackages = result
                     val selected =
@@ -7732,7 +7812,7 @@ class ArchpheneRuntimeService : Service() {
                     lastResolvedPackage = review.packageName
                     lastResolvedRepository = "aur"
                     lastResolvedInstalledVersion =
-                        installedPackageVersion(readyHandle, review.packageName)
+                        installedPackageVersion(activeHandle, review.packageName)
                     lastResolvedAvailableVersion = review.version
                     primaryActionLabel =
                         if (lastResolvedInstalledVersion.isEmpty()) "Install" else "Update"
@@ -10402,6 +10482,12 @@ class ArchpheneRuntimeService : Service() {
                             100,
                             "Installed ${review.packageName} ${review.version}",
                         )
+                        if (NativeRuntime.nativeClearAurBuiltCapability(activeHandle) != 0) {
+                            Log.w(
+                                TAG,
+                                "Installed AUR package but could not retire its retained capability",
+                            )
+                        }
                         clearRetainedAurBuiltPackages()
                         lastResolvedInstalledVersion = review.version
                         lastResolvedAvailableVersion = review.version
@@ -10523,6 +10609,161 @@ class ArchpheneRuntimeService : Service() {
                 }
             }
     }
+
+    private fun persistAurBuiltPackages(
+        activeHandle: Long,
+        review: AurReviewData,
+        builder: AurBuilderReport,
+        packages: Array<AurBuiltPackage>,
+    ): Array<AurBuiltPackage> {
+        val descriptors =
+            packages.map { output ->
+                ParcelFileDescriptor.open(
+                    output.file,
+                    ParcelFileDescriptor.MODE_READ_ONLY,
+                )
+            }
+        return try {
+            val manifest = aurInstallFilenameManifest(packages)
+            aurBuildClosureOutputBuffer.clear()
+            val length =
+                NativeRuntime.nativePersistAurBuiltPackages(
+                    activeHandle,
+                    descriptors.map(ParcelFileDescriptor::getFd).toIntArray(),
+                    manifest,
+                    manifest.capacity(),
+                    review.packageBase,
+                    review.packageName,
+                    review.version,
+                    currentLinuxArchitecture(),
+                    builder.closureManifestSha256,
+                    aurBuildClosureOutputBuffer,
+                )
+            check(length in 1..NativeRuntime.AUR_BUILD_CLOSURE_OUTPUT_SIZE) {
+                "Could not retain verified AUR outputs: " +
+                    readNativeMessage(aurBuildClosureOutputBuffer, length)
+            }
+            parsePersistedAurBuiltPackages(
+                length,
+                review.requiredPackages,
+                packages.associate { output -> output.packageName to output.logs },
+            )
+        } finally {
+            descriptors.forEach(ParcelFileDescriptor::close)
+        }
+    }
+
+    private fun restorePersistedAurBuiltPackages(
+        activeHandle: Long,
+        review: AurReviewData,
+        builder: AurBuilderReport,
+    ): Array<AurBuiltPackage> {
+        aurBuildClosureOutputBuffer.clear()
+        val length =
+            NativeRuntime.nativeRestoreAurBuiltPackages(
+                activeHandle,
+                review.packageBase,
+                review.packageName,
+                review.version,
+                currentLinuxArchitecture(),
+                builder.closureManifestSha256,
+                aurBuildClosureOutputBuffer,
+            )
+        if (length == 0) {
+            return emptyArray()
+        }
+        check(length in 1..NativeRuntime.AUR_BUILD_CLOSURE_OUTPUT_SIZE) {
+            "Could not restore verified AUR outputs: " +
+                readNativeMessage(aurBuildClosureOutputBuffer, length)
+        }
+        return parsePersistedAurBuiltPackages(
+            length,
+            review.requiredPackages,
+            emptyMap(),
+        )
+    }
+
+    private fun parsePersistedAurBuiltPackages(
+        length: Int,
+        requiredPackages: Array<String>,
+        logs: Map<String, String>,
+    ): Array<AurBuiltPackage> {
+        val bytes = ByteArray(length)
+        aurBuildClosureOutputBuffer.position(0)
+        aurBuildClosureOutputBuffer.get(bytes)
+        val lines =
+            String(bytes, StandardCharsets.UTF_8)
+                .trimEnd('\n')
+                .split('\n')
+        val header = lines.firstOrNull()?.split('\t').orEmpty()
+        check(
+            header.size == 2 &&
+                header[0] == "ABCY0001" &&
+                header[1].toIntOrNull() == requiredPackages.size &&
+                lines.size == requiredPackages.size + 1,
+        ) {
+            "Invalid persisted AUR output header"
+        }
+        val cacheRoot =
+            File(filesDir, "arch-root/var/cache/archphene/aur-packages").canonicalFile
+        return lines
+            .drop(1)
+            .mapIndexed { index, line ->
+                val fields = line.split('\t')
+                check(
+                    fields.size == 7 &&
+                        fields[0] == requiredPackages[index] &&
+                        AUR_BUILT_PACKAGE_FILENAME.matches(fields[1]) &&
+                        fields[5].matches(SHA256_HEX),
+                ) {
+                    "Invalid persisted AUR output identity"
+                }
+                val archiveBytes = fields[2].toLongOrNull()
+                val installedBytes = fields[3].toLongOrNull()
+                val buildPackageCount = fields[4].toIntOrNull()
+                check(
+                    archiveBytes != null &&
+                        archiveBytes > 0L &&
+                        installedBytes != null &&
+                        installedBytes > 0L &&
+                        buildPackageCount != null &&
+                        buildPackageCount in 1..256,
+                ) {
+                    "Invalid persisted AUR output metrics"
+                }
+                val file = File(fields[6]).canonicalFile
+                val expected =
+                    File(cacheRoot, "${fields[5]}-${fields[1]}").canonicalFile
+                check(
+                    file == expected &&
+                        file.parentFile == cacheRoot &&
+                        file.isFile &&
+                        file.length() == archiveBytes
+                ) {
+                    "Persisted AUR output path changed"
+                }
+                AurBuiltPackage(
+                    packageName = fields[0],
+                    filename = fields[1],
+                    archiveBytes = archiveBytes,
+                    installedBytes = installedBytes,
+                    buildPackageCount = buildPackageCount,
+                    sha256 = fields[5],
+                    file = file,
+                    logs =
+                        logs[fields[0]]
+                            ?: "Restored independently verified build output after restart",
+                    persistent = true,
+                )
+            }.toTypedArray()
+    }
+
+    private fun currentLinuxArchitecture(): String =
+        when (Build.SUPPORTED_ABIS.firstOrNull()) {
+            "x86_64" -> "x86_64"
+            "arm64-v8a" -> "aarch64"
+            else -> throw IllegalStateException("Unsupported Android ABI")
+        }
 
     @Synchronized
     private fun requestPackageInstall(packageName: String): Boolean {

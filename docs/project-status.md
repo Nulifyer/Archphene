@@ -1768,6 +1768,18 @@ Remove instead of failing official-repository resolution. Cancelled
 PackageInstaller confirmations now persist as a distinct terminal launcher
 state instead of being reconciled back to publication after manager restart.
 
+Verified AUR build capabilities now survive manager process death without
+trusting stale Kotlin state. Rust atomically publishes a bounded manifest and
+mode-0600 content-addressed output files only after independently verifying the
+Builder copy. Reattachment requires the exact reviewed package identity,
+commit/source evidence, signed official closure, ordered output identities,
+sizes, and SHA-256 values, then hashes every file and runs the full
+Builder-output verifier again. A physical Samsung built the current 212 MiB
+Code archive, killed and replaced the manager, re-established the exact
+250-package closure, and restored the ready-to-install capability without
+running Build again. The full-device result shows disabled **Built**, enabled
+**Install**, and “restored verified build · ready to install.”
+
 The AUR pre-install decision surface is now explicitly gated as a complete
 contract rather than by one token per section. Six mutually compact,
 expandable, selectable sections expose source origins and licenses; maintainer,
@@ -1802,9 +1814,9 @@ installed wrapper with an untrusted signer remains a visible retryable failure;
 explicit Retry persists removal across catalog refresh, opens Android's
 uninstall confirmation, waits for confirmed absence, then opens the trusted
 replacement install confirmation. A real stale emulator Foot identity
-completed that full-device flow and returned to Current. Recursive AUR dependencies, the
-install-script/scriptlet policy, verified-output retention across manager
-process death, and cross-package-base AUR dependency builds remain open.
+completed that full-device flow and returned to Current. Recursive AUR
+dependencies, the install-script/scriptlet policy, and cross-package-base AUR
+dependency builds remain open.
 
 Split-package build and installation now close the boundary exposed by .NET.
 The Builder returns every required archive instead of only the selected output;

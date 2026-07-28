@@ -299,6 +299,28 @@ internal object NativeRuntime {
         closureSha256: String,
         outputBuffer: ByteBuffer,
     ): Int
+    external fun nativePersistAurBuiltPackages(
+        handle: Long,
+        descriptors: IntArray,
+        filenameManifest: ByteBuffer,
+        filenameManifestLength: Int,
+        packageBase: String,
+        packageName: String,
+        version: String,
+        architecture: String,
+        closureSha256: String,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeRestoreAurBuiltPackages(
+        handle: Long,
+        packageBase: String,
+        packageName: String,
+        version: String,
+        architecture: String,
+        closureSha256: String,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeClearAurBuiltCapability(handle: Long): Int
     external fun nativeInstallAurBuiltPackage(
         handle: Long,
         descriptor: Int,

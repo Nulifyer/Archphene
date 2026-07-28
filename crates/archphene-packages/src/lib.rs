@@ -21,6 +21,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use archphene_process::{CommandEnvironment, GuiAppearance, ProcessError, publish_gui_appearance};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tar::{Archive, EntryType};
 use xz2::read::XzDecoder;
@@ -74,6 +75,9 @@ const PACKAGE_ARCHIVE_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
 const PACKAGE_SIGNATURE_LIMIT: u64 = 1024 * 1024;
 const PACKAGE_CACHE_DIRECTORY: &str = "var/cache/pacman/pkg";
 const AUR_PACKAGE_CACHE_DIRECTORY: &str = "var/cache/archphene/aur-packages";
+const AUR_BUILT_CAPABILITY_FILE: &str = ".built-capability-v1.json";
+const AUR_BUILT_CAPABILITY_TEMP_FILE: &str = ".built-capability-v1.tmp";
+const AUR_BUILT_CAPABILITY_LIMIT: u64 = 256 * 1024;
 const PACKAGE_COMPATIBILITY_CACHE_DIRECTORY: &str = "var/cache/archphene/package-compatibility-v1";
 const PACKAGE_COMPATIBILITY_CACHE_DOMAIN: &[u8] = b"org.archphene.package-compatibility-cache.v2\0";
 const PACKAGE_COMPATIBILITY_CACHE_RECORD_LIMIT: u64 = 1024;
@@ -431,6 +435,51 @@ pub struct VerifiedAurArchive<'a> {
     pub version: &'a str,
     pub expected_bytes: u64,
     pub expected_sha256: [u8; 32],
+}
+
+pub struct VerifiedAurCapabilityArchive<'a> {
+    pub source: &'a mut File,
+    pub filename: &'a str,
+    pub package: &'a str,
+    pub archive_bytes: u64,
+    pub installed_bytes: u64,
+    pub build_package_count: usize,
+    pub sha256: [u8; 32],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PersistedAurCapabilityArchive {
+    pub package: String,
+    pub filename: String,
+    pub archive_bytes: u64,
+    pub installed_bytes: u64,
+    pub build_package_count: usize,
+    pub sha256: [u8; 32],
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AurBuiltCapabilityRecord {
+    format: u32,
+    package_base: String,
+    package_name: String,
+    version: String,
+    architecture: String,
+    review_sha256: [u8; 32],
+    closure_sha256: [u8; 32],
+    outputs: Vec<AurBuiltCapabilityOutputRecord>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AurBuiltCapabilityOutputRecord {
+    package: String,
+    filename: String,
+    archive_bytes: u64,
+    installed_bytes: u64,
+    build_package_count: usize,
+    sha256: [u8; 32],
 }
 
 pub struct InstalledPackageCatalog {
@@ -2246,6 +2295,185 @@ impl PackageRuntime {
             recovery_target,
             InstallResolutionMode::Normal,
         )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn persist_aur_built_capability(
+        &self,
+        package_base: &str,
+        package_name: &str,
+        version: &str,
+        architecture: &str,
+        review_sha256: [u8; 32],
+        closure_sha256: [u8; 32],
+        required_packages: &[String],
+        outputs: &mut [VerifiedAurCapabilityArchive<'_>],
+    ) -> Result<Vec<PersistedAurCapabilityArchive>, PackageRuntimeError> {
+        validate_aur_capability_identity(
+            package_base,
+            package_name,
+            version,
+            architecture,
+            review_sha256,
+            closure_sha256,
+            required_packages,
+        )?;
+        if outputs.len() != required_packages.len() {
+            return Err(PackageRuntimeError::InvalidPayload);
+        }
+        let directory = self.arch_root.join(AUR_PACKAGE_CACHE_DIRECTORY);
+        prepare_private_directory(&directory)?;
+        let mut records = Vec::with_capacity(outputs.len());
+        let mut persisted = Vec::with_capacity(outputs.len());
+        for (output, required_package) in outputs.iter_mut().zip(required_packages) {
+            if output.package != required_package
+                || !safe_package_filename(output.filename)
+                || output.archive_bytes == 0
+                || output.archive_bytes > PACKAGE_ARCHIVE_LIMIT
+                || output.installed_bytes == 0
+                || output.build_package_count == 0
+                || output.build_package_count > 256
+                || output.sha256 == [0; 32]
+            {
+                return Err(PackageRuntimeError::InvalidPayload);
+            }
+            let path = stage_verified_aur_file(
+                &directory,
+                output.source,
+                output.filename,
+                output.archive_bytes,
+                output.sha256,
+            )?;
+            records.push(AurBuiltCapabilityOutputRecord {
+                package: output.package.to_owned(),
+                filename: output.filename.to_owned(),
+                archive_bytes: output.archive_bytes,
+                installed_bytes: output.installed_bytes,
+                build_package_count: output.build_package_count,
+                sha256: output.sha256,
+            });
+            persisted.push(PersistedAurCapabilityArchive {
+                package: output.package.to_owned(),
+                filename: output.filename.to_owned(),
+                archive_bytes: output.archive_bytes,
+                installed_bytes: output.installed_bytes,
+                build_package_count: output.build_package_count,
+                sha256: output.sha256,
+                path,
+            });
+        }
+        let record = AurBuiltCapabilityRecord {
+            format: 1,
+            package_base: package_base.to_owned(),
+            package_name: package_name.to_owned(),
+            version: version.to_owned(),
+            architecture: architecture.to_owned(),
+            review_sha256,
+            closure_sha256,
+            outputs: records,
+        };
+        let bytes =
+            serde_json::to_vec(&record).map_err(|_| PackageRuntimeError::InvalidManifest)?;
+        if bytes.is_empty()
+            || u64::try_from(bytes.len()).map_err(|_| PackageRuntimeError::OutputLimit)?
+                > AUR_BUILT_CAPABILITY_LIMIT
+        {
+            return Err(PackageRuntimeError::OutputLimit);
+        }
+        publish_aur_built_capability(&directory, &bytes)?;
+        Ok(persisted)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn restore_aur_built_capability(
+        &self,
+        package_base: &str,
+        package_name: &str,
+        version: &str,
+        architecture: &str,
+        review_sha256: [u8; 32],
+        closure_sha256: [u8; 32],
+        required_packages: &[String],
+    ) -> Result<Option<Vec<PersistedAurCapabilityArchive>>, PackageRuntimeError> {
+        validate_aur_capability_identity(
+            package_base,
+            package_name,
+            version,
+            architecture,
+            review_sha256,
+            closure_sha256,
+            required_packages,
+        )?;
+        let directory = self.arch_root.join(AUR_PACKAGE_CACHE_DIRECTORY);
+        let Some(bytes) = read_aur_built_capability(&directory)? else {
+            return Ok(None);
+        };
+        let record: AurBuiltCapabilityRecord =
+            serde_json::from_slice(&bytes).map_err(|_| PackageRuntimeError::InvalidManifest)?;
+        if record.format != 1
+            || record.package_base != package_base
+            || record.package_name != package_name
+            || record.version != version
+            || record.architecture != architecture
+            || record.review_sha256 != review_sha256
+            || record.closure_sha256 != closure_sha256
+            || record.outputs.len() != required_packages.len()
+        {
+            return Ok(None);
+        }
+        let mut restored = Vec::with_capacity(record.outputs.len());
+        for (output, required_package) in record.outputs.into_iter().zip(required_packages) {
+            if output.package != *required_package
+                || !safe_package_filename(&output.filename)
+                || output.archive_bytes == 0
+                || output.archive_bytes > PACKAGE_ARCHIVE_LIMIT
+                || output.installed_bytes == 0
+                || output.build_package_count == 0
+                || output.build_package_count > 256
+                || output.sha256 == [0; 32]
+            {
+                return Err(PackageRuntimeError::InvalidManifest);
+            }
+            let path = directory.join(format!(
+                "{}-{}",
+                hex_sha256(&output.sha256),
+                output.filename
+            ));
+            verify_persisted_aur_file(&path, output.archive_bytes, output.sha256)?;
+            restored.push(PersistedAurCapabilityArchive {
+                package: output.package,
+                filename: output.filename,
+                archive_bytes: output.archive_bytes,
+                installed_bytes: output.installed_bytes,
+                build_package_count: output.build_package_count,
+                sha256: output.sha256,
+                path,
+            });
+        }
+        Ok(Some(restored))
+    }
+
+    pub fn clear_aur_built_capability(&self) -> Result<(), PackageRuntimeError> {
+        let directory = self.arch_root.join(AUR_PACKAGE_CACHE_DIRECTORY);
+        let metadata = match fs::symlink_metadata(&directory) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(PackageRuntimeError::Io(error)),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(PackageRuntimeError::UnsafeEntry(directory));
+        }
+        let path = directory.join(AUR_BUILT_CAPABILITY_FILE);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                return Err(PackageRuntimeError::UnsafeEntry(path));
+            }
+            Ok(_) => fs::remove_file(path)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(PackageRuntimeError::Io(error)),
+        }
+        File::open(directory)?.sync_all()?;
+        Ok(())
     }
 
     pub fn install_verified_aur_archive(
@@ -4815,6 +5043,219 @@ fn hex_sha256(value: &[u8; 32]) -> String {
         output.push(char::from(HEX[usize::from(*byte & 0x0f)]));
     }
     output
+}
+
+fn validate_aur_capability_identity(
+    package_base: &str,
+    package_name: &str,
+    version: &str,
+    architecture: &str,
+    review_sha256: [u8; 32],
+    closure_sha256: [u8; 32],
+    required_packages: &[String],
+) -> Result<(), PackageRuntimeError> {
+    let unique_packages: BTreeSet<&str> = required_packages.iter().map(String::as_str).collect();
+    if !safe_logical_name(package_base)
+        || !safe_logical_name(package_name)
+        || version.is_empty()
+        || version.len() > 128
+        || version
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || byte == 0)
+        || (architecture != "x86_64" && architecture != "aarch64")
+        || review_sha256 == [0; 32]
+        || closure_sha256 == [0; 32]
+        || required_packages.is_empty()
+        || required_packages.len() > 256
+        || !required_packages
+            .iter()
+            .all(|package| safe_logical_name(package))
+        || unique_packages.len() != required_packages.len()
+        || !required_packages
+            .iter()
+            .any(|package| package == package_name)
+    {
+        return Err(PackageRuntimeError::InvalidPayload);
+    }
+    Ok(())
+}
+
+fn stage_verified_aur_file(
+    directory: &Path,
+    source: &mut File,
+    filename: &str,
+    expected_bytes: u64,
+    expected_sha256: [u8; 32],
+) -> Result<PathBuf, PackageRuntimeError> {
+    let metadata = source.metadata()?;
+    if !metadata.is_file() || metadata.len() != expected_bytes {
+        return Err(PackageRuntimeError::InvalidPayload);
+    }
+    let digest = hex_sha256(&expected_sha256);
+    let destination = directory.join(format!("{digest}-{filename}"));
+    let temporary = directory.join(format!(".{digest}.part"));
+    prepare_output_path(&temporary)?;
+    match fs::symlink_metadata(&destination) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(PackageRuntimeError::UnsafeEntry(destination));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(PackageRuntimeError::Io(error)),
+    }
+    let result = (|| {
+        source.seek(SeekFrom::Start(0))?;
+        let mut output = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        let mut copied = 0_u64;
+        loop {
+            let count = source.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            copied = copied
+                .checked_add(count as u64)
+                .ok_or(PackageRuntimeError::OutputLimit)?;
+            if copied > expected_bytes {
+                return Err(PackageRuntimeError::InvalidPayload);
+            }
+            hasher.update(&buffer[..count]);
+            output.write_all(&buffer[..count])?;
+        }
+        if copied != expected_bytes || <[u8; 32]>::from(hasher.finalize()) != expected_sha256 {
+            return Err(PackageRuntimeError::InvalidPayload);
+        }
+        output.sync_all()?;
+        drop(output);
+        fs::rename(&temporary, &destination)?;
+        File::open(directory)?.sync_all()?;
+        Ok(destination.clone())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
+    }
+    result
+}
+
+fn publish_aur_built_capability(directory: &Path, bytes: &[u8]) -> Result<(), PackageRuntimeError> {
+    let destination = directory.join(AUR_BUILT_CAPABILITY_FILE);
+    let temporary = directory.join(AUR_BUILT_CAPABILITY_TEMP_FILE);
+    prepare_output_path(&temporary)?;
+    match fs::symlink_metadata(&destination) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(PackageRuntimeError::UnsafeEntry(destination));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(PackageRuntimeError::Io(error)),
+    }
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temporary, &destination)?;
+        File::open(directory)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
+    }
+    result
+}
+
+fn read_aur_built_capability(directory: &Path) -> Result<Option<Vec<u8>>, PackageRuntimeError> {
+    let directory_metadata = match fs::symlink_metadata(directory) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(PackageRuntimeError::Io(error)),
+    };
+    if directory_metadata.file_type().is_symlink() || !directory_metadata.is_dir() {
+        return Err(PackageRuntimeError::UnsafeEntry(directory.to_path_buf()));
+    }
+    let path = directory.join(AUR_BUILT_CAPABILITY_FILE);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(PackageRuntimeError::Io(error)),
+    };
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.permissions().mode() & 0o777 != 0o600
+        || metadata.len() == 0
+        || metadata.len() > AUR_BUILT_CAPABILITY_LIMIT
+    {
+        return Err(PackageRuntimeError::UnsafeEntry(path));
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW | O_CLOEXEC)
+        .open(&path)?;
+    let opened = file.metadata()?;
+    if !opened.is_file() || opened.len() != metadata.len() {
+        return Err(PackageRuntimeError::InvalidManifest);
+    }
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(metadata.len()).map_err(|_| PackageRuntimeError::OutputLimit)?,
+    );
+    file.take(AUR_BUILT_CAPABILITY_LIMIT + 1)
+        .read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).map_err(|_| PackageRuntimeError::OutputLimit)? != metadata.len() {
+        return Err(PackageRuntimeError::InvalidManifest);
+    }
+    Ok(Some(bytes))
+}
+
+fn verify_persisted_aur_file(
+    path: &Path,
+    expected_bytes: u64,
+    expected_sha256: [u8; 32],
+) -> Result<(), PackageRuntimeError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.permissions().mode() & 0o777 != 0o600
+        || metadata.len() != expected_bytes
+    {
+        return Err(PackageRuntimeError::UnsafeEntry(path.to_path_buf()));
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW | O_CLOEXEC)
+        .open(path)?;
+    let opened = file.metadata()?;
+    if !opened.is_file() || opened.len() != expected_bytes {
+        return Err(PackageRuntimeError::InvalidPayload);
+    }
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut read_bytes = 0_u64;
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        read_bytes = read_bytes
+            .checked_add(count as u64)
+            .ok_or(PackageRuntimeError::OutputLimit)?;
+        if read_bytes > expected_bytes {
+            return Err(PackageRuntimeError::InvalidPayload);
+        }
+        hasher.update(&buffer[..count]);
+    }
+    if read_bytes != expected_bytes || <[u8; 32]>::from(hasher.finalize()) != expected_sha256 {
+        return Err(PackageRuntimeError::InvalidPayload);
+    }
+    Ok(())
 }
 
 fn read_output_bytes(path: &Path, maximum: usize) -> Result<Vec<u8>, PackageRuntimeError> {
@@ -9212,6 +9653,107 @@ library\tlibarchphene_path_bridge.so\tlibarchphene_pkg_555555555555555555555555.
                     .is_none()
             );
         }
+    }
+
+    #[test]
+    fn aur_built_capability_survives_runtime_recreation_and_rejects_tampering() {
+        let tree = TestTree::new();
+        let runtime = tree.package_runtime();
+        let archive = b"independently verified AUR package";
+        let source_path = tree.root.join("verified-aur-output");
+        fs::write(&source_path, archive).expect("verified output");
+        let digest = <[u8; 32]>::from(Sha256::digest(archive));
+        let review_digest = [7_u8; 32];
+        let closure_digest = [8_u8; 32];
+        let required = vec!["example-bin".to_owned()];
+        let mut source = File::open(&source_path).expect("open verified output");
+        let mut outputs = [VerifiedAurCapabilityArchive {
+            source: &mut source,
+            filename: "example-bin-1.2.3-1-x86_64.pkg.tar.zst",
+            package: "example-bin",
+            archive_bytes: archive.len() as u64,
+            installed_bytes: 4096,
+            build_package_count: 12,
+            sha256: digest,
+        }];
+        let persisted = runtime
+            .persist_aur_built_capability(
+                "example-bin",
+                "example-bin",
+                "1.2.3-1",
+                "x86_64",
+                review_digest,
+                closure_digest,
+                &required,
+                &mut outputs,
+            )
+            .expect("persist capability");
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(
+            fs::read(&persisted[0].path).expect("persisted archive"),
+            archive,
+        );
+        drop(runtime);
+
+        let restored_runtime = tree.package_runtime();
+        assert!(
+            restored_runtime
+                .restore_aur_built_capability(
+                    "example-bin",
+                    "example-bin",
+                    "1.2.3-1",
+                    "x86_64",
+                    [9_u8; 32],
+                    closure_digest,
+                    &required,
+                )
+                .expect("mismatched review")
+                .is_none(),
+        );
+        let restored = restored_runtime
+            .restore_aur_built_capability(
+                "example-bin",
+                "example-bin",
+                "1.2.3-1",
+                "x86_64",
+                review_digest,
+                closure_digest,
+                &required,
+            )
+            .expect("restore capability")
+            .expect("matching capability");
+        assert_eq!(restored, persisted);
+
+        fs::write(&restored[0].path, b"tampered output").expect("tamper output");
+        assert!(matches!(
+            restored_runtime.restore_aur_built_capability(
+                "example-bin",
+                "example-bin",
+                "1.2.3-1",
+                "x86_64",
+                review_digest,
+                closure_digest,
+                &required,
+            ),
+            Err(PackageRuntimeError::UnsafeEntry(_)) | Err(PackageRuntimeError::InvalidPayload)
+        ));
+        restored_runtime
+            .clear_aur_built_capability()
+            .expect("clear capability");
+        assert!(
+            restored_runtime
+                .restore_aur_built_capability(
+                    "example-bin",
+                    "example-bin",
+                    "1.2.3-1",
+                    "x86_64",
+                    review_digest,
+                    closure_digest,
+                    &required,
+                )
+                .expect("cleared capability")
+                .is_none(),
+        );
     }
 
     #[test]

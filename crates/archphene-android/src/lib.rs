@@ -99,8 +99,8 @@ mod android {
     use archphene_packages::{
         MAX_MANIFEST_BYTES, MAX_PACKAGE_RESOLUTION_BYTES, MAX_TOOL_OUTPUT_BYTES,
         MAX_VERIFIED_PACKAGE_CLOSURE_BYTES, PackageCompatibilityCancellation, PackageResolution,
-        PackageRuntimeError, Repository, RepositoryArchitecture, ToolOutput, VerifiedAurArchive,
-        VerifiedPackageClosure,
+        PackageRuntimeError, PersistedAurCapabilityArchive, Repository, RepositoryArchitecture,
+        ToolOutput, VerifiedAurArchive, VerifiedAurCapabilityArchive, VerifiedPackageClosure,
         aur::{
             MAX_AUR_REVIEW_BYTES, MAX_AUR_RPC_BYTES, MAX_AUR_SNAPSHOT_BYTES, MAX_AUR_SOURCE_BYTES,
             aur_snapshot_path, review_aur_snapshot,
@@ -140,6 +140,7 @@ mod android {
     const BUILT_PACKAGE_REPORT_MAGIC: &[u8; 8] = b"ABMV0001";
     const AUR_INSTALL_FILENAME_MAGIC: &[u8; 8] = b"AIFN0001";
     const MAX_AUR_INSTALL_FILENAME_BYTES: usize = 64 * 1024;
+    const MAX_AUR_BUILT_CAPABILITY_OUTPUT_BYTES: usize = 256 * 1024;
     const PTY_EVENT_READABLE: jint = 1;
     const PTY_EVENT_WRITABLE: jint = 1 << 1;
     const PTY_EVENT_HANGUP: jint = 1 << 2;
@@ -400,6 +401,44 @@ mod android {
             return Err(ERROR_INVALID_ARGUMENT);
         }
         Ok(filenames)
+    }
+
+    fn encode_persisted_aur_outputs(
+        outputs: &[PersistedAurCapabilityArchive],
+    ) -> Result<Vec<u8>, jint> {
+        if outputs.is_empty() || outputs.len() > 256 {
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+        let mut encoded = format!("ABCY0001\t{}\n", outputs.len());
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        for output in outputs {
+            let path = output.path.to_str().ok_or(ERROR_INTERNAL)?;
+            if output.package.contains(['\t', '\n'])
+                || output.filename.contains(['\t', '\n'])
+                || path.contains(['\t', '\n'])
+            {
+                return Err(ERROR_INTERNAL);
+            }
+            let mut digest = String::with_capacity(64);
+            for byte in output.sha256 {
+                digest.push(char::from(HEX[usize::from(byte >> 4)]));
+                digest.push(char::from(HEX[usize::from(byte & 0x0f)]));
+            }
+            encoded.push_str(&format!(
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                output.package,
+                output.filename,
+                output.archive_bytes,
+                output.installed_bytes,
+                output.build_package_count,
+                digest,
+                path,
+            ));
+            if encoded.len() > MAX_AUR_BUILT_CAPABILITY_OUTPUT_BYTES {
+                return Err(ERROR_INTERNAL);
+            }
+        }
+        Ok(encoded.into_bytes())
     }
 
     const fn hex_value(value: u8) -> Option<u8> {
@@ -2453,6 +2492,291 @@ mod android {
         output[24..28].copy_from_slice(&build_package_count.to_le_bytes());
         output[32..64].copy_from_slice(&report.sha256);
         BUILT_PACKAGE_REPORT_BYTES as jint
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativePersistAurBuiltPackages(
+        mut environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        descriptors: JIntArray,
+        filename_manifest: JByteBuffer,
+        filename_manifest_length: jint,
+        package_base: JString,
+        package_name: JString,
+        version: JString,
+        architecture: JString,
+        closure_sha256: JString,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let (Ok(handle), Ok(filename_manifest_length)) = (
+            u64::try_from(handle),
+            usize::try_from(filename_manifest_length),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let (Ok(package_base), Ok(package_name), Ok(version), Ok(architecture), Ok(closure_sha256)) = (
+            java_string(&mut environment, &package_base),
+            java_string(&mut environment, &package_name),
+            java_string(&mut environment, &version),
+            java_string(&mut environment, &architecture),
+            java_string(&mut environment, &closure_sha256),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(closure_sha256) = parse_sha256(&closure_sha256) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let (Ok(manifest_capacity), Ok(manifest_address)) = (
+            environment.get_direct_buffer_capacity(&filename_manifest),
+            environment.get_direct_buffer_address(&filename_manifest),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if filename_manifest_length > manifest_capacity
+            || filename_manifest_length > MAX_AUR_INSTALL_FILENAME_BYTES
+            || manifest_address.is_null()
+        {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let manifest = unsafe { slice::from_raw_parts(manifest_address, filename_manifest_length) };
+        let Ok(filenames) = parse_aur_install_filenames(manifest) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(descriptor_count) = environment.get_array_length(&descriptors) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(descriptor_count) = usize::try_from(descriptor_count) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if descriptor_count != filenames.len() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let mut descriptor_values = vec![0_i32; descriptor_count];
+        if environment
+            .get_int_array_region(&descriptors, 0, &mut descriptor_values)
+            .is_err()
+            || descriptor_values.iter().any(|descriptor| *descriptor < 0)
+        {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let (Ok(output_capacity), Ok(output_address)) = (
+            environment.get_direct_buffer_capacity(&output_buffer),
+            environment.get_direct_buffer_address(&output_buffer),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if output_capacity < MAX_AUR_BUILT_CAPABILITY_OUTPUT_BYTES || output_address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let output = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
+        output.fill(0);
+        let (review, closure, package_runtime) = {
+            let Ok(mut registry) = registry().lock() else {
+                return ERROR_INTERNAL;
+            };
+            let Some(runtime) = registry.runtime_mut(handle) else {
+                return ERROR_INVALID_HANDLE;
+            };
+            match runtime.verified_aur_capability_context(&package_name, &version) {
+                Ok(context) => context,
+                Err(error) => return copy_package_error(&error, output),
+            }
+        };
+        if review.package_base != package_base
+            || review.required_packages.len() != filenames.len()
+            || review.required_packages.is_empty()
+        {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let mut verified = Vec::with_capacity(review.required_packages.len());
+        for ((descriptor, filename), required_package) in descriptor_values
+            .iter()
+            .zip(&filenames)
+            .zip(&review.required_packages)
+        {
+            let borrowed = unsafe { BorrowedFd::borrow_raw(*descriptor) };
+            let Ok(owned) = rustix::io::dup(borrowed) else {
+                return ERROR_INVALID_ARGUMENT;
+            };
+            let mut archive = File::from(owned);
+            let report = match archphene_builder::verify_copied_built_package(
+                &mut archive,
+                filename,
+                &package_base,
+                required_package,
+                &version,
+                &architecture,
+                closure.as_bytes(),
+                closure_sha256,
+            ) {
+                Ok(report) => report,
+                Err(error) => return copy_package_error(&error, output),
+            };
+            verified.push((archive, report));
+        }
+        let mut capability_inputs: Vec<VerifiedAurCapabilityArchive<'_>> = verified
+            .iter_mut()
+            .zip(&review.required_packages)
+            .map(
+                |((archive, report), package)| VerifiedAurCapabilityArchive {
+                    source: archive,
+                    filename: &report.filename,
+                    package,
+                    archive_bytes: report.archive_bytes,
+                    installed_bytes: report.installed_bytes,
+                    build_package_count: report.build_package_count,
+                    sha256: report.sha256,
+                },
+            )
+            .collect();
+        let persisted = match package_runtime.persist_aur_built_capability(
+            &package_base,
+            &package_name,
+            &version,
+            &architecture,
+            review.review_sha256,
+            closure_sha256,
+            &review.required_packages,
+            &mut capability_inputs,
+        ) {
+            Ok(persisted) => persisted,
+            Err(error) => return copy_package_error(&error, output),
+        };
+        let encoded = match encode_persisted_aur_outputs(&persisted) {
+            Ok(encoded) => encoded,
+            Err(error) => return error,
+        };
+        output[..encoded.len()].copy_from_slice(&encoded);
+        i32::try_from(encoded.len()).unwrap_or(ERROR_INTERNAL)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeRestoreAurBuiltPackages(
+        mut environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        package_base: JString,
+        package_name: JString,
+        version: JString,
+        architecture: JString,
+        closure_sha256: JString,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let Ok(handle) = u64::try_from(handle) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let (Ok(package_base), Ok(package_name), Ok(version), Ok(architecture), Ok(closure_sha256)) = (
+            java_string(&mut environment, &package_base),
+            java_string(&mut environment, &package_name),
+            java_string(&mut environment, &version),
+            java_string(&mut environment, &architecture),
+            java_string(&mut environment, &closure_sha256),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(closure_sha256) = parse_sha256(&closure_sha256) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let (Ok(output_capacity), Ok(output_address)) = (
+            environment.get_direct_buffer_capacity(&output_buffer),
+            environment.get_direct_buffer_address(&output_buffer),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if output_capacity < MAX_AUR_BUILT_CAPABILITY_OUTPUT_BYTES || output_address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let output = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
+        output.fill(0);
+        let (review, closure, package_runtime) = {
+            let Ok(mut registry) = registry().lock() else {
+                return ERROR_INTERNAL;
+            };
+            let Some(runtime) = registry.runtime_mut(handle) else {
+                return ERROR_INVALID_HANDLE;
+            };
+            match runtime.verified_aur_capability_context(&package_name, &version) {
+                Ok(context) => context,
+                Err(error) => return copy_package_error(&error, output),
+            }
+        };
+        if review.package_base != package_base || review.required_packages.is_empty() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let persisted = match package_runtime.restore_aur_built_capability(
+            &package_base,
+            &package_name,
+            &version,
+            &architecture,
+            review.review_sha256,
+            closure_sha256,
+            &review.required_packages,
+        ) {
+            Ok(Some(persisted)) => persisted,
+            Ok(None) => return 0,
+            Err(error) => return copy_package_error(&error, output),
+        };
+        for (candidate, required_package) in persisted.iter().zip(&review.required_packages) {
+            let mut archive = match File::open(&candidate.path) {
+                Ok(archive) => archive,
+                Err(error) => return copy_package_error(&PackageRuntimeError::Io(error), output),
+            };
+            let report = match archphene_builder::verify_copied_built_package(
+                &mut archive,
+                &candidate.filename,
+                &package_base,
+                required_package,
+                &version,
+                &architecture,
+                closure.as_bytes(),
+                closure_sha256,
+            ) {
+                Ok(report) => report,
+                Err(error) => return copy_package_error(&error, output),
+            };
+            if report.filename != candidate.filename
+                || report.archive_bytes != candidate.archive_bytes
+                || report.installed_bytes != candidate.installed_bytes
+                || report.build_package_count != candidate.build_package_count
+                || report.sha256 != candidate.sha256
+            {
+                return copy_package_error(&PackageRuntimeError::InvalidPayload, output);
+            }
+        }
+        let encoded = match encode_persisted_aur_outputs(&persisted) {
+            Ok(encoded) => encoded,
+            Err(error) => return error,
+        };
+        output[..encoded.len()].copy_from_slice(&encoded);
+        i32::try_from(encoded.len()).unwrap_or(ERROR_INTERNAL)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeClearAurBuiltCapability(
+        _environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+    ) -> jint {
+        let Ok(handle) = u64::try_from(handle) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let package_runtime = {
+            let Ok(mut registry) = registry().lock() else {
+                return ERROR_INTERNAL;
+            };
+            let Some(runtime) = registry.runtime_mut(handle) else {
+                return ERROR_INVALID_HANDLE;
+            };
+            let Some(package_runtime) = runtime.package_runtime().cloned() else {
+                return ERROR_INVALID_STATE;
+            };
+            package_runtime
+        };
+        match package_runtime.clear_aur_built_capability() {
+            Ok(()) => 0,
+            Err(_) => ERROR_PACKAGE_RUNTIME,
+        }
     }
 
     #[unsafe(no_mangle)]

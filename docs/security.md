@@ -175,6 +175,17 @@ the archive under SHA-256
 The installed package is not isolated: it joins the shared Archphene Linux
 trust domain.
 
+The manager does not treat a process-surviving filename as authority to install
+an AUR package. Rust persists one bounded capability manifest atomically beside
+mode-0600 content-addressed outputs after checking the exact reviewed identity,
+source evidence, signed build closure, and independently verified Builder
+metadata. Restore repeats exact review/closure matching, enforces derived
+cache-path containment and metadata, rehashes every output, and runs the full
+Builder-output verifier against the retained closure. Missing, mismatched,
+replaced, truncated, or modified state fails closed. A successful install
+revokes the manifest; explicit AUR-data cleanup removes the manifest and
+retained outputs.
+
 ## Important limitations
 
 - The greenfield manager performs current official-package search, resolution,
@@ -187,11 +198,10 @@ trust domain.
   production-client coverage remain incomplete. Legacy per-wrapper runtime-pack
   results are historical evidence, not substitutes for those production gates.
 - Durable jobs already represent package and future launcher phases without
-  renumbering persisted v1 states. Real launcher installation results and
-  official/AUR package mutations reconcile across manager death. The transient
-  verified-built-package capability still requires a rebuild after manager
-  process death; bounded no-follow startup cleanup removes the now-unusable
-  transient output.
+  renumbering persisted v1 states. Real launcher installation results,
+  official/AUR package mutations, and exact verified AUR build capabilities
+  reconcile across manager death. Active builds themselves are not resumed;
+  only fully published, independently reverified outputs can reattach.
 - The shared Rust Wayland compositor enforces the currently implemented object, role, configure, buffer, popup, subsurface, input, and teardown contracts on x86_64 and AArch64. It still needs broader protocol coverage, independent security review, and sustained parser fuzzing before it should be treated as a hardened general compositor boundary.
 - GrapheneOS-specific hardening has not been validated on a supported Pixel.
 - Running on stock Android does not provide GrapheneOS firmware, verified boot policy, exploit mitigations, or security updates.

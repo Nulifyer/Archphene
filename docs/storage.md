@@ -285,8 +285,10 @@ to the other's files:
 - **Installed Linux system** is the remainder of the shared private Arch root
   and routes to Packages rather than offering an unsafe filesystem deletion.
 - **AUR build data** combines reviewed manager sources, snapshots, retained
-  package outputs, and the isolated Builder workspace through the signed Binder
-  boundary. Its separately confirmed Clear action removes only those known
+  package outputs, their bounded durable capability manifest, and the isolated
+  Builder workspace through the signed Binder boundary. Retained outputs are
+  content-addressed and reverified before a process-surviving capability can
+  reattach. Its separately confirmed Clear action removes only those known
   caches and reloads the measured result.
 - **Archphene Home** counts the shared Linux user's files and opens Android's
   Archphene Home document surface instead of deleting user data.

@@ -1721,6 +1721,28 @@ impl RuntimeHost {
             .ok_or(PackageRuntimeError::InvalidPayload)
     }
 
+    pub fn verified_aur_capability_context(
+        &self,
+        package_name: &str,
+        version: &str,
+    ) -> Result<(AurReview, VerifiedPackageClosure, PackageRuntime), PackageRuntimeError> {
+        let review = self
+            .aur_review
+            .as_ref()
+            .filter(|review| review.package_name == package_name && review.version == version)
+            .cloned()
+            .ok_or(PackageRuntimeError::InvalidPayload)?;
+        let closure = self
+            .aur_build_closure
+            .clone()
+            .ok_or(PackageRuntimeError::InvalidPayload)?;
+        let package_runtime = self
+            .package_runtime
+            .clone()
+            .ok_or(PackageRuntimeError::InvalidPath)?;
+        Ok((review, closure, package_runtime))
+    }
+
     pub fn verified_aur_runtime_dependencies(
         &self,
         package_name: &str,
