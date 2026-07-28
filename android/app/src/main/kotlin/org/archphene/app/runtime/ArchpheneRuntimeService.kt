@@ -128,6 +128,29 @@ internal class PackageCacheSnapshot(
     val revision: Int,
 )
 
+internal class StorageUsageSnapshot(
+    val packageDownloadsBytes: Long,
+    val sharedRuntimeBytes: Long,
+    val managerBuildCacheBytes: Long,
+    val builderBuildCacheBytes: Long,
+    val userFilesBytes: Long,
+    val availableBytes: Long,
+    val totalDeviceBytes: Long,
+    val builderAvailable: Boolean,
+    val status: String,
+    val revision: Int,
+) {
+    val buildCacheBytes: Long
+        get() = Math.addExact(managerBuildCacheBytes, builderBuildCacheBytes)
+
+    val managedBytes: Long
+        get() =
+            Math.addExact(
+                Math.addExact(packageDownloadsBytes, sharedRuntimeBytes),
+                Math.addExact(buildCacheBytes, userFilesBytes),
+            )
+}
+
 internal data class LauncherAuthorization(
     val label: String,
     val terminal: Boolean,
@@ -152,6 +175,12 @@ class ArchpheneRuntimeService : Service() {
 
         internal val packageCache: PackageCacheSnapshot
             get() = packageCacheSnapshot
+
+        internal val storageUsage: StorageUsageSnapshot
+            get() = storageUsageSnapshot
+
+        val storageUsageActionAvailable: Boolean
+            get() = packageCacheActionAvailable
 
         val packageCacheActionAvailable: Boolean
             get() =
@@ -580,6 +609,10 @@ class ArchpheneRuntimeService : Service() {
         fun clearAllPackageCacheDownloads(): Boolean =
             requestAllPackageCacheCleanup()
 
+        fun refreshStorageUsage(): Boolean = requestStorageUsage()
+
+        fun clearBuildCache(): Boolean = requestBuildCacheCleanup()
+
         fun searchPackages(query: String): Boolean = requestPackageSearch(query)
 
         fun resolvePackage(packageName: String): Boolean =
@@ -987,6 +1020,7 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var bootstrapActive = false
     private var catalogThread: Thread? = null
     private var packageThread: Thread? = null
+    @Volatile private var packageCacheThread: Thread? = null
     @Volatile private var packageResolutionThread: Thread? = null
     private var commandThread: Thread? = null
     private var shellThread: Thread? = null
@@ -1152,6 +1186,20 @@ class ArchpheneRuntimeService : Service() {
             IntArray(0),
             0L,
             "Open Downloads to inspect the package cache",
+            0,
+        )
+    @Volatile
+    private var storageUsageSnapshot =
+        StorageUsageSnapshot(
+            0L,
+            0L,
+            0L,
+            0L,
+            0L,
+            0L,
+            0L,
+            false,
+            "Open Files to inspect storage",
             0,
         )
     @Volatile private var commandStatus = "Linux command has not run"
@@ -1891,6 +1939,7 @@ class ArchpheneRuntimeService : Service() {
                 bootstrapThread,
                 catalogThread,
                 packageThread,
+                packageCacheThread,
                 packageResolutionThread,
                 commandThread,
                 shellThread,
@@ -1903,6 +1952,7 @@ class ArchpheneRuntimeService : Service() {
         launcherPublisherActive.set(false)
         catalogThread = null
         packageThread = null
+        packageCacheThread = null
         packageResolutionThread = null
         commandThread = null
         shellThread = null
@@ -2145,6 +2195,10 @@ class ArchpheneRuntimeService : Service() {
             IBinder.FIRST_CALL_TRANSACTION + 13
         private const val AUR_BUILDER_TRANSACTION_VERIFY_OUTPUT =
             IBinder.FIRST_CALL_TRANSACTION + 14
+        private const val AUR_BUILDER_TRANSACTION_STORAGE_USAGE =
+            IBinder.FIRST_CALL_TRANSACTION + 15
+        private const val AUR_BUILDER_TRANSACTION_CLEAR_STORAGE =
+            IBinder.FIRST_CALL_TRANSACTION + 16
         private const val AUR_BUILDER_PACKAGE_BATCH = 8
         private const val AUR_BUILD_POLL_MILLIS = 100L
         private const val AUR_BUILD_VISIBLE_LOG_CHARACTERS = 8 * 1024
@@ -4911,6 +4965,7 @@ class ArchpheneRuntimeService : Service() {
 
     private fun hasForegroundWork(): Boolean =
         catalogRefreshActive ||
+            packageCacheActive ||
             packageOperationActive ||
             commandActive ||
             storageDocumentActive ||
@@ -8209,9 +8264,12 @@ class ArchpheneRuntimeService : Service() {
                     builderPackage,
                     PackageManager.GET_PERMISSIONS,
                 )
-            } catch (_: PackageManager.NameNotFoundException) {
-                return null
-            }
+        } catch (_: PackageManager.NameNotFoundException) {
+            return null
+        }
+        val builderApplication =
+            builderInfo.applicationInfo
+                ?: throw IllegalStateException("AUR builder has no application identity")
         check(
             packageManager.checkSignatures(packageName, builderPackage) ==
                 PackageManager.SIGNATURE_MATCH,
@@ -8225,9 +8283,7 @@ class ArchpheneRuntimeService : Service() {
         ) {
             "AUR builder must not request network permission"
         }
-        val builderUid =
-            builderInfo.applicationInfo?.uid
-                ?: throw IllegalStateException("AUR builder has no application UID")
+        val builderUid = builderApplication.uid
         check(builderUid != Process.myUid())
 
         val sentinel = File(filesDir, "aur-builder-manager-sentinel")
@@ -11176,11 +11232,15 @@ class ArchpheneRuntimeService : Service() {
                     Log.e(TAG, "Package cache inventory failed", error)
                 } finally {
                     packageCacheActive = false
+                    packageCacheThread = null
                     stopWhenUnobservedAndIdle()
                 }
             },
             "ArchphenePackageCacheInventory",
-        ).start()
+        ).also { worker ->
+            packageCacheThread = worker
+            worker.start()
+        }
         promoteWorkToForeground()
         return true
     }
@@ -11267,11 +11327,15 @@ class ArchpheneRuntimeService : Service() {
                     Log.e(TAG, "Selected package cache cleanup failed", error)
                 } finally {
                     packageCacheActive = false
+                    packageCacheThread = null
                     stopWhenUnobservedAndIdle()
                 }
             },
             "ArchpheneSelectedPackageCache",
-        ).start()
+        ).also { worker ->
+            packageCacheThread = worker
+            worker.start()
+        }
         promoteWorkToForeground()
         return true
     }
@@ -11324,11 +11388,15 @@ class ArchpheneRuntimeService : Service() {
                     Log.e(TAG, "Complete package cache cleanup failed", error)
                 } finally {
                     packageCacheActive = false
+                    packageCacheThread = null
                     stopWhenUnobservedAndIdle()
                 }
             },
             "ArchpheneAllPackageCache",
-        ).start()
+        ).also { worker ->
+            packageCacheThread = worker
+            worker.start()
+        }
         promoteWorkToForeground()
         return true
     }
@@ -11464,6 +11532,318 @@ class ArchpheneRuntimeService : Service() {
             status,
             current.revision + 1,
         )
+    }
+
+    @Synchronized
+    private fun requestStorageUsage(): Boolean {
+        val activeHandle = readyHandle
+        if (
+            activeHandle == 0L ||
+            catalogRefreshActive ||
+            packageCacheActive ||
+            searchActive ||
+            packageOperationActive ||
+            commandActive ||
+            aurBuildActive
+        ) {
+            return false
+        }
+        packageCacheActive = true
+        storageUsageSnapshot = copyStorageUsageSnapshot("Measuring Archphene storage…")
+        Thread(
+            {
+                requireRuntimeWorker("Storage inventory")
+                try {
+                    storageUsageSnapshot = loadStorageUsageSnapshot(activeHandle)
+                } catch (error: Exception) {
+                    storageUsageSnapshot =
+                        copyStorageUsageSnapshot(
+                            "Storage unavailable: " +
+                                (error.message ?: error.javaClass.simpleName),
+                        )
+                    Log.e(TAG, "Storage inventory failed", error)
+                } finally {
+                    packageCacheActive = false
+                    packageCacheThread = null
+                    stopWhenUnobservedAndIdle()
+                }
+            },
+            "ArchpheneStorageInventory",
+        ).also { worker ->
+            packageCacheThread = worker
+            worker.start()
+        }
+        promoteWorkToForeground()
+        return true
+    }
+
+    @Synchronized
+    private fun requestBuildCacheCleanup(): Boolean {
+        val activeHandle = readyHandle
+        if (
+            activeHandle == 0L ||
+            catalogRefreshActive ||
+            packageCacheActive ||
+            searchActive ||
+            packageOperationActive ||
+            commandActive ||
+            aurBuildActive
+        ) {
+            return false
+        }
+        packageCacheActive = true
+        storageUsageSnapshot = copyStorageUsageSnapshot("Clearing AUR build data…")
+        Thread(
+            {
+                requireRuntimeWorker("Build cache cleanup")
+                try {
+                    val builder = readBuilderStorageUsage(clear = true)
+                    val transientOutputBytes = managerAurOutputBytes()
+                    val output = ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
+                    val managerBytes =
+                        NativeRuntime.nativeClearAurBuildCache(
+                            activeHandle,
+                            output,
+                        )
+                    if (managerBytes < 0L) {
+                        throw IllegalStateException(
+                            readNativeMessage(output, managerBytes.toInt()),
+                        )
+                    }
+                    val outputFiles = detachRetainedAurBuiltPackageFiles()
+                    deleteRetainedAurBuiltPackageFiles(outputFiles)
+                    clearManagerAurOutputFiles()
+                    retainedAurReview = null
+                    retainedAurVerifiedBytes = 0L
+                    retainedAurSourceEvidence = emptyArray()
+                    retainedAurBuilderReport = null
+                    retainedAurBuildLogs = ""
+                    aurReviewSnapshot =
+                        AurReviewSnapshot("", "", "", "", "", "", "", "", aurReviewSnapshot.revision + 1)
+                    val reclaimed =
+                        Math.addExact(
+                            Math.addExact(managerBytes, transientOutputBytes),
+                            builder?.bytes ?: 0L,
+                        )
+                    storageUsageSnapshot =
+                        loadStorageUsageSnapshot(
+                            activeHandle,
+                            if (reclaimed == 0L) {
+                                "No AUR build data was cached"
+                            } else {
+                                "Freed ${formatStorageBytes(reclaimed)} of AUR build data"
+                            },
+                        )
+                    Log.i(TAG, "Cleared $reclaimed bytes of AUR build data")
+                } catch (error: Exception) {
+                    storageUsageSnapshot =
+                        runCatching {
+                            loadStorageUsageSnapshot(
+                                activeHandle,
+                                "Build cleanup incomplete: " +
+                                    (error.message ?: error.javaClass.simpleName),
+                            )
+                        }.getOrElse {
+                            copyStorageUsageSnapshot(
+                                "Build cleanup failed: " +
+                                    (error.message ?: error.javaClass.simpleName),
+                            )
+                        }
+                    Log.e(TAG, "Build cache cleanup failed", error)
+                } finally {
+                    packageCacheActive = false
+                    packageCacheThread = null
+                    stopWhenUnobservedAndIdle()
+                }
+            },
+            "ArchpheneBuildCache",
+        ).also { worker ->
+            packageCacheThread = worker
+            worker.start()
+        }
+        promoteWorkToForeground()
+        return true
+    }
+
+    private fun loadStorageUsageSnapshot(
+        activeHandle: Long,
+        completionStatus: String? = null,
+    ): StorageUsageSnapshot {
+        val output = ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
+        val length = NativeRuntime.nativeReadStorageUsage(activeHandle, output)
+        if (length < 0) {
+            throw IllegalStateException(readNativeMessage(output, length))
+        }
+        val usage = decodeNativeStorageUsage(readUtf8(output, length))
+        val managerOutputBytes = managerAurOutputBytes()
+        val builder = readBuilderStorageUsage(clear = false)
+        val stat = StatFs(filesDir.absolutePath)
+        val managerBuildBytes = Math.addExact(usage.buildCacheBytes, managerOutputBytes)
+        val snapshot =
+            StorageUsageSnapshot(
+                packageDownloadsBytes = usage.packageDownloadsBytes,
+                sharedRuntimeBytes = usage.sharedRuntimeBytes,
+                managerBuildCacheBytes = managerBuildBytes,
+                builderBuildCacheBytes = builder?.bytes ?: 0L,
+                userFilesBytes = usage.userFilesBytes,
+                availableBytes = stat.availableBytes,
+                totalDeviceBytes = stat.totalBytes,
+                builderAvailable = builder != null,
+                status = "",
+                revision = storageUsageSnapshot.revision + 1,
+            )
+        return StorageUsageSnapshot(
+            snapshot.packageDownloadsBytes,
+            snapshot.sharedRuntimeBytes,
+            snapshot.managerBuildCacheBytes,
+            snapshot.builderBuildCacheBytes,
+            snapshot.userFilesBytes,
+            snapshot.availableBytes,
+            snapshot.totalDeviceBytes,
+            snapshot.builderAvailable,
+            completionStatus
+                ?: "${formatStorageBytes(snapshot.managedBytes)} managed · " +
+                    "${formatStorageBytes(snapshot.availableBytes)} free on device" +
+                    if (snapshot.builderAvailable) {
+                        ""
+                    } else {
+                        " · Builder not installed"
+                    },
+            snapshot.revision,
+        )
+    }
+
+    private fun copyStorageUsageSnapshot(status: String): StorageUsageSnapshot {
+        val current = storageUsageSnapshot
+        return StorageUsageSnapshot(
+            current.packageDownloadsBytes,
+            current.sharedRuntimeBytes,
+            current.managerBuildCacheBytes,
+            current.builderBuildCacheBytes,
+            current.userFilesBytes,
+            current.availableBytes,
+            current.totalDeviceBytes,
+            current.builderAvailable,
+            status,
+            current.revision + 1,
+        )
+    }
+
+    private data class BuilderStorageUsage(
+        val entries: Long,
+        val bytes: Long,
+    )
+
+    private fun readBuilderStorageUsage(clear: Boolean): BuilderStorageUsage? {
+        val builderPackage =
+            if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) {
+                "org.archphene.builder.debug"
+            } else {
+                "org.archphene.builder"
+            }
+        val builderInfo =
+            try {
+                @Suppress("DEPRECATION")
+                packageManager.getPackageInfo(builderPackage, PackageManager.GET_PERMISSIONS)
+            } catch (_: PackageManager.NameNotFoundException) {
+                return null
+            }
+        val builderApplication =
+            builderInfo.applicationInfo
+                ?: throw IllegalStateException("AUR builder has no application identity")
+        check(
+            packageManager.checkSignatures(packageName, builderPackage) ==
+                PackageManager.SIGNATURE_MATCH &&
+                builderInfo.requestedPermissions?.none { permission ->
+                    permission == android.Manifest.permission.INTERNET
+                } != false &&
+                builderApplication.uid != Process.myUid(),
+        ) {
+            "Installed AUR builder failed its identity boundary"
+        }
+        val connected = CountDownLatch(1)
+        var endpoint: IBinder? = null
+        var disconnected = false
+        val connection =
+            object : ServiceConnection {
+                override fun onServiceConnected(
+                    name: ComponentName?,
+                    service: IBinder?,
+                ) {
+                    endpoint = service
+                    connected.countDown()
+                }
+
+                override fun onServiceDisconnected(name: ComponentName?) {
+                    disconnected = true
+                    connected.countDown()
+                }
+            }
+        val bound =
+            bindService(
+                Intent("org.archphene.action.BIND_BUILDER").setPackage(builderPackage),
+                connection,
+                BIND_AUTO_CREATE,
+            )
+        try {
+            check(bound && connected.await(10, TimeUnit.SECONDS) && !disconnected) {
+                "Could not bind the AUR builder companion"
+            }
+            val remote = endpoint ?: throw IllegalStateException("AUR builder returned no Binder")
+            return transactAurBuilder(
+                remote,
+                if (clear) {
+                    AUR_BUILDER_TRANSACTION_CLEAR_STORAGE
+                } else {
+                    AUR_BUILDER_TRANSACTION_STORAGE_USAGE
+                },
+                {},
+            ) { reply ->
+                val entries = reply.readLong()
+                val bytes = reply.readLong()
+                check(entries in 0..STORAGE_USAGE_ENTRY_LIMIT && bytes >= 0L)
+                BuilderStorageUsage(entries, bytes)
+            }
+        } finally {
+            if (bound) {
+                unbindService(connection)
+            }
+        }
+    }
+
+    private fun managerAurOutputBytes(): Long {
+        var entries = 0
+        var bytes = 0L
+        Files.newDirectoryStream(cacheDir.toPath(), AUR_BUILD_OUTPUT_GLOB).use { paths ->
+            for (path in paths) {
+                entries++
+                if (
+                    entries > MAX_STALE_AUR_BUILD_OUTPUTS ||
+                    !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)
+                ) {
+                    throw IllegalStateException("Unsafe AUR output cache")
+                }
+                val stat = Os.lstat(path.toString())
+                bytes = Math.addExact(bytes, Math.multiplyExact(stat.st_blocks, 512L))
+            }
+        }
+        return bytes
+    }
+
+    private fun clearManagerAurOutputFiles() {
+        var entries = 0
+        Files.newDirectoryStream(cacheDir.toPath(), AUR_BUILD_OUTPUT_GLOB).use { paths ->
+            for (path in paths) {
+                entries++
+                if (
+                    entries > MAX_STALE_AUR_BUILD_OUTPUTS ||
+                    !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)
+                ) {
+                    throw IllegalStateException("Unsafe AUR output cache")
+                }
+                Files.delete(path)
+            }
+        }
     }
 
     private fun clearSelectedPackageCache(

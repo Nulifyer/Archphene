@@ -62,6 +62,22 @@ landscape windows omit nonessential terminal explanation so every control stays
 on screen. Exact-ABI full-device portrait/landscape navigation, onboarding,
 clean lifecycle, and persisted-folder gates pass on the emulator and Samsung.
 
+The Files section now presents one bounded storage inventory across both
+Archphene Android UIDs. It separates package downloads, the installed shared
+Linux system, manager and isolated-Builder AUR build data, Archphene Home, and
+device free space. Rust counts allocated blocks through descriptor-rooted
+no-follow traversal, caps depth and entries, tolerates only entries that
+disappear during a live scan, and counts hard-linked file storage once.
+Downloads opens the existing package-selective cache manager; the installed
+system routes to Packages; Home routes to Android's document browser; and AUR
+cleanup is separately confirmed. That cleanup removes only reviewed
+manager-owned AUR caches/outputs and the Builder workspace, then reloads actual
+post-cleanup state. The exact-ABI automated gate clears a 13 MB cross-UID
+fixture to 0 B on the emulator and Samsung while package downloads, installed
+package state, and Home remain exact. A real Samsung cleanup reclaimed 4 GiB
+while its 122 MB downloads, 2.3 GB installed system, and 86 kB Home remained
+unchanged. Full-device light and dark captures are visually clean.
+
 Debug builds now install StrictMode main-thread I/O and closeable-leak
 diagnostics after OEM application initialization. Navigation, Terminal text,
 and Linux appearance settings read and commit through one serialized preference

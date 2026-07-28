@@ -114,7 +114,7 @@ mod android {
     use archphene_runtime::PackageLauncherReviewStatus;
     use archphene_storage::{
         MirrorCancellation, OpenMode, StorageError, SyncAction, SyncEntryKind, SyncFingerprint,
-        fingerprint_file_from_fd,
+        arch_storage_usage, fingerprint_file_from_fd,
     };
     use jni::JNIEnv;
     use jni::objects::{JByteBuffer, JClass, JIntArray, JString};
@@ -5001,6 +5001,65 @@ mod android {
     }
 
     #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeReadStorageUsage(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let Ok(handle) = u64::try_from(handle) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(output_capacity) = environment.get_direct_buffer_capacity(&output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if output_capacity < MAX_TOOL_OUTPUT_BYTES {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let Ok(output_address) = environment.get_direct_buffer_address(&output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if output_address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
+        let root = {
+            let Ok(mut registry) = registry().lock() else {
+                return ERROR_INTERNAL;
+            };
+            let Some(runtime) = registry.runtime_mut(handle) else {
+                return ERROR_INVALID_HANDLE;
+            };
+            let Some(root) = runtime.arch_root() else {
+                return ERROR_INVALID_STATE;
+            };
+            root.to_path_buf()
+        };
+        let usage = match arch_storage_usage(&root) {
+            Ok(usage) => usage,
+            Err(error) => return copy_storage_error(&error, destination),
+        };
+        let mut writer = std::io::Cursor::new(destination);
+        if write!(
+            &mut writer,
+            "S1\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            usage.package_downloads.entries,
+            usage.package_downloads.bytes,
+            usage.shared_runtime.entries,
+            usage.shared_runtime.bytes,
+            usage.build_cache.entries,
+            usage.build_cache.bytes,
+            usage.user_files.entries,
+            usage.user_files.bytes,
+        )
+        .is_err()
+        {
+            return ERROR_INTERNAL;
+        }
+        i32::try_from(writer.position()).unwrap_or(ERROR_INTERNAL)
+    }
+
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeReadPackageCachePage(
         environment: JNIEnv,
         _class: JClass,
@@ -5123,6 +5182,41 @@ mod android {
             return i64::from(ERROR_INVALID_HANDLE);
         };
         match runtime.clear_package_cache() {
+            Ok(bytes) => i64::try_from(bytes).unwrap_or(i64::from(ERROR_INTERNAL)),
+            Err(error) => i64::from(copy_package_error(&error, destination)),
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeClearAurBuildCache(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        output_buffer: JByteBuffer,
+    ) -> jlong {
+        let Ok(handle) = u64::try_from(handle) else {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        };
+        let Ok(output_capacity) = environment.get_direct_buffer_capacity(&output_buffer) else {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        };
+        if output_capacity < MAX_TOOL_OUTPUT_BYTES {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        }
+        let Ok(output_address) = environment.get_direct_buffer_address(&output_buffer) else {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        };
+        if output_address.is_null() {
+            return i64::from(ERROR_INVALID_ARGUMENT);
+        }
+        let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
+        let Ok(mut registry) = registry().lock() else {
+            return i64::from(ERROR_INTERNAL);
+        };
+        let Some(runtime) = registry.runtime_mut(handle) else {
+            return i64::from(ERROR_INVALID_HANDLE);
+        };
+        match runtime.clear_aur_build_cache() {
             Ok(bytes) => i64::try_from(bytes).unwrap_or(i64::from(ERROR_INTERNAL)),
             Err(error) => i64::from(copy_package_error(&error, destination)),
         }

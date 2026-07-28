@@ -56,6 +56,8 @@ class AurBuilderService : Service() {
                             TRANSACTION_POLL_BUILD -> pollBuild(reply)
                             TRANSACTION_CANCEL_BUILD -> cancelBuild(reply)
                             TRANSACTION_VERIFY_OUTPUT -> verifyOutput(data, reply)
+                            TRANSACTION_STORAGE_USAGE -> storageUsage(reply, clear = false)
+                            TRANSACTION_CLEAR_STORAGE -> storageUsage(reply, clear = true)
                             else -> return super.onTransact(code, data, reply, flags)
                         }
                     } catch (error: Exception) {
@@ -528,6 +530,38 @@ class AurBuilderService : Service() {
         }
     }
 
+    @Synchronized
+    private fun storageUsage(
+        reply: Parcel,
+        clear: Boolean,
+    ) {
+        val output = ByteBuffer.allocateDirect(NativeBuilder.ERROR_OUTPUT_BYTES)
+        val result =
+            if (clear) {
+                NativeBuilder.nativeClearStorage(filesDir.absolutePath, output)
+            } else {
+                NativeBuilder.nativeReadStorageUsage(filesDir.absolutePath, output)
+            }
+        check(result in 7 until NativeBuilder.ERROR_OUTPUT_BYTES) {
+            "Builder storage inventory failed: ${readNativeMessage(output, result)}"
+        }
+        val fields =
+            ByteArray(result)
+                .also { bytes ->
+                    output.position(0)
+                    output.get(bytes)
+                }.toString(Charsets.US_ASCII)
+                .trimEnd('\n')
+                .split('\t')
+        check(fields.size == 3 && fields[0] == "B1")
+        val entries = fields[1].toLongOrNull() ?: -1L
+        val bytes = fields[2].toLongOrNull() ?: -1L
+        check(entries >= 0L && bytes >= 0L)
+        reply.writeNoException()
+        reply.writeLong(entries)
+        reply.writeLong(bytes)
+    }
+
     private fun hexSha256(value: ByteArray): String {
         require(value.size == 32)
         return buildString(64) {
@@ -788,6 +822,8 @@ class AurBuilderService : Service() {
         const val TRANSACTION_POLL_BUILD = IBinder.FIRST_CALL_TRANSACTION + 12
         const val TRANSACTION_CANCEL_BUILD = IBinder.FIRST_CALL_TRANSACTION + 13
         const val TRANSACTION_VERIFY_OUTPUT = IBinder.FIRST_CALL_TRANSACTION + 14
+        const val TRANSACTION_STORAGE_USAGE = IBinder.FIRST_CALL_TRANSACTION + 15
+        const val TRANSACTION_CLEAR_STORAGE = IBinder.FIRST_CALL_TRANSACTION + 16
         private const val ROLE_SNAPSHOT = 0
         private const val ROLE_SOURCE = 1
         private const val MAX_INPUTS = 65

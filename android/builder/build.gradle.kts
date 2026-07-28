@@ -2,6 +2,11 @@ plugins {
     id("com.android.application")
 }
 
+val archpheneAbi = providers.gradleProperty("archpheneAbi").orNull
+require(archpheneAbi == null || archpheneAbi in setOf("x86_64", "arm64-v8a")) {
+    "archpheneAbi must be x86_64 or arm64-v8a"
+}
+
 android {
     namespace = "org.archphene.builder"
     compileSdk = 36
@@ -13,6 +18,11 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "0.1.0"
+        if (archpheneAbi != null) {
+            ndk {
+                abiFilters += archpheneAbi
+            }
+        }
     }
 
     compileOptions {

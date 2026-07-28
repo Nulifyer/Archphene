@@ -1830,6 +1830,21 @@ impl RuntimeHost {
         Ok(reclaimed)
     }
 
+    pub fn clear_aur_build_cache(&mut self) -> Result<u64, PackageRuntimeError> {
+        if self.aur_source_download.is_some() || self.package_download.is_some() {
+            return Err(PackageRuntimeError::Busy);
+        }
+        let reclaimed = self
+            .package_runtime
+            .as_ref()
+            .ok_or(PackageRuntimeError::InvalidPath)?
+            .clear_aur_build_cache()?;
+        self.aur_review = None;
+        self.aur_build_resolution = None;
+        self.aur_build_closure = None;
+        Ok(reclaimed)
+    }
+
     pub fn open_pty(
         &mut self,
         command: &str,

@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use archphene_process::{BatchProcess, CommandEnvironment, ProcessError};
 use archphene_root::{ArchRoot, RootError};
+use archphene_storage::{AllocatedStorageUsage, StorageError, allocated_storage_usage};
 use flate2::read::GzDecoder;
 use rustix::fd::OwnedFd;
 use rustix::fs::{
@@ -76,6 +77,7 @@ pub enum BuilderError {
     Syscall(Errno),
     Root(RootError),
     Process(ProcessError),
+    Storage(StorageError),
 }
 
 impl fmt::Display for BuilderError {
@@ -94,6 +96,7 @@ impl fmt::Display for BuilderError {
             Self::Syscall(error) => error.fmt(formatter),
             Self::Root(error) => error.fmt(formatter),
             Self::Process(error) => error.fmt(formatter),
+            Self::Storage(error) => error.fmt(formatter),
         }
     }
 }
@@ -121,6 +124,12 @@ impl From<RootError> for BuilderError {
 impl From<ProcessError> for BuilderError {
     fn from(error: ProcessError) -> Self {
         Self::Process(error)
+    }
+}
+
+impl From<StorageError> for BuilderError {
+    fn from(error: StorageError) -> Self {
+        Self::Storage(error)
     }
 }
 
@@ -242,6 +251,61 @@ struct BuilderRuntimeEntry {
     packaged: String,
     bytes: u64,
     sha256: [u8; 32],
+}
+
+pub fn builder_storage_usage(
+    files_directory: &Path,
+) -> Result<AllocatedStorageUsage, BuilderError> {
+    let mut usage = AllocatedStorageUsage::default();
+    for name in [LEGACY_WORKSPACE_NAME, WORKSPACE_NAME] {
+        let path = files_directory.join(name);
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let current = if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            allocated_storage_usage(&path)?
+        } else {
+            AllocatedStorageUsage {
+                entries: 1,
+                bytes: metadata
+                    .blocks()
+                    .checked_mul(512)
+                    .ok_or(BuilderError::OutputLimit)?,
+            }
+        };
+        usage.entries = usage
+            .entries
+            .checked_add(current.entries)
+            .ok_or(BuilderError::OutputLimit)?;
+        usage.bytes = usage
+            .bytes
+            .checked_add(current.bytes)
+            .ok_or(BuilderError::OutputLimit)?;
+    }
+    Ok(usage)
+}
+
+pub fn clear_builder_storage(
+    files_directory: &Path,
+) -> Result<AllocatedStorageUsage, BuilderError> {
+    let before = builder_storage_usage(files_directory)?;
+    let files = openat(
+        CWD,
+        files_directory,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let mut visited = 0;
+    remove_entry_if_present(&files, LEGACY_WORKSPACE_NAME, 0, &mut visited)?;
+    remove_entry_if_present(&files, WORKSPACE_NAME, 0, &mut visited)?;
+    fsync(&files)?;
+    let after = builder_storage_usage(files_directory)?;
+    Ok(AllocatedStorageUsage {
+        entries: before.entries.saturating_sub(after.entries),
+        bytes: before.bytes.saturating_sub(after.bytes),
+    })
 }
 
 impl ReviewedInputSession {
@@ -2743,7 +2807,8 @@ mod android {
 
     use super::{
         AurBuildSession, BuilderRuntime, ClosureSession, ExtractionReport, ProvisionSession,
-        ReviewedInputRole, ReviewedInputSession, parse_sha256, prepare_recipe_workspace,
+        ReviewedInputRole, ReviewedInputSession, builder_storage_usage, clear_builder_storage,
+        parse_sha256, prepare_recipe_workspace,
     };
 
     const ERROR_INVALID_ARGUMENT: jint = -1;
@@ -2825,6 +2890,101 @@ mod android {
         output[16..24].copy_from_slice(&report.entry_count.to_le_bytes());
         output[24..32].copy_from_slice(&report.expanded_bytes.to_le_bytes());
         Ok(EXTRACTION_REPORT_BYTES as jint)
+    }
+
+    fn write_storage_report(output: &mut [u8], entries: u64, bytes: u64) -> Result<jint, jint> {
+        let value = format!("B1\t{entries}\t{bytes}\n");
+        if value.len() >= output.len() {
+            return Err(ERROR_BUILDER);
+        }
+        output.fill(0);
+        output[..value.len()].copy_from_slice(value.as_bytes());
+        i32::try_from(value.len()).map_err(|_| ERROR_BUILDER)
+    }
+
+    fn lock_idle_builder() -> Result<
+        (
+            std::sync::MutexGuard<'static, Option<ReviewedInputSession>>,
+            std::sync::MutexGuard<'static, Option<AurBuildSession>>,
+            std::sync::MutexGuard<'static, Option<ClosureSession>>,
+            std::sync::MutexGuard<'static, Option<ProvisionSession>>,
+        ),
+        jint,
+    > {
+        let reviewed = reviewed_inputs().lock().map_err(|_| ERROR_INVALID_STATE)?;
+        let active_build = build().lock().map_err(|_| ERROR_INVALID_STATE)?;
+        let closure = session().lock().map_err(|_| ERROR_INVALID_STATE)?;
+        let active_provision = provision().lock().map_err(|_| ERROR_INVALID_STATE)?;
+        if reviewed.is_some()
+            || active_build.is_some()
+            || closure.is_some()
+            || active_provision.is_some()
+        {
+            return Err(ERROR_INVALID_STATE);
+        }
+        Ok((reviewed, active_build, closure, active_provision))
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_builder_NativeBuilder_nativeReadStorageUsage(
+        mut environment: JNIEnv,
+        _class: JClass,
+        files_directory: JString,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let Ok(files_directory) = java_string(&mut environment, &files_directory) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let (Ok(capacity), Ok(address)) = (
+            environment.get_direct_buffer_capacity(&output_buffer),
+            environment.get_direct_buffer_address(&output_buffer),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if capacity < ERROR_OUTPUT_BYTES || address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let output = unsafe { slice::from_raw_parts_mut(address, capacity) };
+        let Ok(_guards) = lock_idle_builder() else {
+            return ERROR_INVALID_STATE;
+        };
+        match builder_storage_usage(Path::new(&files_directory)) {
+            Ok(usage) => {
+                write_storage_report(output, usage.entries, usage.bytes).unwrap_or(ERROR_BUILDER)
+            }
+            Err(error) => copy_builder_error(&error, output),
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_builder_NativeBuilder_nativeClearStorage(
+        mut environment: JNIEnv,
+        _class: JClass,
+        files_directory: JString,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let Ok(files_directory) = java_string(&mut environment, &files_directory) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let (Ok(capacity), Ok(address)) = (
+            environment.get_direct_buffer_capacity(&output_buffer),
+            environment.get_direct_buffer_address(&output_buffer),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if capacity < ERROR_OUTPUT_BYTES || address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let output = unsafe { slice::from_raw_parts_mut(address, capacity) };
+        let Ok(_guards) = lock_idle_builder() else {
+            return ERROR_INVALID_STATE;
+        };
+        match clear_builder_storage(Path::new(&files_directory)) {
+            Ok(usage) => {
+                write_storage_report(output, usage.entries, usage.bytes).unwrap_or(ERROR_BUILDER)
+            }
+            Err(error) => copy_builder_error(&error, output),
+        }
     }
 
     #[unsafe(no_mangle)]
@@ -3628,6 +3788,52 @@ mod tests {
         ));
         fs::create_dir(&path).expect("test directory");
         path
+    }
+
+    #[test]
+    fn builder_storage_inventory_and_cleanup_are_bounded_to_workspaces() {
+        let directory = test_directory();
+        let outside = test_directory();
+        fs::create_dir_all(
+            directory
+                .join(WORKSPACE_NAME)
+                .join(BUILD_ROOT_NAME)
+                .join("usr/bin"),
+        )
+        .expect("build root");
+        fs::write(
+            directory
+                .join(WORKSPACE_NAME)
+                .join(BUILD_ROOT_NAME)
+                .join("usr/bin/tool"),
+            [7; 8192],
+        )
+        .expect("builder data");
+        fs::write(directory.join("retained"), b"keep").expect("unrelated builder file");
+        fs::write(outside.join("sentinel"), b"outside").expect("outside sentinel");
+        std::os::unix::fs::symlink(&outside, directory.join(LEGACY_WORKSPACE_NAME))
+            .expect("legacy symlink");
+
+        let before = builder_storage_usage(&directory).expect("storage inventory");
+        let reclaimed = clear_builder_storage(&directory).expect("storage cleanup");
+        let after = builder_storage_usage(&directory).expect("storage after cleanup");
+
+        assert!(before.bytes >= 8192);
+        assert!(reclaimed.entries >= 4);
+        assert!(reclaimed.bytes >= 8192);
+        assert_eq!(after, AllocatedStorageUsage::default());
+        assert_eq!(
+            fs::read(directory.join("retained")).expect("retained builder file"),
+            b"keep",
+        );
+        assert_eq!(
+            fs::read(outside.join("sentinel")).expect("outside remains"),
+            b"outside",
+        );
+        assert!(!directory.join(WORKSPACE_NAME).exists());
+        assert!(!directory.join(LEGACY_WORKSPACE_NAME).exists());
+        fs::remove_dir_all(directory).expect("cleanup");
+        fs::remove_dir_all(outside).expect("outside cleanup");
     }
 
     fn fixture_manifest_with_filename(filename: &str, archive: &[u8], signature: &[u8]) -> Vec<u8> {

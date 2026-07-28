@@ -106,6 +106,16 @@ internal object NativeBuilder {
 
     external fun nativeCancelBuild(): Boolean
 
+    external fun nativeReadStorageUsage(
+        filesDirectory: String,
+        outputBuffer: ByteBuffer,
+    ): Int
+
+    external fun nativeClearStorage(
+        filesDirectory: String,
+        outputBuffer: ByteBuffer,
+    ): Int
+
     external fun nativeVerifyAndCopyBuiltPackage(
         filesDirectory: String,
         packageBase: String,

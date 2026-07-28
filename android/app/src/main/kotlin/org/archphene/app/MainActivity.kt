@@ -83,6 +83,13 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private var packageJobRenderedProgress = 0
     private lateinit var commandStatusView: TextView
     private lateinit var storageStatusView: TextView
+    private lateinit var storageUsageStatusView: TextView
+    private lateinit var packageDownloadsSizeView: TextView
+    private lateinit var sharedRuntimeSizeView: TextView
+    private lateinit var buildCacheSizeView: TextView
+    private lateinit var userFilesSizeView: TextView
+    private lateinit var refreshStorageButton: Button
+    private lateinit var clearBuildCacheButton: Button
     private lateinit var folderStatusView: TextView
     private lateinit var runtimeSurface: RuntimeSurfaceView
     private lateinit var managerPanel: FrameLayout
@@ -139,6 +146,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private var packageCacheDialog: AlertDialog? = null
     private var packageCacheDialogRequested = false
     private var packageCacheRequestedRevision = Int.MIN_VALUE
+    private var storageUsageRevision = Int.MIN_VALUE
+    private var buildCacheConfirmationDialog: AlertDialog? = null
     private var launcherPermissionDeferred = false
     private var launcherReviewDeferredRevision = Int.MIN_VALUE
     private var pendingImportUris: List<Uri>? = null
@@ -184,6 +193,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 jobStatusView.setText(R.string.package_job_unavailable)
                 commandStatusView.setText(R.string.linux_command_unavailable)
                 storageStatusView.setText(R.string.document_import_unavailable)
+                storageUsageStatusView.setText(R.string.storage_usage_unavailable)
                 folderStatusView.setText(R.string.folder_grant_unavailable)
                 installButton.isEnabled = false
                 removeButton.isEnabled = false
@@ -197,6 +207,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                 folderButton.isEnabled = false
                 folderMirrorButton.isEnabled = false
                 folderDisconnectButton.isEnabled = false
+                refreshStorageButton.isEnabled = false
+                clearBuildCacheButton.isEnabled = false
                 shellSpinner.isEnabled = false
                 updateShellPresentation(false)
             }
@@ -271,18 +283,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             Button(this).apply {
                 setText(R.string.downloads)
                 contentDescription = getString(R.string.manage_package_downloads)
-                setOnClickListener {
-                    val binder = runtimeBinder
-                    if (binder?.packageCacheActionAvailable == true) {
-                        packageCacheDialogRequested = true
-                        packageCacheRequestedRevision = binder.packageCache.revision
-                        isEnabled = false
-                        if (!binder.refreshPackageCacheInventory()) {
-                            packageCacheDialogRequested = false
-                            isEnabled = true
-                        }
-                    }
-                }
+                setOnClickListener { openPackageDownloads() }
             }
         val catalogRow =
             LinearLayout(this).apply {
@@ -1124,6 +1125,123 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                     ),
                 )
             }
+        storageUsageStatusView =
+            TextView(this).apply {
+                setText(R.string.storage_usage_prompt)
+                setTextColor(getColor(R.color.archphene_on_surface_muted))
+                textSize = 14f
+                gravity = Gravity.CENTER_VERTICAL
+                maxLines = 2
+            }
+        packageDownloadsSizeView = storageSizeView()
+        sharedRuntimeSizeView = storageSizeView()
+        buildCacheSizeView = storageSizeView()
+        userFilesSizeView = storageSizeView()
+        refreshStorageButton =
+            Button(this).apply {
+                setText(R.string.refresh)
+                setOnClickListener {
+                    isEnabled = false
+                    if (runtimeBinder?.refreshStorageUsage() != true) {
+                        isEnabled = true
+                    }
+                }
+            }
+        clearBuildCacheButton =
+            Button(this).apply {
+                setText(R.string.clear)
+                setOnClickListener { showBuildCacheClearConfirmation() }
+            }
+        val storageUsageCard =
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(12), dp(4), dp(8), dp(8))
+                setBackgroundColor(getColor(R.color.archphene_surface_variant))
+                addView(
+                    LinearLayout(this@MainActivity).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        addView(
+                            TextView(this@MainActivity).apply {
+                                setText(R.string.storage_usage_heading)
+                                setTextColor(getColor(R.color.archphene_on_surface))
+                                textSize = 18f
+                                gravity = Gravity.CENTER_VERTICAL
+                            },
+                            LinearLayout.LayoutParams(
+                                0,
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                1f,
+                            ),
+                        )
+                        addView(
+                            refreshStorageButton,
+                            LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.WRAP_CONTENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                            ),
+                        )
+                    },
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        dp(48),
+                    ),
+                )
+                addView(
+                    storageUsageStatusView,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        dp(44),
+                    ),
+                )
+                addView(
+                    storageUsageRow(
+                        R.string.storage_package_downloads,
+                        packageDownloadsSizeView,
+                        R.string.manage,
+                    ) { openPackageDownloads() },
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        dp(48),
+                    ),
+                )
+                addView(
+                    storageUsageRow(
+                        R.string.storage_shared_runtime,
+                        sharedRuntimeSizeView,
+                        R.string.packages,
+                    ) {
+                        selectManagerSection(MANAGER_SECTION_PACKAGES)
+                        showPackageResultMode(true)
+                    },
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        dp(48),
+                    ),
+                )
+                addView(
+                    storageUsageRow(
+                        R.string.storage_build_cache,
+                        buildCacheSizeView,
+                        clearBuildCacheButton,
+                    ),
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        dp(48),
+                    ),
+                )
+                addView(
+                    storageUsageRow(
+                        R.string.storage_user_files,
+                        userFilesSizeView,
+                        R.string.browse,
+                    ) { openLinuxDocumentForViewing() },
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        dp(48),
+                    ),
+                )
+            }
         shellAdapter =
             ArrayAdapter<String>(this, R.layout.shell_spinner_item).apply {
                 setDropDownViewResource(R.layout.shell_spinner_dropdown_item)
@@ -1428,6 +1546,15 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
                                 },
                             )
                         }
+                        addView(
+                            storageUsageCard,
+                            LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                dp(300),
+                            ).apply {
+                                topMargin = dp(12)
+                            },
+                        )
                     },
                     FrameLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
@@ -2023,6 +2150,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         updateInstalledPackages(runtimeBinder)
         updateAvailablePackages(runtimeBinder)
         updateAurReview(runtimeBinder)
+        updateStorageUsage(runtimeBinder)
         val handle = runtimeBinder?.runtimeHandle ?: 0L
         if (!snapshot.read(handle)) {
             statusView.contentDescription = null
@@ -2250,6 +2378,93 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         ) {
             Toast.makeText(this, cache.status, Toast.LENGTH_LONG).show()
         }
+    }
+
+    private fun openPackageDownloads() {
+        val binder = runtimeBinder
+        if (binder?.packageCacheActionAvailable == true) {
+            packageCacheDialogRequested = true
+            packageCacheRequestedRevision = binder.packageCache.revision
+            packageCacheButton.isEnabled = false
+            if (!binder.refreshPackageCacheInventory()) {
+                packageCacheDialogRequested = false
+                packageCacheButton.isEnabled = true
+            }
+        }
+    }
+
+    private fun updateStorageUsage(binder: ArchpheneRuntimeService.LocalBinder?) {
+        if (binder == null) {
+            setTextIfChanged(
+                storageUsageStatusView,
+                getString(R.string.storage_usage_unavailable),
+            )
+            refreshStorageButton.isEnabled = false
+            clearBuildCacheButton.isEnabled = false
+            return
+        }
+        val usage = binder.storageUsage
+        if (
+            selectedManagerSection == MANAGER_SECTION_FILES &&
+            usage.revision == 0 &&
+            binder.storageUsageActionAvailable
+        ) {
+            binder.refreshStorageUsage()
+        }
+        setTextIfChanged(storageUsageStatusView, usage.status)
+        if (usage.revision != storageUsageRevision) {
+            storageUsageRevision = usage.revision
+            setTextIfChanged(
+                packageDownloadsSizeView,
+                Formatter.formatShortFileSize(this, usage.packageDownloadsBytes),
+            )
+            setTextIfChanged(
+                sharedRuntimeSizeView,
+                Formatter.formatShortFileSize(this, usage.sharedRuntimeBytes),
+            )
+            setTextIfChanged(
+                buildCacheSizeView,
+                Formatter.formatShortFileSize(this, usage.buildCacheBytes),
+            )
+            setTextIfChanged(
+                userFilesSizeView,
+                Formatter.formatShortFileSize(this, usage.userFilesBytes),
+            )
+        }
+        refreshStorageButton.isEnabled = binder.storageUsageActionAvailable
+        clearBuildCacheButton.isEnabled =
+            binder.storageUsageActionAvailable && usage.buildCacheBytes > 0L
+    }
+
+    private fun showBuildCacheClearConfirmation() {
+        if (
+            buildCacheConfirmationDialog != null ||
+            runtimeBinder?.storageUsageActionAvailable != true
+        ) {
+            return
+        }
+        val dialog =
+            AlertDialog
+                .Builder(this)
+                .setTitle(R.string.clear_build_cache_title)
+                .setMessage(R.string.clear_build_cache_message)
+                .setPositiveButton(R.string.clear, null)
+                .setNegativeButton(android.R.string.cancel, null)
+                .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                if (runtimeBinder?.clearBuildCache() == true) {
+                    dialog.dismiss()
+                }
+            }
+        }
+        dialog.setOnDismissListener {
+            if (buildCacheConfirmationDialog === dialog) {
+                buildCacheConfirmationDialog = null
+            }
+        }
+        buildCacheConfirmationDialog = dialog
+        dialog.show()
     }
 
     private fun showPackageCacheClearConfirmation(revision: Int) {
@@ -3395,6 +3610,68 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(20), 0, dp(20), 0)
             maxLines = 1
+        }
+
+    private fun storageSizeView(): TextView =
+        TextView(this).apply {
+            setText(R.string.storage_size_unavailable)
+            setTextColor(getColor(R.color.archphene_on_surface_muted))
+            textSize = 14f
+            gravity = Gravity.CENTER_VERTICAL or Gravity.END
+            maxLines = 1
+        }
+
+    private fun storageUsageRow(
+        titleResource: Int,
+        size: TextView,
+        actionResource: Int,
+        action: () -> Unit,
+    ): LinearLayout =
+        storageUsageRow(
+            titleResource,
+            size,
+            Button(this).apply {
+                setText(actionResource)
+                setOnClickListener { action() }
+            },
+        )
+
+    private fun storageUsageRow(
+        titleResource: Int,
+        size: TextView,
+        action: Button,
+    ): LinearLayout =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(
+                TextView(this@MainActivity).apply {
+                    setText(titleResource)
+                    setTextColor(getColor(R.color.archphene_on_surface))
+                    textSize = 14f
+                    gravity = Gravity.CENTER_VERTICAL
+                    maxLines = 1
+                },
+                LinearLayout.LayoutParams(
+                    0,
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    1f,
+                ),
+            )
+            addView(
+                size,
+                LinearLayout.LayoutParams(
+                    dp(88),
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                ),
+            )
+            addView(
+                action,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                ),
+            )
         }
 
     private fun managerNavigationButton(

@@ -3643,6 +3643,66 @@ impl PackageRuntime {
         Ok(reclaimed_bytes)
     }
 
+    pub fn clear_aur_build_cache(&self) -> Result<u64, PackageRuntimeError> {
+        if self.read_pending_mutation()?.is_some() {
+            return Err(PackageRuntimeError::Busy);
+        }
+        let mut directories = Vec::new();
+        let mut artifacts = Vec::new();
+        let mut reclaimed_bytes = 0_u64;
+        for relative in [
+            AUR_PACKAGE_CACHE_DIRECTORY,
+            aur::AUR_SNAPSHOT_CACHE_DIRECTORY,
+            aur::AUR_SOURCE_CACHE_DIRECTORY,
+        ] {
+            let directory = self.arch_root.join(relative);
+            let metadata = match fs::symlink_metadata(&directory) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(PackageRuntimeError::Io(error)),
+            };
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(PackageRuntimeError::UnsafeEntry(directory));
+            }
+            for entry in fs::read_dir(&directory)? {
+                if artifacts.len() >= LOCAL_DATABASE_ENTRY_LIMIT {
+                    return Err(PackageRuntimeError::OutputLimit);
+                }
+                let entry = entry?;
+                let path = entry.path();
+                let name = entry
+                    .file_name()
+                    .into_string()
+                    .map_err(|_| PackageRuntimeError::UnsafeEntry(path.clone()))?;
+                let metadata = fs::symlink_metadata(&path)?;
+                if name.is_empty()
+                    || name.len() > 255
+                    || name == "."
+                    || name == ".."
+                    || name
+                        .bytes()
+                        .any(|byte| byte.is_ascii_control() || byte == b'/')
+                    || metadata.file_type().is_symlink()
+                    || !metadata.is_file()
+                {
+                    return Err(PackageRuntimeError::UnsafeEntry(path));
+                }
+                reclaimed_bytes = reclaimed_bytes
+                    .checked_add(metadata.len())
+                    .ok_or(PackageRuntimeError::OutputLimit)?;
+                artifacts.push(path);
+            }
+            directories.push(directory);
+        }
+        for artifact in artifacts {
+            fs::remove_file(artifact)?;
+        }
+        for directory in directories {
+            File::open(directory)?.sync_all()?;
+        }
+        Ok(reclaimed_bytes)
+    }
+
     fn scan_package_cache(
         &self,
     ) -> Result<(PathBuf, Vec<PackageCacheArtifact>), PackageRuntimeError> {
@@ -9093,6 +9153,65 @@ library\tlibarchphene_path_bridge.so\tlibarchphene_pkg_555555555555555555555555.
                 .is_none()
         );
         assert_eq!(runtime.clear_package_cache().expect("clear empty cache"), 0);
+    }
+
+    #[test]
+    fn aur_build_cache_cleanup_is_separate_and_fails_closed() {
+        let tree = TestTree::new();
+        tree.file("libarchphene_pkg_111111111111111111111111.so", b"loader");
+        tree.file("libarchphene_pkg_222222222222222222222222.so", b"pacman");
+        tree.file("libarchphene_pkg_444444444444444444444444.so", b"keyring");
+        tree.file("libarchphene_pkg_555555555555555555555555.so", b"bridge");
+        tree.file("libarchphene_pkg_666666666666666666666666.so", b"trust");
+        let manifest = b"# org.archphene.package-runtime.v1\n\
+loader\t@loader\tlibarchphene_pkg_111111111111111111111111.so\t6\n\
+tool\t@pacman\tlibarchphene_pkg_222222222222222222222222.so\t6\n\
+keyring\t@keyring\tlibarchphene_pkg_444444444444444444444444.so\t7\n\
+ownertrust\t@ownertrust\tlibarchphene_pkg_666666666666666666666666.so\t5\n\
+library\tlibarchphene_path_bridge.so\tlibarchphene_pkg_555555555555555555555555.so\t6\n";
+        let runtime = PackageRuntime::prepare(
+            &tree.root,
+            &tree.native,
+            manifest,
+            RepositoryArchitecture::X86_64,
+        )
+        .expect("package runtime");
+        let downloads = tree.root.join(PACKAGE_CACHE_DIRECTORY);
+        let download = downloads.join("btop-1.4.7-1-x86_64.pkg.tar.zst");
+        fs::write(&download, b"download").expect("package download");
+        let package_cache = tree.root.join(AUR_PACKAGE_CACHE_DIRECTORY);
+        let snapshot_cache = tree.root.join(aur::AUR_SNAPSHOT_CACHE_DIRECTORY);
+        let source_cache = tree.root.join(aur::AUR_SOURCE_CACHE_DIRECTORY);
+        for directory in [&package_cache, &snapshot_cache, &source_cache] {
+            fs::create_dir_all(directory).expect("AUR cache");
+        }
+        fs::write(package_cache.join("built.pkg.tar.zst"), b"built").expect("built package");
+        fs::write(snapshot_cache.join("snapshot.tar.gz"), b"snapshot").expect("snapshot");
+        fs::write(source_cache.join("source"), b"source").expect("source");
+        let unsafe_entry = source_cache.join("directory");
+        fs::create_dir(&unsafe_entry).expect("unsafe cache directory");
+
+        assert!(matches!(
+            runtime.clear_aur_build_cache(),
+            Err(PackageRuntimeError::UnsafeEntry(path)) if path == unsafe_entry
+        ));
+        assert!(package_cache.join("built.pkg.tar.zst").exists());
+        assert!(snapshot_cache.join("snapshot.tar.gz").exists());
+        fs::remove_dir(&unsafe_entry).expect("remove unsafe entry");
+
+        assert_eq!(
+            runtime.clear_aur_build_cache().expect("clear AUR cache"),
+            19,
+        );
+        assert!(download.exists());
+        for directory in [&package_cache, &snapshot_cache, &source_cache] {
+            assert!(
+                fs::read_dir(directory)
+                    .expect("empty AUR cache")
+                    .next()
+                    .is_none()
+            );
+        }
     }
 
     #[test]

@@ -275,6 +275,40 @@ managed private-home aliases rather than a misleading live SAF mount; connected
 tree direction, action progress, conflicts, history, retry, and grant state are
 shown in the Files UI.
 
+## Storage accounting and controls
+
+The Files page reports five values without granting either Android UID access
+to the other's files:
+
+- **Package downloads** counts allocated blocks under pacman's package cache
+  and opens the bounded package/version selection and Clear all workflow.
+- **Installed Linux system** is the remainder of the shared private Arch root
+  and routes to Packages rather than offering an unsafe filesystem deletion.
+- **AUR build data** combines reviewed manager sources, snapshots, retained
+  package outputs, and the isolated Builder workspace through the signed Binder
+  boundary. Its separately confirmed Clear action removes only those known
+  caches and reloads the measured result.
+- **Archphene Home** counts the shared Linux user's files and opens Android's
+  Archphene Home document surface instead of deleting user data.
+- The summary also reports free space from Android's filesystem view.
+
+The Rust inventory traverses directory descriptors without following symlinks,
+counts allocated blocks rather than logical lengths, counts hard-linked file
+storage once, and fails closed above 2,000,000 entries or 64 levels. Directory
+structure needed to hold an otherwise empty cache belongs to the shared
+runtime category, so clearing actionable AUR data or package downloads can
+reach 0 B. Live scans ignore only an entry that disappears between directory
+enumeration and descriptor open; other I/O failures remain visible.
+
+`scripts/test-archphene-storage-usage.sh` seeds bounded manager and Builder
+fixtures only when their AUR workspaces are empty, drives Refresh and confirmed
+Clear through the real UI, and proves package downloads, the installed package
+database, and Home remain exact. The current exact x86_64 emulator and
+AArch64 Samsung runs both report 13 MB to 0 B with clean full-device captures.
+A separate real Samsung cleanup reclaimed 4 GiB of prior Builder/AUR data while
+122 MB of downloads, 2.3 GB of installed system data, and 86 kB of Home
+remained unchanged.
+
 ## Virtual Linux Layout
 
 The Linux process should see familiar paths, but those paths are policy-backed views, not raw unrestricted Android filesystem access.

@@ -1,6 +1,7 @@
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+use std::collections::BTreeSet;
 use std::ffi::{CString, OsStr};
 use std::fmt;
 use std::fs::{self, File};
@@ -32,6 +33,7 @@ mod sys {
     pub const O_TRUNC: c_int = 0o1000;
     pub const O_APPEND: c_int = 0o2000;
     pub const O_NONBLOCK: c_int = 0o4000;
+    pub const O_PATH: c_int = 0o10000000;
     pub const O_CLOEXEC: c_int = 0o2000000;
     pub const O_DIRECTORY: c_int = 0o200000;
     pub const O_NOFOLLOW: c_int = 0o400000;
@@ -216,6 +218,8 @@ pub const MAX_MIRROR_PATH_BYTES: usize = 4 * 1024;
 pub const MAX_MIRROR_FILE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub const MAX_MIRROR_TOTAL_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 pub const MAX_SYNC_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_STORAGE_USAGE_ENTRIES: u64 = 2_000_000;
+pub const MAX_STORAGE_USAGE_DEPTH: usize = 64;
 
 const IMPORT_STAGING_DIRECTORY: &str = ".archphene-import";
 const IMPORT_STAGING_FILE: &str = "pending";
@@ -242,6 +246,38 @@ pub struct OpenMode {
     pub append: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AllocatedStorageUsage {
+    pub entries: u64,
+    pub bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ArchStorageUsage {
+    pub package_downloads: AllocatedStorageUsage,
+    pub shared_runtime: AllocatedStorageUsage,
+    pub build_cache: AllocatedStorageUsage,
+    pub user_files: AllocatedStorageUsage,
+}
+
+impl ArchStorageUsage {
+    pub fn total_entries(self) -> Option<u64> {
+        self.package_downloads
+            .entries
+            .checked_add(self.shared_runtime.entries)?
+            .checked_add(self.build_cache.entries)?
+            .checked_add(self.user_files.entries)
+    }
+
+    pub fn total_bytes(self) -> Option<u64> {
+        self.package_downloads
+            .bytes
+            .checked_add(self.shared_runtime.bytes)?
+            .checked_add(self.build_cache.bytes)?
+            .checked_add(self.user_files.bytes)
+    }
+}
+
 #[derive(Debug)]
 pub enum StorageError {
     InvalidRoot,
@@ -260,6 +296,7 @@ pub enum StorageError {
     ManifestTooLarge,
     SyncChanged,
     SyncConflictLimit,
+    UsageTooLarge,
     Io(io::Error),
 }
 
@@ -292,9 +329,180 @@ impl fmt::Display for StorageError {
             Self::SyncConflictLimit => {
                 formatter.write_str("could not allocate a project conflict copy")
             }
+            Self::UsageTooLarge => formatter.write_str("storage inventory exceeds its limit"),
             Self::Io(error) => write!(formatter, "Archphene document I/O error: {error}"),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StorageUsageClass {
+    SharedRuntime,
+    Home,
+    UserFiles,
+    Var,
+    VarCache,
+    PacmanCache,
+    PackageDownloads,
+    ArchpheneCache,
+    BuildCache,
+}
+
+impl StorageUsageClass {
+    fn child(self, name: &[u8]) -> Self {
+        match self {
+            Self::SharedRuntime if name == b"home" => Self::Home,
+            Self::SharedRuntime if name == b"var" => Self::Var,
+            Self::Home if name == b"archphene" => Self::UserFiles,
+            Self::Var if name == b"cache" => Self::VarCache,
+            Self::VarCache if name == b"pacman" => Self::PacmanCache,
+            Self::VarCache if name == b"archphene" => Self::ArchpheneCache,
+            Self::PacmanCache if name == b"pkg" => Self::PackageDownloads,
+            Self::ArchpheneCache
+                if matches!(name, b"aur-packages" | b"aur-snapshots" | b"aur-sources") =>
+            {
+                Self::BuildCache
+            }
+            Self::UserFiles => Self::UserFiles,
+            Self::PackageDownloads => Self::PackageDownloads,
+            Self::BuildCache => Self::BuildCache,
+            _ => Self::SharedRuntime,
+        }
+    }
+
+    fn usage_mut(self, usage: &mut ArchStorageUsage) -> &mut AllocatedStorageUsage {
+        match self {
+            Self::UserFiles => &mut usage.user_files,
+            Self::PackageDownloads => &mut usage.package_downloads,
+            Self::BuildCache => &mut usage.build_cache,
+            _ => &mut usage.shared_runtime,
+        }
+    }
+}
+
+pub fn arch_storage_usage(root: &Path) -> Result<ArchStorageUsage, StorageError> {
+    let root = open_directory(root, &[])?;
+    let mut usage = ArchStorageUsage::default();
+    let mut hard_links = BTreeSet::new();
+    inventory_allocated_directory(
+        &root,
+        StorageUsageClass::SharedRuntime,
+        0,
+        &mut usage,
+        &mut hard_links,
+    )?;
+    usage
+        .total_entries()
+        .filter(|entries| *entries <= MAX_STORAGE_USAGE_ENTRIES)
+        .ok_or(StorageError::UsageTooLarge)?;
+    usage.total_bytes().ok_or(StorageError::UsageTooLarge)?;
+    Ok(usage)
+}
+
+pub fn allocated_storage_usage(root: &Path) -> Result<AllocatedStorageUsage, StorageError> {
+    let usage = arch_storage_usage(root)?;
+    Ok(AllocatedStorageUsage {
+        entries: usage.total_entries().ok_or(StorageError::UsageTooLarge)?,
+        bytes: usage.total_bytes().ok_or(StorageError::UsageTooLarge)?,
+    })
+}
+
+fn inventory_allocated_directory(
+    directory: &File,
+    class: StorageUsageClass,
+    depth: usize,
+    usage: &mut ArchStorageUsage,
+    hard_links: &mut BTreeSet<(u64, u64)>,
+) -> Result<(), StorageError> {
+    if depth > MAX_STORAGE_USAGE_DEPTH {
+        return Err(StorageError::UsageTooLarge);
+    }
+    let descriptor_path = format!("/proc/self/fd/{}", directory.as_raw_fd());
+    for child in fs::read_dir(descriptor_path)? {
+        let child = match child {
+            Ok(child) => child,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let name = child.file_name();
+        let name_bytes = name.as_bytes();
+        if name_bytes.is_empty() || name_bytes.len() > 255 || name_bytes.contains(&b'/') {
+            return Err(StorageError::InvalidDocument);
+        }
+        let child_class = class.child(name_bytes);
+        let entry_class = match child_class {
+            StorageUsageClass::UserFiles
+            | StorageUsageClass::PackageDownloads
+            | StorageUsageClass::BuildCache
+                if child_class != class =>
+            {
+                StorageUsageClass::SharedRuntime
+            }
+            _ => child_class,
+        };
+        let name = c_string(&name)?;
+        let entry = match sys::open_at(
+            directory.as_raw_fd(),
+            &name,
+            sys::O_PATH | sys::O_CLOEXEC | sys::O_NOFOLLOW,
+            0,
+        ) {
+            Ok(entry) => entry,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let metadata = entry.metadata()?;
+        let allocated = metadata
+            .blocks()
+            .checked_mul(512)
+            .ok_or(StorageError::UsageTooLarge)?;
+        let count_bytes = metadata.is_dir()
+            || metadata.nlink() <= 1
+            || hard_links.insert((metadata.dev(), metadata.ino()));
+        {
+            let target = entry_class.usage_mut(usage);
+            target.entries = target
+                .entries
+                .checked_add(1)
+                .ok_or(StorageError::UsageTooLarge)?;
+            if count_bytes {
+                target.bytes = target
+                    .bytes
+                    .checked_add(allocated)
+                    .ok_or(StorageError::UsageTooLarge)?;
+            }
+        }
+        if usage
+            .total_entries()
+            .filter(|entries| *entries <= MAX_STORAGE_USAGE_ENTRIES)
+            .is_none()
+        {
+            return Err(StorageError::UsageTooLarge);
+        }
+        if metadata.is_dir() {
+            if depth == MAX_STORAGE_USAGE_DEPTH {
+                return Err(StorageError::UsageTooLarge);
+            }
+            let child_directory = match sys::open_at(
+                directory.as_raw_fd(),
+                &name,
+                sys::O_RDONLY | sys::O_DIRECTORY | sys::O_CLOEXEC | sys::O_NOFOLLOW,
+                0,
+            ) {
+                Ok(directory) => directory,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            inventory_allocated_directory(
+                &child_directory,
+                child_class,
+                depth + 1,
+                usage,
+                hard_links,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 pub struct MirrorImport {
@@ -2605,6 +2813,83 @@ mod tests {
             fs::create_dir(&path).expect("create test home");
             Self(path)
         }
+    }
+
+    #[test]
+    fn arch_storage_usage_separates_actionable_storage_without_following_links() {
+        let root = TestDirectory::new();
+        let outside = TestDirectory::new();
+        fs::create_dir_all(root.0.join("home/archphene/Projects")).expect("home");
+        fs::create_dir_all(root.0.join("var/cache/pacman/pkg")).expect("package cache");
+        fs::create_dir_all(root.0.join("var/cache/archphene/aur-sources")).expect("build cache");
+        fs::create_dir_all(root.0.join("usr/bin")).expect("runtime");
+        fs::write(root.0.join("home/archphene/Projects/source.rs"), [1; 8192]).expect("user file");
+        fs::hard_link(
+            root.0.join("home/archphene/Projects/source.rs"),
+            root.0.join("home/archphene/Projects/source-copy.rs"),
+        )
+        .expect("user hard link");
+        fs::write(
+            root.0
+                .join("var/cache/pacman/pkg/example-1-1-x86_64.pkg.tar.zst"),
+            [2; 12_288],
+        )
+        .expect("package archive");
+        fs::write(
+            root.0.join("var/cache/archphene/aur-sources/source"),
+            [3; 16_384],
+        )
+        .expect("build source");
+        fs::write(root.0.join("usr/bin/tool"), [4; 4096]).expect("runtime file");
+        fs::write(outside.0.join("not-owned"), [5; 1024 * 1024]).expect("outside file");
+        symlink(
+            outside.0.join("not-owned"),
+            root.0.join("home/archphene/Projects/external"),
+        )
+        .expect("external link");
+
+        let usage = arch_storage_usage(&root.0).expect("storage usage");
+
+        assert!(usage.package_downloads.bytes >= 12_288);
+        assert!(usage.build_cache.bytes >= 16_384);
+        assert!(usage.user_files.bytes >= 8192);
+        assert!(usage.user_files.bytes < 1024 * 1024);
+        assert!(usage.shared_runtime.bytes >= 4096);
+        assert_eq!(
+            usage.total_entries(),
+            Some(
+                usage.package_downloads.entries
+                    + usage.shared_runtime.entries
+                    + usage.build_cache.entries
+                    + usage.user_files.entries
+            ),
+        );
+        assert_eq!(
+            usage.total_bytes(),
+            Some(
+                usage.package_downloads.bytes
+                    + usage.shared_runtime.bytes
+                    + usage.build_cache.bytes
+                    + usage.user_files.bytes
+            ),
+        );
+
+        fs::remove_file(
+            root.0
+                .join("var/cache/pacman/pkg/example-1-1-x86_64.pkg.tar.zst"),
+        )
+        .expect("remove package archive");
+        fs::remove_file(root.0.join("var/cache/archphene/aur-sources/source"))
+            .expect("remove build source");
+        let empty_actionable = arch_storage_usage(&root.0).expect("empty actionable storage");
+        assert_eq!(
+            empty_actionable.package_downloads,
+            AllocatedStorageUsage::default()
+        );
+        assert_eq!(
+            empty_actionable.build_cache,
+            AllocatedStorageUsage::default()
+        );
     }
 
     impl Drop for TestDirectory {

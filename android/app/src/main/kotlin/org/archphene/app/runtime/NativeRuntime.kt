@@ -542,7 +542,15 @@ internal object NativeRuntime {
         handle: Long,
         outputBuffer: ByteBuffer,
     ): Long
+    external fun nativeClearAurBuildCache(
+        handle: Long,
+        outputBuffer: ByteBuffer,
+    ): Long
     external fun nativeRefreshPackageCache(
+        handle: Long,
+        outputBuffer: ByteBuffer,
+    ): Int
+    external fun nativeReadStorageUsage(
         handle: Long,
         outputBuffer: ByteBuffer,
     ): Int

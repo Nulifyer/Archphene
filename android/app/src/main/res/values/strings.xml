@@ -40,6 +40,10 @@
     <string name="package_search_unavailable">Package search unavailable</string>
     <string name="refresh_catalogs">Refresh catalogs</string>
     <string name="downloads">Downloads</string>
+    <string name="refresh">Refresh</string>
+    <string name="clear">Clear</string>
+    <string name="manage">Manage</string>
+    <string name="browse">Browse</string>
     <string name="manage_package_downloads">Manage downloaded Linux packages</string>
     <string name="package_downloads_title">Downloaded packages</string>
     <string name="package_downloads_title_with_size">Downloaded packages · %1$s</string>
@@ -47,6 +51,16 @@
     <string name="clear_all">Clear all</string>
     <string name="clear_all_downloads_title">Clear all downloaded packages?</string>
     <string name="clear_all_downloads_message">Installed Linux packages remain installed. Future installs or updates may need to download these package files again.</string>
+    <string name="storage_usage_heading">Storage</string>
+    <string name="storage_usage_prompt">Open Files to measure Archphene storage</string>
+    <string name="storage_usage_unavailable">Storage usage is unavailable while Linux starts</string>
+    <string name="storage_size_unavailable">—</string>
+    <string name="storage_package_downloads">Package downloads</string>
+    <string name="storage_shared_runtime">Installed Linux system</string>
+    <string name="storage_build_cache">AUR build data</string>
+    <string name="storage_user_files">Archphene Home</string>
+    <string name="clear_build_cache_title">Clear AUR build data?</string>
+    <string name="clear_build_cache_message">This removes retained AUR sources, reviewed recipes, built packages, and the isolated Builder root. Installed packages and Archphene Home files remain. A future AUR build will download and rebuild this data.</string>
     <string name="catalog_refresh_busy">Catalog refresh is unavailable or already active</string>
     <string name="package_name_hint">Package name</string>
     <string name="search">Search</string>
