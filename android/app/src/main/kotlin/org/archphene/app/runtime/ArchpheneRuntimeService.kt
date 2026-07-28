@@ -9005,7 +9005,7 @@ class ArchpheneRuntimeService : Service() {
         }
 
     private fun resolveAurBuildEnvironment(activeHandle: Long): AurBuildEnvironment {
-        val bytes =
+        val partitionBytes =
             synchronized(packageResolutionOutputBuffer) {
                 packageResolutionOutputBuffer.clear()
                 val outputLength =
@@ -9023,6 +9023,42 @@ class ArchpheneRuntimeService : Service() {
                     packageResolutionOutputBuffer.get(output)
                 }
             }
+        val reader = ByteBuffer.wrap(partitionBytes).order(ByteOrder.LITTLE_ENDIAN)
+        val magic = ByteArray(8)
+        require(reader.remaining() >= magic.size + Integer.BYTES * 2)
+        reader.get(magic)
+        require(magic.contentEquals("AUBP0001".toByteArray(StandardCharsets.US_ASCII)))
+        val resolutionLength = reader.int
+        require(resolutionLength in 1..NativeRuntime.PACKAGE_RESOLUTION_OUTPUT_SIZE)
+        require(resolutionLength <= reader.remaining() - Integer.BYTES)
+        val bytes = ByteArray(resolutionLength)
+        reader.get(bytes)
+        val unresolvedCount = reader.int
+        require(unresolvedCount in 0..256)
+        val unresolved = ArrayList<String>(unresolvedCount)
+        repeat(unresolvedCount) {
+            require(reader.remaining() >= Integer.BYTES)
+            val length = reader.int
+            require(length in 1..128 && length <= reader.remaining())
+            val value = ByteArray(length)
+            reader.get(value)
+            val target = String(value, StandardCharsets.US_ASCII)
+            require(
+                target.toByteArray(StandardCharsets.US_ASCII).contentEquals(value) &&
+                    target.all { character ->
+                        character.isLetterOrDigit() || character in "@._+-"
+                    },
+            )
+            require(target !in unresolved)
+            unresolved += target
+        }
+        require(!reader.hasRemaining())
+        if (unresolved.isNotEmpty()) {
+            throw IllegalStateException(
+                "Additional reviewed AUR package providers are required for: " +
+                    unresolved.joinToString(", "),
+            )
+        }
         val packages = decodeResolvedPayloads(bytes, 512)
         require(packages.any { payload -> payload.name == "base-devel" })
         val totalBytes =

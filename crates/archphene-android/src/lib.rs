@@ -100,7 +100,8 @@ mod android {
         MAX_MANIFEST_BYTES, MAX_PACKAGE_RESOLUTION_BYTES, MAX_TOOL_OUTPUT_BYTES,
         MAX_VERIFIED_PACKAGE_CLOSURE_BYTES, PackageCompatibilityCancellation, PackageResolution,
         PackageRuntimeError, PersistedAurCapabilityArchive, Repository, RepositoryArchitecture,
-        ToolOutput, VerifiedAurArchive, VerifiedAurCapabilityArchive, VerifiedPackageClosure,
+        RepositoryTargetPartition, ToolOutput, VerifiedAurArchive, VerifiedAurCapabilityArchive,
+        VerifiedPackageClosure,
         aur::{
             AurReview, MAX_AUR_REVIEW_BYTES, MAX_AUR_RPC_BYTES, MAX_AUR_SNAPSHOT_BYTES,
             MAX_AUR_SOURCE_BYTES, ReviewedInstallScript, aur_snapshot_path, review_aur_snapshot,
@@ -139,6 +140,7 @@ mod android {
     const BUILT_PACKAGE_REPORT_BYTES: usize = 64;
     const BUILT_PACKAGE_REPORT_MAGIC: &[u8; 8] = b"ABMV0001";
     const AUR_INSTALL_FILENAME_MAGIC: &[u8; 8] = b"AIFN0001";
+    const AUR_BUILD_PARTITION_MAGIC: &[u8; 8] = b"AUBP0001";
     const MAX_AUR_INSTALL_FILENAME_BYTES: usize = 64 * 1024;
     const MAX_AUR_BUILT_CAPABILITY_OUTPUT_BYTES: usize = 256 * 1024;
     const PTY_EVENT_READABLE: jint = 1;
@@ -519,6 +521,60 @@ mod android {
         }
         destination[..bytes.len()].copy_from_slice(bytes);
         i32::try_from(bytes.len()).unwrap_or(i32::MAX)
+    }
+
+    fn copy_aur_build_partition_result(
+        result: Result<RepositoryTargetPartition, PackageRuntimeError>,
+        destination: &mut [u8],
+    ) -> jint {
+        let partition = match result {
+            Ok(partition) => partition,
+            Err(error) => return copy_package_error(&error, destination),
+        };
+        let Some(resolution) = partition.resolution() else {
+            return copy_package_error(&PackageRuntimeError::MissingTarget, destination);
+        };
+        let unresolved = partition.unresolved_targets();
+        let required = AUR_BUILD_PARTITION_MAGIC
+            .len()
+            .checked_add(4)
+            .and_then(|length| length.checked_add(resolution.as_bytes().len()))
+            .and_then(|length| length.checked_add(4))
+            .and_then(|length| {
+                unresolved.iter().try_fold(length, |total, target| {
+                    total.checked_add(4)?.checked_add(target.len())
+                })
+            });
+        let Some(required) = required.filter(|required| *required <= destination.len()) else {
+            return ERROR_INTERNAL;
+        };
+        let Ok(resolution_length) = u32::try_from(resolution.as_bytes().len()) else {
+            return ERROR_INTERNAL;
+        };
+        let Ok(unresolved_count) = u32::try_from(unresolved.len()) else {
+            return ERROR_INTERNAL;
+        };
+        let mut cursor = 0;
+        destination[cursor..cursor + 8].copy_from_slice(AUR_BUILD_PARTITION_MAGIC);
+        cursor += 8;
+        destination[cursor..cursor + 4].copy_from_slice(&resolution_length.to_le_bytes());
+        cursor += 4;
+        destination[cursor..cursor + resolution.as_bytes().len()]
+            .copy_from_slice(resolution.as_bytes());
+        cursor += resolution.as_bytes().len();
+        destination[cursor..cursor + 4].copy_from_slice(&unresolved_count.to_le_bytes());
+        cursor += 4;
+        for target in unresolved {
+            let Ok(length) = u32::try_from(target.len()) else {
+                return ERROR_INTERNAL;
+            };
+            destination[cursor..cursor + 4].copy_from_slice(&length.to_le_bytes());
+            cursor += 4;
+            destination[cursor..cursor + target.len()].copy_from_slice(target.as_bytes());
+            cursor += target.len();
+        }
+        debug_assert_eq!(cursor, required);
+        i32::try_from(required).unwrap_or(i32::MAX)
     }
 
     fn copy_verified_package_closure_result(
@@ -2288,10 +2344,10 @@ mod android {
             let Some(runtime) = registry.runtime_mut(handle) else {
                 return ERROR_INVALID_HANDLE;
             };
-            runtime.resolve_aur_build_environment()
+            runtime.partition_aur_build_environment()
         };
         let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
-        copy_package_resolution_result(result, destination)
+        copy_aur_build_partition_result(result, destination)
     }
 
     #[unsafe(no_mangle)]
