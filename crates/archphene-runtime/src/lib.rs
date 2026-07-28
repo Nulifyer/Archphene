@@ -1677,6 +1677,16 @@ impl RuntimeHost {
             .map_err(PackageRuntimeError::from)
     }
 
+    pub fn write_terminal_clipboard(
+        &mut self,
+        handle: u64,
+        output: &mut [u8],
+    ) -> Result<Option<usize>, PackageRuntimeError> {
+        self.pty_sessions
+            .write_terminal_clipboard(handle, output)
+            .map_err(PackageRuntimeError::from)
+    }
+
     pub fn resize_pty(
         &mut self,
         handle: u64,

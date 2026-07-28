@@ -6,6 +6,8 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.ComponentName
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.SharedPreferences
@@ -775,6 +777,28 @@ class ArchpheneRuntimeService : Service() {
 
     private val binder = LocalBinder()
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val shellClipboardLock = Any()
+    private val pendingShellClipboardBytes = ByteArray(NativeRuntime.TERMINAL_CLIPBOARD_SIZE)
+    private var pendingShellClipboardLength = -1
+    private var shellClipboardPublishScheduled = false
+    private val shellClipboardPublishRunnable =
+        Runnable {
+            val text =
+                synchronized(shellClipboardLock) {
+                    val length = pendingShellClipboardLength
+                    if (length < 0) {
+                        shellClipboardPublishScheduled = false
+                        return@Runnable
+                    }
+                    val pending =
+                        String(pendingShellClipboardBytes, 0, length, StandardCharsets.UTF_8)
+                    pendingShellClipboardLength = -1
+                    shellClipboardPublishScheduled = false
+                    pending
+                }
+            getSystemService(ClipboardManager::class.java)
+                ?.setPrimaryClip(ClipData.newPlainText(getString(R.string.app_name), text))
+        }
     private val projectSyncProvider by lazy {
         ProjectSyncProvider(
             contentResolver,
@@ -1096,7 +1120,6 @@ class ArchpheneRuntimeService : Service() {
             0,
         )
     @Volatile private var commandStatus = "Linux command has not run"
-    private val shellOutput = BoundedByteRing(SHELL_SCROLLBACK_BYTES)
     private val shellInput = FixedByteQueue(SHELL_INPUT_BYTES)
     private val installedPackageOutputBuffer =
         ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
@@ -1408,73 +1431,6 @@ class ArchpheneRuntimeService : Service() {
         val outputBuffer: ByteBuffer =
             ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
         val transferBuffer = ByteArray(64 * 1024)
-    }
-
-    private class BoundedByteRing(capacity: Int) {
-        private val bytes = ByteArray(capacity)
-        private var start = 0
-        private var size = 0
-
-        @Synchronized
-        fun clear() {
-            start = 0
-            size = 0
-        }
-
-        @Synchronized
-        fun append(
-            source: ByteArray,
-            length: Int,
-        ) {
-            if (length <= 0) {
-                return
-            }
-            val sourceStart =
-                if (length >= bytes.size) {
-                    length - bytes.size
-                } else {
-                    0
-                }
-            val retained = length - sourceStart
-            if (retained >= bytes.size) {
-                System.arraycopy(source, sourceStart, bytes, 0, bytes.size)
-                start = 0
-                size = bytes.size
-                return
-            }
-            val overflow = (size + retained - bytes.size).coerceAtLeast(0)
-            if (overflow != 0) {
-                start = (start + overflow) % bytes.size
-                size -= overflow
-            }
-            var destination = (start + size) % bytes.size
-            var copied = 0
-            while (copied < retained) {
-                val count = minOf(retained - copied, bytes.size - destination)
-                System.arraycopy(source, sourceStart + copied, bytes, destination, count)
-                copied += count
-                destination = 0
-            }
-            size += retained
-        }
-
-        @Synchronized
-        fun snapshotTail(maximum: Int): String {
-            val length = minOf(size, maximum)
-            if (length == 0) {
-                return ""
-            }
-            val result = ByteArray(length)
-            var source = (start + size - length) % bytes.size
-            var copied = 0
-            while (copied < length) {
-                val count = minOf(length - copied, bytes.size - source)
-                System.arraycopy(bytes, source, result, copied, count)
-                copied += count
-                source = 0
-            }
-            return String(result, StandardCharsets.UTF_8)
-        }
     }
 
     private class FixedByteQueue(capacity: Int) {
@@ -2074,8 +2030,6 @@ class ArchpheneRuntimeService : Service() {
                 DEBUG_DOCUMENT_HANDOFF_FAILURE.compareAndSet(true, false)
 
         private const val TAG = "ArchpheneRuntime"
-        private const val SHELL_SCROLLBACK_BYTES = 16 * 1024
-        private const val SHELL_DISPLAY_BYTES = 4 * 1024
         private const val SHELL_INPUT_BYTES = 8 * 1024
         private const val SHELL_INPUT_CHARACTERS = 2 * 1024
         private const val SHELL_IO_BYTES = 4 * 1024
@@ -12252,7 +12206,6 @@ class ArchpheneRuntimeService : Service() {
         ) {
             return false
         }
-        shellOutput.clear()
         shellInput.clear()
         shellStopRequested = false
         shellWasStarted = true
@@ -12367,8 +12320,9 @@ class ArchpheneRuntimeService : Service() {
         var failure: Exception? = null
         val readBuffer = ByteBuffer.allocateDirect(SHELL_IO_BYTES)
         val writeBuffer = ByteBuffer.allocateDirect(SHELL_IO_BYTES)
-        val readBytes = ByteArray(SHELL_IO_BYTES)
         val writeBytes = ByteArray(SHELL_IO_BYTES)
+        val clipboardBuffer = ByteBuffer.allocateDirect(NativeRuntime.TERMINAL_CLIPBOARD_SIZE)
+        val clipboardBytes = ByteArray(NativeRuntime.TERMINAL_CLIPBOARD_SIZE)
         try {
             val initialRows = shellRows
             val initialColumns = shellColumns
@@ -12448,11 +12402,12 @@ class ArchpheneRuntimeService : Service() {
                     if (read == 0) {
                         break
                     }
-                    readBuffer.position(0)
-                    readBuffer.get(readBytes, 0, read)
-                    PerformanceMetrics.recordTerminalKotlinCopy(read)
-                    shellOutput.append(readBytes, read)
-                    PerformanceMetrics.recordTerminalKotlinCopy(read)
+                    drainTerminalClipboard(
+                        activeHandle,
+                        ptyHandle,
+                        clipboardBuffer,
+                        clipboardBytes,
+                    )
                     shellTerminalRevision.incrementAndGet()
                 }
                 val encodedStatus =
@@ -12528,6 +12483,55 @@ class ArchpheneRuntimeService : Service() {
         }
     }
 
+    private fun drainTerminalClipboard(
+        activeHandle: Long,
+        ptyHandle: Long,
+        clipboardBuffer: ByteBuffer,
+        clipboardBytes: ByteArray,
+    ) {
+        clipboardBuffer.clear()
+        val encodedLength =
+            NativeRuntime.nativeReadTerminalClipboard(
+                activeHandle,
+                ptyHandle,
+                clipboardBuffer,
+            )
+        PerformanceMetrics.recordTerminalJni(
+            directOutputBytes = (encodedLength - 1).coerceAtLeast(0),
+        )
+        if (encodedLength < 0) {
+            throw IllegalStateException("Could not read the shared shell clipboard request")
+        }
+        if (encodedLength == 0) {
+            return
+        }
+        val length = encodedLength - 1
+        if (length !in 0..clipboardBytes.size) {
+            throw IllegalStateException("Invalid shared shell clipboard request")
+        }
+        clipboardBuffer.position(0)
+        clipboardBuffer.get(clipboardBytes, 0, length)
+        PerformanceMetrics.recordTerminalKotlinCopy(length)
+        var schedule = false
+        synchronized(shellClipboardLock) {
+            System.arraycopy(
+                clipboardBytes,
+                0,
+                pendingShellClipboardBytes,
+                0,
+                length,
+            )
+            pendingShellClipboardLength = length
+            if (!shellClipboardPublishScheduled) {
+                shellClipboardPublishScheduled = true
+                schedule = true
+            }
+        }
+        if (schedule) {
+            mainHandler.post(shellClipboardPublishRunnable)
+        }
+    }
+
     private fun hasActiveRuntimeWork(): Boolean =
         bootstrapActive ||
             launcherPublisherActive.get() ||
@@ -12582,14 +12586,7 @@ class ArchpheneRuntimeService : Service() {
         }
     }
 
-    private fun sharedShellDisplayStatus(): String {
-        val output = sanitizeCommandOutput(shellOutput.snapshotTail(SHELL_DISPLAY_BYTES))
-        return if (output.isEmpty()) {
-            shellPhase
-        } else {
-            "$shellPhase\n$output"
-        }
-    }
+    private fun sharedShellDisplayStatus(): String = shellPhase
 
     private fun readLatestPackageJob(activeHandle: Long): String {
         val outputBuffer = ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)

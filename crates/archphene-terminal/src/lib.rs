@@ -14,13 +14,14 @@ pub const DAMAGE_CELL_SIZE: usize = 76;
 pub const MAX_DAMAGE_BYTES: usize =
     DAMAGE_HEADER_SIZE + MAX_ROWS as usize * MAX_COLUMNS as usize * DAMAGE_CELL_SIZE;
 pub const MAX_SELECTION_BYTES: usize = 8 * 1024;
+pub const MAX_CLIPBOARD_BYTES: usize = 2 * 1024;
 pub const MAX_REPLY_BYTES: usize = 64 * 1024;
 pub const SCROLLBACK_BYTE_LIMIT: usize = 4 * 1024 * 1024;
 pub const SCROLLBACK_LINE_LIMIT: usize = 4 * 1024;
 const DAMAGE_MAGIC: u32 = u32::from_le_bytes(*b"ATRM");
 const MAX_CSI_PARAMETERS: usize = 16;
 const MAX_STRING_BYTES: usize = 8 * 1024;
-const MAX_OSC_BYTES: usize = 512;
+const MAX_OSC_BYTES: usize = 4 * 1024;
 const MAX_OSC_COLOR_OPERATIONS: usize = 32;
 const DEFAULT_FOREGROUND: u32 = 7;
 const DEFAULT_BACKGROUND: u32 = 0;
@@ -571,6 +572,9 @@ pub struct Terminal {
     reply_bytes: Vec<u8>,
     reply_start: usize,
     reply_length: usize,
+    clipboard_bytes: [u8; MAX_CLIPBOARD_BYTES],
+    clipboard_length: usize,
+    clipboard_pending: bool,
 }
 
 impl Terminal {
@@ -660,6 +664,9 @@ impl Terminal {
             reply_bytes: vec![0; MAX_REPLY_BYTES],
             reply_start: 0,
             reply_length: 0,
+            clipboard_bytes: [0; MAX_CLIPBOARD_BYTES],
+            clipboard_length: 0,
+            clipboard_pending: false,
         })
     }
 
@@ -1027,6 +1034,20 @@ impl Terminal {
         if self.reply_length == 0 {
             self.reply_start = 0;
         }
+    }
+
+    pub fn write_clipboard(&mut self, output: &mut [u8]) -> Result<Option<usize>, TerminalError> {
+        if !self.clipboard_pending {
+            return Ok(None);
+        }
+        if output.len() < self.clipboard_length {
+            return Err(TerminalError::OutputTooSmall);
+        }
+        output[..self.clipboard_length]
+            .copy_from_slice(&self.clipboard_bytes[..self.clipboard_length]);
+        let length = self.clipboard_length;
+        self.clipboard_pending = false;
+        Ok(Some(length))
     }
 
     pub fn resize(&mut self, rows: u16, columns: u16) -> Result<(), TerminalError> {
@@ -1449,10 +1470,33 @@ impl Terminal {
         match fields.next() {
             Some(b"4") => self.execute_palette_change(fields),
             Some(b"12") => self.execute_cursor_color(fields),
+            Some(b"52") => self.execute_clipboard(fields),
             Some(b"104") => self.execute_palette_reset(fields),
             Some(b"112") if fields.next().is_none() => self.reset_cursor_color(),
             _ => {}
         }
+    }
+
+    fn execute_clipboard<'a>(&mut self, mut fields: impl Iterator<Item = &'a [u8]>) {
+        let (Some(selection), Some(encoded)) = (fields.next(), fields.next()) else {
+            return;
+        };
+        if fields.next().is_some()
+            || encoded == b"?"
+            || !selection
+                .iter()
+                .all(|byte| matches!(byte, b'c' | b'p' | b'q' | b's' | b'0'..=b'7'))
+        {
+            return;
+        }
+        let Some(length) = decode_base64(encoded, &mut self.clipboard_bytes) else {
+            return;
+        };
+        if std::str::from_utf8(&self.clipboard_bytes[..length]).is_err() {
+            return;
+        }
+        self.clipboard_length = length;
+        self.clipboard_pending = true;
     }
 
     fn execute_cursor_color<'a>(&mut self, mut fields: impl Iterator<Item = &'a [u8]>) {
@@ -3182,6 +3226,50 @@ const fn parse_hex_digit(byte: u8) -> Option<u8> {
     }
 }
 
+fn decode_base64(input: &[u8], output: &mut [u8]) -> Option<usize> {
+    let padding = input.iter().rev().take_while(|byte| **byte == b'=').count();
+    if padding > 2 || (padding != 0 && input.len() % 4 != 0) {
+        return None;
+    }
+    let encoded = &input[..input.len().checked_sub(padding)?];
+    match (encoded.len() % 4, padding) {
+        (1, _) | (2, 1) | (3, 2) => return None,
+        _ => {}
+    }
+
+    let mut accumulator = 0_u16;
+    let mut bits = 0_u8;
+    let mut length = 0;
+    for byte in encoded {
+        accumulator = (accumulator << 6) | u16::from(base64_value(*byte)?);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            if length == output.len() {
+                return None;
+            }
+            output[length] = ((accumulator >> bits) & 0xff) as u8;
+            length += 1;
+            accumulator &= if bits == 0 { 0 } else { (1_u16 << bits) - 1 };
+        }
+    }
+    if accumulator != 0 {
+        return None;
+    }
+    Some(length)
+}
+
+const fn base64_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'A'..=b'Z' => Some(byte - b'A'),
+        b'a'..=b'z' => Some(byte - b'a' + 26),
+        b'0'..=b'9' => Some(byte - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    }
+}
+
 const fn default_palette_color(index: u8) -> u32 {
     const BASIC: [u32; 16] = [
         0x1f2326, 0xf38ba8, 0xa6e3a1, 0xf9e2af, 0x89b4fa, 0xcba6f7, 0x94e2d5, 0xcdd6f4, 0x585b70,
@@ -3803,6 +3891,44 @@ mod tests {
             terminal.pending_reply(),
             b"\x1b]4;16;rgb:0000/0000/0000\x1b\\"
         );
+    }
+
+    #[test]
+    fn osc_clipboard_is_bounded_write_only_and_utf8_exact() {
+        let mut terminal = Terminal::new(2, 5).unwrap();
+        let mut output = [0_u8; MAX_CLIPBOARD_BYTES];
+
+        terminal.feed(b"\x1b]52;c;Zmlyc3Q=\x07\x1b]52;cp;c2Vjb25kIPCfkY0\x1b\\");
+        assert_eq!(terminal.write_clipboard(&mut output), Ok(Some(11)));
+        assert_eq!(&output[..11], "second 👍".as_bytes());
+        assert_eq!(terminal.write_clipboard(&mut output), Ok(None));
+
+        terminal.feed(b"\x1b]52;;\x07");
+        assert_eq!(terminal.write_clipboard(&mut []), Ok(Some(0)));
+        assert_eq!(terminal.write_clipboard(&mut output), Ok(None));
+
+        terminal.feed(
+            b"\x1b]52;c;?\x07\
+              \x1b]52;bad;dmFsdWU=\x07\
+              \x1b]52;c;dmFsdWU===\x07\
+              \x1b]52;c;/w==\x07",
+        );
+        assert_eq!(terminal.write_clipboard(&mut output), Ok(None));
+        assert!(terminal.pending_reply().is_empty());
+
+        terminal.feed(b"\x1b]52;c;dmFsdWU=\x07");
+        assert_eq!(
+            terminal.write_clipboard(&mut [0; 4]),
+            Err(TerminalError::OutputTooSmall)
+        );
+        assert_eq!(terminal.write_clipboard(&mut output), Ok(Some(5)));
+        assert_eq!(&output[..5], b"value");
+
+        let mut oversized = b"\x1b]52;c;".to_vec();
+        oversized.extend(std::iter::repeat_n(b"YWFh", 683).flatten());
+        oversized.push(0x07);
+        terminal.feed(&oversized);
+        assert_eq!(terminal.write_clipboard(&mut output), Ok(None));
     }
 
     #[test]

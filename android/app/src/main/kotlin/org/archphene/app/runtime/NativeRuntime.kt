@@ -23,6 +23,7 @@ internal object NativeRuntime {
     const val LAUNCHER_REVIEW_REQUEST_LIMIT = 32 * 1024
     const val TERMINAL_DAMAGE_SIZE = 6_080_052
     const val TERMINAL_SELECTION_SIZE = 8 * 1024
+    const val TERMINAL_CLIPBOARD_SIZE = 2 * 1024
     const val ERROR_INVALID_STATE = -3
 
     const val LIFECYCLE_RUNNING = 2
@@ -470,6 +471,12 @@ internal object NativeRuntime {
         startColumn: Int,
         endRow: Int,
         endColumn: Int,
+        outputBuffer: ByteBuffer,
+    ): Int
+    // Zero means no write; a write returns decoded bytes + 1 so empty text is observable.
+    external fun nativeReadTerminalClipboard(
+        handle: Long,
+        ptyHandle: Long,
         outputBuffer: ByteBuffer,
     ): Int
     external fun nativeWaitPty(

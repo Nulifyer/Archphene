@@ -1337,6 +1337,27 @@ installs, cold launches, scoped logs, and inspected full-device light/dark
 manager frames pass. A real hardware-key PTY probe remains part of the
 shell-dependent consolidated terminal gate.
 
+OSC 52 now provides a deliberately write-only terminal-to-Android clipboard
+bridge. It accepts only xterm clipboard selector characters, strictly decodes
+padded or unpadded Base64, requires valid UTF-8, and caps decoded data at 2
+KiB. Clipboard queries are ignored without a reply, so a terminal process
+cannot read Android clipboard contents; malformed or oversized commands do not
+mutate the clipboard. Fixed terminal, runtime, JNI, and service buffers carry
+only the newest pending write, and one coalesced main-thread callback publishes
+it without logging content. The redundant 16 KiB raw PTY-output mirror and its
+snapshot copy were removed, leaving only the session phase outside the native
+terminal. Host unit, warmed-allocation, and real-PTY tests, full workspace
+test/clippy, Android unit/lint, exact x86_64/AArch64 builds and installs, cold
+launches, scoped logs, and inspected full-device manager frames pass. A live
+Android clipboard write remains in the consolidated device gate because both
+clean-data devices currently lack a package-installed shell.
+
+The material `xterm-256color` contract audit is complete. Title/title-stack,
+hyperlink, printer, and window operations remain deliberate no-ops where they
+cannot affect visible terminal correctness or a safe Android interaction. A
+real screen-reader workflow and the consolidated shell-dependent device proofs
+remain open.
+
 The temporary command field and Run/Send controls are no longer present in the
 production manager. Active sessions reserve only the measured terminal plus a
 52 dp status/Stop row; normal regression input goes through the focused

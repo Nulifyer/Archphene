@@ -17,7 +17,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use archphene_terminal::{
-    MAX_COLUMNS, MAX_DAMAGE_BYTES, MAX_ROWS, MAX_SELECTION_BYTES, MIN_COLUMNS, MIN_ROWS, Terminal,
+    MAX_CLIPBOARD_BYTES, MAX_COLUMNS, MAX_DAMAGE_BYTES, MAX_ROWS, MAX_SELECTION_BYTES, MIN_COLUMNS,
+    MIN_ROWS, Terminal,
 };
 
 pub const MAX_COMMAND_NAME_BYTES: usize = 128;
@@ -36,6 +37,7 @@ pub const MAX_BATCH_LOG_BYTES: usize = 64 * 1024;
 pub const BATCH_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 pub const MAX_TERMINAL_DAMAGE_BYTES: usize = MAX_DAMAGE_BYTES;
 pub const MAX_TERMINAL_SELECTION_BYTES: usize = MAX_SELECTION_BYTES;
+pub const MAX_TERMINAL_CLIPBOARD_BYTES: usize = MAX_CLIPBOARD_BYTES;
 pub const MAX_WAYLAND_DISPLAY_BYTES: usize = 64;
 
 const MAX_SYMLINKS: usize = 16;
@@ -1127,6 +1129,15 @@ impl PtySession {
             .map_err(|_| ProcessError::InvalidArgument)
     }
 
+    pub fn write_terminal_clipboard(
+        &mut self,
+        output: &mut [u8],
+    ) -> Result<Option<usize>, ProcessError> {
+        self.terminal
+            .write_clipboard(output)
+            .map_err(|_| ProcessError::InvalidArgument)
+    }
+
     pub fn close(&mut self) {
         let _ = self.waiter.signal();
         self.finish();
@@ -1304,6 +1315,14 @@ impl PtyRegistry {
             end_row,
             end_column,
         )
+    }
+
+    pub fn write_terminal_clipboard(
+        &mut self,
+        handle: u64,
+        output: &mut [u8],
+    ) -> Result<Option<usize>, ProcessError> {
+        self.session_mut(handle)?.write_terminal_clipboard(output)
     }
 
     pub fn exit_status(&mut self, handle: u64) -> Result<Option<i32>, ProcessError> {
@@ -2907,7 +2926,9 @@ mod tests {
         session
             .write_terminal_damage(&mut damage, false, 0)
             .expect("initial damage");
-        slave.write_all(b"\x1b[32;1mOK").expect("terminal output");
+        slave
+            .write_all(b"\x1b[32;1mOK\x1b]52;c;Y2xpcA==\x07")
+            .expect("terminal output");
         let mut output = [0_u8; 64];
         let deadline = Instant::now() + Duration::from_secs(1);
         while Instant::now() < deadline {
@@ -2943,6 +2964,14 @@ mod tests {
             2
         );
         assert_eq!(damage[first_cell + 72] & 1, 1);
+        let mut clipboard = [0_u8; MAX_TERMINAL_CLIPBOARD_BYTES];
+        assert_eq!(
+            session
+                .write_terminal_clipboard(&mut clipboard)
+                .expect("terminal clipboard"),
+            Some(4)
+        );
+        assert_eq!(&clipboard[..4], b"clip");
     }
 
     #[test]
