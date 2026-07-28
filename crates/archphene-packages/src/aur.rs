@@ -19,6 +19,8 @@ pub const MAX_AUR_PKGBUILD_BYTES: usize = 256 * 1024;
 pub const MAX_AUR_REVIEW_BYTES: usize = 1024 * 1024;
 pub const MAX_AUR_SOURCES: usize = 64;
 pub const MAX_AUR_DEPENDENCIES: usize = 256;
+pub const MAX_AUR_GRAPH_BASES: usize = 32;
+pub const MAX_AUR_GRAPH_EDGES: usize = 256;
 pub const MAX_AUR_SOURCE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 const MAX_AUR_SNAPSHOT_ENTRIES: usize = 128;
@@ -109,6 +111,7 @@ pub struct AurReview {
     pub licenses: Vec<String>,
     pub dependencies: Vec<String>,
     pub required_packages: Vec<String>,
+    pub provided_packages: Vec<String>,
     pub make_dependencies: Vec<String>,
     pub check_dependencies: Vec<String>,
     pub sources: Vec<AurSource>,
@@ -146,6 +149,61 @@ pub enum AurReviewError {
     MissingPackageFunction,
     Limit(&'static str),
 }
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AurBuildGraph {
+    pub package_bases: Vec<String>,
+    pub edges: Vec<AurBuildGraphEdge>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AurBuildGraphEdge {
+    pub package_base: String,
+    pub dependency_base: String,
+    pub dependency: String,
+    pub requirement: String,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum AurBuildGraphError {
+    InvalidReview,
+    DuplicatePackageBase,
+    AmbiguousProvider(String),
+    MissingProvider(String),
+    Cycle,
+    DisconnectedReview,
+    Limit(&'static str),
+}
+
+impl fmt::Display for AurBuildGraphError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidReview => formatter.write_str("invalid reviewed AUR dependency graph"),
+            Self::DuplicatePackageBase => {
+                formatter.write_str("duplicate package base in reviewed AUR dependency graph")
+            }
+            Self::AmbiguousProvider(dependency) => {
+                write!(
+                    formatter,
+                    "multiple reviewed AUR bases provide {dependency}"
+                )
+            }
+            Self::MissingProvider(dependency) => {
+                write!(
+                    formatter,
+                    "no official or reviewed AUR package provides {dependency}"
+                )
+            }
+            Self::Cycle => formatter.write_str("reviewed AUR dependency graph contains a cycle"),
+            Self::DisconnectedReview => {
+                formatter.write_str("reviewed AUR dependency graph contains an unused package base")
+            }
+            Self::Limit(field) => write!(formatter, "AUR dependency graph exceeds {field} limit"),
+        }
+    }
+}
+
+impl std::error::Error for AurBuildGraphError {}
 
 impl fmt::Display for AurReviewError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -568,6 +626,7 @@ pub fn review_aur_package(
     }
     let required_packages = required_split_packages(&srcinfo, requested_package)?;
     let dependencies = required_runtime_dependencies(&srcinfo, &required_packages)?;
+    let provided_packages = required_provided_packages(&srcinfo, &required_packages)?;
     let install_scripts = required_install_scripts(&srcinfo, &required_packages)?;
 
     let mut sources = Vec::with_capacity(
@@ -628,6 +687,7 @@ pub fn review_aur_package(
         licenses: srcinfo.licenses,
         dependencies,
         required_packages,
+        provided_packages,
         make_dependencies: srcinfo.make_dependencies,
         check_dependencies: srcinfo.check_dependencies,
         sources,
@@ -796,6 +856,189 @@ impl AurReview {
         }
         Ok(writer.position)
     }
+}
+
+pub fn plan_reviewed_aur_graph(
+    reviews: &[AurReview],
+    root_package: &str,
+    official_providers: &std::collections::BTreeSet<String>,
+) -> Result<AurBuildGraph, AurBuildGraphError> {
+    if reviews.is_empty() || reviews.len() > MAX_AUR_GRAPH_BASES {
+        return Err(AurBuildGraphError::Limit("package-base"));
+    }
+    validate_package_name(root_package).map_err(|_| AurBuildGraphError::InvalidReview)?;
+    if official_providers.len() > MAX_AUR_DEPENDENCIES
+        || official_providers
+            .iter()
+            .any(|provider| validate_package_name(provider).is_err())
+    {
+        return Err(AurBuildGraphError::InvalidReview);
+    }
+
+    let mut bases = BTreeMap::new();
+    let mut providers: BTreeMap<String, Option<usize>> = BTreeMap::new();
+    let mut root = None;
+    for (index, review) in reviews.iter().enumerate() {
+        if validate_package_name(&review.package_base).is_err()
+            || validate_package_name(&review.package_name).is_err()
+            || review.version.is_empty()
+            || review.version.len() > MAX_VERSION_BYTES
+            || review.required_packages.is_empty()
+            || review.required_packages.len() > MAX_AUR_DEPENDENCIES
+            || review.provided_packages.is_empty()
+            || review.provided_packages.len() > MAX_AUR_DEPENDENCIES
+            || !review
+                .required_packages
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+            || !review
+                .provided_packages
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+            || !review
+                .required_packages
+                .iter()
+                .all(|package| validate_package_name(package).is_ok())
+            || !review
+                .provided_packages
+                .iter()
+                .all(|package| validate_package_name(package).is_ok())
+            || !review
+                .required_packages
+                .iter()
+                .all(|package| review.provided_packages.binary_search(package).is_ok())
+            || !review
+                .required_packages
+                .iter()
+                .any(|package| package == &review.package_name)
+        {
+            return Err(AurBuildGraphError::InvalidReview);
+        }
+        if bases.insert(review.package_base.clone(), index).is_some() {
+            return Err(AurBuildGraphError::DuplicatePackageBase);
+        }
+        if review.package_name == root_package && root.replace(index).is_some() {
+            return Err(AurBuildGraphError::InvalidReview);
+        }
+        for provider in &review.provided_packages {
+            providers
+                .entry(provider.clone())
+                .and_modify(|current| {
+                    if current.is_some_and(|existing| existing != index) {
+                        *current = None;
+                    }
+                })
+                .or_insert(Some(index));
+        }
+    }
+    let root = root.ok_or(AurBuildGraphError::InvalidReview)?;
+
+    let mut graph_edges = Vec::new();
+    let mut dependency_pairs = std::collections::BTreeSet::new();
+    for (index, review) in reviews.iter().enumerate() {
+        let dependencies = review
+            .dependencies
+            .iter()
+            .chain(review.make_dependencies.iter())
+            .chain(review.check_dependencies.iter());
+        for declaration in dependencies {
+            let dependency =
+                dependency_name(declaration).map_err(|_| AurBuildGraphError::InvalidReview)?;
+            if official_providers.contains(dependency)
+                || review
+                    .provided_packages
+                    .binary_search_by(|provider| provider.as_str().cmp(dependency))
+                    .is_ok()
+            {
+                continue;
+            }
+            let provider = match providers.get(dependency) {
+                Some(Some(provider)) => *provider,
+                Some(None) => {
+                    return Err(AurBuildGraphError::AmbiguousProvider(dependency.to_owned()));
+                }
+                None => {
+                    return Err(AurBuildGraphError::MissingProvider(dependency.to_owned()));
+                }
+            };
+            if provider == index {
+                continue;
+            }
+            if graph_edges.len() >= MAX_AUR_GRAPH_EDGES {
+                return Err(AurBuildGraphError::Limit("edge"));
+            }
+            graph_edges.push(AurBuildGraphEdge {
+                package_base: review.package_base.clone(),
+                dependency_base: reviews[provider].package_base.clone(),
+                dependency: dependency.to_owned(),
+                requirement: declaration.clone(),
+            });
+            dependency_pairs.insert((index, provider));
+        }
+    }
+    graph_edges.sort_by(|left, right| {
+        (
+            &left.package_base,
+            &left.dependency_base,
+            &left.dependency,
+            &left.requirement,
+        )
+            .cmp(&(
+                &right.package_base,
+                &right.dependency_base,
+                &right.dependency,
+                &right.requirement,
+            ))
+    });
+    graph_edges.dedup();
+
+    let mut reachable = std::collections::BTreeSet::from([root]);
+    let mut pending = vec![root];
+    while let Some(current) = pending.pop() {
+        for &(dependent, dependency) in &dependency_pairs {
+            if dependent == current && reachable.insert(dependency) {
+                pending.push(dependency);
+            }
+        }
+    }
+    if reachable.len() != reviews.len() {
+        return Err(AurBuildGraphError::DisconnectedReview);
+    }
+
+    let mut indegree = vec![0_usize; reviews.len()];
+    for &(dependent, _) in &dependency_pairs {
+        indegree[dependent] = indegree[dependent]
+            .checked_add(1)
+            .ok_or(AurBuildGraphError::Limit("edge"))?;
+    }
+    let mut ready = std::collections::BTreeSet::new();
+    for (index, degree) in indegree.iter().enumerate() {
+        if *degree == 0 {
+            ready.insert((reviews[index].package_base.as_str(), index));
+        }
+    }
+    let mut package_bases = Vec::with_capacity(reviews.len());
+    while let Some((_, current)) = ready.pop_first() {
+        package_bases.push(reviews[current].package_base.clone());
+        for &(dependent, dependency) in &dependency_pairs {
+            if dependency != current {
+                continue;
+            }
+            indegree[dependent] = indegree[dependent]
+                .checked_sub(1)
+                .ok_or(AurBuildGraphError::InvalidReview)?;
+            if indegree[dependent] == 0 {
+                ready.insert((reviews[dependent].package_base.as_str(), dependent));
+            }
+        }
+    }
+    if package_bases.len() != reviews.len() {
+        return Err(AurBuildGraphError::Cycle);
+    }
+    Ok(AurBuildGraph {
+        package_bases,
+        edges: graph_edges,
+    })
 }
 
 struct WireWriter<'a> {
@@ -1520,6 +1763,32 @@ fn required_install_scripts(
     Ok(scripts)
 }
 
+fn required_provided_packages(
+    info: &SrcInfo,
+    required_packages: &[String],
+) -> Result<Vec<String>, AurReviewError> {
+    let mut provided = std::collections::BTreeSet::new();
+    for package_name in required_packages {
+        provided.insert(package_name.clone());
+        for declaration in info
+            .package_provides
+            .get(package_name)
+            .ok_or(AurReviewError::InvalidSrcInfo)?
+        {
+            provided.insert(dependency_name(declaration)?.to_owned());
+        }
+    }
+    if info.package_dependencies.len() == 1 && required_packages.len() == 1 {
+        for declaration in &info.provides {
+            provided.insert(dependency_name(declaration)?.to_owned());
+        }
+    }
+    if provided.is_empty() || provided.len() > MAX_AUR_DEPENDENCIES {
+        return Err(AurReviewError::Limit("provided packages"));
+    }
+    Ok(provided.into_iter().collect())
+}
+
 fn required_runtime_dependencies(
     info: &SrcInfo,
     required_packages: &[String],
@@ -1899,6 +2168,40 @@ package_dotnet-sdk-bin() {
         root
     }
 
+    fn graph_review(
+        package_base: &str,
+        dependencies: &[&str],
+        provided_packages: &[&str],
+    ) -> AurReview {
+        let mut review = review_aur_package(
+            RPC,
+            SRCINFO,
+            PKGBUILD,
+            "visual-studio-code-bin",
+            RepositoryArchitecture::Aarch64,
+        )
+        .expect("base graph review");
+        review.package_base = package_base.to_owned();
+        review.package_name = package_base.to_owned();
+        review.required_packages = vec![package_base.to_owned()];
+        review.provided_packages = provided_packages
+            .iter()
+            .copied()
+            .chain(std::iter::once(package_base))
+            .map(str::to_owned)
+            .collect();
+        review.provided_packages.sort();
+        review.provided_packages.dedup();
+        review.dependencies = dependencies
+            .iter()
+            .map(|value| (*value).to_owned())
+            .collect();
+        review.make_dependencies.clear();
+        review.check_dependencies.clear();
+        review.install_scripts.clear();
+        review
+    }
+
     #[test]
     fn reviews_visual_studio_code_for_aarch64() {
         assert_eq!(
@@ -1933,6 +2236,10 @@ package_dotnet-sdk-bin() {
             vec![AurBuildStep::Prepare, AurBuildStep::Package]
         );
         assert_eq!(
+            review.provided_packages,
+            vec!["code", "visual-studio-code-bin", "vscode"],
+        );
+        assert_eq!(
             review.install_scripts,
             vec![AurInstallScript {
                 package_name: "visual-studio-code-bin".to_owned(),
@@ -1963,6 +2270,94 @@ package_dotnet-sdk-bin() {
     }
 
     #[test]
+    fn plans_only_a_bounded_reviewed_aur_dependency_dag() {
+        let root = graph_review(
+            "editor-bin",
+            &["official-runtime>=1", "language-server>=2"],
+            &[],
+        );
+        let dependency = graph_review("language-server-bin", &[], &["language-server"]);
+        let official = std::collections::BTreeSet::from(["official-runtime".to_owned()]);
+        let graph =
+            plan_reviewed_aur_graph(&[root.clone(), dependency.clone()], "editor-bin", &official)
+                .expect("reviewed graph");
+        assert_eq!(
+            graph.package_bases,
+            vec!["language-server-bin", "editor-bin"],
+        );
+        assert_eq!(
+            graph.edges,
+            vec![AurBuildGraphEdge {
+                package_base: "editor-bin".to_owned(),
+                dependency_base: "language-server-bin".to_owned(),
+                dependency: "language-server".to_owned(),
+                requirement: "language-server>=2".to_owned(),
+            }],
+        );
+
+        let official_preferred = std::collections::BTreeSet::from([
+            "language-server".to_owned(),
+            "official-runtime".to_owned(),
+        ]);
+        assert_eq!(
+            plan_reviewed_aur_graph(&[root], "editor-bin", &official_preferred)
+                .expect("official provider is preferred")
+                .package_bases,
+            vec!["editor-bin"],
+        );
+    }
+
+    #[test]
+    fn aur_dependency_graph_rejects_missing_ambiguous_cyclic_and_unused_reviews() {
+        let root = graph_review("root-bin", &["virtual-runtime"], &[]);
+        assert_eq!(
+            plan_reviewed_aur_graph(
+                std::slice::from_ref(&root),
+                "root-bin",
+                &std::collections::BTreeSet::new(),
+            ),
+            Err(AurBuildGraphError::MissingProvider(
+                "virtual-runtime".to_owned(),
+            )),
+        );
+
+        let first = graph_review("first-provider", &[], &["virtual-runtime"]);
+        let second = graph_review("second-provider", &[], &["virtual-runtime"]);
+        assert_eq!(
+            plan_reviewed_aur_graph(
+                &[root.clone(), first, second],
+                "root-bin",
+                &std::collections::BTreeSet::new(),
+            ),
+            Err(AurBuildGraphError::AmbiguousProvider(
+                "virtual-runtime".to_owned(),
+            )),
+        );
+
+        let cyclic_root = graph_review("cyclic-root", &["cyclic-dependency"], &[]);
+        let cyclic_dependency = graph_review("cyclic-dependency", &["cyclic-root"], &[]);
+        assert_eq!(
+            plan_reviewed_aur_graph(
+                &[cyclic_root, cyclic_dependency],
+                "cyclic-root",
+                &std::collections::BTreeSet::new(),
+            ),
+            Err(AurBuildGraphError::Cycle),
+        );
+
+        let unused = graph_review("unused", &[], &[]);
+        let provider = graph_review("virtual-runtime", &[], &[]);
+        assert_eq!(
+            plan_reviewed_aur_graph(
+                &[root, provider, unused],
+                "root-bin",
+                &std::collections::BTreeSet::new(),
+            ),
+            Err(AurBuildGraphError::DisconnectedReview),
+        );
+    }
+
+    #[test]
     fn reviews_a_split_package_from_the_canonical_package_base_snapshot() {
         assert_eq!(
             aur_snapshot_path(SPLIT_RPC, "dotnet-sdk-bin").expect("canonical snapshot path"),
@@ -1986,6 +2381,10 @@ package_dotnet-sdk-bin() {
         assert_eq!(
             review.required_packages,
             vec!["dotnet-runtime-bin", "dotnet-sdk-bin"]
+        );
+        assert_eq!(
+            review.provided_packages,
+            vec!["dotnet-runtime", "dotnet-runtime-bin", "dotnet-sdk-bin"],
         );
         assert_eq!(
             review
