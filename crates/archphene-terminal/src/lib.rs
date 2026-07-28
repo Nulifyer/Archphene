@@ -39,6 +39,21 @@ const CURSOR_STYLE_UNDERLINE: u8 = 0;
 const CURSOR_STYLE_BLOCK: u8 = 1;
 const CURSOR_STYLE_BAR: u8 = 2;
 const DEFAULT_CURSOR_STYLE: u8 = CURSOR_STYLE_UNDERLINE;
+const FLAG_MOUSE_TRACKING_SHIFT: u32 = 10;
+const FLAG_MOUSE_TRACKING_MASK: u32 = 0x7 << FLAG_MOUSE_TRACKING_SHIFT;
+const MOUSE_TRACKING_NONE: u8 = 0;
+const MOUSE_TRACKING_X10: u8 = 1;
+const MOUSE_TRACKING_VT200: u8 = 2;
+const MOUSE_TRACKING_BUTTON_EVENT: u8 = 3;
+const MOUSE_TRACKING_ANY_EVENT: u8 = 4;
+const FLAG_FOCUS_REPORTING: u32 = 1 << 13;
+const FLAG_MOUSE_ENCODING_SHIFT: u32 = 14;
+const FLAG_MOUSE_ENCODING_MASK: u32 = 0x7 << FLAG_MOUSE_ENCODING_SHIFT;
+const MOUSE_ENCODING_NORMAL: u8 = 0;
+const MOUSE_ENCODING_UTF8: u8 = 1;
+const MOUSE_ENCODING_SGR: u8 = 2;
+const MOUSE_ENCODING_URXVT: u8 = 3;
+const MOUSE_ENCODING_SGR_PIXELS: u8 = 4;
 const ATTRIBUTE_BOLD: u8 = 1;
 const ATTRIBUTE_UNDERLINE: u8 = 1 << 1;
 const ATTRIBUTE_INVERSE: u8 = 1 << 2;
@@ -500,6 +515,9 @@ pub struct Terminal {
     cursor_visible: bool,
     cursor_style: u8,
     cursor_blink: bool,
+    mouse_tracking: u8,
+    mouse_encoding: u8,
+    focus_reporting: bool,
     application_cursor: bool,
     application_keypad: bool,
     bracketed_paste: bool,
@@ -582,6 +600,9 @@ impl Terminal {
             cursor_visible: true,
             cursor_style: DEFAULT_CURSOR_STYLE,
             cursor_blink: false,
+            mouse_tracking: MOUSE_TRACKING_NONE,
+            mouse_encoding: MOUSE_ENCODING_NORMAL,
+            focus_reporting: false,
             application_cursor: false,
             application_keypad: false,
             bracketed_paste: false,
@@ -921,7 +942,16 @@ impl Terminal {
         } else {
             0
         } | ((u32::from(self.cursor_style) << FLAG_CURSOR_STYLE_SHIFT)
-            & FLAG_CURSOR_STYLE_MASK);
+            & FLAG_CURSOR_STYLE_MASK)
+            | ((u32::from(self.mouse_tracking) << FLAG_MOUSE_TRACKING_SHIFT)
+                & FLAG_MOUSE_TRACKING_MASK)
+            | if self.focus_reporting {
+                FLAG_FOCUS_REPORTING
+            } else {
+                0
+            }
+            | ((u32::from(self.mouse_encoding) << FLAG_MOUSE_ENCODING_SHIFT)
+                & FLAG_MOUSE_ENCODING_MASK);
         output[20..24].copy_from_slice(&flags.to_le_bytes());
         output[24..32].copy_from_slice(&self.revision.to_le_bytes());
         output[32..36].copy_from_slice(&history_rows.to_le_bytes());
@@ -1737,6 +1767,15 @@ impl Terminal {
                 66 => self.set_application_keypad(enabled),
                 67 => self.set_backarrow_key(enabled),
                 69 => self.set_left_right_margin_mode(enabled),
+                9 => self.set_mouse_tracking(MOUSE_TRACKING_X10, enabled),
+                1000 => self.set_mouse_tracking(MOUSE_TRACKING_VT200, enabled),
+                1002 => self.set_mouse_tracking(MOUSE_TRACKING_BUTTON_EVENT, enabled),
+                1003 => self.set_mouse_tracking(MOUSE_TRACKING_ANY_EVENT, enabled),
+                1004 => self.set_focus_reporting(enabled),
+                1005 => self.set_mouse_encoding(MOUSE_ENCODING_UTF8, enabled),
+                1006 => self.set_mouse_encoding(MOUSE_ENCODING_SGR, enabled),
+                1015 => self.set_mouse_encoding(MOUSE_ENCODING_URXVT, enabled),
+                1016 => self.set_mouse_encoding(MOUSE_ENCODING_SGR_PIXELS, enabled),
                 1047 | 1049 => self.set_alternate_screen(enabled, enabled),
                 1048 if enabled => {
                     self.saved_row = self.cursor_row;
@@ -1771,6 +1810,41 @@ impl Terminal {
     fn set_application_cursor(&mut self, enabled: bool) {
         if self.application_cursor != enabled {
             self.application_cursor = enabled;
+            self.mark_dirty(self.cursor_row);
+        }
+    }
+
+    fn set_mouse_tracking(&mut self, mode: u8, enabled: bool) {
+        let next = if enabled {
+            mode
+        } else if self.mouse_tracking == mode {
+            MOUSE_TRACKING_NONE
+        } else {
+            self.mouse_tracking
+        };
+        if self.mouse_tracking != next {
+            self.mouse_tracking = next;
+            self.mark_dirty(self.cursor_row);
+        }
+    }
+
+    fn set_mouse_encoding(&mut self, encoding: u8, enabled: bool) {
+        let next = if enabled {
+            encoding
+        } else if self.mouse_encoding == encoding {
+            MOUSE_ENCODING_NORMAL
+        } else {
+            self.mouse_encoding
+        };
+        if self.mouse_encoding != next {
+            self.mouse_encoding = next;
+            self.mark_dirty(self.cursor_row);
+        }
+    }
+
+    fn set_focus_reporting(&mut self, enabled: bool) {
+        if self.focus_reporting != enabled {
+            self.focus_reporting = enabled;
             self.mark_dirty(self.cursor_row);
         }
     }
@@ -1819,6 +1893,15 @@ impl Terminal {
                 66 => mode_status(self.application_keypad),
                 67 => mode_status(self.backarrow_key),
                 69 => mode_status(self.left_right_margin_mode),
+                9 => mode_status(self.mouse_tracking == MOUSE_TRACKING_X10),
+                1000 => mode_status(self.mouse_tracking == MOUSE_TRACKING_VT200),
+                1002 => mode_status(self.mouse_tracking == MOUSE_TRACKING_BUTTON_EVENT),
+                1003 => mode_status(self.mouse_tracking == MOUSE_TRACKING_ANY_EVENT),
+                1004 => mode_status(self.focus_reporting),
+                1005 => mode_status(self.mouse_encoding == MOUSE_ENCODING_UTF8),
+                1006 => mode_status(self.mouse_encoding == MOUSE_ENCODING_SGR),
+                1015 => mode_status(self.mouse_encoding == MOUSE_ENCODING_URXVT),
+                1016 => mode_status(self.mouse_encoding == MOUSE_ENCODING_SGR_PIXELS),
                 2004 => mode_status(self.bracketed_paste),
                 _ => 0,
             }
@@ -2623,6 +2706,9 @@ impl Terminal {
         self.cursor_visible = true;
         self.cursor_style = DEFAULT_CURSOR_STYLE;
         self.cursor_blink = false;
+        self.mouse_tracking = MOUSE_TRACKING_NONE;
+        self.mouse_encoding = MOUSE_ENCODING_NORMAL;
+        self.focus_reporting = false;
         self.application_cursor = false;
         self.application_keypad = false;
         self.bracketed_paste = false;
@@ -2652,6 +2738,9 @@ impl Terminal {
         self.cursor_visible = true;
         self.cursor_style = DEFAULT_CURSOR_STYLE;
         self.cursor_blink = false;
+        self.mouse_tracking = MOUSE_TRACKING_NONE;
+        self.mouse_encoding = MOUSE_ENCODING_NORMAL;
+        self.focus_reporting = false;
         self.application_cursor = false;
         self.application_keypad = false;
         self.bracketed_paste = false;
@@ -3700,6 +3789,47 @@ mod tests {
     }
 
     #[test]
+    fn mouse_and_focus_modes_are_mutually_exclusive_queryable_and_bounded() {
+        let mut terminal = Terminal::new(2, 5).unwrap();
+        let mut output = [0_u8; 2048];
+
+        terminal.feed(b"\x1b[?1000;1004;1006h");
+        terminal.write_damage(&mut output).unwrap();
+        assert_eq!(
+            u32::from_le_bytes(output[20..24].try_into().unwrap()),
+            FLAG_CURSOR_VISIBLE
+                | FLAG_FOCUS_REPORTING
+                | (u32::from(MOUSE_TRACKING_VT200) << FLAG_MOUSE_TRACKING_SHIFT)
+                | (u32::from(MOUSE_ENCODING_SGR) << FLAG_MOUSE_ENCODING_SHIFT)
+        );
+
+        terminal.feed(b"\x1b[?1002h\x1b[?1000l\x1b[?1016h\x1b[?1006l");
+        terminal.write_damage(&mut output).unwrap();
+        assert_eq!(
+            u32::from_le_bytes(output[20..24].try_into().unwrap()),
+            FLAG_CURSOR_VISIBLE
+                | FLAG_FOCUS_REPORTING
+                | (u32::from(MOUSE_TRACKING_BUTTON_EVENT) << FLAG_MOUSE_TRACKING_SHIFT)
+                | (u32::from(MOUSE_ENCODING_SGR_PIXELS) << FLAG_MOUSE_ENCODING_SHIFT)
+        );
+
+        terminal.feed(b"\x1b[?1000$p\x1b[?1002$p\x1b[?1004$p\x1b[?1006$p\x1b[?1016$p");
+        assert_eq!(
+            terminal.pending_reply(),
+            b"\x1b[?1000;2$y\x1b[?1002;1$y\x1b[?1004;1$y\
+              \x1b[?1006;2$y\x1b[?1016;1$y"
+        );
+        terminal.consume_reply(usize::MAX);
+
+        terminal.feed(b"\x1b[?1002;1004;1016l");
+        terminal.write_damage(&mut output).unwrap();
+        assert_eq!(
+            u32::from_le_bytes(output[20..24].try_into().unwrap()),
+            FLAG_CURSOR_VISIBLE
+        );
+    }
+
+    #[test]
     fn reverse_screen_and_soft_reset_follow_the_advertised_xterm_contract() {
         let mut terminal = Terminal::new(4, 8).unwrap();
         let mut output = [0_u8; 4096];
@@ -3707,7 +3837,7 @@ mod tests {
         terminal.write_damage(&mut output).unwrap();
 
         terminal.feed(
-            b"\x1b[2;3r\x1b[?1;5;6;67;69;2004h\x1b[2;4H\x1b=\x1b[4;20h\
+            b"\x1b[2;3r\x1b[?1;5;6;67;69;1003;1004;1005;2004h\x1b[2;4H\x1b=\x1b[4;20h\
               \x1b[31;44;1m\x1b(0\x1b[?25l\x1b[?5$p",
         );
         assert_eq!(terminal.pending_reply(), b"\x1b[?5;1$y");
@@ -3722,6 +3852,9 @@ mod tests {
                 | FLAG_NEW_LINE_MODE
                 | FLAG_BACKARROW_KEY
                 | FLAG_REVERSE_SCREEN
+                | FLAG_FOCUS_REPORTING
+                | (u32::from(MOUSE_TRACKING_ANY_EVENT) << FLAG_MOUSE_TRACKING_SHIFT)
+                | (u32::from(MOUSE_ENCODING_UTF8) << FLAG_MOUSE_ENCODING_SHIFT)
         );
 
         terminal.feed(b"\x1b[!p\x1b[?5$p");
@@ -3738,6 +3871,9 @@ mod tests {
         assert!(!terminal.new_line_mode);
         assert!(!terminal.backarrow_key);
         assert!(!terminal.reverse_screen);
+        assert_eq!(terminal.mouse_tracking, MOUSE_TRACKING_NONE);
+        assert_eq!(terminal.mouse_encoding, MOUSE_ENCODING_NORMAL);
+        assert!(!terminal.focus_reporting);
         assert!(!terminal.left_right_margin_mode);
         assert_eq!(terminal.scroll_left, 0);
         assert_eq!(terminal.scroll_right, 7);

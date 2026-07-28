@@ -1270,8 +1270,22 @@ warmed zero-allocation, and clippy gates plus Android lint/unit and exact
 x86_64/AArch64 builds pass. Both APKs are installed and cold-launch without
 scoped fatal errors, and their current no-shell manager states pass
 full-device inspection. The real PTY cursor visual remains explicitly pending
-until a package-installed shell is restored. Terminal mouse/focus reporting
-and synchronized output remain open.
+until a package-installed shell is restored.
+
+Mouse and focus reporting now cover the modes used by the local
+`xterm-256color` description and common full-screen applications: X10, VT200,
+button-motion, any-motion, focus in/out, and normal, UTF-8, SGR, URXVT, or
+SGR-pixel coordinates. Protocol and encoding modes are mutually exclusive,
+queryable, reset-safe, and published through reserved damage flags. Android
+maps touch, external buttons, wheel, modifiers, cell motion, and pixel motion
+into an allocation-free encoder backed by the existing reusable terminal input
+array. Motion is emitted only after the reported cell or pixel changes, while
+Shift retains local selection and history scrolling. Rust unit/allocation and
+clippy gates, exact Kotlin encoder tests, Android lint/unit, both exact builds
+and installs, scoped cold-launch logs, and inspected full-device no-shell
+manager frames pass. Real TUI interaction and focus-transition device proof
+remain pending with shell restoration. Synchronized output is the next
+material terminal-control gap.
 
 The temporary command field and Run/Send controls are no longer present in the
 production manager. Active sessions reserve only the measured terminal plus a

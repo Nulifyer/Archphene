@@ -6,6 +6,7 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Rect
 import android.graphics.RenderNode
 import android.graphics.Typeface
 import android.os.Bundle
@@ -149,6 +150,16 @@ internal class RuntimeSurfaceView(
     private var terminalFlags = 0
     private var cursorBlinkPhaseVisible = true
     private var cursorBlinkPosted = false
+    private var mousePointerId = NO_MOUSE_POINTER
+    private var mouseLocalSelectionOverride = false
+    private var mousePressedButton = MOUSE_BUTTON_PRIMARY
+    private var lastMouseColumn = NO_MOUSE_POSITION
+    private var lastMouseRow = NO_MOUSE_POSITION
+    private var lastMousePixelX = NO_MOUSE_POSITION
+    private var lastMousePixelY = NO_MOUSE_POSITION
+    private val mousePositionScratch = MousePosition()
+    private var terminalFocusStateKnown = false
+    private var terminalFocused = false
     private var terminalRevision = Long.MIN_VALUE
     private var sourceRevision = Long.MIN_VALUE
     private var historyRows = 0
@@ -326,6 +337,7 @@ internal class RuntimeSurfaceView(
         } else {
             stopCursorBlink(revealCursor = true)
         }
+        reportTerminalFocusChange()
     }
 
     override fun onWindowVisibilityChanged(visibility: Int) {
@@ -335,15 +347,35 @@ internal class RuntimeSurfaceView(
         } else {
             stopCursorBlink(revealCursor = true)
         }
+        reportTerminalFocusChange()
+    }
+
+    override fun onFocusChanged(
+        gainFocus: Boolean,
+        direction: Int,
+        previouslyFocusedRect: Rect?,
+    ) {
+        super.onFocusChanged(gainFocus, direction, previouslyFocusedRect)
+        reportTerminalFocusChange()
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
         if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+            mouseLocalSelectionOverride =
+                terminalMouseReportingActive() &&
+                    event.metaState and KeyEvent.META_SHIFT_ON != 0
+        }
+        val mouseReporting =
+            terminalMouseReportingActive() &&
+                !mouseLocalSelectionOverride
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
             scrollRowRemainder = 0f
-            beginSelectionHandleDrag(event.x, event.y)
+            if (!mouseReporting) {
+                beginSelectionHandleDrag(event.x, event.y)
+            }
         }
         val selectionOwnedGesture = selectionDragging
-        if (!selectionOwnedGesture) {
+        if (!selectionOwnedGesture && !mouseReporting) {
             scaleGestureDetector.onTouchEvent(event)
             gestureDetector.onTouchEvent(event)
         }
@@ -364,6 +396,10 @@ internal class RuntimeSurfaceView(
             argument0 = event.getX(pointerIndex).toRawBits(),
             argument1 = event.getY(pointerIndex).toRawBits(),
         )
+        if (mouseReporting) {
+            handleTerminalMouseEvent(event)
+            return true
+        }
         if (selectionDragging) {
             when (event.actionMasked) {
                 MotionEvent.ACTION_MOVE -> {
@@ -384,6 +420,12 @@ internal class RuntimeSurfaceView(
                 }
             }
         }
+        if (
+            event.actionMasked == MotionEvent.ACTION_UP ||
+            event.actionMasked == MotionEvent.ACTION_CANCEL
+        ) {
+            mouseLocalSelectionOverride = false
+        }
         return true
     }
 
@@ -393,6 +435,30 @@ internal class RuntimeSurfaceView(
             event.isFromSource(InputDevice.SOURCE_CLASS_POINTER)
         ) {
             val vertical = event.getAxisValue(MotionEvent.AXIS_VSCROLL)
+            if (
+                vertical != 0f &&
+                terminalMouseReportingActive() &&
+                event.metaState and KeyEvent.META_SHIFT_ON == 0
+            ) {
+                val position = terminalMousePosition(event.x, event.y) ?: return true
+                sendTerminalMouseReport(
+                    button =
+                        if (vertical > 0f) {
+                            MOUSE_BUTTON_WHEEL_UP
+                        } else {
+                            MOUSE_BUTTON_WHEEL_DOWN
+                        },
+                    column = position.column,
+                    row = position.row,
+                    pixelX = position.pixelX,
+                    pixelY = position.pixelY,
+                    modifiers = mouseModifiers(event),
+                    release = false,
+                    motion = false,
+                    eventTimeMillis = event.eventTime,
+                )
+                return true
+            }
             if (vertical != 0f && historyRows != 0) {
                 setViewportOffset(
                     viewportOffset + (vertical * SCROLL_WHEEL_ROWS).roundToInt(),
@@ -401,6 +467,36 @@ internal class RuntimeSurfaceView(
             }
         }
         return super.onGenericMotionEvent(event)
+    }
+
+    override fun onHoverEvent(event: MotionEvent): Boolean {
+        if (
+            terminalMouseReportingActive() &&
+            terminalMouseTrackingMode() == MOUSE_TRACKING_ANY_EVENT &&
+            event.actionMasked == MotionEvent.ACTION_HOVER_MOVE
+        ) {
+            val position = terminalMousePosition(event.x, event.y) ?: return true
+            if (!mousePositionChanged(position)) {
+                return true
+            }
+            if (
+                sendTerminalMouseReport(
+                    button = MOUSE_BUTTON_NONE,
+                    column = position.column,
+                    row = position.row,
+                    pixelX = position.pixelX,
+                    pixelY = position.pixelY,
+                    modifiers = mouseModifiers(event),
+                    release = false,
+                    motion = true,
+                    eventTimeMillis = event.eventTime,
+                )
+            ) {
+                rememberMousePosition(position)
+            }
+            return true
+        }
+        return super.onHoverEvent(event)
     }
 
     override fun performClick(): Boolean {
@@ -686,6 +782,7 @@ internal class RuntimeSurfaceView(
         val dirtyStart = damageBuffer.getShort(16).toInt() and 0xffff
         val dirtyEnd = damageBuffer.getShort(18).toInt() and 0xffff
         val nextTerminalFlags = damageBuffer.getInt(20)
+        val previousTerminalFlags = terminalFlags
         val nextHistoryRows = damageBuffer.getInt(32)
         val nextViewportOffset = damageBuffer.getInt(36)
         if (
@@ -834,6 +931,23 @@ internal class RuntimeSurfaceView(
                 recordRow(cursorRow)
             }
             invalidate()
+        }
+        if (
+            (previousTerminalFlags xor terminalFlags) and
+                (MOUSE_TRACKING_MASK or MOUSE_ENCODING_MASK) != 0
+        ) {
+            resetMouseGesture()
+            if (terminalMouseReportingActive()) {
+                clearSelection()
+            }
+        }
+        if (
+            (previousTerminalFlags xor terminalFlags) and
+                FOCUS_REPORTING_FLAG != 0
+        ) {
+            terminalFocusStateKnown =
+                terminalFlags and FOCUS_REPORTING_FLAG != 0
+            terminalFocused = terminalHasInputFocus()
         }
         updateCursorBlinkScheduling()
         if (contentChanged) {
@@ -1033,6 +1147,303 @@ internal class RuntimeSurfaceView(
             scheduleCursorBlink()
         } else {
             stopCursorBlink(revealCursor = true)
+        }
+    }
+
+    private fun handleTerminalMouseEvent(event: MotionEvent) {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                val position = terminalMousePosition(event.x, event.y) ?: return
+                requestFocus()
+                clearSelection()
+                mousePointerId = event.getPointerId(0)
+                mousePressedButton = mouseButton(event)
+                if (
+                    sendTerminalMouseReport(
+                        button = mousePressedButton,
+                        column = position.column,
+                        row = position.row,
+                        pixelX = position.pixelX,
+                        pixelY = position.pixelY,
+                        modifiers = mouseModifiers(event),
+                        release = false,
+                        motion = false,
+                        eventTimeMillis = event.eventTime,
+                    )
+                ) {
+                    rememberMousePosition(position)
+                }
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val tracking = terminalMouseTrackingMode()
+                if (
+                    tracking != MOUSE_TRACKING_BUTTON_EVENT &&
+                    tracking != MOUSE_TRACKING_ANY_EVENT
+                ) {
+                    return
+                }
+                val pointerIndex = event.findPointerIndex(mousePointerId)
+                if (pointerIndex < 0) {
+                    return
+                }
+                val position =
+                    terminalMousePosition(
+                        event.getX(pointerIndex),
+                        event.getY(pointerIndex),
+                    ) ?: return
+                if (!mousePositionChanged(position)) {
+                    return
+                }
+                if (
+                    sendTerminalMouseReport(
+                        button = mousePressedButton,
+                        column = position.column,
+                        row = position.row,
+                        pixelX = position.pixelX,
+                        pixelY = position.pixelY,
+                        modifiers = mouseModifiers(event),
+                        release = false,
+                        motion = true,
+                        eventTimeMillis = event.eventTime,
+                    )
+                ) {
+                    rememberMousePosition(position)
+                }
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
+                if (
+                    event.getPointerId(event.actionIndex) != mousePointerId
+                ) {
+                    return
+                }
+                val position =
+                    terminalMousePosition(
+                        event.getX(event.actionIndex),
+                        event.getY(event.actionIndex),
+                    )
+                if (
+                    terminalMouseTrackingMode() != MOUSE_TRACKING_X10 &&
+                    (position != null || lastMouseColumn != NO_MOUSE_POSITION)
+                ) {
+                    sendTerminalMouseReport(
+                        button = mousePressedButton,
+                        column = position?.column ?: lastMouseColumn,
+                        row = position?.row ?: lastMouseRow,
+                        pixelX = position?.pixelX ?: lastMousePixelX,
+                        pixelY = position?.pixelY ?: lastMousePixelY,
+                        modifiers = mouseModifiers(event),
+                        release = true,
+                        motion = false,
+                        eventTimeMillis = event.eventTime,
+                    )
+                }
+                resetMouseGesture()
+                if (
+                    event.actionMasked == MotionEvent.ACTION_UP &&
+                    event.isFromSource(InputDevice.SOURCE_TOUCHSCREEN)
+                ) {
+                    performClick()
+                }
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                if (
+                    terminalMouseTrackingMode() != MOUSE_TRACKING_X10 &&
+                    lastMouseColumn != NO_MOUSE_POSITION
+                ) {
+                    sendTerminalMouseReport(
+                        button = mousePressedButton,
+                        column = lastMouseColumn,
+                        row = lastMouseRow,
+                        pixelX = lastMousePixelX,
+                        pixelY = lastMousePixelY,
+                        modifiers = mouseModifiers(event),
+                        release = true,
+                        motion = false,
+                        eventTimeMillis = event.eventTime,
+                    )
+                }
+                resetMouseGesture()
+            }
+        }
+    }
+
+    private fun terminalMouseReportingActive(): Boolean =
+        viewportOffset == 0 &&
+            rows != 0 &&
+            columns != 0 &&
+            terminalMouseTrackingMode() != MOUSE_TRACKING_NONE
+
+    private fun terminalMouseTrackingMode(): Int =
+        (terminalFlags and MOUSE_TRACKING_MASK) ushr
+            MOUSE_TRACKING_SHIFT
+
+    private fun terminalMouseEncoding(): Int =
+        (terminalFlags and MOUSE_ENCODING_MASK) ushr
+            MOUSE_ENCODING_SHIFT
+
+    private fun terminalMousePosition(
+        x: Float,
+        y: Float,
+    ): MousePosition? {
+        if (
+            x < CONTENT_PADDING ||
+            y < CONTENT_PADDING ||
+            x >= CONTENT_PADDING + columns * cellWidth ||
+            y >= CONTENT_PADDING + rows * cellHeight
+        ) {
+            return null
+        }
+        mousePositionScratch.column =
+            ((x - CONTENT_PADDING) / cellWidth).toInt() + 1
+        mousePositionScratch.row =
+            ((y - CONTENT_PADDING) / cellHeight).toInt() + 1
+        mousePositionScratch.pixelX =
+            x.roundToInt().coerceIn(0, width.coerceAtLeast(1) - 1) + 1
+        mousePositionScratch.pixelY =
+            y.roundToInt().coerceIn(0, height.coerceAtLeast(1) - 1) + 1
+        return mousePositionScratch
+    }
+
+    private fun mouseButton(event: MotionEvent): Int =
+        when {
+            event.actionButton == MotionEvent.BUTTON_TERTIARY ||
+                event.buttonState and MotionEvent.BUTTON_TERTIARY != 0 ->
+                MOUSE_BUTTON_MIDDLE
+            event.actionButton == MotionEvent.BUTTON_SECONDARY ||
+                event.buttonState and MotionEvent.BUTTON_SECONDARY != 0 ->
+                MOUSE_BUTTON_SECONDARY
+            else -> MOUSE_BUTTON_PRIMARY
+        }
+
+    private fun mouseModifiers(event: MotionEvent): Int {
+        var result = 0
+        if (event.metaState and KeyEvent.META_SHIFT_ON != 0) {
+            result = result or MOUSE_MODIFIER_SHIFT
+        }
+        if (
+            event.metaState and
+                (KeyEvent.META_ALT_ON or KeyEvent.META_META_ON) != 0
+        ) {
+            result = result or MOUSE_MODIFIER_META
+        }
+        if (event.metaState and KeyEvent.META_CTRL_ON != 0) {
+            result = result or MOUSE_MODIFIER_CONTROL
+        }
+        return result
+    }
+
+    private fun mousePositionChanged(position: MousePosition): Boolean =
+        if (
+            terminalMouseEncoding() ==
+            TerminalMouseEncoder.ENCODING_SGR_PIXELS
+        ) {
+            position.pixelX != lastMousePixelX ||
+                position.pixelY != lastMousePixelY
+        } else {
+            position.column != lastMouseColumn ||
+                position.row != lastMouseRow
+        }
+
+    private fun rememberMousePosition(position: MousePosition) {
+        lastMouseColumn = position.column
+        lastMouseRow = position.row
+        lastMousePixelX = position.pixelX
+        lastMousePixelY = position.pixelY
+    }
+
+    private fun resetMouseGesture() {
+        mousePointerId = NO_MOUSE_POINTER
+        mouseLocalSelectionOverride = false
+        mousePressedButton = MOUSE_BUTTON_PRIMARY
+        lastMouseColumn = NO_MOUSE_POSITION
+        lastMouseRow = NO_MOUSE_POSITION
+        lastMousePixelX = NO_MOUSE_POSITION
+        lastMousePixelY = NO_MOUSE_POSITION
+    }
+
+    private fun sendTerminalMouseReport(
+        button: Int,
+        column: Int,
+        row: Int,
+        pixelX: Int,
+        pixelY: Int,
+        modifiers: Int,
+        release: Boolean,
+        motion: Boolean,
+        eventTimeMillis: Long,
+    ): Boolean {
+        val encoding = terminalMouseEncoding()
+        val length =
+            TerminalMouseEncoder.encode(
+                destination = terminalInputBytes,
+                encoding = encoding,
+                button = button,
+                x =
+                    if (
+                        encoding ==
+                        TerminalMouseEncoder.ENCODING_SGR_PIXELS
+                    ) {
+                        pixelX
+                    } else {
+                        column
+                    },
+                y =
+                    if (
+                        encoding ==
+                        TerminalMouseEncoder.ENCODING_SGR_PIXELS
+                    ) {
+                        pixelY
+                    } else {
+                        row
+                    },
+                modifiers = modifiers,
+                release = release,
+                motion = motion,
+            )
+        if (length == 0) {
+            return false
+        }
+        val accepted =
+            runtimeBinder?.submitTerminalInput(
+                terminalInputBytes,
+                length,
+            ) == true
+        if (accepted) {
+            PerformanceMetrics.noteTerminalInput(eventTimeMillis)
+        }
+        return accepted
+    }
+
+    private fun terminalHasInputFocus(): Boolean =
+        isAttachedToWindow &&
+            hasFocus() &&
+            hasWindowFocus() &&
+            windowVisibility == VISIBLE &&
+            isShown
+
+    private fun reportTerminalFocusChange() {
+        if (terminalFlags and FOCUS_REPORTING_FLAG == 0) {
+            terminalFocusStateKnown = false
+            return
+        }
+        val focused = terminalHasInputFocus()
+        if (!terminalFocusStateKnown) {
+            terminalFocusStateKnown = true
+            terminalFocused = focused
+            return
+        }
+        if (terminalFocused == focused) {
+            return
+        }
+        terminalFocused = focused
+        val sequence = if (focused) FOCUS_IN else FOCUS_OUT
+        if (
+            runtimeBinder?.submitTerminalInput(
+                sequence,
+                sequence.size,
+            ) == true
+        ) {
+            PerformanceMetrics.noteTerminalInput(SystemClock.uptimeMillis())
         }
     }
 
@@ -2057,6 +2468,9 @@ internal class RuntimeSurfaceView(
     private fun clearTerminal() {
         stopCursorBlink(revealCursor = false)
         cursorBlinkPhaseVisible = true
+        resetMouseGesture()
+        terminalFocusStateKnown = false
+        terminalFocused = false
         rows = 0
         columns = 0
         cursorVisible = false
@@ -2385,6 +2799,13 @@ internal class RuntimeSurfaceView(
         return 0xff000000.toInt() or (red shl 16) or (green shl 8) or blue
     }
 
+    private class MousePosition {
+        var column = 0
+        var row = 0
+        var pixelX = 0
+        var pixelY = 0
+    }
+
     companion object {
         private const val NANOS_PER_MILLISECOND = 1_000_000L
         private const val AUTOMATIC_TEXT_SIZE = 0
@@ -2398,6 +2819,8 @@ internal class RuntimeSurfaceView(
         private const val TEXT_SIZE_RESET = 1
         private const val TEXT_SIZE_LARGER = 2
         private const val NO_SELECTION = -1L
+        private const val NO_MOUSE_POINTER = -1
+        private const val NO_MOUSE_POSITION = -1
         private const val SELECTION_DRAG_NONE = 0
         private const val SELECTION_DRAG_WORD = 1
         private const val SELECTION_DRAG_START = 2
@@ -2448,8 +2871,26 @@ internal class RuntimeSurfaceView(
         private const val CURSOR_STYLE_MASK = 0x3 shl CURSOR_STYLE_SHIFT
         private const val CURSOR_STYLE_BLOCK = 1
         private const val CURSOR_STYLE_BAR = 2
+        private const val MOUSE_TRACKING_SHIFT = 10
+        private const val MOUSE_TRACKING_MASK = 0x7 shl MOUSE_TRACKING_SHIFT
+        private const val MOUSE_TRACKING_NONE = 0
+        private const val MOUSE_TRACKING_X10 = 1
+        private const val MOUSE_TRACKING_BUTTON_EVENT = 3
+        private const val MOUSE_TRACKING_ANY_EVENT = 4
+        private const val FOCUS_REPORTING_FLAG = 1 shl 13
+        private const val MOUSE_ENCODING_SHIFT = 14
+        private const val MOUSE_ENCODING_MASK = 0x7 shl MOUSE_ENCODING_SHIFT
         private const val CURSOR_PRESENTATION_FLAGS =
             CURSOR_VISIBLE_FLAG or CURSOR_BLINK_FLAG or CURSOR_STYLE_MASK
+        private const val MOUSE_BUTTON_PRIMARY = 0
+        private const val MOUSE_BUTTON_MIDDLE = 1
+        private const val MOUSE_BUTTON_SECONDARY = 2
+        private const val MOUSE_BUTTON_NONE = 3
+        private const val MOUSE_BUTTON_WHEEL_UP = 64
+        private const val MOUSE_BUTTON_WHEEL_DOWN = 65
+        private const val MOUSE_MODIFIER_SHIFT = 4
+        private const val MOUSE_MODIFIER_META = 8
+        private const val MOUSE_MODIFIER_CONTROL = 16
         private const val DIRECT_COLOR_FLAG = 1 shl 24
         private const val RGB_MASK = 0x00ffffff
         private const val COLOR_VALUE_MASK = 0x01ffffff
@@ -2481,6 +2922,8 @@ internal class RuntimeSurfaceView(
         private val BRACKETED_PASTE_END = byteArrayOf(0x1b, 0x5b, 0x32, 0x30, 0x31, 0x7e)
         private val TAB = byteArrayOf(0x09)
         private val ESCAPE = byteArrayOf(0x1b)
+        private val FOCUS_IN = byteArrayOf(0x1b, 0x5b, 0x49)
+        private val FOCUS_OUT = byteArrayOf(0x1b, 0x5b, 0x4f)
         private val CURSOR_UP = byteArrayOf(0x1b, 0x5b, 0x41)
         private val CURSOR_DOWN = byteArrayOf(0x1b, 0x5b, 0x42)
         private val CURSOR_RIGHT = byteArrayOf(0x1b, 0x5b, 0x43)
