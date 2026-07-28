@@ -1,0 +1,112 @@
+#!/usr/bin/bash
+set -euo pipefail
+
+stage=/tmp/archphene-terminal-production-stage
+
+publish_stage() {
+  printf '%s' "$1" >"$stage"
+}
+
+wait_key() {
+  local ignored
+  IFS= read -r -s -N 1 ignored
+}
+
+read_mouse_click() {
+  local press release
+  IFS= read -r -s -d M press
+  press+=M
+  IFS= read -r -s -d m release
+  release+=m
+  [[ "$press" == $'\e[<0;'*M && "$release" == $'\e[<0;'*m ]]
+}
+
+rm -f "$stage"
+trap 'rm -f "$stage"' EXIT
+
+printf '\e[2J\e[H\e]12;rgb:ff/00/00\a\e[?12h\e[5 q'
+printf 'TERMINAL-VISUAL-GATE\r\n'
+printf '\e[48;2;0;70;120mBCE-BACKGROUND\e[K\e[0m\r\n'
+printf '\e[5mBLINKING-TEXT\e[25m\r\n'
+printf 'Red blinking bar cursor below\r\n'
+printf 'VISUAL-READY'
+printf '\e[7;12H'
+publish_stage visual
+wait_key
+
+printf '\e[?12l\e[2 q\e]112\a'
+printf '\e[?2026h\e[2J\e[HATOMIC-FRAME'
+sleep 0.1
+printf -- '-COMPLETE\e[?2026l'
+publish_stage sync-released
+wait_key
+
+printf '\e[?2026h\e[2J\e[HSYNC-TIMEOUT'
+publish_stage sync-timeout
+sleep 1
+printf '\e[?2026l\r\nSYNC-TIMEOUT-PASS'
+wait_key
+
+printf '\e[2J\e[H\e[?1000h\e[?1006hTOUCH-WAIT\r\n'
+if read_mouse_click; then
+  printf '\e[?1000lTOUCH-PASS\r\n'
+else
+  printf '\e[?1000lTOUCH-FAIL\r\n'
+  exit 20
+fi
+
+printf '\e[?1000h\e[?1006hMOUSE-WAIT\r\n'
+if read_mouse_click; then
+  printf '\e[?1000lMOUSE-PASS\r\n'
+else
+  printf '\e[?1000lMOUSE-FAIL\r\n'
+  exit 21
+fi
+
+printf '\e[?1000h\e[?1006hWHEEL-WAIT\r\n'
+wheel=
+IFS= read -r -s -d M wheel
+wheel+=M
+printf '\e[?1000l'
+if [[ "$wheel" == $'\e[<64;'*M || "$wheel" == $'\e[<65;'*M ]]; then
+  printf 'WHEEL-PASS\r\n'
+else
+  printf 'WHEEL-FAIL\r\n'
+  exit 22
+fi
+
+printf '\e[?1004hFOCUS-WAIT\r\n'
+focus_out=
+focus_in=
+IFS= read -r -s -N 3 focus_out
+IFS= read -r -s -N 3 focus_in
+printf '\e[?1004l'
+if [[ "$focus_out" == $'\e[O' && "$focus_in" == $'\e[I' ]]; then
+  printf 'FOCUS-PASS\r\n'
+else
+  printf 'FOCUS-FAIL\r\n'
+  exit 23
+fi
+
+printf '\e[?1034hMETA-WAIT\r\n'
+meta=
+LC_ALL=C IFS= read -r -s -N 2 meta
+printf '\e[?1034l'
+if [[ "$meta" == $'\303\241' ]]; then
+  printf 'META-PASS\r\n'
+else
+  printf 'META-FAIL\r\n'
+  exit 24
+fi
+
+printf '\e]52;c;YXJjaHBoZW5lLW9zYzUy\aOSC52-WAIT\r\n'
+clipboard=
+IFS= read -r clipboard
+if [[ "$clipboard" == archphene-osc52 ]]; then
+  printf 'OSC52-PASS\r\n'
+else
+  printf 'OSC52-FAIL\r\n'
+  exit 25
+fi
+
+printf 'PRODUCTION-TERMINAL-PASS\r\n'

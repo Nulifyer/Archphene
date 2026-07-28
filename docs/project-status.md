@@ -1334,10 +1334,9 @@ Android now coalesces terminal text-change and scroll accessibility events,
 publishes the cursor or visible selection as UTF-16 text offsets, accepts
 bounded accessibility selection, and includes nonblank content below the
 cursor. The implementation passes Android-10 lint/unit checks and exact
-x86_64/AArch64 builds. The signed-manager device fixture now includes a real
-`tput el` background-color-erase marker, but the final current-APK device gate
-is pending restoration of a package-installed shell after the intentional
-clean-data navigation regression cleared both test roots.
+x86_64/AArch64 builds. The current exact-ABI production-terminal gate now runs
+through package-installed Bash and `tput` on both devices; full-device captures
+show the background color extending through the erased remainder of the line.
 
 The terminal now advertises and handles Android character, word, and line
 movement granularities, emits exact traversal events, and extends bounded
@@ -1351,9 +1350,13 @@ script installs nothing, restores accessibility and notification state,
 verifies the installed Google TalkBack service is bound, requires real
 accessibility focus plus the character/word/line mask, drives next-item
 navigation, and retains full-device focus-border pixels. That workflow passes
-on the API 36 emulator. The Samsung lane fails closed because its preinstalled
-TalkBack still opens the vendor first-run tutorial; Archphene does not dismiss
-or accept that user-owned setup.
+on the API 36 emulator. Samsung's preinstalled TalkBack still opens its
+user-owned first-run tutorial, so a debug-only public-framework accessibility
+service tests the exact production View there without changing vendor
+onboarding. It performs accessibility focus, selected-text, and word-traversal
+actions, receives the exact focus/selection/traversal events, retains
+full-device selected/focus evidence, and restores every secure accessibility
+setting afterward. The same framework gate also passes on the emulator.
 
 Auditing the terminal against the locally installed `xterm-256color` terminfo
 also exposed two terminfo-used controls that had been silently ignored. DEC
@@ -1397,9 +1400,9 @@ resets the 500 ms phase when cursor content or presentation changes, and stops
 the callback while the surface is detached, hidden, or unfocused. Rust unit,
 warmed zero-allocation, and clippy gates plus Android lint/unit and exact
 x86_64/AArch64 builds pass. Both APKs are installed and cold-launch without
-scoped fatal errors, and their current no-shell manager states pass
-full-device inspection. The real PTY cursor visual remains explicitly pending
-until a package-installed shell is restored.
+scoped fatal errors. The live package-installed PTY gate visibly alternates an
+exact red blinking bar cursor on both devices while retaining phone-scale
+terminal geometry.
 
 Mouse and focus reporting now cover the modes used by the local
 `xterm-256color` description and common full-screen applications: X10, VT200,
@@ -1411,9 +1414,10 @@ into an allocation-free encoder backed by the existing reusable terminal input
 array. Motion is emitted only after the reported cell or pixel changes, while
 Shift retains local selection and history scrolling. Rust unit/allocation and
 clippy gates, exact Kotlin encoder tests, Android lint/unit, both exact builds
-and installs, scoped cold-launch logs, and inspected full-device no-shell
-manager frames pass. Real TUI interaction and focus-transition device proof
-remain pending with shell restoration.
+and installs, scoped cold-launch logs, and inspected full-device manager
+frames pass. The live package-installed PTY gate now verifies exact SGR reports
+from touchscreen press/release, external mouse press/release, mouse wheel, and
+Home/resume focus-out/focus-in on the emulator and Samsung.
 
 DEC private synchronized-output mode 2026 now withholds terminal damage without
 consuming dirty rows and publishes the complete current frame when the client
@@ -1425,8 +1429,10 @@ revision early return and polls the existing native damage buffer until release
 or timeout; the steady-state parser/grid/damage path remains allocation-free.
 Rust unit/allocation and clippy gates, Android unit/lint, both exact builds and
 installs, scoped cold-launch logs, and inspected full-device light/dark manager
-frames pass. Real PTY atomicity and timeout visuals remain pending until a
-package-installed shell is restored on the clean-data devices.
+frames pass. Rapid full-device sequences from the live PTY on both targets
+contain only the complete prior screen or `ATOMIC-FRAME-COMPLETE`, never its
+partial prefix. A separately held synchronized frame becomes visible through
+the 250 ms fail-safe without requiring later PTY output.
 
 SGR 5/6 text blink and SGR 25 reset now survive the fixed terminal grid,
 compact scrollback, and damage protocol v7. The Rust `Cell` remains 76 bytes:
@@ -1439,8 +1445,9 @@ callback. Text stays visible while the surface is hidden or unfocused and when
 Android's animator setting disables motion. There is no per-frame allocation;
 the full Rust workspace tests, warmed allocation gate, warnings-denied Clippy,
 Android unit/lint, exact x86_64/AArch64 builds and installs, cold launches,
-scoped logs, and inspected full-device light/dark manager frames pass. Real PTY
-blink visuals remain pending until a package-installed shell is restored.
+scoped logs, and inspected full-device light/dark manager frames pass. Timed
+full-device live-PTY captures on both targets visibly alternate the SGR
+blinking text while stable content remains unchanged.
 
 OSC 12 now accepts bounded cursor-color set/query commands and emits an exact
 16-bit-per-channel RGB reply through the fixed terminal reply ring; OSC 112
@@ -1450,8 +1457,8 @@ per-frame allocation. Malformed and multi-value commands fail closed, hard
 reset restores the default, and soft reset preserves the selected color. Full
 workspace test/clippy, Android unit/lint, exact x86_64/AArch64 builds and
 installs, cold launches, scoped logs, and inspected full-device light/dark
-manager frames pass. Live cursor-color visual proof remains pending until a
-package-installed shell is restored.
+manager frames pass. The live exact-ABI PTY gate shows the requested red color
+on the blinking bar cursor on both targets.
 
 Xterm DEC private mode 1034 is now bounded, queryable, resettable, and
 published through a reserved damage flag. Android keeps the normal ESC-prefix
@@ -1461,8 +1468,8 @@ value as valid UTF-8; non-ASCII chords safely retain ESC-prefixed UTF-8. The
 parser/damage loop remains warmed-allocation-free. Exact encoder tests, full
 workspace test/clippy, Android unit/lint, exact x86_64/AArch64 builds and
 installs, cold launches, scoped logs, and inspected full-device light/dark
-manager frames pass. A real hardware-key PTY probe remains part of the
-shell-dependent consolidated terminal gate.
+manager frames pass. Real hardware Alt+A reaches package-installed Bash as the
+exact UTF-8 encoding of the high-bit value on both targets.
 
 OSC 52 now provides a deliberately write-only terminal-to-Android clipboard
 bridge. It accepts only xterm clipboard selector characters, strictly decodes
@@ -1476,14 +1483,14 @@ snapshot copy were removed, leaving only the session phase outside the native
 terminal. Host unit, warmed-allocation, and real-PTY tests, full workspace
 test/clippy, Android unit/lint, exact x86_64/AArch64 builds and installs, cold
 launches, scoped logs, and inspected full-device manager frames pass. A live
-Android clipboard write remains in the consolidated device gate because both
-clean-data devices currently lack a package-installed shell.
+OSC 52 write from package-installed Bash reaches Android's clipboard and
+pastes the exact bounded value back through the terminal on both targets.
 
 The material `xterm-256color` contract audit is complete. Title/title-stack,
 hyperlink, printer, and window operations remain deliberate no-ops where they
 cannot affect visible terminal correctness or a safe Android interaction. The
-real screen-reader workflow is now maintained; the consolidated
-shell-dependent device proofs remain open.
+consolidated exact-ABI shell, visual, input, clipboard, and accessibility
+device proofs now pass on the emulator and Samsung.
 
 The temporary command field and Run/Send controls are no longer present in the
 production manager. Active sessions reserve only the measured terminal plus a

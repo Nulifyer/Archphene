@@ -7,6 +7,18 @@
         <activity
             android:name=".TerminalAccessibilityFixtureActivity"
             android:exported="true" />
+        <service
+            android:name=".TerminalAccessibilityTestService"
+            android:exported="true"
+            android:label="Archphene terminal test accessibility service"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/terminal_test_accessibility_service" />
+        </service>
         <receiver
             android:name=".ClipboardTestReceiver"
             android:exported="true" />
