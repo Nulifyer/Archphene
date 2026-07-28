@@ -1201,7 +1201,7 @@ visibly reunite a marker that began in portrait history and ended on the live
 screen on both the emulator and Samsung.
 
 Selection now uses bounded coordinates in the combined scrollback/live
-document instead of transient viewport-cell indexes. Damage protocol v6
+document instead of transient viewport-cell indexes. Damage protocol v7
 publishes a scrollback-origin epoch; appending output preserves historical
 ranges, while actual ring eviction, resize, or selected live-screen mutation
 invalidates them rather than copying unrelated cells. Rust serializes at most
@@ -1302,7 +1302,7 @@ frames pass. Real PTY atomicity and timeout visuals remain pending until a
 package-installed shell is restored on the clean-data devices.
 
 SGR 5/6 text blink and SGR 25 reset now survive the fixed terminal grid,
-compact scrollback, and damage protocol v6. The Rust `Cell` remains 76 bytes:
+compact scrollback, and damage protocol v7. The Rust `Cell` remains 76 bytes:
 the previous internal truncation marker moved into existing struct padding and
 the already-reserved scrollback byte, leaving the high wire attribute bit for
 blink. Android packs blink into the unused high bit of its existing glyph-width
@@ -1314,6 +1314,17 @@ the full Rust workspace tests, warmed allocation gate, warnings-denied Clippy,
 Android unit/lint, exact x86_64/AArch64 builds and installs, cold launches,
 scoped logs, and inspected full-device light/dark manager frames pass. Real PTY
 blink visuals remain pending until a package-installed shell is restored.
+
+OSC 12 now accepts bounded cursor-color set/query commands and emits an exact
+16-bit-per-channel RGB reply through the fixed terminal reply ring; OSC 112
+restores the default. Damage protocol v7 adds one fixed RGB field, and Android
+uses it for block, bar, underline, and IME-composition cursors without
+per-frame allocation. Malformed and multi-value commands fail closed, hard
+reset restores the default, and soft reset preserves the selected color. Full
+workspace test/clippy, Android unit/lint, exact x86_64/AArch64 builds and
+installs, cold launches, scoped logs, and inspected full-device light/dark
+manager frames pass. Live cursor-color visual proof remains pending until a
+package-installed shell is restored.
 
 The temporary command field and Run/Send controls are no longer present in the
 production manager. Active sessions reserve only the measured terminal plus a

@@ -8,8 +8,8 @@ pub const MAX_ROWS: u16 = 200;
 pub const MIN_COLUMNS: u16 = 2;
 pub const MAX_COLUMNS: u16 = 400;
 pub const MAX_GRAPHEME_CODEPOINTS: usize = 16;
-pub const DAMAGE_PROTOCOL_VERSION: u32 = 6;
-pub const DAMAGE_HEADER_SIZE: usize = 48;
+pub const DAMAGE_PROTOCOL_VERSION: u32 = 7;
+pub const DAMAGE_HEADER_SIZE: usize = 52;
 pub const DAMAGE_CELL_SIZE: usize = 76;
 pub const MAX_DAMAGE_BYTES: usize =
     DAMAGE_HEADER_SIZE + MAX_ROWS as usize * MAX_COLUMNS as usize * DAMAGE_CELL_SIZE;
@@ -24,6 +24,7 @@ const MAX_OSC_BYTES: usize = 512;
 const MAX_OSC_COLOR_OPERATIONS: usize = 32;
 const DEFAULT_FOREGROUND: u32 = 7;
 const DEFAULT_BACKGROUND: u32 = 0;
+const DEFAULT_CURSOR_COLOR: u32 = 0x7d_d3_fc;
 const DIRECT_COLOR_FLAG: u32 = 1 << 24;
 const FLAG_CURSOR_VISIBLE: u32 = 1;
 const FLAG_APPLICATION_CURSOR: u32 = 1 << 1;
@@ -520,6 +521,7 @@ pub struct Terminal {
     cursor_visible: bool,
     cursor_style: u8,
     cursor_blink: bool,
+    cursor_color: u32,
     mouse_tracking: u8,
     mouse_encoding: u8,
     focus_reporting: bool,
@@ -607,6 +609,7 @@ impl Terminal {
             cursor_visible: true,
             cursor_style: DEFAULT_CURSOR_STYLE,
             cursor_blink: false,
+            cursor_color: DEFAULT_CURSOR_COLOR,
             mouse_tracking: MOUSE_TRACKING_NONE,
             mouse_encoding: MOUSE_ENCODING_NORMAL,
             focus_reporting: false,
@@ -993,6 +996,7 @@ impl Terminal {
         output[32..36].copy_from_slice(&history_rows.to_le_bytes());
         output[36..40].copy_from_slice(&viewport_offset.to_le_bytes());
         output[40..48].copy_from_slice(&self.history_origin_epoch().to_le_bytes());
+        output[48..52].copy_from_slice(&self.cursor_color.to_le_bytes());
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
@@ -1436,9 +1440,59 @@ impl Terminal {
         let mut fields = bytes.split(|byte| *byte == b';');
         match fields.next() {
             Some(b"4") => self.execute_palette_change(fields),
+            Some(b"12") => self.execute_cursor_color(fields),
             Some(b"104") => self.execute_palette_reset(fields),
+            Some(b"112") if fields.next().is_none() => self.reset_cursor_color(),
             _ => {}
         }
+    }
+
+    fn execute_cursor_color<'a>(&mut self, mut fields: impl Iterator<Item = &'a [u8]>) {
+        let Some(color_field) = fields.next() else {
+            return;
+        };
+        if fields.next().is_some() {
+            return;
+        }
+        if color_field == b"?" {
+            self.report_cursor_color();
+            return;
+        }
+        let Some(color) = parse_palette_color(color_field) else {
+            return;
+        };
+        self.set_cursor_color(color);
+    }
+
+    fn reset_cursor_color(&mut self) {
+        self.set_cursor_color(DEFAULT_CURSOR_COLOR);
+    }
+
+    fn set_cursor_color(&mut self, color: u32) {
+        if self.cursor_color != color {
+            self.cursor_color = color;
+            self.mark_dirty(self.cursor_row);
+        }
+    }
+
+    fn report_cursor_color(&mut self) {
+        let color = self.cursor_color;
+        let mut response = [0_u8; 32];
+        response[..9].copy_from_slice(b"\x1b]12;rgb:");
+        let mut length = 9;
+        length += write_hex_u16(
+            &mut response[length..],
+            ((color >> 16) as u8 as u16) * 0x101,
+        );
+        response[length] = b'/';
+        length += 1;
+        length += write_hex_u16(&mut response[length..], ((color >> 8) as u8 as u16) * 0x101);
+        response[length] = b'/';
+        length += 1;
+        length += write_hex_u16(&mut response[length..], (color as u8 as u16) * 0x101);
+        response[length..length + 2].copy_from_slice(b"\x1b\\");
+        length += 2;
+        self.queue_reply(&response[..length]);
     }
 
     fn execute_palette_change<'a>(&mut self, mut fields: impl Iterator<Item = &'a [u8]>) {
@@ -2768,6 +2822,7 @@ impl Terminal {
         self.cursor_visible = true;
         self.cursor_style = DEFAULT_CURSOR_STYLE;
         self.cursor_blink = false;
+        self.cursor_color = DEFAULT_CURSOR_COLOR;
         self.mouse_tracking = MOUSE_TRACKING_NONE;
         self.mouse_encoding = MOUSE_ENCODING_NORMAL;
         self.focus_reporting = false;
@@ -3702,6 +3757,28 @@ mod tests {
         assert!(!terminal.palette_overridden[25]);
         terminal.feed(b"\x1b]104\x07");
         assert!(!terminal.palette_overridden.iter().any(|value| *value));
+
+        terminal.feed(b"\x1b]12;#123456\x07");
+        terminal.write_damage(&mut damage).unwrap();
+        assert_eq!(
+            u32::from_le_bytes(damage[48..52].try_into().unwrap()),
+            0x123456
+        );
+        terminal.feed(b"\x1b]12;?\x1b\\");
+        assert_eq!(
+            terminal.pending_reply(),
+            b"\x1b]12;rgb:1212/3434/5656\x1b\\"
+        );
+        terminal.consume_reply(usize::MAX);
+        terminal.feed(b"\x1b]12;bad;extra\x07\x1b]112;\x07");
+        assert_eq!(terminal.cursor_color, 0x123456);
+        terminal.feed(b"\x1b]112\x07");
+        terminal.write_damage(&mut damage).unwrap();
+        assert_eq!(
+            u32::from_le_bytes(damage[48..52].try_into().unwrap()),
+            DEFAULT_CURSOR_COLOR
+        );
+
         terminal.feed(b"\x1b]4;16;?\x07");
         assert_eq!(
             terminal.pending_reply(),

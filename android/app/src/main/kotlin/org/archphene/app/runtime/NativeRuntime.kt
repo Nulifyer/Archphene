@@ -21,7 +21,7 @@ internal object NativeRuntime {
     const val COMMAND_REQUEST_LIMIT = 16 * 1024
     const val DNS_REQUEST_LIMIT = 512
     const val LAUNCHER_REVIEW_REQUEST_LIMIT = 32 * 1024
-    const val TERMINAL_DAMAGE_SIZE = 6_080_048
+    const val TERMINAL_DAMAGE_SIZE = 6_080_052
     const val TERMINAL_SELECTION_SIZE = 8 * 1024
     const val ERROR_INVALID_STATE = -3
 

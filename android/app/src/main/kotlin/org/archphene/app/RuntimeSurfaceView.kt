@@ -150,6 +150,7 @@ internal class RuntimeSurfaceView(
     private var cursorRow = 0
     private var cursorColumn = 0
     private var cursorVisible = false
+    private var cursorColor = DEFAULT_CURSOR_COLOR
     private var terminalFlags = 0
     private var cursorBlinkPhaseVisible = true
     private var textBlinkPhaseVisible = true
@@ -818,6 +819,7 @@ internal class RuntimeSurfaceView(
         val previousTerminalFlags = terminalFlags
         val nextHistoryRows = damageBuffer.getInt(32)
         val nextViewportOffset = damageBuffer.getInt(36)
+        val nextCursorColor = damageBuffer.getInt(48)
         if (
             nextRows !in MIN_ROWS..MAX_ROWS ||
             nextColumns !in MIN_COLUMNS..MAX_COLUMNS ||
@@ -827,7 +829,8 @@ internal class RuntimeSurfaceView(
             dirtyEnd !in dirtyStart..nextRows ||
             nextHistoryRows < 0 ||
             nextViewportOffset !in 0..nextHistoryRows ||
-            damageBuffer.getLong(40) <= 0L
+            damageBuffer.getLong(40) <= 0L ||
+            nextCursorColor and RGB_MASK != nextCursorColor
         ) {
             return false
         }
@@ -878,6 +881,7 @@ internal class RuntimeSurfaceView(
         val cursorPresentationChanged =
             nextCursorRow != cursorRow ||
                 nextCursorColumn != cursorColumn ||
+                nextCursorColor != cursorColor ||
                 (nextTerminalFlags and CURSOR_PRESENTATION_FLAGS) !=
                 (terminalFlags and CURSOR_PRESENTATION_FLAGS)
         if (nextRows != rows || nextColumns != columns) {
@@ -904,6 +908,7 @@ internal class RuntimeSurfaceView(
         }
         cursorRow = nextCursorRow
         cursorColumn = nextCursorColumn
+        cursorColor = nextCursorColor
         terminalFlags = nextTerminalFlags
         cursorVisible = terminalFlags and CURSOR_VISIBLE_FLAG != 0
         terminalRevision = nextTerminalRevision
@@ -1124,7 +1129,7 @@ internal class RuntimeSurfaceView(
                     CURSOR_STYLE_SHIFT
             ) {
                 CURSOR_STYLE_BLOCK -> {
-                    backgroundPaint.color = CURSOR_BLOCK_COLOR
+                    backgroundPaint.color = CURSOR_BLOCK_ALPHA or cursorColor
                     canvas.drawRect(
                         left,
                         0f,
@@ -1134,7 +1139,7 @@ internal class RuntimeSurfaceView(
                     )
                 }
                 CURSOR_STYLE_BAR -> {
-                    backgroundPaint.color = CURSOR_COLOR
+                    backgroundPaint.color = OPAQUE_ALPHA or cursorColor
                     canvas.drawRect(
                         left,
                         0f,
@@ -1144,7 +1149,7 @@ internal class RuntimeSurfaceView(
                     )
                 }
                 else -> {
-                    backgroundPaint.color = CURSOR_COLOR
+                    backgroundPaint.color = OPAQUE_ALPHA or cursorColor
                     canvas.drawRect(
                         left,
                         (cellHeight - cursorStrokeWidth).coerceAtLeast(0f),
@@ -1564,7 +1569,7 @@ internal class RuntimeSurfaceView(
         textPaint.color = ANSI_COLORS[7]
         textPaint.isFakeBoldText = false
         canvas.drawText(composingText, left, top - textPaint.fontMetrics.ascent, textPaint)
-        backgroundPaint.color = CURSOR_COLOR
+        backgroundPaint.color = OPAQUE_ALPHA or cursorColor
         canvas.drawRect(
             left,
             top + cellHeight - UNDERLINE_HEIGHT,
@@ -2549,6 +2554,7 @@ internal class RuntimeSurfaceView(
         rows = 0
         columns = 0
         cursorVisible = false
+        cursorColor = DEFAULT_CURSOR_COLOR
         terminalFlags = 0
         terminalRevision = Long.MIN_VALUE
         sourceRevision = Long.MIN_VALUE
@@ -2924,8 +2930,8 @@ internal class RuntimeSurfaceView(
         private const val FAINT_TOTAL_WEIGHT =
             FAINT_FOREGROUND_WEIGHT + FAINT_BACKGROUND_WEIGHT
         private const val DAMAGE_MAGIC = 0x4d525441
-        private const val DAMAGE_VERSION = 6
-        private const val DAMAGE_HEADER_SIZE = 48
+        private const val DAMAGE_VERSION = 7
+        private const val DAMAGE_HEADER_SIZE = 52
         private const val DAMAGE_CELL_SIZE = 76
         private const val MAX_GRAPHEME_CODEPOINTS = 16
         private const val MAX_GRAPHEME_UTF16_UNITS = MAX_GRAPHEME_CODEPOINTS * 2
@@ -2991,8 +2997,9 @@ internal class RuntimeSurfaceView(
         private const val GLYPH_WIDTH_MASK = 0x7f
         private const val GLYPH_BLINK_FLAG = 0x80
         private const val TERMINAL_BACKGROUND = 0xff1f2326.toInt()
-        private const val CURSOR_COLOR = 0xff7dd3fc.toInt()
-        private const val CURSOR_BLOCK_COLOR = 0x997dd3fc.toInt()
+        private const val DEFAULT_CURSOR_COLOR = 0x7dd3fc
+        private const val OPAQUE_ALPHA = 0xff000000.toInt()
+        private const val CURSOR_BLOCK_ALPHA = 0x99000000.toInt()
         private const val COMPOSING_BACKGROUND = 0xff31363b.toInt()
         private const val SELECTION_OVERLAY = 0x667dd3fc
         private const val SELECTION_HANDLE_COLOR = 0xff7dd3fc.toInt()
