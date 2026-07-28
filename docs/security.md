@@ -53,6 +53,9 @@ content, missing local sources, local-source checksum mismatches, and a missing
 install script. It records both the exact snapshot SHA-256 and the AUR cgit
 commit advertised in the snapshot's PAX header, and reports every selected
 source without treating that advertised commit as an official Arch signature.
+Common package-base `provides` declarations are accepted as inherited
+`.SRCINFO` metadata; if a dependency tries to use one across multiple split
+outputs, the ambiguous provider still fails closed.
 
 The manager now fetches the exact AUR RPC endpoint and only the snapshot path
 accepted by Rust, over Android HTTPS without ambient credentials. A versioned,
@@ -133,12 +136,17 @@ descriptor-only output, and reciprocal private-storage denial.
 
 The Builder now scans the complete signed official closure before mutation,
 rehashes every archive immediately before extraction, rejects unsafe archive
-paths/types, and provisions a disposable private Arch root through Rust. Root
-reuse is reset with no-follow directory-FD traversal; Android-forbidden hard
-links become bounded regular copies. A filesystem sync precedes publication of
-a closure-bound root manifest. The physical Samsung recovery gate provisions
-250 packages, 66,878 verified archive entries, and 1,744,478,772 expanded
-bytes, including executable `bash`, `makepkg`, and `fakeroot`.
+paths/types, and provisions a disposable private Arch root through Rust. Scan
+state advances through at-most-eight-package Binder transactions and returns
+cumulative package, entry, and expanded-byte evidence. Root reset is a separate
+transition, so cancellation between scan batches aborts the unpublished
+session before mutation. Root reuse is reset with no-follow directory-FD
+traversal; Android-forbidden hard links become bounded regular copies. A
+filesystem sync precedes publication of a closure-bound root manifest. The
+current physical Samsung gate scans and provisions 250 packages, 66,877
+verified archive entries, and 1,744,486,351 expanded bytes, including
+executable `bash`, `makepkg`, and `fakeroot`; a separate run cancels at
+200/250 with a visible full-device **Cancel AUR** action.
 
 The Builder's small packaged execution runtime is independently
 content-addressed: Rust validates its manifest, digest-bearing filenames,

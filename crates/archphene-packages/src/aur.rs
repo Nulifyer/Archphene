@@ -507,6 +507,7 @@ struct SrcInfo {
     architectures: Vec<String>,
     licenses: Vec<String>,
     dependencies: Vec<String>,
+    provides: Vec<String>,
     package_dependencies: BTreeMap<String, Vec<String>>,
     package_provides: BTreeMap<String, Vec<String>>,
     make_dependencies: Vec<String>,
@@ -1033,11 +1034,13 @@ fn parse_srcinfo(
             continue;
         }
         if key == "provides" || key == provides_architecture {
-            let package = current_package.ok_or(AurReviewError::InvalidSrcInfo)?;
-            let provides = info
-                .package_provides
-                .get_mut(package)
-                .ok_or(AurReviewError::InvalidSrcInfo)?;
+            let provides = if let Some(package) = current_package {
+                info.package_provides
+                    .get_mut(package)
+                    .ok_or(AurReviewError::InvalidSrcInfo)?
+            } else {
+                &mut info.provides
+            };
             push_limited(provides, value, MAX_AUR_DEPENDENCIES, "provides")?;
             continue;
         }
@@ -1475,6 +1478,20 @@ fn split_provider<'a>(
             provider = Some(package.as_str());
         }
     }
+    for declaration in &info.provides {
+        if dependency_name(declaration)? != dependency {
+            continue;
+        }
+        let mut packages = info.package_dependencies.keys();
+        let package = packages.next().ok_or(AurReviewError::InvalidSrcInfo)?;
+        if packages.next().is_some() {
+            return Err(AurReviewError::InvalidSrcInfo);
+        }
+        if provider.is_some_and(|existing| existing != package) {
+            return Err(AurReviewError::InvalidSrcInfo);
+        }
+        provider = Some(package.as_str());
+    }
     Ok(provider)
 }
 
@@ -1612,6 +1629,8 @@ mod tests {
 	depends = gtk3
 	makedepends = patchelf
 	checkdepends = shellcheck
+	provides = code
+	provides = vscode
 	source = visual-studio-code-bin.sh
 	sha256sums = bd0d9edf69283ebdf4e73e0a7b168d2fcf50acbd01f63674cad93ed4fe42fdad
 	source_x86_64 = code.deb::https://update.code.visualstudio.com/x64
@@ -1800,6 +1819,25 @@ package_dotnet-sdk-bin() {
             Some("visual-studio-code-bin.install")
         );
         assert_ne!(review.review_sha256, [0; 32]);
+    }
+
+    #[test]
+    fn common_provides_requires_one_unambiguous_output() {
+        let info = parse_srcinfo(SRCINFO, "visual-studio-code-bin", "aarch64")
+            .expect("single-output srcinfo");
+        assert_eq!(
+            split_provider(&info, "code").expect("common provider"),
+            Some("visual-studio-code-bin"),
+        );
+
+        let mut ambiguous = SRCINFO.to_vec();
+        ambiguous.extend_from_slice(b"\npkgname = visual-studio-code-insiders-bin\n");
+        let info = parse_srcinfo(&ambiguous, "visual-studio-code-bin", "aarch64")
+            .expect("multi-output srcinfo");
+        assert_eq!(
+            split_provider(&info, "code"),
+            Err(AurReviewError::InvalidSrcInfo),
+        );
     }
 
     #[test]

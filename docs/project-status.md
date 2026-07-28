@@ -1681,12 +1681,19 @@ gate then executes `makepkg (pacman) 7.1.0` as Builder UID 10345, validates the
 48,271-entry/1,221,416,416-byte root, and leaves all 36 shared-root packages
 unchanged.
 
-That cold gate also exposes two production gaps rather than hiding them:
-after closure transfer reaches 152/152, root scan/extraction takes several
-minutes with no distinct progress phase, and the full-device review remains a
-long text surface partly obscured by a previous completed transaction card.
-Phase-specific extraction progress, compact expandable review sections, and
-completed-card dismissal remain tracked UI work.
+Root preparation no longer hides a whole-closure scan inside one blocking
+Binder request. Builder Rust retains a bounded scan cursor, reverifies and
+inspects at most eight archives per call, reports cumulative packages, entries,
+and expanded bytes, and requires a separate root-reset transition before
+extraction. The manager checks cancellation between every batch, aborts the
+Builder session on interruption, and keeps one visible AUR activity card with
+the exact phase and a **Cancel AUR** action through source verification,
+closure staging, scan, extraction, and build. A physical Samsung run rendered
+the current 250-package scan through 66,877 entries/1,744,486,351 expanded
+bytes; a second full-device run cancelled at 200/250 without publishing a new
+Builder report. Output handling now separately reports Builder verification
+and descriptor copy, independent manager verification, and final completion
+for each split output.
 
 Reviewed-input reuse is no longer a Kotlin filesystem boundary. A Rust-owned
 session now removes both substituted v2 state and the legacy

@@ -64,6 +64,13 @@ internal object NativeBuilder {
         outputBuffer: ByteBuffer,
     ): Int
 
+    external fun nativeScanProvisionBatch(
+        maximumPackages: Int,
+        outputBuffer: ByteBuffer,
+    ): Int
+
+    external fun nativePrepareProvisionRoot(outputBuffer: ByteBuffer): Int
+
     external fun nativeExtractProvisionBatch(
         maximumPackages: Int,
         outputBuffer: ByteBuffer,

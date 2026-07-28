@@ -171,9 +171,10 @@ pub struct ProvisionSession {
     root: std::path::PathBuf,
     workspace: OwnedFd,
     archives: OwnedFd,
-    local_database: OwnedFd,
+    local_database: Option<OwnedFd>,
     packages: Vec<ExpectedPackage>,
     manifest_sha256: [u8; 32],
+    next_scan: usize,
     next_package: usize,
     expected: ExtractionReport,
     extracted: ExtractionReport,
@@ -622,41 +623,87 @@ impl ProvisionSession {
             return Err(BuilderError::InvalidInput);
         }
 
-        let mut expected = ExtractionReport {
-            package_count: packages.len(),
+        let root = files_directory.join(WORKSPACE_NAME).join(BUILD_ROOT_NAME);
+        Ok(Self {
+            root,
+            workspace,
+            archives,
+            local_database: None,
+            packages,
+            manifest_sha256: expected_manifest_sha256,
+            next_scan: 0,
+            next_package: 0,
+            expected: ExtractionReport::default(),
+            extracted: ExtractionReport::default(),
+            package_info_buffer: Vec::with_capacity(MAX_PACKAGE_INFO_BYTES),
+        })
+    }
+
+    pub fn plan(&self) -> ExtractionReport {
+        ExtractionReport {
+            package_count: self.packages.len(),
             ..ExtractionReport::default()
-        };
-        for (index, package) in packages.iter().enumerate() {
+        }
+    }
+
+    pub fn scan_next(&mut self, maximum_packages: usize) -> Result<ExtractionReport, BuilderError> {
+        if maximum_packages == 0
+            || maximum_packages > 8
+            || self.next_scan == self.packages.len()
+            || self.local_database.is_some()
+        {
+            return Err(BuilderError::InvalidArgument);
+        }
+        let end = self
+            .next_scan
+            .saturating_add(maximum_packages)
+            .min(self.packages.len());
+        while self.next_scan < end {
+            let index = self.next_scan;
+            let package = &self.packages[index];
             let archive_name = staged_name(index, &package.filename, false);
             verify_staged_file(
-                &archives,
+                &self.archives,
                 &archive_name,
                 package.archive_bytes,
                 package.archive_sha256,
             )?;
             verify_staged_file(
-                &archives,
+                &self.archives,
                 &staged_name(index, &package.filename, true),
                 package.signature_bytes,
                 package.signature_sha256,
             )?;
-            let archive = open_regular_file(&archives, &archive_name)?;
+            let archive = open_regular_file(&self.archives, &archive_name)?;
             let report = inspect_package_archive(archive, &package.filename, None)?;
-            expected.entry_count = checked_entries(expected.entry_count, report.entry_count)?;
-            expected.expanded_bytes =
-                checked_expanded_bytes(expected.expanded_bytes, report.expanded_bytes)?;
+            self.expected.package_count = self
+                .expected
+                .package_count
+                .checked_add(1)
+                .ok_or(BuilderError::OutputLimit)?;
+            self.expected.entry_count =
+                checked_entries(self.expected.entry_count, report.entry_count)?;
+            self.expected.expanded_bytes =
+                checked_expanded_bytes(self.expected.expanded_bytes, report.expanded_bytes)?;
+            self.next_scan += 1;
         }
 
+        Ok(self.expected)
+    }
+
+    pub fn prepare_root(&mut self) -> Result<ExtractionReport, BuilderError> {
+        if self.next_scan != self.packages.len() || self.local_database.is_some() {
+            return Err(BuilderError::InvalidArgument);
+        }
         let mut visited = 0;
-        remove_entry_if_present(&workspace, BUILD_ROOT_MANIFEST_NAME, 0, &mut visited)?;
-        remove_entry_if_present(&workspace, BUILD_ROOT_NAME, 0, &mut visited)?;
-        mkdirat(&workspace, BUILD_ROOT_NAME, Mode::from_raw_mode(0o700))?;
-        fsync(&workspace)?;
-        let root = files_directory.join(WORKSPACE_NAME).join(BUILD_ROOT_NAME);
-        ArchRoot::bootstrap(&root)?;
+        remove_entry_if_present(&self.workspace, BUILD_ROOT_MANIFEST_NAME, 0, &mut visited)?;
+        remove_entry_if_present(&self.workspace, BUILD_ROOT_NAME, 0, &mut visited)?;
+        mkdirat(&self.workspace, BUILD_ROOT_NAME, Mode::from_raw_mode(0o700))?;
+        fsync(&self.workspace)?;
+        ArchRoot::bootstrap(&self.root)?;
         let root_descriptor = openat(
             CWD,
-            &root,
+            &self.root,
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         )?;
@@ -671,18 +718,8 @@ impl ProvisionSession {
             PACMAN_LOCAL_DATABASE_VERSION,
         )?;
         fsync(&local_database)?;
-        Ok(Self {
-            root,
-            workspace,
-            archives,
-            local_database,
-            packages,
-            manifest_sha256: expected_manifest_sha256,
-            next_package: 0,
-            expected,
-            extracted: ExtractionReport::default(),
-            package_info_buffer: Vec::with_capacity(MAX_PACKAGE_INFO_BYTES),
-        })
+        self.local_database = Some(local_database);
+        Ok(self.expected)
     }
 
     pub fn expected(&self) -> ExtractionReport {
@@ -693,7 +730,11 @@ impl ProvisionSession {
         &mut self,
         maximum_packages: usize,
     ) -> Result<ExtractionReport, BuilderError> {
-        if maximum_packages == 0 || maximum_packages > 8 {
+        if maximum_packages == 0
+            || maximum_packages > 8
+            || self.next_scan != self.packages.len()
+            || self.local_database.is_none()
+        {
             return Err(BuilderError::InvalidArgument);
         }
         let end = self
@@ -721,7 +762,13 @@ impl ProvisionSession {
                 validate_package_info(package, &self.package_info_buffer)?.to_owned();
             let archive = open_regular_file(&self.archives, &archive_name)?;
             let report = inspect_package_archive(archive, &package.filename, Some(&self.root))?;
-            publish_local_package_database(&self.local_database, package, &architecture)?;
+            publish_local_package_database(
+                self.local_database
+                    .as_ref()
+                    .ok_or(BuilderError::InvalidArgument)?,
+                package,
+                &architecture,
+            )?;
             self.extracted.package_count = self
                 .extracted
                 .package_count
@@ -737,9 +784,16 @@ impl ProvisionSession {
     }
 
     pub fn finish(self) -> Result<ExtractionReport, BuilderError> {
-        if self.next_package != self.packages.len() || self.extracted != self.expected {
+        if self.next_scan != self.packages.len()
+            || self.next_package != self.packages.len()
+            || self.extracted != self.expected
+        {
             return Err(BuilderError::InvalidInput);
         }
+        let local_database = self
+            .local_database
+            .as_ref()
+            .ok_or(BuilderError::InvalidArgument)?;
         let root = File::open(&self.root)?;
         root.sync_all()?;
         syncfs(&root)?;
@@ -755,7 +809,7 @@ impl ProvisionSession {
             BUILD_ROOT_MANIFEST_NAME,
             manifest.as_bytes(),
         )?;
-        fsync(&self.local_database)?;
+        fsync(local_database)?;
         Ok(self.extracted)
     }
 
@@ -3327,10 +3381,72 @@ mod android {
             expected_sha256,
         ) {
             Ok(value) => {
-                let report = value.expected();
+                let report = value.plan();
                 *slot = Some(value);
                 write_extraction_report(output, report).unwrap_or(ERROR_BUILDER)
             }
+            Err(error) => copy_builder_error(&error, output),
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_builder_NativeBuilder_nativeScanProvisionBatch(
+        environment: JNIEnv,
+        _class: JClass,
+        maximum_packages: jint,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let Ok(maximum_packages) = usize::try_from(maximum_packages) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let (Ok(capacity), Ok(address)) = (
+            environment.get_direct_buffer_capacity(&output_buffer),
+            environment.get_direct_buffer_address(&output_buffer),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if capacity < ERROR_OUTPUT_BYTES || address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        // SAFETY: JNI verified the fixed direct diagnostic/report buffer.
+        let output = unsafe { slice::from_raw_parts_mut(address, capacity) };
+        let Ok(mut slot) = provision().lock() else {
+            return ERROR_INVALID_STATE;
+        };
+        let Some(value) = slot.as_mut() else {
+            return ERROR_INVALID_STATE;
+        };
+        match value.scan_next(maximum_packages) {
+            Ok(report) => write_extraction_report(output, report).unwrap_or(ERROR_BUILDER),
+            Err(error) => copy_builder_error(&error, output),
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_builder_NativeBuilder_nativePrepareProvisionRoot(
+        environment: JNIEnv,
+        _class: JClass,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let (Ok(capacity), Ok(address)) = (
+            environment.get_direct_buffer_capacity(&output_buffer),
+            environment.get_direct_buffer_address(&output_buffer),
+        ) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if capacity < ERROR_OUTPUT_BYTES || address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        // SAFETY: JNI verified the fixed direct diagnostic/report buffer.
+        let output = unsafe { slice::from_raw_parts_mut(address, capacity) };
+        let Ok(mut slot) = provision().lock() else {
+            return ERROR_INVALID_STATE;
+        };
+        let Some(value) = slot.as_mut() else {
+            return ERROR_INVALID_STATE;
+        };
+        match value.prepare_root() {
+            Ok(report) => write_extraction_report(output, report).unwrap_or(ERROR_BUILDER),
             Err(error) => copy_builder_error(&error, output),
         }
     }
@@ -4432,8 +4548,20 @@ summary\t1\t{}\n",
             append_symlink(builder, "usr/bin/build-tool-link", Path::new("build-tool"));
         });
         let digest = stage_fixture_closure(&directory, &archive, b"signature");
+        let stale_root = directory.join(WORKSPACE_NAME).join(BUILD_ROOT_NAME);
+        fs::create_dir_all(&stale_root).expect("stale root");
+        fs::write(stale_root.join("retained-until-prepare"), b"stale").expect("stale root marker");
         let mut provision = ProvisionSession::begin(&directory, "fixture", "1-1", digest)
             .expect("provision session");
+        assert_eq!(provision.plan().package_count, 1);
+        assert_eq!(provision.expected(), ExtractionReport::default());
+        assert!(stale_root.join("retained-until-prepare").exists());
+        assert!(provision.prepare_root().is_err());
+        provision.scan_next(1).expect("scan package");
+        assert!(stale_root.join("retained-until-prepare").exists());
+        provision.prepare_root().expect("prepare root");
+        assert!(!stale_root.join("retained-until-prepare").exists());
+        assert!(provision.scan_next(1).is_err());
         assert_eq!(provision.expected().package_count, 1);
         assert!(provision.expected().entry_count >= 3);
         let report = provision.extract_next(8).expect("extract package");
@@ -4593,6 +4721,8 @@ summary\t1\t{}\n",
         let digest = stage_fixture_closure(&directory, &archive, b"signature");
         let mut provision = ProvisionSession::begin(&directory, "fixture", "1-1", digest)
             .expect("provision session");
+        provision.scan_next(1).expect("scan package");
+        provision.prepare_root().expect("prepare root");
         assert_eq!(
             provision.expected().expanded_bytes,
             (b"pkgname = base-devel\npkgver = 1-1\narch = any\n".len()
@@ -4626,6 +4756,8 @@ summary\t1\t{}\n",
         let digest = stage_fixture_closure(&directory, &archive, b"signature");
         let mut provision = ProvisionSession::begin(&directory, "fixture", "1-1", digest)
             .expect("provision session");
+        provision.scan_next(1).expect("scan package");
+        provision.prepare_root().expect("prepare root");
         assert!(provision.extract_next(1).is_err());
         assert!(
             !provision
@@ -4645,6 +4777,8 @@ summary\t1\t{}\n",
         let digest = stage_fixture_closure(&directory, &archive, b"signature");
         let mut first =
             ProvisionSession::begin(&directory, "fixture", "1-1", digest).expect("first provision");
+        first.scan_next(1).expect("first scan");
+        first.prepare_root().expect("prepare first root");
         first.extract_next(1).expect("first extraction");
         let root = first.root().to_path_buf();
         first.finish().expect("finish first provision");
@@ -4656,8 +4790,10 @@ summary\t1\t{}\n",
         fs::set_permissions(&churn, fs::Permissions::from_mode(0o111))
             .expect("hostile directory mode");
 
-        let second = ProvisionSession::begin(&directory, "fixture", "1-1", digest)
+        let mut second = ProvisionSession::begin(&directory, "fixture", "1-1", digest)
             .expect("repeat provision");
+        second.scan_next(1).expect("repeat scan");
+        second.prepare_root().expect("prepare repeated root");
         assert!(!second.root().join("tmp/churn").exists());
         assert!(
             !directory
@@ -4679,6 +4815,8 @@ summary\t1\t{}\n",
         let digest = stage_fixture_closure(&directory, &archive, b"signature");
         let mut provision = ProvisionSession::begin(&directory, "fixture", "1-1", digest)
             .expect("provision session");
+        provision.scan_next(1).expect("scan package");
+        provision.prepare_root().expect("prepare root");
         assert!(provision.extract_next(1).is_err());
         assert!(!outside.join("pwn").exists());
         fs::remove_dir_all(directory).expect("cleanup");

@@ -3429,6 +3429,7 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
     private fun updatePackageActivity() {
         val binder = runtimeBinder
         val compatibilityReview = binder?.packageCompatibilityReviewActive == true
+        val aurWork = binder?.aurWorkActive == true
         val packageName = binder?.packageJobName.orEmpty()
         val terminal =
             when (binder?.packageJobState) {
@@ -3442,7 +3443,8 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         val visible =
             binder != null &&
                 (
-                    compatibilityReview ||
+                    aurWork ||
+                        compatibilityReview ||
                         (
                             packageName.isNotEmpty() &&
                                 (
@@ -3460,6 +3462,26 @@ class MainActivity : Activity(), Choreographer.FrameCallback {
         if (!visible) {
             setTextIfChanged(packageJobTitleView, getString(R.string.package_activity_heading))
             setTextIfChanged(packageJobActivityView, "")
+            if (packageJobProgressTrack.visibility != View.INVISIBLE) {
+                packageJobProgressTrack.visibility = View.INVISIBLE
+            }
+            if (packageJobRenderedProgress != 0) {
+                setPackageJobProgress(0)
+            }
+            return
+        }
+        if (aurWork) {
+            setTextIfChanged(
+                packageJobTitleView,
+                binder.aurReviewedPackage.ifEmpty {
+                    selectedPackage.ifEmpty { getString(R.string.package_activity_heading) }
+                },
+            )
+            setTextIfChanged(packageJobActivityView, "AUR preparation and build")
+            setTextIfChanged(jobStatusView, binder.packageSearchStatus)
+            resetHorizontalScroll(packageJobTitleView)
+            resetHorizontalScroll(packageJobActivityView)
+            resetHorizontalScroll(jobStatusView)
             if (packageJobProgressTrack.visibility != View.INVISIBLE) {
                 packageJobProgressTrack.visibility = View.INVISIBLE
             }

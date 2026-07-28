@@ -247,6 +247,9 @@ class ArchpheneRuntimeService : Service() {
         val aurBuildCancellationAvailable: Boolean
             get() = aurBuildActive && aurBuildCancelable
 
+        val aurWorkActive: Boolean
+            get() = aurBuildActive
+
         internal val installedPackages: InstalledPackageSnapshot
             get() = installedPackageSnapshot
 
@@ -470,7 +473,7 @@ class ArchpheneRuntimeService : Service() {
         val packageActivityActionLabel: String
             get() =
                 when {
-                    aurBuildCancellationAvailable -> "Cancel build"
+                    aurBuildCancellationAvailable -> "Cancel AUR"
                     packageCancellationAvailable -> "Cancel"
                     packageMutationRepairAvailable -> "Repair"
                     packageCacheRecoveryAvailable -> "Clear cache"
@@ -1020,6 +1023,7 @@ class ArchpheneRuntimeService : Service() {
     @Volatile private var bootstrapActive = false
     private var catalogThread: Thread? = null
     private var packageThread: Thread? = null
+    private var aurThread: Thread? = null
     @Volatile private var packageCacheThread: Thread? = null
     @Volatile private var packageResolutionThread: Thread? = null
     private var commandThread: Thread? = null
@@ -1932,6 +1936,7 @@ class ArchpheneRuntimeService : Service() {
         activePackageConnection = null
         shellStopRequested = true
         packageCancellationRequested = true
+        aurBuildCancellationRequested = true
         folderMirrorCancellationRequested = true
         val workers =
             arrayOf(
@@ -1939,6 +1944,7 @@ class ArchpheneRuntimeService : Service() {
                 bootstrapThread,
                 catalogThread,
                 packageThread,
+                aurThread,
                 packageCacheThread,
                 packageResolutionThread,
                 commandThread,
@@ -1952,6 +1958,7 @@ class ArchpheneRuntimeService : Service() {
         launcherPublisherActive.set(false)
         catalogThread = null
         packageThread = null
+        aurThread = null
         packageCacheThread = null
         packageResolutionThread = null
         commandThread = null
@@ -2199,6 +2206,10 @@ class ArchpheneRuntimeService : Service() {
             IBinder.FIRST_CALL_TRANSACTION + 15
         private const val AUR_BUILDER_TRANSACTION_CLEAR_STORAGE =
             IBinder.FIRST_CALL_TRANSACTION + 16
+        private const val AUR_BUILDER_TRANSACTION_SCAN_PROVISION_BATCH =
+            IBinder.FIRST_CALL_TRANSACTION + 17
+        private const val AUR_BUILDER_TRANSACTION_PREPARE_PROVISION_ROOT =
+            IBinder.FIRST_CALL_TRANSACTION + 18
         private const val AUR_BUILDER_PACKAGE_BATCH = 8
         private const val AUR_BUILD_POLL_MILLIS = 100L
         private const val AUR_BUILD_VISIBLE_LOG_CHARACTERS = 8 * 1024
@@ -7456,19 +7467,24 @@ class ArchpheneRuntimeService : Service() {
             return false
         }
         searchActive = true
+        aurBuildActive = true
+        aurBuildCancelable = true
+        aurBuildCancellationRequested = false
         retainedAurVerifiedBytes = 0L
         retainedAurSourceEvidence = emptyArray()
         retainedAurBuilderReport = null
         val staleAurBuildOutputs = detachRetainedAurBuiltPackageFiles()
         searchStatus = "Preparing ${remoteSources.size} reviewed AUR source download(s)"
-        Thread(
-            {
+        val worker =
+            Thread({
                 requireRuntimeWorker("AUR source verification")
                 try {
+                    throwIfAurBuildCancelled()
                     deleteRetainedAurBuiltPackageFiles(staleAurBuildOutputs)
                     var totalVerified = 0L
                     val evidence = ArrayList<AurSourceEvidence>(remoteSources.size)
                     remoteSources.forEachIndexed { remoteIndex, (sourceIndex, source) ->
+                        throwIfAurBuildCancelled()
                         val initialEndpoint =
                             source.remoteUrl
                                 ?: throw SecurityException("AUR source has no HTTPS endpoint")
@@ -7576,6 +7592,7 @@ class ArchpheneRuntimeService : Service() {
                         }
                     }
                     retainedAurSourceEvidence = evidence.toTypedArray()
+                    throwIfAurBuildCancelled()
                     val buildEnvironment =
                         downloadAndVerifyAurBuildEnvironment(
                             activeHandle,
@@ -7636,17 +7653,30 @@ class ArchpheneRuntimeService : Service() {
                     }
                 } catch (error: Exception) {
                     searchStatus =
-                        "AUR source verification failed: " +
-                            (error.message ?: error.javaClass.simpleName)
+                        if (
+                            error is InterruptedException ||
+                            aurBuildCancellationRequested
+                        ) {
+                            "AUR preparation cancelled"
+                        } else {
+                            "AUR source verification failed: " +
+                                (error.message ?: error.javaClass.simpleName)
+                        }
                     Log.e(TAG, "AUR source verification failed", error)
                 } finally {
                     activePackageConnection = null
+                    aurBuildCancelable = false
+                    aurBuildActive = false
+                    aurBuildCancellationRequested = false
+                    if (aurThread === Thread.currentThread()) {
+                        aurThread = null
+                    }
                     searchActive = false
                     stopWhenUnobservedAndIdle()
                 }
-            },
-            "ArchpheneAurSources",
-        ).start()
+            }, "ArchpheneAurSources")
+        aurThread = worker
+        worker.start()
         promoteWorkToForeground()
         return true
     }
@@ -7677,8 +7707,8 @@ class ArchpheneRuntimeService : Service() {
         publishAurBuildLogs("")
         val staleAurBuildOutputs = detachRetainedAurBuiltPackageFiles()
         searchStatus = "Starting isolated offline build for ${review.packageName}"
-        Thread(
-            {
+        val worker =
+            Thread({
                 requireRuntimeWorker("AUR build")
                 try {
                     deleteRetainedAurBuiltPackageFiles(staleAurBuildOutputs)
@@ -7728,12 +7758,15 @@ class ArchpheneRuntimeService : Service() {
                     aurBuildCancelable = false
                     aurBuildActive = false
                     aurBuildCancellationRequested = false
+                    if (aurThread === Thread.currentThread()) {
+                        aurThread = null
+                    }
                     searchActive = false
                     stopWhenUnobservedAndIdle()
                 }
-            },
-            "ArchpheneAurBuild",
-        ).start()
+            }, "ArchpheneAurBuild")
+        aurThread = worker
+        worker.start()
         promoteWorkToForeground()
         return true
     }
@@ -7745,8 +7778,24 @@ class ArchpheneRuntimeService : Service() {
         }
         aurBuildCancellationRequested = true
         aurBuildCancelable = false
-        searchStatus = "Cancelling the AUR build"
+        searchStatus = "Cancelling AUR work"
+        activePackageConnection?.let { connection ->
+            Thread(
+                {
+                    requireRuntimeWorker("AUR network cancellation")
+                    connection.disconnect()
+                },
+                "ArchpheneAurCancel",
+            ).start()
+        }
+        aurThread?.interrupt()
         return true
+    }
+
+    private fun throwIfAurBuildCancelled() {
+        if (aurBuildCancellationRequested || Thread.currentThread().isInterrupted) {
+            throw InterruptedException("AUR work cancelled")
+        }
     }
 
     private fun runAurBuilderBuild(
@@ -7873,6 +7922,7 @@ class ArchpheneRuntimeService : Service() {
                     val outputFiles = ArrayList<File>(review.requiredPackages.size)
                     try {
                         review.requiredPackages.forEachIndexed { index, packageName ->
+                            throwIfAurBuildCancelled()
                             val outputFile =
                                 File.createTempFile(
                                     ".aur-$packageName-",
@@ -7880,6 +7930,9 @@ class ArchpheneRuntimeService : Service() {
                                     cacheDir,
                                 )
                             outputFiles += outputFile
+                            searchStatus =
+                                "Builder verification and descriptor copy ${index + 1}/" +
+                                    "${review.requiredPackages.size}: $packageName"
                             val report =
                             ParcelFileDescriptor.open(
                                 outputFile,
@@ -7909,6 +7962,7 @@ class ArchpheneRuntimeService : Service() {
                                         logs = poll.logs,
                                     )
                                 }.also { report ->
+                                    throwIfAurBuildCancelled()
                                     check(
                                         report.filename.matches(AUR_BUILT_PACKAGE_FILENAME) &&
                                             report.archiveBytes > 0L &&
@@ -7919,6 +7973,10 @@ class ArchpheneRuntimeService : Service() {
                                     ) {
                                         "Builder returned an invalid package-output report"
                                     }
+                                    searchStatus =
+                                        "Independent output verification ${index + 1}/" +
+                                            "${review.requiredPackages.size}: $packageName · " +
+                                            formatStorageBytes(report.archiveBytes)
                                     verifyManagerOwnedAurPackage(
                                         activeHandle,
                                         review,
@@ -8318,6 +8376,7 @@ class ArchpheneRuntimeService : Service() {
                 )
             var evidenceIndex = 0
             review.sources.forEachIndexed { sourceIndex, source ->
+                throwIfAurBuildCancelled()
                 if (source.local) {
                     return@forEachIndexed
                 }
@@ -8552,6 +8611,7 @@ class ArchpheneRuntimeService : Service() {
             environment.verifiedPackages.indices
                 .chunked(AUR_BUILDER_PACKAGE_BATCH)
                 .forEachIndexed { batchIndex, indices ->
+                    throwIfAurBuildCancelled()
                     val descriptors =
                         ArrayList<Pair<ParcelFileDescriptor, ParcelFileDescriptor>>(indices.size)
                     try {
@@ -8692,7 +8752,7 @@ class ArchpheneRuntimeService : Service() {
     ): AurBuilderRootReport {
         var began = false
         try {
-            val expected =
+            val plan =
                 transactAurBuilder(
                     endpoint,
                     AUR_BUILDER_TRANSACTION_BEGIN_PROVISION,
@@ -8702,16 +8762,49 @@ class ArchpheneRuntimeService : Service() {
                         request.writeString(environment.closureManifestSha256)
                     },
                 ) { reply -> readAurBuilderRootReport(reply) }
-            check(
-                expected.packageCount == environment.packageCount &&
-                    expected.entryCount > expected.packageCount &&
-                    expected.expandedBytes > 0,
-            ) {
-                "Builder root extraction plan does not match the verified closure"
-            }
             began = true
+            check(
+                plan.packageCount == environment.packageCount &&
+                    plan.entryCount == 0L &&
+                    plan.expandedBytes == 0L,
+            ) {
+                "Builder root scan plan does not match the verified closure"
+            }
+            var expected = AurBuilderRootReport(0, 0, 0)
+            while (expected.packageCount < plan.packageCount) {
+                throwIfAurBuildCancelled()
+                expected =
+                    transactAurBuilder(
+                        endpoint,
+                        AUR_BUILDER_TRANSACTION_SCAN_PROVISION_BATCH,
+                        { request -> request.writeInt(AUR_BUILDER_PACKAGE_BATCH) },
+                    ) { reply -> readAurBuilderRootReport(reply) }
+                check(
+                    expected.packageCount in 1..plan.packageCount &&
+                        expected.entryCount > expected.packageCount &&
+                        expected.expandedBytes > 0,
+                ) {
+                    "Builder root scan exceeded its verified closure"
+                }
+                searchStatus =
+                    "Scanning isolated build root ${expected.packageCount}/" +
+                        "${plan.packageCount} · " +
+                        "${formatStorageBytes(expected.expandedBytes)} expanded"
+            }
+            throwIfAurBuildCancelled()
+            searchStatus = "Resetting the isolated build root"
+            val prepared =
+                transactAurBuilder(
+                    endpoint,
+                    AUR_BUILDER_TRANSACTION_PREPARE_PROVISION_ROOT,
+                    {},
+                ) { reply -> readAurBuilderRootReport(reply) }
+            check(prepared == expected) {
+                "Builder root preparation changed the verified extraction plan"
+            }
             var extracted = AurBuilderRootReport(0, 0, 0)
             while (extracted.packageCount < expected.packageCount) {
+                throwIfAurBuildCancelled()
                 extracted =
                     transactAurBuilder(
                         endpoint,
@@ -8856,9 +8949,7 @@ class ArchpheneRuntimeService : Service() {
         var cachedPackages = 0
         var downloadedPackages = 0
         environment.packages.forEachIndexed { index, payload ->
-            if (Thread.currentThread().isInterrupted) {
-                throw InterruptedException("AUR build-environment verification interrupted")
-            }
+            throwIfAurBuildCancelled()
             searchStatus =
                 "Verifying official build package ${index + 1}/${environment.packageCount}: " +
                     payload.name

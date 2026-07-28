@@ -20,6 +20,7 @@ class AurBuilderService : Service() {
         ByteBuffer
             .allocateDirect(NativeBuilder.ERROR_OUTPUT_BYTES)
             .order(ByteOrder.LITTLE_ENDIAN)
+    private var provisionPackageCount = 0
 
     private val endpoint =
         object : Binder() {
@@ -46,6 +47,10 @@ class AurBuilderService : Service() {
                             TRANSACTION_FINISH_PACKAGE_CLOSURE -> finishPackageClosure(reply)
                             TRANSACTION_ABORT_PACKAGE_CLOSURE -> abortPackageClosure(reply)
                             TRANSACTION_BEGIN_PROVISION -> beginProvision(data, reply)
+                            TRANSACTION_SCAN_PROVISION_BATCH ->
+                                scanProvisionBatch(data, reply)
+                            TRANSACTION_PREPARE_PROVISION_ROOT ->
+                                prepareProvisionRoot(reply)
                             TRANSACTION_EXTRACT_PROVISION_BATCH ->
                                 extractProvisionBatch(data, reply)
                             TRANSACTION_FINISH_PROVISION -> finishProvision(reply)
@@ -256,6 +261,7 @@ class AurBuilderService : Service() {
         data: Parcel,
         reply: Parcel,
     ) {
+        provisionPackageCount = 0
         val packageBase = data.readString().orEmpty()
         val version = data.readString().orEmpty()
         val manifestSha256 = data.readString().orEmpty()
@@ -270,19 +276,55 @@ class AurBuilderService : Service() {
                 nativeOutputBuffer,
             )
         val report = readExtractionReport(result)
-        val requiredBytes =
-            runCatching {
-                Math.addExact(report.expandedBytes, BUILD_ROOT_STORAGE_RESERVE_BYTES)
-            }.getOrElse {
-                NativeBuilder.nativeAbortProvision()
-                throw IllegalStateException("Builder root storage estimate overflowed")
-            }
-        if (requiredBytes > filesDir.usableSpace) {
-            NativeBuilder.nativeAbortProvision()
-            throw IllegalStateException(
-                "Not enough Builder-private storage for the isolated build root",
+        check(report.packageCount in 1..MAX_CLOSURE_PACKAGES)
+        check(report.entryCount == 0L && report.expandedBytes == 0L)
+        provisionPackageCount = report.packageCount
+        writeExtractionReport(reply, report)
+    }
+
+    @Synchronized
+    private fun scanProvisionBatch(
+        data: Parcel,
+        reply: Parcel,
+    ) {
+        val maximumPackages = data.readInt()
+        require(maximumPackages in 1..MAX_PACKAGE_BATCH)
+        check(provisionPackageCount in 1..MAX_CLOSURE_PACKAGES)
+        nativeOutputBuffer.clear()
+        val result =
+            NativeBuilder.nativeScanProvisionBatch(
+                maximumPackages,
+                nativeOutputBuffer,
             )
+        val report = readExtractionReport(result)
+        check(report.packageCount in 1..provisionPackageCount)
+        if (report.packageCount == provisionPackageCount) {
+            val requiredBytes =
+                runCatching {
+                    Math.addExact(report.expandedBytes, BUILD_ROOT_STORAGE_RESERVE_BYTES)
+                }.getOrElse {
+                    NativeBuilder.nativeAbortProvision()
+                    provisionPackageCount = 0
+                    throw IllegalStateException("Builder root storage estimate overflowed")
+                }
+            if (requiredBytes > filesDir.usableSpace) {
+                NativeBuilder.nativeAbortProvision()
+                provisionPackageCount = 0
+                throw IllegalStateException(
+                    "Not enough Builder-private storage for the isolated build root",
+                )
+            }
         }
+        writeExtractionReport(reply, report)
+    }
+
+    @Synchronized
+    private fun prepareProvisionRoot(reply: Parcel) {
+        check(provisionPackageCount in 1..MAX_CLOSURE_PACKAGES)
+        nativeOutputBuffer.clear()
+        val result = NativeBuilder.nativePrepareProvisionRoot(nativeOutputBuffer)
+        val report = readExtractionReport(result)
+        check(report.packageCount == provisionPackageCount)
         writeExtractionReport(reply, report)
     }
 
@@ -306,12 +348,15 @@ class AurBuilderService : Service() {
     private fun finishProvision(reply: Parcel) {
         nativeOutputBuffer.clear()
         val result = NativeBuilder.nativeFinishProvision(nativeOutputBuffer)
-        writeExtractionReport(reply, readExtractionReport(result))
+        val report = readExtractionReport(result)
+        provisionPackageCount = 0
+        writeExtractionReport(reply, report)
     }
 
     @Synchronized
     private fun abortProvision(reply: Parcel) {
         NativeBuilder.nativeAbortProvision()
+        provisionPackageCount = 0
         reply.writeNoException()
     }
 
@@ -824,6 +869,8 @@ class AurBuilderService : Service() {
         const val TRANSACTION_VERIFY_OUTPUT = IBinder.FIRST_CALL_TRANSACTION + 14
         const val TRANSACTION_STORAGE_USAGE = IBinder.FIRST_CALL_TRANSACTION + 15
         const val TRANSACTION_CLEAR_STORAGE = IBinder.FIRST_CALL_TRANSACTION + 16
+        const val TRANSACTION_SCAN_PROVISION_BATCH = IBinder.FIRST_CALL_TRANSACTION + 17
+        const val TRANSACTION_PREPARE_PROVISION_ROOT = IBinder.FIRST_CALL_TRANSACTION + 18
         private const val ROLE_SNAPSHOT = 0
         private const val ROLE_SOURCE = 1
         private const val MAX_INPUTS = 65
