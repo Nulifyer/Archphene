@@ -19,7 +19,7 @@ use archphene_packages::{
     PackageResolution, PackageRuntime, PackageRuntimeError, PackageTool, Repository,
     RepositoryArchitecture, RepositoryTargetPartition, ToolOutput, VerifiedPackageClosure,
     aur::{
-        AurBuildGraphError, AurReview, AurSourceDownload, MAX_AUR_GRAPH_BASES,
+        AurBuildGraph, AurBuildGraphError, AurReview, AurSourceDownload, MAX_AUR_GRAPH_BASES,
         MAX_AUR_SOURCE_BYTES, plan_reviewed_aur_graph,
     },
     desktop::{DesktopCatalog, ExecArgument},
@@ -61,6 +61,7 @@ pub struct RuntimeHost {
     package_download: Option<PackagePayloadDownload>,
     aur_review: Option<AurReview>,
     aur_dependency_reviews: Vec<AurReview>,
+    aur_build_graph: Option<AurBuildGraph>,
     aur_build_resolution: Option<PackageResolution>,
     aur_build_closure: Option<VerifiedPackageClosure>,
     aur_source_download: Option<AurSourceDownload>,
@@ -278,6 +279,7 @@ impl RuntimeHost {
             package_download: None,
             aur_review: None,
             aur_dependency_reviews: Vec::new(),
+            aur_build_graph: None,
             aur_build_resolution: None,
             aur_build_closure: None,
             aur_source_download: None,
@@ -1571,6 +1573,7 @@ impl RuntimeHost {
 
     pub fn retain_aur_review(&mut self, review: AurReview) {
         self.aur_source_download = None;
+        self.aur_build_graph = None;
         self.aur_build_resolution = None;
         self.aur_build_closure = None;
         self.aur_dependency_reviews.clear();
@@ -1596,6 +1599,7 @@ impl RuntimeHost {
             return Err(PackageRuntimeError::InvalidPayload);
         }
         self.aur_source_download = None;
+        self.aur_build_graph = None;
         self.aur_build_resolution = None;
         self.aur_build_closure = None;
         self.aur_dependency_reviews.push(review);
@@ -1705,6 +1709,7 @@ impl RuntimeHost {
     pub fn partition_aur_build_environment(
         &mut self,
     ) -> Result<RepositoryTargetPartition, PackageRuntimeError> {
+        self.aur_build_graph = None;
         let root = self
             .aur_review
             .as_ref()
@@ -1725,6 +1730,7 @@ impl RuntimeHost {
             Err(AurBuildGraphError::MissingProvider(_))
                 if !initial.unresolved_targets().is_empty() =>
             {
+                self.aur_build_graph = None;
                 self.aur_build_resolution = None;
                 self.aur_build_closure = None;
                 return Ok(initial);
@@ -1745,9 +1751,21 @@ impl RuntimeHost {
         if !partition.unresolved_targets().is_empty() {
             return Err(PackageRuntimeError::InvalidPayload);
         }
+        self.aur_build_graph = Some(graph);
         self.aur_build_resolution = partition.resolution().cloned();
         self.aur_build_closure = None;
         Ok(partition)
+    }
+
+    pub fn write_aur_build_graph(
+        &self,
+        destination: &mut [u8],
+    ) -> Result<usize, PackageRuntimeError> {
+        self.aur_build_graph
+            .as_ref()
+            .ok_or(PackageRuntimeError::InvalidPayload)?
+            .write_wire(destination)
+            .map_err(|_| PackageRuntimeError::InvalidPayload)
     }
 
     pub fn verify_aur_build_environment(

@@ -1223,6 +1223,8 @@ class ArchpheneRuntimeService : Service() {
         ByteBuffer.allocateDirect(NativeRuntime.PACKAGE_OUTPUT_SIZE)
     private val aurBuildClosureOutputBuffer =
         ByteBuffer.allocateDirect(NativeRuntime.AUR_BUILD_CLOSURE_OUTPUT_SIZE)
+    private val aurBuildGraphOutputBuffer =
+        ByteBuffer.allocateDirect(NativeRuntime.AUR_BUILD_GRAPH_OUTPUT_SIZE)
     private val aurPackageBuffer = ByteBuffer.allocateDirect(128)
     private val aurEndpointBuffer =
         ByteBuffer
@@ -1383,6 +1385,19 @@ class ArchpheneRuntimeService : Service() {
     private data class AurBuildTargetPartition(
         val environment: AurBuildEnvironment,
         val unresolvedTargets: List<String>,
+        val graph: AurBuildGraph? = null,
+    )
+
+    private data class AurBuildGraph(
+        val packageBases: List<String>,
+        val edges: List<AurBuildGraphEdge>,
+    )
+
+    private data class AurBuildGraphEdge(
+        val packageBase: String,
+        val dependencyBase: String,
+        val dependency: String,
+        val requirement: String,
     )
 
     private data class VerifiedBuildPackage(
@@ -9282,7 +9297,87 @@ class ArchpheneRuntimeService : Service() {
         return AurBuildTargetPartition(
             AurBuildEnvironment(packages, bytes, totalBytes),
             unresolved,
+            if (unresolved.isEmpty()) readAurBuildGraph(activeHandle) else null,
         )
+    }
+
+    private fun readAurBuildGraph(activeHandle: Long): AurBuildGraph {
+        val graphBytes =
+            synchronized(aurBuildGraphOutputBuffer) {
+                aurBuildGraphOutputBuffer.clear()
+                val outputLength =
+                    NativeRuntime.nativeReadAurBuildGraph(
+                        activeHandle,
+                        aurBuildGraphOutputBuffer,
+                    )
+                if (outputLength <= 0) {
+                    throw SecurityException(
+                        readNativeMessage(aurBuildGraphOutputBuffer, outputLength),
+                    )
+                }
+                ByteArray(outputLength).also { output ->
+                    aurBuildGraphOutputBuffer.position(0)
+                    aurBuildGraphOutputBuffer.get(output)
+                }
+            }
+        val reader = ByteBuffer.wrap(graphBytes).order(ByteOrder.LITTLE_ENDIAN)
+        val magic = ByteArray(8)
+        require(reader.remaining() >= 12)
+        reader.get(magic)
+        require(magic.contentEquals("AUBG0001".toByteArray(StandardCharsets.US_ASCII)))
+        val packageBaseCount = reader.int
+        require(packageBaseCount in 1..32)
+        val packageBases = ArrayList<String>(packageBaseCount)
+        repeat(packageBaseCount) {
+            val packageBase = readAurGraphString(reader, 128)
+            require(packageBase.matches(AUR_PACKAGE_NAME) && packageBase !in packageBases)
+            packageBases += packageBase
+        }
+        require(reader.remaining() >= Integer.BYTES)
+        val edgeCount = reader.int
+        require(edgeCount in 0..256)
+        val edges = ArrayList<AurBuildGraphEdge>(edgeCount)
+        repeat(edgeCount) {
+            val edge =
+                AurBuildGraphEdge(
+                    readAurGraphString(reader, 128),
+                    readAurGraphString(reader, 128),
+                    readAurGraphString(reader, 128),
+                    readAurGraphString(reader, 4 * 1024),
+                )
+            val dependentIndex = packageBases.indexOf(edge.packageBase)
+            val dependencyIndex = packageBases.indexOf(edge.dependencyBase)
+            val requirementName =
+                edge.requirement.takeWhile { character -> character !in "<=>" }
+            require(
+                dependentIndex >= 0 &&
+                    dependencyIndex >= 0 &&
+                    dependencyIndex < dependentIndex &&
+                    edge.dependency.matches(AUR_PACKAGE_NAME) &&
+                    requirementName == edge.dependency &&
+                    edge.requirement.all { character ->
+                        character.isLetterOrDigit() || character in "@+._-:<=>"
+                    } &&
+                    edge !in edges,
+            )
+            edges += edge
+        }
+        require(!reader.hasRemaining())
+        return AurBuildGraph(packageBases, edges)
+    }
+
+    private fun readAurGraphString(
+        reader: ByteBuffer,
+        maximumBytes: Int,
+    ): String {
+        require(reader.remaining() >= Integer.BYTES)
+        val length = reader.int
+        require(length in 1..maximumBytes && length <= reader.remaining())
+        val bytes = ByteArray(length)
+        reader.get(bytes)
+        val value = String(bytes, StandardCharsets.US_ASCII)
+        require(value.toByteArray(StandardCharsets.US_ASCII).contentEquals(bytes))
+        return value
     }
 
     private fun downloadAndVerifyAurBuildEnvironment(

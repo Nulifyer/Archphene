@@ -103,9 +103,9 @@ mod android {
         RepositoryTargetPartition, ToolOutput, VerifiedAurArchive, VerifiedAurCapabilityArchive,
         VerifiedPackageClosure,
         aur::{
-            AurReview, MAX_AUR_REVIEW_BYTES, MAX_AUR_RPC_BYTES, MAX_AUR_SNAPSHOT_BYTES,
-            MAX_AUR_SOURCE_BYTES, ReviewedInstallScript, aur_provider_candidates,
-            aur_snapshot_path, review_aur_snapshot,
+            AurReview, MAX_AUR_GRAPH_WIRE_BYTES, MAX_AUR_REVIEW_BYTES, MAX_AUR_RPC_BYTES,
+            MAX_AUR_SNAPSHOT_BYTES, MAX_AUR_SOURCE_BYTES, ReviewedInstallScript,
+            aur_provider_candidates, aur_snapshot_path, review_aur_snapshot,
         },
     };
     use archphene_process::{
@@ -2349,6 +2349,44 @@ mod android {
         };
         let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
         copy_aur_build_partition_result(result, destination)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_org_archphene_app_runtime_NativeRuntime_nativeReadAurBuildGraph(
+        environment: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        output_buffer: JByteBuffer,
+    ) -> jint {
+        let Ok(handle) = u64::try_from(handle) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Ok(output_capacity) = environment.get_direct_buffer_capacity(&output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if output_capacity < MAX_AUR_GRAPH_WIRE_BYTES {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let Ok(output_address) = environment.get_direct_buffer_address(&output_buffer) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if output_address.is_null() {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let destination = unsafe { slice::from_raw_parts_mut(output_address, output_capacity) };
+        let result = {
+            let Ok(mut registry) = registry().lock() else {
+                return ERROR_INTERNAL;
+            };
+            let Some(runtime) = registry.runtime_mut(handle) else {
+                return ERROR_INVALID_HANDLE;
+            };
+            runtime.write_aur_build_graph(destination)
+        };
+        match result {
+            Ok(length) => i32::try_from(length).unwrap_or(ERROR_INTERNAL),
+            Err(error) => copy_package_error(&error, destination),
+        }
     }
 
     #[unsafe(no_mangle)]

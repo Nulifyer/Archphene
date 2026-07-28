@@ -21,6 +21,7 @@ pub const MAX_AUR_SOURCES: usize = 64;
 pub const MAX_AUR_DEPENDENCIES: usize = 256;
 pub const MAX_AUR_GRAPH_BASES: usize = 32;
 pub const MAX_AUR_GRAPH_EDGES: usize = 256;
+pub const MAX_AUR_GRAPH_WIRE_BYTES: usize = 128 * 1024;
 pub const MAX_AUR_SOURCE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 const MAX_AUR_SNAPSHOT_ENTRIES: usize = 128;
@@ -162,6 +163,121 @@ pub struct AurBuildGraphEdge {
     pub dependency_base: String,
     pub dependency: String,
     pub requirement: String,
+}
+
+impl AurBuildGraph {
+    pub fn write_wire(&self, destination: &mut [u8]) -> Result<usize, AurBuildGraphError> {
+        if destination.len() < 8 || destination.len() > MAX_AUR_GRAPH_WIRE_BYTES {
+            return Err(AurBuildGraphError::Limit("graph wire"));
+        }
+        let mut writer = GraphWireWriter {
+            destination,
+            position: 0,
+        };
+        writer.bytes(b"AUBG0001")?;
+        writer.u32(
+            u32::try_from(self.package_bases.len())
+                .map_err(|_| AurBuildGraphError::Limit("package-base"))?,
+        )?;
+        if self.package_bases.is_empty() || self.package_bases.len() > MAX_AUR_GRAPH_BASES {
+            return Err(AurBuildGraphError::Limit("package-base"));
+        }
+        let mut package_base_positions = BTreeMap::new();
+        for (index, package_base) in self.package_bases.iter().enumerate() {
+            validate_package_name(package_base).map_err(|_| AurBuildGraphError::InvalidReview)?;
+            if package_base_positions
+                .insert(package_base.as_str(), index)
+                .is_some()
+            {
+                return Err(AurBuildGraphError::InvalidReview);
+            }
+            writer.string(package_base)?;
+        }
+        writer
+            .u32(u32::try_from(self.edges.len()).map_err(|_| AurBuildGraphError::Limit("edge"))?)?;
+        if self.edges.len() > MAX_AUR_GRAPH_EDGES {
+            return Err(AurBuildGraphError::Limit("edge"));
+        }
+        if !self.edges.windows(2).all(|pair| {
+            (
+                &pair[0].package_base,
+                &pair[0].dependency_base,
+                &pair[0].dependency,
+                &pair[0].requirement,
+            ) < (
+                &pair[1].package_base,
+                &pair[1].dependency_base,
+                &pair[1].dependency,
+                &pair[1].requirement,
+            )
+        }) {
+            return Err(AurBuildGraphError::InvalidReview);
+        }
+        for edge in &self.edges {
+            for value in [
+                edge.package_base.as_str(),
+                edge.dependency_base.as_str(),
+                edge.dependency.as_str(),
+            ] {
+                validate_package_name(value).map_err(|_| AurBuildGraphError::InvalidReview)?;
+                writer.string(value)?;
+            }
+            if edge.requirement.is_empty()
+                || edge.requirement.len() > MAX_FIELD_BYTES
+                || !matches!(
+                    dependency_name(&edge.requirement),
+                    Ok(dependency) if dependency == edge.dependency
+                )
+                || package_base_positions
+                    .get(edge.dependency_base.as_str())
+                    .zip(package_base_positions.get(edge.package_base.as_str()))
+                    .is_none_or(|(dependency, dependent)| dependency >= dependent)
+                || edge.requirement.bytes().any(|byte| {
+                    !(byte.is_ascii_alphanumeric()
+                        || matches!(
+                            byte,
+                            b'@' | b'+' | b':' | b'.' | b'_' | b'-' | b'<' | b'=' | b'>'
+                        ))
+                })
+            {
+                return Err(AurBuildGraphError::InvalidReview);
+            }
+            writer.string(&edge.requirement)?;
+        }
+        Ok(writer.position)
+    }
+}
+
+struct GraphWireWriter<'a> {
+    destination: &'a mut [u8],
+    position: usize,
+}
+
+impl GraphWireWriter<'_> {
+    fn u32(&mut self, value: u32) -> Result<(), AurBuildGraphError> {
+        self.bytes(&value.to_le_bytes())
+    }
+
+    fn string(&mut self, value: &str) -> Result<(), AurBuildGraphError> {
+        let length =
+            u32::try_from(value.len()).map_err(|_| AurBuildGraphError::Limit("graph wire"))?;
+        self.u32(length)?;
+        self.bytes(value.as_bytes())
+    }
+
+    fn bytes(&mut self, value: &[u8]) -> Result<(), AurBuildGraphError> {
+        let end = self
+            .position
+            .checked_add(value.len())
+            .ok_or(AurBuildGraphError::Limit("graph wire"))?;
+        let target = self
+            .destination
+            .get_mut(self.position..end)
+            .ok_or(AurBuildGraphError::Limit("graph wire"))?;
+        target.copy_from_slice(value);
+        self.position = end;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -2404,6 +2520,27 @@ package_dotnet-sdk-bin() {
                 requirement: "language-server>=2".to_owned(),
             }],
         );
+        let mut wire = [0_u8; 512];
+        let wire_length = graph.write_wire(&mut wire).expect("bounded graph wire");
+        let expected = [
+            b"AUBG0001".as_slice(),
+            &(2_u32.to_le_bytes()),
+            &(19_u32.to_le_bytes()),
+            b"language-server-bin",
+            &(10_u32.to_le_bytes()),
+            b"editor-bin",
+            &(1_u32.to_le_bytes()),
+            &(10_u32.to_le_bytes()),
+            b"editor-bin",
+            &(19_u32.to_le_bytes()),
+            b"language-server-bin",
+            &(15_u32.to_le_bytes()),
+            b"language-server",
+            &(18_u32.to_le_bytes()),
+            b"language-server>=2",
+        ]
+        .concat();
+        assert_eq!(&wire[..wire_length], expected);
 
         let official_preferred = std::collections::BTreeSet::from([
             "language-server".to_owned(),
